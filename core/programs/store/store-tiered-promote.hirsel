@@ -249,7 +249,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
         return Error(Io(Closed))
     }
     let installed = disk_state(db).pages
-    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed)?
+    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed, next_stamp)?
     let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
     let captured_packs = match view roots[at].collections.paging {
@@ -270,6 +270,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
     for added in queued {
         promotion_queue_root(source, added, mut queue_roots)?
     }
+    let captured_root = arc.share(roots[at].collections.root)
     let mut map_root = arc.share(roots[at].collections.root)
     let mut changed = false
     for (collection, edge) in collections {
@@ -309,5 +310,70 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
     if changed {
         roots[at].collections.root = take map_root
     }
-    Ok(changed)
+    let materialized = promotion_materialize(captured, source, captured_root, mut roots[at].collections, mut next_stamp)?
+    Ok(changed || materialized)
+}
+
+// §13.5 step 3 after step 2: a Snapshot's overlay is applied to its tree as
+// resolution left it, with fresh stamps, through the installed inventory
+// that lists every Cold slot resolution kept or found. The `base` and trim
+// evidence checks read the captured Cold tree, which equal stamps make the
+// same logical content. The materialization records nothing: the fold of
+// the Snapshot's own branch already queued what the overlay detaches and
+// filed what it replaces (mandatory candidate steps 2 and 3).
+fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], mut tree: PageTree, mut next_stamp: u64) -> Result[bool, Error] waits {
+    let replayed: Option[Arc[ReplayBranch]] = clone(tree.replay)
+    let Some(take overlay) = take replayed else {
+        return Ok(false)
+    }
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let inline = tree.inline
+    let mut folded = FoldMap(root: arc.share(tree.root), next_stamp: next_stamp, effects: None)
+    let materialized = if let Some(collections) = std.omap.root(overlay.collections) {
+        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+            let inherited = match overlay.fork_time {
+                Some(forked) => std.omap.get(forked, id),
+                None => None,
+            }
+            working.root = promotion_materialize_collection(captured, installed, captured_root, working.root, empty_root, id, edits, inherited, inline, mut working.next_stamp)?
+            Ok(())
+        })
+    } else {
+        Ok(())
+    }
+    let FoldMap(root: take ready, next_stamp: following_stamp, ..) = take folded
+    next_stamp = following_stamp
+    materialized?
+    tree.root = take ready
+    tree.replay = None
+    Ok(true)
+}
+
+fn promotion_materialize_collection(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
+    let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        prefix(id)
+    })?
+    let location = match option.unwrap(std.page.collection_slot(captured_root, key)) {
+        (ColdPage(ptr), _) => ptr,
+        (HotPage(_), _) => std.page.unlocated(0),
+    }
+    let (base, _) = option.unwrap(std.page.collection_slot(root, key))
+    let mut ignored: Option[List[TieredFoldEffect]] = None
+    verify_tiered_fold(captured, location, edits)?
+    let mut starting: std.page.Slot = clone(base)
+    if let Some(previous) = inherited {
+        verify_tiered_fold(captured, location, previous)?
+        starting = fold_apply_overlay(installed, base, empty_root, previous, None, inline, mut next_stamp, mut ignored)?
+    }
+    let ready = fold_apply_overlay(installed, starting, empty_root, edits, inherited, inline, mut next_stamp, mut ignored)?
+    let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+        let mut candidate = arc.share(root)
+        let mut draw = next_stamp
+        page_result(std.page.install_tiered_root(mut candidate, key, ready, mut draw))?
+        Ok((take candidate, draw))
+    })?
+    next_stamp = following
+    Ok(take mapped)
 }

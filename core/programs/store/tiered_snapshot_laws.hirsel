@@ -35,7 +35,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         None => std.omap.new(),
     }
     let (take packs, _) = std.omap.insert(mut ids, initial, pack_seq, TieredPagerPack(inventory: inventory, object: None))
-    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1)))
+    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
     db.heads[0u64].roots.collections = take tree
     db.next_node = draw - 1
     // A disk store lists the pack as a promotion does, so a cut publishes it.

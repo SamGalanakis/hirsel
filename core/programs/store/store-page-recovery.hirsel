@@ -70,7 +70,7 @@ fn attach_manifest_holders(manifest: PageManifest, pages: Map[u64, Arc[std.page.
     take all
 }
 
-fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[HistoryLocator]], generation: u64) -> Result[Arc[TieredReadInventory], Error] {
+fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[HistoryLocator]], generation: u64, next_stamp: u64) -> Result[Arc[TieredReadInventory], Error] {
     let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     let mut ids = 0u64
     let mut rows = std.omap.range(locations.packs.values, Unbounded, Unbounded)
@@ -90,7 +90,7 @@ fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[His
         let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, TieredPagerPack(inventory: clone(inventory), object: object))
         packs = take revised
     }
-    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation)))
+    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation, next_stamp: next_stamp)))
 }
 
 fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[LoadedPageStore, Error] {
@@ -110,7 +110,7 @@ fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[Vie
             for slot in 0u64 .. list.len(all) {
                 if tiered_collections(all[slot].collections.root) {
                     if let None = paging {
-                        paging = Some(recovered_tiered_inventory(locations, locator, manifest.generation)?)
+                        paging = Some(recovered_tiered_inventory(locations, locator, manifest.generation, manifest.next_stamp)?)
                     }
                     all[slot].collections.paging = clone(paging)
                 }

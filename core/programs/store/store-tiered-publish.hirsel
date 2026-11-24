@@ -69,7 +69,7 @@ fn fold_owners(branches: List[u32], heads: u64, forked: List[LineageFork]) -> Re
     Ok(take owners)
 }
 
-fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], owners: List[bool], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[bool, Error] waits {
+fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], owners: List[bool], promote: Option[u64], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[bool, Error] waits {
     let mut folded = false
     let mut filed: Map[(u32, u64, u64), ()] = map.new()
     for slot in 0u64 .. list.len(roots) {
@@ -77,8 +77,9 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
             Some(_) => true,
             None => false,
         }
-        if overlaid {
-            let source = tx_page_source(pager, roots[slot].collections, next_stamp)?
+        // The promoted root materializes after its resolution (§13.5 step 3).
+        if overlaid && promote != Some(slot) {
+            let source = tx_page_source(pager, roots[slot].collections)?
             let effects = fold_page_tree(source, mut roots[slot].collections, mut next_stamp)?
             for effect in effects {
                 match effect {
@@ -142,11 +143,12 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
     let mut replaced: List[TieredDrainKill] = list.new()
     let owners = fold_owners(branches, heads, disk_state(db).pages.forked)?
-    let overlays = fold_cut_roots(pager, mut roots, branches, owners, mut next_stamp, mut seen, mut queued, mut replaced)?
+    let overlays = fold_cut_roots(pager, mut roots, branches, owners, promote, mut next_stamp, mut seen, mut queued, mut replaced)?
     // A Tiered -> Memory change installs its loaded tree like a fold does.
     let loaded = load_memory_residency(pager, mut roots, branches, disk_state(db).unload, mut next_stamp, mut queued)? || overlays
-    // A promoted root can name only existing Cold frames, so a promotion
-    // that emits nothing still installs its re-pointed collection map.
+    // A promotion that emits nothing still installs its re-pointed
+    // collection map. It runs after the queue's added rows have formed, so
+    // its materialization adds none (§13.6a mandatory candidate step 4).
     let promoted = match promote {
         Some(slot) => promote_cut_holder(db, pager, mut roots, slot, queued, mut next_stamp)?,
         None => false,
@@ -191,7 +193,7 @@ fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added
         return Error(Io(Closed))
     }
     let kept = list.len(queue.added)
-    let drained = match recovered_tiered_inventory(installed.locations, None, db.checkpointed) {
+    let drained = match recovered_tiered_inventory(installed.locations, None, db.checkpointed, next_stamp) {
         Ok(paging) => {
             let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
             drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, budget)
@@ -308,12 +310,12 @@ fn cut_tiered_account(published: List[Roots]) -> Result[u64, Error] {
 // Step 5's images, built before the rename so the swap allocates nothing.
 // Each sealed tree reads its Cold roots through the new generation's packs.
 // The cut settles (§13.7): the live Tiered account becomes the published X.
-fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocations, generation: u64) -> Result[u64, Error] {
+fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocations, generation: u64, next_stamp: u64) -> Result[u64, Error] {
     let settled = cut_tiered_account(cut_stage.roots)?
     if tiered_cut_stage_empty(cut_stage) {
         return Ok(settled)
     }
-    let paging = recovered_tiered_inventory(installed, None, generation)?
+    let paging = recovered_tiered_inventory(installed, None, generation, next_stamp)?
     for slot in 0u64 .. list.len(cut_stage.roots) {
         if tiered_collections(cut_stage.roots[slot].collections.root) {
             cut_stage.roots[slot].collections.paging = Some(arc.share(paging))

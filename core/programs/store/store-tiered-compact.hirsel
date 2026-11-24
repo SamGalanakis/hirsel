@@ -325,7 +325,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     }
     let checkpointed = db.checkpointed
     let inventory_read = disk_allocation(scoped fn() -> Result[Arc[TieredReadInventory], Error] {
-        recovered_tiered_inventory(installed.locations, None, checkpointed)
+        recovered_tiered_inventory(installed.locations, None, checkpointed, next_stamp)
     })
     let paging = match take inventory_read {
         Ok(take ready) => take ready,

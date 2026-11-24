@@ -308,7 +308,7 @@ fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut ro
         return Ok(false)
     }
     let key = prefix(id)?
-    let source = tx_page_source(pager, roots[0u64].collections, next_stamp)?
+    let source = tx_page_source(pager, roots[0u64].collections)?
     let (take old, take record) = {
         let Some((edge, before)) = std.page.collection_slot(roots[0u64].collections.root, key) else {
             return Error(Stale(id))

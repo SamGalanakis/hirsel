@@ -122,6 +122,69 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
     close(take reopened)
 }
 
+// §13.5 steps 2 then 3 inside §13.6a's mandatory candidate: the queue's
+// added rows (candidate step 3) form before any promotion (step 4), so a
+// pin's materialization adds no row. The fold cut queues main's detached
+// leaf once. Pinning a Snapshot captured before that cut, whose overlay
+// detaches the same leaf, leaves exactly that row, before and after reopen,
+// and the pin reads only the rows at or above the floor.
+@test
+fn test_l87_pin_materialization_adds_no_queue_row(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let appended = 120u64
+    let events = l87_cold_log(d, c, r, tasks, floor, appended, 48)?
+    let mut cold = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let (leaf, trim) = l87_first_leaf(d, cold, events.binding.id)?
+    let trimmed: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut cold, Some(100000), copy_env((trimmed, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87: the served trim of a Cold Tiered Log commits")
+    }
+    close(take cold)?
+    let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let s = snapshot(db)
+    let _ = checkpoint(mut db)?
+    pin(mut db, "history", s)?
+    for round in 0u64 .. 2 {
+        let queued = l87_queue(db)?
+        if list.len(queued) != 1 || disk_state(db).pages.lists.deferred_next != 1 {
+            fail("L87: a pin's materialization adds no queue row")
+        }
+        let (seq, row) = queued[0u64]
+        let TieredPage(queued_leaf) = row.target else {
+            fail("L87: a detached leaf is queued as a Page row")
+        }
+        if seq != 0 || row.branch_id != 0 || queued_leaf != leaf {
+            fail("L87: the queue names main's detached Cold leaf once")
+        }
+        let Some(held) = pinned(db, "history") else {
+            fail("L87: the pin is published")
+        }
+        let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+        for at in 0u64 .. appended {
+            let expected: Option[Bytes] = if at < trim {
+                None
+            } else {
+                let mut body: Bytes = list.with_capacity(48)
+                list.fill(mut body, 48, int.truncate(at))
+                Some(take body)
+            }
+            let got = log_get(read_handle, held, events, at)?
+            if got != expected {
+                fail("L87: the pin reads its Snapshot's overlay")
+            }
+        }
+        drop(take read_handle)
+        drop(take held)
+        if round == 0 {
+            close(take db)?
+            db = open(tasks, d, c, r, l87_options(floor, 0)?)?
+        }
+    }
+    close(take db)
+}
+
 // L87 (a) on the live path (§13.6a T8 step 3, §13.8 dropped list): a
 // served trim past the first Cold leaf queues that leaf at the next cut.
 // A whole-Log trim after a fresh open loses the Cold root and every leaf;
@@ -429,4 +492,124 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
         return Error(())
     }
     Ok(())
+}
+
+fn l87_snapshot_root(s: Snapshot, collection: u32) -> Result[std.page.PagePtr, Error] {
+    match std.page.collection_slot(s.roots.collections.root, prefix(collection)?) {
+        Some((ColdPage(located), _)) => Ok(located),
+        _ => fail("L87 (e2): a cut leaves every published root Cold"),
+    }
+}
+
+// The class-3 frames a root reaches outside pack `old`, and their payload.
+fn l87_fresh_frames(d: Dir, db: Db, root: std.page.PagePtr, old: u64) -> Result[(u64, u64), Error] waits {
+    let walk = compact_walk_from(d, db, root)?
+    let mut fresh_pack = 0u64
+    let mut payload_total = 0u64
+    for (seq, payload) in walk.live {
+        if seq == old {
+            continue
+        }
+        if fresh_pack != 0 {
+            fail("L87 (e2): one cut emits a materialization into one pack")
+        }
+        fresh_pack = seq
+        payload_total = payload
+    }
+    if fresh_pack == 0 {
+        fail("L87 (e2): a materialization writes fresh pages")
+    }
+    Ok((fresh_pack, payload_total))
+}
+
+fn l87_edit_on(mut db: Db, rows: Table[u64, Bytes], id: u32, edit: u8) -> Result[(), Error] waits {
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let target = Branch(store: db.store, id)
+    let Committed(_) = run_on(mut db, target, Some(100000000), copy_env((fixture, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u8)) -> Result[(), Error] {
+        put(mut tx, env.0, 0, compact_value_of(0, env.1, 48))
+    })? else {
+        fail("L87 (e2): the edit of row 0 commits")
+    }
+    Ok(())
+}
+
+fn l87_reads_row(db: Db, s: Snapshot, rows: Table[u64, Bytes], edit: u8) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for key in 0u64 .. 160 {
+        let wanted = compact_value_of(key, if key == 0 {
+            edit
+        } else {
+            0u8
+        }, 48)
+        if get(read_handle, s, rows, key)? != Some(wanted) {
+            fail("L87 (e2): each holder reads its own row 0 and the shared rows")
+        }
+    }
+    drop(take read_handle)
+    Ok(())
+}
+
+// L87 (e2), one materialization per promoted holder (§13.5 step 3, v2.93).
+// Row 0's edit 1 reopens as a replay overlay over the Cold table in pack 7,
+// and S is captured before the fold cut. pin(S), then the cut-path fork
+// `beta` of S, each materialize S's overlay into fresh pages of their own
+// pack: q1 for the pin and q2 for `beta`, with `live` = the pages laid out.
+// Neither files anything in pack 7, whose replaced path main's fold already
+// filed. `beta` then edits row 0 again, and the next cut files `beta`'s kill
+// of its own pages dead: `live[q2]` = 0, while `live[q1]` and `live[7]` stay
+// unchanged and the pin still reads edit 1, before and after reopen. Seeded
+// bug `reuse_materialization`: `beta` shares the pin's pages, so its kill
+// lowers `live[q1]`.
+@test
+fn test_l87_each_promoted_holder_materializes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, 160, 48)?
+    let mut cold = open(tasks, d, c, r, l69_options(floor)?)?
+    let original = l69_cold_root(cold, rows.id)?.pack
+    l87_edit_on(mut cold, rows, 0, 1)?
+    close(take cold)?
+    let mut db = open(tasks, d, c, r, l69_options(floor)?)?
+    let s = snapshot(db)
+    let _ = checkpoint(mut db)?
+    let old_live = l69_pack_live(db, original)
+    let _ = pin(mut db, "history", s)?
+    let Some(held) = pinned(db, "history") else {
+        fail("L87 (e2): the pin is published")
+    }
+    let (pin_pack, pin_bytes) = l87_fresh_frames(d, db, l87_snapshot_root(held, rows.id)?, original)?
+    drop(take held)
+    if l69_pack_live(db, pin_pack) != pin_bytes || l69_pack_live(db, original) != old_live {
+        fail("L87 (e2): the pin's materialization is its own pack's live, and files nothing in pack 7")
+    }
+    let (beta, _) = fork(mut db, "beta", s)?
+    drop(take s)
+    let forked = snapshot_of(db, beta)?
+    let (beta_pack, beta_bytes) = l87_fresh_frames(d, db, l87_snapshot_root(forked, rows.id)?, original)?
+    drop(take forked)
+    if beta_pack == pin_pack || l69_pack_live(db, beta_pack) != beta_bytes || l69_pack_live(db, pin_pack) != pin_bytes || l69_pack_live(db, original) != old_live {
+        fail("L87 (e2): the fork materializes again into its own pack")
+    }
+    l87_edit_on(mut db, rows, beta.id, 2)?
+    let _ = checkpoint(mut db)?
+    for round in 0u64 .. 2 {
+        if l69_pack_live(db, beta_pack) != 0 || l69_pack_live(db, pin_pack) != pin_bytes || l69_pack_live(db, original) != old_live {
+            fail("L87 (e2): the fork's kill lowers only its own pack's live")
+        }
+        let Some(history) = pinned(db, "history") else {
+            fail("L87 (e2): the pin is published")
+        }
+        l87_reads_row(db, history, rows, 1)?
+        drop(take history)
+        let edited = snapshot_of(db, beta)?
+        l87_reads_row(db, edited, rows, 2)?
+        drop(take edited)
+        let main = snapshot(db)
+        l87_reads_row(db, main, rows, 1)?
+        drop(take main)
+        if round == 0 {
+            close(take db)?
+            db = open(tasks, d, c, r, l69_options(floor)?)?
+        }
+    }
+    close(take db)
 }

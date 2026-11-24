@@ -18,7 +18,10 @@ type TieredPagerPack: shareable + send {
 
 type TieredReadInventory: shareable + send {
     packs: std.omap.OMap[u64, TieredPagerPack],
-    generation: u64
+    generation: u64,
+    // The generation's MANIFEST `next_stamp`: every frame its packs hold is
+    // below it (M6), including a promoted holder's materialized pages.
+    next_stamp: u64
 }
 
 type TieredPageSource {

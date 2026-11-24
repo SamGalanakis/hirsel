@@ -150,7 +150,7 @@ fn snapshot_pager(r: Reader, s: Snapshot, inventory: TieredReadInventory) -> Res
     let Some(pool) = view r.pool else {
         return Error(Io(Closed))
     }
-    let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: s.watermark, deadline: 0)
+    let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
     let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: tree_stamp(s.roots.collections))
     Ok((take source, arc.share(pool.grant), root))
 }

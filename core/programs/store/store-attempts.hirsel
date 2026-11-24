@@ -30,7 +30,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             Some(AttemptMiss(_)) => {
                 // An inline call is held from its first miss (§13.3a "Inline calls").
                 revoke_parked(mut db)
-                deliver_call_miss(db, db.heads[i].roots.collections, int.saturating_add(db.next_node, 1), state, mut pins, mut pending)?
+                deliver_call_miss(db, db.heads[i].roots.collections, state, mut pins, mut pending)?
             },
         }
     }
@@ -55,8 +55,7 @@ fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(TieredTarget, Er
     }
 }
 
-fn deliver_call_miss(db: Db, tree: PageTree, watermark: u64, state: TieredTouchSet,
-    mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+fn deliver_call_miss(db: Db, tree: PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
     let SeekKey(sought) = view state.seek else {
         fail("store: a call's miss has no seek key")
     }
@@ -64,7 +63,7 @@ fn deliver_call_miss(db: Db, tree: PageTree, watermark: u64, state: TieredTouchS
         Some(pager) => Some(view pager),
         None => None,
     }
-    let source = tx_page_source(requests, tree, watermark)?
+    let source = tx_page_source(requests, tree)?
     serve_tiered_miss(source, pins.root, state, sought, TieredPoint, None, mut pins, mut pending)
 }
 
@@ -245,7 +244,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
                     return Error(Io(Closed))
                 }
                 let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
-                let source = tx_page_source(pager, s.roots.collections, s.watermark)?
+                let source = tx_page_source(pager, s.roots.collections)?
                 serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
             },
         }

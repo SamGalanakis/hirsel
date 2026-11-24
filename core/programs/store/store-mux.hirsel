@@ -303,7 +303,7 @@ fn call_page_source(db: Db) -> Result[TieredPageSource, Error] {
         Some(requests) => Some(view requests),
         None => None,
     }
-    tx_page_source(pager, db.heads[0].roots.collections, int.saturating_add(db.next_node, 1))
+    tx_page_source(pager, db.heads[0].roots.collections)
 }
 
 // Abort and rerun for serve (§13.3, §13.3a): each attempt drafts at the head

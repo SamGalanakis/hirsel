@@ -232,6 +232,12 @@ limit = 268435456
 [tests.runs."store@1/store/test_l87_cuts_drain_queued_pages"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l87_pin_materialization_adds_no_queue_row"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_each_promoted_holder_materializes_once"]
+limit = 268435456
+
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
 

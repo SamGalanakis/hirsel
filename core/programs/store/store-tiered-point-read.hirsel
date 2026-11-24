@@ -125,12 +125,12 @@ fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinR
 }
 
 // The source a Tx attempt's misses are served from, at the root it reads.
-fn tx_page_source(pager: Option[View[Sender[TieredPagerMessage]]], tree: PageTree, next_stamp: u64) -> Result[TieredPageSource, Error] {
+fn tx_page_source(pager: Option[View[Sender[TieredPagerMessage]]], tree: PageTree) -> Result[TieredPageSource, Error] {
     let Some(requests) = pager else {
         return Error(Io(Closed))
     }
     let Some(inventory) = view tree.paging else {
         fail("store: a Cold edge has no pack inventory")
     }
-    Ok(TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(inventory.packs), next_stamp: next_stamp, deadline: 0))
+    Ok(TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0))
 }

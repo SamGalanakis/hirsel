@@ -317,7 +317,7 @@ native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 The listener can respond with HTTP 503 while a refusal worker is available.
 
 `runner.admitted` carries the bound `Caller`, attenuated entry keys,
-recorded arrival and decision times, and byte allowances. Ingress binds the
+recorded arrival and decision times, and byte allowances. The transport binds the
 Caller at Hello or at the HTTP request. The wire owner sends the Caller in the
 Welcome frame and retains it; no credential byte is kept. Pure `prepare` resolves
 current/gone/unknown keys, applies attenuation, decodes under byte and step
@@ -378,7 +378,7 @@ The place chooses it to cover the grant tasks it intends to keep live.
 RUNNER-SPEC v2.19 defines the Caller in slices RC1, RS, RR and RC4. `Caller{issuer: u8, subject: Bytes}` names the admitted caller. It is not
 secret, and its subject is at most 64 bytes. Issuer 1 is anonymous: its subject is 16
 random bytes drawn at Hello (v2.24). A binding uses its own issuer number from the
-fixed table; a later issuer takes the next unused number when its spec lands. Ingress binds the
+fixed table; a later issuer takes the next unused number when its spec lands. The transport binds the
 Caller once, at Hello or at the HTTP request. `Admitted` and each request carry it, and the
 store's stream key becomes `caller_key || u32-BE(stream)`, so no token byte is
 stored. `caller_key` is the issuer, the subject's length and the subject. RC1

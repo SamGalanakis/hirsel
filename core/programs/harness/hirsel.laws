@@ -20,7 +20,7 @@ harness@1/laws/test_ingress_orders_at_boundaries src=a08519a6d0b98872 sig=fca456
 harness@1/laws/test_inside_rolls_back_on_error src=9691f3d170d745c1 sig=e2dcd1298136fe72 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_late_decisions_lapse src=0ab007243013b001 sig=f1646191e4688724 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_mcp_catalog_approval_and_patch src=04aea27ebe4a8a3f sig=9c4ef7828216d6a5 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-harness@1/laws/test_mcp_working_and_blob src=dfef2646ab7e16a0 sig=492806d30fb365c3 run=3f1310d156afae9e bug=- oracle=- rows=pending
+harness@1/laws/test_mcp_working_and_blob src=dfef2646ab7e16a0 sig=8f642f5a35e0c8fe run=3f1310d156afae9e bug=- oracle=- rows=pending
 harness@1/laws/test_once_tool_crash src=3d51d378e6f09d32 sig=ee7a1e68e67eb37a run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/laws/test_parked_call_resumes_once src=56632697637fa2da sig=6fd017c22c32cd57 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_presentation_recorded src=18710cdce53fbd63 sig=108b4a0674eb450a run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
@@ -39,4 +39,4 @@ harness@1/provider_laws/test_openrouter_body_and_event_bounds src=5b8817125d93a4
 harness@1/provider_laws/test_preview_only_provider_text src=d77c2302309e308e sig=6a352bd1e0984e0d run=8f61f205199467a4 bug=- oracle=- rows=pending
 harness@1/provider_laws/test_request_bodies_follow_wire_format src=7e36d61dc67e2cb2 sig=f077a1accb99cd29 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 harness@1/provider_laws/test_stream_fits_notes_worker src=fb8bbfe0bb8ee2d5 sig=c84cf6a496fb6722 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
-harness@1/provider_laws/test_warm_and_hedge src=6551f83666f1da60 sig=492b814945031f48 run=3f1310d156afae9e bug=- oracle=- rows=pending
+harness@1/provider_laws/test_warm_and_hedge src=6551f83666f1da60 sig=de97c3777ccf6380 run=3f1310d156afae9e bug=- oracle=- rows=pending

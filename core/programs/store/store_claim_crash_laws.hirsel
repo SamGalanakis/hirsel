@@ -247,3 +247,46 @@ fn claim_served_body_and_record_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     close(take reopened)
 }
+@test
+fn dropped_claim_time_survives_reopen_before_sweep(d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (time, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut db = open(tasks, directory, time, r, options)?
+    let mut policy = claim_law_policy()
+    policy.retention_ms = 50
+    let expired_op = claim_law_key(b"old")
+    let mut bound_op = claim_law_key(b"live")
+    bound_op.op = b"acct"
+    let digest = request_digest(b"charge", b"args")
+    let Accepted(old) = admit_claim(mut db, expired_op, digest, b"args", Some(clone(policy)))? else { fail("orphan admit") }
+    let Accepted(_) = admit_claim(mut db, bound_op, digest, b"args", Some(take policy))? else { fail("bound admit") }
+    let _ = conclude_claim(mut db, take old, b"done")?
+    clock.set_wall(mut wall, 149)
+    let is_bound: scoped[view] fn(Bytes) -> bool = scoped fn(op: Bytes) -> bool { op == b"acct" }
+    let Some(DroppedClaimOp(op: old_name, last_expiry: Finite(150))) = check_dropped_claim_ops(mut db, is_bound)? else {
+        fail("an open immediately before expiry allowed an unbound claim")
+    }
+    if old_name != b"pay" { fail("open check reported another operation") }
+    clock.set_wall(mut wall, 150)
+    if let Some(_) = check_dropped_claim_ops(mut db, is_bound)? { fail("an open exactly at expiry rejected an orphan") }
+    close(take db)?
+    clock.set_wall(mut wall, 149)
+    options.create = false
+    let mut reopened = open(tasks, directory, time, r, options)?
+    let none_policy: Option[KeyedPolicy] = None
+    let MissingClaim = admit_claim(mut reopened, expired_op, digest, b"args", take none_policy)? else {
+        fail("wall rollback revived the dropped operation after reopen")
+    }
+    let mut cursor = claim_sweep_start()
+    let first = sweep_claims(mut reopened, mut cursor, is_bound)?
+    let second = sweep_claims(mut reopened, mut cursor, is_bound)?
+    if first.examined != 2 || first.deleted_rows != 1 || second.examined != 1 || second.deleted_rows != 0 {
+        fail("bounded sweep did not remove the orphan and pass its bound neighbor")
+    }
+    if let Some(_) = keyed_policy(reopened, b"pay")? { fail("empty orphan record survives sweep") }
+    if let None = keyed_policy(reopened, b"acct")? { fail("sweep removed a bound operation") }
+    close(take reopened)
+}

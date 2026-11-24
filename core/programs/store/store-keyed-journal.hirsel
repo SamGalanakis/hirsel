@@ -1,11 +1,11 @@
-type KeyedEdit {
+type KeyedEdit: shareable + send {
     tree: u8,
     key: Bytes,
     value: Option[Bytes],
     call: Option[KeyedCallSection]
 }
 
-type KeyedCallSection {
+type KeyedCallSection: shareable + send {
     record: KeyedCallRecord,
     settlement: Option[Settlement]
 }

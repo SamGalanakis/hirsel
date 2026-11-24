@@ -10,7 +10,7 @@ platform@1/operator/operator_vectors src=c84873355210ce3b sig=9aadf5e4c748233e r
 platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=b93e7f9966f1aaa2 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cc082b9fc99b3ee1 sig=58178d5bd00ab99f run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_hand_install_adopts_at_12 src=eaaab1dc3308b19b sig=904ab40d4037bb7b run=dbf6722727633166 bug=- oracle=- rows=pending
-platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=c92ab2ea46d2fb62 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=1779024283860dc0 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=8ddf134b88d7e695 sig=eced8d71ca5ff1ba run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=524ae9e5bc007d28 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=3af4467f2f9d8665 sig=ccf72900101c8176 run=b1818af2b24835d3 bug=- oracle=- rows=pending

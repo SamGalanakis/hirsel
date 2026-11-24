@@ -1,0 +1,211 @@
+type SimReleaseClock: send {
+    world: std.sim.world.World,
+    stop: Receiver[()],
+    real: Clock
+}
+
+fn run_sim_release_clock(take input: SimReleaseClock) waits {
+    let SimReleaseClock(world: take initial, stop: take stop, real) = take input
+    let mut virtual = take initial
+    loop {
+        if std.sim.world.step(mut virtual) { continue }
+        if let Ok(()) = channel.try_receive(stop) { return }
+        host.sleep_until(real, clock.deadline_after_ms(host.mono_ns(real), 1))
+    }
+}
+
+fn sim_release_client(endpoint: std.sim.s3.Endpoint, c: Clock, tasks: Tasks, rnd: Random) -> std.object.Client waits {
+    let raw = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let key = result.unwrap(secret.seal(take raw, "kdf"))
+    let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take key, "")
+    let bucket = std.object.Bucket(endpoint: "http://s3.test:8080", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
+    let lane = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let due = clock.deadline_after_ms(host.mono_ns(c), 30000)
+    result.unwrap(std.object.start_simulated(endpoint, tasks, take bucket, take credentials, c, rnd, lane, due))
+}
+
+fn sim_release_options() -> store.Options {
+    let lane = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let mut opts = result.unwrap(store.sized(Bucket(lane), 134217728u64))
+    opts.group_commits = 1
+    opts.group_bytes = 65536
+    opts.head_poll_ms = 600000
+    take opts
+}
+
+fn sim_release_levels() -> store.SimLevels {
+    let mut weak: List[String] = list.with_capacity(1)
+    list.push(mut weak, "volatile")
+    store.SimLevels(weak: take weak, strongest: "durable")
+}
+
+fn sim_release_tx(mut tx: store.Tx, h: Qh, author: Caller, take value: u64) -> Result[u64, u64] {
+    store.put(mut tx, h.t, 1, value) ?=> |_| 1u64
+    Ok(value)
+}
+
+fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, rnd: Random,
+    mut world: store.LevelWorld) -> Result[(), store.Error] waits {
+    let client = sim_release_client(endpoint, time, tasks, rnd)
+    let (take requests, take workers) = std.object.split(take client)
+    let backing = SimBacking(requests: take requests, declaration: sim_release_levels(), sync: store.level_sync(mut world)?, op_ms: 30000)
+    let mut config = budget_config(Sim(take backing), time, rnd, tasks, std.sim.s3.endpoint_network(endpoint))
+    config.sizes = store.Overrides(resident_limit: Some(1048576), journal_limit: None,
+        checkpoint_bytes: Some(65536), pack_bytes: Some(65536), group_bytes: Some(65536), group_commits: Some(1),
+        lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    let (take sized, _, _, capture) = result.unwrap(place_store(config, None))
+    if let None = capture { fail("L56: the sim backing was sized as a directory") }
+    let PlaceConfig(backing: take selected, ..) = take config
+    let mut options = take sized
+    options.head_poll_ms = 600000
+    let started = open_backing(take selected, options, tasks, time, rnd)
+    let (take opened, _) = match take started {
+        Ok(take value) => take value,
+        Error(BucketOpen(store.Refusal(error: take problem, ..), _)) => return Error(take problem),
+        Error(_) => fail("L56: the backing did not open"),
+    }
+    let mut db = take opened
+    let handles = install_subs_data(mut db)?
+    for k in 0u64 .. 4 { set(mut db, handles.t, k, k + 1) }
+    let due = clock.deadline_after_ms(host.mono_ns(time), 30000)
+    let base = store.fresh_snapshot(mut db, due)?
+    if store.version(base) != 5 { fail("L56: the fixture did not stop at version five") }
+    let mut queries = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    result.unwrap(bind_query_slots(mut queries, handles))
+    let mut b = Board(r: take queries, h: arc.new(clone(handles)), read_handle: store.reader(db, 0)?,
+        reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let Mailbox(to: take out, from: take inbox, rounds: take reserved) = result.unwrap(mailbox(8u64))
+    let mut rounds = take reserved
+    let mut joined: List[Joiner] = list.new()
+    let owner = failed_read_owner(mut joined, mut rounds, 1)
+    fence_round(mut joined, Fenced(sessions: map.new()), 5, mut rounds)
+    let initial = at_base_generation(mut b, 1, 1u32, 1, failed_read_sub())
+    if list.len(initial.complete) != 1 { fail("L56: the subscription did not start") }
+
+    let operation = code.describe(sim_release_tx)
+    let codec: std.codec.Codec[Result[u64, u64]] = std.codec.of()
+    let (take key, _) = result.unwrap(described(code.identity(operation), code.revision(operation), Transact, std.codec.of_u64(), codec))
+    let mut operations: Registry[(), Qh] = registry()
+    result.unwrap(transact(mut operations, operation, 65536, DEFAULT_STEPS))
+    let mut hd = Head(db: take db, r: take operations, replay_identity: list.new(), h: arc.new(take handles),
+        out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(),
+        wakes: false, minted: 0u64, cut: false, trigger_drive: None)
+    let request = head_request(law_caller(1), clone(b"\x01\x00\x00\x00"), 0, take key, word(7), channel.sender(owner.to))
+    head_arrival(mut hd, take request, false, false)?
+    let receipt = option.unwrap(hd.last)
+    close_group(mut hd)
+    let Ok(PubIn(e: Staged(take next))) = channel.try_receive(inbox) else { fail("L56: the effect did not stage") }
+    if store.version(next) != 7 { fail("L56: the fixture did not seal version seven") }
+    let Some(take prepared) = stage_round(b, next, 1048576u64) else { fail("L56: the publisher did not stage version seven") }
+    result.unwrap(std.sim.s3.requested(endpoint, "PUT", "head", 9))
+    let mut marks = store.level_sync(mut world)?
+    store.level_mark(mut marks, 1)?
+    release_held(mut hd, false)?
+    if let Error(Empty) = channel.try_receive(inbox) {} else { fail("L56: the head released while only the weak frontier covered it") }
+    if let Error(Empty) = channel.try_receive(owner.from) {} else { fail("L56: the client saw the held group") }
+
+    host.sleep_until(time, host.mono_ns(time) + 1)
+    let mut marker = sim_release_client(endpoint, time, tasks, rnd)
+    let (fetched, _) = std.object.fetch(mut marker, "mark-1", list.new(), due)
+    if let Error(NotFound) = fetched {} else { fail("L56: the marker GET did not complete") }
+    release_held(mut hd, true)?
+    let Ok(PubIn(e: Released(Release(version: 7, snapshot: Some(take image), answers: take answers)))) = channel.try_receive(inbox) else {
+        fail("L56: the head did not release after the strongest barrier")
+    }
+    let published = store.position(mut hd.db, receipt)?
+    if published.branch != 0 || published.version != 7 { fail("L56: the released Position does not name the effect") }
+    let mut fenced = Fenced(sessions: map.new())
+    let owes = install_staged(mut b, mut fenced, take image, take prepared)
+    fence_round(mut joined, take fenced, 7, mut rounds)
+    let mut waiting: List[Replies] = list.new()
+    keep_answers(mut waiting, take answers)
+    settle(mut b.subs, mut joined, mut waiting, take owes, 7)
+    let Ok(WireEvent(e: FromRunner(Notice(e: Updated(got))))) = channel.try_receive(owner.from) else {
+        fail("L56: the client did not receive the released update")
+    }
+    let Some(content) = view got.content else { fail("L56: the release did not carry a subscription batch") }
+    if got.version != 7 || list.len(content.groups) != 1 || list.len(got.outcomes) != 1 || got.outcomes[0].p != 0 {
+        fail("L56: the received batch or reply did not identify the release")
+    }
+    if let Returned(data) = got.outcomes[0].outcome {
+        if let Ok(Ok(7u64)) = std.codec.decode(codec, data) {} else { fail("L56: the reply changed") }
+    } else { fail("L56: the released call did not return") }
+    host.sleep_until(time, host.mono_ns(time) + 1)
+    store.level_mark(mut marks, 2)?
+    let _ = take hd
+    let _ = take workers
+
+    let next_client = sim_release_client(endpoint, time, tasks, rnd)
+    let authority = store.sim_authority(take next_client, sim_release_levels(), store.level_sync(mut world)?, 30000)
+    let mut reopened_options = sim_release_options()
+    reopened_options.create = false
+    let mut reopened = store.open_authority(tasks, take authority, time, rnd, reopened_options) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let saved = store.snapshot(reopened)
+    let rows = store.table(mut reopened, "data", std.codec.key_u64(), std.codec.of_u64())?
+    if store.version(saved) != 7 || store.get(store.reader(reopened, 0)?, saved, rows, 1)? != Some(7) {
+        fail("L56: the successor did not recover the client-visible release")
+    }
+    let written = store.run(mut reopened, None, (), fn(mut tx, unused_env) -> Result[(), store.Error] { Ok(()) })?
+    let Committed(store.Done(ticket: ticket, ..)) = written else { fail("L56: the successor could not commit") }
+    let later = store.position(mut reopened, ticket)?
+    if later.version != 8 || later.branch != published.branch { fail("L56: the successor reused a released position") }
+    store.close(take reopened)
+}
+
+@test
+fn test_sim_release_uses_strongest(real: Clock, rnd: Random, tasks: Tasks, seed_grant: Env) -> Result[(), store.Error] waits {
+    let seed = match std.sim.world.test_seed(seed_grant) { Some(value) => value, None => 56u64 }
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut peers: List[Ip] = list.with_capacity(1)
+    list.push(mut peers, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
+    let key_bytes: Inline[u8, 32] = [219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing: Bytes = list.with_capacity(32)
+    let _ = bytebuf.append_inline(mut signing, key_bytes, 0, 32)
+    let verify = result.unwrap(secret.seal(take signing, "verify"))
+    let mut head_holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut head_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 9, count: 1, until: Requested("GET", "mark-1", 1), then: Apply))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None,
+        credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take verify,
+        faults: list.new(), holds: take head_holds, exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (take virtual, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let driver = task.spawn(tasks, bytes 65536, SimReleaseClock(world: take virtual, stop: take stopping, real), run_sim_release_clock)
+    let (endpoint, take sim) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576, 33554432)
+    let mut world = store.level_world(tasks, time, list.new(), 1048576)?
+    sim_release_round(endpoint, time, tasks, rnd, mut world)?
+    let events = store.level_log(take world)?
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take sim))
+    result.unwrap(task.join(take driver))
+    let mut weak = false
+    let mut checked_at: Option[u64] = None
+    let mut received_at: Option[u64] = None
+    for event in events {
+        match event.kind {
+            Synced(9) if event.epoch == 1 && event.level == "volatile" => { weak = true },
+            Mark(1) => {
+                if !weak { fail("L56: the first client check did not observe the weak frontier ahead") }
+                checked_at = Some(event.at_ns)
+            },
+            Mark(2) => { received_at = Some(event.at_ns) },
+            _ => (),
+        }
+    }
+    let effect = view report.head_writes[8u64]
+    if effect.data[120] != 9 { fail("L56: the register did not apply the effect's position") }
+    let mut marked = false
+    let mut applied = false
+    for req in report.requests {
+        if req.method == "GET" && req.key == "mark-1" { marked = true }
+        if req.request == effect.request && req.applied {
+            applied = true
+            if req.at_ns <= option.unwrap(checked_at) || req.at_ns >= option.unwrap(received_at) {
+                fail("L56: the client checks did not straddle the register advance")
+            }
+        }
+    }
+    if !marked || !applied { fail("L56: the marker or effect was absent from the request log") }
+    Ok(())
+}

@@ -2245,9 +2245,15 @@ pub fn lane_reservation(config: LaneConfig) -> Option[u64] {
     int.checked_mul(lane_count(config), config.lane_bytes)
 }
 
+/// Returns the active lanes and grants of the transferred request endpoint.
+pub fn request_lanes(requests: Requests) -> LaneConfig {
+    LaneConfig(requested_lanes: list.len(requests.lanes), lane_bytes: requests.lane_bytes)
+}
+
 /// Tests whether the client's active lanes use this count and grant.
 pub fn matches_lanes(c: Client, config: LaneConfig) -> bool {
-    list.len(c.requests.lanes) == lane_count(config) && c.requests.lane_bytes == config.lane_bytes
+    let actual = request_lanes(c.requests)
+    actual.requested_lanes == lane_count(config) && actual.lane_bytes == config.lane_bytes
 }
 
 /// Starts one owner task per lane. Supply the credential grant as source for
@@ -2395,27 +2401,23 @@ fn object_job(mut c: Client, op: Operation, key: String, take data: Bytes, deadl
 }
 
 fn as_meta(take result: Result[Value, Error]) -> Result[Meta, Error] {
-    match take result {
-        Ok(Object(take value)) => Ok(take value),
-        Error(take e) => Error(take e),
-        _ => Error(Fatal(Malformed)),
+    let Object(take value) = result? else {
+        return Error(Fatal(Malformed))
     }
+    Ok(take value)
 }
 
 fn as_created(take result: Result[Value, Error]) -> Result[Created, Error] {
-    match take result {
-        Ok(Object(take value)) => Ok(Created(take value)),
-        Ok(Existing) => Ok(Exists),
-        Error(take e) => Error(take e),
+    match result? {
+        Object(take value) => Ok(Created(take value)),
+        Existing => Ok(Exists),
         _ => Error(Fatal(Malformed)),
     }
 }
 
 fn as_unit(take result: Result[Value, Error]) -> Result[(), Error] {
-    match take result {
-        Ok(_) => Ok(()),
-        Error(take e) => Error(take e),
-    }
+    let _ = result?
+    Ok(())
 }
 
 /// The deadline `ms` milliseconds from now on the clock the client was started with.
@@ -2550,12 +2552,8 @@ pub fn store_if_retry(mut c: Client, key: String, pre: Precondition, take body: 
 
 fn store_conditional(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64, retry_uncertain: bool) -> (Result[Conditional, Error], Bytes) waits {
     let tag = match pre {
-        Match(value) => {
-            if !strong_tag(value) {
-                return (Error(Precondition), take body)
-            }
-            value
-        },
+        Match(value) if strong_tag(value) => value,
+        Match(_) => return (Error(Precondition), take body),
         Absent => empty_tag(),
     }
     let mut request = object_job(mut c, PutIf, key, take body, deadline_ns)

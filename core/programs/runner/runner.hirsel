@@ -66,9 +66,6 @@ pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String,
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 // An objects@1 place (RUNNER-SPEC v2.50). `credentials.secret` is a sealed
 // grant. The head starts the client and opens it through `open_authority`.
-pub type BucketBacking: send { net: Net, place: std.object.Bucket, credentials: std.cred.Credentials, lanes: std.object.LaneConfig, level: String, op_ms: u64 }
-pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking)
-fn persistent_backing(backing: Backing) -> bool { match backing { Disk(_) => true, Bucket(_) => true, _ => false } }
 pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: send {
     backing: Backing, sizes: store.Overrides, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],

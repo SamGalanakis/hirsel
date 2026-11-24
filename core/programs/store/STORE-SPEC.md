@@ -4426,7 +4426,7 @@ Deleted with §11.18: the generation-publish parts of L4, "the fence" and BK5's 
    - `store-object-journal.hirsel`: the `LevelSync` publish after each entry create, and `WeakSynced` in the inbox;
    - `store-levels.hirsel`: `levels(db)` returns the declared list, with one waiter list per level and D[L]'s rule;
    - `sizes.hirsel`: the open's sim charge.
-   Then L55-1, L55-2, L55-3 and L56-W. L56's runner half over sim@1 needs a RUNNER `Backing` arm for sim@1 (client, `SimLevels`, `LevelSync`, `op_ms`). That is a RUNNER-SPEC change, left open for a RUNNER lane. Until it lands, L56's native loopback case covers the one-level gate.
+   Then L55-1, L55-2, L55-3 and L56-W. L56's Runner half uses the sim@1 `Backing` arm (RUNNER v2.55.3). The client sends its `Requests` to the head. The native loopback case covers the one-level gate.
 5. **L54-W and L54-H**, after their listing step.
 
 ## 13. Tiered collections (Store M3, v2.56, not yet built)

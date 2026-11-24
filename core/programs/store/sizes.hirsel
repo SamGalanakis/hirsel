@@ -258,3 +258,9 @@ fn sim_level_bytes(names: List[String]) -> u64 {
     for name in names { room += round8(string.byte_len(name)) }
     room
 }
+
+/// Fixed opening room for sim@1's weak barriers.
+pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
+    if list.len(declaration.weak) == 0 { return 0 }
+    sim_level_bytes(declaration.weak)
+}

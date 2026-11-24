@@ -1,3 +1,13 @@
+pub type BucketBacking: send { net: Net, place: std.object.Bucket, credentials: std.cred.Credentials, lanes: std.object.LaneConfig, level: String, op_ms: u64 }
+pub type SimBacking: send {
+    requests: std.object.Requests,
+    declaration: store.SimLevels,
+    sync: store.LevelSync,
+    op_ms: u64
+}
+pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | Sim(SimBacking)
+fn persistent_backing(backing: Backing) -> bool { match backing { Disk(_) => true, Bucket(_) => true, Sim(_) => true, _ => false } }
+
 type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
     backing: Backing, options: store.Options, follower_plan: Option[store.FollowerPlan], selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
@@ -39,6 +49,12 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
             let dir = match std.dir.create_temp(parent, mut cleanup.name) { Ok(dir) => dir, Error(problem) => return Error(Start(Open(Store(Io(problem))))) }
             temporary = Some(take cleanup)
             store.open(tasks, dir, clock, random, options)
+        },
+        Sim(take sim) => {
+            let SimBacking(requests: take requests, declaration: take declaration, sync: take sync, op_ms) = take sim
+            let client = std.object.attach(take requests, None)
+            let authority = store.sim_authority(take client, declaration, take sync, op_ms)
+            Ok(store.open_authority(tasks, take authority, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
         },
         Bucket(take bucket) => {
             let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms) = take bucket

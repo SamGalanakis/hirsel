@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.55.2: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.55.3: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.55.3 (sim@1 backing)
+
+`Sim(SimBacking)` carries the S3 simulator client's sendable `Requests`, the ordered `SimLevels`, the world's `LevelSync` and `op_ms`. The task that starts the client keeps its task-affine `Workers` alive for the place. The head attaches the `Requests` and opens through `store.sim_authority`, using the same split as the Store journal. Sim backing uses the Bucket sizing rules with the weak level reservation. Its release gate waits for the strongest level (STORE §12.4).
 
 ## CHANGES-v2.55.2 (waiting Reader calls in the projection)
 
@@ -1791,7 +1795,7 @@ pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Paused | Draining
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }   // v2.21: activation; v2.31: store_id, retain_from (§14.9)
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
-pub type Backing: send = Memory | Disk(Dir) | Temp(Dir)   // v2.45 (DX Q6a): the head sizes the store with store.sized (below)
+pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | Sim(SimBacking)
 pub type TriggerConfig[G: send, H: shareable + inert + send, S: send]: send {
     entries: triggers.Entries, author: Caller, grants: S,
     grant: fn(S, H, take TriggerContext) -> Result[G, Capacity] waits, grant_bytes: u64,

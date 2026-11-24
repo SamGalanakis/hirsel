@@ -116,3 +116,5 @@ Dynamic credentials refresh 300 seconds before expiry. A replacement must
 pass a signed HEAD of the bucket. HTTP 403 leaves the active credentials
 in use up to their expiry. Refresh failures wait 100 ms at first and double
 the delay up to expiry. Static credentials enter through `cred.from_secret`.
+
+`request_lanes(requests)` returns the active lane count and each lane's byte grant. A caller can size a consumer of a transferred `Requests` endpoint before attaching it.

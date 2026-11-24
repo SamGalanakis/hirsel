@@ -44,7 +44,13 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
     let overhead = operate_bytes(p) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()
-    let kind: store.Kind = match p.backing { Memory => Memory, Bucket(b) => Bucket(b.lanes), _ => Directory }
+    let kind: store.Kind = match p.backing {
+        Memory => Memory,
+        Bucket(b) => Bucket(b.lanes),
+        Sim(b) => Bucket(std.object.request_lanes(b.requests)),
+        _ => Directory,
+    }
+    let weak_room = match p.backing { Sim(b) => store.sim_level_reservation(b.declaration), _ => 0u64 }
     let empty: List[store.FollowerPlan] = list.new()
     let capture = if let Bucket(_) = kind {
         let Some(service) = store.service_bytes(empty) else {
@@ -52,7 +58,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
         }
         add_place_bytes(service, store.follower_starter_bytes()) ?=> Full
     } else { 0u64 }
-    let required = add_place_bytes(reserved, capture) ?=> Full
+    let required = add_place_bytes(add_place_bytes(reserved, capture) ?=> Full, weak_room) ?=> Full
     let Some(share) = int.checked_sub(limit, required) else {
         return Error(Full(Capacity(requested: required, available: limit)))
     }
@@ -89,7 +95,9 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
         let Some(peak) = peak_bytes else {
             return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
         }
-        return Ok((take options, share, order.max(reserved_store, peak), Some(take plan)))
+        let sim_writer_room = add_place_bytes(reserved_store, weak_room) ?=> Full
+        let shared_client = match p.backing { Sim(_) => client, _ => 0u64 }
+        return Ok((take options, share, order.max(sim_writer_room, peak) - shared_client, Some(take plan)))
     }
     Ok((take options, share, reserved_store, None))
 }

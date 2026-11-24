@@ -1,6 +1,6 @@
 //! The io_uring backend of a [`Poller`](super::Poller): one ring per owner,
 //! its mailbox, and the multishot polls of its watched descriptors.
-use super::{INTEREST, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
+use super::{INTEREST, POLL_BATCH, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -258,12 +258,14 @@ impl Uring {
     /// One owner turn into `out`. A timeout of Some(0) does not block and
     /// None blocks until a completion.
     pub(super) fn wait(&self, out: &mut [libc::epoll_event], timeout_ns: Option<u64>) -> usize {
-        let n = self.reap(out);
+        let limit = POLL_BATCH as usize;
+        let mut remaining = limit;
+        let n = self.reap(out, &mut remaining);
         self.trim();
         // Kept transmit slots are freed by a later turn, so do not sleep
         // past their trim.
         let trim_ns = sendzc::TRIM.as_nanos() as u64;
-        let timeout_ns = if n != 0 {
+        let timeout_ns = if remaining < limit {
             Some(0)
         } else if self.tx_kept() && timeout_ns.is_none_or(|ns| ns > trim_ns) {
             Some(trim_ns)
@@ -274,7 +276,7 @@ impl Uring {
         if n != 0 {
             return n;
         }
-        let n = self.reap(out);
+        let n = self.reap(out, &mut remaining);
         self.trim();
         n
     }
@@ -283,14 +285,15 @@ impl Uring {
     /// ends (no `F_MORE`) is re-armed through the mailbox unless a removal or
     /// an adoption replaced it: the kernel ends a multishot poll when the
     /// completion queue overflows, and cancels it when its arming thread exits.
-    fn reap(&self, out: &mut [libc::epoll_event]) -> usize {
+    fn reap(&self, out: &mut [libc::epoll_event], remaining: &mut usize) -> usize {
         let watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: the owner holds its turn, the only completion reader.
         let mut cq = unsafe { self.ring.completion_shared() };
         cq.sync();
         let mut n = 0;
-        while n < out.len() {
+        while *remaining != 0 && n < out.len() {
             let Some(cqe) = cq.next() else { break };
+            *remaining -= 1;
             let data = cqe.user_data();
             let (tag, flags) = match data {
                 REMOVED => continue,

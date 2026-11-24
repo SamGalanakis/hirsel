@@ -211,6 +211,33 @@ fn cross_home_release(make: fn() -> io::Result<Arc<Poller>>) -> (bool, bool, boo
     (reused, quiet, ended, woken)
 }
 
+#[test]
+fn reaping_counts_every_completion() {
+    use io_uring::opcode::PollRemove;
+
+    // Removal completions produce no event in the caller's array.
+    let ring = Uring::with_cq_size(512).unwrap();
+    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+    let pending = || {
+        // SAFETY: this test exclusively owns the ring and does not consume the queue here.
+        unsafe { ring.ring.completion_shared() }.len()
+    };
+    for initial in [129, 100] {
+        for submitted in 1..=129 {
+            ring.push(PollRemove::new(1).build().user_data(REMOVED), None);
+            if submitted <= initial && (submitted % 64 == 0 || submitted == initial) {
+                ring.enter(Some(0));
+            }
+        }
+        assert_eq!(pending(), initial);
+        assert_eq!(ring.wait(&mut events, Some(0)), 0);
+        assert_eq!(pending(), 1, "initial backlog {initial}");
+        assert!(ring.due());
+        assert_eq!(ring.wait(&mut events, Some(0)), 0);
+        assert_eq!(pending(), 0);
+    }
+}
+
 /// More sockets turn ready at once than the io_uring completion queue
 /// holds. Every one must still be reported: none of the edges past the
 /// queue's capacity may be lost.

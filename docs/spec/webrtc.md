@@ -151,6 +151,7 @@ negotiated behaviour.
 `transport-wide-cc-extensions-01` and the AV1 RTP specification's `dependency-descriptor`.
 For `ssrc-audio-level`, the extension attribute `vad=on` or `vad=off` is kept in
 `Extmap.vad`, `None` when absent ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §4).
+An absent `vad` means `vad=on`, the RFC's default, everywhere this spec reads it.
 Other extension attributes are skipped.
 
 **Fingerprint.** Only `sha-256` is read. A description whose fingerprints are all of other
@@ -187,7 +188,9 @@ checked at parse, because a description that breaks them cannot be answered:
 
 **RID and simulcast ([RFC 8851](https://www.rfc-editor.org/rfc/rfc8851),
 [RFC 8853](https://www.rfc-editor.org/rfc/rfc8853)).** A RID identifier is 1 to 16 ASCII
-alphanumeric, `-` or `_` bytes (`BadRid(i)` otherwise, RFC 8851 §10). Each `a=rid` line
+alphanumeric, `-` or `_` bytes (`BadRid(i)` otherwise). The characters are RFC 8851 §10's
+grammar, which sets no length. The 16-byte cap is this spec's bound, the length browsers
+accept for `sendEncodings[].rid`. Each `a=rid` line
 keeps its direction, its `pt=` list, its `depend=` list (as indexes into `rids`) and the rest
 of its restrictions as bytes, so nothing the offerer said about a RID is lost (RFC 8851
 §§6.2.2 to 6.3). `a=simulcast` keeps its send list and its receive list separately. Each
@@ -241,9 +244,9 @@ server adds (RTC-5).
    format is kept when its `apt` format is kept. A section left with no media format is
    answered `Rejected`.
 4. Extmaps are the offer's for extensions the policy lists, with the offer's IDs (RFC 8285
-   §6). An extmap with a direction is answered with the complementary direction, and one
+   §7). An extmap with a direction is answered with the complementary direction, and one
    whose direction does not overlap the section's answered direction is not kept (RFC 8285
-   §6). For `AudioLevel` the answer repeats the offer's `vad` value, so each leg's `V` bit
+   §7). For `AudioLevel` the answer repeats the offer's `vad` value, so each leg's `V` bit
    has the meaning that leg negotiated (RTC-6). `Mid` is required, and a section without it
    was refused at parse.
 5. **RIDs and simulcast, one direction at a time** (RFC 8853 §5.3.2). The server receives
@@ -578,8 +581,9 @@ the other unit's port, at most one per destination per turn. Each unit's service
 allow `UdpSend` to the sibling units' ports. A zero-length datagram from a sibling unit's
 address only wakes the unit, and from any other address it is dropped and counted. A
 forged doorbell costs one turn and nothing else, because it carries no data. A doorbell is
-only a wake. No fence or ordering depends on it arriving, and a unit also never waits
-longer than its next timer deadline.
+only a wake. No fence or ordering depends on it arriving: a unit never waits longer than
+its next timer deadline, nor longer than 50 ms when it has no deadline sooner, so a lost
+doorbell delays a fence by at most 50 ms.
 
 **A turn.** `turn` drains the control inbox, then the cross-unit media inbox (below). It then
 takes one `udp_recv` batch, and **drains the control inbox again before it routes any
@@ -592,7 +596,7 @@ tag names a fenced or suspended generation, then calls `udp_send`. A partial sen
 which the next turn's send step rechecks against the fences before it retries it. It
 appends signaling and dynacast output to `events`, which the adapter sends (RTC-8). It
 returns the earliest deadline. A unit's loop is `turn` and then `udp_recv`'s wait until that
-deadline.
+deadline or 50 ms, whichever comes first.
 
 **Fan-out.** For a `Media` packet of publication `P`, encoding `e`:
 
@@ -608,13 +612,18 @@ deadline.
    frame number through `media_bits`. The publisher's MID, RID, payload type and
    transport sequence number never reach a subscriber. The packet is then queued, with
    its `Tag`, for the subscriber's pacer, or straight to `out` when the rtp lane does not
-   pace that down-track. At send, it takes the next transport-wide sequence number of the
+   pace that down-track. A pacer entry (RTP-10's `Q`) is unsealed: the scratch header, the
+   tag and a `Shared[Bytes]` of the plaintext. When any down-track queues the packet, the
+   home unit first copies the payload out of its receive slot into that one `Shared[Bytes]`
+   (the copy step 3 makes for a remote unit), so the slot can be reused at the next
+   `udp_recv` while the entry waits. At send, it takes the next transport-wide sequence number of the
    subscriber's own transport (`twcc.assign`, RTP-8). The router then calls TLS-8
    `seal_into` with the scratch header and the shared payload as source and the
    subscriber's span of `out.data` as destination. One copy, made by the cipher. The
    egress history records the original output rewrite (RTC-4).
 3. For each other unit with at least one down-track of `P`, the home unit posts one
-   `Media(P, src, Shared[Bytes])` message, where `src` is the publisher's generation. The
+   `Media(P, src, speaking, Shared[Bytes])` message, where `src` is the publisher's
+   generation and `speaking` is the publication's speaking state (RTC-6) after this packet. The
    `Shared[Bytes]` holds the plaintext packet, and every remote unit runs step 2 from it.
    One plaintext copy per remote unit, whatever its number of subscribers.
 
@@ -691,10 +700,13 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
   `P = 0` (not inter-picture predicted). Its only references are lower spatial layers of
   the same picture (`D = 1`), and the target forwards all of those. A down-switch, temporal
   or spatial, is allowed at any picture start, since a lower layer never references a
-  higher one.
+  higher one. The temporal rule depends on the down-track's current `T`, so for VP9 the router
+  fills `switches` per down-track, once for each `on_packet` call, not once per packet.
 - **AV1** (Dependency Descriptor, [AV1 RTP §A.8](https://aomediacodec.github.io/av1-rtp-spec/#a8-dependency-descriptor-rtp-header-extension)).
-  `media_bits` `decode_target` answers the indication for a template and a decode-target
-  index, and the router needs the inverse. So at each new template structure it derives,
+  `media_bits` `decode_target` answers the indication for a frame and a decode-target
+  index, and the router needs the inverse. `Structure` is opaque, so S2 adds
+  `media_bits.target_layers(View[Structure], d) -> Option[(u8, u8)]`, which reads the
+  templates' spatial and temporal ids and indications. At each new template structure it derives,
   for every decode target `d`, the pair `(S_d, T_d)`: the highest spatial id and the highest
   temporal id over the templates whose indication for `d` is not Not Present. `Layer(e, s,
   t)` then maps to the `d` with `(S_d, T_d) = (s, t)`. With no such `d`, it maps to the `d`
@@ -821,7 +833,8 @@ the seven level bits unchanged ([RFC 6464](https://www.rfc-editor.org/rfc/rfc646
 The `V` bit follows each leg's negotiated `vad` (RTC-2 step 4). On a subscriber leg with
 `vad=off`, `V` is written 0 and means nothing. On a leg with `vad` on, `V` is the
 publisher's `V` when the publisher's leg also negotiated it on, and otherwise whether the
-publication is speaking by the score above. So a bit that had no meaning on the way in is
+publication is speaking by the score above. A remote unit takes that state from the
+`Media` message that carried the packet (RTC-5), so it never needs the home unit's score. So a bit that had no meaning on the way in is
 never given one on the way out. A leg on which the extension was not negotiated, or not in
 a direction toward the subscriber, carries no extension. With `n = 0`, all audio is
 forwarded. A voice room of N speakers then costs `N · n` audio packets per frame interval
@@ -900,9 +913,10 @@ as a revoke. `resume(r, room)` lifts it the same way. A `join`, `subscribe` or `
 on a suspended room is `Suspended`. RTC-8 uses this for signaling loss.
 
 **Cost and liveness.** A revoke or a suspend waits for each unit's next fence point plus one
-inbox hop. The doorbell wakes a waiting unit at once. A unit inside a turn reaches its next
-fence point when its current `udp_send` returns, and that call waits at most until the turn's
-deadline (NET-16). So the fence's latency is bounded by the slowest unit's turn. No unit
+inbox hop. The doorbell wakes a waiting unit at once, and a lost doorbell costs at most the
+50 ms wait cap. A unit inside a turn reaches its next fence point when its current
+`udp_send` returns, and that call waits at most until the turn's deadline (NET-16). So the
+fence's latency is bounded by the slowest unit's turn plus 50 ms. No unit
 waits for another inside a turn, so revokes cannot deadlock.
 
 **Leave is not revoke.** `leave` closes the participant's sessions with `close_notify`,
@@ -1158,12 +1172,15 @@ unless named otherwise.
   more than a quarter, and the retry after the new interval carries the same FIR sequence
   number. A new request after the keyframe carries the next number mod 256 (RFC 5104
   §4.3.1.1). A publisher that negotiated neither gets no feedback packet at all.
-- **W11 `dynacast_mask`.** Three subscribers change targets over 12 s of simulated time,
-  two of them on a remote unit. One subscriber's budget is below one base layer, and a
+- **W11 `dynacast_mask`.** Four subscribers change targets over 12 s of simulated time:
+  one on the home unit and one on each of three units, two of which want different bits of
+  the same publication at once, and one of which later drops its bit while the other keeps
+  it. A home unit that keeps one remote mask instead of the per-unit union fails. One subscriber's budget is below one base layer, and a
   second subscriber can afford one base but not a second. One down-track holds its old
   encoding during a pending switch. *Oracle:* by hand from RTC-6. A bit turns on in the same
   turn, and a bit turns off after exactly 5,000 ms with no event inside the delay when a
-  target returns. The remote unit's demand sets bits. The below-base down-track stays `Off`,
+  target returns. Each remote unit's demand sets bits, and the bit dropped by one remote unit
+  stays on while the other still wants it. The below-base down-track stays `Off`,
   the unaffordable second base stays `Off` in publication order, and the held encoding
   keeps its bit until the switch. Packets outside the mask are never forwarded.
 - **W12 `active_speaker_scores`.** Audio-level traces of four publications, 20 ms packets,
@@ -1258,8 +1275,8 @@ them under the host rules' matched-comparison terms, against mediasoup's
 
 ## Build slices
 
-Each slice lands on its own with its laws. A Sol lane can run S1 to S6 in order. S7
-can run beside S5. R1 is a runner slice and can run at any time. Reds that may ride a land
+Each slice lands on its own with its laws. A Sol lane can run S1 to S6 in order; S2 can run
+beside S1. S7 runs after S5, beside S6. R1 is a runner slice and can run at any time. Reds that may ride a land
 are the nightly N1 and N2, and any cost target not yet met. A red law of a slice's own blocks
 that slice. A TLS-8 `Reused`, `Issued` or `Range` anywhere, or any red in W14, W15, W16 or
 W19, blocks, because those are soundness reds.
@@ -1267,11 +1284,11 @@ W19, blocks, because those are soundness reds.
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
 | **S1** SDP | the package skeleton (`webrtc_sfu` with `sdp`, `peer`, `router`, `signal`); RTC-1 `parse` and `write` with port kinds, `tls-id`, per-direction RIDs and simulcast, extmap direction and `vad`; RTC-2 `answer`, `offer`, `accept_answer` with association reuse and answer validation, glare state; captured browser offers committed as vectors | nothing | W1, W2, W3, W5 |
-| **S2** VP8 descriptor | `media_bits` gains VP8 (RFC 7741): payload descriptor parse (`X`, `I`, `L`, `T`, `K`, `PictureID`, `TL0PICIDX`, `TID`, `Y`, `KEYIDX`, `S` and partition index), keyframe detection from the payload header's `P` bit, and the rewrites of `PictureID` and `TL0PICIDX` | nothing | in `media_bits`'s own laws: RFC 7741 §4's examples, and captured Chromium VP8 packets, by hand |
-| **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W6, W7, W19 |
-| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W9, W10, W18 |
+| **S2** VP8 descriptor | `media_bits` gains `target_layers` for AV1 (RTC-6) and VP8 (RFC 7741): payload descriptor parse (`X`, `I`, `L`, `T`, `K`, `PictureID`, `TL0PICIDX`, `TID`, `Y`, `KEYIDX`, `S` and partition index), keyframe detection from the payload header's `P` bit, and the rewrites of `PictureID` and `TL0PICIDX` | nothing | in `media_bits`'s own laws: RFC 7741 §4's examples, and captured Chromium VP8 packets, by hand |
+| **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W19 |
+| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18 (W6 and W7 need the router's down-tracks and switches) |
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
-| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S4 | W11, W12, W13 |
+| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness until F1 | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1, F2 for N1 | the cost targets |

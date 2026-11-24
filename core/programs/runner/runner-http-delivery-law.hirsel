@@ -864,3 +864,121 @@ fn http_age_refusal_survives_longer_retention(d: Dir, random: Random, tasks: Tas
     let _ = take wall_hand
     Ok(())
 }
+
+type InvisiblePost: send {
+    net: Net,
+    clock: Clock,
+    address: Addr
+}
+
+fn invisible_post(take job: InvisiblePost) waits {
+    let InvisiblePost(net, clock, address) = take job
+    let lost = http_law_post(net, clock, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32)
+    if lost.status != 409u16 || lost.committed || lost.replayed || !lost.retry || !none(lost.refused) {
+        fail("an owed send past its deadline was not an unmarked 409")
+    }
+}
+
+fn invisible_retry_drive(take job: KeyedHorizonDrive) waits {
+    let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
+    let mut hand_of = take clock_hand
+    let definition: HttpOpPlace = code.describe(http_op_original)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, intercept, pub_to, time, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // X's first delivery is held before the head until its 1000 ms send
+    // deadline passes, so its client sees only the unmarked 409.
+    let first = task.spawn(tasks, bytes 1048576u64, InvisiblePost(net, clock: time, address), invisible_post)
+    let held = l15_head_request(waiting)
+    clock.advance_to(mut hand_of, 1001000000u64)
+    if let Error(_) = task.join(take first) {
+        fail("X's lost delivery failed")
+    }
+    // The held delivery then commits X's one effect, invisible to X, and
+    // every later delivery goes straight to the head.
+    result.unwrap(channel.send(head, take held))
+    let pump = task.spawn(tasks, bytes 65536u64, InvisiblePump(from: take waiting, to: take head), invisible_pump)
+    // The Abandoned send kept its slot (V2), so X's retry receives that one
+    // run's answer: effect 1, not a second run.
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32), false, b"\"1\"")
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32), true, b"\"1\"")
+    // Y on a newer stream evicts X at one stream per Caller.
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", 8u32, 0u64, b"{}", 1000u32), false, b"\"2\"")
+    let aged = http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32)
+    if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000000000000000000007.0\"") {
+        fail("X's retry after eviction was not a marked 410")
+    }
+    // The 410 ran no body: the next new stream's effect is the third.
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", 9u32, 0u64, b"{}", 1000u32), false, b"\"3\"")
+    let _ = std.task.cancel_join(take pump)
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take hand_of
+}
+
+fn invisible_expect(reply: HttpLawReply, replayed: bool, body: Bytes) {
+    if reply.status != 201u16 || !reply.committed || reply.replayed != replayed || reply.body != body || !none(reply.refused) {
+        let mut text = string.from("a stream send got another call's effect: ")
+        string.push_u64(mut text, int.widen(reply.status))
+        string.push(mut text, if reply.committed {
+            " committed "
+        } else {
+            " not committed "
+        })
+        string.push(mut text, if reply.replayed {
+            "replayed "
+        } else {
+            "fresh "
+        })
+        if list.len(reply.body) == 3u64 {
+            string.push_u64(mut text, int.widen(reply.body[1u64]))
+        }
+        fail(take text)
+    }
+}
+
+type InvisiblePump: send {
+    from: Receiver[HeadInput],
+    to: Sender[HeadInput]
+}
+
+fn invisible_pump(take job: InvisiblePump) waits {
+    let InvisiblePump(from: take from, to: take to) = take job
+    while let Ok(take next) = channel.receive(from) {
+        result.unwrap(channel.send(to, take next))
+    }
+}
+
+// Carry 1 (http.md B-7, B-8; transition rows 4 and 6c): X's first delivery
+// commits after its client saw an unmarked 409, the retry gets that run's
+// answer and the next one replays it, Y evicts X, X's next retry is a marked 410 that runs nothing, and
+// the effects are X = 1, Y = 2, then a new stream 3.
+@test
+fn http_invisible_retry_keeps_one_effect(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (time, take wall) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.streams_per_caller_max = 1u64
+    let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
+    let definition: HttpOpPlace = code.describe(http_op_original)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock: time, hand: take wall, random, tasks, net)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, invisible_retry_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    if let Error(take problem) = started {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

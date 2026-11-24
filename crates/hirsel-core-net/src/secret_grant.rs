@@ -2,6 +2,9 @@ use crate::secret_aead::{AeadAlg, AeadMode};
 use crate::{Name, Pattern};
 use std::sync::Arc;
 
+mod import_spend;
+pub use import_spend::{ImportKind, ImportRefusal, ImportSpend};
+
 /// The uses of a Secret other than `tls_send` (TLS-5), as a set. `mac`
 /// permits verification too, so its set holds `VERIFY` as well, and an
 /// intersection is the bitwise and.

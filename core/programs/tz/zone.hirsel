@@ -1,0 +1,166 @@
+pub type Error = Invalid(u64) | UnsupportedVersion(u8) | MissingRules | Limit | Allocation(Capacity) | Unspecified | Range | MultipleMatches | MissingZone | InvalidName | Io(IoError) | DatabaseData(std.flate.Error)
+
+pub type Resolution: key = Unique(std.time.Timestamp) | Ambiguous(early: std.time.Timestamp, late: std.time.Timestamp) | Gap
+
+type LocalType: key {
+    offset: i32,
+    daylight: bool,
+    known: bool
+}
+
+type Transition {
+    at: i64,
+    kind: u8
+}
+
+pub opaque type Zone: send {
+    changes: List[Transition],
+    types: List[LocalType],
+    footer: Option[Footer]
+}
+
+const DAY_SECONDS: i64 = 86400
+
+fn floor_mod(n: i64, divisor: i64) -> i64 {
+    let rem = n % divisor
+    if rem < 0 {
+        rem + divisor
+    } else {
+        rem
+    }
+}
+
+fn local_type(z: Zone, seconds: i64) -> Result[LocalType, Error] {
+    let count = list.len(z.changes)
+    if count == 0 || seconds >= z.changes[count - 1].at {
+        if let Some(rule) = z.footer {
+            return Ok(footer_type(rule, seconds))
+        }
+        if count != 0 {
+            return Error(Unspecified)
+        }
+    }
+    let mut lo = 0u64
+    let mut hi = count
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if z.changes[mid].at <= seconds {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    let index: u64 = if lo == 0 {
+        0
+    } else {
+        int.widen(z.changes[lo - 1].kind)
+    }
+    Ok(z.types[index])
+}
+
+fn utc_offset(z: Zone, seconds: i64) -> Result[i32, Error] {
+    let found = local_type(z, seconds)?
+    if !found.known {
+        return Error(Unspecified)
+    }
+    Ok(found.offset)
+}
+
+/// Seconds east of UTC, including historical offsets that are not whole minutes.
+pub fn offset_at(z: Zone, utc: std.time.Timestamp) -> Result[i32, Error] {
+    utc_offset(z, std.time.unix_secs(utc))
+}
+
+/// Local civil time at utc, with the original nanoseconds. Range if the
+/// resulting civil date is outside years 0 through 9999.
+pub fn to_local(z: Zone, utc: std.time.Timestamp) -> Result[std.time.Civil, Error] {
+    let east: i64 = int.widen(offset_at(z, utc)?)
+    let wall = std.time.unix_secs(utc) + east
+    let clock = floor_mod(wall, DAY_SECONDS)
+    let Some(date) = std.time.from_days((wall - clock) / DAY_SECONDS) else {
+        return Error(Range)
+    }
+    let Some(civil) = std.time.at(date, int.narrow(clock / 3600), int.narrow(clock / 60 % 60), int.narrow(clock % 60), std.time.subsec_nanos(utc)) else {
+        return Error(Range)
+    }
+    Ok(civil)
+}
+
+type Matches {
+    early: Option[i64],
+    late: Option[i64],
+    unknown: bool
+}
+
+fn candidate(z: Zone, mut found: Matches, wall: i64, east: i32) -> Result[(), Error] {
+    let delta: i64 = int.widen(east)
+    let utc = wall - delta
+    let current = match utc_offset(z, utc) {
+        Ok(current) => current,
+        Error(Unspecified) => {
+            found.unknown = true
+            return Ok(())
+        },
+        Error(e) => return Error(e),
+    }
+    if east != current {
+        return Ok(())
+    }
+    if let Some(early) = found.early {
+        if utc == early || found.late == Some(utc) {
+            return Ok(())
+        }
+        if found.late != None {
+            return Error(MultipleMatches)
+        }
+        if utc < early {
+            found.early = Some(utc)
+            found.late = Some(early)
+        } else {
+            found.late = Some(utc)
+        }
+    } else {
+        found.early = Some(utc)
+    }
+    Ok(())
+}
+
+fn timestamp(seconds: i64, nanos: u32) -> Result[std.time.Timestamp, Error] {
+    match std.time.from_unix(seconds, nanos) {
+        Some(t) => Ok(t),
+        None => Error(Range),
+    }
+}
+
+/// Try every declared offset, then verify each candidate against the active
+/// rule. Fold instants are ordered earliest first. With no matching instant,
+/// an unspecified candidate yields Unspecified. More than two matches yield
+/// MultipleMatches because Resolution cannot represent them.
+pub fn from_local(z: Zone, civil: std.time.Civil) -> Result[Resolution, Error] {
+    let hour: i64 = int.widen(std.time.hour(civil))
+    let minute: i64 = int.widen(std.time.minute(civil))
+    let second: i64 = int.widen(std.time.second(civil))
+    let wall = std.time.days(std.time.date_of(civil)) * DAY_SECONDS + hour * 3600 + minute * 60 + second
+    let mut found = Matches(early: None, late: None, unknown: false)
+    for entry in z.types {
+        candidate(z, mut found, wall, entry.offset)?
+    }
+    if let Some(rule) = z.footer {
+        candidate(z, mut found, wall, rule.standard.offset)?
+        if let Some(season) = rule.season {
+            candidate(z, mut found, wall, season.daylight.offset)?
+        }
+    }
+    let nanos = std.time.nanos(civil)
+    if let Some(first) = found.early {
+        let early = timestamp(first, nanos)?
+        if let Some(last) = found.late {
+            return Ok(Ambiguous(early, late: timestamp(last, nanos)?))
+        }
+        return Ok(Unique(early))
+    }
+    if found.unknown {
+        return Error(Unspecified)
+    }
+    Ok(Gap)
+}

@@ -1,0 +1,222 @@
+const MAX_FILE: u64 = 262144
+
+const MAX_TRANSITIONS: u64 = 16384
+
+const MAX_TYPES: u64 = 256
+
+const MAX_LEAPS: u64 = 256
+
+const MAX_DESIGNATIONS: u64 = 4096
+
+const HEADER: u64 = 44
+
+type Header {
+    version: u8,
+    ut: u64,
+    std: u64,
+    leaps: u64,
+    times: u64,
+    kinds: u64,
+    names: u64
+}
+
+fn read_header(raw: Bytes, start: u64) -> Result[Header, Error] {
+    if list.len(raw) - start < HEADER || list.slice(raw, start, start + 4) != b"TZif" {
+        return Error(Invalid(start))
+    }
+    let wire_version = raw[start + 4]
+    if wire_version != 0 && wire_version != b'2' && wire_version != b'3' {
+        return Error(UnsupportedVersion(wire_version))
+    }
+    let ut = word32(raw, start + 20)
+    let std = word32(raw, start + 24)
+    let leaps = word32(raw, start + 28)
+    let times = word32(raw, start + 32)
+    let kinds = word32(raw, start + 36)
+    let names = word32(raw, start + 40)
+    Ok(Header(version: wire_version, ut: int.widen(ut), std: int.widen(std), leaps: int.widen(leaps), times: int.widen(times), kinds: int.widen(kinds), names: int.widen(names)))
+}
+
+fn block_end(h: Header, start: u64, width: u64) -> u64 {
+    start + h.times * (width + 1) + h.kinds * 6 + h.names + h.leaps * (width + 4) + h.std + h.ut
+}
+
+fn word32(raw: Bytes, at: u64) -> u32 {
+    list.word_be(raw, at)
+}
+
+fn read_time(raw: Bytes, at: u64, width: u64) -> i64 {
+    if width == 4 {
+        let low: i32 = int.truncate(word32(raw, at))
+        int.widen(low)
+    } else {
+        int.truncate((list.word_be(raw, at) : u64))
+    }
+}
+
+fn correction(raw: Bytes, at: u64) -> i64 {
+    let n: i32 = int.truncate(word32(raw, at))
+    int.widen(n)
+}
+
+fn validate_leaps(raw: Bytes, start: u64, count: u64, width: u64) -> Result[(), Error] {
+    let mut previous = -1i64
+    let mut before = 0i64
+    for i in 0u64 .. count {
+        let at = start + i * (width + 4)
+        let when = read_time(raw, at, width)
+        let after = correction(raw, at + width)
+        if when <= previous || (after - before != 1 && after - before != -1) {
+            return Error(Invalid(at))
+        }
+        // Positive occurrences name the inserted second. Negative occurrences
+        // name the first normal second after the deletion.
+        let Some(midnight) = int.checked_sub(when, if after > before {
+            before
+        } else {
+            after
+        }) else {
+            return Error(Invalid(at))
+        }
+        let representative = calendar_second(midnight)
+        if representative % DAY_SECONDS != 0 || std.time.day(option.unwrap(std.time.from_days(representative / DAY_SECONDS))) != 1 {
+            return Error(Invalid(at))
+        }
+        previous = when
+        before = after
+    }
+    Ok(())
+}
+
+fn read_types(raw: Bytes, base: u64, h: Header) -> Result[List[LocalType], Error] {
+    let names = base + h.kinds * 6
+    if raw[names + h.names - 1] != 0 {
+        return Error(Invalid(names + h.names - 1))
+    }
+    let mut types: List[LocalType] = list.new()
+    match list.try_reserve(mut types, h.kinds) {
+        Ok(()) => {},
+        Error(e) => return Error(Allocation(e)),
+    }
+    for i in 0u64 .. h.kinds {
+        let p = base + i * 6
+        let offset: i32 = int.truncate(word32(raw, p))
+        let daylight = raw[p + 4]
+        let index: u64 = int.widen(raw[p + 5])
+        if offset == -2147483648i32 || daylight > 1 || index >= h.names {
+            return Error(Invalid(p))
+        }
+        let known = h.names - index < 4 || list.slice(raw, names + index, names + index + 4) != b"-00\x00"
+        list.push(mut types, LocalType(offset, daylight: daylight == 1, known))
+    }
+    Ok(take types)
+}
+
+fn read_changes(raw: Bytes, start: u64, h: Header, width: u64, leaps: u64) -> Result[List[Transition], Error] {
+    let mut changes: List[Transition] = list.new()
+    match list.try_reserve(mut changes, h.times) {
+        Ok(()) => {},
+        Error(e) => return Error(Allocation(e)),
+    }
+    let indexes = start + h.times * width
+    let mut previous = 0i64
+    let mut leap = 0u64
+    let mut correction_now = 0i64
+    for i in 0u64 .. h.times {
+        let p = start + i * width
+        let when = read_time(raw, p, width)
+        let kind = raw[indexes + i]
+        let kind_index: u64 = int.widen(kind)
+        if i != 0 && when <= previous || kind_index >= h.kinds {
+            return Error(Invalid(p))
+        }
+        while leap < h.leaps {
+            let at = leaps + leap * (width + 4)
+            let occurrence = read_time(raw, at, width)
+            let next = correction(raw, at + width)
+            if when < occurrence || when == occurrence && next > correction_now {
+                break
+            }
+            correction_now = next
+            leap += 1
+        }
+        let Some(at) = int.checked_sub(when, correction_now) else {
+            return Error(Range)
+        }
+        list.push(mut changes, Transition(at, kind))
+        previous = when
+    }
+    Ok(take changes)
+}
+
+fn read_block(raw: Bytes, start: u64, h: Header, width: u64) -> Result[Zone, Error] {
+    if h.times > MAX_TRANSITIONS || h.kinds > MAX_TYPES || h.leaps > MAX_LEAPS || h.names > MAX_DESIGNATIONS {
+        return Error(Limit)
+    }
+    let end = block_end(h, start, width)
+    if end > list.len(raw) || h.kinds == 0 || h.names == 0 || h.ut != 0 && h.ut != h.kinds || h.std != 0 && h.std != h.kinds {
+        return Error(Invalid(start))
+    }
+    let local = start + h.times * (width + 1)
+    let leaps = local + h.kinds * 6 + h.names
+    let standard = leaps + h.leaps * (width + 4)
+    let universal = standard + h.std
+    for i in 0u64 .. h.kinds {
+        let s: u8 = if h.std == 0 {
+            0
+        } else {
+            raw[standard + i]
+        }
+        let u: u8 = if h.ut == 0 {
+            0
+        } else {
+            raw[universal + i]
+        }
+        if s > 1 || u > s {
+            return Error(Invalid(standard))
+        }
+    }
+    let footer: Option[Footer] = if width == 4 {
+        if end != list.len(raw) {
+            return Error(Invalid(end))
+        }
+        None
+    } else {
+        parse_footer(raw, end, h.version)?
+    }
+    validate_leaps(raw, leaps, h.leaps, width)?
+    let changes = read_changes(raw, start, h, width, leaps)?
+    let types = read_types(raw, local, h)?
+    if let Some(rule) = footer {
+        if h.times > 0 {
+            let last = changes[h.times - 1]
+            if footer_type(rule, last.at) != types[int.widen(last.kind)] {
+                return Error(Invalid(end))
+            }
+        }
+    }
+    Ok(Zone(changes: take changes, types: take types, footer))
+}
+
+/// Parse RFC 9636 TZif v1/v2/v3. Limits per file are 256 KiB, 16,384
+/// transitions, 256 types, 256 leap records, 4,096 designation bytes and a
+/// 255-byte footer. Blocks and rules are flat. Work is linear in those counts.
+pub fn parse(raw: Bytes) -> Result[Zone, Error] {
+    if list.len(raw) > MAX_FILE {
+        return Error(Limit)
+    }
+    let first = read_header(raw, 0)?
+    if first.version == 0 {
+        return read_block(raw, HEADER, first, 4)
+    }
+    // The first block is for legacy readers. Only its byte size is needed.
+    let second_at = block_end(first, HEADER, 4)
+    if second_at > list.len(raw) {
+        return Error(Invalid(HEADER))
+    }
+    let second = read_header(raw, second_at)?
+    if second.version != first.version {
+        return Error(Invalid(second_at + 4))
+    }
+    read_block(raw, second_at + HEADER, second, 8)
+}

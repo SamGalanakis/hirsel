@@ -1,0 +1,77 @@
+// Expected rows from Python zoneinfo over IANA tzdata 2026f, public domain.
+// Reproduction and exact UTC values are in the lane report.
+fn civil(y: u16, month: u8, day: u8, h: u8, m: u8, s: u8, ns: u32) -> std.time.Civil {
+    option.unwrap(std.time.at(option.unwrap(std.time.date(y, month, day)), h, m, s, ns))
+}
+
+fn instant(s: i64, ns: u32) -> std.time.Timestamp {
+    option.unwrap(std.time.from_unix(s, ns))
+}
+
+fn forward(z: zone.Zone, seconds: i64, wall: std.time.Civil, east: i32) {
+    let utc = instant(seconds, std.time.nanos(wall))
+    if result.unwrap(zone.to_local(z, utc)) != wall || result.unwrap(zone.offset_at(z, utc)) != east {
+        fail("UTC to local differs from zoneinfo")
+    }
+}
+
+fn inverse(z: zone.Zone, wall: std.time.Civil, expected: zone.Resolution) {
+    if result.unwrap(zone.from_local(z, wall)) != expected {
+        fail("local to UTC differs from zoneinfo")
+    }
+}
+
+/// bug: Apply the wrong offset at a transition, collapse a gap or fold, or stop applying DST after the final transition.
+/// oracle: Python zoneinfo over IANA tzdata 2026f and the RFC 9636 bounds for the v1 block.
+@test
+fn tzif_zoneinfo_conformance() -> Result[(), ()] {
+    let db = result.unwrap(zone.embedded())
+    let ny = result.unwrap(zone.lookup(db, "America/New_York"))
+    forward(ny, 1710053999, civil(2024, 3, 10, 1, 59, 59, 999999999), -18000)
+    forward(ny, 1710054000, civil(2024, 3, 10, 3, 0, 0, 0), -14400)
+    forward(ny, 1730613599, civil(2024, 11, 3, 1, 59, 59, 0), -14400)
+    forward(ny, 1730613600, civil(2024, 11, 3, 1, 0, 0, 0), -18000)
+    inverse(ny, civil(2024, 3, 10, 2, 30, 0, 0), Gap)
+    inverse(ny, civil(2024, 11, 3, 1, 30, 0, 42), Ambiguous(early: instant(1730611800, 42), late: instant(1730615400, 42)))
+    forward(ny, 4119163200, civil(2100, 7, 13, 8, 0, 0, 0), -14400)
+    inverse(ny, civil(2100, 7, 13, 10, 0, 0, 0), Unique(instant(4119170400, 0)))
+    let alias = result.unwrap(zone.lookup(db, "US/Eastern"))
+    forward(alias, 1710054000, civil(2024, 3, 10, 3, 0, 0, 0), -14400)
+    let london = result.unwrap(zone.lookup(db, "Europe/London"))
+    forward(london, 1711846799, civil(2024, 3, 31, 0, 59, 59, 0), 0)
+    forward(london, 1711846800, civil(2024, 3, 31, 2, 0, 0, 0), 3600)
+    inverse(london, civil(2024, 3, 31, 2, 0, 0, 0), Unique(instant(1711846800, 0)))
+    let howe = result.unwrap(zone.lookup(db, "Australia/Lord_Howe"))
+    forward(howe, 1712415599, civil(2024, 4, 7, 1, 59, 59, 0), 39600)
+    forward(howe, 1712415600, civil(2024, 4, 7, 1, 30, 0, 0), 37800)
+    inverse(howe, civil(2024, 4, 7, 1, 45, 0, 0), Ambiguous(early: instant(1712414700, 0), late: instant(1712416500, 0)))
+    inverse(howe, civil(2024, 10, 6, 2, 15, 0, 0), Gap)
+    let apia = result.unwrap(zone.lookup(db, "Pacific/Apia"))
+    forward(apia, 1325239199, civil(2011, 12, 29, 23, 59, 59, 0), -36000)
+    forward(apia, 1325239200, civil(2011, 12, 31, 0, 0, 0, 0), 50400)
+    inverse(apia, civil(2011, 12, 30, 12, 0, 0, 0), Gap)
+    let nuuk = result.unwrap(zone.lookup(db, "America/Nuuk"))
+    forward(nuuk, 4109878799, civil(2100, 3, 27, 22, 59, 59, 0), -7200)
+    forward(nuuk, 4109878800, civil(2100, 3, 28, 0, 0, 0, 0), -3600)
+    // Asia/Kathmandu's 32-bit block, with header version set to v1.
+    let legacy = option.unwrap(std.hex.decode(string.as_bytes("545a696600000000000000000000000000000000000000000000000000000000000000030000000300000010a1f27d841e1830a87fffffff01020200004ffc000000004d580004000050dc000a4c4d54002b30353330002b3035343500")))
+    let kathmandu = result.unwrap(zone.parse(legacy))
+    forward(kathmandu, -2208988800, civil(1900, 1, 1, 5, 41, 16, 0), 20476)
+    forward(kathmandu, 504901800, civil(1986, 1, 1, 0, 15, 0, 0), 20700)
+    inverse(kathmandu, civil(1986, 1, 1, 0, 15, 0, 0), Unique(instant(504901800, 0)))
+    // Reject every proper prefix of the v1 file, including short headers.
+    for size in 0u64 .. list.len(legacy) {
+        if let Error(Invalid(_)) = zone.parse(list.slice(legacy, 0, size)) {} else {
+            fail("accepted a truncated v1 file")
+        }
+    }
+    let mut huge: Bytes = list.with_capacity(262145)
+    list.fill(mut huge, 262145, 0)
+    if let Error(Limit) = zone.parse(huge) {} else {
+        fail("TZif byte limit")
+    }
+    if let Error(InvalidName) = zone.lookup(db, "../etc/passwd") {} else {
+        fail("invalid zone name")
+    }
+    Ok(())
+}

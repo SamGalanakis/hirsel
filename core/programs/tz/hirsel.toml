@@ -1,0 +1,21 @@
+[package]
+name = "tz"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"zone.hirsel" = "zone"
+"tzif.hirsel" = "zone"
+"posix.hirsel" = "zone"
+"database.hirsel" = "zone"
+"data.hirsel" = "zone"
+
+[tests]
+limit = 8388608
+grants = []
+
+[tests.sources]
+"conformance.hirsel" = "tests"

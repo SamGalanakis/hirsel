@@ -151,3 +151,81 @@ fn rfc8448_handshake_records_use_the_sending_side() {
         assert!(cipher.open(other.iv(), aad, &mut body, tag).is_err());
     }
 }
+
+#[test]
+fn mask_keeps_a_populated_sender_ledger_until_retire() {
+    use crate::{
+        packet_epoch::{DirectionKeys, Epoch, IssueError},
+        packet_nonce::NonceFormat,
+        secret_aead::AeadAlg,
+    };
+    use std::{cell::Cell, rc::Rc};
+    struct Charge(Rc<Cell<u64>>, u64);
+    impl Drop for Charge {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() - self.1);
+        }
+    }
+    for opaque in [false, true] {
+        let paid = Rc::new(Cell::new(0));
+        let admit = |n| {
+            paid.set(paid.get() + n);
+            Charge(paid.clone(), n)
+        };
+        let traffic = Tls13Traffic::quic_initial(&bytes("8394c8f03e515708")).unwrap();
+        let alg = AeadAlg::Aes128Gcm;
+        let key = |side| {
+            if opaque {
+                DirectionKeys::Opaque
+            } else {
+                DirectionKeys::Live(traffic.packet_keys(side, alg))
+            }
+        };
+        let mut epoch = Epoch::new(NonceFormat::Quic, alg, key(Side::Client), key(Side::Server));
+        let sealer = epoch
+            .sealer(0, 2, |n| {
+                assert_eq!(n, 1040);
+                Ok((admit(1024), admit(16)))
+            })
+            .unwrap();
+        assert_eq!(paid.get(), 1040);
+        drop(sealer);
+        assert_eq!(paid.get(), 16);
+        let (mask, charge) = epoch
+            .header_mask(true, |n| {
+                assert_eq!(n, 512);
+                Ok(admit(n))
+            })
+            .unwrap();
+        assert_eq!(paid.get(), 528);
+        assert_eq!(
+            epoch
+                .sealer(0, 3, |_| panic!("duplicate admits nothing"))
+                .err(),
+            Some(IssueError::Issued)
+        );
+        epoch.retire();
+        assert_eq!(paid.get(), 512);
+        assert_eq!(
+            epoch
+                .sealer(0, 3, |_| panic!("retired admits nothing"))
+                .err(),
+            Some(IssueError::Spent)
+        );
+        assert_eq!(
+            epoch.opener(|_| panic!("retired admits nothing")).err(),
+            Some(IssueError::Spent)
+        );
+        if opaque {
+            assert!(mask.is_none());
+        } else {
+            let sample = bytes("d1b1c98dd7689fb8ec11d242b123dc9b");
+            assert_eq!(
+                mask.unwrap().mask(&sample.try_into().unwrap()).as_slice(),
+                bytes("437b9aec36")
+            );
+        }
+        drop(charge);
+        assert_eq!(paid.get(), 0);
+    }
+}

@@ -221,6 +221,24 @@ pub struct Tls13Traffic {
 }
 
 impl Tls13Traffic {
+    pub fn quic_initial(dcid: &[u8]) -> Option<Self> {
+        if dcid.len() > 20 {
+            return None;
+        }
+        // RFC 9001 §5.2, QUIC version 1.
+        const SALT: [u8; 20] = [
+            0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8,
+            0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+        ];
+        let labels = Tls13Labels::Quic;
+        let initial = DigestSecret::extract(TlsHash::Sha256, &SALT, dcid);
+        let secrets = [
+            initial.expand(labels, b"client in", &[]),
+            initial.expand(labels, b"server in", &[]),
+        ];
+        Some(Self { labels, secrets })
+    }
+
     pub fn packet_keys(&self, sending: Side, alg: AeadAlg) -> Tls13PacketKeys {
         self.secrets[sending as usize].packet_keys(self.labels, alg)
     }

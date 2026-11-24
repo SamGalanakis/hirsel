@@ -704,6 +704,9 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                 }
             }
         },
+        ZeroExtension(..) => {
+            let _ = answer(mut s, take c, ZeroExtensionSupported(true))
+        },
         SyncDir(dir: dir) => {
             let advanced = sync_commits(mut plan, fault)
             sync(mut fs, dir_handle(session, dir), fault_present(fault), advanced, mut s, take c)

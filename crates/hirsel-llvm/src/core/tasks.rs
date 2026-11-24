@@ -282,6 +282,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Stderr
             | HostOp::Sync
             | HostOp::SyncDir
+            | HostOp::ZeroExtension
             | HostOp::Random
             | HostOp::Stopped
             | HostOp::OpenDir

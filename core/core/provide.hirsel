@@ -108,6 +108,8 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
         NextEntries(entries: a, room: b)
     } else if t == 21 {
         Mkstemp(dir: a, prefix: b, room: d)
+    } else if t == 22 {
+        ZeroExtension(dir: a)
     } else {
         Released(id: a)
     }
@@ -289,6 +291,11 @@ pub fn dir_reply(r: DirReply) -> Reply[DirOp] {
         File(id) => words(6, id, 0, 0),
         Dir(id) => words(7, id, 0, 0),
         Entries(id) => words(8, id, 0, 0),
+        ZeroExtensionSupported(supported) => words(9, if supported {
+            1
+        } else {
+            0
+        }, 0, 0),
     }
 }
 

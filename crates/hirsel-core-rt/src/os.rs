@@ -3,13 +3,15 @@
 use crate::provider::*;
 
 mod listing;
+mod metadata;
 pub(crate) mod temp;
 use listing::Listing;
+use metadata::{stat, zero_extension};
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString},
     io,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::Path,
     sync::Mutex,
 };
@@ -235,9 +237,9 @@ impl OsProvider {
             STAT => {
                 let root = self.directories[&request.handle].as_raw_fd();
                 let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
-                return stat(fd.as_raw_fd());
+                return stat(fd.as_fd());
             }
-            STAT_FILE => return stat(self.files[&request.handle].as_raw_fd()),
+            STAT_FILE => return stat(self.files[&request.handle].as_fd()),
             READ | READ_AT => {
                 let fd = self.files[&request.handle].as_raw_fd();
                 let offset = (request.operation == READ_AT).then(|| request.offset());
@@ -359,6 +361,10 @@ impl OsProvider {
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
                 syscall(unsafe { libc::fdatasync(fd) } as isize)?;
+            }
+            ZERO_EXTENSION => {
+                let fd = self.directories[&request.handle].as_fd();
+                out.value = u64::from(zero_extension(fd)?);
             }
             SYNC_DIR => {
                 let fd = self.directories[&request.handle].as_raw_fd();
@@ -1092,23 +1098,6 @@ fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-fn stat(fd: i32) -> io::Result<Outcome> {
-    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: the caller retains fd and fstat writes the supplied stat.
-    syscall(unsafe { libc::fstat(fd, st.as_mut_ptr()) } as isize)?;
-    let st = unsafe { st.assume_init() };
-    let overflow = |_| io::Error::from_raw_os_error(libc::EOVERFLOW);
-    let size = u64::try_from(st.st_size).map_err(overflow)?;
-    let nanos = i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec);
-    let nanos = i64::try_from(nanos).map_err(overflow)?;
-    Ok(Outcome {
-        value: size,
-        written: nanos as u64,
-        kind: file_kind(st.st_mode),
-        ..Outcome::default()
-    })
 }
 
 fn file_kind(mode: libc::mode_t) -> u8 {

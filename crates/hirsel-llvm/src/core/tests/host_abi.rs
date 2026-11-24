@@ -68,7 +68,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
             &["u64", "u64", "ptr", "ptr", "ptr", "ptr"]
         }
         HostOp::SleepUntil | HostOp::SleepUntilWall => &["u64", "u64"],
-        HostOp::Sync | HostOp::SyncDir | HostOp::StatFile => &["u64"],
+        HostOp::Sync | HostOp::SyncDir | HostOp::ZeroExtension | HostOp::StatFile => &["u64"],
         _ => &["u64", "ptr"],
     }
 }

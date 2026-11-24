@@ -153,6 +153,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "wall_ms", 1),
     ("host", "write", 1),
     ("host", "write_at", 1),
+    ("host", "zero_extension", 1),
     ("indexed", "get", 1),
     ("inline", "copy_from_slice", 1),
     ("inline", "copy_within", 1),

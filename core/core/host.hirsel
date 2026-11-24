@@ -46,6 +46,9 @@ pub fn sync(mut f: HostFile) -> Result[(), IoError] waits
 // Flush directory entry updates (fsync on the granted directory).
 pub fn sync_dir(d: Dir) -> Result[(), IoError] waits
 
+/// Whether a crashed extension can expose only zeros or bytes written there.
+pub fn zero_extension(d: Dir) -> Result[bool, IoError] waits
+
 pub fn random(r: Random, mut b: Bytes)
 
 pub fn wall_ms(c: Clock) -> u64

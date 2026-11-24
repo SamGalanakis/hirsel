@@ -12,6 +12,8 @@
 //! a capability is plain and copyable, so nothing earlier proves it gone.
 mod net;
 mod payload;
+mod replies;
+use replies::answers;
 
 use crate::exec_runtime::{Call, ProcCall, SpawnCall};
 use crate::unix_net::{
@@ -146,6 +148,7 @@ const HANDLE_ROOM: u64 = 32;
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
 const DIR_MKSTEMP: u64 = 21;
+const DIR_ZERO_EXTENSION: u64 = 22;
 /// NetOp variants in declaration order.
 const NET_CONNECT: u64 = 0;
 const NET_RESOLVE: u64 = 1;
@@ -170,6 +173,7 @@ const R_STAT: u64 = 5;
 const R_FILE: u64 = 6;
 const R_DIR: u64 = 7;
 const R_ENTRIES: u64 = 8;
+const R_ZERO_EXTENSION: u64 = 9;
 /// NetReply's own variants after the shared Done, Failed and Count.
 const R_SOCKET: u64 = 9;
 const R_LISTENER: u64 = 10;
@@ -437,6 +441,7 @@ impl Port {
                 (Kind::Dir, &[])
             }
             SYNC_DIR => (Kind::Dir, &[8, h]),
+            ZERO_EXTENSION => (Kind::Dir, &[DIR_ZERO_EXTENSION, h]),
             ENTRIES => (Kind::Dir, &[9, h, path]),
             MKSTEMP => (Kind::Dir, &[DIR_MKSTEMP, h, b.len as u64, spare]),
             READ => (Kind::File, &[10, h, spare]),
@@ -548,39 +553,6 @@ fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
         (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV) => words[2],
         _ => 0,
-    }
-}
-
-/// Whether a reply variant answers the call's operation (core.md, Handles).
-fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
-    match vocab {
-        Vocab::Exec => unreachable!("Exec replies use their own matrix"),
-        Vocab::Stream => matches!(reply, R_DONE | R_WRITE_FAILED),
-        Vocab::Dir => {
-            (reply == R_FAILED && op != DIR_RELEASED)
-                || match op {
-                    0 | DIR_MKSTEMP => reply == R_FILE,
-                    1 | 2 => reply == R_DIR,
-                    3 | 14 => reply == R_STAT,
-                    9 => reply == R_ENTRIES,
-                    10 | 11 | 19 => reply == R_COUNT,
-                    12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
-                    16 => reply == R_LOCKED,
-                    _ => reply == R_DONE,
-                }
-        }
-        Vocab::Net => {
-            (reply == R_FAILED && op != NET_RELEASED)
-                || match op {
-                    NET_CONNECT | NET_ACCEPT => reply == R_SOCKET,
-                    NET_LISTEN => reply == R_LISTENER,
-                    NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
-                    NET_HANDSHAKE => reply == R_SECURED,
-                    NET_SEND_SECRET | NET_READY => reply == R_DONE,
-                    NET_LOCAL_ADDR | NET_PEER_ADDR => reply == R_ADDRESS,
-                    _ => false,
-                }
-        }
     }
 }
 
@@ -1853,6 +1825,7 @@ fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -
             }
             out.value = w[0];
         }
+        R_ZERO_EXTENSION if p.vocab == Vocab::Dir => out.value = u64::from(w[0] != 0),
         R_SOCKET | R_LISTENER | R_ADDRESS => {
             let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
             if !(v4 || w[1] == 1) || w[4] > 0xffff {

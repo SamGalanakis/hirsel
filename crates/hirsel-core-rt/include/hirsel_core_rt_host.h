@@ -6,7 +6,7 @@
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
-   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78, Mkstemp 119.
+   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78, Mkstemp 119, ZeroExtension 124.
    Entries takes an optional path (path_len 0 means the grant root).
    Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.

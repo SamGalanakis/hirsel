@@ -658,6 +658,10 @@ impl Bridge {
                     Self::error(5)
                 }
             }
+            124 => Outcome {
+                value: 1,
+                ..Outcome::default()
+            },
             18 => {
                 for byte in &mut data[len..] {
                     *byte = self.random;

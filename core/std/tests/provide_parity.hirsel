@@ -79,8 +79,7 @@ fn store(take s: Served[DirOp]) -> u64 waits {
         match provide.next(mut served) {
             Some(take call) => {
                 let mut c = take call
-                let op = provide.dir_op(c)
-                let reply: Option[DirReply] = match op {
+                let reply: Option[DirReply] = match provide.dir_op(c) {
                     Open(dir, path, mode) => {
                         id = id + 1
                         Some(File(id))
@@ -94,6 +93,7 @@ fn store(take s: Served[DirOp]) -> u64 waits {
                         list.clear(mut data)
                         Some(Done)
                     },
+                    ZeroExtension(..) => Some(ZeroExtensionSupported(false)),
                     Released(id: _) => None,
                     _ => Some(Done)
                 }

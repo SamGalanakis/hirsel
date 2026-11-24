@@ -106,6 +106,7 @@ pub enum HostOp {
     /// Wait until the clock's wall time reaches an absolute millisecond reading.
     SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
     Mkstemp = hirsel_core_ids::host_op::MKSTEMP as isize,
+    ZeroExtension = hirsel_core_ids::host_op::ZERO_EXTENSION as isize,
     CallPayloadPrefix = hirsel_core_ids::host_op::CALL_PAYLOAD_PREFIX as isize,
 }
 
@@ -149,6 +150,7 @@ impl HostOp {
         HostOp::SleepUntilWall,
         HostOp::Sync,
         HostOp::SyncDir,
+        HostOp::ZeroExtension,
         HostOp::Random,
         HostOp::Connect,
         HostOp::Listen,
@@ -264,6 +266,7 @@ impl HostOp {
             HostOp::SleepUntilWall => "host_sleep_until_wall",
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
+            HostOp::ZeroExtension => "host_zero_extension",
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
             HostOp::Resolve => "host_resolve",

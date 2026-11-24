@@ -113,6 +113,7 @@ host_ops! {
     PEER_ADDR = 117,
     CALL_PAYLOAD_PREFIX = 118,
     MKSTEMP = 119,
+    ZERO_EXTENSION = 124,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.

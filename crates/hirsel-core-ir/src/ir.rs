@@ -1216,9 +1216,8 @@ impl RtOp {
     /// | `host_open` | `Dir: u64`, path `ptr`, `mode: u8` | outcome |
     /// | `host_read` | `HostFile: u64`, buffer `ptr` | outcome |
     /// | `host_write` | `HostFile: u64`, bytes `ptr` | outcome |
-    /// | `host_close`, `host_try_lock`, `host_unlock` | `HostFile: u64` | outcome |
-    /// | `host_sync` | `HostFile: u64` | outcome |
-    /// | `host_sync_dir` | `Dir: u64` | outcome |
+    /// | `host_close`, `host_try_lock`, `host_unlock`, `host_sync` | `HostFile: u64` | outcome |
+    /// | `host_sync_dir`, `host_zero_extension` | `Dir: u64` | outcome |
     /// | `host_random` | `Random: u64`, buffer `ptr` | |
     /// | `host_mkdir`, `host_remove`, `host_remove_tree` | `Dir: u64`, path `ptr` | outcome |
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
@@ -1627,7 +1626,8 @@ impl RtOp {
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::Sync
-                    | HostOp::SyncDir => (vec![V(u64_)], outcome),
+                    | HostOp::SyncDir
+                    | HostOp::ZeroExtension => (vec![V(u64_)], outcome),
                     HostOp::Random => (vec![V(u64_), V(p)], vec![]),
                     HostOp::Stopped => (vec![V(u64_)], vec![]),
                     HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),

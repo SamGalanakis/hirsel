@@ -144,6 +144,7 @@ operations! {
     ("host", "sleep_until_wall", Lane::Runtime(Kernel::Host(HostOp::SleepUntilWall)), "B", "clock-fixture-1738", false),
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
+    ("host", "zero_extension", Lane::Runtime(Kernel::Host(HostOp::ZeroExtension)), "B", "journal-prealloc-impl-2177", false),
     ("host", "random", Lane::Runtime(Kernel::Host(HostOp::Random)), "B", "core-ops-914", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
@@ -2477,7 +2478,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let file = matches!(
+        let handle = if matches!(
             op,
             HostOp::Read
                 | HostOp::Write
@@ -2489,8 +2490,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::TryLock
                 | HostOp::Unlock
                 | HostOp::Sync
-        );
-        let handle = if file {
+        ) {
             self.runtime_key(vals[0]?, n)
         } else {
             vals[0]?
@@ -2602,7 +2602,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_stat(ty, at, kind.unwrap(), value, written, n);
                     }
                 }
-                HostOp::TryLock => {
+                HostOp::TryLock | HostOp::ZeroExtension => {
                     if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
                         cx.runtime_case_payload(to, 0, ty, Some(boolean), n);
                     }

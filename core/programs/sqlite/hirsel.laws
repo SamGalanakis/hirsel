@@ -1,17 +1,17 @@
 hirsel.laws 1
 sqlite@1/sqlite/fl20_error_buffer src=a06b7d6f9f10a3bf sig=e05c1da6580e1ade run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
-sqlite@1/tests/fl10_ambient_authority src=35bd3bfbbe4404ce sig=e099a2bce5cfd873 run=d4a2271ba78bbfac bug=- oracle=- rows=-
-sqlite@1/tests/fl10_random src=1ff43f4977dac5da sig=7c66b3afeccd1285 run=91e7b34efc6c2e03 bug=- oracle=- rows=-
-sqlite@1/tests/fl11_directory_confinement src=a2178d4ac2b3f80c sig=26a9e2f63d1e6b8d run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
-sqlite@1/tests/fl11_virtual_dir_refused src=eeeea5897d2458f4 sig=f6c4bb26ce672eb3 run=c1aa892816814eb1 bug=- oracle=- rows=-
-sqlite@1/tests/fl19_column_checks src=ecf6fa44927384d2 sig=d9be23151f916259 run=c1aa892816814eb1 bug=- oracle=- rows=-
+sqlite@1/tests/fl10_ambient_authority src=35bd3bfbbe4404ce sig=4449ed4c5bb00e69 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
+sqlite@1/tests/fl10_random src=1ff43f4977dac5da sig=bc234dcac1ea1733 run=91e7b34efc6c2e03 bug=- oracle=- rows=pending
+sqlite@1/tests/fl11_directory_confinement src=a2178d4ac2b3f80c sig=f519972695cf1fac run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
+sqlite@1/tests/fl11_virtual_dir_refused src=eeeea5897d2458f4 sig=d86dfd9c57c24c1a run=c1aa892816814eb1 bug=- oracle=- rows=pending
+sqlite@1/tests/fl19_column_checks src=ecf6fa44927384d2 sig=ad324f800cda72ac run=c1aa892816814eb1 bug=- oracle=- rows=pending
 sqlite@1/tests/fl19_sql_validation src=c9074a5abf69d73d sig=45f8d7179608778c run=d4a2271ba78bbfac bug=- oracle=- rows=-
 sqlite@1/tests/fl20_short_utf8_boundary src=7f9a3e6bddc3d22a sig=ec2fb9be8d1b6b90 run=d4a2271ba78bbfac bug=- oracle=- rows=-
-sqlite@1/tests/fl21_contention src=c5893c18918ccfd7 sig=93e463fca69ab437 run=c1aa892816814eb1 bug=- oracle=- rows=pending
-sqlite@1/tests/fl22_locks_and_read_only src=f1a87d85eb77e0b8 sig=8e2c6308aa028d1a run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
-sqlite@1/tests/fl8_blob_round_trip src=598e8d5efacb3b3b sig=39a6a877a645cb49 run=d4a2271ba78bbfac bug=- oracle=- rows=-
+sqlite@1/tests/fl21_contention src=c5893c18918ccfd7 sig=3d7fc748f490ca2e run=c1aa892816814eb1 bug=- oracle=- rows=pending
+sqlite@1/tests/fl22_locks_and_read_only src=f1a87d85eb77e0b8 sig=39d0b96705788dba run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
+sqlite@1/tests/fl8_blob_round_trip src=598e8d5efacb3b3b sig=7faa5c6d452781e6 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
 sqlite@1/tests/fl9_close_then_drop src=2b33a6cfae8eedb6 sig=bfb903e530544b4f run=d4a2271ba78bbfac bug=- oracle=- rows=-
-sqlite@1/tests/fl9_close_then_finalize src=fb98f0851fcf8731 sig=d3938c52b6c4ac42 run=d4a2271ba78bbfac bug=- oracle=- rows=-
+sqlite@1/tests/fl9_close_then_finalize src=fb98f0851fcf8731 sig=8f0853dc9044f570 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
 sqlite@1/tests/fl9_drop_both src=19d65d1cde529017 sig=d6649cfcf2e98314 run=d4a2271ba78bbfac bug=- oracle=- rows=-
 sqlite@1/tests/fl9_final_release_error src=25ad72a8aa20920f sig=7a0106867b094549 run=d4a2271ba78bbfac bug=- oracle=- rows=-
 sqlite@1/tests/fl9_finalize_then_close src=07c56cfc939f1e8f sig=aca8a695d31f1ec3 run=d4a2271ba78bbfac bug=- oracle=- rows=-

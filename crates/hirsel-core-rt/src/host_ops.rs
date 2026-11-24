@@ -125,7 +125,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                 hirsel_core_host_file(context, handle, &mut request)
             }
             OPEN | RENAME | MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | SYNC_DIR
-            | OPEN_DIR | ENTRIES | STAT => {
+            | ZERO_EXTENSION | OPEN_DIR | ENTRIES | STAT => {
                 let rights = handle & DIR_READ_ONLY;
                 if rights != 0 && needs_writable_dir(op, mode) {
                     return denied(context, site);

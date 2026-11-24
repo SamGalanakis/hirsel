@@ -274,34 +274,6 @@ pub(crate) unsafe fn launch_host<'a>(run: *const Config) -> Option<&'a HostLaunc
     unsafe { run.state.cast::<OsProcess>().as_ref()?.host.as_ref() }
 }
 
-fn receive_host_control() -> io::Result<Option<OwnedFd>> {
-    let Some(control) = std::env::var_os("HIRSEL_CONTROL_FD") else {
-        return Ok(None);
-    };
-    if control != "4" || std::env::var_os("HIRSEL_HOST_PID").is_none() {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
-    }
-    // SAFETY: the host transfers fd 4. Check its peer before taking ownership.
-    unsafe {
-        let mut peer: libc::sockaddr_un = std::mem::zeroed();
-        let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
-        if libc::getpeername(4, (&raw mut peer).cast(), &mut len) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if i32::from(peer.sun_family) != libc::AF_UNIX {
-            return Err(io::Error::from_raw_os_error(libc::EINVAL));
-        }
-        if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = OwnedFd::from_raw_fd(4);
-        let flags = libc::fcntl(4, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(4, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Some(fd))
-    }
-}
 #[repr(C)]
 pub struct OpenProcess {
     pub process: *mut OsProcess,
@@ -457,6 +429,7 @@ impl OsProcess {
             let isolated_store = prepare_path.or(dry_run_path);
             let dry_run = dry_run_path.is_some();
             let program_args = if dry_run { &args[2..] } else { &args[..] };
+            let installing = options.installing();
             let launch_options::LaunchOptions {
                 n_place,
                 n_place_explicit,
@@ -464,13 +437,24 @@ impl OsProcess {
                 preview_mode,
                 wake,
                 install_child,
+                dev_store,
+                install_predecessor,
                 idle_ms,
                 store_id,
                 witness,
                 exec_approvals,
                 ..
             } = options;
-            let installing = install_child.is_some();
+            let inherited_store = if dev_store {
+                // Dev pins its directory before taking the per-inode supervisor lock.
+                const DEV_STORE_FD: i32 = 5;
+                if libc::fcntl(DEV_STORE_FD, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                Some(OwnedFd::from_raw_fd(DEV_STORE_FD))
+            } else {
+                None
+            };
             let digest = receive_launch_image()?;
             // Fd 3 is the inherited listener and fd 4 is the control socket.
             // Take the launcher's dedicated report descriptor before opening grants.
@@ -495,11 +479,11 @@ impl OsProcess {
                 Some(digest) => Metadata::embedded(Some(digest), target, n_place, describe_mode),
                 None => launch_metadata(target, n_place, describe_mode),
             }
-            .with_launch_identity(input.revision.as_ref().copied(), n_place_explicit);
+            .with_launch_identity(input.revision.as_ref().copied(), n_place_explicit)
+            .with_store_id(store_id);
             if wake {
                 launch = launch
                     .with_wake(idle_ms.unwrap_or_default())
-                    .with_store_id(store_id)
                     .with_witness(witness);
             }
             if prepare_path.is_some() {
@@ -507,6 +491,9 @@ impl OsProcess {
             }
             if dry_run {
                 launch = launch.with_dry_run();
+            }
+            if let Some(predecessor) = install_predecessor {
+                launch = launch.with_install_predecessor(predecessor);
             }
             if let Some(activation) = install_child {
                 launch = launch.with_install_child(activation);
@@ -534,7 +521,7 @@ impl OsProcess {
             } else {
                 (None, None)
             };
-            let host_control = receive_host_control()?;
+            let host_control = launch_options::receive_host_control()?;
             if host_control.is_some() && (describe_mode || isolated_store.is_some() || installing) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
@@ -603,11 +590,17 @@ impl OsProcess {
             } else if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
                     let path = Path::new(OsStr::from_bytes(bytes(*input.directories.add(index))));
+                    let path = if index == 0 && inherited_store.is_some() {
+                        Path::new("/proc/self/fd/5")
+                    } else {
+                        path
+                    };
                     let handle = (operations.grant)(&mut os, path)
                         .map_err(|error| StartupError::Directory(path.to_owned(), error))?;
                     dirs.push(handle);
                 }
             }
+            drop(inherited_store);
             let host_scratch = if host_control.is_some() {
                 let operations =
                     directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
@@ -632,7 +625,7 @@ impl OsProcess {
             let net_granted = input.grant_mask & (1 << NET) != 0;
             let net_rules = if describe_mode {
                 None
-            } else if isolated_store.is_some() || installing {
+            } else if isolated_store.is_some() || (installing && install_predecessor.is_none()) {
                 net_granted.then(crate::net::RulesStorage::empty)
             } else if input.net_rules_len != 0 {
                 let ops = net_ops.ok_or(StartupError::NetRules)?;

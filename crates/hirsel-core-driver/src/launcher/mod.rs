@@ -10,6 +10,7 @@
 mod admit;
 mod bootstrap;
 mod cgroup;
+pub(crate) mod dev;
 mod grants;
 #[cfg(test)]
 mod laws;
@@ -201,9 +202,6 @@ pub(crate) trait Images {
         reserved: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
     ) -> io::Result<u64>;
 }
-
-/// The bound on a wake report (one value-codec `Option[u64]`).
-const REPORT_BYTES: u64 = 12;
 
 /// A nonblocking framed stream: the control session, or a serving child's endpoint.
 struct Conn {
@@ -523,19 +521,6 @@ fn pipe() -> io::Result<(File, OwnedFd)> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// A wake report: an empty read is no report, and anything but one `Option[u64]` is none.
-fn read_report(file: &mut File) -> Option<Option<u64>> {
-    let mut bytes = Vec::new();
-    let _ = file.take(REPORT_BYTES + 1).read_to_end(&mut bytes);
-    match bytes.as_slice() {
-        [0, 0, 0, 0] => Some(None),
-        [1, 0, 0, 0, due @ ..] if due.len() == 8 => {
-            Some(Some(u64::from_le_bytes(due.try_into().unwrap())))
-        }
-        _ => None,
-    }
 }
 
 impl<I: Images> Launcher<I> {

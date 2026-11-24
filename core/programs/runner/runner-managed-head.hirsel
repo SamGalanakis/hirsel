@@ -120,6 +120,11 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
     let persistent = persistent_backing(backing)
     let mut opening = take options
     let mut registration: Option[HeadRegistration[G, H]] = None
+    if !launch_env().wake {
+        if let Some((hi, lo)) = expected_store {
+            opening.expect = Some(store.StoreId(hi, lo))
+        }
+    }
     if let Some(_) = follower_plan {
         if let Some((hi, lo)) = expected_store {
             opening.expect = Some(store.StoreId(hi, lo))

@@ -155,18 +155,7 @@ pub(crate) enum HostReply {
     InstallRefused(InstallRefusal),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum InstallRefusal {
-    Held,
-    Store,
-    Place,
-    Migration,
-    Current,
-    Identity,
-    Capacity,
-    Config,
-    WrongVersion(u64),
-}
+pub(crate) use super::places::InstallRefusal;
 
 /// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
 /// publication R already in the launcher's code store; or source, a `launcher.Tree`'s
@@ -672,20 +661,7 @@ impl Wire for HostReply {
             }
             Self::InstallRefused(why) => {
                 w.u32(11);
-                match why {
-                    InstallRefusal::Held => w.u32(0),
-                    InstallRefusal::Store => w.u32(1),
-                    InstallRefusal::Place => w.u32(2),
-                    InstallRefusal::Migration => w.u32(3),
-                    InstallRefusal::Current => w.u32(4),
-                    InstallRefusal::Identity => w.u32(5),
-                    InstallRefusal::Capacity => w.u32(6),
-                    InstallRefusal::Config => w.u32(7),
-                    InstallRefusal::WrongVersion(next) => {
-                        w.u32(8);
-                        w.u64(*next);
-                    }
-                }
+                why.put(w);
             }
         }
     }
@@ -710,18 +686,7 @@ impl Wire for HostReply {
             8 => Self::Uncertain,
             9 => Self::WriteAck(r.u64()?),
             10 => Self::StoreMismatch(r.u64()?, r.u64()?, r.u64()?, r.u64()?),
-            11 => Self::InstallRefused(match r.u32()? {
-                0 => InstallRefusal::Held,
-                1 => InstallRefusal::Store,
-                2 => InstallRefusal::Place,
-                3 => InstallRefusal::Migration,
-                4 => InstallRefusal::Current,
-                5 => InstallRefusal::Identity,
-                6 => InstallRefusal::Capacity,
-                7 => InstallRefusal::Config,
-                8 => InstallRefusal::WrongVersion(r.u64()?),
-                _ => return Err(malformed("install refusal tag")),
-            }),
+            11 => Self::InstallRefused(InstallRefusal::get(r)?),
             _ => return Err(malformed("host reply tag")),
         })
     }

@@ -1,5 +1,5 @@
 //! Options read before the first program argument.
-use super::{OsStr, OsStrExt, Path, StartupError, io};
+use super::{FromRawFd, OsStr, OsStrExt, OwnedFd, Path, StartupError, io};
 
 pub(super) struct LaunchOptions<'a> {
     pub(super) n_place: u64,
@@ -8,6 +8,8 @@ pub(super) struct LaunchOptions<'a> {
     pub(super) preview_mode: bool,
     pub(super) wake: bool,
     pub(super) install_child: Option<u64>,
+    pub(super) dev_store: bool,
+    pub(super) install_predecessor: Option<[u8; 32]>,
     pub(super) idle_ms: Option<u64>,
     pub(super) store_id: Option<(u64, u64)>,
     pub(super) witness: Option<u64>,
@@ -25,6 +27,8 @@ pub(super) fn parse<'a>(
     let mut preview_mode = false;
     let mut wake = false;
     let mut install_child = None;
+    let mut dev_store = false;
+    let mut install_predecessor = None;
     let mut idle_ms = None;
     let mut store_id = None;
     let mut witness = None;
@@ -48,6 +52,15 @@ pub(super) fn parse<'a>(
                     .and_then(|value| value.parse::<u64>().ok())
                     .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
             );
+            prefix += 1;
+            break;
+        } else if let Some(value) = argument.strip_prefix(b"--hirsel-install-predecessor=") {
+            if install_predecessor.is_some() {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
+            install_predecessor = Some(prepare_hex(value)?);
+        } else if argument == b"--hirsel-dev-store" {
+            dev_store = true;
             prefix += 1;
             break;
         } else if argument == b"--hirsel-wake" {
@@ -109,6 +122,8 @@ pub(super) fn parse<'a>(
         preview_mode,
         wake,
         install_child,
+        dev_store,
+        install_predecessor,
         idle_ms,
         store_id,
         witness,
@@ -118,6 +133,10 @@ pub(super) fn parse<'a>(
 }
 
 impl LaunchOptions<'_> {
+    pub(super) fn installing(&self) -> bool {
+        self.install_child.is_some() || self.install_predecessor.is_some()
+    }
+
     pub(super) fn dry_run_path<'b>(
         &self,
         args: &'b [Vec<u8>],
@@ -132,8 +151,9 @@ impl LaunchOptions<'_> {
                 if dir.is_absolute()
                     && directories != 0
                     && !self.describe_mode
+                    && !self.dev_store
                     && !self.wake
-                    && self.install_child.is_none() =>
+                    && !self.installing() =>
             {
                 Ok(Some(dir))
             }
@@ -158,11 +178,15 @@ impl LaunchOptions<'_> {
         } else {
             None
         };
-        let installing = self.install_child.is_some();
+        let installing = self.installing();
         if (self.wake && (self.describe_mode || prepare_path.is_some() || installing))
             || (installing && (self.describe_mode || prepare_path.is_some()))
-            || (!self.wake
-                && (self.idle_ms.is_some() || self.store_id.is_some() || self.witness.is_some()))
+            || (!self.wake && (self.idle_ms.is_some() || self.witness.is_some()))
+            || (self.store_id.is_some() && (self.describe_mode || prepare_path.is_some()))
+            || (self.install_predecessor.is_some()
+                && (self.store_id.is_none() || !self.dev_store || self.install_child.is_some()))
+            || (self.dev_store
+                && (self.wake || self.describe_mode || prepare_path.is_some() || directories == 0))
         {
             return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
         }
@@ -182,4 +206,33 @@ pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
         *byte = (hi * 16 + lo) as u8;
     }
     Ok(out)
+}
+
+pub(super) fn receive_host_control() -> io::Result<Option<OwnedFd>> {
+    let Some(control) = std::env::var_os("HIRSEL_CONTROL_FD") else {
+        return Ok(None);
+    };
+    if control != "4" || std::env::var_os("HIRSEL_HOST_PID").is_none() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    // SAFETY: the host transfers fd 4. Check its peer before taking ownership.
+    unsafe {
+        let mut peer: libc::sockaddr_un = std::mem::zeroed();
+        let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        if libc::getpeername(4, (&raw mut peer).cast(), &mut len) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if i32::from(peer.sun_family) != libc::AF_UNIX {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = OwnedFd::from_raw_fd(4);
+        let flags = libc::fcntl(4, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(4, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(fd))
+    }
 }

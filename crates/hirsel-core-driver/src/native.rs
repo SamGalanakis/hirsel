@@ -1840,7 +1840,6 @@ fn link_objects(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
     fn source_request(source: &str, dir: &Path) -> CheckRequest {
         let mut request = crate::tests::request(source, dir);
         let core = dir.join("core.hirsel");
@@ -1873,6 +1872,7 @@ pub(crate) mod tests {
     include!("finalizer_native.rs");
     include!("startup_native.rs");
     include!("test_run_suite.rs");
+    mod dev_laws;
     include!("clone_native.rs");
     include!("record_native.rs");
     include!("source_sites_native.rs");

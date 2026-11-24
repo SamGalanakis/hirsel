@@ -543,6 +543,7 @@ def first_party(meta: dict) -> str:
                          {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
                           else {
                               "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                              "HIRSEL_DEV_TEST_DRIVER": "//:hirsel-core-driver-bin-hirsel",
                               "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
                               "HIRSEL_CORE_RT_OBSERVED_ARCHIVE": "//:core-driver-observed-runtime-pic",
                               "HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE": "//:hirsel-core-rt-observed-record-archives[x86_64]",
@@ -555,7 +556,6 @@ def first_party(meta: dict) -> str:
             return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,
                         native_tools=True if core_native or program_llvm or sdk_manifest or binary in ("hirsel-llvm-unittest", "hirsel-core-driver-unittest") else None)
-
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)
         build_script = None

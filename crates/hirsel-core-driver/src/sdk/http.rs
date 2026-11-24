@@ -40,7 +40,7 @@ impl HttpBinding {
                 source: enum_tag(r, &["path", "query", "body"], "source")?,
             });
         }
-        let mode = enum_tag(r, &["read", "subscribe", "stream"], "mode")?;
+        let mode = enum_tag(r, &["read", "subscribe", "stream", "keyed"], "mode")?;
         let ok_status = r.half()?;
         let error_status = r.half()?;
         let body_max = r.word()?;

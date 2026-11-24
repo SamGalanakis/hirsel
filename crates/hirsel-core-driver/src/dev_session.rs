@@ -14,7 +14,7 @@ use super::{Error, STOP, transport::Socket};
 
 pub(super) struct Release {
     pub(super) generation: u64,
-    pub(super) describe: Describe,
+    pub(super) describe: Arc<Describe>,
 }
 
 pub(super) type Current = Arc<Mutex<Option<Arc<Release>>>>;

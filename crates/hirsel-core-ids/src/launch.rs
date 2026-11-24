@@ -68,6 +68,7 @@ pub struct Metadata {
     preview: Option<Vec<u8>>,
     preparing: Option<([u8; 16], [u8; 32])>,
     install_child: Option<u64>,
+    install_predecessor: Option<[u8; 32]>,
     witness: Option<u64>,
     dry_run: bool,
 }
@@ -105,6 +106,7 @@ impl Metadata {
             preview: None,
             preparing: None,
             install_child: None,
+            install_predecessor: None,
             witness: None,
             dry_run: false,
         }
@@ -206,6 +208,11 @@ impl Metadata {
         self
     }
 
+    pub fn with_install_predecessor(mut self, digest: [u8; 32]) -> Self {
+        self.install_predecessor = Some(digest);
+        self
+    }
+
     pub fn with_dry_run(mut self) -> Self {
         self.dry_run = true;
         self
@@ -269,6 +276,11 @@ impl Metadata {
             18 => self.revision.as_ref().map_or(0, |revision| byte(revision)),
             19 => self.witness.unwrap_or(0),
             20 => u64::from(self.dry_run),
+            21 => self.install_predecessor.as_ref().map_or(0, |_| 32),
+            22 => self
+                .install_predecessor
+                .as_ref()
+                .map_or(0, |digest| byte(digest)),
             _ => 0,
         }
     }

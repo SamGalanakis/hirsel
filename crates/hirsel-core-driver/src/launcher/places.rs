@@ -1,4 +1,22 @@
 use super::*;
+use session::{Reader, Writer};
+
+/// The bound on a wake report (one value-codec `Option[u64]`).
+const REPORT_BYTES: u64 = 12;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InstallRefusal {
+    Held,
+    Store,
+    Place,
+    Migration,
+    Current,
+    Identity,
+    Capacity,
+    Config,
+    WrongVersion(u64),
+    Predecessor(Vec<u8>),
+}
 
 impl session::Selection {
     pub(super) fn new(activation: u64, assembly: Vec<u8>) -> Self {
@@ -86,16 +104,7 @@ impl<I: Images> Launcher<I> {
                 .read_to_end(&mut answer)?;
             if answer.len() as u64 <= bound {
                 if let Some(target) = process.install_target {
-                    let reply = match (HostReply::decode(&answer), status) {
-                        (Ok(reply @ HostReply::Installed(version, false)), Status::Code(0))
-                            if version == target =>
-                        {
-                            Some(reply)
-                        }
-                        (Ok(reply @ HostReply::InstallRefused(_)), Status::Code(1)) => Some(reply),
-                        _ => None,
-                    };
-                    if let Some(reply) = reply {
+                    if let Some(reply) = install_reply(&answer, status, Some(target)) {
                         self.children[i].install_reply = Some(reply.clone());
                         self.emit(Event::Placed(child.clone(), reply));
                     }
@@ -146,5 +155,78 @@ impl<I: Images> Launcher<I> {
     #[cfg(test)]
     pub(crate) fn turn(&mut self, timeout: Duration) -> io::Result<()> {
         self.wait_turn(Some(timeout))
+    }
+}
+
+pub(super) fn install_reply(
+    answer: &[u8],
+    status: Status,
+    target: Option<u64>,
+) -> Option<HostReply> {
+    match (HostReply::decode(answer), status) {
+        (Ok(reply @ HostReply::Installed(version, false)), Status::Code(0))
+            if version != 0 && target.is_none_or(|target| version == target) =>
+        {
+            Some(reply)
+        }
+        (Ok(reply @ HostReply::InstallRefused(_)), Status::Code(1)) => Some(reply),
+        _ => None,
+    }
+}
+
+/// A wake report: an empty read is no report, and anything but one `Option[u64]` is none.
+fn read_report(file: &mut File) -> Option<Option<u64>> {
+    let mut bytes = Vec::new();
+    let _ = file.take(REPORT_BYTES + 1).read_to_end(&mut bytes);
+    match bytes.as_slice() {
+        [0, 0, 0, 0] => Some(None),
+        [1, 0, 0, 0, due @ ..] if due.len() == 8 => {
+            Some(Some(u64::from_le_bytes(due.try_into().unwrap())))
+        }
+        _ => None,
+    }
+}
+
+impl Wire for InstallRefusal {
+    fn put(&self, w: &mut Writer) {
+        match self {
+            Self::Held => w.u32(0),
+            Self::Store => w.u32(1),
+            Self::Place => w.u32(2),
+            Self::Migration => w.u32(3),
+            Self::Current => w.u32(4),
+            Self::Identity => w.u32(5),
+            Self::Capacity => w.u32(6),
+            Self::Config => w.u32(7),
+            Self::WrongVersion(next) => {
+                w.u32(8);
+                w.u64(*next);
+            }
+            Self::Predecessor(found) => {
+                w.u32(9);
+                w.bytes(found);
+            }
+        }
+    }
+
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(match r.u32()? {
+            0 => Self::Held,
+            1 => Self::Store,
+            2 => Self::Place,
+            3 => Self::Migration,
+            4 => Self::Current,
+            5 => Self::Identity,
+            6 => Self::Capacity,
+            7 => Self::Config,
+            8 => Self::WrongVersion(r.u64()?),
+            9 => Self::Predecessor(r.bytes()?),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "install refusal tag",
+                ));
+            }
+        })
     }
 }

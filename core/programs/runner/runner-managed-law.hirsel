@@ -97,6 +97,7 @@ fn opened_text(e: runner.OpenError) -> String {
         Unsettled(_) => "calls: place_head: a held run has no fate",
         PublisherStopped => "calls: place_head: publisher stopped",
         InstallVersion(_) => "calls: place_head: wrong install activation",
+        PredecessorChanged(_) => "calls: place_head: install predecessor changed",
         InstallUncertain(_) => "calls: place_head: install outcome unknown",
         KeyedOpDropped(_) => "calls: place_head: live keyed operation was dropped",
         KeyedOpQuotaChanged(..) => "calls: place_head: keyed quota changed",

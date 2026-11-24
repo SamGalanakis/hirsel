@@ -32,6 +32,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         let installing = match selection {
             Install(_) => true,
             InstallAt(_, _) => true,
+            InstallFrom(_) => true,
             _ => store.version(store.snapshot(db)) == 0u64,
         }
         let h = if installing {
@@ -48,6 +49,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
     let explicit_install = match selection {
         Install(_) => true,
         InstallAt(_, _) => true,
+        InstallFrom(_) => true,
         _ => false,
     }
     if explicit_install {
@@ -67,6 +69,22 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
                 target
             }) {
                 return Error(InstallVersion(next))
+            }
+            None
+        },
+        InstallFrom(_) => {
+            let Some(expected) = launch_env().predecessor else {
+                return Error(IdentityUnknown)
+            }
+            if !persistent || store.fence_level(db) == 0 || current == None {
+                return Error(IdentityUnknown)
+            }
+            let version = activation_result(activation_version(db))?
+            let Some(take prior) = activation_result(release_record(db, version))? else {
+                return Error(IdentityUnknown)
+            }
+            if prior.binding != launch_bytes(expected) {
+                return Error(PredecessorChanged(clone(prior.binding)))
             }
             None
         },
@@ -137,6 +155,9 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
             return Error(Store(take problem))
         }
         if let InstallAt(_, _) = selection {
+            return Error(InstallUncertain(take problem))
+        }
+        if let InstallFrom(_) = selection {
             return Error(InstallUncertain(take problem))
         }
         return Error(Store(take problem))
@@ -220,6 +241,7 @@ fn settle_held[G: send, H: shareable + inert + send](db: store.Db, mut stage: st
     let chosen: fate.Fates = match selection {
         Install(f) => clone(f),
         InstallAt(_, f) => clone(f),
+        InstallFrom(f) => clone(f),
         _ => fate.none(),
     }
     match fate.settle(db, mut stage, tables, image, registered, chosen) ?=> Store {
@@ -274,4 +296,84 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
             Reopen
         },
     })
+}
+
+// Installation shares the serving head's open and activation, then closes the store
+// before it sends proof. No publisher, triggers, or listener start for this launch.
+fn operate_install[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
+    let persistent = persistent_backing(backing)
+    let typed = match selection {
+        InstallAt(_, _) => true,
+        InstallFrom(_) => true,
+        _ => false
+    }
+    if typed && !persistent {
+        return Error(Missing("disk store"))
+    }
+    let expected = launch_env().store_id
+    let mut opening = options
+    if let Some((hi, lo)) = expected {
+        opening.expect = Some(store.StoreId(hi, lo))
+    }
+    let (take db, take temporary) = open_backing(take backing, opening, tasks, clock, random) ?=> backing_start_error
+    let mut opened = take db
+    if let Some(id) = expected {
+        let actual = store.identity_words(opened)
+        if id != actual {
+            let _ = close_store(take opened)
+            return Error(Open(StoreMismatch(id, actual)))
+        }
+    }
+    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, on_migrate, schema, n_place, tasks) {
+        Ok(_) => if persistent {
+            match activation_version(opened) {
+                Ok(version) => Ok(version),
+                Error(take problem) => Error(Open(InstallUncertain(take problem)))
+            }
+        } else {
+            Ok(0u64)
+        },
+        Error(take problem) => {
+            let _ = close_store(take opened)
+            return Error(Open(take problem))
+        },
+    }
+    store.close(take opened) ?=> |problem| Open(InstallUncertain(problem))
+    let _ = take temporary
+    take installed
+}
+
+fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartError] {
+    // A failed durability barrier or close can leave the activation on disk.
+    // Let a recovery open decide it if we reached the cut without proof.
+    let reply: Option[HostReply] = match result {
+        Error(Open(InstallUncertain(_))) => None,
+        Ok(version) => Some(PlaceInstalled(version, false)),
+        Error(problem) => Some(PlaceInstallRefused(match problem {
+            Open(Store(Held)) => InstallHeld,
+            Open(Store(Full(_))) => InstallCapacity,
+            Full(_) => InstallCapacity,
+            Open(Store(_)) => InstallStore,
+            Open(Place(_)) => InstallPlace,
+            Open(Migrate(_)) => InstallMigration,
+            Open(NotCurrent(_)) => InstallCurrent,
+            Open(IdentityUnknown) => InstallIdentity,
+            Open(InstallVersion(next)) => InstallWrongVersion(next),
+            Open(PredecessorChanged(found)) => InstallPredecessor(clone(found)),
+            _ => InstallConfig,
+        })),
+    }
+    if let Some(take value) = take reply {
+        let codec: std.codec.Codec[HostReply] = std.codec.of()
+        let mut answer: Bytes = list.with_capacity(16u64)
+        let _ = std.codec.encode(codec, value, mut answer) ?=> |_| Missing("install answer")
+        if !launch_emit(answer) {
+            return Error(Missing("install answer"))
+        }
+    }
+    match take result {
+        Ok(_) => Ok(Unstarted),
+        Error(take problem) => Error(take problem)
+    }
 }

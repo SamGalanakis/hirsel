@@ -7,6 +7,7 @@ type Error = Box<dyn std::error::Error>;
 pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
+mod describe;
 mod http;
 mod manifest;
 mod stubs;
@@ -387,76 +388,6 @@ pub struct Describe {
     pub exported: Vec<Exported>,
     pub tables: Vec<DeclaredCollection>,
     pub bindings: Vec<HttpBinding>,
-}
-impl Describe {
-    pub fn read(bytes: &[u8]) -> Result<Self, Error> {
-        let mut r = Reader { bytes, at: 0 };
-        let description = Self::read_from(&mut r)?;
-        r.done()?;
-        Ok(description)
-    }
-
-    pub(crate) fn read_from(r: &mut Reader<'_>) -> Result<Self, Error> {
-        let digest = r.bytes()?;
-        let target = r.name()?;
-        let n_place = r.word()?;
-        let revision = r.bytes()?;
-        let n = r.count()?;
-        let mut exported = Vec::new();
-        for _ in 0..n {
-            let kind = r.count()? as u32;
-            if kind > 4 {
-                return Err("Malformed: entry kind".into());
-            }
-            let mut entry = Exported {
-                kind,
-                identity: r.bytes()?,
-                args: r.bytes()?,
-                result: r.bytes()?,
-                args_fp: r.word()?,
-                result_fp: r.word()?,
-                revision: r.bytes()?,
-                slots: Vec::new(),
-                value: Vec::new(),
-            };
-            for _ in 0..r.count()? {
-                entry.slots.push(ExportedSlot {
-                    name: r.name()?,
-                    kind: r.count()? as u32,
-                    key: r.bytes()?,
-                    key_json: r.bytes()?,
-                    value: r.bytes()?,
-                });
-            }
-            entry.value = r.bytes()?;
-            if kind != 2 && kind != 4 && (!entry.slots.is_empty() || !entry.value.is_empty()) {
-                return Err("Malformed: call entry carries query schemas".into());
-            }
-            exported.push(entry);
-        }
-        let mut tables = Vec::new();
-        for _ in 0..r.count()? {
-            tables.push(DeclaredCollection {
-                name: r.name()?,
-                id: r.count()? as u32,
-                owner: r.count()? as u32,
-                kind: r.byte()?,
-            });
-        }
-        let mut bindings = Vec::new();
-        for _ in 0..r.count()? {
-            bindings.push(HttpBinding::read(r)?);
-        }
-        Ok(Self {
-            digest,
-            target,
-            n_place,
-            revision,
-            exported,
-            tables,
-            bindings,
-        })
-    }
 }
 
 pub fn place_error(bytes: &[u8]) -> Result<String, Error> {

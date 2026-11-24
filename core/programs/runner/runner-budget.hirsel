@@ -4,6 +4,11 @@ const HEAD_OWN_BYTES: u64 = 2097152
 
 const OPERATE_OWN_BYTES: u64 = 262144
 
+// The dev host-control writer and acknowledger; the reader runs under `bytes n_place`.
+const HOST_WRITER_BYTES: u64 = 16384
+
+const HOST_ACK_BYTES: u64 = 4096
+
 fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
     match int.checked_add(a, b) {
         Some(n) => Ok(n),
@@ -19,9 +24,15 @@ fn place_grant_bytes[G: send, H: shareable + inert + send, S: send](config: Opti
 }
 
 fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, Capacity] {
-    let names = add_place_bytes(n_place, n_publisher)?
+    let names = add_place_bytes(n_place, publisher_bytes(n_place, n_publisher)?)?
     let head = add_place_bytes(names, HEAD_OWN_BYTES)?
     add_place_bytes(head, grant)
+}
+
+// The publisher registers its own copy of the place, under `bytes n_place`, beside
+// its staging, so an allowance above `n_publisher` still fits.
+fn publisher_bytes(n_place: u64, n_publisher: u64) -> Result[u64, Capacity] {
+    add_place_bytes(n_place, n_publisher)
 }
 
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
@@ -83,7 +94,17 @@ fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: shareab
     let funded_head = add_place_bytes(head, claims)?
     let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms)?
     let tasks = add_place_bytes(funded_head, serving)?
-    add_place_bytes(tasks, OPERATE_OWN_BYTES)
+    let hosted = add_place_bytes(tasks, host_control_bytes(n_place)?)?
+    add_place_bytes(hosted, OPERATE_OWN_BYTES)
+}
+
+// A launch with a host control channel (`hirsel dev`) also runs its three tasks.
+fn host_control_bytes(n_place: u64) -> Result[u64, Capacity] {
+    if let None = launch_scratch() {
+        return Ok(0u64)
+    }
+    let pair = add_place_bytes(HOST_WRITER_BYTES, HOST_ACK_BYTES)?
+    add_place_bytes(pair, n_place)
 }
 
 fn place_store[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {

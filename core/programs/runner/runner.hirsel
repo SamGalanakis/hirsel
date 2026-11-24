@@ -74,9 +74,9 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
-pub type Selection: send = Current(u64) | Reopen | Install(fate.Fates) | InstallAt(u64, fate.Fates)
+pub type Selection: send = Current(u64) | Reopen | Install(fate.Fates) | InstallAt(u64, fate.Fates) | InstallFrom(fate.Fates)
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | Unsettled(fate.HeldReport)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | PredecessorChanged(Bytes) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | Unsettled(fate.HeldReport)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 
@@ -315,8 +315,15 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     } else {
         p.n_place
     }
+    let install = match launch.install {
+        Some(version) => Some(InstallAt(version, fate.none())),
+        None => match launch.predecessor {
+            Some(_) => Some(InstallFrom(fate.none())),
+            None => None
+        },
+    }
     if let Some(take problem) = check_keyed_grants(p.place, n_place, p.grants) {
-        if let Some(_) = launch.install {
+        if let Some(_) = install {
             return finish_install(Error(Open(take problem)))
         }
         return Error(Open(take problem))
@@ -328,7 +335,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     let (take options, _, store_bytes, take follower_plan, (claims, rooms)) = match take sized_store {
         Ok(take sized) => take sized,
         Error(take e) => {
-            if let Some(_) = launch.install {
+            if let Some(_) = install {
                 return finish_install(Error(take e))
             }
             return Error(take e)
@@ -340,10 +347,9 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     if let Some((attempt, image)) = launch.prepare {
         return operate_prepare(take p, take options, n_place, attempt, image)
     }
-    if let Some(version) = launch.install {
+    if let Some(selection) = install {
         // A hosted install's fates arrive with F3's Begin `held`; until then it settles no held run.
-        let result = operate_install(take p, take options, InstallAt(version, fate.none()), n_place)
-        return finish_install(take result)
+        return finish_install(operate_install(take p, take options, selection, n_place))
     }
     let installing = match p.selection {
         Install(_) => true,
@@ -760,70 +766,6 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
                 }
             },
         }
-    }
-}
-
-// Installation shares the serving head's open and activation, then closes the store
-// before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
-    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
-    let persistent = persistent_backing(backing)
-    if let InstallAt(_, _) = selection {
-        if !persistent {
-            return Error(Missing("disk store"))
-        }
-    }
-    let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random) ?=> backing_start_error
-    let mut opened = take db
-    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, on_migrate, schema, n_place, tasks) {
-        Ok(_) => if persistent {
-            match activation_version(opened) {
-                Ok(version) => Ok(version),
-                Error(take problem) => Error(Open(InstallUncertain(take problem)))
-            }
-        } else {
-            Ok(0u64)
-        },
-        Error(take problem) => {
-            let _ = close_store(take opened)
-            return Error(Open(take problem))
-        },
-    }
-    store.close(take opened) ?=> |problem| Open(InstallUncertain(problem))
-    let _ = take temporary
-    take installed
-}
-
-fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartError] {
-    // A failed durability barrier or close can leave the activation on disk.
-    // Let a recovery open decide it if we reached the cut without proof.
-    let reply: Option[HostReply] = match result {
-        Error(Open(InstallUncertain(_))) => None,
-        Ok(version) => Some(PlaceInstalled(version, false)),
-        Error(problem) => Some(PlaceInstallRefused(match problem {
-            Open(Store(Held)) => InstallHeld,
-            Open(Store(Full(_))) => InstallCapacity,
-            Full(_) => InstallCapacity,
-            Open(Store(_)) => InstallStore,
-            Open(Place(_)) => InstallPlace,
-            Open(Migrate(_)) => InstallMigration,
-            Open(NotCurrent(_)) => InstallCurrent,
-            Open(IdentityUnknown) => InstallIdentity,
-            Open(InstallVersion(next)) => InstallWrongVersion(next),
-            _ => InstallConfig,
-        })),
-    }
-    if let Some(take value) = take reply {
-        let codec: std.codec.Codec[HostReply] = std.codec.of()
-        let mut answer: Bytes = list.with_capacity(16u64)
-        let _ = std.codec.encode(codec, value, mut answer) ?=> |_| Missing("install answer")
-        if !launch_emit(answer) {
-            return Error(Missing("install answer"))
-        }
-    }
-    match take result {
-        Ok(_) => Ok(Unstarted),
-        Error(take problem) => Error(take problem)
     }
 }
 
@@ -1326,6 +1268,7 @@ pub fn start_text(problem: StartError) -> String {
             string.push(mut line, "install outcome unknown: ");
             push_store_error(mut line, e)
         },
+        Open(PredecessorChanged(_)) => string.push(mut line, "the installed predecessor changed"),
         Open(InstallVersion(next)) => {
             string.push(mut line, "the next install activation is ")
             string.push_u64(mut line, next)
@@ -1930,18 +1873,18 @@ fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place:
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let (ready, readied): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
     let p = Publish(place: place, n_place: n_place, staging: n_publisher / 2u64, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
-    let publishing = task.spawn(tasks, bytes n_publisher, take p, publish)
+    let funded = publisher_bytes(n_place, n_publisher) ?=> |e| Place(Full(e))
+    let publishing = task.spawn(tasks, bytes funded, take p, publish)
     match channel.receive(readied) {
         Ok(None) => (),
         Ok(Some(take e)) => {
             let _ = task.join(take publishing)
             return Error(Place(take e))
         },
-        // The task ended without a word: `place` already ran here, so the task's own
-        // allowance could not hold it.
+        // The task ended without a word: its own allowance could not hold `place`.
         Error(_) => {
             let _ = task.join(take publishing)
-            return Error(Place(Full(Capacity(requested: n_publisher, available: 0u64))))
+            return Error(Place(Full(Capacity(requested: funded, available: 0u64))))
         },
     }
     Ok((take out, take publishing))
@@ -2019,7 +1962,7 @@ pub type PlaceReady: codec + send {
 
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
 
-pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64)
+pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes)
 
 pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
     let mut msg = string.from("store identity mismatch (expected ")
@@ -2067,11 +2010,11 @@ fn start_host_control(tasks: Tasks, clock: Clock, n_place: u64, to_head: Sender[
     let (take input, take output) = net.split(take control)
     let (answer, responses): (Sender[HostReply], Receiver[HostReply]) = channel.new(2u64)
     let (notice, sent): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let writer = task.spawn(tasks, bytes 16384u64, HostWriter(output: take output, responses: take responses, sent: take notice), host_writer)
+    let writer = task.spawn(tasks, bytes HOST_WRITER_BYTES, HostWriter(output: take output, responses: take responses, sent: take notice), host_writer)
     let reader = task.spawn(tasks, bytes n_place, HostReader(input: take input, to_head: channel.sender(to_head), life: channel.sender(life), answer: channel.sender(answer), scratch: scratch, clock: clock, maximum: n_place), host_reader)
     let (ack, take first_write): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let request = (take first_write, channel.sender(answer))
-    let acknowledging = task.spawn(tasks, bytes 4096u64, take request, forward_first_write)
+    let acknowledging = task.spawn(tasks, bytes HOST_ACK_BYTES, take request, forward_first_write)
     Ok(Some(HostControl(answer: take answer, sent: take sent, reading: take reader, writing: take writer, ack: take ack, acknowledging: take acknowledging)))
 }
 

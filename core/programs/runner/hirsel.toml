@@ -76,6 +76,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"runner-dev-identity-law.hirsel" = "runner"
 "operate_budget_law.hirsel" = "runner"
 "sizes_law.hirsel" = "runner_laws"
 "steps_laws.hirsel" = "steps"
@@ -154,3 +155,6 @@ limit = 1342177280
 
 [tests.runs."runner@1/runner/room_decode_capacity_reports_loss"]
 limit = 1342177280
+
+[tests.runs."runner@1/runner/dev_identity_vectors"]
+grants = ["Stdout"]

@@ -119,8 +119,8 @@ fn child(
     }
     command
         .args(exec)
-        .arg(kind)
         .arg(format!("--hirsel-n-place={n_place}"))
+        .arg(kind)
         .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

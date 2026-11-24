@@ -1,0 +1,84 @@
+const DEV_FIXTURE_RELEASE: u64 = 0u64
+
+type DevFixtureTable = store.Table[u64, u64]
+
+fn dev_fixture_schema(mut declaration: store.Declare) -> Result[DevFixtureTable, store.Error] {
+    let table = store.declare_table(mut declaration, "dev_data", std.codec.key_u64(), std.codec.of_u64())?
+    store.finish(mut declaration, take table)
+}
+
+fn dev_fixture_migrate(mut _migration: store.Migration) -> Result[(), store.Error] waits {
+    if DEV_FIXTURE_RELEASE == 1u64 {
+        return Error(MigrationFault)
+    }
+    let (take sender, receiver): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let _ = take sender
+    let _ = channel.receive(receiver)
+    Ok(())
+}
+
+fn dev_fixture_read(tx: store.Tx, table: DevFixtureTable, take _input: ()) -> Result[Answer[u64], Capacity] {
+    let value = option.unwrap(result.unwrap(store.fetch(tx, table, 0u64)))
+    Ok(Answer(value: value + DEV_FIXTURE_RELEASE, covers: covers()))
+}
+
+fn dev_fixture_registration(mut target_registry: Registry[(), DevFixtureTable]) -> Result[(), RegisterError] {
+    query(mut target_registry, code.describe(dev_fixture_read), slots(), 65536u64, DEFAULT_STEPS)?
+    let key = {
+        let export = target_registry.exported[0u64]
+        entry_key(view export.described.identity, export.args_fp, export.result_fp)
+    }
+    bind(mut target_registry, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(), mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
+}
+
+fn dev_fixture_fetch(mut tx: store.Tx, table: DevFixtureTable) -> Result[u64, store.Error] {
+    Ok(option.unwrap(store.fetch(tx, table, 0u64)?))
+}
+
+fn dev_fixture_write(mut tx: store.Tx, table: DevFixtureTable) -> Result[(), store.Error] {
+    store.put(mut tx, table, 0u64, 271828u64)
+}
+
+fn dev_fixture_seed(d: Dir, c: Clock, random: Random, tasks: Tasks) waits {
+    let options = result.unwrap(store.sized(Directory, 134217728u64))
+    let mut db = result.unwrap(store.open(tasks, d, c, random, options))
+    let table = result.unwrap(open_place_schema(mut db, code.describe(dev_fixture_schema)))
+    if let Committed(_) = result.unwrap(store.run(mut db, None, table, dev_fixture_write)) {} else {
+        fail("fixture write did not commit")
+    }
+    result.unwrap(store.close(take db))
+}
+
+// Prints the value this release's read reports, so a law can tell OLD from NEW.
+fn dev_fixture_print(d: Dir, c: Clock, random: Random, tasks: Tasks, errors: Stderr) waits {
+    let options = result.unwrap(store.sized(Directory, 134217728u64))
+    let mut db = result.unwrap(store.open(tasks, d, c, random, options))
+    let table = result.unwrap(open_place_schema(mut db, code.describe(dev_fixture_schema)))
+    let Committed(done) = result.unwrap(store.run(mut db, None, table, dev_fixture_fetch)) else {
+        fail("fixture read did not commit")
+    }
+    let mut line = string.from("fixture value ")
+    string.push_u64(mut line, done.value + DEV_FIXTURE_RELEASE)
+    string.push(mut line, "\n")
+    let _ = stderr.write(errors, line)
+    result.unwrap(store.close(take db))
+}
+
+pub fn dev_fixture(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    if let Some(action) = args.get(a, 0u64) {
+        if action == "seed-fixture" {
+            dev_fixture_seed(d, c, random, tasks)
+            return Ok(())
+        }
+        if action == "read-fixture" {
+            dev_fixture_print(d, c, random, tasks, errors)
+            return Ok(())
+        }
+    }
+    let reg = code.describe(dev_fixture_registration)
+    let schema = code.describe(dev_fixture_schema)
+    main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[Ended, MainError] waits {
+        let configured: PlaceConfig[(), DevFixtureTable, (), ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), grants: None, triggers: None, idle: None)
+        Ok(operate_report(take configured, take stop, result.unwrap(status_root()), None, errors) ?=> Start)
+    })
+}

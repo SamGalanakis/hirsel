@@ -63,6 +63,7 @@ pub enum OptionId {
     Entry,
     Libraries,
     Store,
+    Fresh,
     DryRunExe,
     Inputs,
     PackageStore,

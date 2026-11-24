@@ -470,6 +470,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::IdleMs
             | Opt::Workdir
             | Opt::Listen
+            | Opt::Fresh
             | Opt::FrontHttp
             | Opt::FrontStream
             | Opt::ApproveGrant
@@ -503,9 +504,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::ProfDepth
             | Opt::ProfMinDeltaPct
             | Opt::ProfTimeout
-            | Opt::ProfFormat => {
-                unreachable!("CLI early command option")
-            }
+            | Opt::ProfFormat => unreachable!("CLI early command option"),
         }
     }
     if test_filter.is_some() && !test_exact.is_empty() {

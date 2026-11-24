@@ -308,7 +308,7 @@ impl Poller {
                 tag,
             ),
             Backend::Uring(ring) => {
-                ring.add(tag, fd.clone());
+                ring.add(tag, fd.clone())?;
                 if !owner {
                     self.wake();
                 }
@@ -381,27 +381,6 @@ impl Poller {
         (self.operations.poll)(self, events, timeout_ns(timeout_ms))
     }
 
-    /// A unit pool slot's turn on its own io_uring ring: submit its mailbox
-    /// and reap into `out`, blocking up to `timeout_ns` (None: until a
-    /// completion; Some(0): not at all). Returns the events written.
-    pub fn wait_slot(&self, out: &mut [libc::epoll_event], timeout_ns: Option<u64>) -> usize {
-        let Backend::Uring(ring) = &self.backend else {
-            unreachable!("a pool waits on an epoll slot poller directly")
-        };
-        let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        ring.wait(out, timeout_ns)
-    }
-
-    /// io_uring: whether the owner has anything to take from its ring now: a
-    /// posted completion, task work the kernel queued for it, or a mailbox
-    /// entry to submit. Read without entering the kernel.
-    pub fn due(&self) -> bool {
-        let Backend::Uring(ring) = &self.backend else {
-            return false;
-        };
-        ring.due()
-    }
-
     // The optional operations are installed with the native poller, so a
     // scheduler that can never construct one does not link this syscall path.
     fn poll_epoll<'a>(
@@ -446,7 +425,7 @@ impl Poller {
         events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         events.resize(POLL_BATCH as usize, libc::epoll_event { events: 0, u64: 0 });
-        let len = ring.wait(&mut events, timeout_ns);
+        let len = ring.wait(&mut events, timeout_ns)?;
         events.truncate(len);
         Ok(Some(PollEvents(events)))
     }

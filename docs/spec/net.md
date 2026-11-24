@@ -1231,12 +1231,11 @@ word or `EBADR` this way:
   queues).
 - It reaps the completion ring.
 - It marks every readiness watch on the ring for replacement, since a multishot poll whose
-  terminal completion was dropped has ended without notice. It replaces at most 32 watches
-  per turn, so each turn submits at most 64 entries: one removal and one arm each. That fits
-  the ring's 64 submission entries, and it adds at most 96 completions (an answer, a
-  terminal and one edge per watch), which is under one turn's 128 reaped. The poller does
-  not block while watches await replacement. Their sockets' waiters were already readied,
-  so no readiness waits on a replacement.
+  terminal completion was dropped has ended without notice. Recovery budgets at most 64
+  submission entries per turn. Each replacement takes two, a removal and an arm. Each
+  retry of a retired watch's removal takes one. Recovery carries unfinished work into the
+  next turn and the poller uses a zero timeout while work remains. The sockets' waiters
+  recheck after the drop, so they can resume while recovery is still running.
 
 The recovery needs no completion of its own. A runnable source is read by a nonblocking
 `recvmmsg`, and `EAGAIN` simply makes it idle. A second drop during recovery starts it
@@ -1259,9 +1258,11 @@ these rules:
   re-arms with a fresh id only if that id is still current and its socket still
   registered. A retired id is erased, and nothing is re-armed. A readiness result from a
   retired id still readies waiters, who retry their system calls.
-- **Removal answer.** A removal's completion erases the retired id it names, whatever its
-  result. `0` means the poll was removed, and its own terminal completion follows.
-  `-ENOENT` means the poll had already ended.
+- **Removal answer.** A removal's completion erases the retired id it names on `0` or
+  `-ENOENT`. With `0` the poll was removed and its terminal completion follows.
+  `-ENOENT` means the poll had already ended. With `-EALREADY` pending task work owns
+  the poll and can keep it armed. The id stays retired and the poller retries its removal
+  within the same submission budget as a replacement.
 - **Teardown.** Teardown submits a removal for the current id and for every retired id not
   yet erased. A removal matches the first poll with that `user_data` (`poll.c:912-925`).
   Every live poll has a distinct id, so each removal ends exactly one poll, and no poll is
@@ -1477,9 +1478,11 @@ laws (M1 to M3) are required as well, but each is a single case.
   *Oracle:* the kernel's `PollList` in the ring's `/proc/self/fdinfo` entry
   (`fdinfo.c:231`). Its rows name no file or `user_data`, so the law counts them against
   the ring's count before registration: the readiness ring also holds the poll on the
-  completion ring's descriptor. It lists exactly one more armed poll after each recovery,
-  and none more after teardown. On today's tag-keyed re-arm, a second poll is listed after the stale terminal is reaped, so
-  the law is red. *Harness:* the reactor tests.
+  completion ring's descriptor. After pending task work and submissions settle, it lists
+  one more armed poll and none more after teardown. The law also puts a readable edge in
+  pending task work to get `-EALREADY` from removal, then checks the same poll count after
+  the retry. With 32 watches and recovery invoked again before reaping, the next turn fits
+  at most 64 of its 96 submission entries and carries the rest. *Harness:* the reactor tests.
 - **`member_reader_never_misses_its_wake` (H3).** *Scenario:* the reader's three steps
   (publish, fence and recheck, park) and the intake's three steps (store the write index,
   fence, swap the word and wake), run under every one of the 20 interleavings of those six

@@ -230,12 +230,95 @@ fn reaping_counts_every_completion() {
             }
         }
         assert_eq!(pending(), initial);
-        assert_eq!(ring.wait(&mut events, Some(0)), 0);
+        assert_eq!(ring.wait(&mut events, Some(0)).unwrap(), 0);
         assert_eq!(pending(), 1, "initial backlog {initial}");
         assert!(ring.due());
-        assert_eq!(ring.wait(&mut events, Some(0)), 0);
+        assert_eq!(ring.wait(&mut events, Some(0)).unwrap(), 0);
         assert_eq!(pending(), 0);
     }
+}
+
+#[test]
+fn replaced_watch_leaves_one_poll() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ring = Uring::open().unwrap();
+    let poll_count = || {
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", ring.ring.as_raw_fd()))
+            .unwrap();
+        let (_, polls) = info.split_once("PollList:\n").unwrap();
+        polls
+            .lines()
+            .take_while(|line| line.starts_with("  op="))
+            .count()
+    };
+    let baseline = poll_count();
+    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = socket.local_addr().unwrap();
+    let peer = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let fd = Arc::new(OwnedFd::from(socket));
+    let tag = 3;
+    let settle = || {
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+        for _ in 0..16 {
+            if !ring.due() {
+                return;
+            }
+            ring.wait(&mut events, Some(0)).unwrap();
+        }
+        assert!(!ring.due(), "poll removals did not settle");
+    };
+    let send = AtomicBool::new(false);
+    let sent = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let peer = scope.spawn(|| {
+            while !send.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            let result = peer.send_to(b"x", address);
+            sent.store(true, Ordering::Release);
+            result
+        });
+        ring.add(tag, fd.clone()).unwrap();
+        ring.enter(Some(0));
+        settle();
+        // Let a peer make the watch readable without this owner entering
+        // the kernel. The removal meets a poll owned by pending task work.
+        send.store(true, Ordering::Release);
+        while !sent.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        ring.recover_watches(true);
+        ring.submit_watch_recovery().unwrap();
+        ring.enter(Some(0));
+        assert_eq!(peer.join().unwrap().unwrap(), 1);
+    });
+    settle();
+    assert!(ring.watches().retried > 0, "no retriable removal observed");
+    assert_eq!(poll_count(), baseline + 1);
+    assert!(ring.remove(tag));
+    settle();
+    assert_eq!(poll_count(), baseline);
+
+    // Thirty-two replacements followed by another recovery before reaping.
+    // The second recovery has 32 old removals and 64 replacement SQEs.
+    for tag in 1..=32 {
+        ring.add(tag, fd.clone()).unwrap();
+    }
+    settle();
+    for _ in 0..2 {
+        ring.recover_watches(true);
+        ring.submit_watch_recovery().unwrap();
+        assert_eq!(ring.pending_submissions(), 64);
+        ring.enter(Some(0));
+    }
+    settle();
+    assert_eq!(poll_count(), baseline + 32);
+    for tag in 1..=32 {
+        assert!(ring.remove(tag));
+    }
+    settle();
+    assert_eq!(poll_count(), baseline);
 }
 
 /// More sockets turn ready at once than the io_uring completion queue

@@ -1117,10 +1117,8 @@ fn fire_timers(p: &Pool, ix: usize) {
     }
 }
 
-/// One turn of slot `ix`'s poller by its thread, blocking up to
-/// `timeout_ns` (None: until an event; Some(0): not at all). Each socket
-/// edge goes to its unit, which is queued here in event order; then the
-/// slot's due timers fire.
+/// Poll one slot, waking units with socket arrivals in event order and firing
+/// due timers. `None` waits for an event and `Some(0)` is nonblocking.
 fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
     let slot = &p.slots[ix];
     let mut evs: [libc::epoll_event; 128] = [libc::epoll_event { events: 0, u64: 0 }; 128];
@@ -1129,7 +1127,9 @@ fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
         bump(S_GPOLL_BLOCKS);
     }
     let n = if p.uring {
-        slot.poller.wait_slot(&mut evs, timeout_ns)
+        slot.poller
+            .wait_slot(&mut evs, timeout_ns)
+            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
     } else {
         let timeout =
             timeout_ns.map_or(-1, |ns| ns.div_ceil(1_000_000).min(i32::MAX as u64) as i32);

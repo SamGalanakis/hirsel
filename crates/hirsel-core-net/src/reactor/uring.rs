@@ -7,6 +7,8 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
     sync::{Arc, Mutex},
 };
+mod watch;
+use watch::{REMOVE, Watches};
 
 /// Post a `WAKE` completion to the ring `fd` without a source ring
 /// (`IORING_REGISTER_SEND_MSG_RING`, 6.13). The kernel posts it into the
@@ -46,7 +48,7 @@ pub(super) struct Uring {
     /// The mailbox: entries for the owner to submit, in order.
     sq: Mutex<Submissions>,
     /// Lock before `tx` and `sq`.
-    pub(super) watched: Mutex<HashMap<u64, Watch>>,
+    pub(super) watched: Mutex<Watches>,
     /// Transmit slots and their zero-copy sends. Lock before `sq`.
     pub(super) tx: Mutex<sendzc::Table>,
     /// The kernel runs SEND_ZC.
@@ -55,10 +57,6 @@ pub(super) struct Uring {
     pub(super) sparse: bool,
     #[cfg(test)]
     pub(super) refuse_submit: std::sync::atomic::AtomicBool,
-}
-
-pub(super) struct Watch {
-    pub(super) fd: Arc<OwnedFd>,
 }
 
 struct Submission {
@@ -138,7 +136,7 @@ impl Uring {
         let uring = Uring {
             ring,
             sq: Mutex::default(),
-            watched: Mutex::new(HashMap::new()),
+            watched: Mutex::default(),
             tx: Mutex::default(),
             zc,
             sparse,
@@ -193,37 +191,13 @@ impl Uring {
         });
     }
 
-    fn poll_add(tag: u64, watch: &Watch) -> io_uring::squeue::Entry {
-        io_uring::opcode::PollAdd::new(io_uring::types::Fd(watch.fd.as_raw_fd()), INTEREST)
-            .multi(true)
-            .build()
-            .user_data(tag)
-    }
-
-    /// Watch `fd` under `tag` with one multishot poll for every direction. A
-    /// poll checks readiness as it is armed, so nothing before it is lost.
-    pub(super) fn add(&self, tag: u64, fd: Arc<OwnedFd>) {
-        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        let watch = Watch { fd };
-        self.push(Self::poll_add(tag, &watch), Some(watch.fd.clone()));
-        watched.insert(tag, watch);
-    }
-
-    /// Stop watching `tag`, cancelling its poll. The poll holds its own file
-    /// reference until it is retired. Returns whether a removal was posted.
-    pub(super) fn remove(&self, tag: u64) -> bool {
-        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(watch) = watched.remove(&tag) else {
-            return false;
-        };
-        drop(watch);
-        self.push(
-            io_uring::opcode::PollRemove::new(tag)
-                .build()
-                .user_data(REMOVED),
-            None,
-        );
-        true
+    #[cfg(test)]
+    pub(super) fn pending_submissions(&self) -> usize {
+        self.sq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .len()
     }
 
     pub(super) fn due(&self) -> bool {
@@ -236,7 +210,8 @@ impl Uring {
         }
         drop(cq);
         // SAFETY: only the owner writes the submission queue; this reads its flags.
-        if unsafe { self.ring.submission_shared() }.taskrun() {
+        let sq = unsafe { self.ring.submission_shared() };
+        if sq.taskrun() || sq.cq_overflow() || self.watches().due() {
             return true;
         }
         !self
@@ -273,7 +248,7 @@ impl Uring {
         drop(sq);
         // A timeout, an interrupt or a full completion queue is a turn with
         // whatever completions are already posted.
-        let _ = match timeout_ns {
+        let result = match timeout_ns {
             Some(0) => self.submit(),
             None => self.ring.submitter().submit_and_wait(1),
             Some(ns) => {
@@ -290,19 +265,31 @@ impl Uring {
         let mut sq = unsafe { self.ring.submission_shared() };
         sq.sync();
         pending.consumed(sq.len());
+        drop(sq);
+        drop(pending);
+        if result.is_err_and(|error| error.raw_os_error() == Some(libc::EBADR)) {
+            self.recover_watches(true);
+        }
     }
 
     /// One owner turn into `out`. A timeout of Some(0) does not block and
     /// None blocks until a completion.
-    pub(super) fn wait(&self, out: &mut [libc::epoll_event], timeout_ns: Option<u64>) -> usize {
+    pub(super) fn wait(
+        &self,
+        out: &mut [libc::epoll_event],
+        timeout_ns: Option<u64>,
+    ) -> io::Result<usize> {
+        self.recover_watches(false);
         let limit = POLL_BATCH as usize;
         let mut remaining = limit;
-        let n = self.reap(out, &mut remaining);
+        let n = self.reap(out, &mut remaining)?;
+        let n = n + self.watches().recheck(&mut out[n..]);
         self.trim();
         // Kept transmit slots are freed by a later turn, so do not sleep
         // past their trim.
         let trim_ns = sendzc::TRIM.as_nanos() as u64;
-        let timeout_ns = if remaining < limit {
+        let recovering = self.submit_watch_recovery()?;
+        let timeout_ns = if n != 0 || remaining < limit || recovering {
             Some(0)
         } else if self.tx_kept() && timeout_ns.is_none_or(|ns| ns > trim_ns) {
             Some(trim_ns)
@@ -311,19 +298,19 @@ impl Uring {
         };
         self.enter(timeout_ns);
         if n != 0 {
-            return n;
+            return Ok(n);
         }
-        let n = self.reap(out, &mut remaining);
+        let n = self.reap(out, &mut remaining)?;
         self.trim();
-        n
+        Ok(n + self.watches().recheck(&mut out[n..]))
     }
 
     /// Translate posted completions into `(tag, flags)` events. A poll that
     /// ends (no `F_MORE`) is re-armed through the mailbox unless a removal or
     /// an adoption replaced it: the kernel ends a multishot poll when the
     /// completion queue overflows, and cancels it when its arming thread exits.
-    fn reap(&self, out: &mut [libc::epoll_event], remaining: &mut usize) -> usize {
-        let watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+    fn reap(&self, out: &mut [libc::epoll_event], remaining: &mut usize) -> io::Result<usize> {
+        let mut watched = self.watches();
         // SAFETY: the owner holds its turn, the only completion reader.
         let mut cq = unsafe { self.ring.completion_shared() };
         cq.sync();
@@ -355,15 +342,15 @@ impl Uring {
                         None => continue,
                     }
                 }
+                data if data & REMOVE != 0 => {
+                    watched.removed(data & !REMOVE, cqe.result())?;
+                    continue;
+                }
                 _ => {
-                    let tag = data;
-                    let Some(watch) = watched.get(&tag) else {
+                    let res = cqe.result();
+                    let Some(tag) = watched.polled(self, cqe)? else {
                         continue;
                     };
-                    if !io_uring::cqueue::more(cqe.flags()) {
-                        self.push(Self::poll_add(tag, watch), Some(watch.fd.clone()));
-                    }
-                    let res = cqe.result();
                     if res <= 0 {
                         continue;
                     }
@@ -376,7 +363,34 @@ impl Uring {
             };
             n += 1;
         }
-        n
+        Ok(n)
+    }
+}
+
+impl Poller {
+    /// A unit pool slot's turn on its own io_uring ring: submit its mailbox
+    /// and reap into `out`, blocking up to `timeout_ns` (None: until a
+    /// completion; Some(0): not at all). Returns the events written.
+    pub fn wait_slot(
+        &self,
+        out: &mut [libc::epoll_event],
+        timeout_ns: Option<u64>,
+    ) -> io::Result<usize> {
+        let Backend::Uring(ring) = &self.backend else {
+            unreachable!("a pool waits on an epoll slot poller directly")
+        };
+        let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        ring.wait(out, timeout_ns)
+    }
+
+    /// io_uring: whether the owner has anything to take from its ring now: a
+    /// posted completion, task work the kernel queued for it, or a mailbox
+    /// entry to submit. Read without entering the kernel.
+    pub fn due(&self) -> bool {
+        let Backend::Uring(ring) = &self.backend else {
+            return false;
+        };
+        ring.due()
     }
 }
 

@@ -195,27 +195,63 @@ which name the checked IR.
 ### PROG-9: Code descriptors
 
 `code.describe(f)` returns a `StaticFn[F]`. It is accepted only where `f` is the name of a
-top-level function without type parameters (region parameters are allowed), and `F` is
-then that function's callable type ([LANG-13](language.md#lang-13-callables)); any other
-argument, a local, a parameter, a field, a closure or a generic function, is refused here,
-at the argument. A `StaticFn[F]` is plain, `shareable`, `send` and `key`, 8 bytes, and
-making one admits nothing. `code.callable(s)` returns the function. Nothing turns bytes into
-a function, and a `StaticFn` grants no authority: the function takes its capabilities as
-arguments.
+top-level function; any other argument, a local, a parameter, a field or a closure, is
+refused here, at the argument. When `f` has no type parameters (region parameters are
+allowed), `F` is its callable type ([LANG-13](language.md#lang-13-callables)). When it has
+type parameters, `code.describe` names one **instance** of it (PROG-5): its closed type
+arguments are found as below, and `F` is `f`'s callable type at them. A `StaticFn[F]` is
+plain, `shareable`, `send` and `key`, 8 bytes, and making one admits nothing.
+`code.callable(s)` returns the function. Nothing turns bytes into a function, and a
+`StaticFn` grants no authority: the function takes its capabilities as arguments.
+
+**Type arguments.** A generic `f`'s type arguments are found from the expected type of the
+`code.describe` call alone, at the point LANG-11 types it, and from nothing else: not from
+`f`'s body, its bounds, a later argument or a later statement. That expected type must be
+`StaticFn[G]`, and `f`'s callable type must fit `G` as a function item fits an expected
+callable type (LANG-13). Every type parameter of `f` must be fixed by a part of `G` that is
+already fixed there. A part of `G` that is still open, such as a type argument of an
+enclosing call that a later argument would fix, fixes nothing, and a type parameter that
+only such a part would fix is open. A type parameter of the enclosing definition is fixed;
+its body is checked once with it rigid (LANG-12) and describes, in each of its own instances,
+the instance at that instance's arguments. When every type parameter is fixed, `f`'s callable
+type at them fixes the open parts of `G`, as any argument does (LANG-11). A type parameter
+named in neither `f`'s parameters nor its result is never fixed. Each type argument must
+have the bounds its parameter declares, or it is refused under LANG-12, at the argument.
+These refusals are PROG-9's, at the argument, with these messages:
+
+- the argument is not the name of a top-level function: `code.describe requires the name
+  of a top-level function`;
+- a type parameter is open: `code.describe leaves type parameter T of f open: the expected
+  StaticFn type must fix it`, with `T` the declared name of the first open parameter in
+  declared order and `f` the function's name.
 
 `code.identity(s)` returns a view of static bytes, the function's **identity bytes**. Two
 `StaticFn` values are equal exactly when their identity bytes are, and nothing else about a
-function takes part in that equality. The bytes are produced once, by the front end, from
+function takes part in that equality. The bytes are produced once for each function or instance, by the front end, from
 the checked declarations, and are the same on every engine and build
 ([SEM-8](semantics.md#sem-8-determinism)). They are one version byte, `0x01`, which versions
-this encoding and nothing else, followed by the UTF-8 text `D S`:
+this encoding and nothing else, followed by the UTF-8 text `D A S`:
 
 - `D` is the definition identity (PROG-1): `package@major/module/../name`, the package's
   name, its major version in decimal without leading zeros, each component of the module
   path, and the function's name, joined by `/`. In each component, every byte other than
   an ASCII letter, digit or `_` is written `%` and two upper-case hex digits.
+- `A` is empty for a function without type parameters. For an instance of a generic
+  function it is `[`, the closed type arguments, each written as `S` writes a type and
+  separated by `,`, then `]`, followed, when any type parameter declares a bound, by `{`,
+  the **dictionary texts**, separated by `,`, then `}`. Type parameter `i` is the one `S`
+  writes `$i`, so the arguments come in that order. There is one dictionary text for each
+  bound each type parameter declares, in that order of the parameters and, within one, in
+  the order of the `bound-name` production; it is the bound's name, `[`, the type argument
+  as `S` writes it, and `]`. A bound only implied by another, as `key` is by `integer`, has
+  no text. In v1 a bound has exactly one implementation for each type that has it
+  ([OWN-4](ownership.md#own-4-bounds), [SEM-10](semantics.md#sem-10-codecs)), so the text
+  names the dictionary that the checker selects.
 - `S` is the function's header (`fn-header`, [syntax](syntax.md)) with its whole meaning
-  and no spelling: parameter names and the generics list are left out; the region
+  and no spelling: parameter names and the generics list are left out; a type parameter
+  is written `$0`, `$1`, .. in the order each is first named in the parameters and then the
+  result, read left to right, never as its argument, so `S` is the generic header and not
+  the instance's callable type; the region
   generics ([MEM-6](memory.md#mem-6-roots)) are written `^0`, `^1`, .. in the order each is
   first named in the parameters and then the result, read left to right, and any named in
   neither take the next numbers in their declared order; an anchor, a region argument or
@@ -231,8 +267,13 @@ this encoding and nothing else, followed by the UTF-8 text `D S`:
   or by transitivity, sorted by `x` then `y`, every `^i` before every `#i` and each by `i`;
   bounds in `own[..]` are written in the order of the `bound-name` production.
 - No whitespace appears except one space between two adjacent words, a word being a
-  keyword, an identifier, a number, a definition identity or a root name `^i` or `#i`, and
-  no list has a trailing comma.
+  keyword, an identifier, a number, a definition identity, a root name `^i` or `#i` or a
+  type parameter `$i`, and no list has a trailing comma.
+- `D`'s escape writes every `[`, `{`, `(` and `$` in a component as `%XX`, so `D` ends at
+  the first `[` or `(`; a type and a dictionary text each close every bracket they open, so
+  `A` ends at the `]` or `}` that closes it. The text is therefore read back to one
+  `(D, arguments, dictionaries, header)`, and two descriptors have equal bytes exactly
+  when those four are equal.
 
 So `fn double(b: Bytes) -> Bytes` in module `main` of package `app`
 version 1 has the identity bytes `0x01` followed by
@@ -243,8 +284,23 @@ a: r, r: s` there, or the same header with `[in a, in b]`, has `0x01` followed b
 A change to a function's package, version, module path, name, parameter modes or types,
 result, anchors, `waits` or outlives clauses changes its identity; a change to its
 parameter names, to the order of its region generics or to its body does not. A rename or a move to another module is a new
-identity, and no alias connects the two. A later encoding may add an instance's closed type
-arguments and dictionaries after `D`; version 1 has none.
+identity, and no alias connects the two.
+
+For an instance, a change to its type arguments, to the bounds `f` declares or to the
+definition identity of a type an argument names changes its identity; a change to a type
+parameter's name or declared order, to the fields or body of a type an argument names, or to
+the call site, the enclosing instance or the package that describes it does not. The bytes
+hold no closure hash, layout name, source position, ordinal or build product, so the same
+source gives the same bytes in every build. So `fn pick[T: plain](a: T, b: T) -> T` in module
+`main` of package `app` version 1, described at `u64` and at `u32`, has `0x01` followed by
+`app@1/main/pick[u64]{plain[u64]}($0,$0)->$0` and by
+`app@1/main/pick[u32]{plain[u32]}($0,$0)->$0`: two instances, two descriptors, each calling
+its own instance. `fn swap[B, A: send](take p: (A, B)) -> (B, A)` at `A` = `u64` and `B` =
+`Text` writes `A` as `$0`, since the parameters name it first, whatever the declared order:
+it has `0x01` followed by
+`app@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)`. A
+function without type parameters has an empty `A` and no `$i`, so its bytes are the ones
+this section gave before generic descriptors.
 
 `code.revision(s)` returns `Option[View[Bytes]] in s`: the function's **revision**, 32 bytes
 that name the code a call through `s` runs. It is derived from the function's **code
@@ -254,7 +310,8 @@ function values and descriptors its retained code makes, the core functions the 
 implements that it uses, and the finalizers its values need, among them the functions the
 checker selects from types, such as a codec maker the code calls. The revision
 is `H("hirsel.code-revision.v2", address)`, where the address is that of the function's
-revision root: the function itself, the adapted function for a `$callable` adapter, and the
+revision root: the function itself, the described instance of a generic function, the
+adapted function for a `$callable` adapter, and the
 builtin address (PROG-10) for a core function the compiler implements, such as `float.widen`.
 Equal revisions mean equal addresses, so Hirsel has one identity for code; the revision only
 keeps the bytes a program holds apart from the keys of a code store. Nothing else enters: not
@@ -281,6 +338,15 @@ under `hirsel.code-revision.v2`. Every revision value, and so every release dige
 ([launch](launch.md#release-manifest)), changes once; its size and every format that carries
 it do not. No migration is provided before 1.0.
 
+Version note (2026-11-24, generic descriptors; not yet built): `code.describe` was refused for
+a function with type parameters, and the identity text was `D S`. It now describes an instance
+at closed type arguments and the text is `D A S`. The version byte stays `0x01`: for a function
+without type parameters `A` is empty and `S` writes no `$i`, so every identity a program,
+store catalog, runner key or recording holds today is unchanged, and no byte string that
+names an instance equals one that names a function without type parameters, because `D` is
+then followed by `[`, which no earlier text had there. One encoding covers both, so there is
+no second version for a reader to accept. Reversible: the spec only.
+
 ```hirsel
 type Handler = fn(Bytes) -> Bytes
 type Entry { code: StaticFn[Handler] }
@@ -296,7 +362,26 @@ fn d(f: fn(u64) -> u64) -> StaticFn[fn(u64) -> u64] { code.describe(f) }   // re
 ```
 ```hirsel
 fn same[T: key](a: T, b: T) -> bool { a == b }
-fn d() -> u64 { let _ = code.describe(same); 0 }                             // refused: PROG-9, same is generic
+fn d() -> u64 { let _ = code.describe(same); 0 }                             // refused: PROG-9, T of same is open
+```
+```hirsel
+fn same[T: key](a: T, b: T) -> bool { a == b }
+fn d() -> StaticFn[fn(u64, u64) -> bool] { code.describe(same) }            // same at u64
+fn e[T: key]() -> StaticFn[fn(T, T) -> bool] { code.describe(same) }         // same at each e's T
+fn f() -> bool { d() == e() }                                                // e at u64: true
+```
+```hirsel
+fn same[T: key](a: T, b: T) -> bool { a == b }
+fn d() -> StaticFn[fn(f64, f64) -> bool] { code.describe(same) }            // refused: LANG-12, f64 is not key
+```
+```hirsel
+fn left[A: plain, B](a: A) -> A { a }
+fn d() -> StaticFn[fn(u64) -> u64] { code.describe(left) }                  // refused: PROG-9, B of left is open
+```
+```hirsel
+fn same[T: key](a: T, b: T) -> bool { a == b }
+fn keep[F](s: StaticFn[F]) -> u64 { 0 }
+fn d() -> u64 { keep(code.describe(same)) }                                  // refused: PROG-9, T of same is open
 ```
 
 ### PROG-10: Code addresses

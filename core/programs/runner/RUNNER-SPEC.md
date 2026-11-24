@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.50: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.51: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.51 (generic entries by PROG-9's instance descriptors; lane generic-descriptor-spec-2041)
+
+Rule 2 no longer says PROG-9 refuses a generic function: `code.describe` now describes an instance of a generic function at closed type arguments, and such a `StaticFn` registers like any other. The key (rule 3) is unchanged in form; its identity bytes name the instance, so two instances are two keys. Identity bytes of functions without type parameters, and so every key registered today, are unchanged. Text only, not yet built.
 
 ## CHANGES-v2.50 (Bucket backing; with STORE-SPEC v2.66, lane bucket-backing-t1-2022)
 
@@ -863,13 +867,13 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
 ## 0. Rules (normative)
 
 1. **The runner is a library.** Its module is `runner`, in package `runner`, which binds package `store`. Core gains no runner declaration.
-2. **An entry is a top-level non-generic function registered by its `StaticFn`.** It has one of four kinds:
+2. **An entry is a top-level function, or an instance of a generic one at closed type arguments, registered by its `StaticFn` (v2.51).** It has one of four kinds:
    - **compute:** `fn(take A) -> Result[R, Capacity]`;
    - **transact:** `fn(mut Tx, H, Caller, take A) -> Result[R, E]` (v2.15: the Caller);
    - **query:** `fn(Tx, H, take A) -> Result[Answer[R], Capacity]`, caller-independent: the body never receives the Caller (v2.25; v2.45: `Answer[R]`, §1.1);
    - **query_as:** `fn(Tx, H, Caller, take A) -> Result[Answer[R], Capacity]`, caller-dependent: the body receives the subscribing session's Caller at subscribe, at every rerun and at repair (v2.25). Both query kinds are read-only by type: a view `Tx` cannot `put` (OWN-5, RUN p18 `query_writes`). A query that reads the Caller must be registered with `query_as`, and its type makes `query` refuse it;
    - **granted:** `fn(G, Caller, take A) -> Result[R, Capacity] waits`, only in a `Registry[G, H]` (v2.24: the Caller). Over the wire only when the place's `Wire[G, B]` has a grant half, which `runner.wire` makes and which needs `G: plain + send`; each call runs with its own copy of `G` (rule 13, CHANGES-v2.24). A `runner.wire_bind` configuration has no grant half, so its wire calls are `Refused(NotAllowed)` (v2.28).
-   - `H: shareable + inert + send` is the place's handles (its Tables and Indexes), passed by view, so an entry cannot keep it (RUN p18; v2.45: shareable, rule 12; v2.47: also inert, because a store body's env must be `inert`; it stays shareable because the head and the publisher each keep a share, STORE-SPEC v2.59 §13.3). A, R and E are `codec`. PROG-9 refuses a generic function.
+   - `H: shareable + inert + send` is the place's handles (its Tables and Indexes), passed by view, so an entry cannot keep it (RUN p18; v2.45: shareable, rule 12; v2.47: also inert, because a store body's env must be `inert`; it stays shareable because the head and the publisher each keep a share, STORE-SPEC v2.59 §13.3). A, R and E are `codec`. A generic function is registered through its instance's `StaticFn` (PROG-9, v2.51), whose identity bytes name the instance.
 3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(result)`. For a query (v2.45), the result bytes encode R's value schema followed by its slot list, each slot as (name, key schema, current value schema), all length-prefixed, in slot order. **A key is registered at most once** (§1.2).
 4. **One generic adapter per kind.** It decodes the argument, calls the body and encodes the result inside `bound bytes n` + `isolate`. The codecs come from `std.codec.of`. The encode is inside both because R is app data with no size bound and its codec may run app code (`via`); outside, a large R faults the caller's task instead of giving that call `Failed(OutOfBytes)`. Built cost: +696 instr per call (v2.3).
    - **(v2.47) The store body is a plain fn.** `store.run`, `store.serve` and `store.look` take `body: fn(.., E)` with `E: inert` (STORE-SPEC v2.59 §13.3). Each adapter passes env = (the entry's `StaticFn`, H, the Caller, the argument bytes) and decodes A inside the body, so every attempt, a rerun after a Cold miss included, decodes its own A. Nothing leaves an attempt except its returned value: the adapter encodes R, and a query adapter's projection and the publisher's group bytes are built from the `Answer` that `look` returns as `Seen`, never through a cell the body captured.

@@ -129,7 +129,8 @@ type's values are still built only through code its owner wrote.
 semantic code and runtime-contract identity; a generic identity includes its type, size,
 dictionary and generator dependencies, never backend addresses or clone numbers. An entry
 is made by library code at registration, never declared: module `runner` of package
-`store` registers a top-level non-generic function `f` by its `StaticFn` with `compute`
+`store` registers a top-level function `f`, or an instance of a generic one at closed type
+arguments, by its `StaticFn` with `compute`
 (`fn(take A) -> R`), `transact` (`fn(mut Tx, H, take A) -> Result[R, E]`), `query`
 (`fn(Tx, H, take A) -> Cover`) or `granted` (`fn(G, take A) -> R waits`), each with `A`, `R` and `E` bounded `codec`, where `H:
 send` is the place's handles (its Tables and Indexes), passed by view and built at open by
@@ -145,8 +146,8 @@ itself, because an owning closure is never shareable. Requests resolve only to r
 entries; an ID grants no code execution authority and serializes no closure captures.
 The [runner launch contract](launch.md) fixes describe mode and the immutable
 SHA-256 executable digest, target and `n_place`, privately supplied by the runtime.
-*v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions without type parameters have
-identity bytes; the runner is a library over v1, not a language form; the code revision
+*v1:* PROG-5, PROG-6, PROG-9, SEM-8: named top-level functions, and generic ones at closed
+type arguments with their dictionaries, have identity bytes; sizes never enter them; the runner is a library over v1, not a language form; the code revision
 is `code.revision` (PROG-9).
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and

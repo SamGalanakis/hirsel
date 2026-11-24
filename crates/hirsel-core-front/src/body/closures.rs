@@ -1856,7 +1856,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             base
                         }
                     };
-                    self.entry_address(
+                    self.entry_place(
                         AddressBase::Address(base),
                         &[Step::Field(index as u32)],
                         place,

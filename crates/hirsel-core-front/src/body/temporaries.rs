@@ -131,6 +131,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         address
     }
+    /// An entry-block place of `ty` that is rooted at its own row, like a field
+    /// place after each step (`field_address`): the field it is projected from may
+    /// be typed as a holder (`arc t`, a box) rather than the row its uses project.
+    pub(super) fn entry_place(
+        &mut self,
+        base: AddressBase,
+        steps: &[Step],
+        ty: PlaceTy,
+    ) -> AddressId {
+        let address = self.entry_address(base, steps, ty);
+        if !matches!(ty, PlaceTy::Declared(_)) {
+            return address;
+        }
+        let result = self.value(Ty::Ptr);
+        self.entry_setup.push(Inst::Pointer { result, address });
+        self.note_pointer(result, address);
+        self.entry_address(AddressBase::Value(result), &[], ty)
+    }
     pub(super) fn spill_temporary(&mut self, i: usize, n: NodeId) {
         let cleanup::Owner::Temp(t) = self.owners[i] else {
             return;

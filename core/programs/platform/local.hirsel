@@ -284,7 +284,8 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         Error(_) => { list.push(mut events, Refused(take child, Spawn(string.from("Full")))); return },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms)), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms),
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {

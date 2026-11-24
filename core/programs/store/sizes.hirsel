@@ -1,5 +1,28 @@
 pub type Kind: send = Memory | Directory | Bucket(std.object.LaneConfig)
 
+pub type Options: send {
+    create: bool,
+    lock_wait_ms: u64,
+    group_commits: u32,
+    group_bytes: u32,
+    checkpoint_bytes: u64,
+    journal_limit: u64,
+    pack_bytes: u64,
+    resident_limit: u64,
+    cache_bytes: u64,
+    writer_pin_bytes: u64,
+    dirty_bytes: u64,
+    pager_task_bytes: u64,
+    authority: StorageKind,
+    expect: Option[StoreId],
+    activation: Option[u64],
+    binding: Option[Bytes],
+    claim_ms: u64,
+    head_poll_ms: u64,
+    checkpoint_entries: u64,
+    retain: u8
+}
+
 pub type Overrides: send {
     resident_limit: Option[u64],
     journal_limit: Option[u64],
@@ -8,6 +31,11 @@ pub type Overrides: send {
     group_bytes: Option[u64],
     group_commits: Option[u32],
     lock_wait_ms: Option[u64],
+    cache_bytes: Option[u64],
+    writer_pin_bytes: Option[u64],
+    dirty_bytes: Option[u64],
+    pager_task_bytes: Option[u64],
+    readers: Option[u64],
 }
 
 pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
@@ -21,7 +49,8 @@ const OBJECT_JOURNAL_TASK_BYTES: u64 = 352
 
 pub fn derived_sizes() -> Overrides {
     Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None)
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
 }
 
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
@@ -58,6 +87,51 @@ fn largest_resident(room: u64) -> u64 {
     // Each 11 resident bytes use 13 bytes including the two cut working bytes.
     let tail = size_or(int.checked_sub(room % 13, 2), 0)
     11 * (room / 13) + tail
+}
+
+type TieredSizes {
+    cache: u64,
+    writer: u64,
+    dirty: u64,
+    pager: u64
+}
+
+const MIN_WRITER_PINS: u64 = 2 * VALUE_LIMIT + MIB
+
+fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[TieredSizes] {
+    let writer = size_or(o.writer_pin_bytes, q)
+    let minimum_cache = int.checked_add(writer, size_or(o.readers, VALUE_LIMIT + MIB))?
+    let cache = size_or(o.cache_bytes, order.max(4 * q, minimum_cache))
+    let dirty = size_or(o.dirty_bytes, q)
+    let pager = size_or(o.pager_task_bytes, (q + 3) / 4)
+    let with_cut = int.checked_add(cache, CUT_PIN_BYTES)?
+    let with_dirty = int.checked_add(with_cut, dirty)?
+    let with_pager = int.checked_add(with_dirty, pager)?
+    let floor = int.checked_add(with_pager, 64 * MIB)?
+    if writer < MIN_WRITER_PINS || cache < minimum_cache || floor > resident_limit {
+        return None
+    }
+    Some(TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager))
+}
+
+fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
+    let zero = TieredSizes(cache: 0, writer: 0, dirty: 0, pager: 0)
+    if let Memory = kind { return zero }
+    let Some(initial) = tiered_sizes_at(MIN_WRITER_PINS, resident_limit, o) else { return zero }
+    let mut best = initial
+    let mut low = MIN_WRITER_PINS
+    let mut high = 64 * MIB
+    while low < high {
+        let middle = low + (high - low + 1) / 2
+        match tiered_sizes_at(middle, resident_limit, o) {
+            Some(next_shape) => {
+                low = middle
+                best = next_shape
+            },
+            None => { high = middle - 1 },
+        }
+    }
+    best
 }
 
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {
@@ -118,9 +192,12 @@ pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Option
         return Error(shortage(share, take parts))
     }
     let commits = match o.group_commits { Some(n) => n, None => 64u32 }
+    let tiered = tiered_sizes(kind, resident, o)
     Ok((Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group),
         checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack,
-        resident_limit: resident, authority: Directory(), expect: None, activation: None,
+        resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer,
+        dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager,
+        authority: Directory(), expect: None, activation: None,
         binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2), total))
 }
 
@@ -134,7 +211,9 @@ pub opaque type FollowerPlan: send {
 pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
     let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit),
         checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes),
-        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms))
+        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
+        cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
+        dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
     let (take sized_options, total) = sized_reservation(kind, 18446744073709551615u64, effective)?
     let transport = if let Bucket(lanes) = kind { option.unwrap(std.object.lane_reservation(lanes)) } else { 0u64 }
     let envelope = total - transport

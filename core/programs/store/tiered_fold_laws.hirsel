@@ -115,3 +115,29 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let _ = result.unwrap(task.join(take worker))
     checked
 }
+
+@test
+fn test_l70_tiered_sizes_include_cut_quota() -> Result[(), Error] {
+    let mut overrides = derived_sizes()
+    // At q = 34,471,936, the resident floor is 137,887,744 for the
+    // cache, 34,471,936 dirty, 8,617,984 for the pager, 19,944,296 cut
+    // pins and 67,108,864 Memory bytes.
+    overrides.resident_limit = Some(268030823)
+    let below = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if (below.cache_bytes, below.writer_pin_bytes, below.dirty_bytes, below.pager_task_bytes) != (0u64, 0u64, 0u64, 0u64) {
+        fail("L70: the default Tiered plan must include the cut quota")
+    }
+    overrides.resident_limit = Some(268030824)
+    let exact = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if (exact.cache_bytes, exact.writer_pin_bytes, exact.dirty_bytes, exact.pager_task_bytes) != (137887744u64, 34471936u64, 34471936u64, 8617984u64) {
+        fail("L70: the Tiered plan must fit at the exact resident floor")
+    }
+    // W + U now demands one extra cache byte at the same q. K stays fixed.
+    overrides.readers = Some(103415809)
+    overrides.resident_limit = Some(268030825)
+    let readers_fit = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if readers_fit.cache_bytes != 137887745 || readers_fit.writer_pin_bytes != 34471936 {
+        fail("L70: Reader reservations and the separate cut quota must both fit")
+    }
+    Ok(())
+}

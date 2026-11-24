@@ -83,7 +83,8 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let mut options = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64,
         store.Overrides(resident_limit: Some(1048576), journal_limit: None,
             checkpoint_bytes: Some(65536), pack_bytes: Some(65536),
-            group_bytes: Some(65536), group_commits: None, lock_wait_ms: None)))
+            group_bytes: Some(65536), group_commits: None, lock_wait_ms: None,
+            cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)))
     let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
     let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
     list.push(mut plans, clone(plan))

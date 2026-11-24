@@ -17,25 +17,6 @@ pub const VALUE_LIMIT: u64 = 16711680
 
 const FORMAT_VALUE_MAX: u64 = 16711680
 
-pub type Options: send {
-    create: bool,
-    lock_wait_ms: u64,
-    group_commits: u32,
-    group_bytes: u32,
-    checkpoint_bytes: u64,
-    journal_limit: u64,
-    pack_bytes: u64,
-    resident_limit: u64,
-    authority: StorageKind,
-    expect: Option[StoreId],
-    activation: Option[u64],
-    binding: Option[Bytes],
-    claim_ms: u64,
-    head_poll_ms: u64,
-    checkpoint_entries: u64,
-    retain: u8
-}
-
 pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
 pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed

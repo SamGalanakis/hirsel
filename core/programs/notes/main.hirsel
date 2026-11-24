@@ -17,7 +17,8 @@ pub const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 
 // The notes place shares its task with a helper. Keep its resident and journal buffers small.
 fn sizes() -> store.Overrides {
-    store.Overrides(resident_limit: Some(4194304u64), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(1048576u64), group_commits: None, lock_wait_ms: None)
+    store.Overrides(resident_limit: Some(4194304u64), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(1048576u64), group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
 }
 
 pub fn options() -> store.Options {

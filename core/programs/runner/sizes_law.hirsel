@@ -31,7 +31,8 @@ fn derived_budgets() -> Result[(), String] {
     let config = std.object.LaneConfig(requested_lanes: 3, lane_bytes: 1048576)
     let one_lane = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
     let oversized_group = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(33554432u64), group_commits: None, lock_wait_ms: None)
+        checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(33554432u64), group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
     // The journal worker's grant exceeds the share by itself.
     match store.sized_with(Bucket(one_lane), 134217728u64, oversized_group) {
         Error(short) => {
@@ -47,7 +48,8 @@ fn derived_budgets() -> Result[(), String] {
     if default_bucket.resident_limit != 33934492u64 { fail("L60: Bucket default lanes") }
 
     let mut opts = store.Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64), group_commits: None, lock_wait_ms: None)
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64), group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
     let adjusted = result.unwrap(store.sized_with(Bucket(config), 134217728u64, opts))
     if adjusted.resident_limit != 49017854u64 || adjusted.group_bytes != 2097152u32 {
         fail("L60: Bucket group override changes entry buffers and the journal grant")

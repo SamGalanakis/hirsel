@@ -44,7 +44,8 @@ fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let selection = runner.launch_selection(argv)?
     let groups = if has_flag(argv, "--release-check") { Some(1u32) } else { None }
     Ok(runner.PlaceConfig(
-        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None), selection: selection, place: code.describe(bucket_place), n_place: 524288u64,
+        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None,
+            cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection, place: code.describe(bucket_place), n_place: 524288u64,
         on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
         proxies: list.new(), n_publisher: 3145728u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,

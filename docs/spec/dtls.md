@@ -190,7 +190,9 @@ The endpoint seals with TLS-8's DTLS 1.2 rows: for AES-GCM it writes the record 
 `epoch ‖ seq` as the 8-byte explicit nonce, and `extra` is the 13 bytes
 `epoch ‖ seq ‖ type ‖ version ‖ plaintext length` (RFC 6347 §4.1.2.1, RFC 5246 §6.2.3.3).
 Record sequence numbers start at 0 in each epoch and increase by one per record sent, every
-retransmission included (RFC 6347 §4.2.4), so the sealer's counter is always increasing. A
+retransmission included (RFC 6347 §4.2.4), so the sealer's counter is always increasing. The
+one exception is a `Cookie` server's HelloVerifyRequest and first ServerHello (DTLS-5
+Admission), which are epoch 0 and never sealed. A
 record in epoch 1 that arrives before the endpoint has epoch-1 keys (a Finished overtaking
 the ChangeCipherSpec) is held, at most `max_ahead` records counted with handshake
 fragments, and processed when the keys exist; past that it is discarded as `overflow` and
@@ -199,9 +201,11 @@ retransmission recovers it. A record in any other epoch is `stale_epoch`.
 **Replay.** Each epoch has a 64-record sliding window (RFC 6347 §4.1.2.6), as in dimpl's
 `ReplayWindow` (`src/window.rs`). A record whose number is in the window and already
 marked, or below it, is discarded as `replayed` before decryption. The window is updated only
-after the record authenticates. Epoch 0 records go through the window too, but they are
-unauthenticated, so after `Connected` every epoch-0 record except a retransmitted
-ClientHello or Finished-triggering flight (DTLS-5) is discarded.
+after the record authenticates. Epoch 0 records cannot authenticate, so the epoch-0 window
+marks a record once it parses; it only filters exact duplicates, and a forged epoch-0 record
+can at worst make the endpoint ignore one genuine copy, which retransmission repairs. After
+`Connected`, the only epoch-0 records an endpoint acts on are the retransmissions that
+DTLS-5 Final flights names; the rest are discarded as `stale_epoch`.
 
 **Invalid records.** A record that fails authentication is discarded as `tampered` and
 sends no alert (RFC 6347 §4.1.2.7). The association continues.
@@ -314,8 +318,13 @@ protocol key: it authenticates reachability, protects no traffic, and the caller
 from its own `Random`. dimpl binds the cookie to the client random only
 (`src/dtls12/server.rs:1217`); binding the address too means a cookie seen on one path cannot
 admit a ClientHello from another. Before admission, a `Cookie` server sends exactly one
-HelloVerifyRequest datagram per ClientHello datagram received, which is 25 + 32 + 13 = 70
-bytes (law `cookie_bounds_unproven_address`).
+HelloVerifyRequest datagram per ClientHello datagram received, which is 13 (record header) + 12 (handshake header) + 2 (`server_version`) + 1 (cookie
+length) + 32 = 60 bytes (law `cookie_bounds_unproven_address`). The HelloVerifyRequest and the
+ServerHello that answers the cookie ClientHello take their record sequence numbers from the
+ClientHello they answer (RFC 6347 §4.2.1), because a stateless server keeps no counter. Their
+`message_seq` follows the client's: the HelloVerifyRequest is 0, and the ServerHello and the
+rest of flight 4 continue from the cookie ClientHello's `message_seq` (1). After that the
+server numbers its records and messages normally.
 
 **Failures.** Each handshake failure sends one fatal alert and closes as `SentAlert(n)`:
 
@@ -652,26 +661,38 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   `openssl s_server -dtls1_2 -use_srtp <profile> -keymatexport EXTRACTOR-dtls_srtp -keymatexportlen <n>`
   with a P-256 certificate and `-verify 1`, and a Hirsel server against
   `openssl s_client -dtls1_2` with the same options. Run each of the three suites at least
-  once and each of the three SRTP profiles at least once. *Oracle:* OpenSSL's wire output and
+  once and each of the three SRTP profiles at least once, and the Hirsel server once in
+  `Cookie` mode (OpenSSL's client answers a HelloVerifyRequest by default). *Oracle:* OpenSSL's wire output and
   printed keying material. The handshake completes on both sides. Python `cryptography`
   seals one RTP packet under OpenSSL's exported bytes, cut as TLS-8 `srtp` cuts them, and
   gets the bytes Hirsel's `protect_rtp` makes, and the reverse opens. The peer certificate
   Hirsel reports has the SHA-256 that `openssl x509 -fingerprint -sha256` prints for
   OpenSSL's certificate.
+- **`interop_dimpl`.** *Scenario:* a Hirsel client against a dimpl 1.2 server and a Hirsel
+  server against a dimpl 1.2 client, each for one GCM suite and one GCM SRTP profile, through
+  a Rust driver that exchanges datagrams in memory. *Oracle:* dimpl's wire output and its
+  exported keying material, which the driver prints. Both complete, and the SRTP keys cut from
+  dimpl's exporter output equal the Hirsel session's, checked by one packet sealed on each
+  side and opened on the other.
 - **`handshake_survives_loss`.** *Scenario:* client and server in process, each datagram
   independently dropped with probability 0.2, duplicated with 0.05 and delayed by up to
-  three datagrams, from a seeded stream; 32 seeds, under 15 s. *Oracle:* an invariant plus a
-  hand bound. Every seed either reaches `Connected` on both sides with a cross-check (the
-  client's SRTP packet opens at the server and the reverse), or closes as `Timeout` at the
-  instant the timer schedule gives. With 7 retries, a flight of at most 3 datagrams fails all
-  8 tries with probability below `0.49^8 < 0.004`, so at least 30 of 32 seeds connect.
-- **`flight_timer_schedule`.** *Scenario:* a client whose every datagram is dropped, at
-  defaults; then a client whose flight 1 is answered at once and whose flight 3 needs one
-  retransmission. *Oracle:* RFC 6347 §4.2.4.1 by hand. The ClientHello is sent at 0 and
-  resent at 1, 3, 7, 15, 31, 63 and 123 s cumulative (1, 2, 4, 8, 16, 32, 60 s), each
-  `WakeAt` exact. The handshake deadline closes it as `Timeout` at 60 s, before the retries
-  run out. In the second case flight 3 starts at 1 s, its retransmission comes 1 s later, and
-  flight 5 starts at 2 s.
+  three datagrams, from a seeded stream; 32 seeds, under 15 s. Then the same 32 seeds with
+  duplication and delay but no loss. *Oracle:* an invariant per seed, by hand. Every seed
+  either reaches `Connected` on both sides with a cross-check (the client's SRTP packet opens
+  at the server and the reverse), or both sides close as `Timeout` at the instant the timer
+  schedule gives; no other end is allowed. With no loss, every seed connects. The number of
+  lossy seeds that connect is reported and gates nothing, since no hand bound on it is
+  tight.
+- **`flight_timer_schedule`.** *Scenario:* a client whose every datagram is dropped, three
+  times: at defaults; with `handshake_ns` raised to 300 s; and with `retries` 2. Then a client
+  whose flight 1 is answered without loss and whose flight 3 needs one retransmission. *Oracle:*
+  RFC 6347 §4.2.4.1 by hand, each `WakeAt` exact. At defaults the ClientHello is sent at 0 and
+  resent at 1, 3, 7, 15 and 31 s, and the deadline closes it as `Timeout` at 60 s, before the
+  next resend at 63 s. With 300 s it is resent at 1, 3, 7, 15, 31, 63 and 123 s (the timer
+  capped at 60 s for the last), and the eighth expiry closes it as `Timeout` at 183 s. With
+  `retries` 2 it is resent at 1 and 3 s and closes at 7 s. In the last case flight 1 is
+  answered at 0.5 s, so flight 3 starts at 0.5 s with a 1 s timer; it is resent at 1.5 s and
+  answered at 2 s, so flight 5 starts at 2 s with the doubled 2 s timer (`WakeAt` 4 s).
 - **`final_flight_resent`.** *Scenario:* the server's flight 6 is dropped. The client
   retransmits flight 5 twice. *Oracle:* RFC 6347 §4.2.4 by hand. The server is `Connected`
   after flight 5. Each retransmitted flight 5 gets exactly one flight 6, with record numbers
@@ -708,8 +729,10 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
 - **`cookie_bounds_unproven_address`.** *Scenario:* a `Cookie` server receives 10
   ClientHellos without cookies, one with a cookie computed for another address, and one with
   the correct cookie. *Oracle:* RFC 6347 §4.2.1 by hand. Each of the first 11 gets one
-  70-byte HelloVerifyRequest and no other datagram, and the server holds no state beyond the
-  endpoint. The twelfth gets flight 4.
+  60-byte HelloVerifyRequest and no other datagram, with the record sequence number of the
+  ClientHello it answers, and the server holds no state beyond the endpoint. The twelfth gets
+  flight 4, whose first record has that ClientHello's record sequence number and whose
+  ServerHello has `message_seq` 1.
 - **`exporter_once_after_pin`.** *Scenario:* `take_srtp` before `Connected`, after
   `Connected`, and again; an endpoint that negotiated no profile. *Oracle:* DTLS-8 by hand:
   `NotConnected`, a schedule, `Taken`, `NoSrtp`.
@@ -729,7 +752,7 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   65,536 and 65,537, and its CM packets carry ROC 0, 0, 1 and 1 in the authentication. The
   receiver opens all four, and ends with ROC 1 and `s_l` 1. The third receiver opens a packet
   sent at index `5 × 2^16 + 7`.
-- **`replay_window`.** *Scenario:* after indices 0 to 200, a repeat of 150, then index 73,
+- **`replay_window`.** *Scenario:* after indices 0 to 200 except 73, a repeat of 150, then 73,
   then 72, then a forged packet at index 10,000 with a bad tag, then 201. *Oracle:* SRTP-4 by
   hand. 150 is `Replayed`. 73 is 127 below and unseen in the window, so it opens. 72 is
   `TooOld`. The forgery is `Tampered` and moves nothing, so 201 opens.
@@ -742,9 +765,10 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   association. *Oracle:* TLS-8's direction rule by hand. A's protected packet unprotects at
   B. A's own `unprotect_rtp` of it is `Discarded(Tampered)`, because its opener holds B's key.
   `session_pair` with two `send` imports is `Direction`.
-- **`sender_index_monotone`.** *Scenario:* send SEQ 10, then 9; send at index `2^48 − 1`,
-  then again. *Oracle:* SRTP-3 by hand. 9 is `Reused` with `buf` unchanged, and 11 then seals.
-  The second at `2^48 − 1` is `Exhausted`.
+- **`sender_index_monotone`.** *Scenario:* send SEQ 10, then 9, then 11; on a stream set by
+  `send_from` to ROC `2^32 − 1`, send SEQ 65,535 (index `2^48 − 1`), then SEQ 0. *Oracle:*
+  SRTP-3 by hand. 9 is `Reused` with `buf` unchanged, and 11 then seals. Index `2^48 − 1`
+  seals, and SEQ 0, whose index would be `2^48`, is `Exhausted`.
 - **`streams_after_auth`.** *Scenario:* `receive_streams` 2. Forged packets on 5 new SSRCs,
   then genuine packets on 3 new SSRCs. Then `end_send` of an SSRC and a packet on it.
   *Oracle:* SRTP-3 and SRTP-4 by hand. The forgeries create no stream. The first two genuine
@@ -778,10 +802,18 @@ From PLAN rows 1.2 and 1.3, and nothing else:
 | **S2** DTLS records | M | S0 | `core/programs/dtls/`<!-- doc-ref: planned --> package, record framing, epochs, replay window, alerts, fragmentation and reassembly, the transcript (DTLS-4, DTLS-5 Fragmentation and Transcript, DTLS-6) | `record_replay_and_discards`, `fragments_reassemble` (hand-built parts) |
 | **S3** DTLS handshake | L | S1, S2 | client and server flights, cookie admission, server choice, EMS, `use_srtp`, failures, timers and final flights, `take_srtp`, error mapping (DTLS-3, DTLS-5, DTLS-8) | `flight_timer_schedule`, `final_flight_resent`, `offered_13_negotiates_12`, `refusals`, `cookie_bounds_unproven_address`, `exporter_once_after_pin`, `handshake_survives_loss` |
 | **S4** identity, fingerprints, roles | S | S1 | DTLS-7 | `fingerprint_pins_peer`, `setup_roles` |
-| **S5** SRTP sessions | M | S0 | `core/programs/srtp/`<!-- doc-ref: planned --> package (SRTP-2 to SRTP-6) | every SRTP law |
-| **S6** interop | M | S3, S4, S5 | `interop.py` against OpenSSL on loopback | `interop_openssl`, the live part of `fragments_reassemble` |
+| **S5** SRTP sessions | M | S0; `rtp.seq.estimate` once rtp.md's RTP-2 lands (until then S5 keeps the Appendix A estimate and switches) | `core/programs/srtp/`<!-- doc-ref: planned --> package (SRTP-2 to SRTP-6) | every SRTP law |
+| **S6** interop | M | S3, S4, S5 | `interop.py` against OpenSSL on loopback, and against dimpl at `e341a90` through a small Rust driver built from a clone in `/tmp`, never vendored | `interop_openssl` and `interop_dimpl`, the live part of `fragments_reassemble` |
 | **S7** SRTP cost | S | S5 | counted-allocator and instruction-count run (cost targets) | the cost targets |
 
 S1, S2 and S5 run in parallel after S0. S0 blocks everything else. A Sol lane can take
-S0, S1, S2, S4, S5 and S7 from this text. S3 is the security-bearing slice that the parallel
-recheck gates. S6 closes the build.
+S0, S1, S2, S4, S5 and S7 from this text. S3 is the security-bearing slice: PLAN row 1.2
+asks for an Astra security attack on it (the handshake state machine, cookie admission,
+fingerprint pinning, the exporter) before it lands. S6 closes the build.
+
+**Deviation from PLAN row 1.2's verification.** PLAN asks for interop with Chromium, Firefox,
+str0m and dimpl under `sim.udp` at 20% loss. This text covers OpenSSL and dimpl at wire level
+(S6), and loss in process (`handshake_survives_loss`), because `std.sim.udp` has not landed
+and a browser needs the SDP and ICE glue of PLAN row 1.6. Browser interop therefore moves to
+row 1.6's headless Chromium end-to-end test, which drives this endpoint; str0m uses dimpl for
+DTLS, so the dimpl law covers it. The loss law moves to `std.sim.udp` when that lands.

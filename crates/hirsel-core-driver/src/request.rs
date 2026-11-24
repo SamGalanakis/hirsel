@@ -102,8 +102,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if command == "register" {
         return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?));
     }
-    if command == "dry-run" {
-        return conclude(Outcome::Exit(dry_run::run(invocation)?));
+    match command {
+        "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
+        "dry-run" => return conclude(Outcome::Exit(launch::dry_run::run(invocation)?)),
+        _ => {}
     }
     if command == "deploy" {
         return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?));
@@ -1984,8 +1986,6 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
-#[path = "dry_run.rs"]
-mod dry_run;
 
 /// End a request with `outcome`. A one-shot process exits here, running the
 /// program first for a launch: the in-memory graphs are the OS's to reclaim,

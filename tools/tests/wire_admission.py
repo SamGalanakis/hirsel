@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import struct
@@ -438,6 +439,61 @@ def cli_dry_run_conflict():
     assert {file.name: file.read_bytes() for file in store.iterdir()} == before
 
 
+def cli_dev_restores_subscription():
+    root = Path(__file__).resolve().parents[2]
+    with TemporaryDirectory(prefix='hirsel-dev-law-') as tmp:
+        work = Path(tmp)
+        server = work / 'board'
+        server.mkdir()
+        (work / 'hirsel.toml').write_text('[workspace]\nmembers = ["board", "store", "runner"]\n')
+        (server / 'hirsel.toml').write_text(
+            '[package]\nname = "board"\nmajor = 1\ncharge = "charge-v1"\n'
+            '[dependencies]\nstd = { major = 1 }\n'
+            'store = { major = 1, path = "../store" }\n'
+            'runner = { major = 1, path = "../runner" }\n'
+            '[sources]\n"main.hirsel" = "main"\n[program]\nmodule = "main"\nfunction = "main"\n')
+        for package in ('store', 'runner'):
+            original = root / 'core/programs' / package
+            shutil.copytree(original, work / package, ignore=shutil.ignore_patterns('hirsel.lock', '.hirsel-*'))
+        source = server / 'main.hirsel'
+        shutil.copyfile(root / 'core/programs/wire/dev.hirsel', source)
+        command = [CLI['compiler'], 'dev', str(server), '--listen', '127.0.0.1:0',
+                   '--libraries', str(root / 'core'), '--source-core', '--source-std',
+                   '--backend', 'cranelift', '--runtime', CLI['runtime']]
+        with (work / 'stderr').open('w+') as log:
+            dev = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True)
+            try:
+                for line in dev.stdout:
+                    if line.startswith('hirsel dev listening on '):
+                        port = int(line.rsplit(':', 1)[1])
+                        break
+                else:
+                    raise AssertionError(f'dev exited before listening: {dev.poll()}')
+                with connect(port) as client:
+                    client.settimeout(180)
+                    wants = (
+                        blob(b'\x01board@1/main/current(store@1/store/Tx,(),take())->core@1/core/Result[runner@1/runner/Answer[u64],core@1/core/Capacity]')
+                        + u64(fingerprint(0)) + u64(crc64(blob(b'\x03\0\0\0\0\x06') + u32(0)))
+                    )
+                    client.sendall(REQUEST + frame(2, u32(0) + u32(1) + blob(CREDENTIAL) + u32(1) + wants))
+                    assert head(client).startswith(b'HTTP/1.1 101 ')
+                    assert receive(client)[0] == 'welcome'
+                    placed = receive(client)
+                    assert placed == ('placed', 0, 0), placed
+                    client.sendall(frame(2, u32(2) + u32(7) + u32(0) + blob(b'') + u32(0)))
+                    before = receive(client)
+                    assert before[0] == 'batch' and before[2:] == ([7], [(7, u64(41), [])], []), before
+                    source.write_text(source.read_text().replace('Answer[u64]', 'Answer[u32]').replace('41u64', '42u32'))
+                    after = receive(client)
+                    assert after[0] == 'batch' and after[2:] == ([7], [(7, u32(42), [])], []), after
+                    assert after[1] > before[1], (before, after)
+            finally:
+                stop_process(dev)
+                print(dev.stdout.read(), end='')
+                log.seek(0)
+                print(log.read(), end='')
+
+
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
          history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
@@ -446,8 +502,8 @@ CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, s
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--server', required=True, type=Path)
-    p.add_argument('--case', action='append', choices=[*CASES, 'cli_dry_run_conflict'])
+    p.add_argument('--server', type=Path)
+    p.add_argument('--case', action='append', choices=[*CASES, 'cli_dry_run_conflict', 'cli_dev_restores_subscription'])
     p.add_argument('--report', type=Path)
     p.add_argument('--compiler', type=Path, help='hirsel, for the hirsel call laws')
     p.add_argument('--runtime', type=Path)
@@ -457,11 +513,13 @@ def main():
     rows = []
     selected = args.case or CASES
     for name in selected:
-        if name == 'cli_dry_run_conflict':
-            cli_dry_run_conflict()
+        if name in ('cli_dry_run_conflict', 'cli_dev_restores_subscription'):
+            globals()[name]()
             rows.append({'law': name, 'passed': True})
             print(f'{name}: PASS', flush=True)
             continue
+        if args.server is None:
+            p.error('--server is required for the admission cases')
         temporary = TemporaryDirectory(prefix='wire-cut-') if name == 'resend_same_p' else None
         environment = None
         if temporary:

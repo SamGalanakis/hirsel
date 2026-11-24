@@ -504,7 +504,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn from_hex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_hex(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -967,7 +967,7 @@ impl Url {
     }
 }
 
-fn random<const N: usize>() -> Result<[u8; N], Error> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], Error> {
     let mut bytes = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes)
@@ -1265,7 +1265,7 @@ fn exchange(
 // ---------------------------------------------------------------------------
 // RFC 3174 SHA-1 and RFC 4648 base64, for the RFC 6455 accept check only.
 
-fn sha1(data: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let mut padded = data.to_vec();
     padded.push(0x80);

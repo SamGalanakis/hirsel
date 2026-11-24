@@ -157,6 +157,7 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
+    "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
     "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
@@ -1179,66 +1180,11 @@ pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
         .find(|c| c.name == name)
         .ok_or_else(|| format!("unknown command `{name}`; use help"))
 }
-fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
-    option.commands.is_empty()
-        || option.commands.contains(&command.name)
-        || (option.id == OptionId::Json
-            && command.name.starts_with("prof ")
-            && !matches!(
-                command.name,
-                "prof run" | "prof replay" | "prof attach" | "prof export"
-            ))
-        || (command.name == "prof replay"
-            && option.commands.contains(&"replay")
-            && !matches!(
-                option.id,
-                OptionId::HostState
-                    | OptionId::Diagnose
-                    | OptionId::Emulator
-                    | OptionId::Sysroot
-                    | OptionId::Json
-            ))
-        || (command.name == "prof run"
-            && option.id != OptionId::Output
-            && option.commands.contains(&"run"))
-}
-pub fn help(command: Option<&CommandSpec>) -> String {
-    if let Some(command) = command {
-        let mut result = format!(
-            "Usage: hirsel {}\n\n{}\n\nOptions:\n",
-            command.usage, command.description
-        );
-        if command.name == "prof" {
-            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with("prof ")) {
-                result.push_str(&format!(
-                    "  {}\n    {}\n",
-                    subcommand.usage, subcommand.description
-                ));
-            }
-            return result;
-        }
-        for option in OPTIONS.iter().filter(|o| applies(o, command)) {
-            let label = format!(
-                "{}{}",
-                option.names.join(", "),
-                option.value.map_or(String::new(), |v| format!(" {v}"))
-            );
-            result.push_str(&format!("  {label:<34} {}\n", option.description));
-        }
-        result
-    } else {
-        let mut result =
-            "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
-        for command in COMMANDS
-            .iter()
-            .filter(|c| !c.name.starts_with("prof ") && !c.name.starts_with("laws "))
-        {
-            result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
-        }
-        result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");
-        result
-    }
-}
+#[path = "cli_help.rs"]
+mod help_text;
+use help_text::applies;
+pub use help_text::help;
+
 fn is_help(name: &str) -> bool {
     OPTIONS
         .iter()
@@ -1338,7 +1284,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         if argument == "--"
             && matches!(
                 name.as_str(),
-                "run" | "prof run" | "call" | "register" | "dry-run"
+                "run" | "prof run" | "call" | "register" | "dry-run" | "dev"
             )
         {
             invocation.arguments.extend(arguments);

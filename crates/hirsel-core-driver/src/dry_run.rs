@@ -13,7 +13,7 @@ type Error = Box<dyn std::error::Error>;
 
 const REPORT: &[u8] = b"hirsel dry-run\n";
 
-pub(super) fn run(invocation: Invocation) -> Result<i32, Error> {
+pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     if invocation.positional.is_some() {
         return Err("dry-run takes the candidate through --exe".into());
     }

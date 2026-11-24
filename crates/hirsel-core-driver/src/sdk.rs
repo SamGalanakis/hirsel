@@ -415,7 +415,7 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
     Ok(message)
 }
 
-pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
+pub(crate) fn entry_path(identity: &[u8]) -> Result<&str, Error> {
     // PROG-9: version 01 followed by UTF-8 D A S. D ends at the first '[' or '('.
     if identity.first() != Some(&1) {
         return Err("Malformed: entry identity version".into());
@@ -424,6 +424,11 @@ pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
     let (path, _) = text
         .split_once(['[', '('])
         .ok_or("Malformed: entry signature")?;
+    Ok(path)
+}
+
+pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
+    let path = entry_path(identity)?;
     let name = path
         .rsplit('/')
         .next()

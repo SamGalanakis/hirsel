@@ -605,9 +605,9 @@ listener.
 
 ## Dry run and dev loop
 
-*(The dev loop is planned. See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
+*(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER`<!-- doc-ref: planned --> runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
+`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER` runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded
@@ -619,6 +619,17 @@ Dry run takes the Store's lock while it captures the private image. It
 refuses a store held by another process. The candidate uses the root limit
 embedded in the executable and the same Store sizing overrides it would use
 when serving. Arguments after `--` go to the candidate.
+
+`SERVER` is the package to rebuild. The supervisor gives its first directory
+grant a temporary Store and holds a public loopback listener. The default
+address is `127.0.0.1:7700`, and `--listen ADDR` changes it. The server uses
+`runner.launch_selection` so the supervisor can run the ordinary install
+before restarting it. A build refusal leaves the current executable serving.
+A migration refusal before activation reopens the current executable. The
+supervisor retains each WebSocket, repeats its Hello and live Subscribe
+requests on the new connection, and forwards the complete groups with the
+original subscription numbers. It uses the new query's result fingerprint
+when the named entry still has the same argument fingerprint.
 
 ## Platform host and launcher
 

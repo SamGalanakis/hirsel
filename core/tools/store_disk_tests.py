@@ -26,8 +26,7 @@ LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_lo
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.
 ASSEMBLY_OWNER = 'core-ops-914'
-KNOWN_ASSEMBLY = frozenset({'compact', 'worker_refusal', 'opening', 'db',
-                            'db_refusal', 'schema_refusal', 'pack_bound'})
+KNOWN_ASSEMBLY = frozenset({'opening', 'db', 'db_refusal', 'schema_refusal', 'pack_bound'})
 
 
 def known_assembly(row):

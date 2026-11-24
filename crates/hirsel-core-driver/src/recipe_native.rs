@@ -324,8 +324,7 @@ impl CheckProduct {
             };
             // The materialised module is `retain`'s canonical decoding of
             // `instance.code`, so its annex is read off without encoding again.
-            let (mut annex, module) =
-                normal::prepare_retained_assembly(&instance.code, instance.ir()?, &sources);
+            let (mut annex, module) = normal::prepare_retained_assembly(instance.ir()?, &sources);
             if identity == entry {
                 annex.1.clone_from(&names);
             }
@@ -335,7 +334,7 @@ impl CheckProduct {
                 .filter_map(|identity| builtin_semantics_number(&identity.definition))
                 .collect();
             let code = BodyRef {
-                body: store.put(ObjectKind::Body, &instance.code)?,
+                body: store.put_addressed(ObjectKind::Body, instance.body, &instance.code)?,
                 annex: store.put(ObjectKind::Annex, &annex.encode())?,
             };
             units.insert(
@@ -366,13 +365,7 @@ impl CheckProduct {
             let plan = &remembered.as_ref().unwrap().plan;
             let groups = plan
                 .frames()
-                .map(|(hash, bytes)| {
-                    let object = ObjectRef {
-                        hash,
-                        len: bytes.len() as u64,
-                    };
-                    store.put_addressed(ObjectKind::Group, object, bytes)
-                })
+                .map(|(hash, bytes)| store.put_addressed(ObjectKind::Group, hash, bytes))
                 .collect::<io::Result<Vec<_>>>()?;
             (groups, plan.addresses())
         } else {
@@ -384,12 +377,12 @@ impl CheckProduct {
                     None,
                     [entry.clone()],
                     &reached.materialized.foreign_addresses,
-                    |_, bytes| pending.push(bytes),
+                    |hash, bytes| pending.push((hash, bytes)),
                 )
                 .ok_or_else(invalid)?;
             let groups = pending
                 .iter()
-                .map(|bytes| store.put(ObjectKind::Group, bytes))
+                .map(|(hash, bytes)| store.put_addressed(ObjectKind::Group, *hash, bytes))
                 .collect::<io::Result<Vec<_>>>()?;
             (groups, Arc::new(addresses))
         };
@@ -1862,9 +1855,7 @@ impl Publication {
             &(
                 std.as_ref().map(|std| std.key),
                 // The bodies the program imports shape its code.
-                std.as_ref().filter(|std| !std.lent.is_empty()).map(|std| {
-                    ContentHash::of_parts("hirsel.core-std-lent.v1", [std.lent.as_slice()])
-                }),
+                std.as_ref().and_then(|std| std.lent.key()),
                 emitter,
                 tools.image,
                 tools.runtime,
@@ -2094,7 +2085,7 @@ pub(super) fn release_objects(
         runtime,
         store,
         closed_executable,
-        (&std.summaries, std.key, std.lent.as_slice()),
+        (&std.summaries, std.key, &std.lent),
     )?;
     let linked = std.objects(&emitted.objects, options)?;
     emitted.objects.extend(linked);

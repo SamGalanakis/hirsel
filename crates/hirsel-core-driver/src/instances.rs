@@ -2,7 +2,9 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{CodeRow, Identity, address::code_groups_with_external, code_revision};
+use hirsel_core_ir::{
+    CodeRow, FuncId, Identity, address::code_groups_with_external, code_revision,
+};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -831,26 +833,35 @@ fn materialise(
     let (slots, signatures, adapters) = {
         use hirsel_core_ir::normal::{self, Slot};
         let module = built.module.as_ref().expect("materialized module");
+        let mut hashes = rustc_hash::FxHashMap::default();
+        let mut signature = |function: FuncId| {
+            let row = module.functions[function.index()].signature;
+            *hashes
+                .entry(row)
+                .or_insert_with(|| normal::signature(module, function))
+        };
+        let signatures = CodeSignatures {
+            own: signature(built.function),
+            slots: built
+                .children
+                .iter()
+                .map(|child| (child.identity.clone(), signature(child.function)))
+                .collect(),
+        };
+        let mut children = built.children.iter();
         let slots = built
             .code
             .slots
             .iter()
-            .map(|slot| slot.identity(module))
-            .collect::<Vec<_>>();
-        let signatures = CodeSignatures {
-            own: normal::signature(module, built.function),
-            slots: built
-                .code
-                .slots
-                .iter()
-                .filter_map(|slot| match slot {
-                    Slot::External(function) => {
-                        Some((slot.identity(module), normal::signature(module, *function)))
-                    }
-                    Slot::Builtin(_) => None,
-                })
-                .collect(),
-        };
+            .map(|slot| match slot {
+                Slot::External(_) => children
+                    .next()
+                    .expect("a child for each external slot")
+                    .identity
+                    .clone(),
+                Slot::Builtin(definition) => Identity::plain(definition.clone()),
+            })
+            .collect();
         let adapters = module
             .functions
             .iter()

@@ -14,6 +14,24 @@ use super::*;
 use hirsel_core_ir::{Callee, FuncId, RtOp};
 use serde::{Deserialize, Serialize};
 
+#[derive(Default)]
+pub(crate) struct LentBodies {
+    pub(crate) bytes: Vec<u8>,
+    key: Option<ContentHash>,
+}
+
+impl LentBodies {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        let key = (!bytes.is_empty())
+            .then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [bytes.as_slice()]));
+        Self { bytes, key }
+    }
+
+    pub(crate) fn key(&self) -> Option<ContentHash> {
+        self.key
+    }
+}
+
 /// The release unit's key: its inputs and the role facts each unit consumed.
 fn unit_key(
     inputs: &impl serde::Serialize,
@@ -236,7 +254,7 @@ pub(super) fn emit_release_image(
     (summaries, std_key, lent): (
         &BTreeMap<ContentHash, hirsel_core_ir::step_contexts::Summary>,
         ContentHash,
-        &[u8],
+        &LentBodies,
     ),
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
@@ -246,12 +264,11 @@ pub(super) fn emit_release_image(
         instance.definition.0.name
     ));
     // The bodies a program imports shape its code, so they key its parts.
-    let lent_key =
-        (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));
-    let lend = if lent.is_empty() {
+    let lent_key = lent.key();
+    let lend = if lent.bytes.is_empty() {
         hirsel_llvm_lazy::Lend::None
     } else {
-        hirsel_llvm_lazy::Lend::Borrow(lent)
+        hirsel_llvm_lazy::Lend::Borrow(&lent.bytes)
     };
     let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;

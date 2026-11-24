@@ -679,10 +679,10 @@ fn retained_assembly_is_the_original_assembly() {
         .into(),
     };
     let sources = sources.positions();
-    let (code, retained) = retain(&module, FuncId(0));
+    let (_, retained) = retain(&module, FuncId(0));
     let (_, annex, decoded) = prepare_assembly(&module, FuncId(0), &sources);
     assert_eq!(
-        prepare_retained_assembly(&code.bytes, &retained, &sources),
+        prepare_retained_assembly(&retained, &sources),
         (annex, decoded),
         "a retained module's annex is read off in canonical order"
     );

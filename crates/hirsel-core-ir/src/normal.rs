@@ -5,7 +5,7 @@ use crate::source::SourcePositions;
 use crate::*;
 use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use hirsel_core_layout::{Case, Field, FieldTy, FuncRef, Handle, Repr, TypeRef, Width};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
@@ -61,6 +61,8 @@ const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 mod results;
 use results::results;
 mod charge;
+mod retained;
+pub use retained::{prepare_retained_assembly, retain};
 pub(crate) mod wire;
 use charge::{PlanMeter, reserve};
 pub(crate) use charge::{charge_identity, charge_shape};
@@ -255,6 +257,7 @@ struct ModuleOrder<'m> {
     slots: Vec<Slot>,
     seen_slots: BTreeSet<Slot>,
     described: BTreeSet<Identity>,
+    closure_hashes: BTreeMap<TypeId, ContentHash>,
     canonical_locals: bool,
 }
 
@@ -290,6 +293,7 @@ impl<'m> ModuleOrder<'m> {
             slots: Vec::new(),
             seen_slots: BTreeSet::new(),
             described: BTreeSet::new(),
+            closure_hashes: BTreeMap::new(),
             canonical_locals: true,
         }
     }
@@ -301,6 +305,13 @@ impl<'m> ModuleOrder<'m> {
             GlobalRow::Static => &mut self.statics,
             GlobalRow::Instance => &mut self.instances,
         }
+    }
+
+    fn closure_hash(&mut self, ty: TypeId) -> ContentHash {
+        *self
+            .closure_hashes
+            .entry(ty)
+            .or_insert_with(|| self.module.closure(ty).hash)
     }
 
     fn row(&mut self, kind: GlobalRow, row: usize) -> u32 {
@@ -602,7 +613,7 @@ impl Annex {
 
 /// Encode an instance's checked IR, keeping source and optimisation data out.
 pub fn encode(module: &Module, root: FuncId) -> EncodedBody {
-    encode_with_sources(module, root, None).0
+    encode_with_orders(module, root, |_| {})
 }
 
 /// Encode an instance's checked IR and collect its annex in the same numbering.
@@ -611,7 +622,10 @@ pub fn encode_with_annex(
     root: FuncId,
     sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex) {
-    let (body, annex) = encode_with_sources(module, root, Some(sources));
+    let mut annex = Vec::new();
+    let body = encode_with_orders(module, root, |order| {
+        annex.push(order.map(|order| function_annex(module, &order, sources)));
+    });
     (body, Annex(annex, None))
 }
 
@@ -627,104 +641,23 @@ pub fn prepare_assembly(
     (body, annex, module)
 }
 
-/// `prepare_assembly` for a module `retain` produced, given the body bytes it
-/// returned: the retained module is already in canonical numbering, so its
-/// annex is read off in row order and the body is not encoded again.
-pub fn prepare_retained_assembly(
-    bytes: &[u8],
-    retained: &Module,
-    sources: &SourcePositions<'_>,
-) -> (Annex, Module) {
-    let functions = retained
-        .functions
-        .iter()
-        .map(|function| {
-            let body = function.body.as_ref()?;
-            let rows = |len: usize| (0..len).collect::<Vec<_>>();
-            Some(annex_in_order(
-                retained,
-                body,
-                &rows(body.blocks.len()),
-                |value| value as u32,
-                &rows(body.calls.len()),
-                &rows(body.edges.len()),
-                sources,
-            ))
-        })
-        .collect();
-    let (module, _) =
-        decode_payload(bytes, &Debit::unlimited()).expect("the producer's normal form is readable");
-    (Annex(functions, None), module)
-}
-
-/// Materialize the retained module for existing native and evaluator consumers.
-/// Source anchors and hints keep their original facts in the canonical numbering.
-pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
-    let sources = crate::source::SourceMap::default();
-    let (mut code, annex) = encode_with_annex(module, root, &sources.positions());
-    let mut retained = decode_payload(&code.bytes, &Debit::unlimited())
-        .expect("our own normal body decodes")
-        .0;
-    retained.items.clone_from(&module.items);
-    let mut functions = Numbers::default();
-    for (&row, (function, hints)) in code
-        .original_functions
-        .iter()
-        .zip(retained.functions.iter_mut().zip(annex.0))
-    {
-        functions.number(row);
-        let (Some(body), Some(hints)) = (&mut function.body, hints) else {
-            continue;
-        };
-        let original = module.functions[row]
-            .body
-            .as_ref()
-            .expect("retained function has a producer");
-        let order = BodyOrder::new(original);
-        for (block, &old) in body.blocks.iter_mut().zip(&order.blocks.order) {
-            let old = &original.blocks[old];
-            block.anchor = old.anchor;
-            let source = PoolRange::new(old.insts.start, old.insts.len);
-            let target = block.insts.start as usize;
-            let source = source.get(&original.inst_anchors).unwrap();
-            body.inst_anchors[target..target + source.len()].copy_from_slice(source);
-        }
-        for (call, cold) in body.calls.iter_mut().zip(hints.cold_calls) {
-            call.cold = cold;
-        }
-        for (edge, cold) in body.edges.iter_mut().zip(hints.cold_edges) {
-            edge.cold = cold;
-        }
-        body.callable_parameters = hints.callable_parameters.into_iter().map(ValueId).collect();
-    }
-    for slot in &mut code.slots {
-        if let Slot::External(f) = slot {
-            *f = FuncId(functions.get(f.index()));
-        }
-    }
-    (code, retained)
-}
-
-fn encode_with_sources(
-    module: &Module,
+fn encode_with_orders<'m>(
+    module: &'m Module,
     root: FuncId,
-    sources: Option<&SourcePositions<'_>>,
-) -> (EncodedBody, Vec<Option<FunctionAnnex>>) {
+    mut collect: impl FnMut(Option<BodyOrder<'m>>),
+) -> EncodedBody {
     let mut order = plan(module, root);
 
     let reachable = order.functions.order.clone();
     let mut functions = Vec::new();
-    let mut annex = Vec::new();
     for row in reachable {
         let body = order.live_functions[row]
             .then_some(&module.functions[row].body)
             .and_then(Option::as_ref)
             .map(BodyOrder::new);
-        let (bytes, extras) = write_function(&mut order, row, body, sources);
+        let (bytes, body) = write_function(&mut order, row, body);
         functions.push(bytes);
-        if sources.is_some() {
-            annex.push(extras);
-        }
+        collect(body);
     }
     for kind in [
         GlobalRow::Type,
@@ -756,13 +689,12 @@ fn encode_with_sources(
     for function in functions {
         bytes.extend(function);
     }
-    let encoded = EncodedBody {
+    EncodedBody {
         bytes,
         slots,
         described: order.described.into_iter().collect(),
         original_functions: order.functions.order,
-    };
-    (encoded, annex)
+    }
 }
 
 fn planned_closure(
@@ -809,7 +741,7 @@ fn plan_metered<'m>(
                 .body
                 .as_ref()
                 .map(|body| BodyOrder::metered(body, meter));
-            write_function(&mut order, row, body, None);
+            write_function(&mut order, row, body);
             next += 1;
         }
         let mut finalizers = Vec::new();
@@ -883,8 +815,7 @@ fn write_function<'m>(
     order: &mut ModuleOrder<'m>,
     row: usize,
     body_order: Option<BodyOrder<'m>>,
-    sources: Option<&SourcePositions<'_>>,
-) -> (Vec<u8>, Option<FunctionAnnex>) {
+) -> (Vec<u8>, Option<BodyOrder<'m>>) {
     let module = order.module;
     let function = &module.functions[row];
     let mut out = Write::module(order);
@@ -962,8 +893,7 @@ fn write_function<'m>(
         local.calls.append(&mut out.bytes);
         local.edges.append(&mut out.bytes);
     }
-    let annex = sources.map(|sources| function_annex(module, &local, sources));
-    (out.bytes, annex)
+    (out.bytes, Some(local))
 }
 
 fn function_annex(
@@ -974,10 +904,10 @@ fn function_annex(
     annex_in_order(
         module,
         order.body,
-        &order.blocks.order,
+        order.blocks.order.iter().copied(),
         |value| order.values.get(value),
-        &order.calls.numbers.order,
-        &order.edges.numbers.order,
+        order.calls.numbers.order.iter().copied(),
+        order.edges.numbers.order.iter().copied(),
         sources,
     )
 }
@@ -987,10 +917,10 @@ fn function_annex(
 fn annex_in_order(
     module: &Module,
     body: &Body,
-    blocks: &[usize],
+    blocks: impl Iterator<Item = usize> + Clone,
     value: impl Fn(usize) -> u32,
-    calls: &[usize],
-    edges: &[usize],
+    calls: impl Iterator<Item = usize>,
+    edges: impl Iterator<Item = usize>,
     sources: &SourcePositions<'_>,
 ) -> FunctionAnnex {
     let site = |anchor: Option<Anchor>| {
@@ -1010,7 +940,7 @@ fn annex_in_order(
         .collect();
     callable_parameters.sort_unstable();
     callable_parameters.dedup();
-    let blocks = blocks.iter().map(|&row| &body.blocks[row]);
+    let blocks = blocks.map(|row| &body.blocks[row]);
     FunctionAnnex {
         instructions: blocks
             .clone()
@@ -1024,8 +954,8 @@ fn annex_in_order(
             })
             .collect(),
         terminators: blocks.map(|block| site(block.anchor)).collect(),
-        cold_calls: calls.iter().map(|&row| body.calls[row].cold).collect(),
-        cold_edges: edges.iter().map(|&row| body.edges[row].cold).collect(),
+        cold_calls: calls.map(|row| body.calls[row].cold).collect(),
+        cold_edges: edges.map(|row| body.edges[row].cold).collect(),
         callable_parameters,
     }
 }

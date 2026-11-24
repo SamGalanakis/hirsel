@@ -304,25 +304,26 @@ impl CodeStore {
     /// Publish one checked object: a durable store's with an atomic,
     /// non-replacing name, a cache store's at its next commit.
     pub fn put(&self, kind: ObjectKind, bytes: &[u8]) -> io::Result<ObjectRef> {
-        let object = ObjectRef {
-            hash: kind.hash(bytes),
-            len: bytes.len() as u64,
-        };
+        let hash = kind.hash(bytes);
         if kind == ObjectKind::Recipe
             && let Some(stage) = &self.recipe_stage
         {
-            return Self::new(stage).put_addressed(kind, object, bytes);
+            return Self::new(stage).put_addressed(kind, hash, bytes);
         }
-        self.put_addressed(kind, object, bytes)
+        self.put_addressed(kind, hash, bytes)
     }
 
     /// `put` of an object whose name the caller computed.
     pub(crate) fn put_addressed(
         &self,
         kind: ObjectKind,
-        object: ObjectRef,
+        hash: ContentHash,
         bytes: &[u8],
     ) -> io::Result<ObjectRef> {
+        let object = ObjectRef {
+            hash,
+            len: bytes.len() as u64,
+        };
         if self.cache.is_some() {
             if !self.contains(kind, object)? {
                 self.packs.lock().unwrap().put(kind, object.hash, bytes);

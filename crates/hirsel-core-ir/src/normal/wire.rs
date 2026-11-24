@@ -631,7 +631,7 @@ impl Wire for InstanceKey {
         out.count(self.arguments.len());
         if !out.module.planning {
             for &arg in &self.arguments {
-                out.module.module.closure(arg).hash.write(out);
+                out.module.closure_hash(arg).write(out);
             }
         }
         let prior = std::mem::replace(&mut out.module.metadata, true);

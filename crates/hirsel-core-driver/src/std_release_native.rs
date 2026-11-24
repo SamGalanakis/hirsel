@@ -585,7 +585,10 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
     let std = match build {
         StdBuild::Dev => None,
         StdBuild::Parts => std_of(options, &publication, None)
-            .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
+            .map(|std| crate::native::std_release::StdSide {
+                lent: Default::default(),
+                ..std
+            }),
         StdBuild::Imported => std_of(options, &publication, None),
         StdBuild::Prebuilt => {
             let library = product.image.as_ref().map(|image| image.store_root());
@@ -697,9 +700,9 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         } else {
             assert_eq!(std.lowered, 0, "a build over the stored side lowers none of it");
         }
-        assert!(!std.lent.is_empty(), "the std lends bodies");
+        assert!(!std.lent.bytes.is_empty(), "the std lends bodies");
         assert!(std.roots.contains(&exp), "the std side optimises the scalar routine");
-        sides.push((std.key, std.codes(), std.lent));
+        sides.push((std.key, std.codes(), std.lent.bytes));
         if cache == "cache-b" {
             // The recipe outlives its inputs: with the program's source and
             // image gone, it assembles over the side its build stored.

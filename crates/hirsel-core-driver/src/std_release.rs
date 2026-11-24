@@ -39,8 +39,8 @@
 //! program. A body copied into a program keeps the unit's site references
 //! and step charges; each call it keeps reaches the unit's part under the
 //! same five contracts.
-use super::recipe_build::Unit;
 use super::*;
+use super::{recipe_build::Unit, release::LentBodies};
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use hirsel_core_ir::step_contexts::Summary;
 use hirsel_core_ir::{Callee, FuncId, Identity, Param};
@@ -119,7 +119,7 @@ pub(crate) struct StdSide {
     /// The std's parts, which [`StdSide::objects`] links.
     pub(crate) parts: StdParts,
     /// The bodies the std lends a program's inliner, as bitcode.
-    pub lent: Vec<u8>,
+    pub lent: LentBodies,
     /// How many units this build lowered for the side: none when the shared
     /// cache held it.
     pub lowered: u64,
@@ -254,7 +254,7 @@ pub(crate) fn std_side(
             summaries: BTreeMap::new(),
             points: BTreeMap::new(),
             parts: StdParts::default(),
-            lent: Vec::new(),
+            lent: LentBodies::default(),
             lowered: 0,
         });
     }
@@ -825,7 +825,7 @@ fn side(
     .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
     Ok(StdSide {
         key,
-        lent,
+        lent: LentBodies::new(lent),
         lowered,
         roots: record.roots.into_iter().collect(),
         summaries: record.summaries.into_iter().collect(),

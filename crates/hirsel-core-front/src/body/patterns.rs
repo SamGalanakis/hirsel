@@ -3,6 +3,8 @@
 use super::*;
 use hirsel_core_ir::RtOp;
 
+mod destructure;
+
 /// How a name pattern binds (OWN-15): a view or copy, an owner (`take`), or the
 /// matched place itself, lent for the arm (`mut`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1018,17 +1020,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         );
                     }
                 }
-                let count = if pat.order.len == 0 {
-                    pat.fields.len
-                } else {
-                    pat.order.len
-                };
-                for at in 0..count {
-                    let i = if pat.order.len == 0 {
-                        at
-                    } else {
-                        self.patterns.order[(pat.order.start + at) as usize]
-                    };
+                if subject.owned && !subject.viewed {
+                    self.destructure(pat, case, subject, mutable);
+                    return;
+                }
+                for at in 0..self.pattern_count(pat) {
+                    let i = self.pattern_index(pat, at);
                     let child = self.patterns.fields[(pat.fields.start + i) as usize];
                     if child == 0 {
                         continue;
@@ -1036,9 +1033,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let ty = self.pat(child).ty;
                     let field = self.pattern_at(subject, case, i, ty, pat.site);
                     self.bind_pattern(child, field, mutable);
-                }
-                if subject.owned && !subject.viewed {
-                    self.transfer(pat, case, subject);
                 }
             }
             _ => {}
@@ -1132,31 +1126,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
     /// parts are owners now, so the source is consumed whole and the omitted fields
     /// are dropped in declaration order.
-    /// The owned subject's omitted fields, and a destructured resource's block, are
-    /// cleaned as owners of their own, so a field drop that fails cleans only the
-    /// fields after it and the block, never the subject again (FAIL-12).
-    fn transfer(&mut self, pat: Pat, case: Option<u32>, subject: Subject) {
-        if subject.place.is_none() {
-            self.consume(subject.value, pat.site);
-        }
-        let mark = self.owner_mark();
-        // T3.7: the destructured resource's block is freed last.
-        self.free_owner(subject.value, pat.ty, pat.site);
-        // Begun last to first, so they are cleaned in declaration order.
-        for i in (0..pat.fields.len).rev() {
-            let child = self.patterns.fields[(pat.fields.start + i) as usize];
-            if child != 0 && self.pat_head(child) != Head::Any {
-                continue;
-            }
-            let ty = self.pattern_field_ty(pat.ty, case, i as usize);
-            if self.drop_id(ty).is_none() {
-                continue;
-            }
-            let field = self.pattern_at(subject, case, i, ty, pat.site);
-            self.temp(ty, field.value);
-        }
-        self.end_owners(mark, None, false, pat.site);
-    }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
         if self.pattern_takes(id) && !subject.owned {
             if !subject.viewed

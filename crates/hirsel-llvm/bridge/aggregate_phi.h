@@ -3,6 +3,11 @@
 
 #include <llvm-c/Core.h>
 
+#ifdef __cplusplus
+extern "C"
+#endif
+void hirsel_llvm_note_tail_change(LLVMValueRef function);
+
 // Project scalar fields before the late cleanup round. Inlining can merge a
 // value and its failure byte into one aggregate PHI; projection then hides the
 // constant status on each predecessor from ordinary branch simplification.
@@ -11,6 +16,7 @@ static inline void hirsel_scalarize_aggregate_phis(LLVMModuleRef module,
   LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
   for (LLVMValueRef f = LLVMGetFirstFunction(module); f;
        f = LLVMGetNextFunction(f)) {
+    int changed = 0;
     for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(f); block;
          block = LLVMGetNextBasicBlock(block)) {
       LLVMValueRef phi = LLVMGetFirstInstruction(block);
@@ -59,10 +65,12 @@ static inline void hirsel_scalarize_aggregate_phis(LLVMModuleRef module,
             LLVMInstructionEraseFromParent(extract);
           }
           LLVMInstructionEraseFromParent(phi);
+          changed = 1;
         }
         phi = next;
       }
     }
+    if (changed) hirsel_llvm_note_tail_change(f);
   }
   LLVMDisposeBuilder(builder);
 }

@@ -37,7 +37,7 @@ extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTarge
     LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
     const uint8_t *lent, size_t lent_len);
 extern LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
-    const uint8_t *lent, size_t lent_len);
+    LLVMBool has_lent);
 extern LLVMErrorRef hirsel_llvm_drop_lent(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_cleanup_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_sweep_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
@@ -589,7 +589,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
                                         refill && LLVMGetFirstUse(refill), report, source, receiver,
                                         lent, lent_len);
-        if (!e) e = hirsel_llvm_specialize_release(module, machine, lent, lent_len);
+        if (!e) e = hirsel_llvm_specialize_release(module, machine, lent_len != 0);
         if (!e) {
             hirsel_llvm_inline_recursive_leaves(module);
             hirsel_llvm_guard_copy_loops(module, machine);

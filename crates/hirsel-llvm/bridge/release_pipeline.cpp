@@ -22,13 +22,13 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ValueHandle.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
-#include <llvm/Transforms/IPO/ElimAvailExtern.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Analysis/AssumptionCache.h>
@@ -55,6 +55,7 @@
 using namespace llvm;
 
 extern "C" void hirsel_llvm_prepay_step_trees(void *module);
+extern "C" void hirsel_llvm_note_tail_change(LLVMValueRef function);
 
 namespace {
 
@@ -108,9 +109,8 @@ public:
 // inliner: each body a definition calls, and those they call, comes in
 // `available_externally`. Its own passes do not run over it, the inliner may
 // copy it into a caller, and `elim-avail-extern` then drops it, so each call
-// left reaches the library's part. The release inliner drops them at its end;
-// the specialize inliner takes them again, for itself and the loop helpers
-// after it, until `hirsel_llvm_drop_lent`.
+// left reaches the library's part. Keep them through the late inliners and
+// drop them before per-definition cleanup and emission.
 class LendPass : public PassInfoMixin<LendPass> {
     StringRef lent;
     std::string *failure;
@@ -172,6 +172,39 @@ public:
     // Lent bodies keep the code their library's optimizer made.
     void skip_lent() {
         callbacks.registerShouldRunOptionalPassCallback([](StringRef, Any ir) { return unlent(ir); });
+    }
+
+    void track_inlining() {
+        // InlinerPass erases the call on success. A WeakVH observes deletion
+        // even when the returned value replaces the call's uses. A deleted
+        // caller can lose its whole body and has no tail to run.
+        struct Sites {
+            WeakVH caller;
+            SmallVector<WeakVH, 4> calls;
+        };
+        auto sites = std::make_shared<SmallVector<Sites, 4>>();
+        callbacks.registerBeforeNonSkippedPassCallback([sites](StringRef pass, Any ir) {
+            if (pass != InlinerPass::name()) return;
+            for (const auto &node : *any_cast<const LazyCallGraph::SCC *>(ir)) {
+                Function &function = node.getFunction();
+                Sites &entry = sites->emplace_back(Sites{&function, {}});
+                for (Instruction &instruction : instructions(function))
+                    if (auto *call = dyn_cast<CallBase>(&instruction))
+                        if (auto *callee = call->getCalledFunction(); callee && !callee->isDeclaration())
+                            entry.calls.emplace_back(call);
+            }
+        });
+        auto finish = [sites](StringRef pass) {
+            if (pass != InlinerPass::name()) return;
+            for (const auto &entry : *sites)
+                if (entry.caller && any_of(entry.calls, [](const WeakVH &call) { return !call; }))
+                    hirsel_llvm_note_tail_change(wrap(static_cast<Value *>(entry.caller)));
+            sites->clear();
+        };
+        callbacks.registerAfterPassCallback(
+            [finish](StringRef pass, Any, const PreservedAnalyses &) { finish(pass); });
+        callbacks.registerAfterPassInvalidatedCallback(
+            [finish](StringRef pass, const PreservedAnalyses &) { finish(pass); });
     }
 
     void run(ModulePassManager &pipeline, StringRef phase) {
@@ -778,7 +811,6 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         InvalidateAnalysisPass<ShouldNotRunFunctionPassesAnalysis>()));
     if (lent_len) pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
     pipeline.addPass(std::move(inliner));
-    if (lent_len) pipeline.addPass(EliminateAvailableExternallyPass());
 
     if (auto error = builder.parsePassPipeline(pipeline,
         "deadargelim,globalopt,globaldce,rpo-function-attrs,recompute-globalsaa,"
@@ -820,25 +852,18 @@ extern "C" LLVMErrorRef hirsel_llvm_growth_arms_back(LLVMModuleRef module,
     return LLVMErrorSuccess;
 }
 
-// A composed program's specialize inliner and loop helpers
-// (`hirsel_llvm_promote_step_window`) see the library's bodies; a program over
-// a separate library takes its lent bodies (`LendPass`) again for them.
+// Keep the late inliner over the composed program or its still-lent library.
 extern "C" LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module,
                                                       LLVMTargetMachineRef machine,
-                                                      const uint8_t *lent, size_t lent_len) {
+                                                      LLVMBool has_lent) {
     ReleasePipeline release(module, machine);
-    std::string lend_failure;
     ModulePassManager pipeline;
-    if (lent_len) {
-        release.skip_lent();
-        pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
-    }
+    if (has_lent) release.skip_lent();
+    release.track_inlining();
     if (auto error = release.builder.parsePassPipeline(pipeline,
         "cgscc(argpromotion),ipsccp,cgscc(inline)"))
         return wrap(std::move(error));
     release.run(pipeline, "specialize");
-    if (!lend_failure.empty())
-        return wrap(make_error<StringError>(lend_failure, inconvertibleErrorCode()));
     return LLVMErrorSuccess;
 }
 

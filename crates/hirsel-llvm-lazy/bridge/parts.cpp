@@ -993,10 +993,14 @@ extern "C" int hirsel_llvm_generate_parts(LLVMTargetMachineRef machine, const ui
 }
 
 extern "C" void *hirsel_llvm_tail_open(LLVMModuleRef module, LLVMTargetMachineRef machine);
-extern "C" void hirsel_llvm_tail_run(void *tail, LLVMValueRef function);
+extern "C" LLVMBool hirsel_llvm_take_tail_change(LLVMValueRef function);
+extern "C" void hirsel_llvm_tail_run(void *tail, LLVMValueRef function, LLVMBool changed);
 extern "C" void hirsel_llvm_tail_close(void *tail);
 
 namespace {
+constexpr StringLiteral TailChangedKey = "tail-cleanup post-o3-changed\n";
+constexpr StringLiteral TailUnchangedKey = "tail-cleanup post-o3-unchanged\n";
+
 // Whether `f`'s body can be lent to a part and restored from one exactly: as
 // `part_bitcode` moves it rather than cloning it.
 bool movable(const Function &f) {
@@ -1271,6 +1275,7 @@ void reached_variables(const Function &f, SmallPtrSetImpl<const GlobalVariable *
 struct Tail {
     Function *f;
     std::string name;
+    bool changed = false;
     // Live: runs in place, unkeyed (a body a part cannot lend back exactly).
     // Held: the caller holds the part after the tail. Missed: a worker runs it.
     enum Kind { Live, Held, Missed } kind = Live;
@@ -1318,7 +1323,8 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
         t.live = true;
         return;
     }
-    StringRef facts = StringRef(t.key).drop_front(machine_text_size);
+    StringRef mode = t.changed ? TailChangedKey : TailUnchangedKey;
+    StringRef facts = StringRef(t.key).drop_front(machine_text_size + mode.size());
     while (!facts.empty()) {
         auto [line, rest] = facts.split('\n');
         facts = rest;
@@ -1340,7 +1346,7 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
     auto before = declared_all(p);
     size_t variables = p.global_size();
     void *tail = hirsel_llvm_tail_open(wrap(&p), reinterpret_cast<LLVMTargetMachineRef>(&tm));
-    hirsel_llvm_tail_run(tail, wrap(own));
+    hirsel_llvm_tail_run(tail, wrap(own), t.changed);
     hirsel_llvm_tail_close(tail);
     // Only the definition's own body and attributes may change: in place,
     // a change to anything else would be the program's.
@@ -1366,7 +1372,8 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
 // in module order. The tail of a definition is a function of its part at the
 // cut, so a definition whose body a part can lend and take back exactly is
 // keyed by that part's key (`hirsel_key::module_key`), the machine text, and
-// the linkage the part does not keep: `find` answers 1 with the part after the
+// whether it changed after O3, and the linkage the part does not keep: `find`
+// answers 1 with the part after the
 // tail when the caller holds it, the body is restored from it, and otherwise
 // the tail runs, on one of `jobs` threads from the part's bitcode when `jobs`
 // is above 1 or else in place, and `keep` gets the part after it. `find`
@@ -1418,6 +1425,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     // Keys `t`'s part as the module is now and asks the caller for its tail.
     auto ask = [&](Tail &t) {
         t.key = machine_key;
+        t.key += t.changed ? TailChangedKey : TailUnchangedKey;
         t.debug.clear();
         t.input.clear();
         t.names.clear();
@@ -1448,6 +1456,9 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         Tail &t = tails[k];
         t.f = bodies[k];
         t.name = t.f->getName().str();
+        t.changed = hirsel_llvm_take_tail_change(wrap(t.f));
+    }
+    for (Tail &t : tails) {
         if (keyed && movable(*t.f)) ask(t);
     }
     if (parallel) {
@@ -1484,12 +1495,12 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     };
     // Runs `t`'s tail in place, noting what it changed besides the body.
     auto run_live = [&](Tail &t) {
-        if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f));
+        if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f), t.changed);
         SmallPtrSet<const GlobalVariable *, 32> variables;
         reached_variables(*t.f, variables);
         for (const Function &f : m) look(f);
         for (const GlobalVariable *v : variables) look(*v);
-        hirsel_llvm_tail_run(tail, wrap(t.f));
+        hirsel_llvm_tail_run(tail, wrap(t.f), t.changed);
         reached_variables(*t.f, variables);
         for (const Function &f : m) recheck(f);
         for (const GlobalVariable *v : variables) recheck(*v);

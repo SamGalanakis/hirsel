@@ -10,9 +10,11 @@ std = { major = 1 }
 store = { major = 1, path = "../store" }
 runner = { major = 1, path = "../runner" }
 platform = { major = 1, path = "../platform" }
+jwtbind = { major = 1, path = "../jwtbind" }
 
 [sources]
 "platform_crash.hirsel" = "platform_crash"
 "runner_crash.hirsel" = "runner_crash"
 "runner_crash-bucket.hirsel" = "runner_crash"
 "runner_crash-cold.hirsel" = "runner_crash"
+"runner_crash-jwt.hirsel" = "runner_crash"

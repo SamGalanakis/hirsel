@@ -14,7 +14,6 @@ socket cases and the host laws.
 
 """
 import argparse
-import base64
 import fcntl
 from contextlib import contextmanager
 import hashlib
@@ -33,6 +32,7 @@ import time
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
+from runner_rest import no_jwt_at_rest, no_secret_at_rest
 from runner_host import BUCKET_HOST_LAWS, cold_wake_trigger, cutover_survives_host_loss, runner_idle_stop, unpinned, wait_ready
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
@@ -852,31 +852,6 @@ fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> (
     manifest_path.write_text(json.dumps(model))
 
 
-def no_secret_at_rest(args, root, work, engine, row):
-    name = 'no_secret_at_rest'
-    selection = manifest(root, work, name, crash=True)
-    directory = work / f'{name}-{engine}-disk'
-    directory.mkdir()
-    binary = work / f'{name}-{engine}'
-    command = [str(args.compiler.resolve()), 'build', '--inputs', str(selection), '--source-core',
-               '--source-std', '--entry', 'store_crash@1/runner_crash/no_secret_at_rest', '--backend', engine,
-               '--runtime', str(args.runtime.resolve()), '--store', str(work / f'l31-objects-{engine}'),
-               '--limit', str(64 * 1024 * 1024), '--dir', str(directory), '-o', str(binary),
-               '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
-               '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
-    if args.cc:
-        command += ['--cc', str(args.cc.resolve())]
-    checked(command, os.environ, engine=engine, case=f'{name}:build')
-    nonce = os.urandom(16)
-    encoded = base64.b64encode(nonce).decode('ascii')
-    ran = run_case(name, engine, [str(binary), encoded], capture_output=True, text=True)
-    files = [p for p in directory.rglob('*') if p.is_file()]
-    found = sorted(str(p.relative_to(directory)) for p in files if nonce in p.read_bytes())
-    passed = ran.returncode == 0 and bool(files) and not found
-    row(engine=engine, law='no_secret_at_rest', passed=passed,
-        result={'exit': ran.returncode, 'files': len(files), 'matches': found, 'stderr': ran.stderr})
-
-
 def manifest(root, work, name, runner=None, extra=(), crash=False):
     m = crash_inputs(root) if crash else runner_inputs(root)
     sources = next(p for p in m['packages'] if p['package']['name'] == 'runner')['sources']
@@ -1346,7 +1321,8 @@ def main():
             socket_laws(args, root, work, engines, row)
         if args.part in (None, 'r1', 'rc1'):
             for engine in (e for e in engines if e != 'evaluator'):
-                no_secret_at_rest(args, root, work, engine, row)
+                no_secret_at_rest(args, work, engine, manifest(root, work, 'no_secret_at_rest', crash=True), row)
+                no_jwt_at_rest(args, work, engine, manifest(root, work, 'no_jwt_at_rest', crash=True), row)
         if args.part in ('wire', 'session', 'admission', 'socket', 'rc1'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')

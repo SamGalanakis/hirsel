@@ -139,7 +139,7 @@ edges = ["std@1"]
 [[package]]
 id = "store_crash@1"
 source = "member:store-crash"
-edges = ["platform@1", "runner@1", "std@1", "store@1"]
+edges = ["jwtbind@1", "platform@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "stun_ice@1"

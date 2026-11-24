@@ -2633,7 +2633,7 @@ these groups runs on their first serving start at activation 0.
 
 A place that accepts JWTs binds its sessions with a library binding, `jwtbind`, over `std.jwt` (`core/std/jwt.hirsel`, contract `core/std/api/jwt.md`). `jwtbind` is ordinary application-level code in its own package (planned: package `jwtbind` under core/programs/jwtbind, binding `runner` and `std`). It is a `Wire.bind` like any other: the runner calls it, bounds it and trusts its answer (§3 "Binding"), and still reads no credential itself (rule 13). Nothing in `jwtbind` names a product, an identity provider or a claim beyond RFC 7519's registered claims. This section gives only the delta. The binding contract, `BoundCaller`, expiry enforcement and its 4401 close (CHANGES-v2.57, L62), the deletion of `anon:` minting (CHANGES-v2.24 item 3) and the SDK's credential recovery (docs/spec/sdk.md, "A place's binding may give the session an expiry") are unchanged except where §15.6 says so.
 
-Constants marked GUESS have no measured part; slice J4 measures `BIND_STEPS` and `BIND_BYTES`.
+Constants marked GUESS have no measured part. Slice J4 measured `BIND_STEPS` and `BIND_BYTES` (§15.2).
 
 ### 15.1 Two runner changes, both generic
 
@@ -2684,8 +2684,8 @@ pub type Seed: shareable + send { issuer: Issuer, clock: Clock, keys: Option[std
 pub fn verifier(issuer: Issuer, take source: Source, net: Net, take trust: Trust, clock: Clock, random: Random, tasks: Tasks) -> Result[Verifier, ConfigError] waits   // trust: the roots for the https fetch (std.http_fetch); random: the jitter
 pub fn seed(v: Verifier) -> Latest[Seed]                        // the handle runner.wire_bind takes
 pub fn bind(s: Seed, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] waits
-pub const BIND_BYTES: u64 = 262144   // GUESS: 3 × MAX_TOKEN of decoding plus claims and the largest RSA verify
-pub const BIND_STEPS: u64 = 4194304  // GUESS: one RSA-8192 verify and the claims; J4 measures it
+pub const BIND_BYTES: u64 = 262144   // J4: 114,736 measured at max_token = MAX_TOKEN (65536); 14,384 at 8192
+pub const BIND_STEPS: u64 = 1048576  // J4: 516,821 measured at max_token = MAX_TOKEN; 65,669 at 8192
 pub const MAX_LEEWAY_S: u64 = 300
 ```
 
@@ -2834,7 +2834,7 @@ Every token in these laws is made by an outside tool and checked into the test's
 | L68 `jwt_no_token_at_rest` | L31's byte search, extended: after calls bound by a JWT, no file in the store directory contains the token's signature segment, its payload segment, or the base64url `n` or `x` value of any key in the fixture JWKS | `claims_in_args` (J-D9 broken) | the byte search |
 | L69 `jwt_config_refused` | `verifier` returns `ConfigError` for `issuer` 1, an HS256 entry in `allow`, `leeway_s` 301, an `http:` URL, and a `Static` document holding an `oct` key | `hmac_admitted`; `anon_issuer` | the list in §15.2 |
 
-**Status:** `test_j2_binding` covers L67's runner response codes with a fixture binding. The JWT cases wait on J3, and the replay half of L66 waits on J6. **Not repeated here:** the SDK's 1013 handling is slice J5's case in the existing SDK recovery suite, against a scripted place.
+**Status:** `test_j2_binding` covers L67's runner response codes with a fixture binding. L64-L67 and L69 run in jwtbind's own tests (`core/programs/jwtbind/jwtbind_laws.hirsel`, since `runner` cannot bind `jwtbind`). `hirsel test` runs them natively; J4 also ran them once on the evaluator, where all passed, but no evaluator gate runs them yet. L68 runs on L31's disk harness (`store_crash`'s `no_jwt_at_rest`, `core/tools/runner_rest.py`) over a fresh openssl key and token per run. It also searches the harness output and a marker claim, so `claims_in_args` is caught; a copy that prints the token fails it. The harness sizes `n_granted` to hold the hello's bind child (4096 + `BIND_BYTES`). Recordings are out of scope, as they are for L31, because they carry credentials by class (§15.7). The replay half of L66 waits on J6. **Not repeated here:** the SDK's 1013 handling is slice J5's case in the existing SDK recovery suite, against a scripted place.
 
 ### 15.11 Prior art (each source opened)
 

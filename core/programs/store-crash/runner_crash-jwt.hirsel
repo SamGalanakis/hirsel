@@ -1,0 +1,93 @@
+// L68 jwt_no_token_at_rest (RUNNER-SPEC §15.10) on L31's disk harness. The host mints a fresh
+// openssl key and token per run and passes the JWKS document and the token; after two bound
+// calls and a checkpoint it searches every store file for the token's payload and signature
+// segments, the key's x and y and a marker claim.
+type JwtClient: send {
+    tasks: Tasks,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    head: Sender[runner.HeadInput],
+    post: Sender[runner.PubIn],
+    wire: runner.Wire[(), jwtbind.Seed],
+    token: Bytes
+}
+
+fn jwt_client(take d: JwtClient) -> String waits {
+    let JwtClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: take post, wire: take session_wire, token: take token) = take d
+    let mut keys: List[Bytes] = list.new()
+    list.push(mut keys, body_key(0u64))
+    let mut config = runner.wire_defaults(524288u64)
+    config.q = 1u64
+    config.budget = 65536u64
+    config.socket.max_frame = 32768u64
+    // The session task's allowance must hold the hello's bind child (4096 + BIND_BYTES).
+    config.n_granted = 4096u64 + jwtbind.BIND_BYTES
+    let pair = runner.wire_client.pair_config(tasks, n, c, r, Some(take session_wire), head, post, code.describe(place), keys, Some(take token), config, 2097152u64)
+    let (take wire, take server) = match take pair {
+        Ok(take connected) => take connected,
+        Error(Allocation(_)) => return "L68: client allocation refused",
+        Error(Network(Denied)) => return "L68: loopback grant refused",
+        Error(Network(_)) => return "L68: loopback connection failed",
+        Error(_) => return "L68: the JWT was not bound",
+    }
+    let _ = take head
+    let birth = host.wall_ms(c)
+    let mut answered = true
+    for p in 0u64 .. 2u64 {
+        runner.wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), p, 0u32, 5000u32, u64_bytes(p)))
+        let ok = match runner.wire_client.next(wire) {
+            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == store.StreamId(t: birth, n: 7u64) && ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
+            _ => false,
+        }
+        answered = answered && ok
+    }
+    let closed = runner.wire_client.close(take wire)
+    let joined = match task.join(take server) {
+        Ok(Ok(())) => true,
+        _ => false
+    }
+    if !answered {
+        return "L68: calls did not return"
+    }
+    if !closed || !joined {
+        return "L68: connection did not close"
+    }
+    ""
+}
+
+pub fn no_jwt_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net) -> Result[(), Exit] waits {
+    let Some(document) = args.get(argv, 0u64) else {
+        fail("L68: no JWKS argument")
+    }
+    let Some(credential) = args.get(argv, 1u64) else {
+        fail("L68: no token argument")
+    }
+    let jwks: String = clone(document)
+    let token: Bytes = clone(string.as_bytes(credential))
+    let issuer = jwtbind.issuer_defaults(string.from("https://issuer.example"), string.from("place-a"), 9u8, std.jwt.allow(Es256))
+    let v = match jwtbind.verifier(take issuer, Static(take jwks), n, System, c, r, tasks) {
+        Ok(take v) => take v,
+        Error(_) => fail("L68: the fixture JWKS was refused"),
+    }
+    let session_wire: runner.Wire[(), jwtbind.Seed] = runner.wire_bind(jwtbind.seed(v), code.describe(jwtbind.bind), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS)
+    let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+    result.unwrap(install_data(mut db))
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let seed = JwtClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), wire: take session_wire, token: take token)
+    let driving = task.spawn(tasks, bytes 33554432u64, take seed, jwt_client)
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
+    clean(result.unwrap(task.join(take driving)))
+    let mut o = options()
+    o.create = false
+    let mut again = result.unwrap(store.open(tasks, d, c, r, o))
+    let h = result.unwrap(open_data(again))
+    let total = result.unwrap(store.get(result.unwrap(store.reader(again, 0u64)), store.snapshot(again), h.t, 0u64))
+    want(total == Some(2u64), "L68: two effects must be durable")
+    let ticket = result.unwrap(store.checkpoint(mut again))
+    result.unwrap(store.durable(mut again, ticket))
+    result.unwrap(store.close(take again))
+    let _ = take v
+    Ok(())
+}

@@ -272,11 +272,12 @@ fn secret_client(take d: SecretClient) -> String waits {
         Error(_) => return "L31: handshake failed",
     }
     let _ = take head
+    let birth = host.wall_ms(c)
     let mut answered = true
     for p in 0u64 .. 2u64 {
-        runner.wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 7u64), p, 0u32, 5000u32, u64_bytes(p)))
+        runner.wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), p, 0u32, 5000u32, u64_bytes(p)))
         let ok = match runner.wire_client.next(wire) {
-            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == store.StreamId(t: 0u64, n: 7u64) && ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
+            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == store.StreamId(t: birth, n: 7u64) && ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
             _ => false,
         }
         answered = answered && ok

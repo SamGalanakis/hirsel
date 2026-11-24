@@ -40,9 +40,13 @@ pub opaque type Verifier {
     refresher: Option[Task[()]]
 }
 
-pub const BIND_BYTES: u64 = 262144 // GUESS: 3 × MAX_TOKEN of decoding plus claims and the largest RSA verify
+// J4 (§15.9) measured one bind of an RS256 token over an RSA-8192 key, through a spawned child
+// as the runner binds, on the evaluator and Cranelift alike: at max_token 8192, 14,384 bytes and
+// 65,669 steps; at the ceiling std.jwt.MAX_TOKEN (65536), 114,736 bytes and 516,821 steps. Both
+// constants cover the ceiling about twice over, rounded up to a power of two.
+pub const BIND_BYTES: u64 = 262144
 
-pub const BIND_STEPS: u64 = 4194304 // GUESS: one RSA-8192 verify and the claims; J4 measures it
+pub const BIND_STEPS: u64 = 1048576
 
 pub const MAX_LEEWAY_S: u64 = 300
 

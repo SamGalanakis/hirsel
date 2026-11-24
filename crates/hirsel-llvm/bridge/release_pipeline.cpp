@@ -1,8 +1,10 @@
+#if __has_include(<bits/c++config.h>)
 #include <bits/c++config.h>
 #if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 30)
 #undef _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
+#endif
 #endif
 
 #include "counted_exit.h"

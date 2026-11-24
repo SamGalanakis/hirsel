@@ -690,7 +690,12 @@ void hfl_free(void *p) { (void)p; }
 #define ABI "hfl_value stack () -> u64\n" \
             "hfl_make stack () -> new app@1/main/Obj\n" \
             "hfl_free waits (take app@1/main/Obj) -> ()\n"
-__attribute__((used, section(".hirsel_abi")))
+#ifdef __APPLE__
+#define HIRSEL_TEST_ABI_SECTION "__TEXT,__hirsel_abi"
+#else
+#define HIRSEL_TEST_ABI_SECTION ".hirsel_abi"
+#endif
+__attribute__((used, section(HIRSEL_TEST_ABI_SECTION)))
 static const char abi[sizeof(ABI) - 1] = ABI;
 "#);
     let compile = Command::new(&cc).current_dir(law.path("app"))
@@ -702,6 +707,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
     let bytes = std::fs::read(law.path("app/native.a")).unwrap();
     let pin = ContentHash(Sha256::digest(&bytes).into());
     let pin_text = crate::request::hex(pin);
+    let target = crate::native::TARGET;
     law.manifest("app", "app", 1, &format!(r#"
 [sources]
 "main.hirsel" = "main"
@@ -709,7 +715,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
 
 [foreign.native]
 symbols = "hfl_"
-archives = [{{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "{pin_text}" }}]
+archives = [{{ target = "{target}", file = "native.a", sha256 = "{pin_text}" }}]
 "#));
     law.write("app/native.hirsel", "\
 pub fn value(f: Foreign[main.I]) -> u64\n\
@@ -934,14 +940,20 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
     use crate::code_store::{CodeStore, ObjectKind};
     use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};
 
+    // The host's archive is selected; the ARM Linux row is the other target.
+    let (host, host_archive) = if cfg!(target_os = "macos") {
+        ("aarch64-apple-darwin", "libffi_laws.aarch64-apple-darwin.a")
+    } else {
+        ("x86_64-unknown-linux-gnu", "libffi_laws.a")
+    };
     for engine in ["cranelift", "llvm"] {
         let law = PackageLaw::new();
-        for file in ["laws.hirsel", "native.hirsel", "main.hirsel", "libffi_laws.a"] {
+        for file in ["laws.hirsel", "native.hirsel", "main.hirsel", host_archive] {
             let contents = std::fs::read(law.libraries.join("programs/ffi_laws").join(file)).unwrap();
             law.write(&format!("ffi_laws/{file}"), contents);
         }
         let store = CodeStore::new(law.path("code-store"));
-        let x86 = std::fs::read(law.path("ffi_laws/libffi_laws.a")).unwrap();
+        let x86 = std::fs::read(law.path(&format!("ffi_laws/{host_archive}"))).unwrap();
         let x86_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(&x86).0);
         let publish = |arm: &[u8]| {
             let arm_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(arm).0);
@@ -954,7 +966,7 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
 [foreign.native]
 symbols = "hfl_"
 archives = [
-    {{ target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "{x86_pin}" }},
+    {{ target = "{host}", file = "{host_archive}", sha256 = "{x86_pin}" }},
     {{ target = "aarch64-unknown-linux-gnu", file = "arm.a", sha256 = "{arm_pin}" }},
 ]
 "#));
@@ -1829,7 +1841,12 @@ uint64_t PING(void) { return UINT64_C(1); }
 #define TEXT_(x) #x
 #define TEXT(x) TEXT_(x)
 #define ABI TEXT(PING) " stack () -> u64\n"
-__attribute__((used, section(".hirsel_abi")))
+#ifdef __APPLE__
+#define HIRSEL_TEST_ABI_SECTION "__TEXT,__hirsel_abi"
+#else
+#define HIRSEL_TEST_ABI_SECTION ".hirsel_abi"
+#endif
+__attribute__((used, section(HIRSEL_TEST_ABI_SECTION)))
 static const char abi[sizeof(ABI) - 1] = ABI;
 "#);
     std::fs::create_dir_all(law.path("work/math/native")).unwrap();
@@ -1865,6 +1882,7 @@ pub opaque type Math {}
 pub fn ping(f: Foreign[Math]) -> u64 { native.ping(f) }
 "#);
     law.write("work/math/native.hirsel", "pub fn ping(f: Foreign[math.Math]) -> u64\n");
+    let target = crate::native::TARGET;
     let configure = |symbols: Option<&str>, arm: bool| {
         let mut manifest = String::from("[sources]\n\"math.hirsel\" = \"math\"\n\"native.hirsel\" = \"native\"\n");
         if let Some(symbols) = symbols {
@@ -1873,7 +1891,7 @@ pub fn ping(f: Foreign[Math]) -> u64 { native.ping(f) }
 [foreign.native]
 symbols = "{symbols}"
 archives = [
-  {{ target = "x86_64-unknown-linux-gnu", file = "native/{symbols}.a", sha256 = "{pin}" }},
+  {{ target = "{target}", file = "native/{symbols}.a", sha256 = "{pin}" }},
 "#));
             if arm {
                 manifest.push_str(r#"  { target = "aarch64-unknown-linux-gnu", file = "native/arm.a", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },"#);
@@ -1937,6 +1955,7 @@ archives = [
     assert!(!law.path("linked-program").exists());
 }
 
+#[cfg(target_os = "linux")]
 fn sqlite_hot_journal(db: &[u8], super_name: Option<&[u8]>) -> Vec<u8> {
     const MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
     // SQLite's rollback journal begins with a sector header, then one page
@@ -1964,6 +1983,8 @@ fn sqlite_hot_journal(db: &[u8], super_name: Option<&[u8]>) -> Vec<u8> {
     bytes
 }
 
+// The law injects sync faults through an LD_PRELOAD shared object.
+#[cfg(target_os = "linux")]
 #[test]
 fn sqlite_directory_recovery_locking_and_sync() {
     use std::fs;
@@ -2154,7 +2175,14 @@ fn foreign_deploy_and_recording_registration_refuse_before_payloads() {
     const REFUSAL: &str = "FFI-8: a recording build cannot reach foreign code: ffi_laws@1/main/main reaches ffi_laws@1/native/touch";
 
     let law = PackageLaw::new();
-    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "tests.hirsel", "libffi_laws.a"] {
+    for file in [
+        "hirsel.toml",
+        "laws.hirsel",
+        "native.hirsel",
+        "tests.hirsel",
+        "libffi_laws.a",
+        "libffi_laws.aarch64-apple-darwin.a",
+    ] {
         let contents = fs::read(law.libraries.join("programs/ffi_laws").join(file)).unwrap();
         law.write(&format!("ffi_laws/{file}"), contents);
     }
@@ -2224,6 +2252,8 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
     }
 }
 
+// The law cross-builds x86_64 and aarch64 Linux images with ld.lld.
+#[cfg(target_os = "linux")]
 #[test]
 fn foreign_archive_refusals_precede_the_linker() {
     use crate::code_store::ObjectKind;

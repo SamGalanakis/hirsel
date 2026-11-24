@@ -3,6 +3,7 @@
 use crate::provider::*;
 
 mod listing;
+use hirsel_core_net::sys;
 use listing::Listing;
 use std::{
     collections::BTreeMap,
@@ -128,7 +129,7 @@ impl OsProvider {
         drop(beneath(
             self.directories[&handle].as_raw_fd(),
             b".",
-            libc::O_PATH | libc::O_DIRECTORY,
+            hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY,
         )?);
         Ok(())
     }
@@ -233,7 +234,7 @@ impl OsProvider {
             }
             STAT => {
                 let root = self.directories[&request.handle].as_raw_fd();
-                let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
+                let fd = beneath(root, path, LINK_ITSELF)?;
                 return stat(fd.as_raw_fd());
             }
             STAT_FILE => return stat(self.files[&request.handle].as_raw_fd()),
@@ -411,7 +412,7 @@ impl OsProvider {
                 // fdatasync makes file contents and the metadata required to
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
-                syscall(unsafe { libc::fdatasync(fd) } as isize)?;
+                syscall(unsafe { sys::fdatasync(fd) } as isize)?;
             }
             SYNC_DIR => {
                 let fd = self.directories[&request.handle].as_raw_fd();
@@ -511,7 +512,7 @@ unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
     let (clock, wall) = if operation == WALL_MS {
         (libc::CLOCK_REALTIME, true)
     } else {
-        (libc::CLOCK_MONOTONIC, false)
+        (hirsel_core_net::sys::CLOCK_MONOTONIC, false)
     };
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -543,7 +544,7 @@ fn monotonic_clock_ns() -> io::Result<u64> {
         tv_nsec: 0,
     };
     // SAFETY: valid writable timespec for the host monotonic clock.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+    if unsafe { libc::clock_gettime(hirsel_core_net::sys::CLOCK_MONOTONIC, &mut now) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let seconds =
@@ -994,7 +995,7 @@ fn random(request: &mut Request) -> io::Result<Outcome> {
         // SAFETY: the carrier owns writable spare capacity and the
         // syscall is bounded to that exact extent.
         let n = unsafe {
-            libc::getrandom(
+            sys::getrandom(
                 request.buffer.data.add(request.buffer.len + filled).cast(),
                 spare,
                 0,
@@ -1083,8 +1084,15 @@ fn valid_path(path: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+/// Open flags for a final symlink itself rather than its target: macOS has
+/// no O_PATH, and opens the link with O_SYMLINK.
+#[cfg(target_os = "linux")]
+const LINK_ITSELF: i32 = libc::O_PATH | libc::O_NOFOLLOW;
+#[cfg(target_os = "macos")]
+const LINK_ITSELF: i32 = libc::O_SYMLINK;
+
 fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
-    open_beneath(fd, path, flags, libc::RESOLVE_NO_MAGICLINKS)
+    open_beneath(fd, path, flags, sys::RESOLVE_NO_MAGICLINKS)
 }
 
 pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io::Result<OwnedFd> {
@@ -1097,20 +1105,17 @@ pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io
         long = CString::new(path)?;
         &long
     };
-    // SAFETY: open_how is an integer-only Linux UAPI structure.
-    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (flags | libc::O_CLOEXEC) as u64;
-    how.mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
-    how.resolve = libc::RESOLVE_BENEATH | resolve;
-    // SAFETY: Linux openat2 atomically enforces confinement, including symlinks.
-    // Unsupported hosts return Other(ENOSYS); no unconstrained fallback.
+    let mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
+    // SAFETY: openat2 (or the host's equivalent open flags) atomically
+    // enforces confinement, including symlinks. Unsupported hosts return
+    // Other(ENOSYS); no unconstrained fallback.
     let raw = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
+        sys::openat2(
             fd,
             path.as_ptr(),
-            &how,
-            size_of::<libc::open_how>(),
+            flags | libc::O_CLOEXEC,
+            mode,
+            sys::RESOLVE_BENEATH | resolve,
         )
     };
     syscall(raw as isize)?;
@@ -1124,7 +1129,7 @@ fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
         None => (b".".as_slice(), path),
     };
     Ok((
-        beneath(fd, prefix, libc::O_PATH | libc::O_DIRECTORY)?,
+        beneath(fd, prefix, hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY)?,
         CString::new(name)?,
     ))
 }
@@ -1185,13 +1190,71 @@ fn remove(fd: i32, name: &CString) -> io::Result<()> {
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(libc::EISDIR) {
+    // macOS refuses to unlink a directory with EPERM rather than EISDIR.
+    let directory = match error.raw_os_error() {
+        Some(libc::EISDIR) => true,
+        Some(libc::EPERM) if cfg!(target_os = "macos") => {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: the pinned parent, fixed leaf and result slot are live.
+            unsafe {
+                libc::fstatat(
+                    fd,
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                ) == 0
+                    && stat.assume_init().st_mode & libc::S_IFMT == libc::S_IFDIR
+            }
+        }
+        _ => false,
+    };
+    if !directory {
         return Err(error);
     }
     // SAFETY: same pinned parent and fixed leaf, directory-only removal.
     syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
     Ok(())
 }
+/// The names in the directory `directory` holds open, without `.` and `..`.
+#[cfg(target_os = "linux")]
+fn entry_names(directory: &OwnedFd) -> io::Result<Vec<CString>> {
+    use std::os::unix::ffi::OsStrExt;
+    std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?
+        .map(|entry| Ok(CString::new(entry?.file_name().as_bytes())?))
+        .collect()
+}
+
+/// The names in the directory `directory` holds open, without `.` and `..`:
+/// read through a duplicate, since closedir closes the descriptor it reads.
+#[cfg(not(target_os = "linux"))]
+fn entry_names(directory: &OwnedFd) -> io::Result<Vec<CString>> {
+    let copy = directory.try_clone()?;
+    // SAFETY: fdopendir takes ownership of the duplicate; closedir releases both.
+    let stream = unsafe { libc::fdopendir(copy.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    std::mem::forget(copy);
+    let mut names = Vec::new();
+    // SAFETY: the stream is live until closedir; each entry's name is
+    // NUL-terminated and copied before the next readdir.
+    unsafe {
+        libc::rewinddir(stream);
+        loop {
+            let entry = libc::readdir(stream);
+            if entry.is_null() {
+                break;
+            }
+            let name = CStr::from_ptr((*entry).d_name.as_ptr());
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                names.push(name.to_owned());
+            }
+        }
+        libc::closedir(stream);
+    }
+    Ok(names)
+}
+
 fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
     // Descriptor-based walk; never follow a leaf link. std's read_dir owns the
     // /proc fd traversal, while every child open is relative to its pinned parent.
@@ -1211,10 +1274,7 @@ fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
             continue;
         }
         let mut children = Vec::new();
-        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
-            use std::os::unix::ffi::OsStrExt;
-            let entry = entry?;
-            let child = CString::new(entry.file_name().as_bytes())?;
+        for child in entry_names(&directory)? {
             let opened = beneath(
                 directory.as_raw_fd(),
                 child.as_bytes(),

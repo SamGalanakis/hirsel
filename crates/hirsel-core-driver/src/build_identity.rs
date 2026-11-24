@@ -174,18 +174,34 @@ mod assembly_environment {
         let marker = dir.path().join("marker");
         std::fs::write(&marker, b"recipe runtime archive B3\0").unwrap();
         let editor = options.link.driver().with_file_name("llvm-objcopy");
-        let status = Command::new(editor)
-            .arg("--add-section")
-            .arg(format!(".rodata.recipe_runtime={}", marker.display()))
-            .args([
-                "--set-section-flags",
-                ".rodata.recipe_runtime=alloc,load,readonly,data",
-            ])
-            .arg(&input)
-            .arg(&options.runtime)
-            .status()
-            .unwrap();
-        assert!(status.success(), "prepare the changed runtime fixture");
+        if cfg!(target_os = "macos") {
+            // llvm-objcopy cannot add a section to a Mach-O object: change a
+            // string every executable links instead.
+            let mut bytes = std::fs::read(&input).unwrap();
+            let (from, to) = (b"run stop: ", b"run stop; ");
+            let mut changed = 0;
+            for at in 0..bytes.len().saturating_sub(from.len()) {
+                if &bytes[at..at + from.len()] == from {
+                    bytes[at..at + to.len()].copy_from_slice(to);
+                    changed += 1;
+                }
+            }
+            assert!(changed > 0, "prepare the changed runtime fixture");
+            std::fs::write(&options.runtime, bytes).unwrap();
+        } else {
+            let status = Command::new(editor)
+                .arg("--add-section")
+                .arg(format!(".rodata.recipe_runtime={}", marker.display()))
+                .args([
+                    "--set-section-flags",
+                    ".rodata.recipe_runtime=alloc,load,readonly,data",
+                ])
+                .arg(&input)
+                .arg(&options.runtime)
+                .status()
+                .unwrap();
+            assert!(status.success(), "prepare the changed runtime fixture");
+        }
         let warm = assemble(&options);
         options.store = dir.path().join("cold");
         let cold = assemble(&options);

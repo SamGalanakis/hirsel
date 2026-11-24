@@ -96,7 +96,7 @@ impl ProcessBudget {
         Self::build(limit, headroom.min(limit), true)
     }
     fn build(limit: u64, headroom: u64, sites: bool) -> Arc<Self> {
-        Arc::new(Self {
+        let budget = Arc::new(Self {
             limit,
             headroom,
             ledger: Mutex::new(Ledger::default()),
@@ -106,7 +106,18 @@ impl ProcessBudget {
             idle_reclaimer: Mutex::new(None),
             evictors: Mutex::default(),
             sites,
-        })
+        });
+        // macOS boxes a std mutex's pthread lock on its first lock. Box these
+        // here, before the allocator locks them: a box made there would
+        // re-enter the allocator and lock them again.
+        #[cfg(target_os = "macos")]
+        {
+            drop(budget.ledger());
+            drop(budget.idle_reclaimer.lock());
+            drop(budget.evictors.lock());
+            super::owners::warm();
+        }
+        budget
     }
     fn ledger(&self) -> MutexGuard<'_, Ledger> {
         self.ledger.lock().unwrap_or_else(|e| e.into_inner())

@@ -1,4 +1,6 @@
 //! Validate a sealed archive's own objects before any use as a link input.
+//! Linux archives hold ELF objects; macOS archives hold Mach-O objects, whose
+//! C symbols carry a leading underscore that is dropped from every name here.
 use crate::code_admission::AdmissionError;
 use crate::code_store::ObjectKind;
 use hirsel_core_ids::{ContentHash, DefPath};
@@ -19,7 +21,7 @@ const THIN: &[u8] = b"!<thin>\n";
 const LLVM_ADDRSIG: elf::SectionType = elf::SectionType(0x6fff_4c03);
 
 pub(crate) struct SealedArchive {
-    file: File,
+    file: Sealed,
     indexed: BTreeMap<Vec<u8>, IndexedSymbol>,
     members: Vec<Member>,
 }
@@ -103,12 +105,7 @@ impl LinkArchives {
         for input in &*inputs {
             symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
         }
-        let pid = std::process::id();
-        inputs.extend(
-            self.0.values().map(|row| {
-                PathBuf::from(format!("/proc/{pid}/fd/{}", row.archive.file.as_raw_fd()))
-            }),
-        );
+        inputs.extend(self.0.values().map(|row| row.archive.file.link_path()));
         Ok(())
     }
 }
@@ -200,6 +197,10 @@ impl ForeignDefinitions<'_> {
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
         self.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
+        // macOS system libraries are text stubs; only the runtime is a binary input.
+        if hirsel_core_layout::Target::from_triple(&recipe.target).is_some_and(|t| t.is_darwin()) {
+            return Ok(());
+        }
         let closure = crate::link_closure::closure(
             &recipe.args,
             crate::tool_inputs::INPUT_MARKER,
@@ -219,6 +220,14 @@ impl ForeignDefinitions<'_> {
         let unsupported =
             || AdmissionError::Refused(format!("FFI-3: cannot read symbol definitions of {label}"));
         let check = |bytes: &[u8]| -> Result<(), AdmissionError> {
+            if bytes.starts_with(&MACHO_MAGIC) {
+                for (name, definition) in macho_symbols(bytes).ok_or_else(unsupported)? {
+                    if definition && let Some(&archive) = self.0.get(name.as_slice()) {
+                        return Err(collision(&name, archive, label));
+                    }
+                }
+                return Ok(());
+            }
             let file = ElfFile64::<LittleEndian>::parse(bytes).map_err(|_| unsupported())?;
             let sections = file.elf_section_table();
             let endian = LittleEndian;
@@ -294,7 +303,8 @@ impl SealedArchive {
     ) -> Result<Self, AdmissionError> {
         let seal_error =
             || AdmissionError::Refused("FFI-3: this host cannot seal staged archives".into());
-        let mut file = seal(&bytes).map_err(|_| seal_error())?;
+        let mut sealed = seal(&bytes).map_err(|_| seal_error())?;
+        let file = &mut sealed.file;
         let context = context(archive, module, target, path);
         let length = file.metadata()?.len();
         file.seek(SeekFrom::Start(0))?;
@@ -303,7 +313,7 @@ impl SealedArchive {
             ObjectKind::ForeignArchive.hash(&bytes)
         } else {
             ObjectKind::ForeignArchive
-                .hash_stream(length, |hash| std::io::copy(&mut file, hash).map(|_| ()))?
+                .hash_stream(length, |hash| std::io::copy(file, hash).map(|_| ()))?
         };
         if observed != archive.hash {
             return Err(refuse(
@@ -361,6 +371,7 @@ impl SealedArchive {
             ));
         }
         // An index names actual member headers, never a location inside an object.
+        let darwin = hirsel_core_layout::Target::from_triple(target).is_some_and(|t| t.is_darwin());
         let mut symbols = BTreeMap::<Vec<u8>, IndexedSymbol>::new();
         for entry in indexed {
             let entry = entry.map_err(|_| bad_ar())?;
@@ -371,8 +382,13 @@ impl SealedArchive {
             {
                 return Err(bad_ar());
             }
+            let name = if darwin {
+                c_name(entry.name())
+            } else {
+                entry.name()
+            };
             symbols
-                .entry(entry.name().to_vec())
+                .entry(name.to_vec())
                 .and_modify(|symbol| symbol.offset = None)
                 .or_insert(IndexedSymbol {
                     offset: Some(offset),
@@ -400,7 +416,7 @@ impl SealedArchive {
             members.push(member);
         }
         Ok(Self {
-            file,
+            file: sealed,
             indexed: symbols,
             members,
         })
@@ -490,9 +506,40 @@ impl SealedArchive {
     }
 }
 
+/// The sealed copy of an archive and the path the linker reads it by.
+struct Sealed {
+    file: File,
+    /// macOS has no sealed memory files: a private directory holds a
+    /// read-only, user-immutable copy, removed with the archive.
+    #[cfg(target_os = "macos")]
+    dir: PathBuf,
+}
+
+impl Sealed {
+    fn link_path(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        return self.dir.join("archive.a");
+        #[cfg(target_os = "linux")]
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.file.as_raw_fd()
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        // SAFETY: a live descriptor and integer flags.
+        unsafe { libc::fchflags(self.file.as_raw_fd(), 0) };
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn seal(bytes: &[u8]) -> std::io::Result<File> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+fn seal(bytes: &[u8]) -> std::io::Result<Sealed> {
+    use std::os::fd::FromRawFd;
     // SAFETY: the name is NUL-terminated and these open flags take no other arguments.
     let fd = unsafe {
         libc::memfd_create(
@@ -511,16 +558,222 @@ fn seal(bytes: &[u8]) -> std::io::Result<File> {
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(file)
+    Ok(Sealed { file })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn seal(_: &[u8]) -> std::io::Result<File> {
-    Err(std::io::ErrorKind::Unsupported.into())
+#[cfg(target_os = "macos")]
+fn seal(bytes: &[u8]) -> std::io::Result<Sealed> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = tempfile::Builder::new()
+        .prefix("hirsel-foreign-")
+        .tempdir()?
+        .keep();
+    let sealed = (|| {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let path = dir.join("archive.a");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o400)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        // SAFETY: a live descriptor and integer flags.
+        if unsafe { libc::fchflags(file.as_raw_fd(), libc::UF_IMMUTABLE) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+    })();
+    match sealed {
+        Ok(file) => Ok(Sealed { file, dir }),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(error)
+        }
+    }
+}
+
+/// Mach-O constants by value, from `<mach-o/loader.h>` and `<mach-o/nlist.h>`.
+mod macho_raw {
+    pub const MH_OBJECT: u32 = 0x1;
+    pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+    pub const N_STAB: u8 = 0xe0;
+    pub const N_PEXT: u8 = 0x10;
+    pub const N_TYPE: u8 = 0x0e;
+    pub const N_EXT: u8 = 0x01;
+    pub const N_UNDF: u8 = 0x0;
+    pub const N_SECT: u8 = 0xe;
+    pub const N_WEAK_DEF: u16 = 0x0080;
+    pub const N_SYMBOL_RESOLVER: u16 = 0x0100;
+    pub const SECTION_TYPE: u32 = 0xff;
+    pub const S_REGULAR: u32 = 0x0;
+    pub const S_ZEROFILL: u32 = 0x1;
+    pub const S_CSTRING_LITERALS: u32 = 0x2;
+    pub const S_4BYTE_LITERALS: u32 = 0x3;
+    pub const S_8BYTE_LITERALS: u32 = 0x4;
+    pub const S_LITERAL_POINTERS: u32 = 0x5;
+    pub const S_COALESCED: u32 = 0xb;
+    pub const S_GB_ZEROFILL: u32 = 0xc;
+    pub const S_16BYTE_LITERALS: u32 = 0xe;
+    pub const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
+    pub const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
+    pub const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
+    pub const S_THREAD_LOCAL_VARIABLE_POINTERS: u32 = 0x14;
+    pub const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
+    pub const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
+}
+
+const MACHO_MAGIC: [u8; 4] = 0xfeed_facf_u32.to_le_bytes();
+
+/// A Mach-O C symbol name without its leading underscore.
+fn c_name(name: &[u8]) -> &[u8] {
+    name.strip_prefix(b"_").unwrap_or(name)
+}
+
+/// Each external symbol of a 64-bit Mach-O object, and whether it defines it.
+fn macho_symbols(bytes: &[u8]) -> Option<Vec<(Vec<u8>, bool)>> {
+    use object::read::macho::{MachOFile64, Nlist};
+    let file = MachOFile64::<LittleEndian>::parse(bytes).ok()?;
+    let table = file.macho_symbol_table();
+    let strings = table.strings();
+    let mut symbols = Vec::new();
+    for symbol in table.iter() {
+        let kind = symbol.n_type().0;
+        if kind & macho_raw::N_STAB != 0 || kind & macho_raw::N_EXT == 0 {
+            continue;
+        }
+        let name = symbol.name(LittleEndian, strings).ok()?;
+        let defined = match kind & macho_raw::N_TYPE {
+            macho_raw::N_UNDF => symbol.n_value(LittleEndian) != 0,
+            _ => true,
+        };
+        symbols.push((c_name(name).to_vec(), defined));
+    }
+    Some(symbols)
+}
+
+/// A Mach-O relocatable object for arm64 macOS, held to the same features as
+/// an ELF member: no constructors, destructors, interposing or resolver
+/// functions, and ABI text in `__TEXT,__hirsel_abi`.
+fn parse_macho_member(bytes: &[u8], name: &str) -> Option<Member> {
+    use object::read::macho::{MachHeader, MachOFile64, Nlist, Section as _};
+    let endian = LittleEndian;
+    let file = MachOFile64::<LittleEndian>::parse(bytes).ok()?;
+    let header = file.macho_header();
+    if header.filetype(endian).0 as u32 != macho_raw::MH_OBJECT
+        || header.cputype(endian).0 as u32 != macho_raw::CPU_TYPE_ARM64
+    {
+        return None;
+    }
+    let mut member = Member {
+        name: name.into(),
+        symbols: vec![],
+        abi: vec![],
+        bad_feature: None,
+    };
+    // Section kinds an ordinary C object holds; anything else is refused.
+    let admitted = |kind: u32| {
+        matches!(
+            kind,
+            macho_raw::S_REGULAR
+                | macho_raw::S_ZEROFILL
+                | macho_raw::S_CSTRING_LITERALS
+                | macho_raw::S_4BYTE_LITERALS
+                | macho_raw::S_8BYTE_LITERALS
+                | macho_raw::S_16BYTE_LITERALS
+                | macho_raw::S_LITERAL_POINTERS
+                | macho_raw::S_COALESCED
+                | macho_raw::S_GB_ZEROFILL
+                | macho_raw::S_THREAD_LOCAL_REGULAR
+                | macho_raw::S_THREAD_LOCAL_ZEROFILL
+                | macho_raw::S_THREAD_LOCAL_VARIABLES
+                | macho_raw::S_THREAD_LOCAL_VARIABLE_POINTERS
+        )
+    };
+    let mut code = Vec::new();
+    for section in object::Object::sections(&file) {
+        let section = section.macho_section();
+        let flags = section.flags(endian).0;
+        let kind = flags & macho_raw::SECTION_TYPE;
+        let segment = section.segment_name();
+        let sectname = section.name();
+        let label = || {
+            format!(
+                "section {},{} of type {kind:#x}",
+                String::from_utf8_lossy(trim(segment)),
+                String::from_utf8_lossy(trim(sectname))
+            )
+        };
+        if !admitted(kind) {
+            member.bad_feature.get_or_insert_with(label);
+        }
+        if trim(segment) == b"__TEXT" && trim(sectname) == b"__hirsel_abi" {
+            // Only a regular section can supply ABI text.
+            member.abi.push(
+                (kind == macho_raw::S_REGULAR)
+                    .then(|| {
+                        section
+                            .data(endian, bytes, u64::from(section.offset(endian)))
+                            .ok()
+                            .map(<[u8]>::to_vec)
+                    })
+                    .flatten(),
+            );
+        }
+        code.push(
+            flags & (macho_raw::S_ATTR_PURE_INSTRUCTIONS | macho_raw::S_ATTR_SOME_INSTRUCTIONS)
+                != 0,
+        );
+    }
+    let table = file.macho_symbol_table();
+    let strings = table.strings();
+    let mut first_bad_symbol = None;
+    for symbol in table.iter() {
+        let kind = symbol.n_type().0;
+        if kind & macho_raw::N_STAB != 0 || kind & macho_raw::N_EXT == 0 {
+            continue;
+        }
+        let raw = symbol.name(endian, strings).ok()?;
+        let name = c_name(raw).to_vec();
+        let desc = symbol.n_desc(endian).0;
+        if desc & macho_raw::N_SYMBOL_RESOLVER != 0 && first_bad_symbol.is_none() {
+            first_bad_symbol = Some(format!(
+                "resolver function {}",
+                String::from_utf8_lossy(&name)
+            ));
+        }
+        let section = (kind & macho_raw::N_TYPE == macho_raw::N_SECT)
+            .then(|| usize::from(symbol.n_sect()).checked_sub(1))
+            .flatten();
+        let definition = match kind & macho_raw::N_TYPE {
+            macho_raw::N_UNDF => symbol.n_value(endian) != 0,
+            _ => true,
+        };
+        let strong_function = kind & macho_raw::N_PEXT == 0
+            && desc & macho_raw::N_WEAK_DEF == 0
+            && section.is_some_and(|index| code.get(index) == Some(&true));
+        member.symbols.push(Symbol {
+            name,
+            definition,
+            strong_function,
+        });
+    }
+    member.bad_feature = member.bad_feature.or(first_bad_symbol);
+    Some(member)
+}
+
+/// A fixed-width Mach-O name without its NUL padding.
+fn trim(name: &[u8]) -> &[u8] {
+    name.split(|&b| b == 0).next().unwrap_or(name)
 }
 
 fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
     let (machine, unwind, irelative) = match target {
+        "aarch64-apple-darwin" => return parse_macho_member(bytes, name),
         "x86_64-unknown-linux-gnu" => (
             elf::EM_X86_64,
             elf::SHT_X86_64_UNWIND,

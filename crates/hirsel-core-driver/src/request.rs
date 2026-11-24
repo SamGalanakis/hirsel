@@ -310,13 +310,23 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut root_limit = 64 * 1024 * 1024;
     let mut emulator = None;
     let mut sysroot = None;
-    let mut target = "x86_64-unknown-linux-gnu".to_owned();
+    let mut target = hirsel_core_layout::Target::host()
+        .unwrap_or(hirsel_core_layout::Target::X86_64Linux)
+        .triple()
+        .to_owned();
     // How a native request links: --cc, else the recipe the installation
     // captured, else (uninstalled) the pinned LLVM's clang. Never a `cc`
     // found on PATH.
     let mut cc = None;
-    let pinned =
-        || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
+    // On macOS the developer tools' clang drives ld64 when no LLVM is pinned.
+    let pinned = || {
+        std::env::var_os("LLVM_SYS_231_PREFIX")
+            .map(|p| PathBuf::from(p).join("bin/clang"))
+            .or_else(|| {
+                let clang = Path::new("/usr/bin/clang");
+                (cfg!(target_os = "macos") && clang.is_file()).then(|| clang.to_owned())
+            })
+    };
     let mut run_args = invocation.arguments;
     let mut recording_build = false;
     let mut additional_runtimes = crate::installation::RuntimeVariants::<PathBuf>::default();
@@ -712,6 +722,16 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 (true, true) => None,
             };
         }
+    }
+    // An uninstalled compiler takes the plain runtime archive that
+    // HIRSEL_CORE_RT_ARCHIVE names, as its tests do.
+    if installed.is_none()
+        && runtime.is_none()
+        && !observe
+        && !charge_observation
+        && !needs_recording
+    {
+        runtime = std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").map(PathBuf::from);
     }
     if command == "env" {
         let cache = core_product.unwrap_or_else(crate::PackageProduct::default_cache);

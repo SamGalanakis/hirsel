@@ -1150,7 +1150,10 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
         let mut fds = [-1i32; 2];
         // SAFETY: pipe initializes two descriptors, each transferred once.
         unsafe {
-            assert_eq!(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC), 0);
+            assert_eq!(
+                hirsel_core_net::sys::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC),
+                0
+            );
             let reader = std::fs::File::from_raw_fd(fds[0]);
             let writer = std::fs::File::from_raw_fd(fds[1]);
             let other = writer.try_clone().unwrap();

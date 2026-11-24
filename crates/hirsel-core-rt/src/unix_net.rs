@@ -6,7 +6,7 @@ use crate::{
     provider::*,
 };
 use hirsel_core_net::{GrantRule, Sockets, UnixDirection, UnixRule, valid_relative_path};
-use std::{os::fd::OwnedFd, ptr};
+use std::ptr;
 
 // This is a typed extension, not a raw path byte range.
 pub(crate) struct UnixRequest<'a> {
@@ -18,7 +18,7 @@ pub(crate) struct UnixRequest<'a> {
     pub until: Option<(Provider, u64, u64)>,
     pub sockets: *mut Sockets,
     pub connecting: Option<u64>,
-    pub target: Option<OwnedFd>,
+    pub target: Option<crate::os_unix::Endpoint>,
     pub retry: Option<u64>,
 }
 

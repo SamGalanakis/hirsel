@@ -479,9 +479,17 @@ static LLVMTargetMachineRef target_machine(const char *triple, const char *cpu, 
                                            uint8_t speed, HirselLlvmOutput *out) {
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
+#ifdef __APPLE__
+    // macOS links the platform's LLVM 23.1 (Homebrew), whose patch releases
+    // keep 23.1.5's interfaces; keys still name the library by its UUID.
+    if (major != 23 || minor != 1 || patch < 5) {
+        error(out, "LLVM component requires LLVM 23.1.5 or a later 23.1 patch release"); return NULL;
+    }
+#else
     if (major != 23 || minor != 1 || patch != 5) {
         error(out, "LLVM component requires pinned LLVM 23.1.5"); return NULL;
     }
+#endif
     pthread_once(&initialized, initialize);
     LLVMTargetRef target = NULL;
     char *message = NULL;

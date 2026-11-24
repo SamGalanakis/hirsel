@@ -51,8 +51,7 @@ pub(crate) static RESIDENT: Mutex<Incremental> = Mutex::new(Incremental(None));
 /// through `/proc/self/fd`, since an object this request wrote is held by
 /// the write-only descriptor its bytes were written through.
 fn read(file: &File) -> io::Result<Arc<[u8]>> {
-    let fd = std::os::fd::AsRawFd::as_raw_fd(file);
-    Ok(std::fs::read(format!("/proc/self/fd/{fd}"))?.into())
+    Ok(std::fs::read(crate::package_files::fd_path(file)?)?.into())
 }
 
 impl Incremental {
@@ -554,5 +553,6 @@ fn locate(
     None
 }
 
-#[cfg(test)]
+// Incremental links patch ELF images that ld.lld linked.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

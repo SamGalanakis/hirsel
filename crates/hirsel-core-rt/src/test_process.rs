@@ -1,12 +1,19 @@
 //! Reexecute native libtest children through the explicitly selected ARM runner.
 use std::{ffi::OsStr, process::Command};
 
+/// The directory listing this process's open descriptors.
+pub(crate) const OPEN_FDS: &str = if cfg!(target_os = "linux") {
+    "/proc/self/fd"
+} else {
+    "/dev/fd"
+};
+
 pub(crate) fn command() -> Command {
     command_for(std::env::current_exe().unwrap().as_os_str())
 }
 
 pub(crate) fn command_for(executable: &OsStr) -> Command {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         let runner = std::env::var_os("HIRSEL_QEMU_AARCH64")
             .expect("ARM runtime tests require an explicit HIRSEL_QEMU_AARCH64");
@@ -16,7 +23,7 @@ pub(crate) fn command_for(executable: &OsStr) -> Command {
         command.arg("-L").arg(sysroot).arg(executable);
         command
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
     Command::new(executable)
 }
 

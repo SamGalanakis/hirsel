@@ -12,6 +12,20 @@ thread_local! {
 }
 
 /// Called before the first task starts on the serial replay thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare() {
+    // SAFETY: both queries take this live thread; the stack grows down from
+    // the address they return.
+    unsafe {
+        let thread = libc::pthread_self();
+        let top = libc::pthread_get_stackaddr_np(thread).addr();
+        let size = libc::pthread_get_stacksize_np(thread);
+        HOST.set((top - size, top));
+    }
+}
+
+/// Called before the first task starts on the serial replay thread.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn prepare() {
     // SAFETY: pthread attributes are initialized by pthread_getattr_np.
     unsafe {

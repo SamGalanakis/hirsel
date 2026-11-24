@@ -11,8 +11,22 @@ use std::{
 };
 
 fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
-    matches!(section.flags(), object::SectionFlags::Elf { sh_flags, .. }
-        if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
+    match section.flags() {
+        object::SectionFlags::Elf { sh_flags, .. } => sh_flags.0 & object::elf::SHF_ALLOC.0 != 0,
+        // Mach-O loads every segment but the debug one.
+        object::SectionFlags::MachO { .. } => {
+            section.segment_name().ok().flatten() != Some("__DWARF")
+        }
+        _ => false,
+    }
+}
+
+/// A symbol's name as the compiler wrote it: Mach-O prefixes C names with `_`.
+fn unmangled(format: object::BinaryFormat, name: &[u8]) -> &[u8] {
+    match format {
+        object::BinaryFormat::MachO => name.strip_prefix(b"_").unwrap_or(name),
+        _ => name,
+    }
 }
 
 /// Keep the runtime binders used by the actual link inputs and report whether
@@ -222,7 +236,10 @@ fn referenced(input: &PathBuf) -> std::io::Result<Referenced> {
             let symbol = object
                 .symbol_by_index(index)
                 .map_err(std::io::Error::other)?;
-            let name = symbol.name_bytes().map_err(std::io::Error::other)?;
+            let name = unmangled(
+                object.format(),
+                symbol.name_bytes().map_err(std::io::Error::other)?,
+            );
             spawns_units |= name == b"hirsel_core_spawn_unit";
             if let Some(item) = site_item_symbol(name)
                 && !items.contains(item)
@@ -255,7 +272,7 @@ pub(crate) fn live_site_words(bytes: &[u8]) -> Result<BTreeSet<u64>> {
                 continue;
             };
             let symbol = file.symbol_by_index(index).map_err(error)?;
-            let name = symbol.name_bytes().map_err(error)?;
+            let name = unmangled(file.format(), symbol.name_bytes().map_err(error)?);
             if site_item_symbol(name).is_none() {
                 continue;
             }
@@ -319,13 +336,24 @@ fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
         name: name.into_bytes(),
         value,
         size: 0,
-        kind: object::SymbolKind::Unknown,
+        // Mach-O mangles (prefixes `_`) only text and data symbols, as the
+        // units' imports of these names are.
+        kind: if object.format() == object::BinaryFormat::MachO {
+            object::SymbolKind::Data
+        } else {
+            object::SymbolKind::Unknown
+        },
         scope: object::SymbolScope::Linkage,
         weak: false,
         section: object::write::SymbolSection::Absolute,
-        flags: object::SymbolFlags::Elf {
-            st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
-            st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+        // Linkage scope is already hidden on Mach-O (private extern).
+        flags: if object.format() == object::BinaryFormat::Elf {
+            object::SymbolFlags::Elf {
+                st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+                st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+            }
+        } else {
+            object::SymbolFlags::None
         },
     });
 }
@@ -335,8 +363,10 @@ pub(crate) fn check_linked_sites(bytes: &[u8]) -> Result<()> {
     let sites: std::collections::HashMap<_, _> = file
         .dynamic_symbols()
         .filter_map(|s| {
-            s.name()
+            s.name_bytes()
                 .ok()
+                .map(|n| unmangled(file.format(), n))
+                .and_then(|n| std::str::from_utf8(n).ok())
                 .filter(|n| n.starts_with("hirsel_core_site_"))
                 .map(|name| (s.index(), name))
         })
@@ -353,7 +383,8 @@ pub(crate) fn check_linked_sites(bytes: &[u8]) -> Result<()> {
     // The external linker must preserve the absolute definitions. This also
     // catches a section-relative definition reduced to a nameless RELATIVE.
     for symbol in file.symbols() {
-        if let Ok(name) = symbol.name()
+        if let Ok(name) = symbol.name_bytes()
+            && let Ok(name) = std::str::from_utf8(unmangled(file.format(), name))
             && name.starts_with("hirsel_core_site_")
             && symbol.section() != object::SymbolSection::Absolute
         {

@@ -1,8 +1,10 @@
+#if __has_include(<bits/c++config.h>)
 #include <bits/c++config.h>
 #if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 30)
 #undef _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
+#endif
 #endif
 
 #include "pass_cost.h"
@@ -14,8 +16,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __linux__
 #include <linux/perf_event.h>
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <llvm/Analysis/LazyCallGraph.h>
@@ -46,6 +50,9 @@ struct Counter {
 };
 
 int openCounter() {
+#ifndef __linux__
+    report_fatal_error("LLVM pass cost tracing needs the Linux perf instructions:u counter");
+#else
     perf_event_attr event{};
     event.size = sizeof(event);
     event.type = PERF_TYPE_HARDWARE;
@@ -58,6 +65,7 @@ int openCounter() {
     if (fd < 0)
         report_fatal_error(Twine("open LLVM pass instructions:u counter: ") + std::strerror(errno));
     return fd;
+#endif
 }
 
 Counter readCounter(int fd) {

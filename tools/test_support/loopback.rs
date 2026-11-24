@@ -1,6 +1,8 @@
 //! Loopback fixture peers. Keep connection identity independent of wire assertions.
+#[cfg(not(target_os = "macos"))]
+use std::fs;
 use std::{
-    fs, io,
+    io,
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
 };
 
@@ -34,6 +36,85 @@ pub fn accept_local(listener: &TcpListener) -> io::Result<TcpStream> {
     accept_from_process(listener, std::process::id())
 }
 
+/// macOS has no /proc: each process's own descriptor table names its TCP
+/// sockets' endpoints (`proc_pidfdinfo`), and `proc_listchildpids` its children.
+#[cfg(target_os = "macos")]
+pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Result<bool> {
+    // struct socket_fdinfo: its size and the offsets of psi.soi_kind and the
+    // TCP in_sockinfo's foreign and local ports, address family flag and
+    // foreign and local addresses.
+    const SIZE: usize = 792;
+    const KIND: usize = 256;
+    const FPORT: usize = 264;
+    const LPORT: usize = 268;
+    const VFLAG: usize = 288;
+    const FADDR: usize = 296;
+    const LADDR: usize = 312;
+    const SOCKINFO_TCP: i32 = 2;
+    const PROX_FDTYPE_SOCKET: u32 = 2;
+    let word = |info: &[u8], at: usize| u32::from_le_bytes(info[at..at + 4].try_into().unwrap());
+    let port = |info: &[u8], at: usize| u16::from_be(word(info, at) as u16);
+    let address = |info: &[u8], at: usize| -> IpAddr {
+        let bytes: [u8; 16] = info[at..at + 16].try_into().unwrap();
+        if info[VFLAG] & 1 != 0 {
+            IpAddr::from(<[u8; 4]>::try_from(&bytes[12..]).unwrap())
+        } else {
+            IpAddr::from(bytes)
+        }
+    };
+    let mut pending = vec![pid as i32];
+    while let Some(pid) = pending.pop() {
+        let mut fds = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            4096
+        ];
+        // SAFETY: the buffer holds `fds.len()` entries for the kernel to fill.
+        let filled = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                (fds.len() * size_of::<libc::proc_fdinfo>()) as i32,
+            )
+        };
+        let count = usize::try_from(filled).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
+        for fd in &fds[..count] {
+            if fd.proc_fdtype != PROX_FDTYPE_SOCKET {
+                continue;
+            }
+            let mut info = [0u8; SIZE];
+            // SAFETY: the buffer holds SIZE bytes for the kernel to fill.
+            let read = unsafe {
+                libc::proc_pidfdinfo(pid, fd.proc_fd, 3, info.as_mut_ptr().cast(), SIZE as i32)
+            };
+            if read != SIZE as i32 || word(&info, KIND) as i32 != SOCKINFO_TCP {
+                continue;
+            }
+            let local = SocketAddr::new(address(&info, LADDR), port(&info, LPORT));
+            let foreign = SocketAddr::new(address(&info, FADDR), port(&info, FPORT));
+            if local == client && foreign == server {
+                return Ok(true);
+            }
+        }
+        let mut children = vec![0i32; 1024];
+        // SAFETY: the buffer holds `children.len()` PIDs for the kernel to fill.
+        let filled = unsafe {
+            libc::proc_listchildpids(
+                pid,
+                children.as_mut_ptr().cast(),
+                (children.len() * size_of::<i32>()) as i32,
+            )
+        };
+        pending.extend(&children[..usize::try_from(filled).unwrap_or(0).min(children.len())]);
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Result<bool> {
     fn endpoint(address: SocketAddr) -> String {
         let ip = match address.ip() {

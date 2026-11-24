@@ -155,37 +155,59 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
     let profile = dir.path().join("profiles.toml");
-    let mut executable = [0u8; 192];
-    executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
-    executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
-    let machine = if cfg!(target_arch = "x86_64") {
-        62u16
-    } else {
-        183
-    };
-    executable[18..20].copy_from_slice(&machine.to_le_bytes());
-    executable[20..24].copy_from_slice(&1u32.to_le_bytes());
-    executable[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // entry
-    executable[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
-    executable[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
-    executable[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
-    executable[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
-    executable[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
-    executable[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
-    executable[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
-    executable[96..104].copy_from_slice(&192u64.to_le_bytes());
-    executable[104..112].copy_from_slice(&192u64.to_le_bytes());
-    executable[120..124].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
-    executable[128..136].copy_from_slice(&176u64.to_le_bytes());
     let interpreter = c"/oracle/loader";
-    let loader = interpreter.to_bytes_with_nul();
-    executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
-    executable[176..176 + loader.len()].copy_from_slice(loader);
-    std::fs::write(&image, executable).unwrap();
+    // The image is only pinned and parsed: a header naming its interpreter,
+    // ELF on Linux and Mach-O on macOS.
+    let executable: Vec<u8> = if cfg!(target_os = "macos") {
+        let name = interpreter.to_bytes_with_nul();
+        let dylinker = (12 + name.len()).next_multiple_of(8);
+        let mut image = Vec::new();
+        for word in [0xfeed_facfu32, 0x0100_000c, 0, 2, 2, (dylinker + 24) as u32, 0, 0] {
+            image.extend(word.to_le_bytes());
+        }
+        // LC_LOAD_DYLINKER naming the interpreter, then LC_MAIN.
+        image.extend(0xeu32.to_le_bytes());
+        image.extend((dylinker as u32).to_le_bytes());
+        image.extend(12u32.to_le_bytes());
+        image.extend(name);
+        image.resize(32 + dylinker, 0);
+        image.extend(0x8000_0028u32.to_le_bytes());
+        image.extend(24u32.to_le_bytes());
+        image.extend([0; 16]);
+        image
+    } else {
+        let mut executable = [0u8; 192];
+        executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        let machine = if cfg!(target_arch = "x86_64") {
+            62u16
+        } else {
+            183
+        };
+        executable[18..20].copy_from_slice(&machine.to_le_bytes());
+        executable[20..24].copy_from_slice(&1u32.to_le_bytes());
+        executable[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // entry
+        executable[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+        executable[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+        executable[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+        executable[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
+        executable[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        executable[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+        executable[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
+        executable[96..104].copy_from_slice(&192u64.to_le_bytes());
+        executable[104..112].copy_from_slice(&192u64.to_le_bytes());
+        executable[120..124].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
+        executable[128..136].copy_from_slice(&176u64.to_le_bytes());
+        let loader = interpreter.to_bytes_with_nul();
+        executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
+        executable[176..176 + loader.len()].copy_from_slice(loader);
+        executable.to_vec()
+    };
+    std::fs::write(&image, &executable).unwrap();
     let policy = format!(
         "[git]\nimage = {:?}\nsha256 = \"{:x}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
         image.to_str().unwrap(),
-        Sha256::digest(executable),
+        Sha256::digest(&executable),
         dir.path().to_str().unwrap(),
     );
     std::fs::write(&profile, &policy).unwrap();
@@ -198,7 +220,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
         [format!(
             "exec: git: image {}, sha256 {:x}, interpreter /oracle/loader, policy {}\n",
             image.display(),
-            Sha256::digest(executable),
+            Sha256::digest(&executable),
             hirsel_core_net::exec::hex(&expected),
         )]
     );
@@ -260,7 +282,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     std::fs::write(
         &profile,
         policy.replace(
-            &format!("{:x}", Sha256::digest(executable)),
+            &format!("{:x}", Sha256::digest(&executable)),
             &format!("{:x}", Sha256::digest(b"#!/bin/sh\n")),
         ),
     )

@@ -106,6 +106,10 @@ fn note(object: &mut object::write::Object<'_>, name: &str, owner: &[u8], kind: 
 // Equal code can bind to different source coordinates. Include the binding
 // identity in the linker build ID even when only the side product holds DWARF.
 pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: ContentHash) {
+    // Mach-O has no notes, and no build ID for them to enter.
+    if object.format() != object::BinaryFormat::Elf {
+        return;
+    }
     note(object, ".note.hirsel.source", OWNER, 2, &source.0);
 }
 
@@ -127,6 +131,218 @@ fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
     staged.write_all(debug)?;
     staged.persist(target).map_err(|e| e.error)?;
+    if image.starts_with(&0xfeed_facf_u32.to_le_bytes()) {
+        write_dsym(path, image, debug)?;
+    }
+    Ok(())
+}
+
+/// A `.debug_aranges` section for every unit in `sections` (Mach-O names).
+fn address_ranges(sections: &[([u8; 16], &[u8])]) -> Option<Vec<u8>> {
+    use gimli::{EndianSlice, LittleEndian};
+    let find = |name: &str| {
+        let wanted = format!("__{}", name.trim_start_matches('.'));
+        let wanted = &wanted.as_bytes()[..wanted.len().min(16)];
+        sections
+            .iter()
+            .find(|(sectname, _)| {
+                &sectname[..wanted.len()] == wanted
+                    && sectname.get(wanted.len()).is_none_or(|b| *b == 0)
+            })
+            .map_or(&[][..], |(_, data)| *data)
+    };
+    let dwarf = gimli::Dwarf::load(|id| {
+        Ok::<_, gimli::Error>(EndianSlice::new(find(id.name()), LittleEndian))
+    })
+    .ok()?;
+    let mut out = Vec::new();
+    let mut units = dwarf.units();
+    while let Some(header) = units.next().ok()? {
+        let offset = header.offset().to_debug_info_offset(&header)?.0 as u32;
+        let unit = dwarf.unit(header).ok()?;
+        let mut ranges = dwarf.unit_ranges(&unit).ok()?;
+        let mut tuples = Vec::new();
+        while let Some(range) = ranges.next().ok()? {
+            if range.end > range.begin {
+                tuples.push((range.begin, range.end - range.begin));
+            }
+        }
+        // A DWARF32 set: a 12-byte header padded to 16, then the tuples.
+        let length = 12 + tuples.len() * 16 + 16;
+        out.extend_from_slice(&(length as u32).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&[8, 0, 0, 0, 0, 0]);
+        for (address, length) in tuples {
+            out.extend_from_slice(&address.to_le_bytes());
+            out.extend_from_slice(&length.to_le_bytes());
+        }
+        out.extend_from_slice(&[0; 16]);
+    }
+    Some(out)
+}
+
+/// macOS debuggers find DWARF in a `.dSYM` bundle beside the executable,
+/// matched by its LC_UUID: ld64 never copies DWARF into an executable. The
+/// bundle's file is an MH_DSYM image with the executable's UUID and segment
+/// layout (without file contents) and the detached DWARF in `__DWARF`.
+fn write_dsym(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
+    use object::LittleEndian as LE;
+    use object::macho::MachHeader64;
+    use object::read::macho::{LoadCommandVariant, MachHeader as _, Segment as _};
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const MH_DSYM: u32 = 0xa;
+    const LC_UUID: u32 = 0x1b;
+    const LC_SEGMENT_64: u32 = 0x19;
+    const S_ATTR_DEBUG: u32 = 0x0200_0000;
+    let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
+    let header = MachHeader64::<LE>::parse(image, 0).map_err(io::Error::other)?;
+    let mut commands = header
+        .load_commands(LE, image, 0)
+        .map_err(io::Error::other)?;
+    let mut uuid = None;
+    let mut segments = Vec::new();
+    let mut end = 0u64;
+    while let Some(command) = commands.next().map_err(io::Error::other)? {
+        match command.variant().map_err(io::Error::other)? {
+            LoadCommandVariant::Uuid(command) => uuid = Some(command.uuid),
+            LoadCommandVariant::Segment64(segment, _) if segment.name() != b"__LINKEDIT" => {
+                // The layout without its contents: no file range anywhere.
+                let mut raw = command.raw_data().to_vec();
+                raw[40..56].fill(0);
+                for section in 0..segment.nsects.get(LE) as usize {
+                    let at = 72 + section * 80;
+                    raw[at + 48..at + 52].fill(0);
+                    raw[at + 56..at + 64].fill(0);
+                }
+                end = end.max(segment.vmaddr.get(LE) + segment.vmsize.get(LE));
+                segments.push(raw);
+            }
+            _ => {}
+        }
+    }
+    let uuid = uuid.ok_or_else(|| invalid("the executable has no LC_UUID"))?;
+    let debug = object::File::parse(debug).map_err(io::Error::other)?;
+    let mut dwarf = Vec::new();
+    for section in debug.sections() {
+        let Some(name) = section
+            .name()
+            .ok()
+            .and_then(|name| name.strip_prefix(".debug_"))
+        else {
+            continue;
+        };
+        let data = section.data().map_err(io::Error::other)?;
+        if data.is_empty() {
+            continue;
+        }
+        // Mach-O section names hold 16 bytes: "__debug_str_offsets" becomes
+        // "__debug_str_offs", as dsymutil writes it.
+        let mut sectname = [0u8; 16];
+        let full = format!("__debug_{name}");
+        let len = full.len().min(16);
+        sectname[..len].copy_from_slice(&full.as_bytes()[..len]);
+        dwarf.push((sectname, data));
+    }
+    // lldb maps an address to its unit through .debug_aranges.
+    let aranges = address_ranges(&dwarf);
+    if let Some(aranges) = &aranges {
+        let mut sectname = [0u8; 16];
+        sectname[..15].copy_from_slice(b"__debug_aranges");
+        dwarf.push((sectname, aranges));
+    }
+    const PAGE: u64 = 0x4000;
+    let commands_size: usize =
+        24 + segments.iter().map(Vec::len).sum::<usize>() + 72 + 80 * dwarf.len();
+    let data_start = (32 + commands_size as u64).next_multiple_of(PAGE);
+    let base = end.next_multiple_of(PAGE);
+    let mut data = Vec::new();
+    let mut rows = Vec::new();
+    for (name, bytes) in &dwarf {
+        let at = data.len() as u64;
+        data.extend_from_slice(bytes);
+        rows.push((name, at, bytes.len() as u64));
+    }
+    let size = data.len() as u64;
+    let mut out = Vec::new();
+    let u32le = |out: &mut Vec<u8>, value: u32| out.extend_from_slice(&value.to_le_bytes());
+    let u64le = |out: &mut Vec<u8>, value: u64| out.extend_from_slice(&value.to_le_bytes());
+    let name16 = |out: &mut Vec<u8>, name: &[u8]| {
+        let mut field = [0u8; 16];
+        field[..name.len()].copy_from_slice(name);
+        out.extend_from_slice(&field);
+    };
+    u32le(&mut out, MH_MAGIC_64);
+    u32le(&mut out, header.cputype(LE).0 as u32);
+    u32le(&mut out, header.cpusubtype(LE).0 as u32);
+    u32le(&mut out, MH_DSYM);
+    u32le(&mut out, 2 + segments.len() as u32);
+    u32le(&mut out, commands_size as u32);
+    u32le(&mut out, 0);
+    u32le(&mut out, 0);
+    u32le(&mut out, LC_UUID);
+    u32le(&mut out, 24);
+    out.extend_from_slice(&uuid);
+    for segment in &segments {
+        out.extend_from_slice(segment);
+    }
+    u32le(&mut out, LC_SEGMENT_64);
+    u32le(&mut out, 72 + 80 * dwarf.len() as u32);
+    name16(&mut out, b"__DWARF");
+    u64le(&mut out, base);
+    u64le(&mut out, size.next_multiple_of(PAGE));
+    u64le(&mut out, data_start);
+    u64le(&mut out, size);
+    u32le(&mut out, 7);
+    u32le(&mut out, 3);
+    u32le(&mut out, dwarf.len() as u32);
+    u32le(&mut out, 0);
+    for (name, at, len) in rows {
+        out.extend_from_slice(name);
+        name16(&mut out, b"__DWARF");
+        u64le(&mut out, base + at);
+        u64le(&mut out, len);
+        u32le(&mut out, (data_start + at) as u32);
+        u32le(&mut out, 0);
+        u32le(&mut out, 0);
+        u32le(&mut out, 0);
+        u32le(&mut out, S_ATTR_DEBUG);
+        u32le(&mut out, 0);
+        u32le(&mut out, 0);
+        u32le(&mut out, 0);
+    }
+    out.resize(data_start as usize, 0);
+    out.extend_from_slice(&data);
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("the executable path has no file name"))?;
+    let mut bundle = path.as_os_str().to_owned();
+    bundle.push(".dSYM");
+    let contents = PathBuf::from(bundle).join("Contents");
+    let dwarf_dir = contents.join("Resources/DWARF");
+    std::fs::create_dir_all(&dwarf_dir)?;
+    let identifier = name.to_string_lossy();
+    std::fs::write(
+        contents.join("Info.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n\
+             \t<key>CFBundleDevelopmentRegion</key>\n\t<string>English</string>\n\
+             \t<key>CFBundleIdentifier</key>\n\t<string>com.apple.xcode.dsym.{identifier}</string>\n\
+             \t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n\
+             \t<key>CFBundlePackageType</key>\n\t<string>dSYM</string>\n\
+             \t<key>CFBundleSignature</key>\n\t<string>????</string>\n\
+             \t<key>CFBundleShortVersionString</key>\n\t<string>1.0</string>\n\
+             \t<key>CFBundleVersion</key>\n\t<string>1</string>\n\
+             </dict>\n</plist>\n"
+        ),
+    )?;
+    use std::io::Write as _;
+    let mut staged = tempfile::NamedTempFile::new_in(&dwarf_dir)?;
+    staged.write_all(&out)?;
+    staged.persist(dwarf_dir.join(name)).map_err(|e| e.error)?;
     Ok(())
 }
 

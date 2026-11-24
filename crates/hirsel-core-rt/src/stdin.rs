@@ -87,7 +87,12 @@ impl Drop for Stream {
 impl Helper {
     fn start(input: Arc<OwnedFd>) -> io::Result<Arc<Self>> {
         // SAFETY: eventfd either returns an owned fd or signals a host error.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        let fd = unsafe {
+            hirsel_core_net::sys::eventfd(
+                0,
+                hirsel_core_net::sys::EFD_CLOEXEC | hirsel_core_net::sys::EFD_NONBLOCK,
+            )
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -109,7 +114,7 @@ impl Helper {
         // SAFETY: the eventfd borrows eight bytes for this one write. A full
         // counter is already readable, so the helper still sees the change.
         let _ = crate::os_net::retry(|| unsafe {
-            libc::write(
+            hirsel_core_net::sys::eventfd_write(
                 self.changed.as_raw_fd(),
                 1u64.to_ne_bytes().as_ptr().cast(),
                 8,
@@ -146,7 +151,7 @@ impl Helper {
                 let mut count = 0u64;
                 // SAFETY: the helper is the only eventfd reader and count holds eight bytes.
                 let _ = crate::os_net::retry(|| unsafe {
-                    libc::read(
+                    hirsel_core_net::sys::eventfd_read(
                         self.changed.as_raw_fd(),
                         ptr::from_mut(&mut count).cast(),
                         8,

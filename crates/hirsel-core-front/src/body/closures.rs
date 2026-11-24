@@ -261,7 +261,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let g = &self.p.fns[f];
-        if mentions_error(&self.t, g.callable) {
+        if mentions_error(&self.t, g.callable)
+            || (f >= self.p.fns.base_len() && self.p.item(g.at).range.has_errors)
+        {
             self.inherited_refusal = true;
             self.halt();
             return (ERROR, None);

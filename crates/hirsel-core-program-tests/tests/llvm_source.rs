@@ -2464,7 +2464,7 @@ fn site_fixture(target: Target) {
                 // thunks. The destination's real source body owns their debug rows.
                 let branch = match target {
                     Target::X86_64Linux => code.len() == 5 && code[0] == 0xe9,
-                    Target::Aarch64Linux => {
+                    Target::Aarch64Linux | Target::Aarch64Darwin => {
                         code.len() == 4
                             && u32::from_le_bytes(code.try_into().unwrap()) & 0xfc000000
                                 == 0x14000000

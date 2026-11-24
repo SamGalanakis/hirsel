@@ -123,7 +123,10 @@ fn a_parked_sync_delivers_the_syscalls_failure() {
     let mut f = Fixture::new();
     let mut fds = [0; 2];
     // SAFETY: pipe2 writes two new descriptors into the array.
-    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    assert_eq!(
+        unsafe { hirsel_core_net::sys::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
     // SAFETY: both descriptors are new and owned here.
     let (read, write) = unsafe {
         use std::os::fd::FromRawFd;
@@ -1084,7 +1087,7 @@ fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
         // SAFETY: the call lends three initialized argument words. The
         // borrowed gate remains pinned and only its mutex-protected bit changes.
         unsafe {
-            assert_ne!(args.read(), libc::pthread_self());
+            assert_ne!(args.read(), libc::pthread_self() as u64);
             let gate = &*std::ptr::with_exposed_provenance::<Gate>(args.add(1).read() as usize);
             drop(
                 gate.1
@@ -1135,7 +1138,7 @@ fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
             );
             assert!(!child.task.is_null());
             let mut words = [
-                libc::pthread_self(),
+                libc::pthread_self() as u64,
                 gate_pointer.expose_provenance() as u64,
                 0,
             ];
@@ -1290,6 +1293,7 @@ fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_s
 #[path = "rule_provider_tests.rs"]
 mod rule_provider_tests;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exec_supervisor_preserves_inputs_and_only_reaps_its_children() {
     use std::process::Command;
@@ -1413,6 +1417,7 @@ int main(int argc, char **argv) {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn exec_supervisor_law(image: &std::path::Path) {
     use crate::os_exec::{SetupStep, Signal, SpawnInput, Supervisor, Termination};
     use std::{
@@ -1819,12 +1824,32 @@ fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
         hirsel_core_host_connect_unix(f.context, n, &root, &carrier(b"slot"), 0, 0, 0, 2)
     };
     let first = connect();
-    assert_eq!(first.error, IoError::OK);
-    assert!(old.accept().is_ok());
-    assert_eq!(
-        next.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    #[cfg(target_os = "linux")]
+    let first = {
+        // The pinned inode still reaches the socket renamed away.
+        assert_eq!(first.error, IoError::OK);
+        assert!(old.accept().is_ok());
+        assert_eq!(
+            next.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        first
+    };
+    #[cfg(not(target_os = "linux"))]
+    let first = {
+        // Connecting by name refuses a socket swapped in after resolution.
+        assert_eq!(first.error, error(2, 0));
+        for listener in [&old, &next] {
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let first = connect();
+        assert_eq!(first.error, IoError::OK);
+        assert!(next.accept().is_ok());
+        first
+    };
     let second = connect();
     assert_eq!(second.error, IoError::OK);
     assert!(next.accept().is_ok());
@@ -1959,21 +1984,39 @@ fn exec_provider_runs_the_sealed_image_and_uses_directional_pipes() {
     std::fs::write(
         &source,
         r#"
-#include <openssl/evp.h>
 #include <stdio.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#include <mach-o/dyld.h>
+#else
+#include <openssl/evp.h>
+#endif
 
 int main(void) {
     if (getchar() != 'x' || getchar() != 'y' || getchar() != EOF) return 1;
+    unsigned char block[4096], digest[32];
+    size_t n;
+#ifdef __APPLE__
+    char path[4096];
+    uint32_t size = sizeof path;
+    if (_NSGetExecutablePath(path, &size)) return 2;
+    FILE *self = fopen(path, "rb");
+    CC_SHA256_CTX state;
+    if (!self || !CC_SHA256_Init(&state)) return 2;
+    while ((n = fread(block, 1, sizeof block, self))) {
+        if (!CC_SHA256_Update(&state, block, (CC_LONG)n)) return 3;
+    }
+    if (ferror(self) || !CC_SHA256_Final(digest, &state)) return 4;
+#else
     FILE *self = fopen("/proc/self/exe", "rb");
     EVP_MD_CTX *state = EVP_MD_CTX_new();
     if (!self || !state || !EVP_DigestInit_ex(state, EVP_sha256(), NULL)) return 2;
-    unsigned char block[4096], digest[32];
-    size_t n;
     while ((n = fread(block, 1, sizeof block, self))) {
         if (!EVP_DigestUpdate(state, block, n)) return 3;
     }
     if (ferror(self) || !EVP_DigestFinal_ex(state, digest, NULL)) return 4;
+#endif
     for (int i = 0; i < 32; ++i) printf("%02x", digest[i]);
     fputs("digest", stderr);
     return 23;
@@ -1985,7 +2028,11 @@ int main(void) {
         .arg(&source)
         .args(["-o"])
         .arg(&image)
-        .arg("-lcrypto")
+        .args(if cfg!(target_os = "linux") {
+            &["-lcrypto"][..]
+        } else {
+            &[]
+        })
         .output()
         .unwrap();
     assert!(
@@ -2045,7 +2092,9 @@ fn exec_provider_law(image: &std::path::Path) {
         .unwrap();
     let rules = policy.rules();
     let (profiles, approval) = policy.pin_images().unwrap();
-    let expected_interpreter = if cfg!(target_arch = "aarch64") {
+    let expected_interpreter = if cfg!(target_os = "macos") {
+        "/usr/lib/dyld"
+    } else if cfg!(target_arch = "aarch64") {
         "/lib/ld-linux-aarch64.so.1"
     } else {
         "/lib64/ld-linux-x86-64.so.2"

@@ -31,6 +31,76 @@ runtime archive identities by target.
 request would use; `--json` prints the same as JSON and `--target` selects another
 target's runtime.
 
+### macOS from source
+
+On Apple silicon the compiler builds from a checkout and targets `aarch64-apple-darwin`,
+its default target there. It needs the Xcode command line tools and Homebrew's LLVM 23.1
+(23.1.5 or a later 23.1 patch release) in place of the pinned Linux LLVM tree:
+
+```sh
+xcode-select --install
+brew install llvm
+ln -s "$(brew --prefix llvm)" tools/buck2/toolchains/llvm-files
+cargo build --release --bin hirsel
+cargo rustc -p hirsel-core-rt --release --lib --crate-type staticlib \
+  --features standalone,mimalloc --target-dir target/runtime
+export HIRSEL_CORE_RT_ARCHIVE="$PWD/target/runtime/release/libhirsel_core_rt.a"
+```
+
+An uninstalled compiler links with `/usr/bin/clang` (or `--cc`) and the runtime archive that
+`HIRSEL_CORE_RT_ARCHIVE` (or `--runtime`) names. `check`, `fmt`, `run`, `test` and `build`
+work with both backends. To record and replay, build a second archive with
+`--features standalone,mimalloc,record` and pass it with `--runtime`.
+
+macOS provides the Linux mechanisms these features use in its own way:
+
+- **Debug info.** ld64 never copies DWARF into an executable, so every build writes
+  `PROGRAM.dSYM` beside the executable, matched by its UUID; `lldb` reads Hirsel source
+  lines from it. `--debug-lines on` writes the same bundle.
+- **Exec.** Children start with `posix_spawn` and are watched by a kqueue `NOTE_EXIT` in
+  place of a pidfd. An image on a read-only volume (such as `/bin` or `/usr/bin` on the
+  sealed system volume) runs in place, since macOS kills a copy of a platform binary.
+  Any other image runs from a private, read-only, user-immutable copy; unlike a sealed
+  memfd, the run's own user could clear that flag. There is no subreaper, so a child's own
+  children are not adopted.
+- **Net Unix.** Bind, connect and send-to resolve the socket's name beneath its pinned
+  directory with a per-thread working directory (`pthread_fchdir_np`). macOS cannot hold a
+  socket's inode, so a connect or send-to refuses a socket that replaced the one resolved.
+- **The launcher.** A launched run is forked with the descriptors it holds closed one by one
+  (there is no `close_range`), runs a private copy of its verified image, and kills itself
+  when the launcher exits (there is no `PR_SET_PDEATHSIG`). Without cgroups, ending a run
+  kills its session's process group.
+- **File watching.** The code store watches its directories and each cached object with
+  kqueue.
+- **Foreign archives.** Archives hold arm64 Mach-O objects with ABI text in
+  `__TEXT,__hirsel_abi`; `HIRSEL_TARGET=aarch64-apple-darwin sh build.sh` builds the
+  `sqlite` and `ffi_laws` archives.
+- **Profiling.** `hirsel prof run` needs a profiling runtime archive (build one with
+  `--features standalone,mimalloc,prof` and pass it with `--runtime`): the run samples its
+  own running threads by frame records, since macOS lets a process read only its own
+  threads' registers. `hirsel prof replay` works as on Linux; `hirsel prof attach` and
+  `--mem` are not available.
+- **Memory limit.** macOS refuses every `RLIMIT_DATA` change, so the guard checks
+  `HIRSEL_MEMORY_LIMIT` against the process's physical footprint (which counts LLVM's
+  allocations too) after every MiB a thread allocates and before any larger allocation.
+  Guarded children inherit the variable; other children are not limited.
+- **Failure positions.** ld64 keeps no relocations to show which failure sites a release
+  link kept, so a release executable carries every site's source position, as a
+  development build does.
+
+Contained groups need Linux namespaces and are refused on macOS.
+
+The driver's unit tests take one runtime archive per variant, each built as above with
+its features: `HIRSEL_CORE_RT_ARCHIVE` (`standalone,mimalloc`),
+`HIRSEL_CORE_RT_RECORD_ARCHIVE` (`standalone,mimalloc,record`),
+`HIRSEL_CORE_RT_OBSERVED_ARCHIVE` (`standalone,charge-observation`),
+`HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE` (`standalone,charge-observation,record`),
+`HIRSEL_CORE_RT_PROF_ARCHIVE` (`standalone,mimalloc,prof`),
+`HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE` (`standalone,prof,record`) and
+`HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE` (`testing,memcheck,charge-observation,record`).
+Tests of Linux mechanisms (`ld.lld` links, GNU `--wrap` interposition, `/proc`, perf
+attach) are compiled only on Linux.
+
 `hirsel help` lists the commands and `hirsel help <command>`, `COMMAND --help` or
 `COMMAND -h` prints one command's options. A command name that is not in that list
 exits 2 with `hirsel: unknown command`.

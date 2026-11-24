@@ -41,7 +41,7 @@ struct Discovered {
 }
 
 fn parent(directory: &File) -> io::Result<File> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         // SAFETY: directory is live and ".." is a static C string. This
@@ -50,7 +50,7 @@ fn parent(directory: &File) -> io::Result<File> {
             libc::openat(
                 directory.as_raw_fd(),
                 c"..".as_ptr(),
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
@@ -59,7 +59,7 @@ fn parent(directory: &File) -> io::Result<File> {
         // SAFETY: openat returned a new owned descriptor.
         Ok(unsafe { File::from_raw_fd(fd) })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = directory;
         Err(io::ErrorKind::Unsupported.into())

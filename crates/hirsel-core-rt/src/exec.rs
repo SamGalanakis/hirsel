@@ -3,7 +3,9 @@ use hirsel_core_net::exec::{ExecRules, PinnedProfile, Policy, Request};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,8 +15,11 @@ pub(crate) use launch::Launch;
 pub use launch::{Binding, Operations};
 pub(crate) use narrow::NarrowedGrant;
 
+#[cfg(target_os = "linux")]
 const EXEC_HOST: &str =
     "Exec requires clone3 with CLONE_PIDFD and close_range (Linux 5.9 or later)";
+#[cfg(not(target_os = "linux"))]
+const EXEC_HOST: &str = "Exec requires opening beneath a directory and a private image copy";
 
 pub(crate) enum Grant {
     Native {
@@ -77,12 +82,14 @@ impl Grant {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct CapHeader {
     version: u32,
     pid: i32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Caps {
@@ -99,6 +106,19 @@ pub(crate) fn unprivileged(
     !uids.contains(&0) && effective == [0; 2] && permitted == [0; 2]
 }
 
+/// macOS has no capability sets: an unprivileged run is one whose real and
+/// effective users are not root.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn check_credentials() -> Result<(), &'static str> {
+    // SAFETY: getuid and geteuid have no preconditions.
+    let uids = unsafe { [libc::getuid(), libc::geteuid(), libc::geteuid()] };
+    if !unprivileged(uids, [0; 2], [0; 2]) {
+        return Err("Exec requires an unprivileged run");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn check_credentials() -> Result<(), &'static str> {
     let [mut real, mut effective, mut saved] = [0; 3];
     let mut header = CapHeader {
@@ -123,6 +143,13 @@ pub(crate) fn check_credentials() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// macOS starts children with posix_spawn, which needs no probe.
+#[cfg(not(target_os = "linux"))]
+fn probe_clone() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
 fn probe_clone() -> bool {
     let mut pidfd = -1i32;
     let mut args = [0u64; 11];
@@ -167,7 +194,11 @@ fn probe_clone() -> bool {
 pub(crate) fn probe() -> io::Result<()> {
     check_credentials().map_err(io::Error::other)?;
     let openat2 = File::open(".").and_then(|root| {
-        hirsel_core_net::unix::open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)
+        hirsel_core_net::unix::open_beneath(
+            root.as_fd(),
+            c".",
+            hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY,
+        )
     });
     if openat2.is_err() || !probe_clone() || hirsel_core_net::exec::probe_seals().is_err() {
         return Err(io::Error::other(EXEC_HOST));

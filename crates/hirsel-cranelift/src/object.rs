@@ -10,6 +10,10 @@ pub(crate) fn finish(product: ObjectProduct) -> Result<Vec<u8>, String> {
 }
 
 fn relax_got_loads(bytes: &mut [u8]) -> object::read::Result<()> {
+    // Only x86-64 ELF has relaxable GOT loads; a Mach-O object is final.
+    if object::FileKind::parse(&*bytes)? != object::FileKind::Elf64 {
+        return Ok(());
+    }
     let endian = LittleEndian;
     let file = object::read::elf::ElfFile64::<LittleEndian>::parse(&*bytes)?;
     if file.elf_header().e_machine(endian) != elf::EM_X86_64 {

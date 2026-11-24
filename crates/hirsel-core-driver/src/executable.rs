@@ -24,6 +24,7 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
                 // SAFETY: unshare(CLONE_FILES) gives this thread a private copy
                 // of the descriptor table; no memory is involved, and the table
                 // is released when the thread exits.
+                #[cfg(target_os = "linux")]
                 if unsafe { libc::unshare(libc::CLONE_FILES) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -49,12 +50,17 @@ mod tests {
     #[test]
     fn a_written_executable_runs_while_another_thread_forks() {
         let dir = tempfile::tempdir().unwrap();
-        let program = std::fs::read("/bin/true").unwrap();
+        // macOS kills a copy of a platform binary such as /usr/bin/true.
+        let program = if cfg!(target_os = "macos") {
+            b"#!/bin/sh\nexit 0\n".to_vec()
+        } else {
+            std::fs::read("/bin/true").unwrap()
+        };
         let stop = AtomicBool::new(false);
         let busy = std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !stop.load(Ordering::Relaxed) {
-                    Command::new("/bin/true").status().unwrap();
+                    Command::new("true").status().unwrap();
                 }
             });
             let mut busy = 0;

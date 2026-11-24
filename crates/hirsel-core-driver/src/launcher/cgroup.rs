@@ -22,6 +22,10 @@ fn membership(path: &Path) -> io::Result<PathBuf> {
 /// The default uses a launcher-owned directory in the current delegated cgroup.
 /// It has a stable name so a restart in the same delegation can recover it.
 pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
+    // macOS has no cgroups: a run's session stands in for its group.
+    if cfg!(not(target_os = "linux")) {
+        return Ok(None);
+    }
     let parent = match membership(Path::new("/proc/self/cgroup")) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
@@ -49,6 +53,15 @@ pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
 
 /// A launcher with cgroups owns the orphans it kills, so it can reap them before
 /// reporting Ended. The launcher runs in its own process.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn own_orphans() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "adopting orphans needs a Linux child subreaper",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn own_orphans() -> io::Result<()> {
     // SAFETY: this prctl only changes who adopts this process's descendants.
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {

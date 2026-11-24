@@ -21,12 +21,12 @@ pub struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts) -> Self {
-        Self::build(s, Some(layouts), aarch64(object), true)
+        Self::build(s, Some(layouts), aarch64(object), call_conv(object), true)
     }
     /// A Hirsel entry with no scalar-record parameter or result rewrites.
     /// Scalars, pointers and a destination follow the same ABI as unit code.
     pub fn foreign(s: &c::Signature, object: &ObjectModule) -> Self {
-        Self::build(s, None, aarch64(object), true)
+        Self::build(s, None, aarch64(object), call_conv(object), true)
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -38,6 +38,7 @@ impl Signature {
             },
             None,
             aarch64(object),
+            call_conv(object),
             false,
         );
         // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
@@ -50,7 +51,13 @@ impl Signature {
         }
         signature
     }
-    fn build(s: &c::Signature, layouts: Option<&CallLayouts>, arm: bool, context: bool) -> Self {
+    fn build(
+        s: &c::Signature,
+        layouts: Option<&CallLayouts>,
+        arm: bool,
+        conv: CallConv,
+        context: bool,
+    ) -> Self {
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
         let mut results: Vec<Ty> = if let Some(record) = record {
@@ -65,7 +72,7 @@ impl Signature {
         if context {
             results.push(Ty::Scalar(Scalar::U8));
         }
-        let mut clif = ir::Signature::new(CallConv::SystemV);
+        let mut clif = ir::Signature::new(conv);
         let mut offsets = Vec::new();
         let mut size: u32 = 0;
         let mut align = 1;
@@ -313,6 +320,11 @@ fn result_flags(t: ir::Type) -> MemFlags {
 /// The module owns one target; every imported/generated C signature uses it.
 pub(super) fn aarch64(object: &ObjectModule) -> bool {
     object.isa().name() == "aarch64"
+}
+
+/// The target's C convention: System V on Linux, Apple's AAPCS64 on macOS.
+pub(super) fn call_conv(object: &ObjectModule) -> CallConv {
+    object.isa().default_call_conv()
 }
 
 pub(super) fn record_place(b: &mut FunctionBuilder<'_>, record: ScalarRecord) -> Value {

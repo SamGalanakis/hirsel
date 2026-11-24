@@ -93,7 +93,7 @@ impl Relay {
     fn install() -> io::Result<Self> {
         // SAFETY: eventfd returns a new descriptor. A blocking reader wakes on
         // the first signal or shutdown. These are the only two possible writes.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+        let fd = unsafe { hirsel_core_net::sys::eventfd(0, hirsel_core_net::sys::EFD_CLOEXEC) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -189,10 +189,11 @@ fn notify(fd: i32) {
     // SAFETY: write is async-signal-safe. Restore the interrupted thread's
     // errno even if the write was interrupted by another signal.
     unsafe {
-        let errno = libc::__errno_location();
+        let errno = hirsel_core_net::sys::errno_location();
         let saved = *errno;
         let one = 1u64;
-        while libc::write(fd, (&one as *const u64).cast(), size_of::<u64>()) < 0
+        while hirsel_core_net::sys::eventfd_write(fd, (&one as *const u64).cast(), size_of::<u64>())
+            < 0
             && *errno == libc::EINTR
         {}
         *errno = saved;
@@ -203,7 +204,14 @@ fn relay(fd: i32, state: &Mutex<State>) {
     let mut value = 0u64;
     loop {
         // SAFETY: installation owns the eventfd until this thread joins.
-        if unsafe { libc::read(fd, (&mut value as *mut u64).cast(), size_of::<u64>()) } > 0 {
+        if unsafe {
+            hirsel_core_net::sys::eventfd_read(
+                fd,
+                (&mut value as *mut u64).cast(),
+                size_of::<u64>(),
+            )
+        } > 0
+        {
             break;
         }
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {

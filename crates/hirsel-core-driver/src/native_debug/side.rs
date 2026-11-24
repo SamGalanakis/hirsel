@@ -317,7 +317,9 @@ pub(crate) fn bind<'a>(
 ) -> Result<Vec<u8>, String> {
     let architecture = match hirsel_core_layout::Target::from_triple(target) {
         Some(hirsel_core_layout::Target::X86_64Linux) => object::Architecture::X86_64,
-        Some(hirsel_core_layout::Target::Aarch64Linux) => object::Architecture::Aarch64,
+        Some(
+            hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin,
+        ) => object::Architecture::Aarch64,
         None => return Err(format!("no native debug target {target}")),
     };
     let mut object = debug_object(architecture);
@@ -374,11 +376,15 @@ pub(crate) fn bind_linked<'a>(
 ) -> Result<Vec<u8>, String> {
     use object::{Object as _, ObjectSymbol as _};
     let file = object::File::parse(image).map_err(error)?;
+    // Mach-O C names carry a leading underscore, and Mach-O code is placed
+    // function by function: its rows name the functions themselves.
+    let macho = file.format() == object::BinaryFormat::MachO;
     let symbols = file
         .symbols()
         .filter_map(|symbol| {
             let name = symbol.name().ok()?;
-            (name.starts_with("__hirsel_debug_") && symbol.section_index().is_some())
+            let name = if macho { name.strip_prefix('_')? } else { name };
+            ((macho || name.starts_with("__hirsel_debug_")) && symbol.section_index().is_some())
                 .then_some((name, symbol.address()))
         })
         .collect::<FxHashMap<_, _>>();

@@ -278,15 +278,19 @@ int main(int argc, char **argv) {
             .arg(include)
             .arg(source)
             .arg(&options.runtime)
-            .args([
-                "-lgcc_s",
-                "-lpthread",
-                "-ldl",
-                "-lm",
-                "-lrt",
-                "-lutil",
-                "-o",
-            ])
+            .args(crate::tool_inputs::support_libs(&options.target))
+            .args(if cfg!(target_os = "macos") {
+                let mut args = crate::tool_inputs::darwin_sdk_args().unwrap();
+                args.extend(
+                    crate::tool_inputs::darwin_system_libs()
+                        .iter()
+                        .map(|a| a.to_string()),
+                );
+                args
+            } else {
+                Vec::new()
+            })
+            .arg("-o")
             .arg(&options.output),
     )
     .unwrap();
@@ -439,7 +443,9 @@ fn end_samples_listener_before_watch() {
     let address = rig.bind();
     rig.ask(launch(0, &work, Mode::Serving(1, serve(1, None))));
     let waiting = TcpStream::connect(address).unwrap();
-    assert!(rig.idle(Duration::from_millis(100)).is_empty());
+    // Let the shell install its trap first: a macOS launch (fork, a private
+    // image copy, then sh) can take more than 100ms.
+    assert!(rig.idle(Duration::from_millis(500)).is_empty());
     rig.ask(Request::Stop(serving(1)));
     let end = End {
         status: Status::Code(0),
@@ -450,7 +456,7 @@ fn end_samples_listener_before_watch() {
         rig.until(|e| ended(e, &serving(1))),
         [Event::Ended(serving(1), end)]
     );
-    assert!(rig.idle(Duration::from_millis(100)).is_empty());
+    assert!(rig.idle(Duration::from_millis(1000)).is_empty());
     assert_eq!(rig.inventory().1, [group()]);
     drop(waiting);
 
@@ -473,7 +479,7 @@ fn end_samples_listener_before_watch() {
     ));
     let _client = TcpStream::connect(address).unwrap();
     assert_eq!(rig.until(|e| !e.is_empty()), [Event::Arrived(group())]);
-    assert!(rig.idle(Duration::from_millis(100)).is_empty());
+    assert!(rig.idle(Duration::from_millis(1000)).is_empty());
     assert_eq!(rig.inventory().1, [group()]);
 }
 
@@ -587,7 +593,20 @@ fn launcher_restart_stateless() {
     assert!(Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).is_err());
     drop(host);
     drop(launcher);
-    let mut successor = Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).unwrap();
+    // A child another test forks shares the lock's descriptor until it execs,
+    // so the lock can outlive its launcher by that long.
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut successor = loop {
+        match Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))) {
+            Ok(successor) => break successor,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end =>
+            {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
     successor.handle(Request::Hello);
     successor.handle(Request::Bind(
         group(),
@@ -663,10 +682,17 @@ fn collect_reservation_handoff() {
 fn child_mode_authority() {
     // Each stand-in writes its inherited descriptors 3-9 with what they are, then its
     // arguments, to fds-<name>.
+    // macOS has no /proc: /dev/fd names each descriptor by its kind alone.
     let report = |name: &str| {
-        format!(
-            "out=\"$PWD/fds-{name}\"; : > \"$out\"\nfor n in 3 4 5 6 7 8 9; do [ -e /proc/$$/fd/$n ] && echo \"$n $(readlink /proc/$$/fd/$n)\" >> \"$out\"; done\necho \"args $*\" >> \"$out\""
-        )
+        if cfg!(target_os = "linux") {
+            format!(
+                "out=\"$PWD/fds-{name}\"; : > \"$out\"\nfor n in 3 4 5 6 7 8 9; do [ -e /proc/$$/fd/$n ] && echo \"$n $(readlink /proc/$$/fd/$n)\" >> \"$out\"; done\necho \"args $*\" >> \"$out\""
+            )
+        } else {
+            format!(
+                "out=\"$PWD/fds-{name}\"; : > \"$out\"\nfor n in 3 4 5 6 7 8 9; do if [ -S /dev/fd/$n ]; then echo \"$n socket:[]\"; elif [ -p /dev/fd/$n ]; then echo \"$n pipe:[]\"; elif [ -e /dev/fd/$n ]; then echo \"$n file\"; fi >> \"$out\"; done\necho \"args $*\" >> \"$out\""
+            )
+        }
     };
     let scripts = [
         format!("{}\n{SLEEP}", report("serving")),
@@ -682,13 +708,16 @@ fn child_mode_authority() {
     rig.launcher
         .listen(UnixListener::bind(work.join("control")).unwrap())
         .unwrap();
-    let control = {
+    // Only Linux names a socket's identity; the count of descriptors stands in.
+    let control = if cfg!(target_os = "linux") {
         let fd = rig.launcher.control.as_ref().unwrap().as_raw_fd();
         fs::read_link(format!("/proc/self/fd/{fd}"))
             .unwrap()
             .to_str()
             .unwrap()
             .to_owned()
+    } else {
+        "the launcher's control socket".to_owned()
     };
     let held = |name: &str| -> Vec<String> {
         fs::read_to_string(work.join(format!("fds-{name}")))

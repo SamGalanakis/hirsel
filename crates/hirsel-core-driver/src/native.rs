@@ -25,8 +25,12 @@ pub(crate) mod std_release;
 use cleanup::result_cleanup;
 use link::direct_link;
 
-pub const TARGET: &str = "x86_64-unknown-linux-gnu";
-use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
+/// The target the driver's native tests build for.
+pub const TARGET: &str = if cfg!(target_os = "macos") {
+    "aarch64-apple-darwin"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Backend {
     Cranelift,
@@ -1490,6 +1494,12 @@ pub fn grant_kind(name: &str) -> Option<u8> {
     recipe_build::kind(name)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
+    redirected(command)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     let result = command
         .output()
@@ -1502,6 +1512,44 @@ pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
         )));
     }
     Ok(result.stdout)
+}
+
+/// [`command`] on macOS. A link holds one descriptor per object, so pipes
+/// for the tool's output can land above OPEN_MAX, where posix_spawn refuses
+/// to place them (EBADF). The tool is started through `/bin/sh` with its
+/// descriptors inherited, and the shell itself opens /dev/null and two files
+/// for its standard streams before it execs the tool.
+#[cfg(target_os = "macos")]
+fn redirected(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
+    let streams = tempfile::tempdir()?;
+    let (out, err) = (streams.path().join("stdout"), streams.path().join("stderr"));
+    let mut shell = Command::new("/bin/sh");
+    shell
+        .env_clear()
+        .envs(command.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .arg("-c")
+        .arg(r#"out=$1 err=$2; shift 2; exec "$@" </dev/null >"$out" 2>"$err""#)
+        .arg("sh")
+        .arg(&out)
+        .arg(&err)
+        .arg(command.get_program())
+        .args(command.get_args());
+    if let Some(directory) = command.get_current_dir() {
+        shell.current_dir(directory);
+    }
+    let status = shell
+        .status()
+        .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
+    if !status.success() {
+        return Err(NativeStop::Link(format!(
+            "{command:?}: {status}\n{}",
+            String::from_utf8_lossy(&std::fs::read(&err).unwrap_or_default())
+        )));
+    }
+    Ok(std::fs::read(&out)?)
 }
 
 /// Raise the soft descriptor limit to the hard limit once, as Go does since
@@ -1642,7 +1690,7 @@ fn link_objects(
 ) -> Result<Linked, NativeStop> {
     let revision = hirsel_core_ir::code_revision(address);
     let support_libs = match &options.link {
-        Link::Driver(_) => DIRECT_LINK_SUPPORT_LIBS,
+        Link::Driver(_) => crate::tool_inputs::support_libs(&options.target),
         Link::Installed(_) => &[],
     };
     // The executable key includes the mode-specific lld options.
@@ -1756,6 +1804,11 @@ fn link_objects(
         // unit is stored under their key; the rest are linked one by one.
         #[cfg(test)]
         let image = image.filter(|_| !SEPARATE_IMAGE.get());
+        // ld64 has no `ld -r` unit to reuse and no /proc to open descriptors
+        // through: a Darwin link names every checked object by its path.
+        let darwin =
+            hirsel_core_layout::Target::from_triple(&options.target).is_some_and(|t| t.is_darwin());
+        let image = image.filter(|_| !darwin);
         let (in_image, separate): (Vec<&ObjectProduct>, Vec<&ObjectProduct>) = objects
             .iter()
             .partition(|o| image.is_some_and(|image| image.holds(&o.path)));
@@ -1796,12 +1849,20 @@ fn link_objects(
         let pid = std::process::id();
         let mut inputs = Vec::with_capacity(objects.len() + 4);
         inputs.push(entry.clone());
-        inputs.extend(unit.iter().map(|(_, file)| file).chain(&files).map(|file| {
-            PathBuf::from(format!(
-                "/proc/{pid}/fd/{}",
-                std::os::fd::AsRawFd::as_raw_fd(file)
-            ))
-        }));
+        // A Darwin link names objects by path, so the checked descriptors
+        // close now: thousands held open would put the linker's pipes past
+        // the descriptor numbers posix_spawn accepts.
+        let files = if darwin { Vec::new() } else { files };
+        if darwin {
+            inputs.extend(separate.iter().map(|o| o.path.clone()));
+        } else {
+            inputs.extend(unit.iter().map(|(_, file)| file).chain(&files).map(|file| {
+                PathBuf::from(format!(
+                    "/proc/{pid}/fd/{}",
+                    std::os::fd::AsRawFd::as_raw_fd(file)
+                ))
+            }));
+        }
         // Each input is named by the key its bytes are a function of: the
         // unit by its key, an object by its identity and read check.
         let keys: Vec<_> = unit
@@ -1825,7 +1886,9 @@ fn link_objects(
             std::fs::write(&entry, &bytes)?;
             Ok(bytes)
         };
-        if options.debug_lines {
+        // ld64 never copies DWARF into an executable: a Darwin build's lines
+        // reach the debugger through the .dSYM bundle written with it.
+        if options.debug_lines && !darwin {
             let debug = crate::native_debug::bind_side_products(
                 debug_rows(),
                 &sources,
@@ -1840,7 +1903,8 @@ fn link_objects(
         }
         // A resident compiler links a development edit by patching its last
         // link's executable when it can (crate::incremental_link).
-        let incremental = !options.optimize && !options.debug_lines && crate::resident::serving();
+        let incremental =
+            !darwin && !options.optimize && !options.debug_lines && crate::resident::serving();
         let patched = std::cell::Cell::new(false);
         let link = |recipe: &crate::tool_inputs::LinkRecipe| {
             let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
@@ -1893,7 +1957,9 @@ fn link_objects(
                 }
                 Ok::<_, NativeStop>(image)
             };
-            if options.optimize && !runtime_sources.items.is_empty() {
+            // ld64 keeps no relocations in its output, so a Darwin link
+            // cannot probe for the live sites: it keeps every site's position.
+            if options.optimize && !darwin && !runtime_sources.items.is_empty() {
                 // The probe defines the same symbols and references. Only the
                 // source payload changes between the two links.
                 let probe = run(Some(&BTreeSet::new()), true)?;
@@ -2253,7 +2319,12 @@ uint64_t hfl_freed(void) { return released; }
             "hfl_make stack () -> new ffi_laws@1/laws/Obj\n" \
             "hfl_free waits (take ffi_laws@1/laws/Obj) -> ()\n" \
             "hfl_freed stack () -> u64\n"
-__attribute__((used, section(".hirsel_abi")))
+#ifdef __APPLE__
+#define HIRSEL_TEST_ABI_SECTION "__TEXT,__hirsel_abi"
+#else
+#define HIRSEL_TEST_ABI_SECTION ".hirsel_abi"
+#endif
+__attribute__((used, section(HIRSEL_TEST_ABI_SECTION)))
 static const char abi[sizeof(ABI) - 1] = ABI;
 "#,
         )
@@ -2464,7 +2535,7 @@ fn f5 = n5 g5 extern
             direct_link(
                 &recipe,
                 &inputs,
-                DIRECT_LINK_SUPPORT_LIBS,
+                crate::tool_inputs::support_libs(TARGET),
                 &output,
                 false,
                 false,

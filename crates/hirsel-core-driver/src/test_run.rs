@@ -54,7 +54,7 @@ impl Runner {
         let interpreter = match hirsel_core_layout::Target::from_triple(target) {
             Some(hirsel_core_layout::Target::Aarch64Linux) => "lib/ld-linux-aarch64.so.1",
             Some(hirsel_core_layout::Target::X86_64Linux) => "lib64/ld-linux-x86-64.so.2",
-            None => {
+            Some(hirsel_core_layout::Target::Aarch64Darwin) | None => {
                 return Err(io::Error::other(format!(
                     "unsupported execution target {target}"
                 )));
@@ -276,6 +276,13 @@ fn test_key(
     .ok()
 }
 
+/// Hosts without CPU affinity run as many jobs as they have CPUs.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
+    std::thread::available_parallelism()
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     let mut mask = vec![0usize; 16];
     loop {

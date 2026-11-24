@@ -39,9 +39,18 @@ pub(super) fn emit(
     let (allocated, stopped) = f.if_nonzero(args);
     f.b.switch_to_block(stopped);
     let message = f.string(b"run stop: HostMemory\n")?;
+    // Darwin's libc names its stderr stream `__stderrp`.
+    let stderr_name =
+        if hirsel_core_layout::Target::from_triple(&f.object.isa().triple().to_string())
+            .is_some_and(|t| t.is_darwin())
+        {
+            "__stderrp"
+        } else {
+            "stderr"
+        };
     let stderr = f
         .object
-        .declare_data("stderr", Linkage::Import, true, false)
+        .declare_data(stderr_name, Linkage::Import, true, false)
         .map_err(error)?;
     let stderr_address = f.address(stderr);
     let stderr = f.load(I64, stderr_address, 0);

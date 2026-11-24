@@ -383,6 +383,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+        Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
     };
     if memcheck && target == Target::X86_64Linux {
         // The pool's system loader is stripped; use the declared symbol-bearing
@@ -455,6 +456,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
                 .arg(dir.join("test"));
             command
         }
+        Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
     };
     output(&mut executable)
         .lines()

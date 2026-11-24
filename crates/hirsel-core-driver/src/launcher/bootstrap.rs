@@ -137,10 +137,11 @@ impl Bootstrap {
             (above_launch_slots(libc::STDERR_FILENO)?, 2),
             (above_launch_slots(self.operator.as_raw_fd())?, OPERATOR_FD),
         ];
-        let (pid, pidfd) = spawn::start(&command, &self.cwd, &slots, None, false)?;
+        // The bootstrap host runs by path with no pinned image to keep.
+        let (pid, pidfd, _) = spawn::start(&command, &self.cwd, &slots, None, false)?;
         let mut watch = epoll.watch(pidfd.as_raw_fd());
         if let Err(error) = watch.set(READ) {
-            let _ = send(pidfd.as_raw_fd(), libc::SIGKILL);
+            let _ = send(pid, pidfd.as_raw_fd(), libc::SIGKILL);
             let _ = wait_pid(pid);
             return Err(error);
         }
@@ -154,7 +155,11 @@ impl Bootstrap {
     }
 
     /// One launcher turn: reap an ended host and schedule it, and start one that is due.
-    pub(super) fn turn(&mut self, epoll: &Epoll, events: &[libc::epoll_event]) -> io::Result<()> {
+    pub(super) fn turn(
+        &mut self,
+        epoll: &Epoll,
+        events: &[hirsel_core_net::sys::epoll_event],
+    ) -> io::Result<()> {
         if let Some(running) = &self.running
             && running.watch.fired(events)
         {
@@ -190,13 +195,33 @@ impl Bootstrap {
 impl Drop for Bootstrap {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() {
-            let _ = send(running.pidfd.as_raw_fd(), libc::SIGKILL);
+            let _ = send(running.pid, running.pidfd.as_raw_fd(), libc::SIGKILL);
             let _ = wait_pid(running.pid);
         }
     }
 }
 
 /// The PID of the process at the other end of `stream`.
+#[cfg(target_os = "macos")]
+pub(super) fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<libc::pid_t> {
+    const SOL_LOCAL: i32 = 0;
+    const LOCAL_PEERPID: i32 = 2;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: pid and len are live, sized for LOCAL_PEERPID.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(pid)
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<libc::pid_t> {
     let mut cred = libc::ucred {
         pid: 0,

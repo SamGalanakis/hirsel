@@ -728,7 +728,7 @@ impl Live {
 
     fn worker(&self) -> LiveWorker {
         // SAFETY: gettid has no operands.
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
+        let tid = unsafe { hirsel_core_net::sys::gettid() } as u64;
         super::prof_stack::prepare();
         LiveWorker {
             sampler: Sampler::new(prof::now_ns() ^ tid.wrapping_mul(0xff51_afd7_ed55_8ccd)),

@@ -370,6 +370,9 @@ mod sites_tests;
 #[cfg(feature = "prof")]
 pub(crate) mod prof;
 
+#[cfg(all(feature = "prof", target_os = "macos"))]
+mod prof_sampler;
+
 #[cfg(feature = "prof")]
 #[unsafe(no_mangle)]
 pub static hirsel_core_prof_runtime: u8 = 1;

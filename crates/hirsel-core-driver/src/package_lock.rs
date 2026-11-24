@@ -6,7 +6,6 @@ use crate::package_workspace::Workspace;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 const NAME: &str = "hirsel.lock";
@@ -317,7 +316,7 @@ impl Lock {
 
     pub(crate) fn commit(self, workspace: &Workspace) -> std::io::Result<()> {
         if let Some((text, message)) = self.pending {
-            let directory = PathBuf::from(format!("/proc/self/fd/{}", workspace.root.as_raw_fd()));
+            let directory = crate::package_files::fd_path(&workspace.root)?;
             atomic_write(&directory.join(NAME), text.as_bytes())?;
             eprintln!("hirsel: {message}");
         }
@@ -346,12 +345,12 @@ pub(crate) struct PackOutput {
 }
 
 impl PackOutput {
-    fn path(&self) -> PathBuf {
-        PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd())).join(&self.name)
+    fn path(&self) -> std::io::Result<PathBuf> {
+        Ok(crate::package_files::fd_path(&self.directory)?.join(&self.name))
     }
 
     pub(crate) fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
-        atomic_write(&self.path(), bytes)
+        atomic_write(&self.path()?, bytes)
     }
 
     pub(crate) fn stage(
@@ -371,7 +370,7 @@ impl PackOutput {
         let directory = open_directory(parent)?;
         let parent = FileId::of(&directory.metadata()?);
         let output = Self { directory, name };
-        let identity = output.path().metadata().ok().map(|meta| FileId::of(&meta));
+        let identity = output.path()?.metadata().ok().map(|meta| FileId::of(&meta));
         let store = &resolution.store;
         let existing_store_alias = identity
             .map(|id| store.identities_include(id))

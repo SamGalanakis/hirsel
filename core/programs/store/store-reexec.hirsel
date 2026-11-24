@@ -310,7 +310,7 @@ fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) 
 }
 
 pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
-    match take replay_source(db, b, v)? {
+    match replay_source(db, b, v)? {
         Ok(take source) => replay_run(db, source, plan, failed, body),
         Error(reason) => Ok(Unknown(reason)),
     }

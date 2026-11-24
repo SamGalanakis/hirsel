@@ -1065,7 +1065,7 @@ impl Session {
         if left.is_zero() {
             return Err("timed out waiting for the server".into());
         }
-        self.stream.set_read_timeout(Some(left))?;
+        hirsel_core_net::sys::timeout_set(self.stream.set_read_timeout(Some(left)))?;
         let mut buffer = [0u8; 65536];
         match self.stream.read(&mut buffer) {
             Ok(0) => Err("server closed the connection".into()),

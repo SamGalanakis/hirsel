@@ -364,7 +364,11 @@ fn write_message(stream: &mut UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Re
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
         std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(cmsg).cast(), fds.len());
-        libc::sendmsg(stream.as_raw_fd(), &header, libc::MSG_NOSIGNAL)
+        libc::sendmsg(
+            stream.as_raw_fd(),
+            &header,
+            hirsel_core_net::sys::MSG_NOSIGNAL,
+        )
     };
     if sent < 0 {
         return Err(io::Error::last_os_error());
@@ -388,7 +392,11 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
         header.msg_iovlen = 1;
         header.msg_control = control.as_mut_ptr().cast();
         header.msg_controllen = control.len() as _;
+        #[cfg(target_os = "linux")]
         let got = libc::recvmsg(stream.as_raw_fd(), &mut header, libc::MSG_CMSG_CLOEXEC);
+        // Without MSG_CMSG_CLOEXEC each received descriptor is marked below.
+        #[cfg(not(target_os = "linux"))]
+        let got = libc::recvmsg(stream.as_raw_fd(), &mut header, 0);
         if got > 0 {
             let mut cmsg = libc::CMSG_FIRSTHDR(&header);
             while !cmsg.is_null() {
@@ -397,7 +405,10 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
                     let n = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
                         / std::mem::size_of::<RawFd>();
                     for i in 0..n {
-                        fds.push(OwnedFd::from_raw_fd(data.add(i).read_unaligned()));
+                        let fd = data.add(i).read_unaligned();
+                        #[cfg(not(target_os = "linux"))]
+                        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        fds.push(OwnedFd::from_raw_fd(fd));
                     }
                 }
                 cmsg = libc::CMSG_NXTHDR(&header, cmsg);
@@ -421,10 +432,7 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
 /// long the directory's own path is: through the descriptor `held` keeps open.
 fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::File)> {
     let held = std::fs::File::open(directory)?;
-    Ok((
-        PathBuf::from(format!("/proc/self/fd/{}/{name}", held.as_raw_fd())),
-        held,
-    ))
+    Ok((crate::package_files::fd_path(&held)?.join(name), held))
 }
 
 /// Where the resident compiler of a `build` or `run` request listens: the

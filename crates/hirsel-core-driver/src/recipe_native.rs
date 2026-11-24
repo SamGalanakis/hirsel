@@ -1879,7 +1879,7 @@ impl Publication {
                 tools.runtime,
                 tools.environment,
                 link.identity,
-                DIRECT_LINK_SUPPORT_LIBS,
+                crate::tool_inputs::support_libs(TARGET),
                 options.debug_lines,
                 options.recording,
                 &options.replay,

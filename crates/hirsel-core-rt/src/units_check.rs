@@ -885,14 +885,14 @@ pub(crate) mod seam {
     #[track_caller]
     pub(crate) unsafe fn epoll_wait(
         epfd: i32,
-        evs: *mut libc::epoll_event,
+        evs: *mut hirsel_core_net::sys::epoll_event,
         max: i32,
         timeout: i32,
     ) -> i32 {
         let at = Location::caller();
         let Some(m) = me() else {
             // SAFETY: the caller's contract.
-            return unsafe { libc::epoll_wait(epfd, evs, max, timeout) };
+            return unsafe { hirsel_core_net::sys::epoll_wait(epfd, evs, max, timeout) };
         };
         point(
             m,
@@ -912,8 +912,8 @@ pub(crate) mod seam {
             if st.kernel.counter > 0 && n < max as usize {
                 // SAFETY: n < max.
                 unsafe {
-                    *evs.add(n) = libc::epoll_event {
-                        events: libc::EPOLLIN as u32,
+                    *evs.add(n) = hirsel_core_net::sys::epoll_event {
+                        events: hirsel_core_net::sys::EPOLLIN as u32,
                         u64: super::super::WAKE_TAG,
                     }
                 };
@@ -925,7 +925,7 @@ pub(crate) mod seam {
             {
                 // SAFETY: n < max.
                 unsafe {
-                    *evs.add(n) = libc::epoll_event {
+                    *evs.add(n) = hirsel_core_net::sys::epoll_event {
                         events: ev,
                         u64: tag,
                     }
@@ -1200,7 +1200,7 @@ fn edge(unit: u32, ident: u64) {
     let mut st = lock();
     st.kernel.edges.push_back((
         (u64::from(unit) << hirsel_core_net::SHARED_UNIT_SHIFT) | ident,
-        libc::EPOLLIN as u32,
+        hirsel_core_net::sys::EPOLLIN as u32,
     ));
     st.wake_epoll();
 }
@@ -2122,11 +2122,23 @@ mod tests {
         let mut inconclusive = 0u64;
         let cpus = {
             // SAFETY: zeroed is the empty set; the call fills it.
-            let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) };
-            (0..libc::CPU_SETSIZE as usize)
-                .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
-                .collect::<Vec<_>>()
+            let mut set: hirsel_core_net::sys::cpu_set_t = unsafe { std::mem::zeroed() };
+            unsafe {
+                hirsel_core_net::sys::sched_getaffinity(
+                    0,
+                    size_of::<hirsel_core_net::sys::cpu_set_t>(),
+                    &mut set,
+                )
+            };
+            let pinned = (0..hirsel_core_net::sys::CPU_SETSIZE as usize)
+                .filter(|&c| unsafe { hirsel_core_net::sys::CPU_ISSET(c, &set) })
+                .collect::<Vec<_>>();
+            // Without affinity (macOS) every CPU is a candidate.
+            if pinned.is_empty() {
+                (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect()
+            } else {
+                pinned
+            }
         };
         let dir = std::env::temp_dir().join(format!("hirsel-units-check-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2206,9 +2218,13 @@ mod tests {
                 // SAFETY: a one-CPU set for this process's main thread; the
                 // checker's threads inherit it.
                 unsafe {
-                    let mut set: libc::cpu_set_t = std::mem::zeroed();
-                    libc::CPU_SET(cpu, &mut set);
-                    libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
+                    let mut set: hirsel_core_net::sys::cpu_set_t = std::mem::zeroed();
+                    hirsel_core_net::sys::CPU_SET(cpu, &mut set);
+                    hirsel_core_net::sys::sched_setaffinity(
+                        0,
+                        size_of::<hirsel_core_net::sys::cpu_set_t>(),
+                        &set,
+                    );
                 }
             }
             let seed = std::env::var("HIRSEL_CHECK_SEED").unwrap().parse().unwrap();

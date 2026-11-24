@@ -3,7 +3,12 @@
 
 #include <errno.h>
 #include <pthread.h>
+#ifdef __APPLE__
+/* macOS has no unnamed POSIX semaphores. */
+#include <dispatch/dispatch.h>
+#else
 #include <semaphore.h>
+#endif
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,11 +23,29 @@ static uint64_t freed;
 static uint64_t held;
 static bool gated;
 static pthread_once_t semaphore_once = PTHREAD_ONCE_INIT;
+#ifdef __APPLE__
+static dispatch_semaphore_t semaphore;
+
+static void initialize_semaphore(void) {
+    semaphore = dispatch_semaphore_create(0);
+    if (semaphore == NULL) abort();
+}
+
+static int sem_wait(dispatch_semaphore_t *s) {
+    return (int)dispatch_semaphore_wait(*s, DISPATCH_TIME_FOREVER);
+}
+
+static int sem_post(dispatch_semaphore_t *s) {
+    dispatch_semaphore_signal(*s);
+    return 0;
+}
+#else
 static sem_t semaphore;
 
 static void initialize_semaphore(void) {
     if (sem_init(&semaphore, 0, 0) != 0) abort();
 }
+#endif
 
 static void await_open(void) {
     pthread_once(&semaphore_once, initialize_semaphore);

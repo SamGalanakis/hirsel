@@ -373,9 +373,7 @@ fn request(
     };
     let layer = std::mem::take(&mut driver.layers);
     Answer {
-        installed: layer
-            .shape
-            .map(|_| meter.result.counters.declared_installs == 1),
+        installed: layer.shape.map(|_| layer.installed),
         layer,
         class: meter.result.layer_class,
         ..answer(&product, req, options.as_ref())

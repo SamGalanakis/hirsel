@@ -296,14 +296,12 @@ fn exchange(
     deadline: Option<u64>,
 ) -> Result<(Zeroizing<Vec<u8>>, std::ops::Range<usize>), Outcome> {
     let mut stream = connect(&[SocketAddr::V4(at)], deadline)?;
-    stream
-        .set_write_timeout(remaining(deadline)?)
+    hirsel_core_net::sys::timeout_set(stream.set_write_timeout(remaining(deadline)?))
         .map_err(|e| io_failure(&e))?;
     stream.write_all(request).map_err(|e| io_failure(&e))?;
     let mut reply = Reply::new();
     while !reply.whole() {
-        stream
-            .set_read_timeout(remaining(deadline)?)
+        hirsel_core_net::sys::timeout_set(stream.set_read_timeout(remaining(deadline)?))
             .map_err(|e| io_failure(&e))?;
         match stream.read(reply.room()?) {
             Ok(0) => break,
@@ -639,7 +637,7 @@ fn tls_exchange(
     let mut used = 0;
     let mut outgoing = Vec::new();
     let send = |tcp: &mut TcpStream, outgoing: &mut Vec<u8>| -> Result<(), Outcome> {
-        tcp.set_write_timeout(remaining(deadline)?)
+        hirsel_core_net::sys::timeout_set(tcp.set_write_timeout(remaining(deadline)?))
             .map_err(|e| io_failure(&e))?;
         tcp.write_all(outgoing).map_err(|e| io_failure(&e))?;
         outgoing.clear();
@@ -650,7 +648,7 @@ fn tls_exchange(
         if *used == incoming.len() {
             return Err(tls(4));
         }
-        tcp.set_read_timeout(remaining(deadline)?)
+        hirsel_core_net::sys::timeout_set(tcp.set_read_timeout(remaining(deadline)?))
             .map_err(|e| io_failure(&e))?;
         match tcp.read(&mut incoming[*used..]) {
             Ok(0) => return Ok(false),

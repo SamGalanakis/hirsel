@@ -230,6 +230,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 let compiler = match target {
                     Target::X86_64Linux => llvm_prefix.join("bin/clang"),
                     Target::Aarch64Linux => arm_cc.clone(),
+                    Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
                 };
                 run(Command::new(compiler)
                     .arg(dir.join("probe.c"))
@@ -242,6 +243,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                         .arg("-L")
                         .arg(&sysroot)
                         .arg(dir.join("probe"))),
+                    Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
                 }
             }
         }
@@ -321,6 +323,7 @@ int main(void) {{
                 let compiler = match target {
                     Target::X86_64Linux => prefix.join("bin/clang"),
                     Target::Aarch64Linux => arm_cc.clone(),
+                    Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
                 };
                 run(Command::new(compiler)
                     .arg("-O0")
@@ -337,6 +340,7 @@ int main(void) {{
                         .arg("-L")
                         .arg(&sysroot)
                         .arg(dir.join("probe"))),
+                    Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
                 }
             }
         }

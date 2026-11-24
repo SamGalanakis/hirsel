@@ -1,17 +1,45 @@
 //! Executed precondition for the exact tests that require the Linux OS Dir provider.
-use std::{
-    ffi::{c_char, c_int, c_long, c_void},
-    os::fd::{AsRawFd, FromRawFd},
-};
+#[cfg(target_os = "linux")]
+use std::ffi::{c_char, c_int, c_long, c_void};
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct OpenHow {
     flags: u64,
     mode: u64,
     resolve: u64,
 }
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
 }
+
+/// macOS resolves beneath a directory with open flags; the same shim the
+/// Dir provider uses must refuse nothing here.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn require() {
+    use hirsel_core_net::sys;
+    let directory = std::fs::File::open(".").expect("openat2 precondition: open test directory");
+    // SAFETY: a pinned C pathname and a live directory descriptor.
+    let fd = unsafe {
+        sys::openat2(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            0,
+            0,
+            sys::RESOLVE_BENEATH | sys::RESOLVE_NO_MAGICLINKS,
+        )
+    };
+    assert!(
+        fd >= 0,
+        "requires opening beneath a directory: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: a successful open transfers exactly one new descriptor.
+    drop(unsafe { std::fs::File::from_raw_fd(fd) });
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn require() {
     let directory = std::fs::File::open(".").expect("openat2 precondition: open test directory");
     let how = OpenHow {

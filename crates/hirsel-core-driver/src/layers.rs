@@ -64,5 +64,8 @@ pub(crate) struct Probe {
     pub(crate) law: bool,
     /// None when the request declared nothing (served by snapshot).
     pub(crate) shape: Option<ContentHash>,
+    /// The store's record stood in for declaration. The meter's install
+    /// count cannot say: it counts every request running in the process.
+    pub(crate) installed: bool,
     pub(crate) tables: Vec<(&'static str, Vec<String>)>,
 }

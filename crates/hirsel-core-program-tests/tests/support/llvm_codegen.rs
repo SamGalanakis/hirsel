@@ -337,7 +337,7 @@ fn release_machine_code_pins() {
             file.architecture(),
             match target {
                 Target::X86_64Linux => object::Architecture::X86_64,
-                Target::Aarch64Linux => object::Architecture::Aarch64,
+                Target::Aarch64Linux | Target::Aarch64Darwin => object::Architecture::Aarch64,
             }
         );
         for (body, name, pins) in bodies {
@@ -426,7 +426,7 @@ fn instructions<'a>(
 ) -> Vec<Instruction<'a>> {
     let hex_digits_per_word = match target {
         Target::X86_64Linux => 2,
-        Target::Aarch64Linux => 8,
+        Target::Aarch64Linux | Target::Aarch64Darwin => 8,
     };
     let mut insns: Vec<Instruction<'_>> = Vec::new();
     let mut next = extent.start;
@@ -569,7 +569,7 @@ impl<'a> Instruction<'a> {
                 self.opcode.starts_with("call"),
                 self.opcode.starts_with('j') || self.opcode.starts_with("loop"),
             ),
-            Target::Aarch64Linux => (
+            Target::Aarch64Linux | Target::Aarch64Darwin => (
                 matches!(self.opcode, "bl" | "blr"),
                 matches!(self.opcode, "b" | "br" | "cbz" | "cbnz" | "tbz" | "tbnz")
                     || self.opcode.starts_with("b."),

@@ -10,12 +10,18 @@ pub struct IoError {
     pub tag: u8,
     pub code: u32,
 }
+/// macOS's ENOTCAPABLE.
+const ENOTCAPABLE: i32 = 107;
+
 impl IoError {
     pub const OK: Self = Self { tag: 0, code: 0 };
     pub fn from_errno(code: i32) -> Self {
         let tag = match code {
             libc::ENOENT => 1,
             libc::EACCES | libc::EPERM | libc::EXDEV | libc::ELOOP => 2,
+            // macOS reports a path that leaves its O_RESOLVE_BENEATH root
+            // with ENOTCAPABLE, where Linux openat2 reports EXDEV.
+            ENOTCAPABLE if cfg!(target_os = "macos") => 2,
             libc::EEXIST => 3,
             libc::EBADF => 4,
             _ => 5,

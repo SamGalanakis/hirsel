@@ -146,7 +146,13 @@ fn code_revision_of(executable: &Path) -> [u8; 32] {
     let file = object::File::parse(&*bytes).unwrap();
     let symbol = file
         .symbols()
-        .find(|s| s.name() == Ok("hirsel_code_revision"))
+        .find(|s| {
+            // Mach-O C names carry a leading underscore.
+            s.name().is_ok_and(|name| {
+                name.strip_prefix('_').filter(|_| cfg!(target_os = "macos")).unwrap_or(name)
+                    == "hirsel_code_revision"
+            })
+        })
         .expect("the executable defines hirsel_code_revision");
     let section = file
         .section_by_index(symbol.section_index().unwrap())
@@ -291,8 +297,13 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
 
                 let bytes = std::fs::read(&program).unwrap();
                 let elf = object::File::parse(bytes.as_slice()).unwrap();
+                // Mach-O C names carry a leading underscore.
                 let defines_recording_entry = elf.symbols().any(|symbol| {
-                    symbol.is_definition() && symbol.name() == Ok("hirsel_core_os_run_recording")
+                    symbol.is_definition()
+                        && symbol.name().is_ok_and(|name| {
+                            name.strip_prefix('_').filter(|_| cfg!(target_os = "macos")).unwrap_or(name)
+                                == "hirsel_core_os_run_recording"
+                        })
                 });
                 assert_eq!(
                     defines_recording_entry, recording_on,
@@ -1029,9 +1040,11 @@ pub fn main(p: Process, out: Stdout) -> Result[(), Exit] waits {
         .output()
         .unwrap();
     assert!(name.status.success());
+    // macOS ps prints the command's whole path.
+    let name = String::from_utf8(name.stdout).unwrap();
     assert_eq!(
-        String::from_utf8(name.stdout).unwrap().trim(),
-        built.executable.file_name().unwrap().to_str().unwrap()
+        Path::new(name.trim()).file_name().unwrap(),
+        built.executable.file_name().unwrap()
     );
     // SAFETY: this is the still-owned child, which wrote the ready marker.
     assert_eq!(
@@ -1290,6 +1303,8 @@ fn tape_http_replays_both_native_engines() {
 /// RL3 checks the server's HTTP bytes, RFC 7301's selected index and the
 /// OpenSSL digest of the fixture leaf. Replay runs after removing both live
 /// inputs, with a counting provider in place of the CLI's refuse-all provider.
+// The harness interposes replay calls with GNU ld --wrap.
+#[cfg(target_os = "linux")]
 #[test]
 fn rl3_replays_tls_offline() {
     cli_tls_replay(false);
@@ -1297,11 +1312,14 @@ fn rl3_replays_tls_offline() {
 
 /// RL4 and RL5. The permitted peer receives the exact
 /// synthetic grant bytes. Plain TCP and the wrong verified name receive zero.
+// The harness interposes replay calls with GNU ld --wrap.
+#[cfg(target_os = "linux")]
 #[test]
 fn rl4_rl5_replays_tls_without_secret_sources() {
     cli_tls_replay(true);
 }
 
+#[cfg(target_os = "linux")]
 fn cli_tls_replay(with_secret: bool) {
     use rustls::{
         ServerConfig, ServerConnection, StreamOwned,
@@ -1695,6 +1713,8 @@ fn simd_versions_preserve_run_tape_and_revision() {
 
 /// NET-11: the host supplies a duplicate IPv6 result followed by IPv4.
 /// Replay must deliver the same list with the resolver disabled.
+// The harness interposes getaddrinfo with GNU ld --wrap.
+#[cfg(target_os = "linux")]
 #[test]
 fn cli_replays_resolution_without_resolver() {
     const PROGRAM: &str = r#"pub fn main(n: Net) -> Result[(), Exit] waits {
@@ -2947,6 +2967,8 @@ pub fn main(c: Cred, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
 /// after the fetch, the whole readable address space holds exactly one copy
 /// of it, the sealed store. The control serves the key as the session token
 /// too, which the program receives as a String, and the scan must see it.
+// The law scans the child's memory through /proc/PID/mem.
+#[cfg(target_os = "linux")]
 #[test]
 fn cr1_fetched_secret_key_is_only_in_the_sealed_store() {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -4204,8 +4226,14 @@ fn exec_unix_recording_replays_without_host_resources() {
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
     std::fs::create_dir(&work).unwrap();
-    let image = work.join("image");
-    std::fs::copy("/bin/cat", &image).unwrap();
+    // macOS kills a copy of a platform binary: pin /bin/cat where it is.
+    let image = if cfg!(target_os = "macos") {
+        PathBuf::from("/bin/cat")
+    } else {
+        let image = work.join("image");
+        std::fs::copy("/bin/cat", &image).unwrap();
+        image
+    };
     let pin = Sha256::digest(std::fs::read(&image).unwrap());
     let policy = work.join("policy.toml");
     // The recording must split a valid profile snapshot larger than a tape block.

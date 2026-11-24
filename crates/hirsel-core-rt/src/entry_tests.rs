@@ -187,7 +187,11 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
             len: target.len(),
         },
     };
-    let fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let fds = || {
+        std::fs::read_dir(crate::test_process::OPEN_FDS)
+            .unwrap()
+            .count()
+    };
     let before = fds();
     // SAFETY: constructor copies its views and owns the duplicated descriptors.
     unsafe {
@@ -715,7 +719,10 @@ fn broken_pipe_child() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         let mut fds = [0; 2];
-        assert_eq!(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC), 0);
+        assert_eq!(
+            hirsel_core_net::sys::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC),
+            0
+        );
         let read = OwnedFd::from_raw_fd(fds[0]);
         let write = OwnedFd::from_raw_fd(fds[1]);
         drop(read);

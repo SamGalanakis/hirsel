@@ -14,6 +14,7 @@ fn main() {
     // a child tool inherits stdin, stdout and stderr only. A kernel without
     // close_range (before 5.11) leaves them as they are.
     // SAFETY: close_range only changes descriptor flags; it touches no memory.
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::syscall(
             libc::SYS_close_range,
@@ -22,5 +23,19 @@ fn main() {
             libc::CLOSE_RANGE_CLOEXEC,
         )
     };
+    // Without close_range, mark each descriptor /dev/fd lists.
+    #[cfg(not(target_os = "linux"))]
+    if let Ok(entries) = std::fs::read_dir("/dev/fd") {
+        let fds: Vec<i32> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .filter(|&fd| fd > 2)
+            .collect();
+        for fd in fds {
+            // SAFETY: F_SETFD only changes a descriptor flag; a descriptor
+            // already closed (the listing's own) answers EBADF.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
     hirsel_core_driver::request::main(std::env::args().skip(1).collect())
 }

@@ -345,7 +345,9 @@ fn resumption(run: &mut Run) {
 }
 
 fn fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").unwrap().count()
+    std::fs::read_dir(crate::test_process::OPEN_FDS)
+        .unwrap()
+        .count()
 }
 
 fn assert_error(outcome: Outcome, expected: Outcome) {

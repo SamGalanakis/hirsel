@@ -10,6 +10,7 @@ use std::net::IpAddr;
 
 mod env;
 pub mod exec;
+pub mod sys;
 pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 

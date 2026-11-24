@@ -3,6 +3,8 @@ fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
     super::side::tests::binding_case();
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn llvm_split_preserves_distinct_cie_rules() {
     use gimli::{
@@ -98,6 +100,8 @@ ret
     }
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn native_symbol_tiers_follow_the_elf_identity() {
     use super::{NativeImage, SymbolSource, bind_detached, resolve_symbols, source_positions};
@@ -236,6 +240,8 @@ fn native_symbol_tiers_follow_the_elf_identity() {
     );
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn native_fiber_boundary_has_no_caller() {
     use crate::{CheckRequest, Driver, Meter, native::tests::native_options};
@@ -329,6 +335,8 @@ fn native_fiber_boundary_has_no_caller() {
     }
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn llvm_unwind_covers_live_whole_split_and_reused_code() {
     use gimli::{BaseAddresses, CieOrFde, EhFrame, LittleEndian, UnwindSection as _};
@@ -367,6 +375,7 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
         for (section, jobs, expected_parts) in match target {
             Target::X86_64Linux => &[("", 0, 3), ("", 2, 3), ("section \".text.start\"", 0, 1)][..],
             Target::Aarch64Linux => &[("", 0, 1)][..],
+            Target::Aarch64Darwin => unreachable!(),
         }
         .iter()
         .copied()
@@ -463,6 +472,8 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
     }
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn llvm_split_parts_share_one_weak_placeholder() {
     use hirsel_core_ids::ContentHash;
@@ -587,6 +598,8 @@ fn llvm_split_parts_share_one_weak_placeholder() {
     );
 }
 
+// ELF links through ld.lld and ELF unwind tables.
+#[cfg(target_os = "linux")]
 #[test]
 fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
     use gimli::{BaseAddresses, EhFrame, LittleEndian, UnwindSection as _};

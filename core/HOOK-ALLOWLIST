@@ -29,6 +29,11 @@ core@1/box/unbox
 core@1/bytebuf/append_inline
 core@1/bytebuf/freeze
 core@1/bytebuf/as_bytes
+# 2026-11-23 (469095f48, store value headroom): the store reserves physical
+# headroom for encoded values while charging logical growth.
+core@1/bytebuf/try_reserve_hint
+core@1/bytebuf/with_tail
+core@1/bytebuf/from_tail
 core@1/channel/new
 core@1/channel/receive
 core@1/channel/send

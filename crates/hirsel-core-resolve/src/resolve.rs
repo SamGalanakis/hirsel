@@ -245,6 +245,9 @@ impl ResolutionScratch {
         r.out
     }
 }
+/// A scope slot whose name's binding was refused: no binder, reads poisoned.
+const POISONED: u32 = u32::MAX - 1;
+
 struct Resolver<'a, 's> {
     index: &'a NameIndex,
     module: ModuleId,
@@ -350,7 +353,11 @@ impl<'a> Resolver<'a, '_> {
     }
     fn local_in(&self, name: Symbol, ns: Namespace) -> Option<u32> {
         let b = self.scratch.slots[Self::slot(name, ns)];
-        (b != u32::MAX).then_some(b)
+        (b < POISONED).then_some(b)
+    }
+    /// A binding of `name` in scope was refused (LANG-7).
+    fn poisoned(&self, name: Symbol, ns: Namespace) -> bool {
+        self.scratch.slots[Self::slot(name, ns)] == POISONED
     }
     fn scope(&mut self, f: impl FnOnce(&mut Self)) {
         let mark = self.scratch.bindings.len();
@@ -423,6 +430,16 @@ impl<'a> Resolver<'a, '_> {
             d.declared = Some(self.index.symbols.text(name).into());
             d.required = Some("a name not already visible in this namespace".into());
             self.out.diagnostics.push(d);
+            // The refused binding binds no binder, but its scope's later reads
+            // of the name meant it: they are poisoned (PROG-8), not resolved
+            // to the shadowed name and refused again.
+            let slot = Self::slot(name, ns);
+            self.scratch.bindings.push(Binding {
+                symbol: name,
+                namespace: ns,
+                previous: self.scratch.slots[slot],
+            });
+            self.scratch.slots[slot] = POISONED;
             return;
         }
         let id = self.out.binders.len() as u32;
@@ -723,6 +740,9 @@ impl<'a> Resolver<'a, '_> {
         );
         if let Some(b) = local {
             return Target::Binder(b);
+        }
+        if self.poisoned(name, ns) {
+            return Target::Missing;
         }
         if let Some(t) = self
             .module_lookup(n, self.module, name, ns, false)

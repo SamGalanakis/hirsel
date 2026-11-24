@@ -411,7 +411,8 @@ unsafe extern "C" fn invoke(
             };
             let mut tape_id = run.record_id.unwrap_or_default();
             if run.record_id.is_none() {
-                let n = libc::getrandom(tape_id.as_mut_ptr().cast(), tape_id.len(), 0);
+                let n =
+                    hirsel_core_net::sys::getrandom(tape_id.as_mut_ptr().cast(), tape_id.len(), 0);
                 if n != tape_id.len() as isize {
                     return stopped(run, std::io::Error::last_os_error());
                 }

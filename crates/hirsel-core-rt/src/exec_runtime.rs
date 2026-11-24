@@ -94,7 +94,7 @@ fn cwd(base: &str, path: &str) -> io::Result<OwnedFd> {
     let root = unsafe {
         libc::open(
             base.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
     };
     if root < 0 {
@@ -106,7 +106,11 @@ fn cwd(base: &str, path: &str) -> io::Result<OwnedFd> {
         return Ok(root);
     }
     let path = CString::new(path).unwrap();
-    hirsel_core_net::unix::open_beneath(root.as_fd(), &path, libc::O_PATH | libc::O_DIRECTORY)
+    hirsel_core_net::unix::open_beneath(
+        root.as_fd(),
+        &path,
+        hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY,
+    )
 }
 
 unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome {

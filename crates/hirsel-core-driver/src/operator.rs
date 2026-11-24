@@ -509,6 +509,18 @@ fn operator_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: uid and gid are live result slots.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0 {
+        Ok(uid)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     let mut cred = libc::ucred {
         pid: 0,
@@ -561,7 +573,7 @@ impl Connection {
     }
 
     pub(crate) fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
-        self.stream.set_read_timeout(timeout)
+        hirsel_core_net::sys::timeout_set(self.stream.set_read_timeout(timeout))
     }
 
     pub(crate) fn send(&mut self, ask: &Ask) -> io::Result<()> {

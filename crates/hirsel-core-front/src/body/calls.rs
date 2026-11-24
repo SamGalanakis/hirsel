@@ -301,8 +301,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let g = &p.fns[f];
         self.diagnostic_callee = Some(DiagnosticCallee::Named(f));
-        if mentions_error(&self.t, g.callable) {
-            // The callee's signature owns the diagnostic.
+        // A callee that failed to parse is refused and never built (PROG-8),
+        // whatever its header declares. Library rows were all accepted.
+        if mentions_error(&self.t, g.callable)
+            || (f >= p.fns.base_len() && p.item(g.at).range.has_errors)
+        {
+            // The callee's signature or syntax owns the diagnostic.
             self.inherited_refusal = true;
             self.halt();
             return (ERROR, None);

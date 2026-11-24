@@ -52,6 +52,26 @@ impl WalkError {
     }
 }
 
+/// A path that names the file `fd` holds open: through `/proc/self/fd` on
+/// Linux, so it reaches that inode however the file was moved; the file's
+/// current path on macOS (`F_GETPATH`).
+#[cfg(target_os = "linux")]
+pub(crate) fn fd_path(fd: &impl AsRawFd) -> io::Result<PathBuf> {
+    Ok(PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn fd_path(fd: &impl AsRawFd) -> io::Result<PathBuf> {
+    let mut path = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes into the buffer.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    path.truncate(end);
+    Ok(PathBuf::from(OsString::from_vec(path)))
+}
+
 pub(crate) fn open_directory(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     File::options()
@@ -93,7 +113,10 @@ impl Walked {
                     _ => error.into(),
                 }
             })?;
-        #[cfg(not(target_os = "linux"))]
+        // macOS walks with readable descriptors, so the walked one is read.
+        #[cfg(target_os = "macos")]
+        let file = self.file;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let file: File = return Err(WalkError::Unsupported);
         if FileId::of(&file.metadata()?) != identity {
             return Err(WalkError::Unsupported);
@@ -120,7 +143,7 @@ fn child(parent: &File, name: &std::ffi::OsStr) -> Result<File, WalkError> {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            hirsel_core_net::sys::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -156,12 +179,55 @@ fn link_target(link: &File) -> Result<PathBuf, WalkError> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS has no O_PATH: open the entry itself read-only, a symbolic link
+/// as the link (`O_SYMLINK`) and a FIFO without waiting for a writer.
+#[cfg(target_os = "macos")]
+fn child(parent: &File, name: &std::ffi::OsStr) -> Result<File, WalkError> {
+    const O_SYMLINK: i32 = 0x0020_0000;
+    let name = CString::new(name.as_bytes()).map_err(|_| WalkError::Missing)?;
+    // SAFETY: the descriptor and the NUL-terminated component live through openat.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | O_SYMLINK | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "macos")]
+fn link_target(link: &File) -> Result<PathBuf, WalkError> {
+    unsafe extern "C" {
+        fn freadlink(fd: libc::c_int, buf: *mut libc::c_char, size: libc::size_t) -> isize;
+    }
+    let mut bytes = vec![0u8; 256];
+    loop {
+        // SAFETY: the output buffer is writable for the supplied length and
+        // the descriptor, opened with O_SYMLINK, stays open.
+        let n = unsafe { freadlink(link.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let n = n as usize;
+        if n < bytes.len() {
+            bytes.truncate(n);
+            return Ok(OsString::from_vec(bytes).into());
+        }
+        bytes.resize(bytes.len() * 2, 0);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn walk(_root: &File, _path: &Path) -> Result<Walked, WalkError> {
     Err(WalkError::Unsupported)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
     use std::collections::BTreeSet;
 

@@ -125,9 +125,14 @@ pub(super) fn finish(
                 scope: object::SymbolScope::Linkage,
                 weak: false,
                 section: SymbolSection::Section(section),
-                flags: object::SymbolFlags::Elf {
-                    st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
-                    st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+                // Linkage scope is already hidden on Mach-O (private extern).
+                flags: if product.object.format() == object::BinaryFormat::Elf {
+                    object::SymbolFlags::Elf {
+                        st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+                        st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+                    }
+                } else {
+                    object::SymbolFlags::None
                 },
             });
             debug.sections.push(CodeSection { symbol: name, size });

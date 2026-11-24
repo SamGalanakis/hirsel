@@ -16,6 +16,38 @@ pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
 const LINK_RECIPE_SCHEMA: u32 = 6;
 /// The libraries every direct link appends at the input marker.
 pub(crate) const SUPPORT_LIBS: &[&str] = &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+
+/// The support libraries a direct link adds for `target`: glibc's on Linux.
+/// A Darwin recipe already names libSystem and the runtime's frameworks.
+pub(crate) fn support_libs(target: &str) -> &'static [&'static str] {
+    if hirsel_core_layout::Target::from_triple(target).is_some_and(|t| t.is_darwin()) {
+        &[]
+    } else {
+        SUPPORT_LIBS
+    }
+}
+
+/// What the runtime archive needs from the system on macOS
+/// (`rustc --print native-static-libs`).
+const DARWIN_LINK_ARGS: &[&str] = &[
+    "-arch",
+    "arm64",
+    INPUT_MARKER,
+    "-framework",
+    "Security",
+    "-framework",
+    "CoreFoundation",
+    "-liconv",
+    "-lSystem",
+    "-lc",
+    "-lm",
+];
+
+/// The system libraries a direct macOS link of the runtime archive needs.
+#[cfg(test)]
+pub(crate) fn darwin_system_libs() -> &'static [&'static str] {
+    &DARWIN_LINK_ARGS[3..]
+}
 const TOOLCHAIN_SCHEMA: u32 = 2;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeFile {
@@ -381,6 +413,11 @@ pub(crate) fn toolchain(
     runtime: &Path,
 ) -> io::Result<(Toolchain, LinkRecipe)> {
     match link {
+        Link::Driver(cc)
+            if hirsel_core_layout::Target::from_triple(target).is_some_and(|t| t.is_darwin()) =>
+        {
+            darwin_toolchain(cc, target, runtime)
+        }
         Link::Driver(cc) => driver_toolchain(cc, target, runtime),
         Link::Installed(recipe) => installed_toolchain(recipe, target, runtime),
     }
@@ -489,6 +526,70 @@ fn installed_toolchain(
         files,
         source_files: Vec::new(),
         absent: closure.absent,
+        identity,
+    };
+    Ok((toolchain, recipe))
+}
+
+/// The link runs under an empty environment: name the SDK and the linker the
+/// developer tools select, which the C driver cannot search for.
+pub(crate) fn darwin_sdk_args() -> io::Result<Vec<String>> {
+    let xcrun = |args: &[&str]| -> io::Result<String> {
+        let output = std::process::Command::new("/usr/bin/xcrun")
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "xcrun {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"])?;
+    let ld = xcrun(&["--find", "ld"])?;
+    Ok(vec![format!("-fuse-ld={ld}"), "-isysroot".to_owned(), sdk])
+}
+
+/// macOS links through the C driver itself with a fixed argv: ld64 takes
+/// none of the ELF options a captured ld.lld recipe holds, and the SDK's
+/// libraries are text stubs the ELF link closure cannot read. The driver and
+/// the runtime archive are the recorded inputs.
+fn darwin_toolchain(
+    cc: &Path,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<(Toolchain, LinkRecipe)> {
+    let store = host_tools()?;
+    let linker = cc.canonicalize()?;
+    let driver = recorded(&linker, &store)?;
+    let archive = recorded(runtime, &store)?;
+    let mut args = darwin_sdk_args()?;
+    args.extend(DARWIN_LINK_ARGS.iter().map(|arg| (*arg).to_owned()));
+    let identity = ContentHash::of_parts(
+        "hirsel.darwin-link-recipe.v1",
+        [
+            crate::encode(&(LINK_RECIPE_SCHEMA, target, &linker, &args, driver.content))?
+                .as_slice(),
+        ],
+    );
+    let toolchain = Toolchain {
+        image: ContentHash::of_parts(
+            "hirsel.toolchain-image.v4",
+            [crate::encode(&(TOOLCHAIN_SCHEMA, target, identity, archive.content))?.as_slice()],
+        ),
+        runtime: runtime_identity(archive.content),
+        environment: keyed_environment(&[]),
+    };
+    let recipe = LinkRecipe {
+        schema: LINK_RECIPE_SCHEMA,
+        target: target.into(),
+        linker,
+        args,
+        files: vec![driver],
+        source_files: Vec::new(),
+        absent: Vec::new(),
         identity,
     };
     Ok((toolchain, recipe))
@@ -790,6 +891,19 @@ fn keyed_environment(children: &[(&str, &[u8])]) -> ContentHash {
 }
 
 /// This process's umask, as the kernel reports it; a child inherits it.
+#[cfg(not(target_os = "linux"))]
+fn umask() -> io::Result<u32> {
+    // SAFETY: umask only swaps the process mask; the second call restores it.
+    let mask = unsafe {
+        let mask = libc::umask(0o022);
+        libc::umask(mask);
+        mask
+    };
+    Ok(u32::from(mask))
+}
+
+/// This process's umask, as the kernel reports it; a child inherits it.
+#[cfg(target_os = "linux")]
 fn umask() -> io::Result<u32> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     status
@@ -1349,6 +1463,7 @@ thread_local! {
 /// no record is ever promoted.
 fn clock() -> Option<Reading> {
     static COUNT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    #[cfg(target_os = "linux")]
     let read = || {
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok();
         let namespace = std::fs::read_link("/proc/self/ns/time")
@@ -1356,6 +1471,9 @@ fn clock() -> Option<Reading> {
             .and_then(|link| link.into_os_string().into_string().ok());
         clock_identity(boot.as_deref(), namespace.as_deref())
     };
+    // macOS has no time namespaces: the boot session alone names the count.
+    #[cfg(target_os = "macos")]
+    let read = || clock_identity(boot_session().as_deref(), Some("time:[0]"));
     #[cfg(test)]
     let count = match SOURCE.get() {
         Some((boot, namespace)) => clock_identity(boot, namespace),
@@ -1371,15 +1489,59 @@ fn clock() -> Option<Reading> {
             latest: now,
         });
     }
-    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
-    let (seconds, hundredths) = uptime.split_whitespace().next()?.split_once('.')?;
-    let at =
-        seconds.parse::<u64>().ok()? * 1_000_000_000 + hundredths.parse::<u64>().ok()? * 10_000_000;
-    Some(Reading {
-        clock: count,
-        earliest: at,
-        latest: at + 10_000_000,
-    })
+    #[cfg(target_os = "linux")]
+    {
+        let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+        let (seconds, hundredths) = uptime.split_whitespace().next()?.split_once('.')?;
+        let at = seconds.parse::<u64>().ok()? * 1_000_000_000
+            + hundredths.parse::<u64>().ok()? * 10_000_000;
+        Some(Reading {
+            clock: count,
+            earliest: at,
+            latest: at + 10_000_000,
+        })
+    }
+    // CLOCK_MONOTONIC_RAW counts from boot through sleep, as CLOCK_BOOTTIME does.
+    #[cfg(target_os = "macos")]
+    {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid writable timespec.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut now) } != 0 {
+            return None;
+        }
+        let at =
+            u64::try_from(now.tv_sec).ok()? * 1_000_000_000 + u64::try_from(now.tv_nsec).ok()?;
+        Some(Reading {
+            clock: count,
+            earliest: at,
+            latest: at,
+        })
+    }
+}
+
+/// The boot session's UUID (`kern.bootsessionuuid`).
+#[cfg(target_os = "macos")]
+fn boot_session() -> Option<String> {
+    let mut buffer = [0u8; 64];
+    let mut len = buffer.len();
+    // SAFETY: the name is NUL-terminated and the buffer holds `len` bytes.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let text = std::str::from_utf8(&buffer[..len]).ok()?;
+    Some(text.trim_end_matches('\0').to_ascii_lowercase())
 }
 
 /// Which count a clock reading belongs to: a boot id (a UUID) and a time
@@ -1515,6 +1677,138 @@ fn shell_words(line: &str) -> io::Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// macOS archives hold arm64 Mach-O objects: the same admission, with the
+    /// `_` symbol prefix dropped and ABI text in `__TEXT,__hirsel_abi`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sealed_macho_archives_check_object_features_and_abi() {
+        use crate::code_store::ObjectKind;
+        use crate::foreign_archive::{ArchiveOrigin, SealedArchive, check_distinct_definitions};
+        use hirsel_core_ids::DefPath;
+        use hirsel_core_ir::Identity;
+        use hirsel_core_ir::decode::DecodeBudget;
+        use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
+
+        let target = "aarch64-apple-darwin";
+        let module = DefPath::from_full("ffi_laws@1/native").unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+        let abi = |symbol: &str| {
+            format!(
+                "__attribute__((used, section(\"__TEXT,__hirsel_abi\")))\n\
+                 static const char abi[sizeof(\"{symbol} stack () -> i32\\n\") - 1] = \"{symbol} stack () -> i32\\n\";\n"
+            )
+        };
+        let build = |name: &str, source: &str| {
+            std::fs::write(fixture.path().join(format!("{name}.c")), source).unwrap();
+            let compiled = Command::new(llvm.join("clang"))
+                .current_dir(fixture.path())
+                .args(["--target=arm64-apple-macos11", "-std=c11", "-O2", "-c"])
+                .arg(format!("{name}.c"))
+                .arg("-o")
+                .arg(format!("{name}.o"))
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let archived = Command::new(llvm.join("llvm-ar"))
+                .current_dir(fixture.path())
+                .args(["--format=darwin", "rcs"])
+                .arg(format!("{name}.a"))
+                .arg(format!("{name}.o"))
+                .output()
+                .unwrap();
+            assert!(
+                archived.status.success(),
+                "{}",
+                String::from_utf8_lossy(&archived.stderr)
+            );
+            let bytes = std::fs::read(fixture.path().join(format!("{name}.a"))).unwrap();
+            let object = ObjectRef {
+                hash: ObjectKind::ForeignArchive.hash(&bytes),
+                len: bytes.len() as u64,
+            };
+            (
+                SealedArchive::open(bytes, object, &module, target, None).unwrap(),
+                object,
+            )
+        };
+        let leaf = ForeignLeaf {
+            module: module.clone(),
+            symbols: "hfl_".into(),
+            targets: vec![],
+            functions: vec![ForeignFunction {
+                identity: Identity::plain(DefPath::from_full("ffi_laws@1/native/touch").unwrap()),
+                header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32".into(),
+            }],
+        };
+        let prefix = |object: ObjectRef| {
+            format!(
+                "FFI-3: archive object {} of ffi_laws@1/native for {target}",
+                crate::call::hex(&object.hash.0)
+            )
+        };
+        let touch =
+            "static volatile int flag;\nint hfl_touch(void) { return flag; }\nint hfl_shared;\n";
+        let (valid, valid_object) = build("laws", &format!("{touch}{}", abi("hfl_touch")));
+        valid
+            .check_headers(valid_object, &leaf, target, None)
+            .unwrap();
+
+        // A symbol two archives define is refused by its unprefixed name.
+        let (other, other_object) =
+            build("other", &format!("int hfl_shared;\n{}", abi("hfl_other")));
+        let second = DefPath::from_full("other@1/native").unwrap();
+        let origin = |object, module| ArchiveOrigin {
+            object,
+            module,
+            path: None,
+        };
+        let collision = check_distinct_definitions(
+            [
+                (&valid, origin(valid_object, &module)),
+                (&other, origin(other_object, &second)),
+            ],
+            &mut DecodeBudget::unlimited(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            collision.to_string(),
+            format!(
+                "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by archive object {} of other@1/native",
+                crate::call::hex(&valid_object.hash.0),
+                crate::call::hex(&other_object.hash.0),
+            )
+        );
+
+        for (name, source, expected) in [
+            (
+                "constructor",
+                format!(
+                    "{touch}{}__attribute__((constructor)) static void initialize(void) {{ flag = 1; }}\n",
+                    abi("hfl_touch")
+                ),
+                ": member constructor.o has section __DATA,__mod_init_func of type 0x9, which is not an admitted object feature".to_owned(),
+            ),
+            (
+                "foreign",
+                format!("{touch}{}int malloc_like(void) {{ return 0; }}\n", abi("hfl_touch")),
+                ": member foreign.o defines malloc_like, which does not start with the prefix hfl_".to_owned(),
+            ),
+            ("bare", touch.to_owned(), " has no ABI text".to_owned()),
+        ] {
+            let (invalid, object) = build(name, &source);
+            let error = invalid.check_headers(object, &leaf, target, None).unwrap_err();
+            assert_eq!(error.to_string(), format!("{}{expected}", prefix(object)));
+        }
+    }
+
+    // ELF archives for x86_64 Linux, linked with ld.lld.
+    #[cfg(target_os = "linux")]
     #[test]
     fn sealed_foreign_archives_check_pin_object_features_and_abi() {
         use crate::code_store::ObjectKind;
@@ -1570,7 +1864,12 @@ mod tests {
 static volatile int flag;
 int hfl_touch(void) { return flag; }
 __attribute__((weak)) int hfl_shared;
-__attribute__((used, section(".hirsel_abi")))
+#ifdef __APPLE__
+#define HIRSEL_TEST_ABI_SECTION "__TEXT,__hirsel_abi"
+#else
+#define HIRSEL_TEST_ABI_SECTION ".hirsel_abi"
+#endif
+__attribute__((used, section(HIRSEL_TEST_ABI_SECTION)))
 static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch stack () -> i32\n";
 "#;
         let build_source = |source: &str| {
@@ -1651,7 +1950,12 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
             r#"
 int hfl_other(void) { return 0; }
 int hfl_shared;
-__attribute__((used, section(".hirsel_abi")))
+#ifdef __APPLE__
+#define HIRSEL_TEST_ABI_SECTION "__TEXT,__hirsel_abi"
+#else
+#define HIRSEL_TEST_ABI_SECTION ".hirsel_abi"
+#endif
+__attribute__((used, section(HIRSEL_TEST_ABI_SECTION)))
 static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other stack () -> i32\n";
 "#,
         );
@@ -1945,7 +2249,8 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
             let _ = std::fs::remove_file(cache.join(name));
         }
         identity.unwrap();
-        assert_eq!(recipe.unwrap().linker, linker);
+        // The recipe names the linker canonically (macOS's /var is /private/var).
+        assert_eq!(recipe.unwrap().linker, linker.canonicalize().unwrap());
     }
 
     #[test]

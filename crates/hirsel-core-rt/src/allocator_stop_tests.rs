@@ -23,6 +23,9 @@ fn native_refusal_child() {
     // guest limit infinite, so ARM instead requests a valid 1EiB Layout beyond
     // its address space. Both exercise a real allocator null, never a test hook.
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &denied) }, 0);
+    // macOS refuses an address-space limit below current use; its 1EiB
+    // request has no backing either way.
+    #[cfg(target_os = "linux")]
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_AS, &denied) }, 0);
     #[cfg(target_arch = "aarch64")]
     let bytes = 1usize << 60;

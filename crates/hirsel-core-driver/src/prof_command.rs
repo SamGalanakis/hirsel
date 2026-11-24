@@ -123,8 +123,10 @@ impl Run {
         drop(self.replay_executable.take());
     }
 
+    /// macOS samples from inside the run, so every capture there needs the
+    /// profiling runtime.
     pub(crate) fn observes(&self) -> bool {
-        self.tasks || self.replay || self.mem.is_some()
+        cfg!(target_os = "macos") || self.tasks || self.replay || self.mem.is_some()
     }
 
     pub(crate) fn capture(

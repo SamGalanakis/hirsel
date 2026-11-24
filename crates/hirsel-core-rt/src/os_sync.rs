@@ -235,7 +235,7 @@ fn run() {
             if directory {
                 libc::fsync(fd.as_raw_fd())
             } else {
-                libc::fdatasync(fd.as_raw_fd())
+                hirsel_core_net::sys::fdatasync(fd.as_raw_fd())
             }
         };
         // errno is this thread's and is read before anything else runs here.

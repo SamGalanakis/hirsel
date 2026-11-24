@@ -17,6 +17,12 @@
 //! a compiler that reserves address space it never touches stays inside it,
 //! where an address-space limit would not.
 //!
+//! macOS refuses every `RLIMIT_DATA` change, so there the allocator enforces
+//! the limit itself against the process's physical footprint (which counts
+//! foreign allocations too): each thread checks it after every MiB it
+//! allocates and before any allocation of a MiB or more. A guarded child
+//! reads the same limit from the `HIRSEL_MEMORY_LIMIT` it inherits.
+//!
 //! In debug builds it also traps every allocation and free made while a Free
 //! recorder section is open on the calling thread ([`section`]): such a call
 //! ends the process with exit status [`SECTION_STATUS`]. Sections write only
@@ -177,6 +183,8 @@ static STATE: AtomicU8 = AtomicU8::new(UNSET);
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        #[cfg(target_os = "macos")]
+        footprint::admit(layout.size());
         if thread::word() != 0 {
             return unsafe { self.admit(layout, false) };
         }
@@ -188,6 +196,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        #[cfg(target_os = "macos")]
+        footprint::admit(layout.size());
         if thread::word() != 0 {
             return unsafe { self.admit(layout, true) };
         }
@@ -199,6 +209,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     }
     #[inline]
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        #[cfg(target_os = "macos")]
+        footprint::admit(size.saturating_sub(layout.size()));
         if thread::word() != 0 || admission::listed(block as usize) {
             return unsafe { self.readmit(block, layout, size) };
         }
@@ -257,6 +269,73 @@ impl<A: GlobalAlloc> Guarded<A> {
     }
 }
 
+/// macOS's limit, enforced against the process's physical footprint.
+#[cfg(target_os = "macos")]
+mod footprint {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The limit `set_limit` chose; unlimited until then.
+    pub(crate) static LIMIT: AtomicU64 = AtomicU64::new(u64::MAX);
+    /// Bytes a thread allocates between footprint checks.
+    const STRIDE: usize = 1 << 20;
+
+    thread_local! {
+        static SINCE: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Refuse `size` more bytes if the footprint would pass the limit,
+    /// checked every STRIDE bytes this thread allocates and before any
+    /// allocation of STRIDE or more.
+    #[inline(always)]
+    pub(crate) fn admit(size: usize) {
+        let since = SINCE
+            .try_with(|since| {
+                let total = since.get().saturating_add(size);
+                since.set(if total >= STRIDE { 0 } else { total });
+                total
+            })
+            .unwrap_or(0);
+        if since >= STRIDE {
+            check(size);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn check(size: usize) {
+        let limit = LIMIT.load(Ordering::Relaxed);
+        if limit == u64::MAX {
+            return;
+        }
+        if footprint().is_some_and(|bytes| bytes.saturating_add(size as u64) > limit) {
+            crate::exhausted(size);
+        }
+    }
+
+    /// `task_info(TASK_VM_INFO)`'s phys_footprint: every page the process
+    /// owns, as Activity Monitor's memory column counts it.
+    fn footprint() -> Option<u64> {
+        const TASK_VM_INFO: i32 = 22;
+        const COUNT: u32 = 93;
+        const PHYS_FOOTPRINT: usize = 144;
+        unsafe extern "C" {
+            static mach_task_self_: u32;
+            fn task_info(task: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        }
+        let mut info = [0i32; COUNT as usize];
+        let mut count = COUNT;
+        // SAFETY: the buffer holds COUNT words for the kernel to fill.
+        let status =
+            unsafe { task_info(mach_task_self_, TASK_VM_INFO, info.as_mut_ptr(), &mut count) };
+        if status != 0 {
+            return None;
+        }
+        let words = &info[PHYS_FOOTPRINT / 4..PHYS_FOOTPRINT / 4 + 2];
+        Some(u64::from(words[0] as u32) | (u64::from(words[1] as u32) << 32))
+    }
+}
+
 fn limit_once() {
     if STATE.load(Ordering::Acquire) != SET {
         set_limit();
@@ -295,6 +374,8 @@ fn set_limit() {
         rlim_max: current.rlim_max,
     };
     unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limited) };
+    #[cfg(target_os = "macos")]
+    footprint::LIMIT.store(limited.rlim_cur, Ordering::Relaxed);
     STATE.store(SET, Ordering::Release);
 }
 
@@ -329,6 +410,10 @@ pub fn parse_limit(text: &[u8]) -> Option<u64> {
 /// shadow address space at startup, which any data limit refuses. Every other
 /// child inherits the limit.
 pub fn sanitized(command: &mut std::process::Command) -> &mut std::process::Command {
+    // macOS sets no data limit to lift.
+    if cfg!(target_os = "macos") {
+        return command;
+    }
     use std::os::unix::process::CommandExt;
     // getrlimit and setrlimit are async-signal-safe system calls.
     unsafe {
@@ -579,6 +664,10 @@ fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
         rlim_max: libc::RLIM_INFINITY,
     };
     unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut current) };
+    #[cfg(target_os = "macos")]
+    {
+        current.rlim_cur = footprint::LIMIT.load(Ordering::Relaxed);
+    }
     let mut line = Line::new();
     line.text(b"hirsel: memory limit ");
     if current.rlim_cur == libc::RLIM_INFINITY {
@@ -617,6 +706,15 @@ fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
 
 /// The process's resident peak (`VmHWM`), read without allocating: it tells
 /// growth apart from reservations the data limit also counts.
+#[cfg(target_os = "macos")]
+fn resident_peak_kib() -> Option<u64> {
+    // SAFETY: getrusage fills one rusage; macOS reports ru_maxrss in bytes.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    (unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0)
+        .then(|| usage.ru_maxrss as u64 >> 10)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn resident_peak_kib() -> Option<u64> {
     let mut status = [0u8; 4096];
     let fd = unsafe {
@@ -876,6 +974,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stderr).contains("HIRSEL_MEMORY_LIMIT=4GB is not"));
     }
 
+    // A refused thread stack and shell inheritance are RLIMIT_DATA's, which
+    // macOS refuses to set.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_thread_stack_past_the_limit_ends_the_process_with_the_message() {
         let output = child("tests::stack_child", &[("HIRSEL_MEMORY_LIMIT", "64M")]);
@@ -908,6 +1009,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn child_processes_inherit_the_limit_and_cannot_raise_it() {
         let output = child(

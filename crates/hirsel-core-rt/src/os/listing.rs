@@ -77,7 +77,7 @@ impl Listing {
             // SAFETY: the listing owns the live stream and exclusively advances it.
             // readdir reports EOF and errors with null, distinguishing them by errno.
             let entry = unsafe {
-                *libc::__errno_location() = 0;
+                *hirsel_core_net::sys::errno_location() = 0;
                 libc::readdir(self.stream.as_ptr()).as_ref()
             };
             let Some(entry) = entry else {

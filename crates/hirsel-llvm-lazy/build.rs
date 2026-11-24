@@ -16,9 +16,15 @@ fn main() {
         "cargo:rerun-if-changed={}",
         shared.join("failure_edges.h").display()
     );
+    let macos = env::var("CARGO_CFG_TARGET_OS").unwrap() == "macos";
+    let llvm_library = if macos {
+        "libLLVM.23.1.dylib"
+    } else {
+        "libLLVM.so.23.1"
+    };
     println!(
         "cargo:rerun-if-changed={}",
-        prefix.join("lib/libLLVM.so.23.1").display()
+        prefix.join("lib").join(llvm_library).display()
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
     for source in [
@@ -33,26 +39,13 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    let sysroot = prefix.join("sysroot");
     let shared_objects = ["checked_copy", "release_pipeline", "pass_cost"].map(|name| {
         let source = shared.join(format!("{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
         let object = out.join(format!("{name}.o"));
         assert!(
-            Command::new(prefix.join("bin/hirsel-clang++"))
-                .args([
-                    "-std=c++17",
-                    "-fPIC",
-                    "-O2",
-                    "-fno-exceptions",
-                    "-fno-rtti",
-                    "-nostdinc++"
-                ])
-                .arg(format!("--sysroot={}", sysroot.display()))
-                .arg("-isystem")
-                .arg(sysroot.join("usr/include/c++/13"))
-                .arg("-isystem")
-                .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+            cxx(&prefix, macos)
+                .args(["-std=c++17", "-fPIC", "-O2", "-fno-exceptions", "-fno-rtti"])
                 .arg("-I")
                 .arg(prefix.join("include"))
                 .arg("-c")
@@ -71,12 +64,12 @@ fn main() {
             source.with_file_name(header).display()
         );
     }
-    let compose_objects = ["compose", "builder", "parts", "key"].map(|name| {
+    let compose_objects = ["compose", "builder", "parts", "key", "out_of_memory"].map(|name| {
         let source = source.with_file_name(format!("{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
         let object = out.join(format!("{name}.o"));
         assert!(
-            Command::new(prefix.join("bin/hirsel-clang++"))
+            cxx(&prefix, macos)
                 .args([
                     "-std=c++17",
                     "-O2",
@@ -84,13 +77,7 @@ fn main() {
                     "-fvisibility=hidden",
                     "-fno-exceptions",
                     "-fno-rtti",
-                    "-nostdinc++",
                 ])
-                .arg(format!("--sysroot={}", sysroot.display()))
-                .arg("-isystem")
-                .arg(sysroot.join("usr/include/c++/13"))
-                .arg("-isystem")
-                .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
                 .arg("-I")
                 .arg(prefix.join("include"))
                 .arg("-I")
@@ -105,42 +92,87 @@ fn main() {
         );
         object
     });
-    let component = out.join("libhirsel_llvm_engine.so");
-    assert!(
-        Command::new(prefix.join("bin/hirsel-clang"))
-            .args([
-                "-shared",
-                "-fPIC",
-                "-O2",
-                "-fvisibility=hidden",
-                "-Wl,--build-id=sha1",
-                "-Wl,-z,defs"
-            ])
-            .arg("-I")
-            .arg(prefix.join("include"))
-            .arg("-I")
-            .arg(&shared)
-            .arg(&source)
-            .args(&shared_objects)
-            .args(&compose_objects)
-            .arg("-l:libstdc++.so.6")
+    let component_name = if macos {
+        "libhirsel_llvm_engine.dylib"
+    } else {
+        "libhirsel_llvm_engine.so"
+    };
+    let component = out.join(component_name);
+    let mut link = Command::new(prefix.join(if macos {
+        "bin/clang"
+    } else {
+        "bin/hirsel-clang"
+    }));
+    link.args(["-shared", "-fPIC", "-O2", "-fvisibility=hidden"]);
+    if !macos {
+        link.args(["-Wl,--build-id=sha1", "-Wl,-z,defs"]);
+    }
+    link.arg("-I")
+        .arg(prefix.join("include"))
+        .arg("-I")
+        .arg(&shared)
+        .arg(&source)
+        .args(&shared_objects)
+        .args(&compose_objects);
+    if macos {
+        link.arg("-lc++")
             .arg("-L")
             .arg(prefix.join("lib"))
-            .arg("-l:libLLVM.so.23.1")
-            .arg("-o")
-            .arg(&component)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let engine = prefix
-        .join("engine/libLLVM.so.23.1")
+            .arg("-lLLVM");
+    } else {
+        link.arg("-l:libstdc++.so.6")
+            .arg("-L")
+            .arg(prefix.join("lib"))
+            .arg("-l:libLLVM.so.23.1");
+    }
+    assert!(link.arg("-o").arg(&component).status().unwrap().success());
+    let engine = if macos {
+        prefix.join("lib").join(llvm_library)
+    } else {
+        prefix.join("engine").join(llvm_library)
+    }
+    .canonicalize()
+    .unwrap();
+    println!("cargo:rerun-if-changed={}", engine.display());
+    let build_id = if macos {
+        mach_uuid(&engine)
+    } else {
+        elf_build_id(&engine)
+    };
+    let profile = out
+        .ancestors()
+        .nth(3)
+        .expect("Cargo profile directory")
         .canonicalize()
         .unwrap();
-    println!("cargo:rerun-if-changed={}", engine.display());
+    std::fs::write(out.join("component.rs"), format!(
+        "static COMPONENT: &[u8] = include_bytes!({component_name:?});\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\n",
+        profile.to_str().unwrap(), engine.to_str().unwrap(),
+    )).unwrap();
+}
+
+/// The C++ compiler: the pinned tree's, against its hermetic libstdc++ on
+/// Linux, or the prefix's clang++ against the SDK's libc++ on macOS.
+fn cxx(prefix: &std::path::Path, macos: bool) -> Command {
+    if macos {
+        return Command::new(prefix.join("bin/clang++"));
+    }
+    let sysroot = prefix.join("sysroot");
+    let mut command = Command::new(prefix.join("bin/hirsel-clang++"));
+    command
+        .arg("-nostdinc++")
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-isystem")
+        .arg(sysroot.join("usr/include/c++/13"))
+        .arg("-isystem")
+        .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"));
+    command
+}
+
+fn elf_build_id(engine: &std::path::Path) -> String {
     let notes = Command::new("readelf")
         .arg("-n")
-        .arg(&engine)
+        .arg(engine)
         .output()
         .unwrap();
     assert!(
@@ -149,18 +181,29 @@ fn main() {
         engine.display()
     );
     let notes = String::from_utf8(notes.stdout).unwrap();
-    let build_id = notes
+    notes
         .lines()
         .find_map(|line| line.trim().strip_prefix("Build ID: "))
-        .expect("pinned LLVM engine has no build ID");
-    let profile = out
-        .ancestors()
-        .nth(3)
-        .expect("Cargo profile directory")
-        .canonicalize()
+        .expect("pinned LLVM engine has no build ID")
+        .to_string()
+}
+
+/// The Mach-O `LC_UUID`, as lowercase hex without dashes.
+fn mach_uuid(engine: &std::path::Path) -> String {
+    let out = Command::new("dwarfdump")
+        .arg("--uuid")
+        .arg(engine)
+        .output()
         .unwrap();
-    std::fs::write(out.join("component.rs"), format!(
-        "static COMPONENT: &[u8] = include_bytes!(\"libhirsel_llvm_engine.so\");\nconst CARGO_ENGINE: Option<(&str, &str)> = Some(({:?}, {:?}));\nconst LLVM_BUILD_ID: &str = {build_id:?};\n",
-        profile.to_str().unwrap(), engine.to_str().unwrap(),
-    )).unwrap();
+    assert!(
+        out.status.success(),
+        "cannot read LLVM engine UUID: {}",
+        engine.display()
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let uuid = text
+        .split_whitespace()
+        .nth(1)
+        .expect("LLVM engine has no UUID");
+    uuid.replace('-', "").to_ascii_lowercase()
 }

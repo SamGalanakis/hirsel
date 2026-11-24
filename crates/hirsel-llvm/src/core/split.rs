@@ -1011,6 +1011,15 @@ fn restrict(
 /// Weak definitions (shared constants, revision carriers a link overrides)
 /// are left out.
 pub fn strong_definitions(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    if is_macho(object) {
+        return macho::names(object, |symbol| {
+            use object::ObjectSymbol as _;
+            symbol.is_global()
+                && !symbol.is_undefined()
+                && !symbol.is_weak()
+                && symbol.section() != object::SymbolSection::Absolute
+        });
+    }
     let header = Header::parse(object).map_err(error)?;
     let table = header.sections(LE, object).map_err(error)?;
     let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
@@ -1029,6 +1038,12 @@ pub fn strong_definitions(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 /// The symbols `object` names and does not define: what another object of
 /// its link defines for it.
 pub fn undefined_symbols(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    if is_macho(object) {
+        return macho::names(object, |symbol| {
+            use object::ObjectSymbol as _;
+            !symbol.is_local() && symbol.is_undefined()
+        });
+    }
     let header = Header::parse(object).map_err(error)?;
     let table = header.sections(LE, object).map_err(error)?;
     let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
@@ -1052,6 +1067,9 @@ pub fn rewrite_std_symbols(
 ) -> Result<Vec<u8>, String> {
     use object::build::Id as _;
     use object::build::elf::{Builder, SectionData};
+    if is_macho(object) {
+        return macho::rename(object, rename);
+    }
     let mut elf = Builder::read(object).map_err(error)?;
     let used: std::collections::HashSet<_> = elf
         .sections
@@ -1078,4 +1096,102 @@ pub fn rewrite_std_symbols(
     let mut out = Vec::new();
     elf.write(&mut out).map_err(error)?;
     Ok(out)
+}
+
+fn is_macho(object: &[u8]) -> bool {
+    object::FileKind::parse(object).is_ok_and(|kind| kind == object::FileKind::MachO64)
+}
+
+/// The Mach-O forms of the symbol queries and the std rename. Names are the
+/// compiler's: Mach-O's leading `_` is taken off on read and put back on write.
+mod macho {
+    use super::error;
+    use object::{Object as _, ObjectSymbol as _};
+
+    fn unmangled(name: &[u8]) -> &[u8] {
+        name.strip_prefix(b"_").unwrap_or(name)
+    }
+
+    pub(super) fn names(
+        object: &[u8],
+        keep: impl Fn(&object::Symbol<'_, '_>) -> bool,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let file = object::File::parse(object).map_err(error)?;
+        let mut names = Vec::new();
+        for symbol in file.symbols() {
+            let name = symbol.name_bytes().map_err(error)?;
+            if !name.is_empty() && keep(&symbol) {
+                names.push(unmangled(name).to_vec());
+            }
+        }
+        Ok(names)
+    }
+
+    fn word(bytes: &[u8], at: usize) -> Result<u32, String> {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .ok_or_else(|| "truncated Mach-O object".to_owned())
+    }
+
+    /// Renames symbols by appending their new names to the string table,
+    /// which an object file ends with, and pointing each symbol at its own.
+    pub(super) fn rename(
+        object: &[u8],
+        rename: &dyn Fn(&[u8]) -> Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
+        const LC_SYMTAB: u32 = 0x2;
+        const HEADER: usize = 32;
+        const NLIST: usize = 16;
+        let commands = word(object, 16)? as usize;
+        let mut at = HEADER;
+        let mut symtab = None;
+        for _ in 0..commands {
+            if word(object, at)? == LC_SYMTAB {
+                symtab = Some(at);
+            }
+            at += word(object, at + 4)? as usize;
+        }
+        let Some(command) = symtab else {
+            return Ok(object.to_vec());
+        };
+        let symoff = word(object, command + 8)? as usize;
+        let nsyms = word(object, command + 12)? as usize;
+        let stroff = word(object, command + 16)? as usize;
+        let strsize = word(object, command + 20)? as usize;
+        if stroff + strsize != object.len() {
+            return Err("Mach-O string table is not at the end of the object".into());
+        }
+        let mut out = object.to_vec();
+        let mut strings = Vec::new();
+        for index in 0..nsyms {
+            let entry = symoff + index * NLIST;
+            let strx = word(object, entry)? as usize;
+            let start = stroff + strx;
+            let end = object[start..stroff + strsize]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|n| start + n)
+                .ok_or("unterminated Mach-O symbol name")?;
+            let name = &object[start..end];
+            if name.is_empty() {
+                continue;
+            }
+            let mangled = name.starts_with(b"_");
+            if let Some(new) = rename(unmangled(name)) {
+                let offset = u32::try_from(strsize + strings.len()).map_err(error)?;
+                if mangled {
+                    strings.push(b'_');
+                }
+                strings.extend_from_slice(&new);
+                strings.push(0);
+                out[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+            }
+        }
+        strings.resize(strings.len().next_multiple_of(8), 0);
+        let size = u32::try_from(strsize + strings.len()).map_err(error)?;
+        out.extend_from_slice(&strings);
+        out[command + 20..command + 24].copy_from_slice(&size.to_le_bytes());
+        Ok(out)
+    }
 }

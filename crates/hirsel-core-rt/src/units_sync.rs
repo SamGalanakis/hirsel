@@ -7,7 +7,7 @@
 #[cfg(not(test))]
 pub(crate) use crate::os::monotonic_ns;
 #[cfg(not(test))]
-pub(crate) use libc::{epoll_wait, read, write};
+pub(crate) use hirsel_core_net::sys::{epoll_wait, eventfd_read as read, eventfd_write as write};
 #[cfg(not(test))]
 pub(crate) use std::sync::{
     Mutex, MutexGuard,

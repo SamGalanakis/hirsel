@@ -199,7 +199,14 @@ pub(super) fn write(
         .declare_data(SOURCE_FILES, Linkage::Local, false, false)
         .map_err(error)?;
     let mut files = description(files, 8);
-    files.set_custom_section(".rodata.hirsel_sites");
+    // Mach-O names a section by segment and section.
+    if hirsel_core_layout::Target::from_triple(&object.isa().triple().to_string())
+        .is_some_and(|t| t.is_darwin())
+    {
+        files.set_custom_section("__TEXT,__hirsel_sites");
+    } else {
+        files.set_custom_section(".rodata.hirsel_sites");
+    }
     object.define_data(files_id, &files).map_err(error)?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
@@ -312,9 +319,17 @@ pub(crate) fn source_site(binary: &std::path::Path, site: u64) -> Option<String>
     }
     let file = ReadCache::new(std::fs::File::open(binary).ok()?);
     let elf = object::File::parse(&file).ok()?;
-    let files = elf.symbol_by_name(SOURCE_FILES)?;
+    // A Mach-O name carries a leading underscore and records no size: the
+    // table runs to its section's end.
+    let files = elf
+        .symbol_by_name(SOURCE_FILES)
+        .or_else(|| elf.symbol_by_name(&format!("_{SOURCE_FILES}")))?;
     let section = elf.section_by_index(files.section_index()?).ok()?;
-    let data = section.data_range(files.address(), files.size()).ok()??;
+    let size = match files.size() {
+        0 => section.address() + section.size() - files.address(),
+        size => size,
+    };
+    let data = section.data_range(files.address(), size).ok()??;
     let word = |row: &[u8], at| u64::from_le_bytes(row[at..at + 8].try_into().unwrap());
     // The first path starts immediately after the file rows.
     let rows_end = word(data.get(..SOURCE_ROW_BYTES)?, 0) as usize;

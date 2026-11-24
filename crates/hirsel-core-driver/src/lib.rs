@@ -1056,6 +1056,7 @@ impl Driver {
             #[cfg(test)]
             {
                 self.layers.shape = Some(publication.shape);
+                self.layers.installed = installed.is_some();
             }
             let mut p = installed.unwrap_or_else(|| {
                 Program::declare_with_library(

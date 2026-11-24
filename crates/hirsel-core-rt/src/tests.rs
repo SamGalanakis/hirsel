@@ -877,9 +877,11 @@ fn trimmed_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
             .collect()
     };
     // Survivors straddle every third native-page boundary, so the pages
-    // between them hold no live slot.
+    // between them hold no live slot. The fill spans as many pages at
+    // macOS's 16KiB as at 4KiB.
+    let count = 6_000 * (page as u64 / 4096).max(1);
     let mut kept = Vec::new();
-    for (index, block) in fill(6_000, 0).into_iter().enumerate() {
+    for (index, block) in fill(count, 0).into_iter().enumerate() {
         let start = block.pointer().addr().get();
         let boundary = (start + 8 * WORDS - 1) / page;
         if boundary != start / page && boundary % 3 == 0 {
@@ -887,7 +889,7 @@ fn trimmed_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
         }
     }
     assert!(kept.len() > 10);
-    let refill = fill(6_000, 1 << 32);
+    let refill = fill(count, 1 << 32);
     for (value, block) in &kept {
         read(block, *value);
     }

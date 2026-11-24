@@ -642,7 +642,7 @@ fn socket_crosses_pending_readiness() {
     let (replacement, _peer) = UnixStream::pair().unwrap();
     let replacement = sender.insert(replacement.into()).unwrap();
     sender.arm(replacement, false, 2).unwrap();
-    sender.dispatch(stale, libc::EPOLLIN as u32, |_| {
+    sender.dispatch(stale, hirsel_core_net::sys::EPOLLIN as u32, |_| {
         panic!("stale readiness reached the sender")
     });
 

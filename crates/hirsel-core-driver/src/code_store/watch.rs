@@ -1,5 +1,7 @@
 //! A resident build can skip repeated name lookups while the kernel observes
-//! every change to the local directories that contain its code objects.
+//! every change to the local directories that contain its code objects:
+//! inotify on Linux; on macOS, kqueue on each directory and on each cached
+//! object, since kqueue cannot name the entry that changed in a directory.
 
 use super::{CodeStore, ObjectKind};
 use hirsel_core_ids::ContentHash;
@@ -7,11 +9,22 @@ use hirsel_core_ir::release_recipe::ObjectRef;
 use rustc_hash::FxHashMap;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 
 pub(crate) struct Watch {
+    #[cfg(target_os = "linux")]
     events: File,
+    #[cfg(target_os = "macos")]
+    events: std::os::fd::OwnedFd,
+    /// The watched directories, open for as long as the watch.
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
+    held: [std::os::fd::OwnedFd; 3],
+    /// The directory and name each cached entry's descriptor watches.
+    #[cfg(target_os = "macos")]
+    watched: FxHashMap<i32, (usize, ContentHash)>,
     directories: [(i32, Metadata); 3],
     present: [FxHashMap<ContentHash, Checked>; 3],
 }
@@ -19,7 +32,14 @@ pub(crate) struct Watch {
 struct Checked {
     len: u64,
     seen: bool,
+    /// An event-only descriptor on the cached file; closing it ends its watch.
+    #[cfg(target_os = "macos")]
+    watch: std::os::fd::OwnedFd,
 }
+
+/// The cached entries macOS watches: one descriptor each.
+#[cfg(target_os = "macos")]
+const MAX_WATCHED: usize = 4096;
 
 const KINDS: [ObjectKind; 3] = [ObjectKind::Body, ObjectKind::Annex, ObjectKind::Group];
 
@@ -32,6 +52,103 @@ fn same_directory(a: &Metadata, b: &Metadata) -> bool {
 }
 
 impl Watch {
+    #[cfg(target_os = "macos")]
+    pub(super) fn open(store: &CodeStore) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        // SAFETY: the kernel returns a new owned descriptor on success.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd is the new descriptor returned by kqueue.
+        let events = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut directories = Vec::new();
+        let mut held = Vec::new();
+        for kind in KINDS {
+            let file = File::open(directory(store, kind))?;
+            let metadata = file.metadata()?;
+            // SAFETY: fstatfs writes into this valid statfs buffer.
+            let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            if unsafe { libc::fstatfs(file.as_raw_fd(), info.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful fstatfs initialized info.
+            let local = unsafe { info.assume_init() }.f_flags & libc::MNT_LOCAL as u32 != 0;
+            if !metadata.is_dir() || !local {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            // The directory's own replacement or permission change loses the
+            // watch; entries are watched one by one as they are cached.
+            kqueue::watch(
+                &events,
+                file.as_raw_fd(),
+                libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE | libc::NOTE_ATTRIB,
+            )?;
+            directories.push((file.as_raw_fd(), metadata));
+            held.push(OwnedFd::from(file));
+        }
+        Ok(Self {
+            events,
+            held: held.try_into().unwrap(),
+            watched: FxHashMap::default(),
+            directories: directories.try_into().unwrap(),
+            present: Default::default(),
+        })
+    }
+
+    /// Consume every change the kernel has posted until now.
+    #[cfg(target_os = "macos")]
+    fn drain(&mut self, invalidated: &mut Vec<(ObjectKind, ObjectRef)>) -> bool {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: an all-integer event buffer.
+            let mut posted: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
+            let zero = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: the kqueue and the output buffer are live.
+            let n = unsafe {
+                libc::kevent(
+                    self.events.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    posted.as_mut_ptr(),
+                    posted.len() as i32,
+                    &zero,
+                )
+            };
+            if n < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return false;
+            }
+            for event in &posted[..n as usize] {
+                let ident = event.ident as i32;
+                let Some((directory, hash)) = self.watched.remove(&ident) else {
+                    // A directory itself changed.
+                    return false;
+                };
+                // Only the entry still holding this descriptor is stale.
+                let present = &mut self.present[directory];
+                if present
+                    .get(&hash)
+                    .is_some_and(|checked| checked.watch.as_raw_fd() == ident)
+                    && let Some(Checked {
+                        len, seen: true, ..
+                    }) = present.remove(&hash)
+                {
+                    invalidated.push((KINDS[directory], ObjectRef { hash, len }));
+                }
+            }
+            if (n as usize) < posted.len() {
+                return true;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn open(store: &CodeStore) -> io::Result<Self> {
         // SAFETY: the kernel returns a new owned descriptor on success.
         let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
@@ -96,6 +213,11 @@ impl Watch {
         }) {
             return false;
         }
+        self.drain(invalidated)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain(&mut self, invalidated: &mut Vec<(ObjectKind, ObjectRef)>) -> bool {
         let mut bytes = [0; 4096];
         loop {
             match self.events.read(&mut bytes) {
@@ -111,6 +233,7 @@ impl Watch {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn invalidate(
         &mut self,
         mut events: &[u8],
@@ -148,12 +271,77 @@ impl Watch {
             }
             let name = name.split(|b| *b == 0).next().unwrap();
             if let Some(hash) = hash_name(name)
-                && let Some(Checked { len, seen: true }) = self.present[directory].remove(&hash)
+                && let Some(Checked {
+                    len, seen: true, ..
+                }) = self.present[directory].remove(&hash)
             {
                 invalidated.push((KINDS[directory], ObjectRef { hash, len }));
             }
         }
         true
+    }
+
+    /// Watch the file just checked, if it is still the one at its name.
+    #[cfg(target_os = "macos")]
+    fn watch_entry(
+        &mut self,
+        store: &CodeStore,
+        kind: ObjectKind,
+        object: ObjectRef,
+        metadata: &Metadata,
+    ) -> Option<std::os::fd::OwnedFd> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+        const O_EVTONLY: i32 = 0x8000;
+        if self.watched.len() >= MAX_WATCHED {
+            return None;
+        }
+        let path =
+            std::ffi::CString::new(store.path(kind, object.hash).as_os_str().as_bytes()).ok()?;
+        // SAFETY: path is NUL terminated; success returns a new descriptor.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: fd is the new descriptor returned by open.
+        let watch = unsafe { OwnedFd::from_raw_fd(fd) };
+        kqueue::watch(
+            &self.events,
+            fd,
+            libc::NOTE_DELETE
+                | libc::NOTE_WRITE
+                | libc::NOTE_EXTEND
+                | libc::NOTE_ATTRIB
+                | libc::NOTE_LINK
+                | libc::NOTE_RENAME
+                | libc::NOTE_REVOKE,
+        )
+        .ok()?;
+        // The watch began after the check: the name must still hold that file.
+        let live = File::from(watch.try_clone().ok()?).metadata().ok()?;
+        if (
+            live.dev(),
+            live.ino(),
+            live.mode(),
+            live.nlink(),
+            live.len(),
+        ) != (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.nlink(),
+            metadata.len(),
+        ) {
+            return None;
+        }
+        let index = KINDS.iter().position(|&candidate| candidate == kind)?;
+        self.watched.insert(watch.as_raw_fd(), (index, object.hash));
+        Some(watch)
     }
 
     fn contains(
@@ -178,11 +366,17 @@ impl Watch {
         };
         // Writable or aliased files are checked by content each time.
         if metadata.mode() & 0o222 == 0 && metadata.nlink() == 1 {
-            present.insert(
+            #[cfg(target_os = "macos")]
+            let Some(watch) = self.watch_entry(store, kind, object, &metadata) else {
+                return Ok(true);
+            };
+            self.present[index].insert(
                 object.hash,
                 Checked {
                     len: object.len,
                     seen: true,
+                    #[cfg(target_os = "macos")]
+                    watch,
                 },
             );
         }
@@ -306,9 +500,11 @@ impl<'a> Presence<'a> {
         let mut invalidated = Vec::new();
         if !watch.refresh(self.store, &mut invalidated) {
             for (kind, checked) in KINDS.into_iter().zip(&mut watch.present) {
-                invalidated.extend(checked.drain().filter_map(|(hash, Checked { len, seen })| {
-                    seen.then_some((kind, ObjectRef { hash, len }))
-                }));
+                invalidated.extend(checked.drain().filter_map(
+                    |(hash, Checked { len, seen, .. })| {
+                        seen.then_some((kind, ObjectRef { hash, len }))
+                    },
+                ));
             }
         }
         for (kind, object) in invalidated {
@@ -336,6 +532,7 @@ impl Drop for Presence<'_> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn hash_name(name: &[u8]) -> Option<ContentHash> {
     let encoded: &[u8; 64] = name.try_into().ok()?;
     let nibble = |b: u8| match b {
@@ -348,6 +545,44 @@ fn hash_name(name: &[u8]) -> Option<ContentHash> {
         *byte = nibble(chars[0])? << 4 | nibble(chars[1])?;
     }
     Some(ContentHash(hash))
+}
+
+#[cfg(target_os = "macos")]
+mod kqueue {
+    use std::io;
+    use std::os::fd::{AsRawFd, OwnedFd};
+
+    /// Post an EVFILT_VNODE watch for `fflags` on `fd` to `queue`.
+    pub(super) fn watch(queue: &OwnedFd, fd: i32, fflags: u32) -> io::Result<()> {
+        let change = libc::kevent {
+            ident: fd as usize,
+            filter: libc::EVFILT_VNODE,
+            flags: libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT,
+            fflags,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: an all-integer receipt slot.
+        let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
+        // SAFETY: the queue, the change and the receipt slot are live.
+        let n = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                &change,
+                1,
+                &mut receipt,
+                1,
+                std::ptr::null(),
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
+            return Err(io::Error::from_raw_os_error(receipt.data as i32));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +614,29 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
+    }
+
+    #[test]
+    fn a_watched_removal_is_checked_on_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CodeStore::for_build(dir.path().join("code-store"));
+        for kind in KINDS {
+            store.put(kind, b"original").unwrap();
+        }
+        let body = store.put(ObjectKind::Body, b"original").unwrap();
+        let mut watch = None;
+        assert!(
+            Presence::new(&store, Some(&mut watch), true)
+                .contains(ObjectKind::Body, body)
+                .unwrap()
+        );
+        assert!(watch.is_some(), "the store's directories are watched");
+        let mut presence = Presence::new(&store, Some(&mut watch), true);
+        assert!(presence.contains(ObjectKind::Body, body).unwrap());
+        fs::remove_file(store.path(ObjectKind::Body, body.hash)).unwrap();
+        assert_eq!(
+            presence.complete().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }

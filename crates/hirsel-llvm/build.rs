@@ -54,27 +54,31 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest.join("bridge/pass_cost.h").display()
     );
+    let macos = env::var("CARGO_CFG_TARGET_OS").unwrap() == "macos";
     let sysroot = prefix.join("sysroot");
     assert!(
-        sysroot.join("usr/include/c++/13/vector").is_file(),
+        macos || sysroot.join("usr/include/c++/13/vector").is_file(),
         "run python3 tools/buck2/prepare.py for hermetic C++ headers"
     );
     for name in sources {
         let source = manifest.join(format!("bridge/{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
-        let status = Command::new(prefix.join("bin/hirsel-clang++"))
-            .args([
-                "-std=c++17",
-                "-fPIC",
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-nostdinc++",
-            ])
-            .arg(format!("--sysroot={}", sysroot.display()))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/c++/13"))
-            .arg("-isystem")
-            .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+        let mut compile = if macos {
+            // The prefix's clang++ against the SDK's libc++.
+            Command::new(prefix.join("bin/clang++"))
+        } else {
+            let mut compile = Command::new(prefix.join("bin/hirsel-clang++"));
+            compile
+                .arg("-nostdinc++")
+                .arg(format!("--sysroot={}", sysroot.display()))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/c++/13"))
+                .arg("-isystem")
+                .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"));
+            compile
+        };
+        let status = compile
+            .args(["-std=c++17", "-fPIC", "-fno-exceptions", "-fno-rtti"])
             .arg("-I")
             .arg(prefix.join("include"))
             .arg("-c")
@@ -86,15 +90,23 @@ fn main() {
         assert!(status.success(), "LLVM option bridge compilation");
     }
     assert!(
-        Command::new(prefix.join("bin/hirsel-llvm-ar"))
-            .arg("crs")
-            .arg(out.join("libhirsel_llvm_bridge.a"))
-            .args(sources.map(|name| out.join(format!("{name}.o"))))
-            .status()
-            .unwrap()
-            .success()
+        Command::new(prefix.join(if macos {
+            "bin/llvm-ar"
+        } else {
+            "bin/hirsel-llvm-ar"
+        }))
+        .arg("crs")
+        .arg(out.join("libhirsel_llvm_bridge.a"))
+        .args(sources.map(|name| out.join(format!("{name}.o"))))
+        .status()
+        .unwrap()
+        .success()
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=hirsel_llvm_bridge");
-    println!("cargo:rustc-link-lib=dylib:+verbatim=libstdc++.so.6");
+    if macos {
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else {
+        println!("cargo:rustc-link-lib=dylib:+verbatim=libstdc++.so.6");
+    }
 }

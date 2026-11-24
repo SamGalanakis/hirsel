@@ -5,6 +5,8 @@ use std::sync::Arc;
 mod image;
 mod policy;
 pub mod served;
+#[cfg(target_os = "macos")]
+pub use image::PrivateCopy;
 pub use image::{PinnedImage, PinnedProfile, hex, probe_seals};
 pub use policy::{GRANT_SYNTAX, Policy, Profile, Request};
 

@@ -171,9 +171,18 @@ fn run() {
     // The writer shares the workers' CPUs; at idle priority it only takes
     // time they leave, so it never preempts a worker. Best effort: if the
     // policy is refused it runs at normal priority.
-    let idle = libc::sched_param { sched_priority: 0 };
-    // SAFETY: plain syscall on the calling thread with a valid parameter.
-    unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &idle) };
+    #[cfg(target_os = "linux")]
+    {
+        let idle = libc::sched_param { sched_priority: 0 };
+        // SAFETY: plain syscall on the calling thread with a valid parameter.
+        unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &idle) };
+    }
+    // macOS schedules a background-class thread only on time others leave.
+    #[cfg(target_os = "macos")]
+    // SAFETY: changes only the calling thread's QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0)
+    };
     let mut batch = VecDeque::new();
     loop {
         {

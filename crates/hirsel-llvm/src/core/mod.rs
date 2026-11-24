@@ -1644,7 +1644,7 @@ struct FunctionEmitter<'a> {
 impl FunctionEmitter<'_> {
     /// AAPCS64 leaves narrow C arguments' upper bits unspecified.
     fn c_param(&self, mut p: Parameter) -> Parameter {
-        if self.abi.target == Target::Aarch64Linux {
+        if self.abi.target.is_aarch64() {
             p.extension = Extension::None;
         }
         p
@@ -2048,7 +2048,7 @@ impl FunctionEmitter<'_> {
             align: 8,
             absolute_symbol: false,
         });
-        let pointer = if self.abi.target == Target::Aarch64Linux || !fixed {
+        let pointer = if self.abi.target.is_aarch64() || !fixed {
             let pointer = self.temp(shape);
             let words = Type::words(memory_layout::CAUSE_BYTES as u64 / 8);
             let value = self.load(&words, &Value::global(name), 8);

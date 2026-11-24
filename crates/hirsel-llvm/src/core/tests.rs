@@ -2214,6 +2214,7 @@ int main(void) {{
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+        Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
     };
     output(
         compiler
@@ -2244,6 +2245,7 @@ int main(void) {{
                 .arg(dir.join("test"));
             command
         }
+        Target::Aarch64Darwin => unreachable!("these laws link and run Linux images"),
     };
     output(&mut executable);
 }

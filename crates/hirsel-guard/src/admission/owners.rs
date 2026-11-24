@@ -262,6 +262,13 @@ static BLOCKS: OnceLock<Mutex<HashMap<usize, Record>>> = OnceLock::new();
 fn blocks() -> &'static Mutex<HashMap<usize, Record>> {
     BLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// Make and box the block table's lock outside the allocator (see
+/// `ProcessBudget::build`).
+#[cfg(target_os = "macos")]
+pub(super) fn warm() {
+    drop(blocks().lock());
+}
 pub(crate) enum Allocation {
     None,
     Recorded(Record),

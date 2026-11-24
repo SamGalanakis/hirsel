@@ -5,13 +5,19 @@
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 include!(concat!(env!("OUT_DIR"), "/component.rs"));
+#[cfg(not(target_os = "macos"))]
 const LLVM_LIBRARY: &str = "libLLVM.so.23.1";
+#[cfg(target_os = "macos")]
+const LLVM_LIBRARY: &str = "libLLVM.23.1.dylib";
 const BUCK_ENGINE: &str = "../../../../../../tools/buck2/toolchains/llvm-files/engine";
 #[repr(C)]
 struct Output {
@@ -142,9 +148,12 @@ fn dl_error() -> String {
     }
 }
 fn open(name: &CStr) -> Result<*mut libc::c_void, String> {
+    open_with(name, libc::RTLD_LOCAL)
+}
+fn open_with(name: &CStr, scope: libc::c_int) -> Result<*mut libc::c_void, String> {
     // SAFETY: the name is terminated. Handles remain loaded for process life,
     // like rustc's codegen backend, so no callback can outlive its code.
-    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | scope) };
     if handle.is_null() {
         Err(dl_error())
     } else {
@@ -210,11 +219,17 @@ fn check_engine(path: &Path, expected: &str) -> Result<(), String> {
         |detail: &dyn std::fmt::Display| format!("LLVM engine {}: {detail}", path.display());
     let source = File::open(path).map_err(|cause| error(&cause))?;
     let cache = object::read::ReadCache::new(source);
-    let elf = object::File::parse(&cache).map_err(|cause| error(&cause))?;
-    let id = elf
+    let image = object::File::parse(&cache).map_err(|cause| error(&cause))?;
+    #[cfg(not(target_os = "macos"))]
+    let id = image
         .build_id()
         .map_err(|cause| error(&cause))?
         .ok_or_else(|| error(&"no build ID"))?;
+    #[cfg(target_os = "macos")]
+    let id = &image
+        .mach_uuid()
+        .map_err(|cause| error(&cause))?
+        .ok_or_else(|| error(&"no UUID"))?;
     let mut actual = String::with_capacity(id.len() * 2);
     for byte in id {
         write!(actual, "{byte:02x}").unwrap();
@@ -233,9 +248,11 @@ unsafe extern "C" fn llvm_out_of_memory(reason: *const libc::c_char) -> ! {
     let reason = unsafe { std::ffi::CStr::from_ptr(reason) };
     hirsel_guard::foreign_exhausted(b"LLVM", reason.to_bytes())
 }
-fn load() -> Result<Backend, String> {
-    let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    open(&llvm)?;
+/// The embedded component as a file dlopen can map, the path to open, and a
+/// directory to remove once it is open. Linux seals it in a memfd so it
+/// cannot be replaced while it is read.
+#[cfg(target_os = "linux")]
+fn component_image() -> Result<(File, CString, Option<PathBuf>), String> {
     // SAFETY: memfd_create returns a new exclusively owned fd, not an existing
     // process handle. The sealed file is the linked component's exact bytes.
     let fd = unsafe {
@@ -263,7 +280,58 @@ fn load() -> Result<Backend, String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let path = CString::new(format!("/proc/self/fd/{}", image.as_raw_fd())).unwrap();
-    let handle = open(&path)?;
+    Ok((image, path, None))
+}
+
+/// macOS has no memfd: the component is written read-only into a fresh
+/// owner-only directory, which no other user can replace it in.
+#[cfg(target_os = "macos")]
+fn component_image() -> Result<(File, CString, Option<PathBuf>), String> {
+    let mut template = std::env::temp_dir()
+        .join("hirsel-llvm-XXXXXX")
+        .into_os_string()
+        .into_vec();
+    template.push(0);
+    // SAFETY: mkdtemp rewrites the terminated template in place.
+    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    template.pop();
+    let dir = PathBuf::from(std::ffi::OsString::from_vec(template));
+    let file = dir.join("libhirsel_llvm_engine.dylib");
+    let written = (|| {
+        let mut image = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)?;
+        image.write_all(COMPONENT)?;
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o500))?;
+        File::open(&file)
+    })();
+    let path = CString::new(file.as_os_str().as_bytes()).unwrap();
+    match written {
+        Ok(image) => Ok((image, path, Some(dir))),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(dir);
+            Err(error.to_string())
+        }
+    }
+}
+
+fn load() -> Result<Backend, String> {
+    let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    // dyld coalesces the component's weak C++ references only against
+    // globally loaded images, so libLLVM is global there.
+    #[cfg(target_os = "macos")]
+    open_with(&llvm, libc::RTLD_GLOBAL)?;
+    #[cfg(not(target_os = "macos"))]
+    open(&llvm)?;
+    let (image, path, remove) = component_image()?;
+    let handle = open(&path);
+    if let Some(dir) = remove {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let handle = handle?;
     // SAFETY: these two exports and C layouts are defined by the embedded
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };

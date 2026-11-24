@@ -328,7 +328,7 @@ impl SourceProgram {
 fn combine(objects: &[Vec<u8>], target: Target) -> Vec<u8> {
     let scratch = tempfile::tempdir().unwrap();
     let compiler = match target {
-        Target::X86_64Linux => Some(
+        Target::X86_64Linux | Target::Aarch64Darwin => Some(
             std::path::PathBuf::from(
                 std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"),
             )

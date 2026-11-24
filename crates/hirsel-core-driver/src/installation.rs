@@ -393,6 +393,19 @@ pub(crate) fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
     if !bytes.starts_with(b"!<arch>\n") {
         return false;
     }
+    // A BSD table (`__.SYMDEF`, as Apple's archiver writes) lists Mach-O
+    // names, which carry a leading `_`.
+    if let Ok(archive) = object::read::archive::ArchiveFile::parse(bytes)
+        && matches!(
+            archive.kind(),
+            object::read::archive::ArchiveKind::Bsd | object::read::archive::ArchiveKind::Bsd64
+        )
+    {
+        let mangled = [b"_".as_slice(), symbol].concat();
+        return archive.symbols().ok().flatten().is_some_and(|mut symbols| {
+            symbols.any(|entry| entry.is_ok_and(|entry| entry.name() == mangled.as_slice()))
+        });
+    }
     let mut at = 8usize;
     while at + 60 <= bytes.len() {
         let header = &bytes[at..at + 60];

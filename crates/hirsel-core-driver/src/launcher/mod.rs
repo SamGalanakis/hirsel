@@ -318,6 +318,8 @@ struct Process {
 struct Ordinary {
     pid: libc::pid_t,
     pidfd: OwnedFd,
+    #[allow(dead_code)]
+    image: spawn::Image,
     group: Option<cgroup::Group>,
     status: Option<Status>,
 }
@@ -342,7 +344,7 @@ impl Running {
             Self::Ordinary(child) => match (&child.group, signal, &child.status) {
                 (Some(group), libc::SIGKILL, _) => group.kill(),
                 (_, _, Some(_)) => Ok(()),
-                _ => send(child.pidfd.as_raw_fd(), signal),
+                _ => send(child.pid, child.pidfd.as_raw_fd(), signal),
             },
         }
     }
@@ -373,6 +375,13 @@ impl Running {
 
 impl Ordinary {
     fn reap_leader(&mut self) -> io::Result<()> {
+        // Without a cgroup, macOS ends the run's whole session with it: the
+        // unreaped leader still holds its process group's ID.
+        #[cfg(target_os = "macos")]
+        if self.status.is_none() && self.group.is_none() {
+            // SAFETY: the group is this unreaped child's own session.
+            unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+        }
         if self.status.is_none() {
             self.status = Some(status_of(wait_pid(self.pid)?));
             if let Some(group) = &self.group {
@@ -433,7 +442,90 @@ pub(super) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
     }
 }
 
-fn send(pidfd: RawFd, signal: i32) -> io::Result<()> {
+/// macOS signals a child by PID, which stays its own until it is reaped. A
+/// kill reaches the child's whole session, as a cgroup kill does on Linux.
+#[cfg(target_os = "macos")]
+fn send(pid: libc::pid_t, _pidfd: RawFd, signal: i32) -> io::Result<()> {
+    // SAFETY: the caller holds this unreaped child, the leader of its session.
+    let rc = unsafe {
+        if signal == libc::SIGKILL {
+            libc::killpg(pid, signal)
+        } else {
+            libc::kill(pid, signal)
+        }
+    };
+    if rc != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// A kqueue that becomes readable when `pid` exits stands in for a pidfd: a
+/// NOTE_EXIT watch, or a user event already triggered if it has exited.
+#[cfg(target_os = "macos")]
+fn pidfd(pid: u32) -> io::Result<OwnedFd> {
+    // SAFETY: success returns a new descriptor.
+    let raw = unsafe { libc::kqueue() };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: kqueue returned a fresh descriptor.
+    let queue = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: setting close-on-exec on a live descriptor.
+    if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let event = |ident, filter, flags, fflags| libc::kevent {
+        ident,
+        filter,
+        flags,
+        fflags,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let change = event(
+        pid as usize,
+        libc::EVFILT_PROC,
+        libc::EV_ADD | libc::EV_RECEIPT,
+        libc::NOTE_EXIT,
+    );
+    // SAFETY: an all-integer receipt slot.
+    let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
+    // SAFETY: the queue, the change and the receipt are live.
+    if unsafe { libc::kevent(raw, &change, 1, &mut receipt, 1, std::ptr::null()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
+        if receipt.data != libc::ESRCH as isize {
+            return Err(io::Error::from_raw_os_error(receipt.data as i32));
+        }
+        let exited = [
+            event(0, libc::EVFILT_USER, libc::EV_ADD, 0),
+            event(0, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER),
+        ];
+        // SAFETY: the queue and both changes are live.
+        if unsafe {
+            libc::kevent(
+                raw,
+                exited.as_ptr(),
+                2,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(queue)
+}
+
+#[cfg(target_os = "linux")]
+fn send(_pid: libc::pid_t, pidfd: RawFd, signal: i32) -> io::Result<()> {
     // SAFETY: a pidfd signal reaches only the process it pins.
     let rc = unsafe {
         libc::syscall(
@@ -518,6 +610,7 @@ pub(crate) fn lock(state: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+#[cfg(target_os = "linux")]
 fn pidfd(pid: u32) -> io::Result<OwnedFd> {
     // SAFETY: pidfd_open pins a kernel process identity, with no signal.
     let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
@@ -552,7 +645,9 @@ fn above_launch_slots(fd: RawFd) -> io::Result<OwnedFd> {
 fn pipe() -> io::Result<(File, OwnedFd)> {
     let mut fds = [0; 2];
     // SAFETY: pipe2 fills two fresh descriptors.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
+    if unsafe { hirsel_core_net::sys::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) }
+        < 0
+    {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: both descriptors are fresh and owned here.
@@ -1386,7 +1481,7 @@ impl<I: Images> Launcher<I> {
                 let directory = group.as_ref().map(cgroup::Group::directory).transpose()?;
                 spawn::start(&command, workdir, &slots, directory.as_ref(), serving)
             })();
-            let (pid, pidfd) = match started {
+            let (pid, pidfd, executed) = match started {
                 Ok(started) => started,
                 Err(error) => {
                     if let Some(group) = group {
@@ -1401,6 +1496,7 @@ impl<I: Images> Launcher<I> {
             Running::Ordinary(Ordinary {
                 pid,
                 pidfd,
+                image: executed,
                 group,
                 status: None,
             })
@@ -1737,7 +1833,7 @@ impl<I: Images> Launcher<I> {
                 }
             }
         }
-        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+        let mut events = [hirsel_core_net::sys::epoll_event { events: 0, u64: 0 }; 64];
         let timeout = match (timeout, self.bootstrap.as_ref().and_then(|b| b.timeout())) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

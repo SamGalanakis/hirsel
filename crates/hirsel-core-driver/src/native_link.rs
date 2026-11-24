@@ -20,7 +20,21 @@ pub(super) fn direct_link(
     let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
     let mut process = crate::tool_inputs::tool_command(&recipe.linker);
     process.current_dir(directory.path());
-    let _layout = if optimize {
+    // A Darwin recipe runs the C driver over ld64, which takes none of the
+    // ld.lld options below.
+    let darwin =
+        hirsel_core_layout::Target::from_triple(&recipe.target).is_some_and(|t| t.is_darwin());
+    if darwin {
+        if optimize {
+            process.arg("-Wl,-dead_strip");
+        }
+        if !debug_lines {
+            process.arg("-Wl,-S");
+        }
+    }
+    let _layout = if darwin {
+        None
+    } else if optimize {
         // Keep the executable's code revision even when no tape reads it.
         process.args([
             "--gc-sections",
@@ -43,15 +57,33 @@ pub(super) fn direct_link(
     } else {
         None
     };
-    if !debug_lines {
+    if !debug_lines && !darwin {
         process.arg("--strip-debug");
     }
-    if emit_relocations {
+    if emit_relocations && !darwin {
         process.arg("--emit-relocs");
     }
     let mut inserted = false;
     for argument in &recipe.args {
-        if argument == crate::tool_inputs::INPUT_MARKER {
+        if argument == crate::tool_inputs::INPUT_MARKER && darwin {
+            // A large program's object paths exceed macOS's argument limit:
+            // ld64 reads them one per line from a file list instead.
+            let mut list = Vec::new();
+            for input in inputs {
+                use std::os::unix::ffi::OsStrExt;
+                list.extend_from_slice(std::path::absolute(input)?.as_os_str().as_bytes());
+                list.push(b'\n');
+            }
+            let path = std::path::absolute(directory.path().join("inputs.filelist"))?;
+            std::fs::write(&path, list)?;
+            let mut flag = std::ffi::OsString::from("-Wl,-filelist,");
+            flag.push(&path);
+            process.arg(flag);
+            for library in support_libs {
+                process.arg(library);
+            }
+            inserted = true;
+        } else if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
                 process.arg(std::path::absolute(input)?);
             }
@@ -68,7 +100,7 @@ pub(super) fn direct_link(
             "direct link recipe has no input marker".into(),
         ));
     }
-    if !optimize {
+    if !optimize && !darwin {
         process.arg("-O0");
     }
     process.arg("-o").arg("program");

@@ -207,7 +207,9 @@ fn a_message_sent_while_its_receivers_worker_goes_to_wait_in_the_poller_is_recei
         // SAFETY: the root pins the gate and moved the receiver to this task.
         unsafe {
             let input = input.cast::<Receiver>().read();
-            (*input.gate).home.store(libc::gettid(), Ordering::Release);
+            (*input.gate)
+                .home
+                .store(hirsel_core_net::sys::gettid(), Ordering::Release);
             let mut unit = ();
             let got = hirsel_core_receive(context, input.rx, (&raw mut unit).cast(), 2);
             assert_eq!((got.transferred, got.status), (true, 0));
@@ -273,7 +275,7 @@ fn a_message_sent_while_its_receivers_worker_goes_to_wait_in_the_poller_is_recei
             return;
         }
         // SAFETY: gettid has no preconditions.
-        if unsafe { libc::gettid() } == home {
+        if unsafe { hirsel_core_net::sys::gettid() } == home {
             // The receiver is parked: hold its worker after its last checks.
             if !hook.held.swap(true, Ordering::AcqRel) {
                 wait_until(|| hook.released.load(Ordering::Acquire));

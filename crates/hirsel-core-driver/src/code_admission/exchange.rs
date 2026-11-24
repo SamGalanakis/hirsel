@@ -30,8 +30,10 @@ impl ControlConnection {
         if self.need_sent {
             return Ok(());
         }
-        self.stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
+        hirsel_core_net::sys::timeout_set(
+            self.stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(1))),
+        )?;
         self.stream.write_all(&u64::MAX.to_le_bytes())?;
         let length = u32::try_from(reason.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
         self.stream.write_all(&length.to_le_bytes())?;
@@ -57,8 +59,8 @@ impl ControlConnection {
 
     /// Recover the stream for the host's result or deploy preview.
     pub fn into_stream(self) -> io::Result<UnixStream> {
-        self.stream.set_read_timeout(None)?;
-        self.stream.set_write_timeout(None)?;
+        hirsel_core_net::sys::timeout_set(self.stream.set_read_timeout(None))?;
+        hirsel_core_net::sys::timeout_set(self.stream.set_write_timeout(None))?;
         Ok(self.stream)
     }
 }
@@ -195,7 +197,9 @@ impl<'a> Exchange<'a> {
 
     fn write_frame(&mut self, mut bytes: &[u8]) -> io::Result<()> {
         while !bytes.is_empty() {
-            self.stream.set_write_timeout(Some(self.remaining()?))?;
+            hirsel_core_net::sys::timeout_set(
+                self.stream.set_write_timeout(Some(self.remaining()?)),
+            )?;
             match self.stream.write(bytes) {
                 Ok(0) => return Err(io::ErrorKind::BrokenPipe.into()),
                 Ok(n) => bytes = &bytes[n..],
@@ -222,7 +226,9 @@ impl<'a> Exchange<'a> {
 impl Read for Exchange<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         loop {
-            self.stream.set_read_timeout(Some(self.remaining()?))?;
+            hirsel_core_net::sys::timeout_set(
+                self.stream.set_read_timeout(Some(self.remaining()?)),
+            )?;
             match self.stream.read(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 result => return result,

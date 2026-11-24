@@ -37,11 +37,7 @@ pub(super) fn private_suffix(has_status: bool, ok: bool) -> &'static str {
     }
 }
 pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension {
-    if target == hirsel_core_layout::Target::Aarch64Linux
-        || size(t) >= 4
-        || t.is_float()
-        || t == Ty::Ptr
-    {
+    if target.is_aarch64() || size(t) >= 4 || t.is_float() || t == Ty::Ptr {
         Extension::None
     } else if t.int().is_some_and(|x| x.0) {
         Extension::Sign
@@ -223,7 +219,7 @@ impl Return {
         }
         let extent = end.next_multiple_of(alignment);
         let storage = Type::bytes(extent.max(16));
-        let homogeneous = target == hirsel_core_layout::Target::Aarch64Linux
+        let homogeneous = target.is_aarch64()
             && (2..=4).contains(&fields.len())
             && fields[0].is_float()
             && fields.iter().all(|t| *t == fields[0]);
@@ -234,7 +230,7 @@ impl Return {
             vec![]
         } else if homogeneous {
             fields.iter().map(|t| ty(*t)).collect()
-        } else if target == hirsel_core_layout::Target::Aarch64Linux {
+        } else if target.is_aarch64() {
             if extent <= 8 {
                 vec![Type::Int(extent as u32 * 8)]
             } else {
@@ -899,7 +895,7 @@ pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
             align: 8,
             ..Parameter::plain(Type::Ptr)
         },
-        Target::Aarch64Linux => Type::Ptr.into(),
+        Target::Aarch64Linux | Target::Aarch64Darwin => Type::Ptr.into(),
     }
 }
 

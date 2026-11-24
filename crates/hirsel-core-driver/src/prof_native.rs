@@ -28,6 +28,8 @@ fn capture_native_profile(
     hirsel_prof::Profile::open(out).unwrap()
 }
 
+// Attaching samples another process with perf events.
+#[cfg(target_os = "linux")]
 #[test]
 fn profiler_attach_uses_snapshot_before_sampling_existing_mappings() {
     use std::io::{BufRead, BufReader};
@@ -495,6 +497,8 @@ fn run_logical_charge_report_selects_the_installed_observer() {
     assert_eq!(report["peak_root_reserved_bytes"], 288);
 }
 
+// macOS profiles take no memory samples.
+#[cfg(target_os = "linux")]
 #[test]
 fn profiler_replay_memory_peaks_match_the_runtime_metrics() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -684,6 +688,8 @@ pub fn main() -> Result[(), Exit] {
     assert_eq!(task_bytes, 0, "the root Task and both stores close");
 }
 
+// macOS profiles take no memory samples.
+#[cfg(target_os = "linux")]
 #[test]
 fn live_memory_profile_weights_held_bytes_and_closes_churn_across_workers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))

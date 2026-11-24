@@ -230,15 +230,18 @@ mod tests {
         );
         let start = Instant::now();
         assert!(matches!(
-            describe_child(&child, 4096, Duration::from_millis(100)),
+            // Long enough for macOS's first-exec check of a new script, which
+            // can delay the shell past 100ms, and well short of its sleep.
+            describe_child(&child, 4096, Duration::from_millis(500)),
             Err(DescribeError::PlaceTimedOut)
         ));
         assert!(start.elapsed() < Duration::from_secs(1));
         let pid = std::fs::read_to_string(root.path().join("describe-child.pid")).unwrap();
-        assert!(
-            !Path::new("/proc").join(pid.trim()).exists(),
-            "child was not reaped"
-        );
+        let pid: libc::pid_t = pid.trim().parse().unwrap();
+        // SAFETY: signal 0 only asks whether the PID names a process.
+        let exists = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        assert!(!exists, "child was not reaped");
     }
     #[test]
     fn place_capacity_error_is_intact_at_zero_and_one() {

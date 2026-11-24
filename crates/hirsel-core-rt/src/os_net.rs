@@ -138,13 +138,21 @@ unsafe fn address(a: Address) -> (libc::sockaddr_storage, libc::socklen_t) {
         let mut storage: libc::sockaddr_storage = zeroed();
         let len = if a.family == 0 {
             let v4 = storage_as_mut::<libc::sockaddr_in>(&mut storage);
-            v4.sin_family = libc::AF_INET as u16;
+            v4.sin_family = libc::AF_INET as _;
+            #[cfg(target_os = "macos")]
+            {
+                v4.sin_len = size_of::<libc::sockaddr_in>() as u8;
+            }
             v4.sin_port = a.port.to_be();
             v4.sin_addr.s_addr = (a.lo as u32).to_be();
             size_of::<libc::sockaddr_in>()
         } else {
             let v6 = storage_as_mut::<libc::sockaddr_in6>(&mut storage);
-            v6.sin6_family = libc::AF_INET6 as u16;
+            v6.sin6_family = libc::AF_INET6 as _;
+            #[cfg(target_os = "macos")]
+            {
+                v6.sin6_len = size_of::<libc::sockaddr_in6>() as u8;
+            }
             v6.sin6_port = a.port.to_be();
             v6.sin6_addr.s6_addr = ((u128::from(a.hi) << 64) | u128::from(a.lo)).to_be_bytes();
             size_of::<libc::sockaddr_in6>()
@@ -183,7 +191,7 @@ fn socket_option(fd: BorrowedFd<'_>, level: i32, name: i32) -> Result<i32, i32> 
     let mut len = size_of::<i32>() as libc::socklen_t;
     // SAFETY: fd is borrowed and both option outputs are writable.
     retry(|| unsafe {
-        libc::getsockopt(
+        hirsel_core_net::sys::getsockopt(
             fd.as_raw_fd(),
             level,
             name,
@@ -198,7 +206,8 @@ fn inherited_address(listener: &TcpListener) -> Result<Address, i32> {
     let fd = listener.as_fd();
     if socket_option(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 1
-        || socket_option(fd, libc::SOL_SOCKET, libc::SO_PROTOCOL)? != libc::IPPROTO_TCP
+        || socket_option(fd, libc::SOL_SOCKET, hirsel_core_net::sys::SO_PROTOCOL)?
+            != libc::IPPROTO_TCP
     {
         return Err(libc::EINVAL);
     }
@@ -328,13 +337,15 @@ fn options(fd: i32, family: u8, listener: bool, accepted: bool) -> Result<(), i3
 unsafe fn socket(n: &mut NetworkRequest, listener: bool) -> Result<u64, i32> {
     unsafe {
         let fd = retry(|| {
-            libc::socket(
+            hirsel_core_net::sys::socket(
                 if n.address.family == 0 {
                     libc::AF_INET
                 } else {
                     libc::AF_INET6
                 },
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                libc::SOCK_STREAM
+                    | hirsel_core_net::sys::SOCK_CLOEXEC
+                    | hirsel_core_net::sys::SOCK_NONBLOCK,
                 0,
             ) as isize
         })? as i32;
@@ -354,7 +365,12 @@ unsafe fn send_pair(fd: i32, prefix: &Buffer, tail: &Buffer) -> isize {
     unsafe {
         if prefix.len == 0 || tail.len == 0 {
             let bytes = if prefix.len == 0 { tail } else { prefix };
-            return libc::send(fd, bytes.data.cast(), bytes.len, libc::MSG_NOSIGNAL);
+            return libc::send(
+                fd,
+                bytes.data.cast(),
+                bytes.len,
+                hirsel_core_net::sys::MSG_NOSIGNAL,
+            );
         }
         let mut parts = [
             libc::iovec {
@@ -368,8 +384,8 @@ unsafe fn send_pair(fd: i32, prefix: &Buffer, tail: &Buffer) -> isize {
         ];
         let mut message: libc::msghdr = zeroed();
         message.msg_iov = parts.as_mut_ptr();
-        message.msg_iovlen = parts.len();
-        libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL)
+        message.msg_iovlen = parts.len() as _;
+        libc::sendmsg(fd, &message, hirsel_core_net::sys::MSG_NOSIGNAL)
     }
 }
 
@@ -488,11 +504,12 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let mut len = size_of::<libc::sockaddr_storage>() as u32;
                 let accepted = loop {
                     let result = retry(|| {
-                        libc::accept4(
+                        hirsel_core_net::sys::accept4(
                             sockets.fd(key),
                             (&mut peer as *mut libc::sockaddr_storage).cast(),
                             &mut len,
-                            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                            hirsel_core_net::sys::SOCK_CLOEXEC
+                                | hirsel_core_net::sys::SOCK_NONBLOCK,
                         ) as isize
                     });
                     // An aborted peer does not prove the accept queue is drained.
@@ -576,7 +593,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 // readable; none is consumed, so the receive still reports it.
                 let mut poll = libc::pollfd {
                     fd: sockets.fd(key),
-                    events: libc::POLLIN | libc::POLLRDHUP,
+                    events: libc::POLLIN | hirsel_core_net::sys::POLLRDHUP,
                     revents: 0,
                 };
                 match retry(|| libc::poll(&mut poll, 1, 0) as isize) {

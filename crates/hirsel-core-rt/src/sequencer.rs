@@ -355,7 +355,7 @@ fn cpu_l3_ids() -> &'static [usize] {
 /// The calling CPU's cohort.
 fn current_cohort() -> usize {
     // SAFETY: sched_getcpu has no preconditions.
-    let cpu = unsafe { libc::sched_getcpu() };
+    let cpu = unsafe { hirsel_core_net::sys::sched_getcpu() };
     usize::try_from(cpu)
         .ok()
         .and_then(|cpu| cpu_l3_ids().get(cpu))
@@ -383,27 +383,42 @@ const AFFINITY_SHARE: u32 = 8;
 /// whole pool and the inherited mask spans multiple L3s.
 struct Home {
     cohort: usize,
-    cpus: libc::cpu_set_t,
-    allowed: libc::cpu_set_t,
+    cpus: hirsel_core_net::sys::cpu_set_t,
+    allowed: hirsel_core_net::sys::cpu_set_t,
 }
 
 impl Home {
     fn detect(workers: usize) -> Option<Self> {
         // SAFETY: an all-zero cpu_set_t is the empty set.
-        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let mut allowed: hirsel_core_net::sys::cpu_set_t = unsafe { std::mem::zeroed() };
         // SAFETY: the set is writable and sized; pid 0 is the calling thread,
         // which still runs with the pool's inherited mask.
-        if unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut allowed) } != 0 {
+        if unsafe {
+            hirsel_core_net::sys::sched_getaffinity(
+                0,
+                size_of::<hirsel_core_net::sys::cpu_set_t>(),
+                &mut allowed,
+            )
+        } != 0
+        {
             return None;
         }
         Self::from_allowed(allowed, cpu_l3_ids(), workers)
     }
 
-    fn from_allowed(allowed: libc::cpu_set_t, l3_ids: &[usize], workers: usize) -> Option<Self> {
+    fn from_allowed(
+        allowed: hirsel_core_net::sys::cpu_set_t,
+        l3_ids: &[usize],
+        workers: usize,
+    ) -> Option<Self> {
         let mut counts = BTreeMap::<usize, usize>::new();
-        for (cpu, &l3) in l3_ids.iter().take(libc::CPU_SETSIZE as usize).enumerate() {
+        for (cpu, &l3) in l3_ids
+            .iter()
+            .take(hirsel_core_net::sys::CPU_SETSIZE as usize)
+            .enumerate()
+        {
             // SAFETY: CPU_ISSET reads the initialized set within its size.
-            if unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+            if unsafe { hirsel_core_net::sys::CPU_ISSET(cpu, &allowed) } {
                 *counts.entry(l3).or_default() += 1;
             }
         }
@@ -417,12 +432,16 @@ impl Home {
             return None;
         }
         // SAFETY: an all-zero cpu_set_t is the empty set.
-        let mut cpus: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        for (cpu, &l3) in l3_ids.iter().take(libc::CPU_SETSIZE as usize).enumerate() {
+        let mut cpus: hirsel_core_net::sys::cpu_set_t = unsafe { std::mem::zeroed() };
+        for (cpu, &l3) in l3_ids
+            .iter()
+            .take(hirsel_core_net::sys::CPU_SETSIZE as usize)
+            .enumerate()
+        {
             // SAFETY: CPU_ISSET reads the initialized set within its size.
-            if l3 == home && unsafe { libc::CPU_ISSET(cpu, &allowed) } {
+            if l3 == home && unsafe { hirsel_core_net::sys::CPU_ISSET(cpu, &allowed) } {
                 // SAFETY: CPU_SET writes within the set's size.
-                unsafe { libc::CPU_SET(cpu, &mut cpus) };
+                unsafe { hirsel_core_net::sys::CPU_SET(cpu, &mut cpus) };
             }
         }
         Some(Self {
@@ -433,9 +452,15 @@ impl Home {
     }
 }
 
-fn set_affinity(cpus: &libc::cpu_set_t) -> bool {
+fn set_affinity(cpus: &hirsel_core_net::sys::cpu_set_t) -> bool {
     // SAFETY: the set is a valid cpu_set_t; 0 names the calling thread.
-    unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), cpus) == 0 }
+    unsafe {
+        hirsel_core_net::sys::sched_setaffinity(
+            0,
+            size_of::<hirsel_core_net::sys::cpu_set_t>(),
+            cpus,
+        ) == 0
+    }
 }
 
 /// Outermost acquisitions between re-reads of the worker's CPU. A worker
@@ -471,28 +496,11 @@ pub(crate) static PARKS: [std::sync::atomic::AtomicU64; 5] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 fn futex_wait(word: &AtomicU32, expected: u32) {
-    // SAFETY: FUTEX_WAIT reads the pinned word and returns at once if it changed.
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            word.as_ptr(),
-            libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-            expected,
-            ptr::null::<libc::timespec>(),
-        );
-    }
+    hirsel_core_net::sys::futex_wait(word, expected, None);
 }
 
 fn futex_wake(word: &AtomicU32) {
-    // SAFETY: waking a pinned word has no other effect.
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            word.as_ptr(),
-            libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-            1,
-        );
-    }
+    hirsel_core_net::sys::futex_wake(word, 1);
 }
 
 /// Spin briefly, then yield the CPU: a waiter that shares its CPU with the
@@ -955,22 +963,22 @@ mod tests {
         // The first two caches have two CPUs each and share one token cohort.
         // The third cache has one CPU. No single cache can hold four workers.
         // SAFETY: these five CPU indices fit a zeroed cpu_set_t.
-        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let mut allowed: hirsel_core_net::sys::cpu_set_t = unsafe { std::mem::zeroed() };
         for cpu in 0..5 {
             // SAFETY: the set is initialized and the index fits.
-            unsafe { libc::CPU_SET(cpu, &mut allowed) };
+            unsafe { hirsel_core_net::sys::CPU_SET(cpu, &mut allowed) };
         }
         let aliasing = &[0, 0, COHORTS, COHORTS, 1];
         assert!(Home::from_allowed(allowed, aliasing, 4).is_none());
         let home = Home::from_allowed(allowed, aliasing, 2).unwrap();
         // SAFETY: all indices fit and both sets are initialized.
         assert!(unsafe {
-            libc::CPU_ISSET(0, &home.cpus)
-                && libc::CPU_ISSET(1, &home.cpus)
-                && !libc::CPU_ISSET(2, &home.cpus)
-                && !libc::CPU_ISSET(3, &home.cpus)
-                && !libc::CPU_ISSET(4, &home.cpus)
-                && libc::CPU_EQUAL(&home.allowed, &allowed)
+            hirsel_core_net::sys::CPU_ISSET(0, &home.cpus)
+                && hirsel_core_net::sys::CPU_ISSET(1, &home.cpus)
+                && !hirsel_core_net::sys::CPU_ISSET(2, &home.cpus)
+                && !hirsel_core_net::sys::CPU_ISSET(3, &home.cpus)
+                && !hirsel_core_net::sys::CPU_ISSET(4, &home.cpus)
+                && hirsel_core_net::sys::CPU_EQUAL(&home.allowed, &allowed)
         });
     }
 }

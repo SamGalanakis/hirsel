@@ -378,7 +378,12 @@ impl Read for SocketIo {
 impl Write for SocketIo {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         os_net::retry(|| unsafe {
-            libc::send(self.0, buf.as_ptr().cast(), buf.len(), libc::MSG_NOSIGNAL)
+            libc::send(
+                self.0,
+                buf.as_ptr().cast(),
+                buf.len(),
+                hirsel_core_net::sys::MSG_NOSIGNAL,
+            )
         })
         .map(|n| n as usize)
         .map_err(io::Error::from_raw_os_error)

@@ -1257,14 +1257,20 @@ fn fire_timers(p: &Pool) {
 }
 
 fn poll_global(p: &Pool, timeout: i32) {
-    let mut evs: [libc::epoll_event; 128] = [libc::epoll_event { events: 0, u64: 0 }; 128];
+    let mut evs: [hirsel_core_net::sys::epoll_event; 128] =
+        [hirsel_core_net::sys::epoll_event { events: 0, u64: 0 }; 128];
     bump(S_GPOLLS);
     if timeout != 0 {
         bump(S_GPOLL_BLOCKS);
     }
     let n = if p.uring {
         // The ring's turn drains the wake eventfd itself.
-        p._shared.wait_shared(&mut evs, timeout) as i32
+        #[cfg(target_os = "linux")]
+        {
+            p._shared.wait_shared(&mut evs, timeout) as i32
+        }
+        #[cfg(not(target_os = "linux"))]
+        unreachable!("io_uring is Linux-only")
     } else {
         // SAFETY: a live epoll and a writable event array.
         unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) }

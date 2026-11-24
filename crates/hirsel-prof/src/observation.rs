@@ -71,6 +71,19 @@ pub(crate) enum RecordKind {
         status: u8,
     },
     Mapping(Vec<u8>),
+    /// A macOS runtime sample: the sampled thread, then its PC and return
+    /// addresses, innermost first.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    CpuSample {
+        thread: u64,
+        stack: Vec<u64>,
+    },
+    /// The name of a thread macOS samples name by its port.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ThreadName {
+        thread: u64,
+        name: Vec<u8>,
+    },
     Memory {
         event: MemoryEvent,
         stack: Vec<u8>,
@@ -159,6 +172,17 @@ impl RecordKind {
                 status: u8::try_from(status)?,
             },
             (12, [], _) => Self::Mapping(bytes),
+            (24, [thread, stack @ ..], true) if !stack.is_empty() => Self::CpuSample {
+                thread: *thread,
+                stack: stack.to_vec(),
+            },
+            (25, &[thread], _) => Self::ThreadName {
+                thread,
+                name: bytes,
+            },
+            (24 | 25, _, _) => {
+                return Err(format!("invalid runtime observation payload for kind {kind}").into());
+            }
             (16..=21, _, _) => Self::Memory {
                 event: MemoryEvent::decode(kind, words)?,
                 stack: bytes,
@@ -516,6 +540,8 @@ impl<'a> Import<'a> {
             }
             RecordKind::Mapping(_)
             | RecordKind::Memory { .. }
+            | RecordKind::CpuSample { .. }
+            | RecordKind::ThreadName { .. }
             | RecordKind::End
             | RecordKind::Loss(_) => {}
         }

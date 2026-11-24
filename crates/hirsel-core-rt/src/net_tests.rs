@@ -8,7 +8,9 @@ use std::{
 };
 
 fn fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").unwrap().count()
+    std::fs::read_dir(crate::test_process::OPEN_FDS)
+        .unwrap()
+        .count()
 }
 fn isolated(law: &str) {
     let output = crate::test_process::command()
@@ -451,7 +453,14 @@ fn net_inherited_listener_keeps_queued_connection() {
 
 #[test]
 fn net_inherited_listener_checks_bound_address() {
-    let listener = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    // macOS configures only 127.0.0.1 on loopback; an IPv4-mapped IPv6
+    // address is as far outside the granted 127.0.0.1/32.
+    let outside = if cfg!(target_os = "macos") {
+        "[::ffff:127.0.0.1]:0"
+    } else {
+        "127.0.0.2:0"
+    };
+    let listener = std::net::TcpListener::bind(outside).unwrap();
     let output = inherited_child(&listener, "inherited_denied")
         .output()
         .unwrap();
@@ -640,6 +649,11 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         .value,
                     6
                 );
+                // macOS delivers loopback TCP on its input thread, after send
+                // returns: let the payload arrive before the expired deadline.
+                if cfg!(target_os = "macos") {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 let mut bytes = [0; 6];
                 let mut input = carrier(&mut bytes, 0);
                 // The bounded receive appends only the requested prefix even
@@ -995,11 +1009,22 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 hirsel_core_socket_drop(context, split.value);
                 hirsel_core_socket_drop(context, split.written);
                 let mut empty = [0];
-                assert_eq!(peer.read(&mut empty).unwrap(), 0);
+                // Closing with the unread byte resets the connection. Linux
+                // shows the peer its end of stream first; macOS, delivering
+                // loopback on its input thread, can show the reset first.
+                match peer.read(&mut empty) {
+                    Ok(n) => assert_eq!(n, 0),
+                    Err(error) if cfg!(target_os = "macos") => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset)
+                    }
+                    Err(error) => panic!("{error}"),
+                }
                 if law == "spurious_connect" {
-                    let fd = libc::socket(
+                    let fd = hirsel_core_net::sys::socket(
                         libc::AF_INET,
-                        libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                        libc::SOCK_STREAM
+                            | hirsel_core_net::sys::SOCK_NONBLOCK
+                            | hirsel_core_net::sys::SOCK_CLOEXEC,
                         0,
                     );
                     assert!(fd >= 0);
@@ -1215,7 +1240,7 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
                 (*scenario).peer,
                 (&byte as *const u8).cast(),
                 1,
-                libc::MSG_NOSIGNAL
+                hirsel_core_net::sys::MSG_NOSIGNAL
             ),
             1
         );

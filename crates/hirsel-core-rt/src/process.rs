@@ -128,6 +128,7 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: these calls take no memory arguments and affect only this child.
     unsafe {
+        #[cfg(target_os = "linux")]
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == -1 {
             return Err(std::io::Error::last_os_error());
         }
@@ -399,7 +400,9 @@ fn map_hash_key() -> std::io::Result<[u8; 16]> {
     let mut remaining = &mut key[..];
     while !remaining.is_empty() {
         // SAFETY: remaining is a writable slice passed for exactly its length.
-        let n = unsafe { libc::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0) };
+        let n = unsafe {
+            hirsel_core_net::sys::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0)
+        };
         if n < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {

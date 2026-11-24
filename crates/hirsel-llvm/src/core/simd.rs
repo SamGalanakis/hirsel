@@ -252,7 +252,7 @@ impl FunctionEmitter<'_> {
         high: Option<&Value>,
         indices: &Value,
     ) -> Value {
-        if self.abi.target == Target::Aarch64Linux {
+        if self.abi.target.is_aarch64() {
             let mut args = vec![arg(ty.clone(), low.clone())];
             if let Some(high) = high {
                 args.push(arg(ty.clone(), high.clone()));

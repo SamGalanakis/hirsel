@@ -36,6 +36,10 @@ pub(crate) enum Kind {
     ScopeStack = 19,
     MemoryMeta = 20,
     SlackMember = 21,
+    /// macOS only: the sampled thread, then its PC and return addresses.
+    CpuSample = 24,
+    /// macOS only: a sampled thread and, as bytes, its name.
+    ThreadName = 25,
 }
 
 thread_local! {
@@ -217,7 +221,7 @@ impl Worker {
             return Self(false);
         };
         // SAFETY: gettid has no operands.
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        let tid = unsafe { hirsel_core_net::sys::gettid() } as u32;
         let (thread, capacity) = match Thread::new(tid, shared.chunk_bytes) {
             Ok(thread) => (thread, shared.chunk_bytes),
             Err(_) => (Thread::new(tid, 0).unwrap(), 0),
@@ -240,6 +244,8 @@ impl Drop for Worker {
 pub(crate) struct Run {
     shared: Arc<Shared>,
     drain: Option<JoinHandle<io::Result<()>>>,
+    #[cfg(target_os = "macos")]
+    sampler: Option<crate::prof_sampler::Sampler>,
 }
 
 impl Run {
@@ -307,6 +313,16 @@ impl Run {
     ) -> io::Result<Self> {
         let mut output = BufWriter::new(File::options().write(true).truncate(true).open(path)?);
         output.write_all(MAGIC)?;
+        #[cfg(target_os = "macos")]
+        {
+            let stamp = now_ns();
+            let pid = std::process::id();
+            for line in crate::prof_sampler::mappings() {
+                let len = u32::try_from(line.len()).map_err(io::Error::other)?;
+                output.write_all(&header(stamp, pid, Kind::Mapping as u16, 0, len))?;
+                output.write_all(&line)?;
+            }
+        }
         if let Ok(maps) = std::fs::read("/proc/self/maps") {
             let stamp = now_ns();
             let pid = std::process::id();
@@ -334,12 +350,17 @@ impl Run {
         Ok(Self {
             shared,
             drain: Some(drain),
+            #[cfg(target_os = "macos")]
+            sampler: crate::prof_sampler::Sampler::start(),
         })
     }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
+        // The sampler's own chunk closes before the stream ends.
+        #[cfg(target_os = "macos")]
+        drop(self.sampler.take());
         // Every runtime worker has returned, so all registered chunks are sealed.
         if crate::mem_prof::enabled() {
             let _worker = Worker::enter();

@@ -1,5 +1,9 @@
-//! Linux Exec child creation and custody. Only the supervisor creates children.
+//! Exec child creation and custody. Only the supervisor creates children.
 //! Wait, drop and orphan adoption use the same registry lock and pinned pidfds.
+//! macOS has no pidfds: each child is pinned by a private kqueue holding its
+//! NOTE_EXIT, which stays readable once the child exits, and is reaped and
+//! signalled by PID, which stays the child's until this registry reaps it.
+//! macOS has no subreaper either, so a child's own children are not adopted.
 
 use std::{
     ffi::{CStr, CString},
@@ -99,6 +103,7 @@ enum Disposition {
     Live,
     Reaped,
     Released,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Orphan,
 }
 
@@ -131,8 +136,15 @@ impl Supervisor {
     /// The launcher supplies its startup tests. They run on the child-creating
     /// thread before it makes the run non-dumpable and enables subreaping.
     pub fn start(probe: fn() -> io::Result<()>) -> io::Result<Self> {
-        let change = owned(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) })?;
-        let poller = owned(unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) })?;
+        let change = owned(unsafe {
+            hirsel_core_net::sys::eventfd(
+                0,
+                hirsel_core_net::sys::EFD_CLOEXEC | hirsel_core_net::sys::EFD_NONBLOCK,
+            )
+        })?;
+        let poller = owned(unsafe {
+            hirsel_core_net::sys::epoll_create1(hirsel_core_net::sys::EPOLL_CLOEXEC)
+        })?;
         watch(&poller, &change, 0, false)?;
         let shared = Arc::new(Shared {
             registry: Mutex::new(Registry::default()),
@@ -252,7 +264,7 @@ impl Process {
         }
         let mut registry = self.shared.registry.lock().unwrap();
         let child = direct(&mut registry, self.pidfd())?;
-        if let Some(status) = wait(child.fd.as_raw_fd(), libc::WNOHANG)? {
+        if let Some(status) = wait(child.pid, child.fd.as_raw_fd(), libc::WNOHANG)? {
             child.waiter = None;
             child.disposition = Disposition::Reaped;
             self.termination = Some(status);
@@ -276,7 +288,7 @@ impl Process {
         }
         let mut registry = self.shared.registry.lock().unwrap();
         let child = direct(&mut registry, self.pidfd())?;
-        send(child.fd.as_raw_fd(), signal)
+        send(child.pid, child.fd.as_raw_fd(), signal)
     }
 }
 
@@ -307,6 +319,7 @@ fn direct(registry: &mut Registry, fd: RawFd) -> io::Result<&mut Child> {
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))
 }
 
+#[cfg(target_os = "linux")]
 fn start_thread(probe: fn() -> io::Result<()>) -> io::Result<()> {
     // Block signals on the creating thread so the child cannot execute an
     // inherited handler during setup. SIGCHLD must not auto-reap our children.
@@ -352,17 +365,19 @@ impl Shared {
         let one = 1u64;
         // SAFETY: eventfd is live and reads exactly one u64. EAGAIN means
         // a wake is already pending in the saturated counter.
-        while unsafe { libc::write(self.change.as_raw_fd(), (&raw const one).cast(), 8) } < 0
+        while unsafe {
+            hirsel_core_net::sys::eventfd_write(self.change.as_raw_fd(), (&raw const one).cast(), 8)
+        } < 0
             && errno() == libc::EINTR
         {}
     }
 
     fn run(&self) {
         loop {
-            let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
+            let mut events = [hirsel_core_net::sys::epoll_event { events: 0, u64: 0 }; 16];
             // SAFETY: the epoll instance is live and writes at most this array.
             let count = unsafe {
-                libc::epoll_wait(
+                hirsel_core_net::sys::epoll_wait(
                     self.poller.as_raw_fd(),
                     events.as_mut_ptr(),
                     events.len() as i32,
@@ -378,7 +393,13 @@ impl Shared {
             if events[..count as usize].iter().any(|e| e.u64 == 0) {
                 let mut pending = 0u64;
                 // SAFETY: only this thread drains the live eventfd.
-                unsafe { libc::read(self.change.as_raw_fd(), (&raw mut pending).cast(), 8) };
+                unsafe {
+                    hirsel_core_net::sys::eventfd_read(
+                        self.change.as_raw_fd(),
+                        (&raw mut pending).cast(),
+                        8,
+                    )
+                };
             }
             let mut registry = self.registry.lock().unwrap();
             let mut ready: [_; 16] = std::array::from_fn(|_| None);
@@ -420,11 +441,14 @@ impl Shared {
             registry.children.retain(|child| match child.disposition {
                 Disposition::Live => true,
                 Disposition::Reaped => !stopping,
-                Disposition::Released => wait(child.fd.as_raw_fd(), libc::WNOHANG)
+                Disposition::Released => wait(child.pid, child.fd.as_raw_fd(), libc::WNOHANG)
                     .unwrap_or_else(|_| crate::process::stop(b"ExecReap"))
                     .is_none(),
                 Disposition::Orphan => {
-                    matches!(wait(child.fd.as_raw_fd(), libc::WNOHANG), Ok(None))
+                    matches!(
+                        wait(child.pid, child.fd.as_raw_fd(), libc::WNOHANG),
+                        Ok(None)
+                    )
                 }
             });
             self.adopt_orphans(&mut registry);
@@ -439,6 +463,7 @@ impl Shared {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn clone_child(
         &self,
         registry: &mut Registry,
@@ -490,6 +515,7 @@ impl Shared {
         drop(writer);
         let pipes = mem::take(&mut streams.parent);
         Ok(Starting {
+            pid: pid as libc::pid_t,
             pidfd,
             reader,
             pipes,
@@ -499,6 +525,7 @@ impl Shared {
 
     fn finish_spawn(&self, starting: Result<Starting, SpawnError>) -> Result<Started, SpawnError> {
         let Starting {
+            pid,
             pidfd,
             reader,
             pipes,
@@ -509,17 +536,17 @@ impl Shared {
                 Ok(None) => return Ok(Started { pidfd, pipes }),
                 Ok(Some(error)) => error,
                 Err(error) => {
-                    let _ = send(pidfd, Signal::Kill);
+                    let _ = send(pid, pidfd, Signal::Kill);
                     error.into()
                 }
             },
             Err(error) => {
-                let _ = send(pidfd, Signal::Kill);
+                let _ = send(pid, pidfd, Signal::Kill);
                 error.into()
             }
         };
         // No Process was issued. Only this thread can reap this child.
-        if wait(pidfd, 0).is_err() {
+        if wait(pid, pidfd, 0).is_err() {
             crate::process::stop(b"ExecReap");
         }
         self.registry
@@ -530,6 +557,7 @@ impl Shared {
         Err(error)
     }
 
+    #[cfg(target_os = "linux")]
     fn adopt_orphans(&self, registry: &mut Registry) {
         let Ok(tasks) = fs::read_dir("/proc/self/task") else {
             return;
@@ -553,16 +581,16 @@ impl Shared {
                 else {
                     continue;
                 };
-                let parent = wait(fd.as_raw_fd(), libc::WNOHANG | libc::WNOWAIT).is_ok();
+                let parent = wait(pid, fd.as_raw_fd(), libc::WNOHANG | libc::WNOWAIT).is_ok();
                 if !parent {
                     continue;
                 }
                 #[cfg(test)]
                 registry.orphans.push((pid, parent));
-                if send(fd.as_raw_fd(), Signal::Kill).is_err() {
+                if send(pid, fd.as_raw_fd(), Signal::Kill).is_err() {
                     continue;
                 }
-                match wait(fd.as_raw_fd(), libc::WNOHANG) {
+                match wait(pid, fd.as_raw_fd(), libc::WNOHANG) {
                     Ok(None)
                         if watch(&self.poller, &fd, fd.as_raw_fd() as u64 + 1, true).is_ok() =>
                     {
@@ -586,6 +614,7 @@ struct Started {
 }
 
 struct Starting {
+    pid: libc::pid_t,
     pidfd: RawFd,
     reader: OwnedFd,
     pipes: [Option<OwnedFd>; 3],
@@ -594,7 +623,7 @@ struct Starting {
 
 fn release(child: &mut Child) {
     child.waiter = None;
-    if let Err(error) = send(child.fd.as_raw_fd(), Signal::Kill)
+    if let Err(error) = send(child.pid, child.fd.as_raw_fd(), Signal::Kill)
         && error.raw_os_error() != Some(libc::ESRCH)
     {
         crate::process::stop(b"ExecKill");
@@ -603,22 +632,28 @@ fn release(child: &mut Child) {
 }
 
 fn watch(poller: &OwnedFd, fd: &OwnedFd, tag: u64, once: bool) -> io::Result<()> {
-    let mut event = libc::epoll_event {
-        events: (libc::EPOLLIN | if once { libc::EPOLLONESHOT } else { 0 }) as u32,
+    let mut event = hirsel_core_net::sys::epoll_event {
+        events: (hirsel_core_net::sys::EPOLLIN
+            | if once {
+                hirsel_core_net::sys::EPOLLONESHOT
+            } else {
+                0
+            }) as u32,
         u64: tag,
     };
     // SAFETY: both fds are live and the event is read synchronously.
     check(unsafe {
-        libc::epoll_ctl(
+        hirsel_core_net::sys::epoll_ctl(
             poller.as_raw_fd(),
-            libc::EPOLL_CTL_ADD,
+            hirsel_core_net::sys::EPOLL_CTL_ADD,
             fd.as_raw_fd(),
             &mut event,
         )
     })
 }
 
-fn wait(fd: RawFd, options: i32) -> io::Result<Option<Termination>> {
+#[cfg(target_os = "linux")]
+fn wait(_pid: libc::pid_t, fd: RawFd, options: i32) -> io::Result<Option<Termination>> {
     loop {
         // SAFETY: waitid writes the documented siginfo variant on success.
         let mut info: libc::siginfo_t = unsafe { mem::zeroed() };
@@ -646,7 +681,8 @@ fn wait(fd: RawFd, options: i32) -> io::Result<Option<Termination>> {
     }
 }
 
-fn send(fd: RawFd, signal: Signal) -> io::Result<()> {
+#[cfg(target_os = "linux")]
+fn send(_pid: libc::pid_t, fd: RawFd, signal: Signal) -> io::Result<()> {
     // SAFETY: the fd pins the process identity. Null siginfo requests standard user signalling.
     check(unsafe {
         libc::syscall(
@@ -661,7 +697,7 @@ fn send(fd: RawFd, signal: Signal) -> io::Result<()> {
 
 fn errno() -> libc::c_int {
     // SAFETY: this thread owns its errno.
-    unsafe { *libc::__errno_location() }
+    unsafe { *hirsel_core_net::sys::errno_location() }
 }
 
 fn check<N: Into<i64>>(status: N) -> io::Result<()> {
@@ -681,7 +717,7 @@ fn owned(fd: RawFd) -> io::Result<OwnedFd> {
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut ends = [-1; 2];
     // SAFETY: pipe2 writes exactly two new descriptors.
-    check(unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    check(unsafe { hirsel_core_net::sys::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) })?;
     Ok((owned(ends[0])?, owned(ends[1])?))
 }
 
@@ -769,6 +805,7 @@ fn read_report(reader: OwnedFd) -> io::Result<Option<SpawnError>> {
 // The child runs on an inherited stack without access to the spawning
 // process's locks, allocator or thread runtime. These helpers make only
 // Linux syscalls or async-signal-safe libc calls and never unwind.
+#[cfg(target_os = "linux")]
 unsafe fn execute(
     mut fds: [RawFd; 6],
     run: libc::pid_t,
@@ -793,7 +830,7 @@ unsafe fn execute(
         }
         let [report, image, cwd, stdin, stdout, stderr] = fds;
         for (fd, target) in [(stdin, 0), (stdout, 1), (stderr, 2)] {
-            if libc::dup3(fd, target, 0) < 0 {
+            if hirsel_core_net::sys::dup3(fd, target, 0) < 0 {
                 failed(report, SetupStep::Stdio, errno());
             }
         }
@@ -863,12 +900,14 @@ unsafe fn execute(
     }
 }
 
+#[cfg(target_os = "linux")]
 unsafe fn inject(report: RawFd, step: SetupStep, failure: Option<SetupStep>) {
     if failure == Some(step) {
         unsafe { failed(report, step, libc::EIO) }
     }
 }
 
+#[cfg(target_os = "linux")]
 unsafe fn failed(report: RawFd, step: SetupStep, error: libc::c_int) -> ! {
     let message = SetupReport {
         step: step as i32,
@@ -885,4 +924,282 @@ unsafe fn failed(report: RawFd, step: SetupStep, error: libc::c_int) -> ! {
         {}
         libc::_exit(127);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn start_thread(probe: fn() -> io::Result<()>) -> io::Result<()> {
+    // Block signals on the creating thread. SIGCHLD must not auto-reap our
+    // children. posix_spawn resets every disposition and the mask in the child.
+    // SAFETY: the integer-only signal structures are initialized before use.
+    unsafe {
+        let mut all: libc::sigset_t = mem::zeroed();
+        libc::sigfillset(&mut all);
+        let blocked = libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+        if blocked != 0 {
+            return Err(io::Error::from_raw_os_error(blocked));
+        }
+        let mut action: libc::sigaction = mem::zeroed();
+        check(libc::sigaction(
+            libc::SIGCHLD,
+            std::ptr::null(),
+            &mut action,
+        ))?;
+        if action.sa_sigaction == libc::SIG_IGN || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+            if action.sa_sigaction == libc::SIG_IGN {
+                action.sa_sigaction = libc::SIG_DFL;
+            }
+            action.sa_flags &= !libc::SA_NOCLDWAIT;
+            check(libc::sigaction(
+                libc::SIGCHLD,
+                &action,
+                std::ptr::null_mut(),
+            ))?;
+        }
+    }
+    probe()?;
+    // Linux makes the run non-dumpable; the nearest macOS setting refuses
+    // every debugger attachment.
+    // SAFETY: a process-wide setting for a freshly admitted Exec run.
+    check(unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) })?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addfchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        fd: libc::c_int,
+    ) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+impl Shared {
+    fn clone_child(
+        &self,
+        registry: &mut Registry,
+        input: SpawnInput,
+        failure: Option<SetupStep>,
+    ) -> Result<Starting, SpawnError> {
+        registry
+            .children
+            .try_reserve(1)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOMEM))?;
+        if let Some(step) = failure {
+            return Err(SpawnError {
+                error: io::Error::from_raw_os_error(libc::EIO),
+                step: Some(step),
+            });
+        }
+        // posix_spawn reports a setup failure as its result: no report pipe
+        // is written, and the reader sees end of file at once.
+        let (reader, _) = pipe()?;
+        let mut streams = Streams::new(input.piped)?;
+        // A stream at 0-2 would be overwritten by an earlier dup2.
+        for fd in &mut streams.child {
+            if fd.as_raw_fd() <= 2 {
+                // SAFETY: duplicating a live descriptor above the stdio slots.
+                *fd = owned(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) })?;
+            }
+        }
+        let argv = pointers(&input.argv)?;
+        let envp = pointers(&input.envp)?;
+        let image = image_path(input.image.as_raw_fd())?;
+        let mut pid: libc::pid_t = -1;
+        // SAFETY: the actions and attributes are initialized before use and
+        // destroyed after. argv, envp and the image path are pinned C strings.
+        let spawned = unsafe {
+            let mut actions: libc::posix_spawn_file_actions_t = mem::zeroed();
+            let mut attributes: libc::posix_spawnattr_t = mem::zeroed();
+            let mut status = libc::posix_spawn_file_actions_init(&mut actions);
+            if status == 0 {
+                status = libc::posix_spawnattr_init(&mut attributes);
+                if status != 0 {
+                    libc::posix_spawn_file_actions_destroy(&mut actions);
+                }
+            }
+            if status == 0 {
+                for (fd, target) in streams.child.iter().zip(0..) {
+                    if status == 0 {
+                        status = libc::posix_spawn_file_actions_adddup2(
+                            &mut actions,
+                            fd.as_raw_fd(),
+                            target,
+                        );
+                    }
+                }
+                if status == 0 {
+                    status =
+                        posix_spawn_file_actions_addfchdir_np(&mut actions, input.cwd.as_raw_fd());
+                }
+                let mut defaults: libc::sigset_t = mem::zeroed();
+                libc::sigfillset(&mut defaults);
+                libc::sigdelset(&mut defaults, libc::SIGKILL);
+                libc::sigdelset(&mut defaults, libc::SIGSTOP);
+                let mut mask: libc::sigset_t = mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                if status == 0 {
+                    status = libc::posix_spawnattr_setsigdefault(&mut attributes, &defaults);
+                }
+                if status == 0 {
+                    status = libc::posix_spawnattr_setsigmask(&mut attributes, &mask);
+                }
+                if status == 0 {
+                    // Only the three dup2 targets survive into the child.
+                    status = libc::posix_spawnattr_setflags(
+                        &mut attributes,
+                        (libc::POSIX_SPAWN_CLOEXEC_DEFAULT
+                            | libc::POSIX_SPAWN_SETSIGDEF
+                            | libc::POSIX_SPAWN_SETSIGMASK)
+                            as libc::c_short,
+                    );
+                }
+                if status == 0 {
+                    status = libc::posix_spawn(
+                        &mut pid,
+                        image.as_ptr(),
+                        &actions,
+                        &attributes,
+                        argv.as_ptr().cast(),
+                        envp.as_ptr().cast(),
+                    );
+                }
+                libc::posix_spawnattr_destroy(&mut attributes);
+                libc::posix_spawn_file_actions_destroy(&mut actions);
+            }
+            status
+        };
+        if spawned != 0 {
+            return Err(SpawnError {
+                error: io::Error::from_raw_os_error(spawned),
+                step: Some(SetupStep::Exec),
+            });
+        }
+        let fd = match exit_watch(pid) {
+            Ok(fd) => fd,
+            Err(error) => {
+                // SAFETY: the unreaped PID is this new child's.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let _ = wait(pid, -1, 0);
+                return Err(error.into());
+            }
+        };
+        let pidfd = fd.as_raw_fd();
+        let monitored = watch(&self.poller, &fd, pidfd as u64 + 1, true);
+        registry.children.push(Child {
+            pid,
+            fd,
+            disposition: Disposition::Live,
+            waiter: None,
+        });
+        let pipes = mem::take(&mut streams.parent);
+        Ok(Starting {
+            pid,
+            pidfd,
+            reader,
+            pipes,
+            monitored,
+        })
+    }
+
+    fn adopt_orphans(&self, _registry: &mut Registry) {}
+}
+
+/// The path of the pinned image copy, which macOS executes by name.
+#[cfg(target_os = "macos")]
+fn image_path(fd: RawFd) -> io::Result<CString> {
+    let mut path = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
+    check(unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) })?;
+    Ok(CStr::from_bytes_until_nul(&path)
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?
+        .to_owned())
+}
+
+/// A kqueue that becomes readable when `pid` exits: NOTE_EXIT, or a user
+/// event already triggered when the child exited before the watch.
+#[cfg(target_os = "macos")]
+fn exit_watch(pid: libc::pid_t) -> io::Result<OwnedFd> {
+    // SAFETY: success returns a new descriptor.
+    let queue = owned(unsafe { libc::kqueue() })?;
+    // SAFETY: setting close-on-exec on a live descriptor.
+    check(unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    let event = |ident, filter, flags, fflags| libc::kevent {
+        ident,
+        filter,
+        flags,
+        fflags,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let change = event(
+        pid as usize,
+        libc::EVFILT_PROC,
+        libc::EV_ADD | libc::EV_RECEIPT,
+        libc::NOTE_EXIT,
+    );
+    // SAFETY: an all-integer receipt slot.
+    let mut receipt: libc::kevent = unsafe { mem::zeroed() };
+    // SAFETY: the queue, the change and the receipt are live.
+    check(unsafe {
+        libc::kevent(
+            queue.as_raw_fd(),
+            &change,
+            1,
+            &mut receipt,
+            1,
+            std::ptr::null(),
+        )
+    })?;
+    if receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
+        if receipt.data != libc::ESRCH as isize {
+            return Err(io::Error::from_raw_os_error(receipt.data as i32));
+        }
+        let exited = [
+            event(0, libc::EVFILT_USER, libc::EV_ADD, 0),
+            event(0, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER),
+        ];
+        // SAFETY: the queue and both changes are live.
+        check(unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                exited.as_ptr(),
+                2,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        })?;
+    }
+    Ok(queue)
+}
+
+#[cfg(target_os = "macos")]
+fn wait(pid: libc::pid_t, _fd: RawFd, options: i32) -> io::Result<Option<Termination>> {
+    loop {
+        let mut status = 0;
+        // SAFETY: waitpid writes one int; only this registry reaps its children.
+        let reaped = unsafe { libc::waitpid(pid, &mut status, options) };
+        if reaped == pid {
+            return Ok(if libc::WIFEXITED(status) {
+                Some(Termination::Exited(libc::WEXITSTATUS(status) as u8))
+            } else if libc::WIFSIGNALED(status) {
+                Some(Termination::Signalled(libc::WTERMSIG(status) as u8))
+            } else {
+                None
+            });
+        }
+        if reaped == 0 {
+            return Ok(None);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send(pid: libc::pid_t, _fd: RawFd, signal: Signal) -> io::Result<()> {
+    // SAFETY: the PID is a direct child that this registry has not reaped.
+    check(unsafe { libc::kill(pid, signal.number()) })
 }

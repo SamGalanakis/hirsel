@@ -13,6 +13,8 @@ use std::sync::{Arc, LazyLock};
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
 /// Private platform transport for the launcher PID, image descriptor and SHA-256.
 pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
+/// The launcher PID a macOS run ends with, which Linux gets from PR_SET_PDEATHSIG.
+pub const PARENT_DEATH_ENV: &str = "HIRSEL_PARENT_DEATH";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Executable {
@@ -70,7 +72,11 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn native(target: &str, n_place: u64, describe: bool) -> Self {
+        #[cfg(target_os = "linux")]
         let file = File::open("/proc/self/exe");
+        // macOS names the executing image by the path the loader recorded.
+        #[cfg(not(target_os = "linux"))]
+        let file = std::env::current_exe().and_then(File::open);
         #[cfg(target_os = "linux")]
         if let Ok(file) = &file
             && let Some(image) = MappedImage::new(file)

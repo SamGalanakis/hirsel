@@ -366,14 +366,104 @@ fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
         .filter(|fd| *fd >= 6)
         .ok_or_else(invalid)?;
     let digest = prepare_hex(digest.as_bytes())?;
-    let image = std::fs::metadata(format!("/proc/self/fd/{fd}"))?;
+    // SAFETY: the launch transferred this descriptor; it is closed below.
+    let image =
+        std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) }).metadata()?;
+    #[cfg(target_os = "linux")]
     let running = std::fs::metadata("/proc/self/exe")?;
+    #[cfg(not(target_os = "linux"))]
+    let running = std::fs::metadata(std::env::current_exe()?)?;
     if (image.dev(), image.ino()) != (running.dev(), running.ino()) {
         return Err(invalid());
     }
     // SAFETY: the launch transferred this descriptor for the running image.
     drop(unsafe { OwnedFd::from_raw_fd(fd) });
     Ok(Some(digest))
+}
+
+/// macOS has no PR_SET_PDEATHSIG. A launched run watches its launcher's exit
+/// on a kqueue and kills itself when the launcher ends, or at once if the
+/// launcher has already gone.
+#[cfg(target_os = "macos")]
+fn end_with_launcher() -> io::Result<()> {
+    use hirsel_core_ids::launch::PARENT_DEATH_ENV;
+    let Some(value) = std::env::var_os(PARENT_DEATH_ENV) else {
+        return Ok(());
+    };
+    // SAFETY: startup runs before any other thread reads the environment.
+    unsafe { std::env::remove_var(PARENT_DEATH_ENV) };
+    let Some(launcher) = value
+        .to_str()
+        .and_then(|text| text.parse::<libc::pid_t>().ok())
+    else {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    let end = || -> ! {
+        // SAFETY: SIGKILL to this process ends it at once, as PDEATHSIG would.
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        unreachable!("killed")
+    };
+    // SAFETY: kqueue returns a new descriptor or -1.
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: kqueue returned a fresh descriptor; the thread below owns it.
+    let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+    let change = libc::kevent {
+        ident: launcher as usize,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_RECEIPT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    // SAFETY: an all-integer receipt slot.
+    let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
+    // SAFETY: the queue, the change and the receipt are live.
+    if unsafe {
+        libc::kevent(
+            queue.as_raw_fd(),
+            &change,
+            1,
+            &mut receipt,
+            1,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // The watch began after any exit that reparented this process.
+    // SAFETY: getppid takes no arguments.
+    if receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0
+        || unsafe { libc::getppid() } != launcher
+    {
+        end();
+    }
+    std::thread::Builder::new()
+        .name("hirsel-launcher-exit".into())
+        .spawn(move || {
+            // SAFETY: an all-integer event slot.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            loop {
+                // SAFETY: the owned queue and the event slot are live.
+                let n = unsafe {
+                    libc::kevent(
+                        queue.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        &mut event,
+                        1,
+                        std::ptr::null(),
+                    )
+                };
+                if n > 0 {
+                    end();
+                }
+            }
+        })?;
+    Ok(())
 }
 
 pub(crate) enum StartupError {
@@ -549,6 +639,8 @@ impl OsProcess {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let digest = receive_launch_image()?;
+            #[cfg(target_os = "macos")]
+            end_with_launcher()?;
             // Fd 3 is the inherited listener and fd 4 is the control socket.
             // Take the launcher's dedicated report descriptor before opening grants.
             let wake_report = if wake {

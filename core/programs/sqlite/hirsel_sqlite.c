@@ -5,7 +5,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#ifdef __APPLE__
+/* No openat2: open flags resolve beneath the root without symlinks, and
+   there are no path-only descriptors. */
+#define O_PATH O_RDONLY
+#else
 #include <linux/openat2.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -307,12 +313,17 @@ static FileKind file_kind(const DirVfs *dir, const char *name) {
 }
 
 static int beneath(const DirVfs *dir, const char *leaf, int flags) {
+#ifdef __APPLE__
+    return openat(dir->root, leaf, flags | O_CLOEXEC | O_RESOLVE_BENEATH | O_NOFOLLOW_ANY,
+                  (flags & O_CREAT) ? 0600 : 0);
+#else
     struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC),
         .mode = (flags & O_CREAT) ? 0600 : 0,
         .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
     };
     return (int)syscall(SYS_openat2, dir->root, leaf, &how, sizeof how);
+#endif
 }
 
 static int set_lock(int fd, short type, off_t at, off_t len, int error) {

@@ -27,6 +27,14 @@ pub fn finish_native_object(
     }
     let file = object::File::parse(bytes.as_slice()).map_err(error)?;
     let (debug, addresses) = extract(&file, unit)?;
+    // ld64 never copies DWARF into an executable, and each Mach-O row is
+    // anchored to a function symbol the object already has: keep it whole.
+    if file.format() == object::BinaryFormat::MachO {
+        return Ok(NativeObject {
+            bytes,
+            debug: Some(debug),
+        });
+    }
     Ok(NativeObject {
         bytes: addresses.strip(&bytes)?,
         debug: Some(debug),
@@ -71,6 +79,9 @@ fn extract(file: &object::File<'_>, unit: ContentHash) -> Result<(NativeDebug, A
 struct Section {
     index: usize,
     base: u64,
+    /// The object address the code begins at: its section's, or on Mach-O
+    /// its function symbol's, since ld64 places each function on its own.
+    start: u64,
     code: CodeSection,
 }
 struct Addresses {
@@ -92,34 +103,86 @@ impl Addresses {
             .sections()
             .filter(|s| s.kind() == object::SectionKind::Text)
         {
-            let id = u32::try_from(sections.len()).map_err(error)?;
-            sections.push(Section {
-                index: section.index().0,
-                base,
-                code: CodeSection {
-                    symbol: debug_symbol(unit, id),
-                    size: section.size(),
-                },
-            });
-            base = base
-                .checked_add(section.size())
-                .and_then(|v| v.checked_add(1))
-                .ok_or("native debug address space exhausted")?;
+            let pieces = if file.format() == object::BinaryFormat::MachO {
+                function_atoms(file, &section)
+            } else {
+                let id = u32::try_from(sections.len()).map_err(error)?;
+                vec![(debug_symbol(unit, id), section.address(), section.size())]
+            };
+            // A line program advances by deltas across a Mach-O section's
+            // functions, so they keep their object layout, offset as one.
+            let shift = base;
+            let contiguous = file.format() == object::BinaryFormat::MachO;
+            for (symbol, start, size) in pieces {
+                sections.push(Section {
+                    index: section.index().0,
+                    base: if contiguous {
+                        shift
+                            .checked_add(start - section.address())
+                            .ok_or("native debug address space exhausted")?
+                    } else {
+                        base
+                    },
+                    start,
+                    code: CodeSection { symbol, size },
+                });
+                base = base
+                    .checked_add(size)
+                    .and_then(|v| v.checked_add(1))
+                    .ok_or("native debug address space exhausted")?;
+            }
         }
         Ok(Self { sections })
     }
+    /// The synthetic address of `address` in section `index`, or its offset
+    /// in that section when no code piece holds it.
+    fn rebase(&self, file: &object::File<'_>, index: usize, address: u64) -> u64 {
+        // A piece holds its own first byte; its end only when no piece follows.
+        let held = |inclusive: bool| {
+            self.sections.iter().find(|s| {
+                s.index == index
+                    && s.start <= address
+                    && (address - s.start < s.code.size
+                        || inclusive && address - s.start == s.code.size)
+            })
+        };
+        if let Some(piece) = held(false).or_else(|| held(true)) {
+            return piece.base + (address - piece.start);
+        }
+        let start = file
+            .section_by_index(object::SectionIndex(index))
+            .map_or(0, |section| section.address());
+        address.wrapping_sub(start)
+    }
     fn address(&self, value: u64) -> Result<(u32, u64), String> {
-        self.sections
-            .iter()
-            .enumerate()
-            .find(|(_, s)| s.base <= value && value - s.base <= s.code.size)
+        // A piece holds its own first byte; its end only when no piece follows.
+        let held = |inclusive: bool| {
+            self.sections.iter().enumerate().find(|(_, s)| {
+                s.base <= value
+                    && (value - s.base < s.code.size || inclusive && value - s.base == s.code.size)
+            })
+        };
+        held(false)
+            .or_else(|| held(true))
             .map(|(id, s)| (id as u32, value - s.base))
             .ok_or_else(|| format!("native debug address {value:#x} has no code section"))
     }
+    /// The synthetic end of the code piece that holds `value`.
+    fn end_of(&self, value: u64) -> Result<u64, String> {
+        let (piece, _) = self.address(value)?;
+        let piece = &self.sections[piece as usize];
+        Ok(piece.base + piece.code.size)
+    }
     fn range(&self, begin: u64, end: u64) -> Result<CodeRange, String> {
         let (section, begin) = self.address(begin)?;
-        let (end_section, end) = self.address(end)?;
-        if section != end_section || end < begin {
+        let piece = &self.sections[section as usize];
+        let Some(end) = end
+            .checked_sub(piece.base)
+            .filter(|end| *end <= piece.code.size)
+        else {
+            return Err("native debug range crosses code sections".into());
+        };
+        if end < begin {
             return Err("native debug range crosses code sections".into());
         }
         Ok(CodeRange {
@@ -134,7 +197,21 @@ impl Addresses {
         };
         let mut bytes = section.data().map_err(error)?.to_vec();
         for (offset, relocation) in section.relocations() {
-            let (target, addend) = match relocation.target() {
+            let at = usize::try_from(offset).map_err(error)?;
+            // A Mach-O relocation's addend is stored in place; a section
+            // target's stored value is the object address itself.
+            let addend = if relocation.has_implicit_addend() {
+                let width = usize::from(relocation.size() / 8);
+                let stored = bytes
+                    .get(at..at + width)
+                    .ok_or("debug relocation outside section")?;
+                let mut word = [0u8; 8];
+                word[..width].copy_from_slice(stored);
+                u64::from_le_bytes(word) as i64
+            } else {
+                relocation.addend()
+            };
+            let (target, address) = match relocation.target() {
                 object::RelocationTarget::Symbol(id) => {
                     let symbol = file.symbol_by_index(id).map_err(error)?;
                     (
@@ -144,18 +221,15 @@ impl Addresses {
                         symbol.address(),
                     )
                 }
-                object::RelocationTarget::Section(id) => (id, 0),
+                object::RelocationTarget::Section(id) if relocation.has_implicit_addend() => {
+                    (id, 0)
+                }
+                object::RelocationTarget::Section(id) => {
+                    (id, file.section_by_index(id).map_err(error)?.address())
+                }
                 _ => return Err("unsupported debug relocation target".into()),
             };
-            let base = self
-                .sections
-                .iter()
-                .find(|s| s.index == target.0)
-                .map_or(0, |s| s.base);
-            let value = base
-                .wrapping_add(addend)
-                .wrapping_add_signed(relocation.addend());
-            let at = usize::try_from(offset).map_err(error)?;
+            let value = self.rebase(file, target.0, address.wrapping_add_signed(addend));
             let data: Vec<u8> = match relocation.size() {
                 64 => value.to_le_bytes().to_vec(),
                 32 => u32::try_from(value).map_err(error)?.to_le_bytes().to_vec(),
@@ -211,6 +285,41 @@ impl Addresses {
         elf.write(&mut output).map_err(error)?;
         Ok(output)
     }
+}
+
+/// The functions of a Mach-O code section: each defined symbol that ld64
+/// keeps, to the next one or the section's end, named without its leading
+/// underscore as the linked image's symbol table names it.
+fn function_atoms(
+    file: &object::File<'_>,
+    section: &object::Section<'_, '_>,
+) -> Vec<(String, u64, u64)> {
+    use object::{ObjectSection as _, ObjectSymbol as _};
+    let mut symbols: Vec<(u64, String)> = file
+        .symbols()
+        .filter(|symbol| symbol.section_index() == Some(section.index()) && symbol.is_definition())
+        .filter_map(|symbol| {
+            let name = symbol.name().ok()?;
+            // ld64 drops assembler-temporary labels.
+            if name.starts_with('l') || name.starts_with('L') || name.is_empty() {
+                return None;
+            }
+            Some((
+                symbol.address(),
+                name.strip_prefix('_').unwrap_or(name).to_owned(),
+            ))
+        })
+        .collect();
+    symbols.sort();
+    symbols.dedup_by_key(|(address, _)| *address);
+    let end = section.address() + section.size();
+    (0..symbols.len())
+        .map(|i| {
+            let (start, name) = &symbols[i];
+            let next = symbols.get(i + 1).map_or(end, |(address, _)| *address);
+            (name.clone(), *start, next - start)
+        })
+        .collect()
 }
 
 fn item(unit: gimli::UnitRef<'_, R<'_>>, index: u64) -> Result<Option<DefPath>, String> {
@@ -279,8 +388,20 @@ fn extract_lines(
             }
             continue;
         }
+        // A Mach-O sequence spans its section's functions: end it at each
+        // function's end, where the next one begins.
+        let (piece, offset) = addresses.address(row.address())?;
+        if let Some(open) = begin
+            && addresses.address(open)?.0 != piece
+        {
+            let end = addresses.end_of(open)?;
+            debug.sequences.push(LineSequence {
+                range: addresses.range(open, end)?,
+                rows: std::mem::take(&mut pending),
+            });
+            begin = None;
+        }
         begin.get_or_insert(row.address());
-        let (_, offset) = addresses.address(row.address())?;
         let source = location(
             unit,
             row.file_index(),

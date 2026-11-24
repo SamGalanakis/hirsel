@@ -357,12 +357,21 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     if newer.head.floor != 5 || newer.head.checkpoint.seq != 7 {
         fail("L59: the witness reported the wrong retained floor")
     }
-    let current = fresh(mut follower_view, due)?
+    let wanted = Position(store: identity(writer), branch: 0, version: 3)
+    close(take writer)?
+    let law = "L59 evicted MANIFEST"
+    let mut marker = bucket_law_client_with(sim, tasks, "s3.test", 814, true)?
+    let healed_ns = follower_heal_start(mut marker, sim.time)
+    let current = match fresh(mut follower_view, clock.deadline_after_ms(healed_ns, BUCKET_LAW_OP_MS)) {
+        Ok(take snap) => take snap,
+        Error(_) => follower_heal_failed(sim.time, healed_ns, wanted, law, applied(follower_view, main_line)),
+    }
+    follower_heal_end(mut marker, sim.time, healed_ns, wanted, law, follower_snapshot_position(current))
     let reading = follower_reader(follower_view, 0u64)?
     if version(current) != 3 || get(reading, current, rows, 7)? != Some(bucket_law_value(7)) || get(reading, current, rows, 8)? != Some(bucket_law_value(8)) || get(reading, saved, rows, 7)? != None {
         fail("L59: the follower lost a retained row or changed the earlier snapshot")
     }
-    close(take writer)
+    Ok(())
 }
 
 // The original case exercises the witness directly with retained and
@@ -374,8 +383,9 @@ fn bucket_test_m2_retention_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, s
     let seed = bucket_law_seed(seed_grant, 598)
     let sim = bucket_law_sim(tasks, c, seed, None, list.new())
     let observed = object_retention_witness_law(r, tasks, sim)
-    let _ = bucket_law_finish(take sim)
+    let report = bucket_law_finish(take sim)
     observed?
+    follower_heal_reads(report, "L59 evicted MANIFEST")
     let directory = disk_test_directory(d)
     bucket_m2_seed_checkpoint(directory, c, r, tasks)?
     let cases: Inline[RetentionCase, 5] = [ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
@@ -386,6 +396,16 @@ fn bucket_test_m2_retention_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, s
 }
 
 type RetentionCase: send = ReclaimedPack | RetainedPack | DeletedAfterCut | LostWitness | RetryCold
+
+fn retention_case_label(case: RetentionCase) -> String {
+    match case {
+        ReclaimedPack => "L59 reclaimed pack",
+        RetainedPack => "L59 retained pack",
+        DeletedAfterCut => "L59 out-of-band pack delete",
+        LostWitness => "L59 lost CHECKPOINT witness",
+        RetryCold => "L59 cold-open retry",
+    }
+}
 
 type RetentionFixture {
     selected: WitnessCut,
@@ -473,6 +493,8 @@ type RetentionReader: send {
     plan: FollowerPlan,
     ready: Sender[()],
     go: Receiver[()],
+    healed: Receiver[()],
+    wanted: Position,
     victim: String,
 }
 
@@ -483,15 +505,22 @@ fn retention_open(m: RetentionReader, mut ids: Followers, seed: u64) -> Result[F
 
 fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
     let mut ids = followers()
+    let law = retention_case_label(m.case)
     if retention_case_is_cold(m.case) {
         if let Error(Reclaimed(3)) = retention_open(m, mut ids, 91) {} else {
             fail("L59: the cold open did not report the reclaimed checkpoint")
         }
-        let opened = retention_open(m, mut ids, 92)?
-        let line = follower_main(opened)
-        if version(snapshot_follower(opened, line)?) != 3 {
-            fail("L59: the second cold open did not reach the new checkpoint")
+        result.unwrap(channel.receive(m.healed))
+        let mut marker = retention_marker(m)?
+        let healed_ns = follower_heal_start(mut marker, m.time)
+        let opened = match retention_open(m, mut ids, 92) {
+            Ok(take found) => take found,
+            Error(take problem) => follower_heal_failed(m.time, healed_ns, m.wanted, law, Error(take problem)),
         }
+        let line = follower_main(opened)
+        let current = snapshot_follower(opened, line)?
+        follower_heal_end(mut marker, m.time, healed_ns, m.wanted, law, follower_snapshot_position(current))
+        if version(current) != 3 { fail("L59: the second cold open did not reach the new checkpoint") }
         return Ok(())
     }
     let mut mirror = retention_open(m, mut ids, 91)?
@@ -511,8 +540,16 @@ fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
     if version(saved) != 0 || version(snapshot_follower(mirror, line)?) != 0 {
         fail("L59: a failed read changed its previously published Snapshot")
     }
+    // A pack that is still retained must stay refused as corruption.
     if let RetainedPack = m.case { return Ok(()) }
-    let _ = catch_up(mut mirror, due)?
+    result.unwrap(channel.receive(m.healed))
+    let mut marker = retention_marker(m)?
+    let healed_ns = follower_heal_start(mut marker, m.time)
+    let reached = match catch_up(mut mirror, clock.deadline_after_ms(healed_ns, BUCKET_LAW_OP_MS)) {
+        Ok(current) => current,
+        Error(_) => follower_heal_failed(m.time, healed_ns, m.wanted, law, applied(mirror, line)),
+    }
+    follower_heal_end(mut marker, m.time, healed_ns, m.wanted, law, reached)
     let visible = snapshot_follower(mirror, line)?
     if version(visible) != 3 { fail("L59: catch_up did not reach the successor's version") }
     match m.case {
@@ -521,6 +558,10 @@ fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
         _ => (),
     }
     Ok(())
+}
+
+fn retention_marker(m: RetentionReader) -> Result[std.object.Client, Error] waits {
+    bucket_endpoint_client(m.endpoint, std.sim.s3.endpoint_network(m.endpoint), m.time, m.tasks, "s3.test", 94, true, 0)
 }
 
 fn retention_rows(mirror: Follower, visible: Snapshot, saved: Snapshot) -> Result[(), Error] waits {
@@ -572,6 +613,23 @@ fn retention_is_pack_case(case: RetentionCase) -> bool {
     match case { LostWitness => false, RetryCold => false, _ => true }
 }
 
+fn retention_join_reader(take trial: Task[Result[(), Error]]) -> Result[(), Error] waits {
+    match task.join(take trial) {
+        Ok(outcome) => outcome,
+        Error(Failed(causes)) => {
+            for cause in causes {
+                match cause.kind {
+                    Capacity(room) => return Error(Full(Allocation(room))),
+                    Fail(message) => fail(string.from(message)),
+                    _ => (),
+                }
+            }
+            fail("L59: reader task failed")
+        },
+        Error(Cancelled(_)) => fail("L59: reader task was cancelled"),
+    }
+}
+
 fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case: RetentionCase) -> Result[(), Error] waits {
     let (id, _) = read_page_manifest_file(d)?
     let base = retention_base(id)?
@@ -594,26 +652,14 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     let owner = follower_owner(service)?
     let (from_reader, reader_ready): (Sender[()], Receiver[()]) = channel.new(1)
     let (go, advancing): (Sender[()], Receiver[()]) = channel.new(1)
+    let (healed, after_heal): (Sender[()], Receiver[()]) = channel.new(1)
     let actor = RetentionReader(case, endpoint: sim.endpoint, time: sim.time, tasks, owner: take owner, plan,
-        ready: take from_reader, go: take advancing, victim: clone(fixture.pack_name))
+        ready: take from_reader, go: take advancing, healed: take after_heal,
+        wanted: Position(store: id, branch: 0, version: 3), victim: clone(fixture.pack_name))
     let trial = task.spawn(tasks, bytes 33554432, take actor, retention_reader)
     if !cold_first {
         if let Error(_) = channel.receive(reader_ready) {
-            match task.join(take trial) {
-                Ok(outcome) => outcome?,
-                Error(Failed(causes)) => {
-                    for cause in causes {
-                        match cause.kind {
-                            Capacity(room) => return Error(Full(Allocation(room))),
-                            Fail(message) => fail(string.from(message)),
-                            _ => (),
-                        }
-                    }
-                    fail("L59: reader task failed")
-                },
-                Error(Cancelled(_)) => fail("L59: reader task was cancelled"),
-            }
-
+            retention_join_reader(take trial)?
             fail("L59: the reader exited before publishing its capture")
         }
         tag = retention_writes(mut inspector, fixture, metadata, tag, due, !stages_pack)?
@@ -629,10 +675,14 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
         let _ = witness_install_cut(mut inspector, replacement, metadata, Match(tag), due)?
         std.object.erase(mut inspector, marker, due) ?=> Remote
     }
-    result.unwrap(task.join(take trial))?
+    // The replacement is published and the delete released the held GET.
+    // The writer is done before the reader starts counting its own GETs.
+    if let RetainedPack = case {} else { result.unwrap(channel.send(healed, ())) }
+    retention_join_reader(take trial)?
     close_follower_service(take service)?
     let _ = take inspector
     let report = bucket_law_finish(take sim)
+    if let RetainedPack = case {} else { follower_heal_reads(report, retention_case_label(case)) }
     let target = if stages_pack { string.from(fixture.pack_name) } else { take marker }
     let mut erased = false
     for req in report.requests {

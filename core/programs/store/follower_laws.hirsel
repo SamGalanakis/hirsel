@@ -807,8 +807,8 @@ fn follower_cancelled_publication(c: Clock, tasks: Tasks) -> Result[(), Error] w
 
 // VP2 epilogue: post-heal bounded convergence. After a law's scripted faults
 // heal (every hold released, no fault left in the plan), a follower must reach
-// the writer's head through its own `at_least` schedule within one poll
-// interval of sim time and at most two head GETs.
+// the writer's head within one object poll interval of sim time and at most
+// two head GETs.
 // The bound's source: STORE §12.10 names no follower poll interval, so the
 // interval is `at_least`'s object poll, 10 ms (store-followers.hirsel), and the
 // heal model is bucket_law_sim's: `std.sim.net` latency 0 and an empty fault
@@ -824,10 +824,10 @@ const FOLLOWER_HEAL_NS: u64 = 10000000
 
 const FOLLOWER_HEAL_HEAD_READS: u64 = 2
 
-fn follower_stalled(f: Follower, wanted: Position, law: String, elapsed: u64) -> String {
+fn follower_heal_failed(time: Clock, healed_ns: u64, wanted: Position, law: String, observed: Result[Position, Error]) -> Never {
     let mut out = string.from("bounded progress: ")
     string.push(mut out, law)
-    match applied(f, follower_main(f)) {
+    match observed {
         Ok(at) => {
             string.push(mut out, " follower at branch ")
             string.push_u64(mut out, int.widen(at.branch))
@@ -841,9 +841,9 @@ fn follower_stalled(f: Follower, wanted: Position, law: String, elapsed: u64) ->
     string.push(mut out, " version ")
     string.push_u64(mut out, wanted.version)
     string.push(mut out, " within 10000000 ns of the heal (elapsed ")
-    string.push_u64(mut out, elapsed)
+    string.push_u64(mut out, host.mono_ns(time) - healed_ns)
     string.push(mut out, " ns)")
-    take out
+    fail(take out)
 }
 
 fn follower_heal_mark(mut marker: std.object.Client, key: String) waits {
@@ -854,22 +854,34 @@ fn follower_heal_mark(mut marker: std.object.Client, key: String) waits {
     }
 }
 
-// Call at the heal. `wanted` names the writer's head by hand. `marker` is a
-// client of the law's own, used only for the two marker GETs.
-fn follower_converges(mut f: Follower, mut marker: std.object.Client, time: Clock, wanted: Position, law: String) -> Snapshot waits {
+// The law's marker client does not participate in follower reads.
+fn follower_heal_start(mut marker: std.object.Client, time: Clock) -> u64 waits {
     follower_heal_mark(mut marker, "vp2-healed")
-    let healed_ns = host.mono_ns(time)
+    host.mono_ns(time)
+}
+
+fn follower_heal_end(mut marker: std.object.Client, time: Clock, healed_ns: u64, wanted: Position, law: String, at: Position) waits {
+    if host.mono_ns(time) - healed_ns > FOLLOWER_HEAL_NS ||
+        !same(at.store, wanted.store) || at.branch != wanted.branch || at.version < wanted.version {
+        follower_heal_failed(time, healed_ns, wanted, law, Ok(at))
+    }
+    follower_heal_mark(mut marker, "vp2-reached")
+}
+
+fn follower_snapshot_position(s: Snapshot) -> Position {
+    Position(store: s.store, branch: s.branch, version: s.head)
+}
+
+// Call at the heal. `wanted` names the writer's head by hand.
+fn follower_converges(mut f: Follower, mut marker: std.object.Client, time: Clock, wanted: Position, law: String) -> Snapshot waits {
+    let healed_ns = follower_heal_start(mut marker, time)
     let observed = at_least(mut f, wanted, clock.deadline_after_ms(healed_ns, BUCKET_LAW_OP_MS))
-    let elapsed = host.mono_ns(time) - healed_ns
     match take observed {
         Ok(take snap) => {
-            if elapsed > FOLLOWER_HEAL_NS {
-                fail(follower_stalled(f, wanted, law, elapsed))
-            }
-            follower_heal_mark(mut marker, "vp2-reached")
+            follower_heal_end(mut marker, time, healed_ns, wanted, law, follower_snapshot_position(snap))
             take snap
         },
-        Error(_) => fail(follower_stalled(f, wanted, law, elapsed)),
+        Error(_) => follower_heal_failed(time, healed_ns, wanted, law, applied(f, follower_main(f))),
     }
 }
 

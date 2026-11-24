@@ -399,6 +399,45 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
     Ok(())
 }
 
+// With a shared Cold Log root, only the retained suffix can differ. Dense
+// sequence bounds make the two overlay cursors advance in lockstep.
+fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
+    let key = prefix(id)?
+    let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else { return Ok(false) }
+    let Some((ColdPage(right), _)) = std.page.collection_slot(after.root, key) else { return Ok(false) }
+    if left != right { return Ok(false) }
+    let (Some(old_branch), Some(new_branch)) = (view before.replay, view after.replay) else { return Ok(true) }
+    let (Some(old_log), Some(new_log)) = (std.omap.get(old_branch.collections, id), std.omap.get(new_branch.collections, id)) else { return Ok(true) }
+    let path = paged_pack_path(left.pack)?
+    let Some(cold_next) = old_log.cold_next else { return Error(disk_fault(path, left.offset, Malformed)) }
+    if new_log.cold_next != Some(cold_next) { return Error(disk_fault(path, left.offset, Malformed)) }
+    let start = order.max(lo, cold_next)
+    if start >= hi { return Ok(true) }
+    let rows = disk_allocation(scoped fn() -> Result[List[Change], Error] {
+        let mut old = std.omap.range(old_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
+        let mut new = std.omap.range(new_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
+        let mut changed: List[Change] = list.new()
+        for seq in start .. hi {
+            let Some((take old_key, ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            let Some((take new_key, ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            if old_key != new_key || list.word_be(new_key, 4) != seq {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            if old_value != new_value {
+                list.push(mut changed, Change(tree_key: take new_key, value: Some(take new_value)))
+            }
+        }
+        Ok(take changed)
+    })?
+    capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+    for take row in take rows { list.push(mut out.rows, take row) }
+    Ok(true)
+}
+
 pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64) -> Result[List[Change], Error] waits {
     let old = tail_window(r, a, l, t)?
     let new = tail_window(r, b, l, t)?
@@ -408,7 +447,8 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     let overlap_next = order.min(old.next, new.next)
     window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
     window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
-    if a.branch != b.branch && overlap_first < overlap_next {
+    if a.branch != b.branch && overlap_first < overlap_next &&
+        !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
         let key = prefix(id)?
         let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(key_word(overlap_first)))
         let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(key_word(overlap_first)))

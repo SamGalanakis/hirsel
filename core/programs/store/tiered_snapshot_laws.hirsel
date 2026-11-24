@@ -41,7 +41,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
     Ok(())
 }
 
-fn l62_replay_log_window(mut db: Db, events: Log[u32]) -> Result[(), Error] {
+fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Result[(), Error] {
     let id = events.binding.id
     let mut tree = share_page_tree(db.heads[0u64].roots.collections)
     let mut draw = stamp_after(db.next_node)?
@@ -51,7 +51,7 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32]) -> Result[(), Error] {
         ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
     let mut value: Bytes = list.with_capacity(6)
     list.put_word_le(mut value, events.binding.readers.current)
-    list.put_word_le(mut value, 13u32)
+    list.put_word_le(mut value, event_number)
     let appended = JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayOrigin(ordinal: 2, branch: 0),
         ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
@@ -64,7 +64,7 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32]) -> Result[(), Error] {
 fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits {
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let before = snapshot(db)
-    l62_replay_log_window(mut db, events)?
+    l62_replay_log_window(mut db, events, 13u32)?
     let after = snapshot(db)
     let added = window_changes(read_handle, before, after, events, 2)?
     let removed = window_changes(read_handle, after, before, events, 2)?
@@ -81,6 +81,19 @@ fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits
         list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) ||
         removed[1u64].tree_key != new_key || removed[1u64].value != None {
         fail("L82: a moving window must recover entering rows from Cold pages and replay")
+    }
+    db.heads[0u64].roots.collections = share_page_tree(before.roots.collections)
+    l62_replay_log_window(mut db, events, 14u32)?
+    let mut forked = snapshot(db)
+    forked.branch = 1
+    let branch_delta = window_changes(read_handle, after, forked, events, 2)?
+    let mut fourteen: Bytes = list.new()
+    list.put_word_le(mut fourteen, 14u32)
+    // Both branches retain [2, 4), share seq 2 on disk and appended distinct
+    // suffix values at seq 3. The latter is a replacement within the overlap.
+    if list.len(branch_delta) != 1 || branch_delta[0u64].tree_key != new_key ||
+        published_log(events, branch_delta[0u64])? != Some(take fourteen) {
+        fail("L82: a shared Cold root must not hide a fork's replayed suffix")
     }
     Ok(())
 }

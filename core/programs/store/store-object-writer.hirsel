@@ -116,7 +116,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         Some(take admitted) => take admitted,
         None => take blank,
     }
-    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, reclaim: None)
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, issued_generation: generation, next_pack: pages.next_pack, reclaim: None)
     if let Error(_) = channel.send(start, take startup) {
         return Error(Io(Closed))
     }
@@ -171,14 +171,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     let mut lane = object_journal_begin(take owned)
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, pack_bytes, limit)
     if let Error(problem) = outcome {
-        let dead = match problem {
-            Fenced(_) => true,
-            Undecided => true,
-            Remote(_) => true,
-            _ => false,
-        }
-        if dead {
-            lane.register.terminal = Some(HistoryFault(clone(problem)))
+        if let Some(_) = lane.register.terminal {
             let saved: Error = clone(problem)
             write_disk(mut db.disk, take saved, scoped fn(mut state: DiskState, take terminal: Error) {
                 if let Some(mut object_writer) = state.object {
@@ -197,7 +190,6 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
 fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     let old = lane.register.head
     let seq = history_next_id(old.entry.seq)?
-    let generation = history_next_id(db.checkpointed)?
     let activation = match delta {
         ReplaceMain(main, _) => main.activation,
         _ => None,
@@ -211,12 +203,17 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let manifest_bytes = cut_manifest_size(db, delta)
     let mut next_stamp = stamp_after(db.next_node)?
     let mut workspace = history_buffers(65536)?
-    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator), Error] waits {
+    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
         let planned = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, participants.holders, installed.lists, None, installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, participants.holders, installed.lists, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
+        // Once upload starts, this epoch must never issue these numbers again,
+        // even if a refused cut leaves orphaned objects.
+        let generation = history_next_id(lane.issued_generation)?
+        lane.issued_generation = generation
+        lane.next_pack = planned.lists.run_packs.next_pack
         let (take layout, take refs) = history_write_page_cut(mut lane.client, old, take planned, object_state(db).locator, mut buffers, mut workspace, now)?
         fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
@@ -238,12 +235,12 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, manifest, mut workspace, now)?
         let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)?
         match advanced {
-            HistoryApplied(_) => Ok((take pages, take candidate_locator)),
+            HistoryApplied(_) => Ok((take pages, take candidate_locator, generation)),
             _ => Error(Undecided),
         }
     })
     db.next_node = next_stamp - 1
-    let (take pages, take locator) = plan?
+    let (take pages, take locator, generation) = plan?
     let resident_pages = resident_location_charge(pages.locations)
     let recorded_after = match delta {
         ReplaceMain(main, _) => main.head,

@@ -110,6 +110,52 @@ fn bucket_test_m2_multipart_restart(c: Clock, tasks: Tasks) -> Result[(), Error]
     Ok(())
 }
 
+fn object_cut_upload_budget_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let clean = bucket_law_authority(sim, tasks, "spare.test", 1)?
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut seed = open_authority(tasks, take clean, c, r, options)?
+    let _ = bucket_law_rows_table(mut seed)?
+    close(take seed)?
+    options.create = false
+    let primary = bucket_law_authority(sim, tasks, "s3.test", 2)?
+    let mut writer = open_authority(tasks, take primary, c, r, options)?
+    bucket_law_commit(mut writer, 1)?
+    let mut witness = bucket_law_client_with(sim, tasks, "spare.test", 3, true)?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let baseline = history_decode_head(workspace.witness)?
+    if let Error(Remote(Uncertain(Status(200, _)))) = checkpoint(mut writer) {} else {
+        fail("the cut did not refuse the exhausted multipart upload")
+    }
+    let _ = history_fetch(mut witness, "head", mut workspace.body, deadline)?
+    if workspace.body != workspace.witness {
+        fail("a refused pack upload published a checkpoint")
+    }
+    healthy(writer)?
+    bucket_law_commit(mut writer, 2)?
+    let _ = history_fetch(mut witness, "head", mut workspace.body, deadline)?
+    let observed = history_decode_head(workspace.body)?
+    if observed.head.entry.seq != baseline.head.entry.seq + 1 ||
+        !history_ref_matches(observed.head.checkpoint, baseline.head.checkpoint) {
+        fail("the holder could not publish a group after its cut was refused")
+    }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_multipart_refused_cut(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, CompleteExpired)
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    let sim = bucket_law_sim(tasks, c, 540, Some(uncut), take faults)
+    let outcome = object_cut_upload_budget_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}
+
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take client, 0)

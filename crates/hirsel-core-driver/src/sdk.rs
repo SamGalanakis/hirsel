@@ -210,7 +210,7 @@ impl Schema {
             14 if t[1] == json!([3]) => "Uint8Array".into(),
             14 => format!("Array<{}>", Self::typescript(&t[1], prefix)),
             15 => format!(
-                "Map<{}, {}>",
+                "ReadonlyMap<{}, {}>",
                 Self::typescript(&t[1], prefix),
                 Self::typescript(&t[2], prefix)
             ),
@@ -454,7 +454,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             let query = entry.query_schemas()?;
             entries.push_str(&format!("{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n", at("subscribe")));
             subscriptions.insert(path, format!(
-                "(args: codec.{arg_name}, onChange: (sub: Subscription) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+                "(args: codec.{arg_name}, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
             let value = format!("Value{i}");
             js.push_str(&query.value.javascript(&value));
@@ -463,6 +463,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             let mut key_codecs = Vec::new();
             let mut row_codecs = Vec::new();
             let mut slot_types = Vec::new();
+            let mut slot_keys = Vec::new();
             for (s, slot) in query.slots.iter().enumerate() {
                 let key = format!("Key{i}_{s}");
                 let row = format!("RowValue{i}_{s}");
@@ -474,6 +475,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
                 slot_types.push(format!(
                     "{slot_name}: DecodedRow<{slot_name}, codec.{key}, codec.{row}>"
                 ));
+                slot_keys.push(format!("{slot_name}: codec.{key}"));
                 names.push(slot_name);
                 key_codecs.push(format!("codec.{key}"));
                 row_codecs.push(format!("codec.{row}"));
@@ -482,11 +484,12 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
                 "{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
                 at("subscribeDecoded"), json!(names), key_codecs.join(","), row_codecs.join(",")
             ));
+            let slots = format!("{{ {} }}", slot_types.join("; "));
             let sub = format!(
-                "Subscription<codec.{value}, {{ {} }}>",
-                slot_types.join("; ")
+                "Subscription<codec.{value}, {slots}, {{ {} }}>",
+                slot_keys.join("; ")
             );
-            decoded.insert(path, format!("(args: codec.{arg_name}, onChange: (sub: {sub}) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
+            decoded.insert(path, format!("(args: codec.{arg_name}, onChange: (sub: {sub}, change: Change<codec.{value}, {slots}>) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
         } else {
             let result = Schema::read(&entry.result)?;
             let result_name = format!("Result{i}");
@@ -502,12 +505,14 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
     if !decoded.is_empty() {
         entries.push_str(r#"function queryCodec(value,names,keys,rows) {
+    const encoders = new Map(names.map((name, i) => [name, keys[i].encode]));
     const slot = position => {
         if (names[position] === undefined) throw new codec.Malformed('unknown row slot');
         return names[position];
     };
     return {
-        value: value.decode, slot,
+        value: value.decode, slot, keyPrefixBytes: 4,
+        key: (name, key) => encoders.get(name)(key),
         row(row) {
             if (row.key.length < 4) throw new codec.Malformed('truncated collection key');
             const i = row.slot;
@@ -519,7 +524,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
 "#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{Change, Option, Outcome, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
         calls.render(),
         subscriptions.render(),
         decoded.render()
@@ -626,7 +631,7 @@ mod tests {
         }
         for (tail, want) in [
             (vec![14, 3], "Uint8Array"),
-            (vec![15, 13, 6], "Map<string, bigint>"),
+            (vec![15, 13, 6], "ReadonlyMap<string, bigint>"),
             (vec![16, 16, 5], "Option<Option<number>>"),
             (vec![17, 6, 13], "Result<bigint, string>"),
             (vec![17, 3, 20], "Result<number, never>"),

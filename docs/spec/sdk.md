@@ -50,43 +50,51 @@ where `a` and `b` are the two entries written `module.path::name`, for example
 `DuplicateStubName(main::pick, main::pick)`.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
-`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onChange, onEnd?)`, returning a
-handle `sub` with `value()`, `rows(slot)` and `unsubscribe()` (RUNNER-SPEC v2.45).
-`sub.value()` reads the query's computed value R. `sub.rows(slot)` reads the
-rows of one slot. Both return `{tag: "Ready", value: ...}` for the last applied
-Batch, `{tag: "Pending"}` before a complete image, or `{tag: "Ended"}` after
-retirement. Raw subscriptions use numeric slots. Decoded subscriptions use
-the slot names from Describe.
+`Promise<Outcome<R>>`.
 
-The accessor contract (RUNNER-SPEC v2.46, astra 1995 #9):
-- A subscription is **pending** until its current instance completes. While
-  pending, `value()` and `rows(slot)` report Pending; after `Ended` or
-  `unsubscribe()` they report Ended. Neither ever returns another instance's or
-  another Caller's data.
-- On a Reset or a disconnect the public image is invalidated at once, not when
-  the new `complete` arrives. When Welcome binds a different Caller, every image
-  of the previous Caller is released.
-- Frames of an earlier connection and groups of retired sub ids are ignored.
-- A Batch is applied in two phases: every current group in it is decoded and
-  staged first, a completing group's image replacing the old one from empty;
-  then all staged images are committed together; only then is `onChange`
-  called, once per changed subscription. So a callback that reads a second
-  subscription changed by the same Batch sees its new image.
-- A `complete` decodes the full value even when its encoding is empty (an
-  `R = ()` or empty-record value). Only a non-completing group with an empty
-  `value` keeps its current instance's previous value.
-- A completing group carries every slot's full rows, so an empty completed
-  result gives `rows(slot)` = `[]` for every slot. The
-generated stub forwards the optional `onEnd` callback. The runtime removes the
-matching subscription before delivering the decoded `Ended` reason once. Reset
-and reconnect resubscribe without calling `onEnd`.
+### Subscriptions
 
-Use `api.subscribeDecoded.<module>.<name>(args, onChange, onEnd?)` for typed values and
-rows: `value()` is the decoded R, and each row of `rows(slot)` has the decoded
-`key` and `value` as an `Option` of the slot table's decoded row type, with
-`slot` the slot's name. `codec.js` exports `Value<i>` and, per slot `s`,
-`Key<i>_<s>` and `RowValue<i>_<s>` for the query at index `i` in `want`. Use
-`api.subscribe.<module>.<name>` for wire groups.
+`subscribe(want, argsBytes, onChange, onEnd?)` returns a handle with `value()`,
+`rows(slot)`, `map(slot)`, `get(slot, key)` and `unsubscribe()`. The four reads
+return `Pending` until the current instance completes, `Ready` with the data
+from the last applied Batch, or `Ended` after an `Ended` frame or
+`unsubscribe()`. An absent key in a ready image gives `Ready` with
+`undefined`.
+
+`value()` reads the query result. `rows(slot)` reads the rows as an array.
+`map(slot)` indexes the same rows by lowercase hex of the full wire key.
+`get(slot, key)` reads one row by key. The array and map each keep their
+identity until that slot changes. Reads and deltas share row references. The
+SDK freezes decoded plain objects, arrays and tuples, and exposes
+`ReadonlyMap` and readonly byte types. Mutating a shared map or
+`Uint8Array`, or any data within a map leaf, is undefined behavior.
+
+`onChange(sub, change)` runs after all current groups in the Batch are
+committed. `change.rows` contains typed `RowChange` records with the slot
+and hex key. An insertion has `new`, a deletion has `old`, and an update
+has both. `change.value` carries the old and new result when its encoded
+bytes change. `change.replaced` marks a completing group. Its rows still
+describe the difference from the current image, and a byte-identical
+completion of a ready image is silent. The first completion publishes even
+when its rows and value encoding are empty. An empty value in a
+non-completing group leaves that result as it was.
+
+Reset, transport loss and terminal client states clear the public image and
+detach old subscription ids immediately. When an image is cleared, its
+handler receives `{invalidated: true, replaced: false, rows: []}` after all
+affected handles read `Pending`. The next instance's first completion
+describes only the new image, including for the same Caller. The SDK ignores
+frames of lost connections and groups for retired ids. Reset and reconnect
+resubscribe. The SDK delivers the optional `onEnd` once after removing the
+matching subscription for an `Ended` frame.
+
+Use `api.subscribeDecoded.<module>.<name>(args, onChange, onEnd?)` for typed
+values, rows and keys. A row holds its slot name, decoded key and present
+value as `Some`. The generated stub uses the appropriate slot's
+`Key<i>_<s>` encoder for `get` and includes the collection prefix in the
+lookup. `codec.js` exports `Value<i>`, `Key<i>_<s>` and `RowValue<i>_<s>`
+for the query at index `i` and slot `s` in that query. Use
+`api.subscribe.<module>.<name>` for numeric slots and raw byte keys.
 
 For a query, `Described.result` is R's value schema followed by the slot list,
 each slot's name, ordered key schema and value schema, each schema encoded as

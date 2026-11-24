@@ -61,13 +61,20 @@ try {
   assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
     [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
   type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
-  const rows = await new Promise<ItemRow[]>((resolve, reject) => {
+  const rows = await new Promise<readonly ItemRow[]>((resolve, reject) => {
     diagnostic = reject;
-    const sub = api.subscribeDecoded.packed_consumer.packed_rows(undefined, current => {
+    const sub = api.subscribeDecoded.packed_consumer.packed_rows(undefined, (current, change) => {
+      if (change.invalidated) return;
       assert.deepEqual(current.value(), {tag: 'Ready', value: undefined});
       const rows = current.rows('items');
-      if (rows.tag === 'Ready') resolve(rows.value);
-      else reject(new Error('completion did not publish the rows'));
+      if (rows.tag !== 'Ready') {
+        reject(new Error('completion did not publish the rows'));
+        return;
+      }
+      const item = rows.value[0];
+      assert.deepEqual(current.get('items', 9007199254740993n), {tag: 'Ready', value: item});
+      assert.strictEqual(change.rows[0].new, item);
+      resolve(rows.value);
     }, reject);
     assert.deepEqual(sub.value(), {tag: 'Pending'});
   });

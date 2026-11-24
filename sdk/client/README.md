@@ -53,21 +53,27 @@ client and reopen after storage is available. `close()` releases the stream leas
 and preserves pending durable work. Each send checks the installation generation
 under its lock, so a live client with an older generation cannot send work.
 
-Subscription callbacks receive a complete current array of raw rows after an
-atomic Batch. Reset and reconnect preserve the old cache until the replacement
-id appears in `Batch.complete`, including an empty initial result. Old ids are
-ignored. All subscriptions use `resume: None`.
+Subscription callbacks receive `onChange(sub, change)` after the entire Batch
+applies. `change.rows` carries the old and new rows for changed keys.
+`sub.rows(slot)`, `sub.map(slot)` and `sub.get(slot, key)` share frozen rows.
+The array and map keep their identity until the slot changes. Mutating shared
+`Uint8Array` or `Map` leaves, or a map returned by `sub.map`, is undefined
+behavior. Use `api.subscribeDecoded.<module>.<name>` for typed keys and values.
 
-Pass `onEnd` after the row callback on `api.subscribe.<module>.<name>`,
-`client.subscribe()` or `client.subscribeChanges()` to receive the decoded
-`SubscriptionEnd` reason. The client removes the subscription before calling
-`onEnd` once for its `Ended` frame. Reset and reconnect resubscribe, and an empty
-completed Batch calls the row callback with `[]`.
+Reset, connection loss and terminal client states clear the public images and
+retire their old ids. Each cleared subscription receives a data-free
+invalidation after the affected handles become `Pending`. Reset and reconnect
+resubscribe with `resume: None`. The fresh completion publishes only rows
+in the new image, including an empty initial result.
+
+Pass `onEnd` after `onChange` to receive the decoded `SubscriptionEnd` reason.
+The client removes the subscription before calling `onEnd` once for its
+`Ended` frame. [SDK subscription contract](../../docs/spec/sdk.md#subscriptions)
 
 Optional predictions supplied as the fourth `call()` argument are removed when a matching outcome row arrives;
 `onPrediction` runs after the complete Batch has been applied.
 
-The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in
+The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in
 `//:core-evaluator`. They use the generated Frame codec and independent
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
 W3e; these laws make no claim about that integration.

@@ -9,7 +9,6 @@ type WireOutcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault
   | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt'};
 export type Outcome<R> = WireOutcome<R> | {tag: 'LocallyUnknown' | 'RequestMismatch'};
 export interface SlotRow { slot: number; key: Uint8Array; value: Option<Uint8Array> }
-export interface Row extends SlotRow { sub: number }
 export interface Group { sub: number; value: Uint8Array; rows: SlotRow[] }
 export interface Done {stream: number; p: bigint; outcome: Outcome<Uint8Array>}
 export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
@@ -27,22 +26,43 @@ export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Ar
 export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
 export type Access<T> = {tag: 'Pending' | 'Ended'} | {tag: 'Ready'; value: T};
 export interface SubscriptionControl { unsubscribe(): void }
-export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>> extends SubscriptionControl {
-  value(): Access<V>;
-  rows<S extends keyof Slots>(slot: S): Access<Slots[S][]>;
+export type Frozen<T> = T extends Uint8Array ? Readonly<T>
+  : T extends ReadonlyMap<infer K, infer V> ? ReadonlyMap<K, V>
+  : T extends object ? {readonly [K in keyof T]: Frozen<T[K]>}
+  : T;
+export type RowChange<Slots extends object> = {
+  [S in keyof Slots]: {readonly slot: S; readonly key: string; readonly old?: Frozen<Slots[S]>; readonly new?: Frozen<Slots[S]>}
+}[keyof Slots];
+export interface Change<V, Slots extends object> {
+  readonly invalidated?: true;
+  readonly replaced: boolean;
+  readonly value?: {readonly old?: Frozen<V>; readonly new: Frozen<V>};
+  readonly rows: readonly RowChange<Slots>[];
 }
-export interface SubscriptionCodec<V, Slots extends object> {
+export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>,
+  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> extends SubscriptionControl {
+  value(): Access<Frozen<V>>;
+  rows<S extends keyof Slots>(slot: S): Access<readonly Frozen<Slots[S]>[]>;
+  map<S extends keyof Slots>(slot: S): Access<ReadonlyMap<string, Frozen<Slots[S]>>>;
+  get<S extends keyof Slots>(slot: S, key: Keys[S]): Access<Frozen<Slots[S]> | undefined>;
+  current(): boolean;
+}
+export interface SubscriptionCodec<V, Slots extends object,
+  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> {
   value(bytes: Uint8Array): V;
   slot(position: number): keyof Slots;
   row(row: SlotRow): Slots[keyof Slots];
+  key<S extends keyof Slots>(slot: S, value: Keys[S]): Uint8Array;
+  keyPrefixBytes?: number;
 }
 export interface Transport {
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, prediction?: unknown): Promise<Outcome<R>>;
-  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription) => void,
+  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void,
     onEnd?: (reason: SubscriptionEnd) => void): Subscription;
-  subscribe<V, Slots extends object>(want: Want, args: Uint8Array,
-    onChange: (sub: Subscription<V, Slots>) => void, onEnd: ((reason: SubscriptionEnd) => void) | undefined,
-    decode: SubscriptionCodec<V, Slots>): Subscription<V, Slots>;
+  subscribe<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
+    onChange: (sub: Subscription<V, Slots, Keys>, change: Change<V, Slots>) => void,
+    onEnd: ((reason: SubscriptionEnd) => void) | undefined,
+    decode: SubscriptionCodec<V, Slots, Keys>): Subscription<V, Slots, Keys>;
 }
 export interface HttpRequest { path: string; body?: string }
 export interface HttpReply { status: number; body: string; committed: boolean; replayed: boolean }
@@ -107,24 +127,111 @@ const fresh = (generation: bigint): Installation => ({version: RECOVERY_VERSION,
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
-interface Image {
-  value: unknown;
-  slots: Map<PropertyKey, Map<string, unknown>>;
+type ImageValue = {raw: Uint8Array; decoded: unknown};
+interface SlotImage {
+  prefix: string;
+  entries: Map<string, ImageValue>;
+  map?: ReadonlyMap<string, unknown>;
+  rows?: readonly unknown[];
 }
-interface RowEdit { slot: PropertyKey; key: string; row?: unknown }
+interface Image { value: ImageValue; slots: Map<PropertyKey, SlotImage> }
+type ImageSlots = Record<PropertyKey, unknown>;
+type ImageChange = Change<unknown, ImageSlots>;
+interface SlotEdits { prefix: string; entries: Map<string, ImageValue | undefined> }
 interface Sub {
-  want: Want; args: Uint8Array; id?: number; active: boolean; complete: boolean;
-  codec?: SubscriptionCodec<unknown, Record<string | number, unknown>>;
+  want: Want; args: Uint8Array; id?: number; active: boolean;
+  codec: SubscriptionCodec<unknown, ImageSlots, ImageSlots>;
   image?: Image;
-  notify: (group: Group, replace: boolean) => void;
+  notify: (change: ImageChange) => void;
   onEnd?: (reason: SubscriptionEnd) => void;
 }
 
 const rawSubscription: SubscriptionCodec<Uint8Array, Record<number, SlotRow>> = {
   value: bytes => bytes.slice(),
   slot: slot => slot,
-  row: row => structuredClone(row),
+  row: row => ({...row, key: row.key.slice(), value: row.value.tag === 'Some'
+    ? {tag: 'Some', value: row.value.value.slice()} : {tag: 'None'}}),
+  key: (_slot, bytes) => bytes,
 };
+
+function freezeDecoded(value: unknown): unknown {
+  if (value !== null && typeof value === 'object'
+      && (Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype
+        || Object.getPrototypeOf(value) === null)) {
+    for (const child of Object.values(value)) freezeDecoded(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function stageImage(sub: Sub, group: Group, replaced: boolean) {
+  const {codec, image} = sub;
+  const value = (replaced || group.value.length > 0) && (!image || !equal(image.value.raw, group.value))
+    ? {raw: group.value, decoded: freezeDecoded(codec.value(group.value))} : undefined;
+  const slots = new Map<PropertyKey, SlotEdits>();
+  for (const row of group.rows) {
+    const slot = codec.slot(row.slot);
+    const hex = key(row.key);
+    const before = image?.slots.get(slot)?.entries.get(hex);
+    const raw = row.value.tag === 'Some' ? row.value.value : undefined;
+    const after = raw && before && equal(before.raw, raw) ? before
+      : raw ? {raw, decoded: freezeDecoded(codec.row(row))} : undefined;
+    if (raw === undefined) codec.row(row);
+    let edits = slots.get(slot);
+    if (!edits) {
+      edits = {prefix: '', entries: new Map()};
+      slots.set(slot, edits);
+    }
+    if (after) edits.prefix = hex.slice(0, 2 * (codec.keyPrefixBytes ?? 0));
+    if (before !== after || (replaced && after)) edits.entries.set(hex, after);
+    else edits.entries.delete(hex);
+  }
+  if (replaced && image) {
+    for (const [slot, prior] of image.slots) {
+      let edits = slots.get(slot);
+      if (!edits) {
+        edits = {prefix: prior.prefix, entries: new Map()};
+        slots.set(slot, edits);
+      }
+      for (const hex of prior.entries.keys()) {
+        if (!edits.entries.has(hex)) edits.entries.set(hex, undefined);
+      }
+      for (const [hex, after] of edits.entries) {
+        if (prior.entries.get(hex) === after) edits.entries.delete(hex);
+      }
+    }
+  }
+  return {sub, id: group.sub, replaced, value, slots};
+}
+
+function commitImage({sub, replaced, value, slots}: ReturnType<typeof stageImage>): ImageChange {
+  const image = sub.image ?? {value: value!, slots: new Map<PropertyKey, SlotImage>()};
+  const rows: RowChange<ImageSlots>[] = [];
+  for (const [slot, edits] of slots) {
+    if (edits.entries.size === 0) continue;
+    const target = image.slots.get(slot) ?? {prefix: edits.prefix, entries: new Map<string, ImageValue>()};
+    for (const [hex, after] of edits.entries) {
+      const before = target.entries.get(hex);
+      if (after) target.entries.set(hex, after);
+      else target.entries.delete(hex);
+      rows.push(Object.freeze({slot, key: hex,
+        ...(before && {old: before.decoded}), ...(after && {new: after.decoded})}) as RowChange<ImageSlots>);
+    }
+    target.prefix = edits.prefix || target.prefix;
+    target.map = target.rows = undefined;
+    image.slots.set(slot, target);
+  }
+  const changedValue = value && Object.freeze({
+    ...(sub.image && {old: sub.image.value.decoded}), new: value.decoded,
+  });
+  if (value) image.value = value;
+  sub.image = image;
+  return Object.freeze({replaced, ...(changedValue && {value: changedValue}), rows: Object.freeze(rows)});
+}
+
+const emptyRows: readonly never[] = Object.freeze([]);
+const emptyMap: ReadonlyMap<string, never> = new Map<string, never>();
+const invalidation: ImageChange = Object.freeze({invalidated: true, replaced: false, rows: emptyRows});
 
 interface QueuedCall {
   want: Want; args: Uint8Array; slot: number; prediction?: unknown; http?: HttpRequest;
@@ -233,13 +340,17 @@ export class Client implements Transport {
   }
   private async unavailable(error: unknown): Promise<void> {
     if (this.state === 'Closed') return;
+    this.cancelTimers(); this.disconnect(); this.setState('StorageUnavailable');
     this.options.onDiagnostic?.(String(error));
-    this.setState('StorageUnavailable'); this.cancelTimers(); this.disconnect();
     this.readyReject(new ClientError('StorageUnavailable'));
   }
   private async installation<T>(fn: (state: Installation) => Promise<T>): Promise<T | undefined> {
     const lock = await this.options.storage.lock('install', true);
-    if (!lock) throw new ClientError('StorageUnavailable');
+    if (!lock) {
+      const error = new ClientError('StorageUnavailable');
+      await this.unavailable(error);
+      throw error;
+    }
     try {
       let state: Installation | null;
       try { state = await this.options.storage.read(); }
@@ -279,25 +390,26 @@ export class Client implements Transport {
         if (!(event.data instanceof ArrayBuffer) && !(event.data instanceof Uint8Array)) throw new Error('binary Frame required');
         frame = this.options.frame.decode(event.data instanceof Uint8Array ? event.data : new Uint8Array(event.data));
       } catch { await this.incompatible(1007); return; }
-      await this.receive(frame);
-      await this.startNextCall();
+      await this.receive(frame, epoch);
+      if (epoch === this.epoch) await this.startNextCall();
     }); };
-    socket.onclose = event => {
-      if (epoch === this.epoch) this.clearSubscriptions();
+    const lost = (finish: () => Promise<void>) => {
+      if (epoch !== this.epoch) return;
+      const lossEpoch = ++this.epoch;
       void this.enqueue(async () => {
-        if (epoch !== this.epoch) return;
-        // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
-        if (event.code === 1008 && !this.welcomed) await this.unbound();
-        else if (event.code === 1009) await this.incompatible(1009,
-          !this.welcomed && event.reason === 'hirsel.3' ? 'Reload' : 'ReplyTooLarge');
-        else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
-        else this.transient();
+        if (lossEpoch === this.epoch) await finish();
       });
+      this.clearSubscriptions();
     };
-    socket.onerror = () => {
-      if (epoch === this.epoch) this.clearSubscriptions();
-      void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); });
-    };
+    socket.onclose = event => lost(async () => {
+      // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
+      if (event.code === 1008 && !this.welcomed) await this.unbound();
+      else if (event.code === 1009) await this.incompatible(1009,
+        !this.welcomed && event.reason === 'hirsel.3' ? 'Reload' : 'ReplyTooLarge');
+      else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
+      else this.transient();
+    });
+    socket.onerror = () => lost(async () => this.transient());
   }
   private disconnect(): void {
     ++this.epoch; const socket = this.socket; this.socket = undefined;
@@ -342,7 +454,7 @@ export class Client implements Transport {
     void this.ready.catch(() => {});
     void this.enqueue(async () => this.connect());
   }
-  private async receive(frame: Frame): Promise<void> {
+  private async receive(frame: Frame, epoch: number): Promise<void> {
     if (frame.tag === 'Welcome') {
       if (this.welcomed) { await this.incompatible(1008); return; }
       const [caller, , , digest, target, n_place] = frame.values;
@@ -360,7 +472,7 @@ export class Client implements Transport {
           if (this.record.pending) this.finish({tag: 'LocallyUnknown'});
           this.record = structuredClone(record);
         });
-        if (this.state !== 'Connecting') return;
+        if (epoch !== this.epoch || this.state !== 'Connecting') return;
       }
       this.welcomed = true; this.welcomedAt = this.clock.now();
       if (this.wants.length === 0) await this.allPlaced();
@@ -379,49 +491,39 @@ export class Client implements Transport {
       if (version < this.version) { await this.incompatible(1008); return; }
       const byId = new Map(groups.map(group => [group.sub, group]));
       const completing = new Set(complete);
-      const staged: Array<{sub: Sub; group: Group; replace: boolean; value: unknown; rows: RowEdit[]}> = [];
+      const staged: ReturnType<typeof stageImage>[] = [];
       try {
         for (const sub of this.subs) {
           if (sub.id === undefined) continue;
           const replace = completing.has(sub.id);
           const group = byId.get(sub.id);
           if (!group && !replace) continue;
-          if (!group || (!replace && !sub.complete)) { await this.incompatible(1008); return; }
-          const codec = sub.codec;
-          const value = codec && (replace || group.value.length > 0) ? codec.value(group.value) : sub.image?.value;
-          const rows = codec ? group.rows.map(row => {
-            const decoded = codec.row(row);
-            return {slot: codec.slot(row.slot), key: key(row.key), row: row.value.tag === 'Some' ? decoded : undefined};
-          }) : [];
-          staged.push({sub, group, replace, value, rows});
+          if (!group || (!replace && !sub.image)) { await this.incompatible(1008); return; }
+          staged.push(stageImage(sub, group, replace));
         }
       } catch { await this.incompatible(1007); return; }
       this.notifications = [];
       await this.outcomes(outcomes);
+      if (epoch !== this.epoch) { this.publish(); return; }
       this.version = version;
-      for (const {sub, group, replace, value, rows} of staged) {
-        if (sub.id !== group.sub) continue;
-        sub.complete = true;
-        if (!sub.codec) continue;
-        const slots = replace ? new Map<PropertyKey, Map<string, unknown>>() : sub.image!.slots;
-        for (const edit of rows) {
-          let slot = slots.get(edit.slot);
-          if (!slot) { slot = new Map(); slots.set(edit.slot, slot); }
-          if (edit.row === undefined) slot.delete(edit.key); else slot.set(edit.key, edit.row);
+      for (const edit of staged) {
+        const {sub, id} = edit;
+        if (sub.id !== id) continue;
+        const change = commitImage(edit);
+        if (change.value || change.rows.length > 0) {
+          this.notify(() => { if (sub.id === id) sub.notify(change); });
         }
-        sub.image = {value, slots};
       }
       this.publish();
-      for (const {sub, group, replace} of staged) {
-        if (sub.id === group.sub) sub.notify(group, replace);
-      }
-      this.options.onBatch?.(version);
+      if (epoch === this.epoch) this.options.onBatch?.(version);
     } else if (frame.tag === 'Reset') {
       const [version, outcomes] = frame.values;
       if (version < this.version) { await this.incompatible(1008); return; }
       this.clearSubscriptions();
       this.notifications = [];
-      await this.outcomes(outcomes); this.version = version;
+      await this.outcomes(outcomes);
+      if (epoch !== this.epoch) { this.publish(); return; }
+      this.version = version;
       this.publish(); await this.subscribeAll();
     } else if (frame.tag === 'Ended') {
       const [id, reason] = frame.values;
@@ -652,42 +754,60 @@ export class Client implements Transport {
       await this.stop('Fenced', outcome);
     });
   }
-  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription) => void,
+  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void,
     onEnd?: (reason: SubscriptionEnd) => void): Subscription;
-  subscribe<V, Slots extends object>(want: Want, args: Uint8Array,
-    onChange: (sub: Subscription<V, Slots>) => void, onEnd: ((reason: SubscriptionEnd) => void) | undefined,
-    decode: SubscriptionCodec<V, Slots>): Subscription<V, Slots>;
-  subscribe<V, Slots extends object>(want: Want, args: Uint8Array, onChange: (sub: Subscription<V, Slots>) => void,
-    onEnd?: (reason: SubscriptionEnd) => void, decode?: SubscriptionCodec<V, Slots>): Subscription<V, Slots> {
-    const codec = (decode ?? rawSubscription) as Sub['codec'];
-    const sub = this.addSubscription(want, args, () => onChange(handle), onEnd, codec);
+  subscribe<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
+    onChange: (sub: Subscription<V, Slots, Keys>, change: Change<V, Slots>) => void,
+    onEnd: ((reason: SubscriptionEnd) => void) | undefined,
+    decode: SubscriptionCodec<V, Slots, Keys>): Subscription<V, Slots, Keys>;
+  subscribe<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
+    onChange: (sub: Subscription<V, Slots, Keys>, change: Change<V, Slots>) => void,
+    onEnd?: (reason: SubscriptionEnd) => void, decode?: SubscriptionCodec<V, Slots, Keys>): Subscription<V, Slots, Keys> {
+    if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
+    const codec = (decode ?? rawSubscription) as unknown as Sub['codec'];
+    const sub: Sub = {
+      want: copyWant(want), args: args.slice(), active: true, codec, onEnd,
+      notify: change => onChange(handle, change as Change<V, Slots>),
+    };
     const access = <T>(read: (value: Image) => T): Access<T> => {
       if (!sub.active) return {tag: 'Ended'};
       if (!sub.image) return {tag: 'Pending'};
-      return {tag: 'Ready', value: structuredClone(read(sub.image))};
+      return {tag: 'Ready', value: read(sub.image)};
     };
-    const handle: Subscription<V, Slots> = {
-      value: () => access(image => image.value as V),
-      rows: slot => access(image => [...(image.slots.get(slot)?.values() ?? [])] as Slots[typeof slot][]),
+    const handle: Subscription<V, Slots, Keys> = {
+      value: () => access(image => image.value.decoded as Frozen<V>),
+      rows: slot => access(image => {
+        const current = image.slots.get(slot);
+        if (!current) return emptyRows;
+        current.rows ??= Object.freeze(Array.from(current.entries.values(), entry => entry.decoded));
+        return current.rows as readonly Frozen<Slots[typeof slot]>[];
+      }),
+      map: slot => access(image => {
+        const current = image.slots.get(slot);
+        if (!current) return emptyMap;
+        current.map ??= new Map(Array.from(current.entries, ([hex, entry]) => [hex, entry.decoded]));
+        return current.map as ReadonlyMap<string, Frozen<Slots[typeof slot]>>;
+      }),
+      get: (slot, typedKey) => access(image => {
+        const current = image.slots.get(slot);
+        if (!current) return undefined;
+        const hex = current.prefix + key(codec.key(slot, typedKey));
+        return current.entries.get(hex)?.decoded as Frozen<Slots[typeof slot]> | undefined;
+      }),
+      current: () => true,
       unsubscribe: () => this.unsubscribe(sub),
     };
-    return handle;
-  }
-  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void,
-    onEnd?: (reason: SubscriptionEnd) => void): SubscriptionControl {
-    const sub = this.addSubscription(want, args,
-      (group, replace) => onChanges(group.rows.map(row => ({...row, sub: group.sub})), replace), onEnd);
-    return {unsubscribe: () => this.unsubscribe(sub)};
-  }
-  private addSubscription(want: Want, args: Uint8Array, notify: Sub['notify'], onEnd?: Sub['onEnd'], codec?: Sub['codec']): Sub {
-    if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
-    const sub: Sub = {want: copyWant(want), args: args.slice(), notify, onEnd, codec, complete: false, active: true};
     this.subs.add(sub);
     void this.enqueue(async () => this.subscribeAll());
-    return sub;
+    return handle;
   }
   private clearSubscriptions(): void {
-    for (const sub of this.subs) { sub.id = undefined; sub.image = undefined; sub.complete = false; }
+    const cleared: Sub[] = [];
+    for (const sub of this.subs) {
+      if (sub.image) cleared.push(sub);
+      sub.id = undefined; sub.image = undefined;
+    }
+    for (const sub of cleared) sub.notify(invalidation);
   }
   private removeSubscription(sub: Sub): void {
     sub.active = false; sub.id = undefined; sub.image = undefined; this.subs.delete(sub);
@@ -710,7 +830,7 @@ export class Client implements Transport {
       if (this.state !== 'Ready') return;
       if (!sub.active || sub.id !== undefined) continue;
       if (this.nextSub > 0xffffffff) { await this.incompatible(1008); return; }
-      sub.id = this.nextSub++; sub.complete = false;
+      sub.id = this.nextSub++;
       await this.send({tag: 'Subscribe', values: [sub.id, this.wants.findIndex(w => sameWant(w, sub.want)), sub.args, {tag: 'None'}]});
     }
   }

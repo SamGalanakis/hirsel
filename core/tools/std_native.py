@@ -595,10 +595,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                        + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)) + bytes(8))
                         unit = blob(bytes([3, 0, 0, 0, 0, 0]))
                         slots = (count(1) + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
+                                 + blob(bytes([3, 0, 0, 0, 0, 6]))
                                  + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
                         description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(3)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
-                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', unit + slots, 2, 3, slots + unit) + transaction + count(0))
+                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', unit + slots, 2, 3, slots + unit)
+                                       + transaction + count(0) + count(0))
                         description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
                         generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'

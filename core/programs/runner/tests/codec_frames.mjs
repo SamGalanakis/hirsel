@@ -23,11 +23,18 @@ export async function vectors(c,frame,entries) {
       const payload = committed ? '000000000900000000000000' : '0100000003000000626164';
       return Promise.resolve({tag:'Returned',value:decode(bytes(payload))});
     },
-    subscribe(want,args,onChange,onEnd) {
+    subscribe(want,args,onChange,onEnd,decode) {
       assert.strictEqual(want,entries.want[1]);
       assert.equal(Buffer.from(args).toString('hex'),'03000000');
+      if (decode) {
+        const key=9007199254740993n, suffix=bytes('0020000000000001');
+        assert.deepEqual(decode.key('rows',key),suffix);
+        assert.equal(decode.keyPrefixBytes,4);
+        const wire={slot:0,key:bytes('00000003 0020000000000001'),value:{tag:'Some',value:bytes('01000000 cd')}};
+        assert.deepEqual(decode.row(wire),{slot:'rows',key,value:{tag:'Some',value:bytes('cd')}});
+      }
       const subscription = {rows: () => ({tag:'Ready',value:[]}), unsubscribe() { unsubscribed = true; }};
-      onChange(subscription);
+      onChange(subscription,{replaced:true,rows:[]});
       onEnd({tag:'Refused',value:{tag:'Deadline'}});
       return subscription;
     }
@@ -37,7 +44,12 @@ export async function vectors(c,frame,entries) {
   assert.deepEqual(await client.call.main.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
   let reason;
-  client.subscribe.main.rows(3, sub => { assert.deepEqual(sub.rows(0),{tag:'Ready',value:[]}); delivered = true; }, end => { reason = end; }).unsubscribe();
+  client.subscribe.main.rows(3, (sub,change) => {
+    assert.deepEqual(sub.rows(0),{tag:'Ready',value:[]});
+    assert.deepEqual(change,{replaced:true,rows:[]});
+    delivered = true;
+  }, end => { reason = end; }).unsubscribe();
+  client.subscribeDecoded.main.rows(3, () => {}, () => {}).unsubscribe();
   assert.equal(delivered,true); assert.equal(unsubscribed,true);
   assert.deepEqual(reason,{tag:'Refused',value:{tag:'Deadline'}});
   let cases = 0;

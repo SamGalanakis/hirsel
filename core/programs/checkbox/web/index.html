@@ -52,7 +52,7 @@
     import {Client, BrowserStorage} from './client.js';
     import {bind, identity, want} from './entries.js';
     import {Frame} from './frame.js';
-    import {keys, values} from './codec.js';
+    import {values} from './codec.js';
 
     const width = 1000;
     const pixels = width * width;
@@ -123,24 +123,18 @@
     }
 
     const empty = new Uint8Array(chunkSize);
-    const present = new Set();
-    function onRows(rows, replace) {
-      const missing = replace ? new Set(present) : null;
-      for (const row of rows) {
-        const chunk = keys.u32.decode(row.key.subarray(4));
-        if (row.value.tag === 'Some') present.add(chunk);
-        else present.delete(chunk);
-        missing?.delete(chunk);
-        updateChunk(chunk * chunkSize, row.value.tag === 'Some' ? values.bytes.decode(row.value.value) : empty);
-      }
-      if (missing) {
-        for (const chunk of missing) {
-          present.delete(chunk);
-          updateChunk(chunk * chunkSize, empty);
+    function onChange(_, {invalidated, rows}) {
+      if (invalidated) {
+        for (let start = 0; start < bits.length; start += chunkSize) updateChunk(start, empty);
+        painted = false;
+        status.textContent = 'Loading board…';
+      } else {
+        for (const {old, new: row} of rows) {
+          updateChunk((row ?? old).key * chunkSize, row ? row.value.value : empty);
         }
+        painted = true;
+        status.textContent = 'Click a pixel to toggle it. With the board focused, use the arrow keys and Space.';
       }
-      painted = true;
-      status.textContent = 'Click a pixel to toggle it. With the board focused, use the arrow keys and Space.';
       scheduleDraw();
     }
 
@@ -170,9 +164,9 @@
     });
     const api = bind({
       call: (entry, arg, decode) => client.call(entry, arg, decode, values.u32.decode(arg)),
-      subscribe: (entry, arg, onChanges) => client.subscribeChanges(entry, arg, onChanges),
+      subscribe: client.subscribe.bind(client),
     });
-    api.subscribe.main.board(undefined, onRows);
+    api.subscribeDecoded.main.board(undefined, onChange);
 
     async function toggle(i) {
       if (!painted || busy || client.state !== 'Ready') return;

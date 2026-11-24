@@ -32,21 +32,15 @@ class Board {
   bits = new Uint8Array(125000);
   version = -1n;
   replacements = 0;
-  constructor(keys, values) {
-    this.keys = keys;
-    this.values = values;
-  }
-  rows(rows, replace) {
-    if (replace) {
-      this.bits.fill(0);
-      this.replacements++;
-    }
-    for (const row of rows) {
-      const offset = this.keys.u32.decode(row.key.subarray(4)) * 64;
+  change({invalidated, replaced, rows}) {
+    if (invalidated) this.bits.fill(0);
+    if (replaced) this.replacements++;
+    for (const {old, new: row} of rows) {
+      const offset = (row ?? old).key * 64;
       assert(offset < this.bits.length);
-      if (row.value.tag === 'None') this.bits.fill(0, offset, offset + 64);
+      if (!row) this.bits.fill(0, offset, offset + 64);
       else {
-        const bytes = this.values.bytes.decode(row.value.value);
+        const bytes = row.value.value;
         assert.equal(bytes.length, 64);
         this.bits.set(bytes.subarray(0, this.bits.length - offset), offset);
       }
@@ -169,7 +163,6 @@ export async function converge(origin, generated, {
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   const imported = file => import(pathToFileURL(resolve(generated, file)).href);
   const {Frame} = await imported('frame.js');
-  const {keys, values} = await imported('codec.js');
   const {want, identity, bind} = await imported('entries.js');
   const runtime = await loadRuntime(mutant && ((file, text) => mutate(mutant, file, text)));
   const state = await mkdtemp(join(tmpdir(), 'checkbox-converge-'));
@@ -178,7 +171,7 @@ export async function converge(origin, generated, {
   const oracle = new Uint8Array(125000);
   let browser;
   async function client(id, options) {
-    const board = new Board(keys, values);
+    const board = new Board();
     const wire = transport(Frame, failure, options);
     const storage = new runtime.NodeStorage(join(state, String(id)));
     const sdk = await runtime.Client.open({
@@ -191,11 +184,8 @@ export async function converge(origin, generated, {
       },
     });
     live.push(sdk);
-    const api = bind({
-      call: sdk.call.bind(sdk),
-      subscribe: (entry, args) => sdk.subscribeChanges(entry, args, (rows, replace) => board.rows(rows, replace)),
-    });
-    api.subscribe.main.board(undefined);
+    const api = bind(sdk);
+    api.subscribeDecoded.main.board(undefined, (_, change) => board.change(change));
     await waitFor(() => board.replacements > 0, failure);
     return {sdk, wire, board, toggle: api.call.main.toggle, storage, positions: new Set()};
   }
@@ -227,9 +217,10 @@ export async function converge(origin, generated, {
     assert.deepEqual(probe.board.bits, oracle);
     probe.wire.requestReset();
     await waitFor(() => probe.wire.resetBatch, failure);
-    assert.deepEqual(probe.board.bits, oracle, 'an unrelated Batch erased the old image before complete');
+    assert(!probe.board.bits.some(Boolean), 'Reset must clear the rendered image before complete');
     probe.wire.releaseReplacement();
     await waitFor(() => probe.board.replacements === 2, failure);
+    assert.deepEqual(probe.board.bits, oracle, 'fresh completion must restore the image');
 
     const started = performance.now();
     const work = Promise.all(streams.map(async (agent, id) => {

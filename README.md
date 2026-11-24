@@ -27,6 +27,10 @@ curl -fsSL https://hirsel.ai/install.sh | sh
 
 See [docs/building.md](docs/building.md) for CLI commands, capabilities, testing, recording/replay, and building from source.
 
+## Subscriptions
+
+The TypeScript SDK exposes a frozen subscription image through `rows(slot)`, `map(slot)`, and `get(slot, key)`. Reads share row references. Each `onChange(sub, change)` callback sees the applied Batch and receives typed insertions, updates, and deletions. Reset and connection loss clear the image and send a data-free invalidation. [SDK subscription contract](docs/spec/sdk.md#subscriptions)
+
 ## License
 
 [MIT](LICENSE) © 2026 Sam Galanakis

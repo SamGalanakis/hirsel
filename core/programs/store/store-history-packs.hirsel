@@ -1,7 +1,38 @@
+type HistoryChunkKey: key {
+    depth: u8,
+    first_seq: u64,
+    first_epoch: u64,
+    first_digest: u64
+}
+
+type HistoryChunk: send {
+    reference: HistoryRef,
+    row_count: u64,
+    last_row: HistoryRef,
+    children: List[HistoryRef]
+}
+
 type HistoryLocator: send {
     rows: Map[u64, HistoryRef],
     chunks: List[HistoryRef],
+    reuse: Map[HistoryChunkKey, HistoryChunk],
     last_pack: u64
+}
+
+fn empty_history_locator() -> HistoryLocator {
+    HistoryLocator(rows: map.new(), chunks: list.new(), reuse: map.new(), last_pack: 0)
+}
+
+fn history_chunk_key(depth: u8, first_row: HistoryRef) -> HistoryChunkKey {
+    HistoryChunkKey(depth, first_seq: first_row.seq, first_epoch: first_row.epoch, first_digest: first_row.digest)
+}
+
+fn history_remember_chunk(mut located: HistoryLocator, reference: HistoryRef, depth: u8, row_count: u64, first_row: HistoryRef, last_row: HistoryRef, take children: List[HistoryRef]) -> Result[(), Error] {
+    capacity(list.try_reserve(mut located.chunks, 1))?
+    capacity(map.try_reserve(mut located.reuse, 1))?
+    list.push(mut located.chunks, reference)
+    map.insert(mut located.reuse, history_chunk_key(depth, first_row), HistoryChunk(reference, row_count, last_row, children: take children))
+    Ok(())
 }
 
 fn history_locate_row(raw: Bytes, at: u64) -> HistoryRef {
@@ -38,15 +69,22 @@ fn history_locator_rows(mut client: std.object.Client, id: StoreId, checkpoint_r
             }
             Ok(field)
         })?
-        capacity(list.try_reserve(mut located.chunks, 1))?
-        list.push(mut located.chunks, item)
-        history_locator_rows(mut client, id, checkpoint_ref, chunk, depth - 1, list.slice(payload, child.payload, child.end), mut located, deadline)?
+        let child_rows = list.slice(payload, child.payload, child.end)
+        let child_count = list.len(child_rows) / 32
+        if child_count == 0 { return Error(disk_fault(chunk, 72, Malformed)) }
+        let mut children: List[HistoryRef] = list.new()
+        if depth > 1 {
+            capacity(list.try_reserve(mut children, child_count))?
+            for j in 0u64 .. child_count { list.push(mut children, history_locate_row(child_rows, j * 32)) }
+        }
+        history_remember_chunk(mut located, item, depth - 1, child_count, history_locate_row(child_rows, 0), history_locate_row(child_rows, (child_count - 1) * 32), take children)?
+        history_locator_rows(mut client, id, checkpoint_ref, chunk, depth - 1, child_rows, mut located, deadline)?
     }
     Ok(())
 }
 
 fn history_locator(mut client: std.object.Client, head: HistoryHead, mark: HistoryMark, raw: Bytes, deadline: u64) -> Result[HistoryLocator, Error] waits {
-    let mut state = HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0)
+    let mut state = empty_history_locator()
     let file = history_key("e-", head.checkpoint)
     history_locator_rows(mut client, head.store, head.checkpoint, file, mark.depth, list.slice(raw, mark.locate_at, mark.locate_end), mut state, deadline)?
     Ok(take state)
@@ -60,7 +98,7 @@ type ObjectPackRead {
 }
 
 fn history_reader(take client: std.object.Client, deadline: u64) -> ObjectPackRead {
-    ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline, admitted_base: None)
+    ObjectPackRead(client: take client, locator: empty_history_locator(), deadline, admitted_base: None)
 }
 
 fn history_list_page(mut source: ObjectPackRead, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {

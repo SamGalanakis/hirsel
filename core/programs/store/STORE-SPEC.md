@@ -154,6 +154,8 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 
 ## CHANGES-v2.64 (replay-delta-fix-2023: astra replay-delta-attack-2020 findings on v2.63; not yet built)
 
+The Store M2 locator uses the pack ranges that its children cover. An unchanged child keeps its original name. A cut retry can write a distinct digest-addressed chunk at the same checkpoint position. §12.6 reclaims the unreferenced chunk after a later cut or a change of holder.
+
 | # | Finding | Fix | Where |
 |---|---|---|---|
 | B1 | A Many entry's prior was 1 for a covering payload, so a 6-byte overwrite replayed as an insert of 6 bytes (+8) | prior = 1 + the full encoded length for every kind; a `()` entry alone gives 1; entry(20, 6) overwrite carries 7 | §13.1, L68 (a) |
@@ -3636,7 +3638,7 @@ The rest of this section is objects@1. sim@1 implements the same protocol over i
 
 - **Create-only everywhere** (Astra #20). Every entry, MANIFEST, pack and chunk is written with `If-None-Match: *`, and a name is never written twice with different bytes:
   - one holder writes an entry's (position, epoch) once. An epoch has one holder, and a holder that cannot finish an entry write is poisoned, so it never writes that position again;
-  - a holder never reuses a pack seq, a generation or a chunk position within its epoch. Its counters only move up during an open, the seqs of refused cuts included, and the MANIFEST's `next_pack` is at least every seq it used;
+  - a holder never reuses a pack seq or MANIFEST generation within its epoch, including numbers consumed by refused cuts. Its counters only move up during an open, and the MANIFEST's `next_pack` is at least every seq it used. A retry at the same prospective checkpoint position can create a chunk under a distinct digest. The abandoned chunk is absent from the retained locators. It becomes a reclaim candidate under rule 4 once a later checkpoint has passed its position, or under rule 3 after another holder takes over (§12.6);
   - a different epoch gives a different name.
 
   A create answered `Exists` (412) is resolved by one GET. Exactly this holder's bytes are `Created`. Any other bytes are `Corrupt(Fault{file: name, offset: 0, why: Malformed})`, refused before publication. Nothing is ever overwritten.
@@ -3723,7 +3725,7 @@ Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retaine
 **The pack locator (Astra #2, #9, #10; v2.47 makes it a tree).** A PagePtr names a pack by `seq` only. On objects@1 a CHECKPOINT's locator maps each seq to the pack's full name and length.
 - **Shape.** The CHECKPOINT entry holds one LOCATE frame, the locator's root, and MARK `depth` says what its rows name:
   - At depth 0 the rows are the pack rows themselves, at most 32,768.
-  - At depth d ≥ 1 the rows name chunk objects of depth d − 1. Each chunk holds at most 32,768 rows, ordered by seq.
+  - At depth d ≥ 1 the rows name chunk objects of depth d − 1. Each chunk holds at most 32,768 rows. At every internal level, the child ranges are ordered by the pack sequences they cover. An unchanged child created at position 20 can follow a rebuilt child created at 24.
   - Depth 3 addresses 32,768⁴ = 2⁶⁰ packs, above any `next_pack` a store can reach before `Limit(Ids)`. So **every covering cut has a representable locator**, whatever `pack_bytes` and the number of live pages. The cut-size refusal of v2.46 (`Limit(Manifest)` for a locator over `ENTRY_LIMIT`) is deleted.
   - A cut builds the smallest depth that fits. It reuses, by name, every chunk whose rows are unchanged, so its cost is O(changed rows + changed chunks).
 - **Coverage.** The leaf rows are exactly the packs the checkpoint's MANIFEST reaches, inherited packs of older epochs included:

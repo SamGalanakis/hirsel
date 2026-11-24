@@ -222,16 +222,16 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let (_, take parsed) = disk_read_page_manifest("MANIFEST", buffers.out)?
         let mut manifest = take parsed
         manifest.sweep = lane.sweep
-        let candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
-            let mut rows: Map[u64, HistoryRef] = map.new()
-            capacity(map.try_reserve(mut rows, list.len(refs)))?
+        let mut candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
+            let mut located = empty_history_locator()
+            capacity(map.try_reserve(mut located.rows, list.len(refs)))?
             for item in refs {
-                map.insert(mut rows, item.seq, item)
+                map.insert(mut located.rows, item.seq, item)
+                located.last_pack = item.seq
             }
-            let last_pack = if list.len(refs) == 0 { 0u64 } else { refs[list.len(refs) - 1].seq }
-            Ok(HistoryLocator(rows: take rows, chunks: list.new(), last_pack))
+            Ok(take located)
         })?
-        let locate_root = history_make_locator(mut lane.client, old.store, seq, old.pair.epoch, take refs, mut workspace, now)?
+        let locate_root = history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, take refs, object_state(db).locator, mut candidate_locator, mut workspace, now)?
         let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, manifest, mut workspace, now)?
         let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)?
         match advanced {

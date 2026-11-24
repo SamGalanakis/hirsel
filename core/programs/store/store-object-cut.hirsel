@@ -46,9 +46,33 @@ fn history_encode_locator(mut raw: Bytes, rows: List[HistoryRef]) {
     }
 }
 
-fn history_make_locator(mut client: std.object.Client, id: StoreId, seq: u64, epoch: u64, take packs: List[HistoryRef], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryLocateRoot, Error] waits {
+fn history_reusable_chunk(inherited: HistoryLocator, rows: List[HistoryRef], first_index: u64, minimum_end: u64, depth: u8) -> Option[(HistoryRef, u64)] {
+    let candidate = map.get(inherited.reuse, history_chunk_key(depth, rows[first_index]))?
+    let until = first_index + candidate.row_count
+    if until > list.len(rows) || until < minimum_end || !history_ref_matches(rows[until - 1], candidate.last_row) {
+        return None
+    }
+    // Strictly ordered leaf rows plus the matching endpoints and count identify
+    // the old chunk's range. Check each row against the admitted old locator.
+    for i in first_index .. until {
+        let expected: HistoryRef = if depth == 0 {
+            clone(map.get(inherited.rows, rows[i].seq)?)
+        } else {
+            candidate.children[i - first_index]
+        }
+        if !history_ref_matches(rows[i], expected) { return None }
+    }
+    Some((candidate.reference, until))
+}
+
+fn history_make_locator_reusing(mut client: std.object.Client, id: StoreId, seq: u64, epoch: u64, take packs: List[HistoryRef], inherited: HistoryLocator, mut located: HistoryLocator, mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryLocateRoot, Error] waits {
     let mut rows = take packs
     let mut depth = 0u8
+    let mut layer_capacity = HISTORY_LOCATE_ROWS
+    while layer_capacity < list.len(rows) {
+        let Some(larger) = int.checked_mul(layer_capacity, HISTORY_LOCATE_ROWS) else { return Error(Limit(Ids)) }
+        layer_capacity = larger
+    }
     if list.len(rows) > HISTORY_LOCATE_ROWS {
         list.clear(mut workspace.packet)
         capacity(list.try_reserve(mut workspace.packet, 88 + 32 * HISTORY_LOCATE_ROWS + BINDING_BYTES))?
@@ -58,27 +82,58 @@ fn history_make_locator(mut client: std.object.Client, id: StoreId, seq: u64, ep
     while list.len(rows) > HISTORY_LOCATE_ROWS {
         let row_count = list.len(rows)
         let length = (row_count - 1) / HISTORY_LOCATE_ROWS + 1
+        layer_capacity /= HISTORY_LOCATE_ROWS
         let mut parents = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
             Ok(list.with_capacity(length))
         })?
         let ctx = DiskContext(store: id, role: 8, seq)
-        for ordinal in 0u64 .. length {
-            let first = ordinal * HISTORY_LOCATE_ROWS
-            let end = first + order.min(row_count - first, HISTORY_LOCATE_ROWS)
-            let slice_rows = list.slice(rows, first, end)
-            list.clear(mut workspace.packet)
-            capacity(history_append_header(mut workspace.packet, ctx, epoch))?
-            history_encode_locator(mut workspace.packet, slice_rows)
-            capacity(history_seal(mut workspace.packet, ctx, 72, 0x00C0))?
-            let chunk = history_new_ref(seq, epoch, workspace.packet)
-            history_fill_key(mut workspace.key, "l-", chunk)
-            history_create(mut client, workspace.key, mut workspace.packet, mut workspace.compare, deadline)?
+        let mut first_index = 0u64
+        while first_index < row_count {
+            let remaining = (layer_capacity - list.len(parents) - 1) * HISTORY_LOCATE_ROWS
+            let minimum_end = order.max(first_index + 1, int.saturating_sub(row_count, remaining))
+            let (chunk, chunk_end) = match history_reusable_chunk(inherited, rows, first_index, minimum_end, depth) {
+                Some(found) => found,
+                None => {
+                    let mut until = first_index + order.min(row_count - first_index, HISTORY_LOCATE_ROWS)
+                    if map.len(inherited.reuse) != 0 {
+                        for probe in minimum_end .. until {
+                            if let Some(_) = history_reusable_chunk(inherited, rows, probe, probe + 1, depth) {
+                                until = probe
+                                break
+                            }
+                        }
+                    }
+                    let slice_rows = list.slice(rows, first_index, until)
+                    list.clear(mut workspace.packet)
+                    capacity(history_append_header(mut workspace.packet, ctx, epoch))?
+                    history_encode_locator(mut workspace.packet, slice_rows)
+                    capacity(history_seal(mut workspace.packet, ctx, 72, 0x00C0))?
+                    let reference = history_new_ref(seq, epoch, workspace.packet)
+                    history_fill_key(mut workspace.key, "l-", reference)
+                    history_create(mut client, workspace.key, mut workspace.packet, mut workspace.compare, deadline)?
+                    (reference, until)
+                },
+            }
+            let mut children: List[HistoryRef] = list.new()
+            if depth > 0 {
+                capacity(list.try_reserve(mut children, chunk_end - first_index))?
+                list.append(mut children, list.slice(rows, first_index, chunk_end))
+            }
+            history_remember_chunk(mut located, chunk, depth, chunk_end - first_index, rows[first_index], rows[chunk_end - 1], take children)?
+            capacity(list.try_reserve(mut parents, 1))?
             list.push(mut parents, chunk)
+            first_index = chunk_end
         }
         rows = take parents
         depth += 1
     }
     Ok(HistoryLocateRoot(depth, rows: take rows))
+}
+
+fn history_make_locator(mut client: std.object.Client, id: StoreId, seq: u64, epoch: u64, take packs: List[HistoryRef], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryLocateRoot, Error] waits {
+    let inherited = empty_history_locator()
+    let mut located = empty_history_locator()
+    history_make_locator_reusing(mut client, id, seq, epoch, take packs, inherited, mut located, mut workspace, deadline)
 }
 
 fn history_publish_checkpoint(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot, activation_update: Option[HistoryActivation], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {

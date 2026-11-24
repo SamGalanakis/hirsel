@@ -77,6 +77,66 @@ fn bucket_test_m2_checkpoint_advance(c: Clock, r: Random, tasks: Tasks) -> Resul
     outcome
 }
 
+fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(1057000)?
+    let mut input: List[HistoryRef] = list.with_capacity(32770)
+    for pack in 1u64 .. 32771 {
+        list.push(mut input, HistoryRef(seq: pack, epoch: 1, len: 96, digest: pack * 2))
+    }
+    let id = StoreId(hi: 2, lo: 7)
+    let previous = history_make_locator(mut client, id, 20, 1, clone(input), mut workspace, deadline)?
+    if previous.depth != 1 || list.len(previous.rows) != 2 {
+        fail("the admitted locator has the wrong shape")
+    }
+    let unchanged = previous.rows[1]
+    let parent = HistoryRef(seq: 19, epoch: 1, len: 112, digest: 19)
+    let manifest = HistoryRef(seq: 1, epoch: 1, len: 88, digest: 7)
+    let kept = HistoryRetention(floor: 20, earlier: list.new())
+    let ctx = DiskContext(store: id, role: 2, seq: 20)
+    let prior_cut = history_checkpoint_packet(mut workspace.packet, ctx, 1, parent, manifest, kept, previous)?
+    let base = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: prior_cut, checkpoint: prior_cut, floor: 20, binding:[0; 32])
+    let mark = history_read_mark("locator at 20", id, prior_cut, workspace.packet)?
+    let inherited = history_locator(mut client, base, mark, workspace.packet, deadline)?
+    let mut located = empty_history_locator()
+    let changed: List[HistoryRef] = clone(list.slice(input, 1, 32770))
+    let updated = history_make_locator_reusing(mut client, id, 24, 1, take changed, inherited, mut located, mut workspace, deadline)?
+    if updated.depth != 1 || list.len(updated.rows) != 2 || updated.rows[0].seq != 24 ||
+        !history_ref_matches(updated.rows[1], unchanged) {
+        fail("deleting an earlier row rewrote an unchanged chunk or misplaced it")
+    }
+    let current_ctx = DiskContext(store: id, role: 2, seq: 24)
+    let retained = HistoryRetention(floor: 24, earlier: list.new())
+    let current_cut = history_checkpoint_packet(mut workspace.packet, current_ctx, 1, prior_cut, manifest, retained, updated)?
+    let mut captured = base
+    captured.entry = current_cut
+    captured.checkpoint = current_cut
+    captured.floor = 24
+    let current_mark = history_read_mark("locator at 24", id, current_cut, workspace.packet)?
+    let recovered = history_locator(mut client, captured, current_mark, workspace.packet, deadline)?
+    if map.len(recovered.rows) != 32769 || map.contains(recovered.rows, 1) {
+        fail("the reused locator lost or invented pack rows")
+    }
+    for pack in 2u64 .. 32771 {
+        let Some(row) = map.get(recovered.rows, pack) else { fail("missing pack row") }
+        if row.epoch != 1 || row.len != 96 || row.digest != pack * 2 {
+            fail("the reused locator changed a pack reference")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_locator_reuse(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 530, None, list.new())
+    let outcome = locator_reuse_law(tasks, sim)
+    let report = bucket_law_finish(take sim)
+    outcome?
+    if report.writes != 3 { fail("the unchanged locator chunk was written again") }
+    Ok(())
+}
+
 fn upload_pack_with_expired_completion(tasks: Tasks, sim: BucketSim, name: String, raw: Bytes) -> Result[(), Error] waits {
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut scratch: Bytes = list.new()

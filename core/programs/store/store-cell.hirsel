@@ -126,7 +126,7 @@ fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
     match cell_edit(tx, id) {
         Some(CellPut(value)) => Some(staged_bytes(value)),
         Some(CellDelete) => None,
-        _ => get_page_row(tx.roots.collections, key),
+        _ => cell_page_row(tx.roots.collections, key),
     }
 }
 
@@ -143,10 +143,19 @@ pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
 pub fn cell_get[V](r: Reader, s: Snapshot, c: Cell[V]) -> Result[Option[V], Error] waits {
     read_access(r, s)?
     readable_value(s.store, s.roots, c.binding)?
-    match get_page_row(s.roots.collections, c.key) {
+    match cell_page_row(s.roots.collections, c.key) {
         Some(raw) => Ok(Some(row_value(c.binding.readers, c.binding.id, raw)?)),
         None => Ok(None),
     }
+}
+
+fn cell_page_row(tree: PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
+    let (root, descriptor) = std.page.collection_entry(tree.root, key)?
+    if let Some(raw) = inline_cell(descriptor) {
+        return Some(raw)
+    }
+    // A spilled Cell stores its only row at the empty key.
+    std.page.lookup(root, list.new())
 }
 
 fn inline_cell(descriptor: Bytes) -> Option[View[Bytes]] in descriptor {

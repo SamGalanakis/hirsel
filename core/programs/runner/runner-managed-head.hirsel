@@ -81,7 +81,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         if let Current(expected) = selection { opening.activation = Some(expected) }
         if launch_env().revision.size == 0u64 { return Error(Open(IdentityUnknown)) }
         let reg = placed(place, n_place) ?=> |problem| Open(Place(take problem))
-        let (take description, take record) = prepare_activation(reg, n_place) ?=> |problem| Open(Place(take problem))
+        let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> |problem| Open(Place(take problem))
         opening.binding = Some(clone(record.binding))
         registration = Some(HeadRegistration(registry: take reg, description: take description, record: take record))
     }

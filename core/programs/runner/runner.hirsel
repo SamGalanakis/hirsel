@@ -1850,7 +1850,7 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
     let handles = (code.callable(p.schema))(mut declaration) ?=> |problem| Open(Migrate(problem))
     let staged = store.finish_export_declaration(source, take declaration) ?=> |problem| Open(Migrate(problem))
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
-    let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
+    let (take description, take record) = prepare_activation(registered, p.n_place, prepare_open_result(store.describe_declarations(p.clock, p.schema))?) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
         resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes,
@@ -1947,7 +1947,7 @@ fn target_release(target: store.PreparedTarget, prepared: Inline[u8, 32]) -> Res
 }
 
 fn cutover_store[G: send, H: shareable + inert + send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
-    let binding = match prepare_activation(reg, n_place) {
+    let binding = match prepare_activation(reg, n_place, list.new()) {
         Ok((_, ReleaseRecord(binding: take binding, ..))) => take binding,
         Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(Allocation(c)))) },
         Error(_) => { store.release_export(mut db, request.attempt); return Error(Drift) },

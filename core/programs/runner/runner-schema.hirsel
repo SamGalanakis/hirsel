@@ -81,7 +81,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         Some(HeadRegistration(registry: take reg, description: take description, record: take record)) => (take reg, take description, take record),
         None => {
             let reg = placed(place, n_place) ?=> Place
-            let (take description, take record) = prepare_activation(reg, n_place) ?=> Place
+            let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> Place
             (take reg, take description, take record)
         },
     }

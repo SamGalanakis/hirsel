@@ -49,7 +49,7 @@ runner@1/runner/test_wire_admission src=f84b907545d53a0f sig=ac85a3301363a77f ru
 runner@1/runner/test_wire_replacement_generation src=006bbda45d6260b3 sig=a1253406826878a5 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_session src=1235f49aa5079d5f sig=c2d31a6e05967646 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_write src=739634d239c3e300 sig=9599f924786a8907 run=9db96dd71cd83a70 bug=- oracle=- rows=pending
-runner@1/runner/trigger_scan_classes src=295e5b2d772c5332 sig=149bd18758643f6b run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/trigger_scan_classes src=8c7038f30f581369 sig=404515b4b5f576e8 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_anonymous_fresh src=1c6ba620c6888e3e sig=604b0a667344353b run=9db96dd71cd83a70 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_atomic_migration src=daaf0947bc4ce071 sig=508a0ac92e9aaa6e run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_bind_only src=b8bb94d4aafa4bd6 sig=e7a5375e23b23586 run=9db96dd71cd83a70 bug=- oracle=- rows=pending

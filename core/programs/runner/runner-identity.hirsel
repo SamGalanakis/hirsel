@@ -173,12 +173,15 @@ fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -
     NotCurrent(Active(version, take description, take read))
 }
 
-fn prepare_activation[G: send, H: shareable + inert + send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
+// `tables` is Describe's diagnostic list (not in the identity). A prepared
+// target carries the preview's exact Describe, so prepare passes the list that
+// describe mode reports; the other activations record none.
+fn prepare_activation[G: send, H: shareable + inert + send](r: Registry[G, H], n_place: u64, take tables: List[store.DeclaredCollection]) -> Result[(Bytes, ReleaseRecord), RegisterError] {
     let release = http_release_digest(r.exported, r.bindings) ?=> |_| Bounds
     let launch = launch_env()
     let image = launch_bytes(launch.digest)
     let target = owned_launch_target(launch.target)
-    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported), tables: list.new(), bindings: clone(r.bindings))
+    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported), tables: take tables, bindings: clone(r.bindings))
     let binding: Bytes = if launch.revision.size == 0u64 { list.new() } else { identity_digest(description)? }
     let payload = encode_describe(description) ?=> |_| Bounds
     let Describe(digest: take digest, ..) = take description

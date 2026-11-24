@@ -1064,7 +1064,10 @@ impl Heap {
     ) -> NonNull<u8> {
         let heap = context.heap.get_or_init(Arc::default);
         // SAFETY: the context pins this open heap under exclusive custody.
-        unsafe { Self::allocate_owned(heap, payer, bytes, align, kind, growable) }
+        let payload = unsafe { Self::allocate_owned(heap, payer, bytes, align, kind, growable) };
+        #[cfg(any(test, feature = "memcheck"))]
+        crate::allocator::checked::allocated(payload, bytes.max(1));
+        payload
     }
 
     /// # Safety
@@ -1312,6 +1315,8 @@ impl Heap {
 /// A live own or resource block allocated by this heap.
 #[inline]
 pub(crate) unsafe fn page_of(payload: NonNull<u8>) -> PagePointer {
+    #[cfg(any(test, feature = "memcheck"))]
+    crate::allocator::checked::require_live(payload);
     let address = payload.addr().get();
     if address & (SLAB - 1) == 0 {
         return dedicated_page(payload);
@@ -1399,6 +1404,8 @@ pub(crate) unsafe fn try_grow_in_place(
         #[cfg(feature = "prof")]
         let old_bytes = (*header.class.get()).stride;
         header.class.get().write(class);
+        #[cfg(any(test, feature = "memcheck"))]
+        crate::allocator::checked::resized(payload, bytes.max(1));
         #[cfg(feature = "memcheck")]
         {
             let slots = &mut *header.slots.get();
@@ -1434,6 +1441,17 @@ pub(crate) unsafe fn release_page(
         payload.as_ptr(),
         unsafe { Page::class(page) }.stride,
     );
+    #[cfg(any(test, feature = "memcheck"))]
+    if crate::allocator::checked::enabled() {
+        // SAFETY: the caller transfers this slot and its outstanding page count.
+        unsafe {
+            crate::allocator::checked::retire(
+                payload,
+                crate::allocator::checked::Storage::Task(page),
+            )
+        };
+        return;
+    }
     #[cfg(feature = "memcheck")]
     // SAFETY: the outstanding slot pins its immutable kind.
     unsafe {
@@ -1456,6 +1474,23 @@ pub(crate) unsafe fn release_page(
                 .returned
                 .publish(&heap.returned, page, payload)
         };
+    }
+}
+
+/// Return a quarantined slot without assuming custody of its original heap.
+/// # Safety
+/// The quarantine transfers the exclusive slot and its live page count.
+#[cfg(any(test, feature = "memcheck"))]
+pub(crate) unsafe fn release_quarantined(page: PagePointer, payload: NonNull<u8>) {
+    // SAFETY: the retained live count pins the page until publication, even
+    // after heap closure. The inbox handles returns to a sealed heap.
+    unsafe {
+        let header = page.as_ref();
+        #[cfg(feature = "memcheck")]
+        allocation_check::freed(payload, Page::kind(page));
+        header
+            .returned
+            .publish(&header.heap.returned, page, payload);
     }
 }
 
@@ -2595,56 +2630,4 @@ thread_local! {
 }
 
 #[cfg(feature = "memcheck")]
-mod allocation_check {
-    use super::NonNull;
-    use crate::abi_layout::own_prefix;
-    use hirsel_stack::valgrind_request;
-
-    fn start(pointer: NonNull<u8>, kind: u8) -> usize {
-        pointer.addr().get() - own_prefix(kind)
-    }
-
-    pub(super) fn allocated(pointer: NonNull<u8>, bytes: usize, kind: u8) {
-        const MALLOCLIKE_BLOCK: u64 = 0x1301;
-        valgrind_request(
-            0,
-            MALLOCLIKE_BLOCK,
-            [start(pointer, kind), bytes.max(1) + own_prefix(kind), 0, 0],
-        );
-    }
-
-    pub(super) fn resized(pointer: NonNull<u8>, old: usize, new: usize, kind: u8) {
-        const RESIZEINPLACE_BLOCK: u64 = 0x130b;
-        let prefix = own_prefix(kind);
-        valgrind_request(
-            0,
-            RESIZEINPLACE_BLOCK,
-            [
-                start(pointer, kind),
-                old.max(1) + prefix,
-                new.max(1) + prefix,
-                0,
-            ],
-        );
-    }
-
-    pub(super) fn freed(pointer: NonNull<u8>, kind: u8) {
-        const FREELIKE_BLOCK: u64 = 0x1302;
-        valgrind_request(0, FREELIKE_BLOCK, [start(pointer, kind), 0, 0, 0]);
-    }
-
-    pub(super) fn link_access(pointer: NonNull<u8>, readable: bool) {
-        storage_access(pointer, size_of::<usize>(), readable);
-    }
-
-    pub(super) fn storage_access(pointer: NonNull<u8>, bytes: usize, readable: bool) {
-        const MAKE_MEM_NOACCESS: u64 = 0x4d43_0000;
-        const MAKE_MEM_DEFINED: u64 = 0x4d43_0002;
-        let request = if readable {
-            MAKE_MEM_DEFINED
-        } else {
-            MAKE_MEM_NOACCESS
-        };
-        valgrind_request(0, request, [pointer.addr().get(), bytes, 0, 0]);
-    }
-}
+mod allocation_check;

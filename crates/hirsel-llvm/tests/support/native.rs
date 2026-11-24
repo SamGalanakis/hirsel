@@ -29,7 +29,7 @@ fn output(command: &mut Command) -> String {
         .output()
         .unwrap_or_else(|e| panic!("{command:?}: {e}"));
     assert!(
-        out.status.success(),
+        out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("checked allocator: leaked "),
         "{command:?}: {}\n{}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stdout),

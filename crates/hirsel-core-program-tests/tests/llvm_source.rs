@@ -12,6 +12,7 @@ hirsel_guard::install!();
 mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
+include!("support/front_cases.rs");
 #[path = "support/llvm_codegen.rs"]
 mod llvm_codegen;
 
@@ -2048,23 +2049,9 @@ fn verify_ir(ir: &str) {
 }
 #[test]
 fn every_front_run_case_matches_the_evaluator() {
-    fn files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files(&path, out)
-            } else if path.extension().is_some_and(|s| s == "hirsel") {
-                out.push(path)
-            }
-        }
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let mut paths = vec![];
-    files(&root.join("cases"), &mut paths);
-    paths.sort();
     let mut count = 0;
     let mut failures = Vec::new();
-    for path in paths {
+    for path in front_run_paths() {
         let source = std::fs::read_to_string(&path).unwrap();
         let runs = source
             .lines()

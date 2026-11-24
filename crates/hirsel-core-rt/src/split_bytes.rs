@@ -31,7 +31,12 @@ pub(crate) fn key(
     charge: Option<u64>,
 ) -> Result<NonNull<u8>, Capacity> {
     let payer = context.payer();
-    if bytes > KEY_BYTES {
+    // Checked allocations quarantine each owner independently.
+    #[cfg(any(test, feature = "memcheck"))]
+    let split = !crate::allocator::checked::enabled();
+    #[cfg(not(any(test, feature = "memcheck")))]
+    let split = true;
+    if bytes > KEY_BYTES || !split {
         return block::allocate(context, payer, charge, bytes, 8, block::PLAIN);
     }
     let base = block::allocate(

@@ -721,7 +721,7 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
     };
     let run = command.output().unwrap();
     assert!(
-        run.status.success(),
+        run.status.success() && !String::from_utf8_lossy(&run.stderr).contains("checked allocator: leaked "),
         "native execution: {:?}\n{}",
         run.status,
         String::from_utf8_lossy(&run.stderr)

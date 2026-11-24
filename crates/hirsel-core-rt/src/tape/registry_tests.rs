@@ -184,7 +184,7 @@ fn root_virtual_agreement_verdicts_are_recorded_and_replayed() {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(observed, recorded);
+            assert_eq!(observed, recorded.map(|(verdict, _)| verdict));
         }
     }
 }

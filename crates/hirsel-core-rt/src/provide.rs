@@ -1393,22 +1393,10 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
     }
     let mut root = 0;
     if vocab == Vocab::Net {
-        // Every address in either direction and family (NOTES 31), a
+        // Every address in each direction and family (NOTES 31), a
         // handshake to any name and port under any trust (NOTES 32), and a
         // lookup of any name (NOTES 34).
-        let addresses = (0..2).flat_map(|dir| {
-            (0..2).map(move |family| {
-                hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
-                    dir,
-                    family,
-                    hi: 0,
-                    lo: 0,
-                    bits: 0,
-                    first: 0,
-                    last: u16::MAX,
-                })
-            })
-        });
+        let addresses = hirsel_core_net::GrantRule::served_addresses();
         let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
         let resolve = hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
         let unix = hirsel_core_net::UnixDirection::ALL

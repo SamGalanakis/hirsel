@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_core_net::{AddressDirection, Rule};
 
 /// Check an address before issue. A tape records the denial for its inner grant
 /// and delivers it at its ordinary provider boundary.
@@ -119,4 +120,38 @@ pub(crate) unsafe fn denial(request: &Request) -> Option<u8> {
     } else {
         None
     }
+}
+
+/// # Safety
+/// Live run and typed Net grant. Rule scalars come from the caller's Rule.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_narrow(
+    context: *mut Context,
+    n: u64,
+    dir: u8,
+    family: u8,
+    hi: u64,
+    lo: u64,
+    bits: u8,
+    first: u16,
+    last: u16,
+    _site: u64,
+) -> Outcome {
+    let Some(dir) = AddressDirection::from_variant(dir) else {
+        return DENIED;
+    };
+    let rule = Rule {
+        dir: dir as u8,
+        family,
+        hi,
+        lo,
+        bits,
+        first,
+        last,
+    };
+    if !rule.valid() {
+        return DENIED;
+    }
+    unsafe { narrow(context, n, GrantRule::Address(rule)) }
 }

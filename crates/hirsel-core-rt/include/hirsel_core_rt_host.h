@@ -158,7 +158,8 @@ uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
    NET-12 extends dir with 4 Unix and 5 UnixRoot (launch input only). For
    those rows, patterns contains the concatenated label and path, and hi
    gives the label's byte count. A Unix row's family is its direction
-   (0 Connect, 1 Listen, 2 Bind, 3 Send). */
+   (0 Connect, 1 Listen, 2 Bind, 3 Send). NET-15 extends address directions
+   with 6 UdpBind and 7 UdpSend. */
 typedef struct {
     uint8_t dir, family;
     uint64_t hi, lo;

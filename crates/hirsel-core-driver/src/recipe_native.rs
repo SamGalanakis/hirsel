@@ -851,10 +851,10 @@ pub(super) fn grant_name(kind: GrantKind) -> &'static str {
 }
 
 fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
-    use hirsel_core_net::{GrantRule, TlsTrust};
+    use hirsel_core_net::{AddressDirection, GrantRule, TlsTrust};
     match rule {
         GrantRule::Address(rule) => {
-            let direction = if rule.dir == 0 { "Connect" } else { "Listen" };
+            let direction = AddressDirection::from_tag(rule.dir).unwrap().word();
             let ip = if rule.family == 0 {
                 std::net::IpAddr::V4(std::net::Ipv4Addr::from(rule.lo as u32))
             } else {

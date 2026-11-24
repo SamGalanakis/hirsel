@@ -209,7 +209,7 @@ pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(
 
 pub type CertFailure = UnknownIssuer | NameMismatch | Expired | NotYetValid | Invalid
 
-pub type NetDirection = Connect | Listen
+pub type NetDirection = Connect | Listen | UdpBind | UdpSend
 
 pub type TlsPin = SystemPin | Sha256(Bytes)
 

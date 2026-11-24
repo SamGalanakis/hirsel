@@ -3078,20 +3078,7 @@ impl Machine<'_> {
                 let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
                 let resolve =
                     hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
-                let rules = (0..2)
-                    .flat_map(|dir| {
-                        (0..2).map(move |family| {
-                            hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
-                                dir,
-                                family,
-                                hi: 0,
-                                lo: 0,
-                                bits: 0,
-                                first: 0,
-                                last: u16::MAX,
-                            })
-                        })
-                    })
+                let rules = hirsel_core_net::GrantRule::served_addresses()
                     .chain([tls, resolve])
                     .chain(hirsel_core_net::UnixDirection::ALL.into_iter().map(|dir| {
                         hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir))
@@ -4757,8 +4744,11 @@ impl Machine<'_> {
             }
             HostOp::NetJoin => vec![a[0], 1, 0, a[1]],
             HostOp::NetNarrow => {
+                let Some(dir) = hirsel_core_net::AddressDirection::from_variant(a[1] as u8) else {
+                    return Ok(error(1));
+                };
                 let r = hirsel_core_net::Rule {
-                    dir: a[1] as u8,
+                    dir: dir as u8,
                     family: a[2] as u8,
                     hi: a[3],
                     lo: a[4],

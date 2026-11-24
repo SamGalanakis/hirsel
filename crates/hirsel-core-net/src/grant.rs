@@ -1,4 +1,4 @@
-use crate::{Name, Pattern, RULE_SYNTAX, Rule, TlsRule, TlsTrust};
+use crate::{AddressDirection, Name, Pattern, RULE_SYNTAX, Rule, TlsRule, TlsTrust};
 use std::collections::BTreeMap;
 
 /// The path grammar shared by Dir and Unix endpoints.
@@ -176,6 +176,23 @@ pub enum GrantRule {
 }
 
 impl GrantRule {
+    /// Address authority at the root of a served Net.
+    pub fn served_addresses() -> impl Iterator<Item = Self> {
+        AddressDirection::ALL.into_iter().flat_map(|direction| {
+            (0..2).map(move |family| {
+                Self::Address(Rule {
+                    dir: direction as u8,
+                    family,
+                    hi: 0,
+                    lo: 0,
+                    bits: 0,
+                    first: 0,
+                    last: u16::MAX,
+                })
+            })
+        })
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut words = text.split_whitespace();
         match words.next() {

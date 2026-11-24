@@ -14,7 +14,45 @@ pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
+
+/// Address rule tags in grant rows and tape headers. Tags 2 through 5
+/// identify other kinds of Net rules and are separate from Core variants.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressDirection {
+    Connect = 0,
+    Listen = 1,
+    UdpBind = 6,
+    UdpSend = 7,
+}
+
+impl AddressDirection {
+    pub const ALL: [Self; 4] = [Self::Connect, Self::Listen, Self::UdpBind, Self::UdpSend];
+
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|direction| *direction as u8 == tag)
+    }
+
+    pub fn from_variant(variant: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(variant)).copied()
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Connect => "Connect",
+            Self::Listen => "Listen",
+            Self::UdpBind => "UdpBind",
+            Self::UdpSend => "UdpSend",
+        }
+    }
+
+    fn is_bind(self) -> bool {
+        matches!(self, Self::Listen | Self::UdpBind)
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -42,7 +80,7 @@ impl Rule {
         }
     }
     pub fn valid(self) -> bool {
-        self.dir <= 1
+        AddressDirection::from_tag(self.dir).is_some()
             && self.family <= 1
             && self.bits <= self.width()
             && (self.family != 0 || (self.hi == 0 && self.lo <= u64::from(u32::MAX)))
@@ -72,7 +110,9 @@ impl Rule {
     }
     pub fn permits(self, dir: u8, family: u8, hi: u64, lo: u64, port: u16) -> bool {
         self.covers_address(dir, family, hi, lo)
-            && if dir == 1 && port == 0 {
+            && if AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind)
+                && port == 0
+            {
                 self.first <= 1 && self.last == u16::MAX
             } else {
                 (self.first..=self.last).contains(&port)
@@ -87,7 +127,13 @@ impl Rule {
         if family == 1 && ((hi == 0 && lo >> 32 == 0xffff) || hi >> 54 == 0x3fa) {
             return false;
         }
-        if ip == 0 && (dir == 0 || self.bits != 0) {
+        let Some(direction) = AddressDirection::from_tag(dir) else {
+            return false;
+        };
+        if ip == 0 && (!direction.is_bind() || self.bits != 0) {
+            return false;
+        }
+        if direction == AddressDirection::UdpSend && family == 0 && ip == u128::from(u32::MAX) {
             return false;
         }
         ip & self.mask() == self.prefix()
@@ -98,11 +144,10 @@ impl Rule {
         if parts.len() != 3 {
             return Err(error());
         }
-        let dir = match parts[0] {
-            "Connect" => 0,
-            "Listen" => 1,
-            _ => return Err(error()),
-        };
+        let dir = AddressDirection::ALL
+            .into_iter()
+            .find(|direction| direction.word() == parts[0])
+            .ok_or_else(error)? as u8;
         let (prefix, bits) = parts[1].split_once('/').ok_or_else(error)?;
         let ip: IpAddr = prefix.parse().map_err(|_| error())?;
         let (family, hi, lo) = match ip {
@@ -143,7 +188,7 @@ pub fn address_denial(
     lo: u64,
     port: u16,
 ) -> Option<u8> {
-    if dir != 1 || port != 0 {
+    if !AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind) || port != 0 {
         return (!rules.any(|rule| rule.permits(dir, family, hi, lo, port))).then_some(1);
     }
     let matching = rules.filter(|rule| rule.covers_address(dir, family, hi, lo));
@@ -207,6 +252,43 @@ pub use secret_grant::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_grants_bind_and_send_with_distinct_authority() {
+        let bind = Rule::parse("UdpBind 0.0.0.0/0 1-1023").unwrap();
+        let remaining = Rule::parse("UdpBind 0.0.0.0/0 1024-65535").unwrap();
+        let send = Rule::parse("UdpSend 0.0.0.0/0 1-65535").unwrap();
+        let tcp = Rule::parse("Listen 0.0.0.0/0 1-65535").unwrap();
+        let loopback = Rule::parse("UdpBind 127.0.0.0/8 1-65535").unwrap();
+        assert!(bind.intersect(tcp).is_none());
+        assert!(bind.intersect(send).is_none());
+        assert_eq!(bind.intersect(loopback).unwrap().last, 1023);
+        assert_eq!(
+            address_denial([bind, send, tcp].into_iter(), bind.dir, 0, 0, 0, 0),
+            Some(EPHEMERAL_OUTSIDE_NET_GRANT),
+        );
+        assert_eq!(
+            address_denial([bind, remaining].into_iter(), bind.dir, 0, 0, 0, 0),
+            None,
+        );
+        assert_eq!(
+            address_denial([loopback].into_iter(), bind.dir, 0, 0, 0, 0),
+            Some(1)
+        );
+        assert!(send.permits(send.dir, 0, 0, 0x7f000001, 53));
+        assert!(!send.permits(send.dir, 0, 0, 0, 53));
+        assert!(!send.permits(send.dir, 0, 0, u64::from(u32::MAX), 53));
+        let v6 = Rule::parse("UdpSend ::/0 1-65535").unwrap();
+        assert!(!v6.permits(v6.dir, 1, 0, 0xffff_7f00_0001, 53));
+        assert!(!v6.permits(v6.dir, 1, 0xfe80_0000_0000_0000, 1, 53));
+        assert_eq!(GrantRule::Address(send).logical_size(), 37);
+        // SAFETY: an address row contains no borrowed text.
+        assert_eq!(
+            unsafe { RuleView::address(send).decode() },
+            Some(GrantRule::Address(send))
+        );
+    }
+
     #[test]
     fn secret_grant_names_destinations_only_inside_tls_send() {
         // TLS-5: `to <patterns>` is CLI sugar for tls_send(<patterns>), so

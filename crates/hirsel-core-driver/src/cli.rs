@@ -900,7 +900,7 @@ static OPTIONS: &[OptionSpec] = &[
         [
             "build", "publish", "run", "replay", "test", "register", "deploy"
         ],
-        "Grant a capability kind. Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
+        "Grant a capability kind. Net takes explicit Connect, Listen, UdpBind, UdpSend, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
     ),
     option!(
         Filter,

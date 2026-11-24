@@ -3,14 +3,14 @@ mod addr;
 #[cfg(feature = "record")]
 pub(crate) use addr::{address_bytes, denial};
 pub(crate) use addr::{authorize, permits_address};
-pub use addr::{hirsel_core_net_local_addr, hirsel_core_net_peer_addr};
+pub use addr::{hirsel_core_net_local_addr, hirsel_core_net_narrow, hirsel_core_net_peer_addr};
 
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
     provider::*,
 };
-use hirsel_core_net::{GrantRule, ResolveRule, Rule, RuleView, TlsRule, TlsTrust};
+use hirsel_core_net::{GrantRule, ResolveRule, RuleView, TlsRule, TlsTrust};
 use std::ptr;
 
 #[repr(C)]
@@ -1363,37 +1363,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         }
     }
 }
-/// # Safety
-/// Live run and typed Net grant. Rule scalars come from the caller's Rule.
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_net_narrow(
-    context: *mut Context,
-    n: u64,
-    dir: u8,
-    family: u8,
-    hi: u64,
-    lo: u64,
-    bits: u8,
-    first: u16,
-    last: u16,
-    _site: u64,
-) -> Outcome {
-    let rule = Rule {
-        dir,
-        family,
-        hi,
-        lo,
-        bits,
-        first,
-        last,
-    };
-    if !rule.valid() {
-        return DENIED;
-    }
-    unsafe { narrow(context, n, GrantRule::Address(rule)) }
-}
-
 /// # Safety
 /// Live run, typed Net grant and pinned pattern and digest carriers.
 #[allow(clippy::too_many_arguments)]

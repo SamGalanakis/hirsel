@@ -3672,7 +3672,7 @@ The rest of this section is objects@1. sim@1 implements the same protocol over i
 
   An AWS bucket whose default encryption is SSE-KMS, DSSE-KMS or SSE-C does not qualify (below), because AWS does not document its ETag as a digest of the body. Q5's exact readback covers a 412. The validator assumption covers only an `Applied` reply, which is never read back.
 
-**Frames of objects@1** (all MUST, all format 3 under §2.7 rules 1–5):
+**Frames of objects@1** (all MUST, all format 5 under §2.7 rules 1–5):
 
 | Frame | Kind | Payload |
 |---|---|---|

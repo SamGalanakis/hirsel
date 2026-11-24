@@ -271,6 +271,8 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let mut schema = declare_follower(follower_view)
     let declared_rows = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = deploy_result(finish(mut schema, take declared_rows))?
+    let other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(finish(mut schema, take other))?
     deploy_result(seal_follower(follower_view, take schema))?
     if version(visible) != exported_head { fail("the imported base lost the exported version") }
     for row_id in 0u64 .. 96 {

@@ -250,8 +250,11 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
+    let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, settings.sizes))
+    // Runner's 1 MiB keep and 1 MiB for the demo's own work.
+    let allowance = result.unwrap(runner.operate_bytes(settings)) + 2 * 1048576u64 + store.planned_bytes(plan)
     let demo = Demo(config: take settings, stop: take stopping, status: latest.handle(status), watch: take watch)
-    let mut running = task.spawn(tasks, bytes 50331648u64, take demo, operate)
+    let mut running = task.spawn(tasks, bytes allowance, take demo, operate)
     let phases = result.unwrap(channel.receive(watching))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("sign-up: place did not start") }

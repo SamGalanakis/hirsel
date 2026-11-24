@@ -218,6 +218,19 @@ pub fn planned_bytes(p: PlacePlan) -> u64 {
     writer_bytes(p.writer) + p.capture_extra
 }
 
+// Sim pays for the request lanes outside the head. Weak publishers overlap
+// the writer, and the capture uses the same lanes after the writer refuses.
+pub fn planned_sim_bytes(p: PlacePlan, weak_room: u64) -> Result[u64, Capacity] {
+    if let Some(capture) = p.capture {
+        let writer = plan_bytes(capture)
+        let extra = order.max(p.capture_extra, weak_room)
+        match int.checked_add(writer, extra) {
+            Some(total) => Ok(total),
+            None => Error(Capacity(requested: extra, available: 18446744073709551615u64 - writer)),
+        }
+    } else { Ok(planned_bytes(p)) }
+}
+
 pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
     clone(p.capture)
 }

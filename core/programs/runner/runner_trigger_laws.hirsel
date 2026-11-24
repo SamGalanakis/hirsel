@@ -645,7 +645,8 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
         schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),
         cut: result.unwrap(cut_activity()), triggering: take triggering, idle: None, expected_store: None)
-    let allowance = disk_store_bytes(options) + job.n_place + job.n_publisher
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
+    let allowance = writer + job.n_place + job.n_publisher
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)
     if let Ok(Recovered) = channel.receive(events) {} else { fail("L40: serving head did not recover") }
     result.unwrap(channel.send(head_to, HeadContinue))

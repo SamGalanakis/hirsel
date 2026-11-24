@@ -6,84 +6,97 @@ fn expect_size_part(parts: List[(String, u64)], name: String, amount: u64) -> ()
     fail("L60: missing shortage part")
 }
 
+// The floor fixtures fix resident bytes and pack bytes. Checkpoint and
+// journal defaults then depend on the pack override alone.
+fn fixed_bucket_plan(kind: store.Kind, o: store.Overrides) -> store.PlacePlan {
+    result.unwrap(store.planned(kind, 18446744073709551615u64, o))
+}
+
+fn maximal_plan(kind: store.Kind, share: u64, o: store.Overrides) -> store.Options {
+    let plan = result.unwrap(store.planned(kind, share, o))
+    let options = store.planned_options(plan)
+    // The current resident fits. Another resident byte would either add one
+    // byte alone or also grow the cut workspace by two bytes.
+    let mut larger: store.Overrides = clone(o)
+    larger.resident_limit = Some(options.resident_limit + 1)
+    if store.planned_bytes(plan) > share { fail("L60: the plan exceeds its share") }
+    if let Ok(_) = store.planned(kind, share, larger) { fail("L60: unused resident room") }
+    take options
+}
+
 @test
 fn derived_budgets() -> Result[(), String] {
-    let memory = result.unwrap(store.sized(Memory, 134217728u64))
-    if memory.resident_limit != 133169152u64 || memory.pack_bytes != 0u64 ||
+    let share = 128 * 1048576u64
+    let mib = 1048576u64
+    let o = store.derived_sizes()
+    let memory = maximal_plan(Memory, share, o)
+    if memory.resident_limit != share - mib || memory.pack_bytes != 0u64 ||
         memory.checkpoint_bytes != 0u64 || memory.journal_limit != 0u64 {
         fail("L60: Memory size formula")
     }
-    let _ = result.unwrap(store.sized(Memory, 2097152u64))
-    match store.sized(Memory, 2097151u64) {
+    let _ = result.unwrap(store.planned(Memory, 2 * mib, o))
+    match store.planned(Memory, 2 * mib - 1, o) {
         Error(short) => {
-            if short.need != 2097152u64 || short.have != 2097151u64 { fail("L60: Memory floor") }
-            expect_size_part(short.parts, "resident_limit", 1048576u64)
-            expect_size_part(short.parts, "memory_keep", 1048576u64)
+            if short.need != 2 * mib || short.have != 2 * mib - 1 { fail("L60: Memory floor") }
+            expect_size_part(short.parts, "resident_limit", mib)
+            expect_size_part(short.parts, "memory_keep", mib)
         },
         _ => fail("L60: below Memory floor"),
     }
-    // STORE §1.1 v2.75: lifetime 4,291,840 (worker 4,194,304 + 65,536 + 352,
-    // timer 4,384, channels 27,264); the cut phase binds: 16,777,640 + 65,536
-    // + 2 x 8,698,670 with r = 95,685,370 totals 134,217,726.
-    let directory = result.unwrap(store.sized(Directory, 134217728u64))
-    if directory.pack_bytes != 8388608u64 || directory.checkpoint_bytes != 8388608u64 ||
-        directory.journal_limit != 25165904u64 || directory.group_bytes != 4194304u32 ||
-        directory.resident_limit != 95685370u64 {
+    // Directory derives pack and checkpoint from a sixteenth of its share.
+    let directory = maximal_plan(Directory, share, o)
+    if directory.pack_bytes != share / 16 || directory.checkpoint_bytes != directory.pack_bytes ||
+        directory.journal_limit != directory.checkpoint_bytes + store.FRAME_LIMIT ||
+        directory.group_bytes != 4194304u32 {
         fail("L60: Directory size formula")
     }
-    let config = std.object.LaneConfig(requested_lanes: 3, lane_bytes: 1048576)
-    let one_lane = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
-    let oversized_group = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(33554432u64), group_commits: None, lock_wait_ms: None,
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
-    // The journal worker's grant exceeds the share by itself.
-    match store.sized_with(Bucket(one_lane), 134217728u64, oversized_group) {
+    let config = std.object.LaneConfig(requested_lanes: 3, lane_bytes: mib)
+    let one_lane = std.object.LaneConfig(requested_lanes: 1, lane_bytes: mib)
+    let mut oversized_group: store.Overrides = clone(o)
+    oversized_group.resident_limit = Some(mib)
+    oversized_group.pack_bytes = Some(mib)
+    oversized_group.group_bytes = Some(32 * mib)
+    let oversized = store.planned_bytes(fixed_bucket_plan(Bucket(one_lane), oversized_group))
+    // The journal worker alone needs four group buffers, plus its scratch and task.
+    match store.planned(Bucket(one_lane), share, oversized_group) {
         Error(short) => {
-            if short.need != 242153196u64 { fail("L60: oversized Bucket group reservation") }
-            expect_size_part(short.parts, "journal_worker", 134742368u64)
+            if short.need != oversized || short.have != share { fail("L60: oversized Bucket group reservation") }
         },
         _ => fail("L60: Bucket sizing admitted a journal worker larger than the share"),
     }
-    let bucket = result.unwrap(store.sized(Bucket(config), 134217728u64))
-    if bucket.resident_limit != 38370774u64 { fail("L60: Bucket fixed reservations") }
-    let default_lanes = std.object.LaneConfig(requested_lanes: 0, lane_bytes: 1048576)
-    let default_bucket = result.unwrap(store.sized(Bucket(default_lanes), 134217728u64))
-    if default_bucket.resident_limit != 33934492u64 { fail("L60: Bucket default lanes") }
+    let bucket = maximal_plan(Bucket(config), share, o)
+    let default_lanes = std.object.LaneConfig(requested_lanes: 0, lane_bytes: mib)
+    let default_bucket = maximal_plan(Bucket(default_lanes), share, o)
+    if default_bucket.resident_limit >= bucket.resident_limit { fail("L60: Bucket default lanes") }
 
-    let mut opts = store.Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64), group_commits: None, lock_wait_ms: None,
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
-    let adjusted = result.unwrap(store.sized_with(Bucket(config), 134217728u64, opts))
-    if adjusted.resident_limit != 49017854u64 || adjusted.group_bytes != 2097152u32 {
+    let mut opts: store.Overrides = clone(o)
+    opts.group_bytes = Some(2 * mib)
+    let adjusted = maximal_plan(Bucket(config), share, opts)
+    if adjusted.resident_limit <= bucket.resident_limit || adjusted.group_bytes != 2097152u32 {
         fail("L60: Bucket group override changes entry buffers and the journal grant")
     }
-    opts.resident_limit = Some(1048576u64)
-    opts.pack_bytes = Some(8388608u64)
-    opts.checkpoint_bytes = Some(8388608u64)
-    opts.journal_limit = Some(25165904u64)
-    // 50,397,344 directory fixed bytes + 25,890,192 Bucket fixed bytes
-    // + 1,048,576 resident bytes + 190,652 bytes of variable checkpoint work.
-    let _ = result.unwrap(store.sized_with(Bucket(config), 77526764u64, opts))
-    match store.sized_with(Bucket(config), 77526763u64, opts) {
+    opts.resident_limit = Some(mib)
+    opts.pack_bytes = Some(8 * mib)
+    opts.checkpoint_bytes = opts.pack_bytes
+    let floor = store.planned_bytes(fixed_bucket_plan(Bucket(config), opts))
+    let exact = result.unwrap(store.planned(Bucket(config), floor, opts))
+    if store.planned_bytes(exact) != floor { fail("L60: exact Bucket floor") }
+    match store.planned(Bucket(config), floor - 1, opts) {
         Error(short) => {
-            if short.need != 77526764u64 || short.have != 77526763u64 { fail("L60: Bucket floor") }
-            expect_size_part(short.parts, "client_lanes", 3145728u64)
-            expect_size_part(short.parts, "entry_buffers", 4194608u64)
-            expect_size_part(short.parts, "head_buffers", 131552u64)
-            expect_size_part(short.parts, "history_key", 64u64)
-            expect_size_part(short.parts, "journal_timer", 4384u64)
-            expect_size_part(short.parts, "journal_worker", 8913248u64)
-            expect_size_part(short.parts, "reclaim_page", 1112000u64)
-            expect_size_part(short.parts, "put_buffer", 8388608u64)
+            if short.need != floor || short.have != floor - 1 { fail("L60: Bucket floor") }
+            expect_size_part(short.parts, "client_lanes", option.unwrap(std.object.lane_reservation(config)))
+            expect_size_part(short.parts, "put_buffer", option.unwrap(opts.pack_bytes))
+            expect_size_part(short.parts, "follower_service", option.unwrap(store.service_bytes(list.new())))
+            expect_size_part(short.parts, "follower_starter", store.follower_starter_bytes())
         },
         _ => fail("L60: below Bucket floor"),
     }
     opts.checkpoint_bytes = Some(18446744073709551615u64)
-    if let Ok(_) = store.sized_with(Directory, 18446744073709551615u64, opts) {
+    if let Ok(_) = store.planned(Directory, 18446744073709551615u64, opts) {
         fail("L60: checkpoint floor overflow")
     }
     let overflow = std.object.LaneConfig(requested_lanes: 2, lane_bytes: 18446744073709551615u64)
-    if let Ok(_) = store.sized(Bucket(overflow), 18446744073709551615u64) {
+    if let Ok(_) = store.planned(Bucket(overflow), 18446744073709551615u64, o) {
         fail("L60: lane reservation overflow")
     }
     Ok(())

@@ -687,8 +687,9 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    let allowance = deadline_disk_bytes(settings)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
-    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
+    let running = task.spawn(tasks, bytes allowance, take seed, deadline_place)
     // A standalone install completes durably without publishing a serving phase.
     if let Install = chosen {
         if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("activation: install did not finish") }
@@ -752,6 +753,12 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     }
 }
 
+fn deadline_disk_bytes(config: runner.PlaceConfig[(), Hd, (), ()]) -> u64 {
+    let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, config.sizes))
+    // Runner's 1 MiB keep and 1 MiB for the fixture.
+    result.unwrap(runner.operate_bytes(config)) + 2 * 1048576u64 + store.planned_bytes(plan)
+}
+
 fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> runner.Ended waits {
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
@@ -763,8 +770,9 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    let allowance = deadline_disk_bytes(config)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
-    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
+    let running = task.spawn(tasks, bytes allowance, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("runner-deadline: no Ready") }

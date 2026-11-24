@@ -1,10 +1,3 @@
-pub fn disk_store_bytes(options: store.Options) -> u64 {
-    match store.writer_plan(Directory, options) {
-        Ok(plan) => store.writer_bytes(plan),
-        Error(_) => 18446744073709551615u64,
-    }
-}
-
 const PLACE_KEEP: u64 = 1048576
 const HEAD_OWN_BYTES: u64 = 2097152
 const OPERATE_OWN_BYTES: u64 = 262144
@@ -63,16 +56,10 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
             return Error(Full(cap))
         },
     }
-    let store_bytes = store.planned_bytes(plan)
-    let capture = store.planned_capture(plan)
-    let head_store = if let Sim(b) = p.backing {
-        // The simulator's request lanes are already running outside the head.
-        let client = option.unwrap(std.object.lane_reservation(std.object.request_lanes(b.requests)))
-        let writer = store.plan_bytes(option.unwrap(clone(capture)))
-        let sim_writer = add_place_bytes(writer, weak_room) ?=> Full
-        order.max(store_bytes - client, sim_writer)
-    } else { store_bytes }
-    Ok((store.planned_options(plan), share, head_store, take capture))
+    let head_store = if let Sim(_) = p.backing {
+        store.planned_sim_bytes(plan, weak_room) ?=> Full
+    } else { store.planned_bytes(plan) }
+    Ok((store.planned_options(plan), share, head_store, store.planned_capture(plan)))
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {

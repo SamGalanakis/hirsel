@@ -1,10 +1,10 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=e7db71c96e614327 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=29e74b578bb50373 sig=41f0e751f2961646 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_idle_unload src=89f26225b5586810 sig=1e50e33656803486 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_one_head src=264faecd5fcb6aba sig=0e5b97640969e86a run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=73fdd797317264bf sig=e27ea148c5683b11 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_route_during_unload src=87affbc58afa165c sig=27e88b091bb1a90f run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=dc8afaecd0c7a9f7 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=e44f321ef16b2cf3 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=f7acc5a529061ae0 sig=82db7ad8add00b19 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=81d26d6fe4fe3514 sig=469d0bdbe1509701 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=16e06887135bce1a sig=3a0e043a387f4012 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_platform_serve_budgets src=75b96fbd5600f3bd sig=82a2fe9a2bdc4fc5 run=ad4c20fab40b1abf bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=bae2230b65e828ad sig=ab53e8bcde716848 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=b5bcfd2a2e432029 run=b1818af2b24835d3 bug=- oracle=- rows=pending

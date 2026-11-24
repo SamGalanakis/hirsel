@@ -10,9 +10,10 @@ fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) 
         net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
 }
 
-fn refused_budget(take p: PlaceConfig[(), (), (), ()]) -> Result[Ended, StartError] waits {
+fn refused_budget(take input: (PlaceConfig[(), (), (), ()], u64)) -> Result[Ended, StartError] waits {
+    let (take p, root) = take input
     let nested = result.unwrap(bound bytes 0u64 { runtime.root_limit() })
-    if nested != 12582912u64 { fail("L60: scoped child read lost the task's root limit") }
+    if nested != root { fail("L60: scoped child read lost the task's root limit") }
     let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let _ = take stopping
     operate(take p, take stop, result.unwrap(status_root()), None)
@@ -61,21 +62,36 @@ fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: St
     take config
 }
 
-fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[u64, StartError] waits {
+fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[(u64, u64), StartError] waits {
     let (_, share, total, _) = place_store(config, None)?
-    if share != 38270700u64 { fail("L60: Bucket share at the floor") }
-    Ok(total)
+    Ok((share, total))
+}
+
+// Head: 256 KiB Registry + 1 MiB publisher + 2 MiB own grant.
+// Serving: 2 MiB supervisor + one owner at 6,711 + 64 KiB + 256 KiB
+// for the Registry + 4 MiB pool. Operate holds 256 KiB and keeps 1 MiB.
+const BUDGET_RUNNER_BYTES: u64 = (262144 + 1048576 + 2097152) +
+    (2097152 + 6711 + 65536 + 262144 + 4194304) + 262144 + 1048576
+
+fn bucket_budget_store(config: PlaceConfig[(), (), (), ()]) -> u64 {
+    let Bucket(backing) = view config.backing else { fail("L60: expected Bucket backing") }
+    // The fixture fixes resident, pack, checkpoint and group bytes. Its
+    // unbounded plan therefore prices the same allocation as its floor plan.
+    let plan = result.unwrap(store.planned(Bucket(backing.lanes), 18446744073709551615u64, config.sizes))
+    store.planned_bytes(plan)
 }
 
 fn exercise_bucket_budget(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
-    // The Store floor is 38,270,700 B, including a 1 MiB client, 131,376 B
-    // of entry buffers, 131,552 B of HEAD buffers, 786,784 B for the
-    // journal task and 1,112,000 B for its reclaim page. X is 80 + 1,034.
-    let exact = task.spawn(tasks, bytes 49616253u64, bucket_budget_config(c, r, tasks, n), bucket_budget_at_limit)
-    if let Ok(Ok(38271814u64)) = task.join(take exact) {} else { return Error("L60: Bucket store term must include X") }
-    let short = task.spawn(tasks, bytes 49616252u64, bucket_budget_config(c, r, tasks, n), bucket_budget_at_limit)
+    let config = bucket_budget_config(c, r, tasks, n)
+    let store_bytes = bucket_budget_store(config)
+    let root = BUDGET_RUNNER_BYTES + store_bytes
+    let exact = task.spawn(tasks, bytes root, take config, bucket_budget_at_limit)
+    if let Ok(Ok((share, total))) = task.join(take exact) {
+        if share != store_bytes || total != store_bytes { return Error("L60: Bucket store term must include capture") }
+    } else { return Error("L60: exact Bucket root must be admitted") }
+    let short = task.spawn(tasks, bytes (root - 1), bucket_budget_config(c, r, tasks, n), bucket_budget_at_limit)
     match task.join(take short) {
-        Ok(Error(Full(cap))) if cap.requested == 49616253u64 && cap.available == 49616252u64 => Ok(()),
+        Ok(Error(Full(cap))) if cap.requested == root && cap.available == root - 1 => Ok(()),
         _ => Error("L60: Bucket limit refusal must name the root requirement"),
     }
 }
@@ -121,13 +137,16 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
     let (take listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
     let mut endpoint = string.from("http://127.0.0.1:")
     string.push_u64(mut endpoint, int.widen(address.port))
-    let server = task.spawn(tasks, bytes 8388608u64,
+    // The fixture only writes small activation records and uses a 64 KiB pack.
+    // 512 KiB leaves room beside the exact child root for the loopback peer.
+    let server = task.spawn(tasks, bytes 524288u64,
         (take listener, std.sim.s3.Loopback(bucket: "bucket", access_key: "access", aws_region: "us-east-1",
-            root: secret.share(key), exists_status: 412u16, max_body: 4194304u64), c), budget_bucket_server)
+            root: secret.share(key), exists_status: 412u16, max_body: 65536u64), c), budget_bucket_server)
     let id = seed_budget_bucket(capture_budget_config(c, r, tasks, n, endpoint, key))?
     let mut stale = capture_budget_config(c, r, tasks, n, endpoint, key)
     stale.selection = Current(2u64)
-    let refused = task.spawn(tasks, bytes 49616253u64, take stale, refused_bucket_place)
+    let root = BUDGET_RUNNER_BYTES + bucket_budget_store(stale)
+    let refused = task.spawn(tasks, bytes root, take stale, refused_bucket_place)
     let response = task.join(take refused)
     let _ = task.cancel_join(take server)
     let Ok(Error(Open(NotCurrent(Active(3u64, description, capture_wire))))) = response else {
@@ -148,25 +167,30 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
 @test
 fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
     if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
+    let expected_share = runtime.root_limit() - BUDGET_RUNNER_BYTES
     let memory = budget_config(Memory, c, r, tasks, n)
-    let (memory_sizes, share, _, _) = place_store(memory, None) ?=> |problem| start_text(problem)
-    // Head 3,407,872 B, serving 6,625,847 B, operate 262,144 B and main 1 MiB.
-    if share != 55764425u64 || memory_sizes.resident_limit != 54715849u64 { return Error("L60: Memory share") }
+    let (_, share, memory_total, _) = place_store(memory, None) ?=> |problem| start_text(problem)
+    if share != expected_share || memory_total != expected_share { return Error("L60: Memory share") }
     open_sized_place(take memory)?
     let disk = budget_config(Temp(d), c, r, tasks, n)
-    let (disk_sizes, disk_share, _, _) = place_store(disk, None) ?=> |problem| start_text(problem)
-    if disk_share != 55764425u64 || disk_sizes.pack_bytes != 3485276u64 ||
-        disk_sizes.checkpoint_bytes != 3485276u64 || disk_sizes.resident_limit != 12839321u64 {
+    let (disk_sizes, disk_share, disk_total, _) = place_store(disk, None) ?=> |problem| start_text(problem)
+    let disk_plan = result.unwrap(store.planned(Directory, expected_share, disk.sizes))
+    let planned = store.planned_options(disk_plan)
+    if disk_share != expected_share || disk_total != store.planned_bytes(disk_plan) ||
+        disk_sizes.pack_bytes != planned.pack_bytes || disk_sizes.checkpoint_bytes != planned.checkpoint_bytes ||
+        disk_sizes.resident_limit != planned.resident_limit {
         return Error("L60: Directory share")
     }
     open_sized_place(take disk)?
     exercise_bucket_budget(c, r, tasks, n)?
     exercise_bucket_capture(c, r, tasks, n)?
     let low = budget_config(Memory, c, r, tasks, n)
-    let child = task.spawn(tasks, bytes 12582912u64, take low, refused_budget)
-    // The child has 1,238,473 B of share. Memory's keep and minimum require 2 MiB.
+    // Memory has a 1 MiB resident minimum and a 1 MiB keep.
+    let minimum = store.planned_bytes(result.unwrap(store.planned(Memory, 2 * 1048576u64, low.sizes)))
+    let short_root = BUDGET_RUNNER_BYTES + minimum - 1
+    let child = task.spawn(tasks, bytes short_root, (take low, short_root), refused_budget)
     match task.join(take child) {
-        Ok(Error(Full(cap))) if cap.requested == 2097152u64 && cap.available == 1238473u64 => Ok(()),
+        Ok(Error(Full(cap))) if cap.requested == minimum && cap.available == minimum - 1 => Ok(()),
         _ => Error("L60: an infeasible share must be returned as Full"),
     }
 }

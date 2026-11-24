@@ -36,11 +36,15 @@ fn try_start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: run
     }
 }
 
+fn managed_budget[G: send, S: send, B: send](settings: runner.PlaceConfig[G, Hd, S, B]) -> (u64, u64) {
+    let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, settings.sizes))
+    // Operate includes the head, serving and supervisor. Its keep is 1 MiB.
+    let share = store.planned_bytes(plan)
+    (result.unwrap(runner.operate_bytes(settings)) + 1048576u64 + share, share)
+}
+
 fn start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
-    // Directory: checkpoint + two frames + pack + resident + cut work
-    // = 4,194,304 + 2 * 16,777,296 + 512 + 1,048,576 + 256,188.
-    // Runner: head + serving + supervisor + keep + optional trigger grant.
-    let allowance = 39054172u64 + 4194304u64 + 7412279u64 + 262144u64 + 1048576u64 + 65536u64
+    let (allowance, _) = managed_budget(settings)
     match try_start_managed(tasks, take settings, stop_pending, allowance) {
         Ok(take started) => take started,
         Error(take why) => fail(runner.start_text(why)),
@@ -54,9 +58,10 @@ fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, 
     let listen = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let stop = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
     let small = managed_settings(dir, clock, random, tasks, net, listen, stop)
-    // The old 48 MiB root leaves 37,414,345 bytes after the 12,917,303 bytes above.
-    if let Error(Full(Capacity(requested: 39054172u64, available: 37414345u64))) = try_start_managed(tasks, take small, true, 50331648u64) {} else {
-        fail("stop: sizing refusal lost before the phase handoff")
+    let (allowance, need) = managed_budget(small)
+    match try_start_managed(tasks, take small, true, allowance - 1) {
+        Error(Full(cap)) if cap.requested == need && cap.available == need - 1 => (),
+        _ => fail("stop: sizing refusal lost before the phase handoff"),
     }
     let config = managed_settings(dir, clock, random, tasks, net, listen, stop)
     let (running, stop_to, phases, _) = start_managed(tasks, take config, true)

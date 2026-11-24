@@ -3,9 +3,12 @@
 
 // What a host spends: its places' budget, its catalog store, the store a create seeds
 // and its own task.
-pub fn host_bytes(options: store.Options, place_bytes: u64) -> u64 {
-    let stores = int.saturating_add(runner.disk_store_bytes(options), runner.disk_store_bytes(options))
-    int.saturating_add(place_bytes, int.saturating_add(stores, LOCAL_BYTES))
+pub fn host_bytes(options: store.Options, place_bytes: u64) -> Result[u64, Refused] {
+    let plan = store.writer_plan(Directory, options) ?=> |_| Full
+    let Some(stores) = int.checked_mul(store.writer_bytes(plan), 2u64) else { return Error(Full) }
+    let Some(owned) = int.checked_add(stores, LOCAL_BYTES) else { return Error(Full) }
+    let Some(need) = int.checked_add(place_bytes, owned) else { return Error(Full) }
+    Ok(need)
 }
 
 pub fn doorway() -> Doorway {
@@ -18,7 +21,7 @@ pub fn door_of(w: Doorway) -> Door { Door(to: channel.sender(w.to)) }
 pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local, Refused] waits {
     if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 { return Error(Full) }
     let tasks = config.tasks
-    let need = host_bytes(config.options, config.place_bytes)
+    let need = host_bytes(config.options, config.place_bytes)?
     let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)

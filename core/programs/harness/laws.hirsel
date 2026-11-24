@@ -3,7 +3,6 @@
 
 const BYTES: u64 = 131072u64
 const PLACE_BYTES: u64 = 1048576u64
-const LIFE_BYTES: u64 = 52428800u64 // Runner overhead and the Disk Store reservation need 49.63 MiB.
 const IDLE_MS: u64 = 300u64
 
 // ---- scripted services ----
@@ -150,14 +149,6 @@ fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, di
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
         wire: None, triggers: Some(take config), idle: idle)
-}
-
-fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Latest[runner.Status]) {
-    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let status = result.unwrap(runner.status_root())
-    let life = Life(config: take config, stop: take stop_from, status: latest.handle(status))
-    let running = task.spawn(tasks, bytes LIFE_BYTES, take life, live)
-    (take running, take stop_to, take status)
 }
 
 // One user message, committed before any place runs.
@@ -1337,9 +1328,10 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let mut cut_services = copy_services(services)
     cut_services.blobs = Some(take cut_fixture)
     let config = blob_settings(first_dir, clock, random, tasks, net, take cut_services)
+    let allowance = life_bytes(config)
     let status = result.unwrap(runner.status_root())
     let life = Life(config: take config, stop: take stop_in, status: take status)
-    let first = task.spawn(tasks, bytes LIFE_BYTES, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
+    let first = task.spawn(tasks, bytes allowance, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
     if let PlaceEnded = result.unwrap(channel.receive(checkpoints)) { fail("blob: place ended before the PUT acknowledgement") }
     result.unwrap(channel.send(stop, ()))
     result.unwrap(task.join(take first))

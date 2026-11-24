@@ -903,7 +903,11 @@ pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, 
     }
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
-    let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
+    let config = helper_settings(helper, clock, random, tasks, net)
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options())))
+    // Runner's 1 MiB keep and 8 MiB for the helper's submit and read work.
+    let allowance = result.unwrap(runner.operate_bytes(config)) + 9 * 1048576u64 + writer
+    let helping = task.spawn(tasks, bytes allowance, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
     let first = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = first {
         return quit(out, why)

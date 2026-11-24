@@ -34,6 +34,9 @@ media_bits = { major = 1, path = "../media_bits" }
 "thumbhash.hirsel" = "image"
 "thumbhash_decode.hirsel" = "image"
 
+"png_simd.hirsel" = "image"
+"resize_simd.hirsel" = "image"
+
 [tests]
 limit = 16777216
 grants = []
@@ -44,3 +47,4 @@ grants = []
 "container_laws.hirsel" = "tests"
 "resize_laws.hirsel" = "tests"
 "hash_laws.hirsel" = "tests"
+"simd_laws.hirsel" = "tests"

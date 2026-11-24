@@ -204,7 +204,18 @@ fn decode_png_inner(input: Bytes, limits: Limits) -> Result[Raster, Error] {
 }
 
 fn png_unfilter(mut b: Bytes, at: u64, n: u64, bpp: u64, prior: bool, filter: u8) {
-    for i in 0u64 .. n {
+    let mut offset = 0u64
+    if n >= 16 {
+        if filter == 1 || (filter == 4 && !prior) {
+            offset = png_sub_prefix(mut b, at, n, bpp)
+        } else if filter == 2 {
+            if !prior {
+                return
+            }
+            offset = png_up_prefix(mut b, at, n)
+        }
+    }
+    for i in offset .. n {
         let a = if i >= bpp {
             b[at + i - bpp]
         } else {

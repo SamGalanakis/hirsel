@@ -1,0 +1,47 @@
+// Sub is a prefix sum with one independent chain per byte of a pixel.
+fn png_shift_lanes(stride: u64) -> Simd[u8, 16] {
+    let mut indices: Inline[u8, 16] =[255; 16]
+    for i in stride .. 16 {
+        indices[i] = int.narrow(i - stride)
+    }
+    simd.from(indices)
+}
+
+fn png_sub_prefix(mut row: Bytes, at: u64, n: u64, bpp: u64) -> u64 {
+    let one = png_shift_lanes(bpp)
+    let two = png_shift_lanes(2 * bpp)
+    let four = png_shift_lanes(4 * bpp)
+    let eight = png_shift_lanes(8 * bpp)
+    let mut prefix: Inline[u8, 16] =[255; 16]
+    for i in 0u64 .. bpp {
+        prefix[i] = int.narrow(i)
+    }
+    let carry: Simd[u8, 16] = simd.from(prefix)
+    let mut offset = 0u64
+    while n - offset >= 16 {
+        let start = at + offset
+        let mut values: Simd[u8, 16] = list.lanes(row, start)
+        if offset != 0 {
+            let preceding: Simd[u8, 16] = list.lanes(row, start - bpp)
+            values = simd.wrapping_add(values, simd.swizzle(preceding, carry))
+        }
+        values = simd.wrapping_add(values, simd.swizzle(values, one))
+        values = simd.wrapping_add(values, simd.swizzle(values, two))
+        values = simd.wrapping_add(values, simd.swizzle(values, four))
+        values = simd.wrapping_add(values, simd.swizzle(values, eight))
+        list.set_lanes(mut row, start, values)
+        offset += 16
+    }
+    offset
+}
+
+fn png_up_prefix(mut row: Bytes, at: u64, n: u64) -> u64 {
+    let mut offset = 0u64
+    while n - offset >= 16 {
+        let current: Simd[u8, 16] = list.lanes(row, at + offset)
+        let preceding: Simd[u8, 16] = list.lanes(row, at + offset - n - 1)
+        list.set_lanes(mut row, at + offset, simd.wrapping_add(current, preceding))
+        offset += 16
+    }
+    offset
+}

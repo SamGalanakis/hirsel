@@ -1,0 +1,86 @@
+fn i16_bias(x: i64) -> i16 {
+    int.narrow(x - 32768)
+}
+
+// A straight-alpha pair supplies eight channels, with RGB premultiplied
+// by the matching opacity. Reassemble the full signed i16 products before
+// restoring the unsigned 16-bit LUT bias and rounding by 255.
+fn premultiply_pair(input: Bytes, at: u64, next: u64) -> (LinearPixel, LinearPixel) {
+    let r0: u64 = int.widen(input[at])
+    let g0: u64 = int.widen(input[at + 1])
+    let b0: u64 = int.widen(input[at + 2])
+    let r1: u64 = int.widen(input[next])
+    let g1: u64 = int.widen(input[next + 1])
+    let b1: u64 = int.widen(input[next + 2])
+    let a0: i16 = int.widen(input[at + 3])
+    let a1: i16 = int.widen(input[next + 3])
+    let channels: Inline[i16, 8] =[i16_bias(SRGB_TO_LINEAR[r0]), i16_bias(SRGB_TO_LINEAR[g0]), i16_bias(SRGB_TO_LINEAR[b0]), 0, i16_bias(SRGB_TO_LINEAR[r1]), i16_bias(SRGB_TO_LINEAR[g1]), i16_bias(SRGB_TO_LINEAR[b1]), 0]
+    let factors: Inline[i16, 8] =[a0, a0, a0, a0, a1, a1, a1, a1]
+    let v = simd.from(channels)
+    let a = simd.from(factors)
+    let high: Simd[u8, 16] = simd.cast(simd.mulhi_i16(v, a))
+    let low: Simd[u8, 16] = simd.cast(simd.wrapping_mul(v, a))
+    let mut hi: Inline[u8, 16] =[0; 16]
+    let mut lo: Inline[u8, 16] =[0; 16]
+    inline.set_lanes(mut hi, 0, high)
+    inline.set_lanes(mut lo, 0, low)
+    (premultiplied_lanes(hi, lo, 0, a0), premultiplied_lanes(hi, lo, 8, a1))
+}
+
+fn premultiplied_lanes(hi: Inline[u8, 16], lo: Inline[u8, 16], at: u64, opacity: i16) -> LinearPixel {
+    let alpha: i64 = int.widen(opacity)
+    let bias = 32768 * alpha + 127
+    LinearPixel(r: (joined_product(hi, lo, at) + bias) / 255, g: (joined_product(hi, lo, at + 2) + bias) / 255, b: (joined_product(hi, lo, at + 4) + bias) / 255, a: alpha * 257)
+}
+
+fn joined_product(hi: Inline[u8, 16], lo: Inline[u8, 16], offset: u64) -> i64 {
+    let upper_bits: u16 = inline.word_le(hi, offset)
+    let upper: i16 = int.truncate(upper_bits)
+    let signed: i64 = int.widen(upper)
+    let lower: u16 = inline.word_le(lo, offset)
+    let tail: i64 = int.widen(lower)
+    (signed << 16) | tail
+}
+
+fn weighted_pair(mut total: LinearPixel, p: LinearPixel, q: LinearPixel, a: i64, b: i64) {
+    if a < -32768 || a > 32767 || b < -32768 || b > 32767 || (a == -32768 && b == -32768) {
+        weighted(mut total, p, a)
+        weighted(mut total, q, b)
+        return
+    }
+    let w0: i16 = int.narrow(a)
+    let w1: i16 = int.narrow(b)
+    let weights: Inline[i16, 8] =[w0, w1, w0, w1, w0, w1, w0, w1]
+    // Each pair gives one s32 weighted sum. Putting pixels in the signed
+    // 16-bit range costs one correction shared by all four components.
+    let channels: Inline[i16, 8] =[i16_bias(p.r), i16_bias(q.r), i16_bias(p.g), i16_bias(q.g), i16_bias(p.b), i16_bias(q.b), i16_bias(p.a), i16_bias(q.a)]
+    let products = simd.madd_i16(simd.from(channels), simd.from(weights))
+    let packed: Simd[u8, 16] = simd.cast(products)
+    let mut lane_bytes: Inline[u8, 16] =[0; 16]
+    inline.set_lanes(mut lane_bytes, 0, packed)
+    let bias = 32768 * (a + b)
+    total.r += signed_product(lane_bytes, 0) + bias
+    total.g += signed_product(lane_bytes, 4) + bias
+    total.b += signed_product(lane_bytes, 8) + bias
+    total.a += signed_product(lane_bytes, 12) + bias
+}
+
+fn signed_product(data: Inline[u8, 16], at: u64) -> i64 {
+    let word: u32 = inline.word_le(data, at)
+    let signed: i32 = int.truncate(word)
+    int.widen(signed)
+}
+
+fn normalized(p: LinearPixel) -> LinearPixel {
+    let rounded: Inline[i32, 4] =[int.narrow((p.r + 8192) >> 14), int.narrow((p.g + 8192) >> 14), int.narrow((p.b + 8192) >> 14), int.narrow((p.a + 8192) >> 14)]
+    let values = simd.from(rounded)
+    let result: Simd[u16, 8] = simd.pack_saturating(values, values)
+    let raw: Simd[u8, 16] = simd.cast(result)
+    let mut parts: Inline[u8, 16] =[0; 16]
+    inline.set_lanes(mut parts, 0, raw)
+    let r: u16 = inline.word_le(parts, 0)
+    let g: u16 = inline.word_le(parts, 2)
+    let b: u16 = inline.word_le(parts, 4)
+    let a: u16 = inline.word_le(parts, 6)
+    LinearPixel(r: int.widen(r), g: int.widen(g), b: int.widen(b), a: int.widen(a))
+}

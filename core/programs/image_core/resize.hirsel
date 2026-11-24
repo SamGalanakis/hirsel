@@ -145,14 +145,6 @@ fn weighted(mut total: LinearPixel, pixel: LinearPixel, weight: i64) {
     total.a += pixel.a * weight
 }
 
-fn normalized_component(value: i64) -> i64 {
-    order.max(0, order.min(65535, (value + 8192) >> 14))
-}
-
-fn normalized(p: LinearPixel) -> LinearPixel {
-    LinearPixel(r: normalized_component(p.r), g: normalized_component(p.g), b: normalized_component(p.b), a: normalized_component(p.a))
-}
-
 pub fn resize(source: Raster, width: u32, height: u32, filter: Filter, limits: Limits) -> Result[Raster, Error] {
     match (bound steps limits.max_steps {
         resize_inner(source, width, height, filter, limits)
@@ -211,7 +203,14 @@ fn resize_inner(source: Raster, width: u32, height: u32, filter: Filter, limits:
                 let span = wx[x]
                 let mut total = black()
                 let base = (next * sw + span.first) * 4
-                for i in span.lo .. span.hi {
+                let mut i = span.lo
+                while i + 1 < span.hi {
+                    let at = base + (i - span.lo) * 4
+                    let (first, second) = premultiply_pair(source.rgba, at, at + 4)
+                    weighted_pair(mut total, first, second, x_coefficients[i], x_coefficients[i + 1])
+                    i += 2
+                }
+                if i < span.hi {
                     let pixel = premultiply(source.rgba, base + (i - span.lo) * 4)
                     weighted(mut total, pixel, x_coefficients[i])
                 }
@@ -221,7 +220,14 @@ fn resize_inner(source: Raster, width: u32, height: u32, filter: Filter, limits:
         }
         for x in 0u64 .. w {
             let mut total = black()
-            for k in 0u64 .. window.hi {
+            let mut k = 0u64
+            while k + 1 < window.hi {
+                let first = ring[(window.first + k) % slots * w + x]
+                let second = ring[(window.first + k + 1) % slots * w + x]
+                weighted_pair(mut total, first, second, y_coefficients[k], y_coefficients[k + 1])
+                k += 2
+            }
+            if k < window.hi {
                 let pixel = ring[(window.first + k) % slots * w + x]
                 weighted(mut total, pixel, y_coefficients[k])
             }

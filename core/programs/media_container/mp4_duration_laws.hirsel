@@ -1,0 +1,34 @@
+fn check_presentation(edit: bool, track_ticks: u64, microseconds: u64) waits {
+    let mut track = mux_test_track(0)
+    track.movie_duration = 126
+    if edit {
+        list.push(mut track.edits, mp4.Edit(duration: 124, media_time: 0, rate_integer: 1, rate_fraction: 0))
+    }
+    let mut tracks: List[mp4.MuxTrack] = list.with_capacity(1)
+    list.push(mut tracks, take track)
+    let headers = result.unwrap(mp4.write_vod(1000, 126, tracks, 10, mp4.MuxLimits(metadata_bytes: 65536, sample_count: 3)))
+    let size = 46 + list.len(headers.suffix)
+    let vod = result.unwrap(mp4.video_probe(size, mp4.VodLimits(metadata_bytes: 65536, top_boxes: 3, tracks: 1), scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(n)
+        if at == 46 {
+            list.append(mut raw, list.slice(headers.suffix, 0, n))
+        } else {
+            list.append(mut raw, list.slice(headers.prefix, at, at + n))
+        }
+        Ok(take raw)
+    }))
+    let (t, _) = result.unwrap(mp4.vod_track(vod, 0))
+    let m = mp4.vod_info(vod)
+    if t.media_duration != 1536 || t.presentation_duration != track_ticks || m.duration != 126 || m.presentation_duration_us != microseconds {
+        fail("presentation duration must use track ticks and edit intervals")
+    }
+}
+
+/// bug: Report the rounded mvhd clock as playback duration or ignore a shorter edit.
+/// oracle: ISO BMFF movie and track timescales, and ffprobe on Mozilla av1.mp4 and bipbop_audio_aac_48k.mp4.
+@test
+fn vod_presentation_duration_uses_track_clock() -> Result[(), ()] waits {
+    check_presentation(false, 1536, 125000)
+    check_presentation(true, 1524, 124023)
+    Ok(())
+}

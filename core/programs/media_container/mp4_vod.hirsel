@@ -16,7 +16,8 @@ pub type FileRange {
 pub type MovieInfo {
     timescale: u32,
     duration: u64,
-    file_size: u64
+    file_size: u64,
+    presentation_duration_us: u64
 }
 
 pub type TrackIndex {
@@ -25,6 +26,7 @@ pub type TrackIndex {
     codec: u32,
     timescale: u32,
     media_duration: u64,
+    presentation_duration: u64,
     movie_duration: u64,
     sample_count: u32,
     decode_duration: u64,
@@ -91,6 +93,8 @@ type VodTrack {
     entry: FileRange,
     edits: Table,
     edit_width: u64,
+    presentation_start_us: u64,
+    presentation_duration_us: u64,
     hdr: Hdr,
     tables: SampleTables
 }
@@ -340,6 +344,70 @@ fn read_edits(input: Bytes, trak: BoxHeader) -> Result[(Table, u64), VodError] {
     Ok((entries(input, b, 8, width)?, width))
 }
 
+fn edit_at(input: Bytes, table: Table, width: u64, i: u64) -> Edit {
+    let at = table.at + i * width
+    let (duration, media_time) = if width == 12 {
+        let n: u32 = list.word_be(input, at)
+        let raw: u32 = list.word_be(input, at + 4)
+        let signed: i32 = int.truncate(raw)
+        let ticks: u64 = int.widen(n)
+        let when: i64 = int.widen(signed)
+        (ticks, when)
+    } else {
+        let raw: u64 = list.word_be(input, at + 8)
+        (list.word_be(input, at), int.truncate(raw))
+    }
+    let rate_hi: u16 = list.word_be(input, at + width - 4)
+    let rate_lo: u16 = list.word_be(input, at + width - 2)
+    Edit(duration: duration, media_time: media_time, rate_integer: int.truncate(rate_hi), rate_fraction: int.truncate(rate_lo))
+}
+
+fn nearest_ticks(value: u64, from: u32, to: u32) -> Result[u64, VodError] {
+    let a: u64 = int.widen(from)
+    let b: u64 = int.widen(to)
+    let Some(whole) = int.checked_mul(value / a, b) else {
+        return Error(BadMovie)
+    }
+    let fraction = ((value % a) * b + a / 2) / a
+    let Some(ticks) = int.checked_add(whole, fraction) else {
+        return Error(BadMovie)
+    }
+    Ok(ticks)
+}
+
+// mdhd is in the track clock; edits are in the movie clock. A trailing
+// rounding tick in mvhd or tkhd cannot extend the available media.
+fn track_presentation(input: Bytes, edits: Table, edit_width: u64, movie_scale: u32, media_scale: u32, raw_duration: u64) -> Result[(u64, u64), VodError] {
+    let mut shown = 0u64
+    let mut start = 0u64
+    let mut visible = false
+    for i in 0u64 .. edits.count {
+        let edit = edit_at(input, edits, edit_width, i)
+        if edit.media_time < -1 {
+            return Error(BadMovie)
+        }
+        if edit.media_time == -1 && !visible {
+            let Some(next) = int.checked_add(start, edit.duration) else {
+                return Error(BadMovie)
+            }
+            start = next
+        } else {
+            visible = true
+            let length = nearest_ticks(edit.duration, movie_scale, media_scale)?
+            let Some(next) = int.checked_add(shown, length) else {
+                return Error(BadMovie)
+            }
+            shown = next
+        }
+    }
+    let duration = if edits.count == 0 || raw_duration < shown {
+        raw_duration
+    } else {
+        shown
+    }
+    Ok((nearest_ticks(start, movie_scale, 1000000)?, duration))
+}
+
 fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
     let mut at = start
     let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
@@ -421,7 +489,7 @@ fn self_contained(input: Bytes, minf: BoxHeader) -> Result[(), VodError] {
     Ok(())
 }
 
-fn read_vod_track(input: Bytes, trak: BoxHeader) -> Result[VodTrack, VodError] {
+fn read_vod_track(input: Bytes, trak: BoxHeader, movie_scale: u32) -> Result[VodTrack, VodError] {
     let tkhd = require_child(input, trak, 0x746b6864)?
     let (id, movie_duration, matrix) = tkhd_fields(input, tkhd)?
     let mdia = require_child(input, trak, 0x6d646961)?
@@ -451,7 +519,9 @@ fn read_vod_track(input: Bytes, trak: BoxHeader) -> Result[VodTrack, VodError] {
     }
     let (tables, sample_count, decode_duration) = read_tables(input, stbl)?
     let (edits, edit_width) = read_edits(input, trak)?
-    let mut info = TrackIndex(id: id, handler: handler, codec: entry.kind, timescale: timescale, media_duration: media_duration, movie_duration: movie_duration, sample_count: sample_count, decode_duration: decode_duration, width: 0, height: 0, channels: 0, sample_rate: 0, matrix: matrix, rotation: None)
+    let (start_us, duration) = track_presentation(input, edits, edit_width, movie_scale, timescale, media_duration)?
+    let duration_us = nearest_ticks(duration, timescale, 1000000)?
+    let mut info = TrackIndex(id: id, handler: handler, codec: entry.kind, timescale: timescale, media_duration: media_duration, presentation_duration: duration, movie_duration: movie_duration, sample_count: sample_count, decode_duration: decode_duration, width: 0, height: 0, channels: 0, sample_rate: 0, matrix: matrix, rotation: None)
     let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
     if handler == 0x76696465 {
         if entry.next - entry.body < 78 {
@@ -466,7 +536,7 @@ fn read_vod_track(input: Bytes, trak: BoxHeader) -> Result[VodTrack, VodError] {
         info.sample_rate = rate
         info.channels = channels
     }
-    Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, hdr: hdr, tables: tables))
+    Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, presentation_start_us: start_us, presentation_duration_us: duration_us, hdr: hdr, tables: tables))
 }
 
 fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], track_limit: u64, layout: VodLayout) -> Result[Vod, VodError] {
@@ -476,6 +546,9 @@ fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], 
     }
     let (scale, duration) = media_clock(metadata, require_child(metadata, moov, 0x6d766864)?)?
     let mut tracks: List[VodTrack] = list.new()
+    let mut earliest = 0xffffffffffffffffu64
+    let mut latest = 0u64
+    let mut longest = 0u64
     let mut ids: Map[u32, bool] = map.new()
     let mut at = moov.body
     while at < moov.next {
@@ -487,7 +560,21 @@ fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], 
             if list.len(tracks) == track_limit {
                 return Error(ResourceLimit)
             }
-            let track = read_vod_track(metadata, b)?
+            let track = read_vod_track(metadata, b, scale)?
+            let start = track.presentation_start_us
+            let span = track.presentation_duration_us
+            let Some(stop) = int.checked_add(start, span) else {
+                return Error(BadMovie)
+            }
+            if start < earliest {
+                earliest = start
+            }
+            if stop > latest {
+                latest = stop
+            }
+            if span > longest {
+                longest = span
+            }
             let id = track.info.id
             if let Some(_) = map.get(ids, id) {
                 return Error(BadMovie)
@@ -500,7 +587,13 @@ fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], 
     if list.len(tracks) == 0 {
         return Error(BadMovie)
     }
-    Ok(Vod(movie: MovieInfo(timescale: scale, duration: duration, file_size: file_size), layout: layout, metadata: take metadata, tracks: take tracks, media: take media))
+    let span = latest - earliest
+    let presentation_us = if longest > span {
+        longest
+    } else {
+        span
+    }
+    Ok(Vod(movie: MovieInfo(timescale: scale, duration: duration, file_size: file_size, presentation_duration_us: presentation_us), layout: layout, metadata: take metadata, tracks: take tracks, media: take media))
 }
 
 // Reads box headers and the moov only. The reader must supply exactly the
@@ -577,21 +670,7 @@ pub fn vod_edits(vod: Vod, track: u64, receive: scoped fn(Edit)) -> Result[(), V
     }
     let t = vod.tracks[track]
     for i in 0u64 .. t.edits.count {
-        let at = t.edits.at + i * t.edit_width
-        let (duration, media_time) = if t.edit_width == 12 {
-            let n: u32 = list.word_be(vod.metadata, at)
-            let raw: u32 = list.word_be(vod.metadata, at + 4)
-            let signed: i32 = int.truncate(raw)
-            let ticks: u64 = int.widen(n)
-            let when: i64 = int.widen(signed)
-            (ticks, when)
-        } else {
-            let raw: u64 = list.word_be(vod.metadata, at + 8)
-            (list.word_be(vod.metadata, at), int.truncate(raw))
-        }
-        let rate_hi: u16 = list.word_be(vod.metadata, at + t.edit_width - 4)
-        let rate_lo: u16 = list.word_be(vod.metadata, at + t.edit_width - 2)
-        receive(Edit(duration: duration, media_time: media_time, rate_integer: int.truncate(rate_hi), rate_fraction: int.truncate(rate_lo)))
+        receive(edit_at(vod.metadata, t.edits, t.edit_width, i))
     }
     Ok(())
 }

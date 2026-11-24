@@ -444,6 +444,14 @@ Version note (2026-11-24, media-w0-udp-2201): first text of NET-15 to NET-17, Wa
 real-time media track. Not yet built; the fences are `unbuilt`. MEM-19 and MEM-24 gain the
 receive pool charge in the same change.
 
+Version note (2026-11-24, media-udp-amend-2225): closes the 13 findings of the
+media-udp-attack-2219 review. A group is one exclusively bound socket that the host
+dispatches, with no `SO_REUSEPORT`. Charges are refunded at a recorded retirement and
+not at the drop. An opened socket receives only from sources its `UdpSend` rules cover.
+Sends run in bounded windows, and an empty datagram ends a GSO train. Served receives stage
+packet records apart from payload bytes. Each ring holds a completion reservation per
+socket, and both calls take byte steps. `NetError` gains `Exhausted`.
+
 UDP gives programs IP datagrams for media, QUIC and DNS-like protocols. Its operations
 move **batches**: one call receives or sends many datagrams, so a program pays one call,
 one wait and one host crossing for a burst. The host's segmentation offloads
@@ -464,8 +472,8 @@ intersection: `net.narrow` keeps a `UdpBind` or `UdpSend` rule only against a ru
 same direction, and drops every other intersection. A `Connect` or `Listen` rule never
 permits a UDP operation, and a UDP rule never permits a TCP one.
 
-- `UdpBind` permits binding a socket to a local endpoint, which then receives
-  ([NET-16](#net-16-udp-sockets-and-batches)). It follows `Listen`'s rules exactly: a
+- `UdpBind` permits binding a socket to a local endpoint, which then receives from any
+  source ([NET-16](#net-16-udp-sockets-and-batches)). It follows `Listen`'s rules exactly: a
   wildcard bind needs a `/0` rule of the same family, and a bind to port 0 needs the
   matching `UdpBind` rules to cover every nonzero port (`1-65535`) or it returns
   `EphemeralOutsideNetGrant` before issue.
@@ -473,7 +481,8 @@ permits a UDP operation, and a UDP rule never permits a TCP one.
   checked, in every batch. The unspecified address, IPv4-mapped IPv6, unscoped
   `fe80::/10` and the IPv4 limited broadcast `255.255.255.255` are denied as destinations.
   The host never sets `SO_BROADCAST` and joins no multicast group, so a directed broadcast
-  the kernel refuses is `Denied` after issue.
+  the kernel refuses is `Denied` after issue. On a socket that was opened and not bound,
+  `UdpSend` also fixes the sources that the socket receives from (below).
 
 A run grants them with the Net rule list:
 
@@ -483,17 +492,35 @@ hirsel run sfu --grant 'Net=UdpBind 0.0.0.0/0 3478-3478;UdpSend 0.0.0.0/0 1-6553
 
 **Receiving grants no reply authority.** A datagram's source address is unauthenticated: an
 attacker can write any address there. If receiving from a peer let a program answer it, a
-spoofed source would make the program send to a host the operator never named, the
-reflection that QUIC's address validation (RFC 9000 §8) and STUN's spend their address-validation machinery on.
+spoofed source would make the program send to a host the operator never named. That is the
+reflection that QUIC (RFC 9000 §8) and STUN spend their address-validation machinery on.
 So a reply needs a `UdpSend` rule like any other send. A server that answers the whole
 Internet holds `UdpSend 0.0.0.0/0 1-65535` (and its IPv6 twin), which says so in the grant.
 A TCP peer is different because its handshake proved the address, and NET-6 lets accepted
-peers inherit the listener's authority for that reason.
+peers inherit the listener's authority for that reason. A narrower reply right needs a
+trusted transport provider that has validated the return path, and is not part of W0.1.
+
+**Ingress of an opened socket.** A socket made by `udp_open` holds no `UdpBind` rule, so it
+has no authority to receive from the whole network. The host delivers to it only datagrams
+whose source endpoint a `UdpSend` rule of its originating Net covers. It discards every
+other datagram before it reaches a slot. So an opened socket hears only from endpoints its
+program may already send to, and it holds no state about which peers it contacted. A
+program that wants general ingress binds with a `UdpBind` rule. A client granted
+`UdpSend 192.0.2.53/32 53-53` therefore receives DNS answers from `192.0.2.53:53` and
+nothing else, even on the ephemeral port the kernel chose.
+
+**Rule lookup.** The provider indexes a Net's rules of each UDP direction and family once,
+when it makes the Net. For each prefix length present it keeps a hash set of prefixes, and
+for each prefix its port intervals sorted and merged. A lookup probes at most 33 (IPv4) or
+129 (IPv6) prefix lengths, with one binary search over intervals at each. Its cost is
+bounded by the number of prefix lengths and the logarithm of the rules per prefix, not by
+the number of rules. The send preflight and the ingress filter use this lookup.
 
 Law: a UDP operation that designates an endpoint succeeds only under a matching rule of the
 same direction in its originating Net, and the check is made before issue with no host
-effect. `net.narrow` keeps a UDP rule exactly as NET-6 keeps an address rule. The host, a
-replay and a served Net make the same checks.
+effect. An opened socket delivers a datagram only from a source that a `UdpSend` rule of its
+Net covers. `net.narrow` keeps a UDP rule exactly as NET-6 keeps an address rule. The host,
+a replay and a served Net make the same checks.
 
 ### NET-16: UDP sockets and batches
 
@@ -512,7 +539,12 @@ pub fn udp_send(mut s: UdpSocket, data: Bytes, pkts: List[UdpTx], until: Until) 
 pub fn udp_local_addr(s: UdpSocket) -> Result[Addr, NetError] waits
 ```
 
-`NetError` gains one variant, `Oversize(max: u32)` (below).
+`NetError` gains two variants:
+
+- `Oversize(max: u32)` (below).
+- `Exhausted`, a host resource the provider could not obtain after issue: the UDP host
+  allowance, a descriptor or a socket. It is recorded like any delivered error, and
+  nothing of the operation remains.
 
 `UdpSocket` is a mechanical resource of logical size 8. It is `send` and `cross`
 ([CONC-2](tasks.md#conc-2-the-send-bound)): like `Socket` and `Listener`, it may move to
@@ -521,17 +553,22 @@ another unit, so one unit per core can own its socket. It is move-only and never
 
 - `udp_open` makes a socket of one family that the kernel binds to an ephemeral port at its
   first send, as a TCP connect takes an ephemeral local port with no `Listen` rule. It needs
-  no `UdpBind` rule. It receives only after its first committed send; before that, `udp_recv`
-  returns `Denied` before issue.
-- `udp_bind` needs a `UdpBind` rule (NET-15) and returns the socket and its bound endpoint,
-  with the kernel's port when `a.port` is 0.
-- `udp_bind_group` binds `members` sockets (2 to 1024) to one endpoint with `SO_REUSEPORT`
-  in one call, and appends them to `out` in member order; `out`'s spare capacity must hold
-  `members`, or the call returns `Denied` before issue. The kernel spreads arriving
-  datagrams across members by `steer` (below). With `a.port` 0, the first member takes the
-  kernel's port and the others bind to it.
-- `udp_send` checks every packet's `to` against `UdpSend` (NET-15); `udp_recv` needs a bound
-  socket or an opened socket that has sent.
+  no `UdpBind` rule. An IPv6 socket is `IPV6_V6ONLY`. The socket becomes **receiving** when
+  a `udp_send` on it returns `Ok(k)` with `k ≥ 1`. Before that, `udp_recv` and
+  `udp_local_addr` return `Denied` before issue, even after a send that failed or committed
+  nothing (Linux may already have bound a port, `af_inet.c:850-852`). It then receives under
+  the ingress rule of NET-15.
+- `udp_bind` needs a `UdpBind` rule (NET-15). It returns the socket, which is receiving at
+  once, and its bound endpoint, with the kernel's port when `a.port` is 0. An IPv6 bind is
+  `IPV6_V6ONLY`, so a v6 socket never receives or sends IPv4.
+- `udp_bind_group` binds one kernel socket to `a` and returns `members` (2 to 65,535)
+  **member** handles of it, appended to `out` in member order. `out`'s spare capacity must
+  hold `members`, or the call returns `Denied` before issue. The host reads every datagram
+  that reaches the socket and dispatches it to one member chosen by `steer` (below). Each
+  member is a `UdpSocket` that receives only its own datagrams, sends from the group's
+  endpoint and moves between units on its own.
+- `udp_send` checks every packet's `to` against `UdpSend` (NET-15). A packet whose `to` is of
+  the other family than the socket's returns `Denied` before issue with nothing sent.
 
 **Options.** `slots` is the number of receive slots and `slot_bytes` the size of each; both
 are explained under the receive pool below. `slots` must be a power of two from 1 to 32,768
@@ -544,12 +581,15 @@ pool below is what a program sizes.
 
 **Datagram sizes.** A datagram payload is at most 65,507 bytes on IPv4 and 65,527 on IPv6,
 the largest a UDP header's length field and the IP header allow without jumbograms. A send
-packet over its family's maximum returns `Oversize(max)` before issue with nothing sent. The
-host sets `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER` to `PMTUDISC_PROBE`, so datagrams are never
-fragmented by the sender. A packet larger than the route's MTU is refused by the kernel
-(`EMSGSIZE`) as `Oversize(0)`: the route's limit is smaller than that packet, and an
-unconnected socket cannot read it (`IP_MTU` needs a connected one). A program doing path MTU
-discovery probes for it, as RFC 8899 does. An empty datagram is a datagram.
+packet over its family's maximum returns `Oversize(max)` before issue with nothing sent. This
+static maximum is the only size checked before issue. The host sets
+`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER` to `PMTUDISC_PROBE`, so the sender never fragments
+a datagram. In that mode the kernel compares a send with the outgoing device's MTU, not the
+path's (`ip.h:455-458`, `ip_output.c:1302-1303`). A packet the kernel refuses for its size
+at the send (`EMSGSIZE`) is `Oversize(0)`. A packet the kernel accepts may still exceed a
+smaller link further along the path and be dropped there. A committed packet therefore
+proves nothing about the path MTU: a program learns it from its protocol's
+acknowledgments or losses, as RFC 8899 probes do. An empty datagram is a datagram.
 
 **Receiving.** `udp_recv` waits until at least one datagram is queued for the socket or its
 deadline passes, then delivers a batch:
@@ -562,7 +602,7 @@ deadline passes, then delivers a batch:
    capacity `r`, exactly `r` bytes are appended, `truncated` is true, `len` is its whole
    length and its rest is lost, as in [NET-14](#net-14-unix-datagrams). A datagram longer
    than one slot's payload room (`slot_bytes - 256`) is truncated to that room the same way,
-   before it reaches `buf`.
+   before it reaches `buf`, and `len` is still its whole length.
 3. Each later datagram is delivered only whole: a datagram that does not fit `buf`'s
    remaining spare capacity, would need an entry beyond `out`'s spare capacity, or was cut by
    its slot, stays queued for the next receive, where it is first. So batching never
@@ -570,151 +610,279 @@ deadline passes, then delivers a batch:
 4. A batch ends when the queued datagrams run out, `out` is full or the next datagram does not
    fit. It never waits for more after the first.
 
-`udp_recv` returns the number of datagrams delivered, at least 1, and admits nothing: the
-caller's spare capacities bound the batch, as `host.resolve` does (NET-11). With `out` spare
-capacity 0 it returns `Ok(0)` at once, consumes nothing and does not wait.
+`udp_recv` returns the number of datagrams delivered and admits nothing: the caller's spare
+capacities bound the batch, as `host.resolve` does (NET-11), and a receive writes only into
+`out`'s spare entries. Its checks run in this order. A socket that is not receiving returns
+`Denied` before issue. Otherwise, with `out` spare capacity 0, it returns `Ok(0)` at once,
+takes nothing from the queue and does not wait. Every other receive delivers at least one
+datagram or returns an error.
 
-A datagram the kernel received with a `UDP_GRO` coalesce is delivered as its individual
-datagrams. Every datagram of one coalesce has the same source, the same ECN bits and the
-same length, except that the last may be shorter (the `UDP_GRO` control message gives the
-stride). There is no receive timestamp, no destination address and no interface index in
+The kernel may coalesce datagrams with `UDP_GRO`. The host delivers such a coalesce as its
+individual datagrams. Every datagram of one coalesce has the same source, the same ECN bits
+and the same length, except that the last may be shorter (the `UDP_GRO` control message
+gives the stride). A coalesce that a batch delivered only in part stays in its slot with a
+cursor at its next datagram. The rest is delivered from there, with no copy beyond the copy
+to `buf`. There is no receive timestamp, no destination address and no interface index in
 W0.1. The ECN field is the one control datum a QUIC sender needs to validate ECN
 (RFC 9000 §13.4.2); the others have no consumer yet.
 
 **Sending.** `udp_send` sends `pkts` in order: packet `i` is the bytes
-`data[at, at + len)` to `to` with ECN bits `ecn` (`IP_TOS`/`IPV6_TCLASS`), each `at + len`
-at most `data`'s length and `ecn` at most 3, or the call returns `Denied` before issue with
-nothing sent. Every packet's `to` is checked first (NET-15); one uncovered destination
-denies the whole call with nothing sent. The call returns `k`, the number of packets
+`data[at, at + len)` to `to` with ECN bits `ecn` (`IP_TOS`/`IPV6_TCLASS`). Each `at + len`
+must be at most `data`'s length and each `ecn` at most 3, or the call returns `Denied`
+before issue with nothing sent. The whole list is validated before anything is issued:
+every bound, every size, every family and every `to` against NET-15. One failing packet
+refuses the whole call with nothing sent. The call returns `k`, the number of packets
 committed: packets `0..k` were each handed to the kernel exactly once as one datagram, and
-none after them was. Each packet commits whole or not at all; there is no partial datagram.
-When the kernel refuses packet `k` after packets `0..k` committed, the call returns `Ok(k)`;
-the caller resends from packet `k`, which is then first and gets the error. So an error is
-returned only by a call that committed nothing, and the failing packet is always the first
-one not committed. The call waits while the socket's send buffer
-is full and keeps one absolute deadline through readiness retries; at the deadline it
-returns the `k` committed so far, or `TimedOut` if none. A program sends a GSO train by
-listing equal-length packets to one peer one after another: the host groups any run of
-consecutive packets with the same `to` and `ecn`, all of one length but the last which may be
-shorter, into one `UDP_SEGMENT` send of up to 64 packets and at most 65,507 bytes in all.
-That grouping is invisible: it changes the number of kernel crossings, never which bytes
-reach the wire, in what order, or `k`.
+none after them was. Each packet commits whole or not at all; there is no partial datagram,
+and an empty packet that commits is one datagram of zero bytes on every backend.
+
+The call returns an error only when it committed nothing. When it commits `k ≥ 1` packets
+and then stops, it returns `Ok(k)`, and the reason it stopped is not reported. The stop
+might be a kernel refusal of packet `k`, the deadline or a cancellation between windows.
+The kernel can discard a refusal after a partial batch (`sendmmsg(2)`, BUGS;
+`socket.c:2752-2753`), so the call does not promise one. A later call that resends from
+packet `k` reports that send's own outcome, which may be a success. The host never issues
+a committed packet again. The call waits while the socket's send buffer is full and keeps
+one absolute deadline through readiness retries. At the deadline it returns the `k`
+committed so far, or `TimedOut` if none.
+
+**GSO trains.** A program sends a GSO train by listing equal-length packets to one peer one
+after another. The host groups each run of consecutive nonempty packets with the same `to`
+and `ecn` into one `UDP_SEGMENT` send. Every packet of a run has one length except the last,
+which may be shorter and nonempty. A run holds up to 64 packets and at most 65,507 bytes in
+all. An empty packet is never part of a train: it ends the run before it and is issued alone.
+A train is one kernel message and commits all its packets or none, so it adds all of them
+to `k` together. The grouping is invisible: it changes the number of kernel crossings, but
+never which bytes reach the wire, their order, or `k`.
 
 **Order and loss.** UDP may drop, duplicate and reorder datagrams on the network, and the
-kernel drops datagrams when a socket's receive queue is full. The host adds none of these.
-Between the kernel queue and the caller, every datagram the host takes is delivered once,
-in the kernel's order; the host never drops one to make room.
+kernel drops datagrams when a socket's receive queue is full. The host adds none of these,
+with exactly these named exceptions, which `std.sim.udp` models in the same way:
 
-**Steering a group.** `udp_bind_group` attaches one classic BPF program to the group
-(`SO_ATTACH_REUSEPORT_CBPF`). The kernel delivers a datagram to the member whose index the
-program returns:
+- an opened socket discards a datagram from a source outside its `UdpSend` rules (NET-15);
+- a group discards a datagram steered to a member that is dropped, or whose queue is full
+  (below);
+- a coalesce that the kernel ever delivers cut (`MSG_TRUNC` on a `UDP_GRO` record) loses the
+  datagrams after the cut. The host delivers its whole datagrams and the cut one truncated.
+  Linux 7.0 keeps a UDP coalesce below 65,536 bytes (`gro.c:116-119`, `gro.c:226`), which a
+  65,536-byte payload room holds, so this happens only if a kernel breaks that bound.
 
-- `Hash` returns a fixed hash of the source address and port, read from the network header,
-  modulo `members`, so one flow stays on one member. It does not use the skb's receive hash
-  (`SKF_AD_RXHASH`), which reads the raw `skb->hash` (`filter.c:412-415`) and is 0 when
-  neither the NIC nor the stack has computed one, which would send every datagram to member 0.
-- `Quic` reads a QUIC v1 or v2 header (RFC 9000 §17). A server issues every connection ID
-  with the owning member's index in its first byte. A short-header packet (fixed bit set,
-  long bit clear) steers by the first byte of its Destination Connection ID, at offset 1. A
-  Handshake long-header packet steers by the first byte of its Destination Connection ID, at
-  offset 6. An Initial or 0-RTT packet carries a connection ID the client invented, so it and
-  every other datagram, including a version this cannot read and a datagram too short for its
-  loads, steers by `Hash`. A retransmitted Initial keeps its source, so it reaches the member
-  that received the first one, which owns the handshake. The program checks each datagram's
-  length before every load, because a classic BPF load past the end of the packet ends the
-  program with 0, which would pick member 0. This is `moq-sock`'s filter
-  (`/tmp/ref-moq/rs/moq-sock/src/shard.rs:40-50,812-833`) for one generation.
+Apart from these, every datagram the host takes from the kernel is delivered once, in the
+kernel's order. The host never drops one to make room.
 
-Because the program returns an index below `members`, a socket that some other process of
-the same user later joins to the group (Linux lets any process of the same effective UID
-join, `udp.c:157-159`) is placed past the members and never chosen. A member that is
-dropped would let the kernel move the last socket into its index
-(`sock_reuseport.c:142-143`) and shift the steering. So the host keeps a dropped member's
-descriptor open until every member of its group is dropped, and discards what it receives.
-Member indices stay fixed for the group's life. Datagrams the group steers to a dropped
-member are lost until the whole group is dropped, so a program that stops serving a member
-keeps it, or rebinds the group.
+**Groups and steering.** A group is one kernel socket bound without `SO_REUSEPORT`, so no
+other socket, of this run or of any process of the same user, can share its endpoint (the
+kernel admits a same-user socket only when both set the option, `udp.c:157-159`). The host
+owns all dispatch. Its **intake**, the group's own pool of `slots` slots and the kernel
+socket, lives on the poller of the slot where `udp_bind_group` ran, for the group's whole
+life. A member may move to another unit; the intake then posts its datagrams to that unit's
+poller mailbox. The intake splits every coalesce into its datagrams first and steers each one
+alone, so two connections on one address and port tuple can reach two members. It copies
+each datagram into its member's queue, a ring of `slots` entries of `slot_bytes` each. A
+member's `udp_recv` delivers from that queue under the rules above. When a member's queue is
+full, the intake discards that member's datagram and goes on, so a flood aimed at one member
+cannot stop the others. Each intake turn takes at most 64 datagrams from the kernel, so a
+group with no active `udp_recv` still does bounded work per poller turn.
 
-**Endpoint query.** `udp_local_addr` returns the bound endpoint, or `Denied` for an opened
-socket that has not yet sent. It borrows, admits nothing and waits only as NET-1's queries
-do.
+`steer` picks the member for one datagram, from the datagram and its source alone. Every
+provider, the host and `std.sim.udp` compute it with the same function:
+
+- `Hash` is `fnv1a64(key) mod members`, where `key` is the family tag (`04` or `06`), the
+  source address in network order (4 or 16 bytes) and the source port (2 bytes,
+  big-endian), and `fnv1a64` is 64-bit FNV-1a (offset `0xcbf29ce484222325`, prime
+  `0x100000001b3`, each byte XORed then multiplied, modulo 2^64). One source endpoint
+  always reaches one member. Shared vectors:
+  - `192.0.2.1:443` has key `04c000020101bb` and hash `0x8a708e0d333ba182`, so member 2 of 8;
+  - `198.51.100.7:50000` has key `04c6336407c350` and hash `0x5b30a0307882ad36`, so member
+    2 of 3;
+  - `[2001:db8::1]:4433` has key `0620010db80000000000000000000000011151` and hash
+    `0x313cf93d25cae0e6`, so member 230 of 1,024.
+- `Quic` reads only QUIC's version-independent header (RFC 8999 §5), so it treats v1, v2
+  and every other version alike. A server using it issues every connection ID in this
+  format: one first octet the server chooses (QUIC-LB keeps it for config rotation), then
+  the owning member's index as a big-endian `u16`, then a nonce. It is at least 3 bytes,
+  and 8 or more is recommended. A **member field** is that `u16` when it is below `members`.
+  - A long-header datagram (`byte0 & 0x80`) has DCID length `d` at offset 5 and the DCID at
+    offsets `6..6+d`. When the datagram is shorter than 6 bytes or than `6 + d`, the datagram
+    steers by `Hash`. When `d ≥ 3` and bytes 7 and 8 form a member field, it goes to that
+    member. Otherwise, when `d ≥ 1`, it goes to member `fnv1a64(DCID) mod members`, and when
+    `d = 0` it steers by `Hash`.
+  - A short-header datagram has its DCID at offset 1 and carries no length for it. When it is
+    at least 4 bytes and bytes 2 and 3 form a member field, it goes to that member; otherwise
+    it steers by `Hash`.
+  - An empty datagram steers by `Hash`.
+
+  So a client's first Initial, its retransmissions and its 0-RTT packets share one DCID and
+  reach one member. An Initial after a Retry, and every Handshake and short-header packet,
+  carries a DCID the server issued and reaches the member it names. A Retry token or a
+  Handshake that names a member reaches that member whatever the source address. A
+  client-chosen DCID whose bytes 1 and 2 happen to form a member field also goes to that
+  member, which is still a function of the DCID. A shared vector: the long-header DCID
+  `8394c8f03e515708` (its member field `94c8` is out of range for 8 members) hashes to
+  `0xa3c8f732fcd9bf08`, so member 0 of 8.
+
+Steering gives affinity only. A sender chooses its source address (spoofed) and its DCID
+bytes, so it can aim every datagram at one member. Steering promises no fairness and
+authenticates no peer, and the per-member queue limits what such a flood costs the other
+members.
+
+A member index is fixed for the group's life. Dropping a member retires its queue (below).
+From then on, the datagrams steered to it are discarded until the last member is dropped and
+the kernel socket closes. A program that stops serving a member keeps it, or rebinds the group.
+
+**Endpoint query.** `udp_local_addr` returns the bound endpoint, which for a member is the
+group's. An opened socket that is not yet receiving gets `Denied`. The query borrows, admits
+nothing and waits only as NET-1's queries do.
 
 **The receive pool.** Each socket owns a receive pool of `slots` slots of `slot_bytes` each.
 The host receives into a slot and copies the payload to the caller's `buf` at delivery, so a
 slot is never lent to program memory. A slot returns to the pool once every datagram in it has
-been delivered; a coalesce that a batch delivered only in part keeps its slot until the rest
-is delivered.
+been delivered.
 The first 256 bytes of each slot are reserved for the host's per-datagram header (on
 io_uring, `io_uring_recvmsg_out`, the source address and the control messages); the rest is
-the slot's payload room. When `slot_bytes` is 65,792 the payload room is 65,536, at least
-the largest possible coalesce, and the host enables `UDP_GRO`. With any smaller value it does
-not, because the kernel truncates a coalesced datagram to the buffer it is given and the
-datagrams after the cut would be lost (`udp.c:2093-2098`). This is the rule that
-`quinn-udp` states for its receive buffers (`quinn-udp/src/unix.rs:133-141`), made a
-program-visible choice: a socket that many small flows reach wants many small slots; one
-that a few fast flows reach wants few large ones.
+the slot's payload room. When `slot_bytes` is 65,792 the payload room is 65,536. That is more
+than any coalesce Linux 7.0 builds (see Order and loss), and the host enables `UDP_GRO`. With
+any smaller value it does not, because the kernel truncates a coalesced datagram to the buffer
+it is given and the datagrams after the cut would be lost (`udp.c:2093-2098`). This is the
+rule that `quinn-udp` states for its receive buffers (`quinn-udp/src/unix.rs:133-141`), made
+a program-visible choice: a socket that many small flows reach wants many small slots; one
+that a few fast flows reach wants few large ones. A group's intake pool and each member's
+queue have the same `slots` and `slot_bytes`.
 
-The pool is run memory that the program sized, so it is charged, unlike other host memory
-behind a provider ([MEM-19](budgets.md#mem-19-limits)). `udp_open` and `udp_bind` admit
-`slots × slot_bytes` bytes, and `udp_bind_group` `members × slots × slot_bytes`, before
-issue, to the limit current at the call, together with each result handle. A refused
-admission raises `Capacity` with no host effect. The charge is the same on io_uring, on
-epoll, on a replay and against a served Net, because it is computed from the options alone
-([CAP-5](capabilities.md#cap-5-provider-operations)). The pool's record keeps its payer when
-the socket moves to another task or unit ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)),
-and dropping the socket refunds the whole charge to the limit that record leads to, at the
-drop, even while the host is still retiring the pool and its kernel registration. A
-cross-unit refund is an input of the paying unit, as for every refund.
+**Charges.** The pool is run memory that the program sized, so it is charged, unlike other
+host memory behind a provider ([MEM-19](budgets.md#mem-19-limits)). The host charges these
+amounts, each computed in exact arithmetic (a product above `2^64 − 1` is refused as
+MEM-22 says):
 
-**Steps.** Each operation is one call step ([MEM-30](budgets.md#mem-30-step-bounds)).
-`udp_recv` takes one further step for each 64 entries, or part of 64, of `out`'s spare
-capacity, and `udp_send` one for each 64 packets, or part of 64, of `pkts`. Both are taken at
-the call, before issue, from the call's arguments, so they never depend on how many datagrams
-arrive or commit, and a bound stops a run at the same step on the host, on a replay and against
-a served Net. The extra steps make a step bound limit the per-datagram work of a batch as
-`crc32c.update`'s per-chunk steps limit hashing.
+- `udp_open` and `udp_bind` admit `slots × slot_bytes` bytes.
+- `udp_bind_group` admits `(members + 1) × slots × slot_bytes`: the intake pool and one queue
+  per member.
+
+Each admission happens before issue, against the limit current at the call, together with
+each result handle, in one admission. A refused admission raises `Capacity` with no host
+effect. The charge is the same on io_uring, on epoll, on a replay and against a served Net,
+because it is computed from the options and `members` alone
+([CAP-5](capabilities.md#cap-5-provider-operations)). A group whose host creation fails
+after admission, partly or wholly, closes what it made. It then returns the whole charge
+once, after that is retired, and delivers the error. No member handle exists for a group that
+failed. The pool's record keeps its payer when the socket moves to another task or unit
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
+
+**Retirement.** A dropped socket's charge stays held until its host backing can be freed.
+The pool, its kernel registration and its descriptor are torn down first. That point is a
+**retirement**, and only then does the charge return as a refund to the limit its record
+leads to (MEM-20). Dropping cannot wait, so the drop starts retirement and returns, and
+retirement completes later as an input event of the paying unit
+([CONC-10](tasks.md#conc-10-event-order), [CONC-15](tasks.md#conc-15-units)), as a
+cross-unit refund is. It is recorded at its position as `Retired(ordinal)`, so an admission
+on replay sees exactly the refunds the recorded run saw. A later open whose admission comes
+before that event sees the old charge still held and can be refused. A pool's credit
+therefore never funds a new pool while the old one's storage is still live.
+
+- **Retiring a socket** cancels its armed receive and any send window, waits for their
+  terminal completions (NET-17), unregisters the pool and closes the descriptor. Datagrams
+  still queued in the kernel or the pool are discarded, and there is no linger.
+- **Retiring a member** stops the intake's dispatch to it and frees its queue. The intake
+  pool retires with the kernel socket, after the last member's retirement.
+- **Retiring on a served Net** happens when the server takes the socket's `Released` call.
+  A replay supplies the recorded position.
+
+A run that ends first discards its retirement events with the rest of its state.
+
+**Host allowance.** The kernel's socket queues use host memory up to the host's defaults
+(`net.core.rmem_default` and `wmem_default`), which no program limit pays for. The host
+therefore keeps one **UDP host allowance** per run, read once at run start from the host
+setting `HIRSEL_UDP_KERNEL_BYTES` (a byte count; unset means 64 MiB, and a value that is not
+a byte count refuses the run), as `HIRSEL_NET_REACTOR` chooses the backend. A socket reserves
+`rmem_default + wmem_default`, read once at run start, from the allowance from its creation
+until its retirement. A group reserves that amount once, for its one kernel socket. A
+reservation the allowance cannot meet, or a descriptor or socket the kernel refuses, returns
+`Exhausted` after issue with nothing created, and the refusal is recorded. This is physical
+backpressure, kept out of the logical admission of MEM-21: a served Net has no allowance and
+never returns `Exhausted` for it, so a refusal is a host input like any other delivered error.
+
+**Steps.** Each operation is one call step ([MEM-30](budgets.md#mem-30-step-bounds)), and a
+UDP batch takes further steps, all taken from the call's arguments before issue:
+
+- `udp_recv` takes one **entry step** for each 64 entries, or part of 64, of `out`'s spare
+  capacity. It also takes one **byte step** for each 16 KiB, or part of 16 KiB, of
+  `min(r, e × (slot_bytes − 256))`, where `r` is `buf`'s spare capacity and `e` is `out`'s
+  spare entries. That is the most it can deliver.
+- `udp_send` takes one entry step for each 64 packets, or part of 64, of `pkts`. It then
+  validates the list (the entry steps pay for this, since each packet costs a bounded rule
+  lookup, NET-15). Then it takes one byte step for each 16 KiB, or part of 16 KiB, of the sum
+  of the packets' `len`. Overlapping slices count once per packet, and the sum is the same
+  whatever commits or is retried.
+
+Steps never depend on how many datagrams arrive or commit, so a bound stops a run at the same
+step on the host, on a replay and against a served Net. The byte steps bound copying as
+`crc32c.update`'s 16 KiB chunks bound hashing. The host's own work outside calls, the
+intake's dispatch and the drain of a retiring socket, takes no program steps. It is bounded
+per poller turn instead (64 datagrams per turn).
 
 **Deadlines and cancellation.** Each operation keeps one absolute deadline through readiness
 retries and is a cancellation point at issue and while it waits
 ([CONC-7](tasks.md#conc-7-cancellation-points)). A receive or send whose host call has
-committed delivers its result even when cancellation arrives after it. A cancelled send
-returns `Aborted` only when it committed nothing; otherwise it returns the `k` committed.
+committed delivers its result even when cancellation arrives after it. A cancellation or a
+deadline can fall between two send windows (NET-17) but never inside one train. A cancelled
+send returns `Aborted` only when it committed nothing; otherwise it returns the `k` committed.
 
-**Dropping.** Dropping a socket closes it once (a group member: at the group's last drop),
-with no linger. Datagrams still queued in the kernel or the pool are discarded.
+**Dropping.** Dropping a socket starts its retirement (above). Dropping a member also ends
+dispatch to it. The group's kernel socket closes at the retirement of its last member.
 
 Laws:
 
-- a receive delivers at least one datagram; the first with room `r` appends exactly
-  `min(r, room, len)` bytes, where `room` is the slot's payload room, with `truncated` equal to
-  `len > min(r, room)`; every later datagram of the batch is whole; `at` of each entry is the
-  length of `buf` before its payload; and the datagrams delivered across successive receives
-  are exactly the kernel's queue, in order, with none lost or repeated by the host;
-- a send returning `k` committed packets `0..k`, each once and whole, and none after them,
-  whatever the host's GSO grouping, its backend, or a GSO send the kernel refused and the host
-  resent as single datagrams;
-- the charge admitted at open or bind equals the refund at drop, and depends only on the
-  options and `members`;
-- a group member's index never changes while the group lives, and no socket outside the
-  group's members receives a datagram the group's steering program chose.
+- On a receiving socket with `out` spare capacity `e ≥ 1`, a receive delivers at least one
+  datagram, and the first one with room `r` appends exactly `min(r, room, len)` bytes. Here
+  `room` is the slot's payload room, and `truncated` equals `len > min(r, room)`. Every later
+  datagram of the batch is whole, and `at` of each entry is the length of `buf` before its
+  payload. With `e = 0` the receive returns `Ok(0)` and takes nothing. Across successive
+  receives, the datagrams delivered are exactly what the host took from the kernel for this
+  socket or member, in order, less only the named exceptions of Order and loss.
+- A send returning `k` committed packets `0..k`, each once and whole, and none after them.
+  This holds whatever the host's GSO grouping, its windows or its backend, and when the
+  kernel refused a GSO train that the host resent as single datagrams. An empty packet
+  commits as one datagram.
+- The charge admitted at open, bind or group creation equals the refund at retirement. It
+  depends only on the options and `members`. No refund comes before the retirement of the
+  storage it paid for.
+- A member's index never changes while the group lives. Every datagram the intake takes goes
+  to the member `steer` names, or is discarded under a named exception. No socket outside the
+  group receives a datagram sent to the group's endpoint.
 
 **Moving between units.** A socket moved to another unit keeps its descriptor, its bound
-endpoint, its pool, its pool's payer and its group index. A datagram the host took from the
-kernel but had not delivered moves with it and is delivered first on the new owner, so a move
-never loses, repeats or reorders a datagram. Law: for any interleaving of moves and receives,
-the datagrams delivered across all owners are the kernel's queue in order. Its harness is
-the existing socket-transfer tests (`crates/hirsel-core-net/src/reactor/tests.rs`), and the
-oracle is the peer's sent sequence on loopback.
+endpoint, its pool, its pool's payer and, for a member, its group index. The host moves with
+it every datagram it took from the kernel but had not delivered, including the unread rest
+of a partly delivered coalesce with its cursor. These are delivered first on the new owner,
+before anything the new ring receives. So a move never loses, repeats or reorders a datagram.
+Law: for any interleaving of moves and receives, the datagrams delivered across all owners
+are, in order, the datagrams the host took from the kernel for that socket. The harness is
+the existing socket-transfer tests (`crates/hirsel-core-net/src/reactor/tests.rs`). Its
+oracle is the host's own dequeue trace of the socket, not the sender's sequence: a loopback
+kernel may drop on a full queue, and only the dequeue trace tells that drop from a transfer
+error.
 
 **Replay.** The grant snapshot holds each UDP rule's direction, prefix and ports. An issue
 holds the Net or socket ordinal, the endpoint or family, the options, `members` and `steer`,
 the spare capacities of `buf` and `out`, the packets and their bytes for a send, and the
-deadline. A delivery holds the new ordinals and bound endpoint, or the delivered datagrams
-(peer, length, truncation, ECN and appended bytes), or `k`, or the error. A replay supplies
-the recorded datagrams and touches no socket; which datagrams formed a batch is part of the
-record, so a replay delivers the same batches. A delivery that breaks the receive law above,
-or a send delivery with `k` above the number of packets, is `Corrupt`, found before any buffer
-changes. Dropping a host-issued `UdpSocket` is the provider's `CLOSE` at its position.
+deadline. A delivery holds one of:
+
+- the new ordinals and bound endpoint;
+- the delivered datagrams (peer, length, truncation, ECN and appended bytes);
+- `k`;
+- the error.
+
+A replay supplies the recorded datagrams and touches no socket. Which datagrams formed a
+batch is part of the record, so a replay delivers the same batches. A retirement is recorded
+as `Retired(ordinal)` at its position in the paying unit's order. Dropping a host-issued
+`UdpSocket` is the provider's `CLOSE` at its position. Every receive delivery, recorded or
+served, passes one validator before any buffer changes. It checks that the count is from 1
+to the spare entries, and that the packet records satisfy the receive law for the recorded
+`r` and slot room. It checks each `len` against the family maximum, each `ecn` against 3,
+each peer's family against the socket's, and for an opened socket each peer against its
+`UdpSend` rules. Finally, the appended bytes must total the sum of the records' appended
+lengths. A send delivery passes when `k` is at most the number of packets. A delivery that
+fails is `Corrupt`.
 
 **Served UDP.** A `provide.net` Net permits every UDP endpoint through one internal rule of
 each UDP direction, as served Unix does (NET-14); intersecting it with a concrete rule gives
@@ -723,18 +891,36 @@ the concrete rule. Its port receives these calls in addition to NET-14's:
 ```hirsel unbuilt
 pub type UdpNetOp = UdpOpen(v6: bool, slots: u32, slot_bytes: u32) | UdpBind(addr: Addr, slots: u32, slot_bytes: u32, members: u16, steer: Steer) | UdpRecv(socket: u64, room: u64, entries: u64) | UdpSend(socket: u64, data: u64, pkts: u64) | UdpLocal(socket: u64)
 pub type UdpNetReply = UdpSockets(first: u64, members: u16, addr: Addr) | UdpPackets(count: u64)
+pub type UdpStaged = UdpStaged(peer: Addr, len: u64, appended: u64, ecn: u8)
+pub fn fill_packets(mut s: Served[NetOp], mut c: Call[NetOp], take p: List[UdpStaged]) -> u64
 ```
 
 These variants join `NetOp` and `NetReply` when NET-16 is built. `UdpSend` is answered with
-the existing `Count(k)`, `UdpLocal` with `Address`, and any call with `Failed`; the build lane fixes their
-payload field numbers with `provide.payload`, as NET-14's are fixed. A `UdpBind` with
-`members` 1 is `udp_bind`. A `UdpPackets` reply must have staged exactly the batch the
-receive law allows for its `room` and `entries`, or the server fails with `Fail` before the
-caller changes; a `Count` reply to `UdpSend` above its packet count fails it the same way.
-The caller has already checked the rules, the options and the handle state before queueing the
-call, and has admitted the pool. A simulated network (`std.sim.udp`, Wave 0.3) is a server
-over exactly these calls: it decides loss, delay, reordering, duplication and address
-rebinding from its seed, and `hirsel test --sim` stands in for the host through them.
+the existing `Count(k)`, `UdpLocal` with `Address`, and any call with `Failed`. The build lane
+fixes their payload field numbers with `provide.payload`, as NET-14's are fixed. A `UdpBind`
+with `members` 1 is `udp_bind`. A served receive stages two things apart:
+
+- **payload bytes** with `provide.fill`, at most `room`;
+- **packet records** with `provide.fill_packets`, at most `entries`.
+
+`provide.fill_packets` stages at most `entries` records and returns how many it took. Its
+staging holds at most `entries` records of 48 bytes each, admitted from the server's current
+limit at the fill and freed at the reply. The caller derives each `at` itself from the
+running total of `appended`. So a receive with room 0 and one entry can still return the
+peer, the whole length, the ECN bits and `truncated` (`len > appended`). A `UdpPackets(count)`
+reply passes when `count` equals the staged records and they and the staged bytes pass the
+validator above with `r` set to `room`. Otherwise the server fails with `Fail` before the
+caller changes. A `Count` reply to `UdpSend` above its packet count fails it the same way. A
+`UdpSockets` reply must issue `members` fresh ids, `first` to `first + members − 1`, none of
+them live, and the room must hold 32 bytes for each. Its `addr` must have the family and
+address of the request, and its port must be the request's when that is nonzero. The caller
+validates all of this and reserves every id before it appends any handle, so a group is
+created whole or not at all. The caller has already checked the rules, the options and the
+handle state before queueing the call, and has admitted the pool. A simulated network
+(`std.sim.udp`, Wave 0.3) is a server over exactly these calls. It decides loss, delay,
+reordering, duplication and address rebinding from its seed, applies the same `steer`
+function and the same named discards, and `hirsel test --sim` stands in for the host
+through it.
 
 ### NET-17: UDP datapaths
 
@@ -745,59 +931,104 @@ reaches it; nothing here is visible to a program except through time.
 `HIRSEL_NET_REACTOR`): io_uring on Linux 6.13 and later where the ring opens, epoll
 otherwise. That is today's D5 default for every Net socket (Sam's Ruling 5, 2026-11-24:
 io_uring stays the `auto` default on 6.13 and later until the unified net and disk ring is
-measured), and UDP follows it with no selection of its own.
+measured), and UDP follows it with no selection of its own. A group's intake uses the poller
+of its home slot (NET-16).
+
+**Completion reservations.** A ring's completion queue holds at most 65,536 entries
+(`IORING_MAX_CQ_ENTRIES`, `io_uring.h:170-171`). An overflow past it is kept only while the
+kernel can allocate an overflow entry, and is otherwise dropped (`io_uring.c:637-641`). So
+the host never lets UDP completions reach overflow. Each ring keeps a reservation count
+against its completion queue size, and a UDP operation posts only into completions it has
+reserved:
+
+- An armed receive reserves 65 completions: at most 64 buffers are offered to the kernel at
+  once, so it posts at most 64 data completions and one terminal one.
+- A send window reserves one completion for each message and one for a cancel.
+
+A socket that arrives on a ring with no room for a receive reservation is still attached,
+since a move cannot fail. It is read instead by the ring's readiness poll and a `recvmmsg`
+in the poller turn, as on epoll, until a reservation frees. A send window that has no room
+waits under its deadline. A reservation is released when the host reaps its completions.
 
 **io_uring receive.** The socket registers its pool as one provided-buffer ring
 (`IORING_REGISTER_PBUF_RING`, ring entries a power of two below 65,536, `kbuf.c:634-637`) on
-its slot's ring, under a buffer group of its own, and arms one multishot `IORING_OP_RECVMSG`
-(`IORING_RECV_MULTISHOT` in the SQE's `ioprio`) with `MSG_TRUNC` in its message flags. Each
-completion fills one slot with an `io_uring_recvmsg_out` header, the source address, the
-`UDP_GRO` and TOS/TCLASS control messages and the payload. With `MSG_TRUNC` the header's
-`payloadlen` is the datagram's whole length even when the slot cut it (`io_uring/net.c:987-989`,
-`udp.c:2162-2163`), which is the `len` NET-16 delivers. The buffer ring is not incremental
-(`IOU_PBUF_RING_INC`): an incremental buffer cannot back a multishot `recvmsg`, because its
-leftover tail can be shorter than the header (`moq-uring` `udp.rs:5-10`). The pool is
-per socket, not shared per slot, so its charge has one payer and a socket moves without
-touching another socket's buffers.
+its slot's ring, under a buffer group of its own. It arms one multishot `IORING_OP_RECVMSG`
+(`IORING_RECV_MULTISHOT` in the SQE's `ioprio`) with `MSG_TRUNC` in its message flags. The
+host offers only free slots, and at most 64 at a time. Each completion fills one slot with
+an `io_uring_recvmsg_out` header, the source address, the `UDP_GRO` and TOS/TCLASS control
+messages and the payload. With `MSG_TRUNC` the header's `payloadlen` is the datagram's whole
+length even when the slot cut it (`io_uring/net.c:987-989`, `udp.c:2162-2163`), which is the
+`len` NET-16 delivers. The buffer ring is not incremental (`IOU_PBUF_RING_INC`): an
+incremental buffer cannot back a multishot `recvmsg`, because its leftover tail can be
+shorter than the header (`moq-uring` `udp.rs:5-10`). The pool is per socket, not shared per
+slot, so its charge has one payer and a socket moves without touching another socket's
+buffers.
 
-When every slot is full the kernel ends the multishot receive with `ENOBUFS`. Datagrams then
-wait in the socket's kernel queue, not lost by the host, and the host re-arms after a
-`udp_recv` returns slots. A multishot receive posts at most `slots` completions before it
-stops, so a slot ring's completion queue is sized for the sum of its armed sockets' `slots`
-plus its other armed operations; the host still relies on `IORING_FEAT_NODROP` for a burst
-past that, and handles overflow as the slot ring already does.
+A multishot receive can end after any datagram:
 
-**io_uring send.** `udp_send` issues one `IORING_OP_SENDMSG` per GSO train or single datagram,
-with `UDP_SEGMENT`, `IP_TOS`/`IPV6_TCLASS` as control messages on each message, all linked
-(`IOSQE_IO_LINK`) and submitted in one `io_uring_enter`. A failure cancels the rest of the
-chain, which gives NET-16's prefix commit. The kernel copies a datagram's bytes during the
-send, so the caller's borrow ends at the terminal completion; an abort first cancels the chain
-and waits for its terminal completions, as NET-7 takes back a held send. `SEND_ZC` is not
-used for UDP.
+- on `ENOBUFS` when the offered slots run out;
+- on a zero-length datagram (`io_uring/net.c:978`);
+- when the kernel cannot post a completion (`io_uring/net.c:904-905`).
 
-**epoll receive and send.** On epoll the same pool is the iovec array of one `recvmmsg` per
-readiness turn, with the same control messages; and a send is one `sendmmsg` whose messages
-are the same trains with the same `UDP_SEGMENT` control messages. `sendmmsg` returns the
-count of messages sent, a prefix, which gives NET-16's commit the same way.
+A terminal completion (one without `IORING_CQE_F_MORE`) with a nonnegative result carries a
+datagram, possibly an empty one, in its slot. The host consumes every successful completion
+of the old request, the terminal one included, before it arms a new one. It re-arms only
+over free slots, so datagrams wait in the socket's kernel queue meanwhile and the host loses
+none.
 
-**GSO refusal.** The kernel refuses a GSO send with `EIO` when the route uses IPsec
-transformation (`udp.c:1154-1157`), and with `EINVAL` past 128 segments
-(`UDP_MAX_SEGMENTS`, `include/linux/udp.h:133`, `udp.c:1146-1149`); some drivers also
-refuse it. A refused train is one skb, so nothing of it was sent; the host resends it as
-single datagrams and sends that socket's later packets without GSO, as `quinn-udp` does
-(`quinn-udp/src/unix.rs:553-566`). The host's train limit of 64 segments stays under the
-kernel's 128.
+**epoll receive.** The same pool is the iovec array of one `recvmmsg` per readiness turn,
+with `MSG_TRUNC` among its input flags so that each message's length is the datagram's whole
+length after a slot cut it (`udp.c:2162-2163`), and with the same control messages.
 
-**Teardown.** Before a socket's descriptor closes, its buffer group is unregistered, or its
-slot ring exits, the host cancels the armed multishot receive and any send chain
-(`IORING_OP_ASYNC_CANCEL`) and waits for their terminal completions (a completion without
-`IORING_CQE_F_MORE`). A move between units does the same on the old ring, carries any filled
-slot not yet delivered, re-registers the pool on the new slot's ring and re-arms there.
+**Sending.** The host validates the whole list first (NET-16) and then sends it in
+**windows** of at most 32 kernel messages, in order, under one deadline. A message is one
+GSO train or one single datagram, and an empty packet is always a single message. The next
+window is issued only after the previous one has fully completed. `k` is the sum of the
+packets that each accepted message carried, ending at the first message that was not accepted.
 
-**Target.** The build lane measures on Linux 7.0 loopback with 1,200-byte payloads: one unit
-on one pinned core receiving, counted as datagrams returned by `udp_recv`, and one unit on
-another pinned core sending 64-packet trains to one peer, counted as packets committed by
-`udp_send`. Each side must reach at least 1.0 million datagrams per second. The matched peer
-is `quinn-udp` (`recvmmsg` with `UDP_GRO`, `sendmsg` with `UDP_SEGMENT`) on the same CPUs,
-kernel and packet size, run from a minimal Rust loop with the same batch size, reporting
-instructions and cycles per datagram for both arms.
+- On io_uring, a window is one `IORING_OP_SENDMSG` per message, with `UDP_SEGMENT` and
+  `IP_TOS`/`IPV6_TCLASS` control messages, all linked (`IOSQE_IO_LINK`). The window is
+  published whole in one `io_uring_enter` after its 32 submission entries are free, since a
+  link chain ends at a submit boundary (`io_submit_state_end`, `io_uring.c:1927-1932`). A
+  failure cancels the rest of the chain, which gives NET-16's prefix commit. The kernel
+  copies a datagram's bytes during the send, so the caller's borrow ends at the window's last
+  terminal completion. An abort first cancels the chain and waits for those completions, as
+  NET-7 takes back a held send. `SEND_ZC` is not used for UDP.
+- On epoll, a window is one `sendmmsg` of at most 32 messages, below the kernel's window of
+  1,024 (`UIO_MAXIOV`, `socket.c:2704`). It returns the count of messages sent, a prefix.
+
+The host keeps 32 message headers and 32 iovecs per socket for its windows, whatever the
+caller's list length.
+
+**GSO refusal.** The kernel refuses a whole train at once, since a train is one skb, so a
+refused train sends nothing (`udp.c:1139-1159`). The host treats the refusals this way:
+
+- `EMSGSIZE` means a segment is larger than the device MTU (`udp.c:1143-1145`). A single
+  datagram of that size would fail too, so the refusal is `Oversize(0)` for the train's first
+  packet (NET-16), and GSO stays on.
+- `EIO` means the route uses IPsec transformation (`udp.c:1155-1157`). The host resends the
+  train as single datagrams, and sends that socket's later packets without GSO, as
+  `quinn-udp` does (`quinn-udp/src/unix.rs:553-566`).
+- `EINVAL` comes past 128 segments (`UDP_MAX_SEGMENTS`, `include/linux/udp.h:133`,
+  `udp.c:1147-1149`), or from a driver. The host's limit of 64 segments stays under 128, and
+  the host never sets `SO_NO_CHECK`, so `EINVAL` can only come from a driver. The host
+  handles it as `EIO`.
+
+**Teardown.** Retirement (NET-16) works the same way on both backends. Before a socket's
+descriptor closes, its buffer group is unregistered, or its slot ring exits, the host cancels
+the armed multishot receive and any send window (`IORING_OP_ASYNC_CANCEL`). It waits for
+their terminal completions, consumes any datagram they carry, and only then emits the
+retirement event. A move between units does the same on the old ring. It carries every filled
+slot not yet delivered, and the cursor of a partly delivered coalesce, then re-registers the
+pool on the new slot's ring and re-arms there over free slots only.
+
+**Target.** The build lane measures `udp_bind` sockets on Linux 7.0 loopback with
+1,200-byte payloads. One unit on one pinned core receives, counted as datagrams returned by
+`udp_recv`. One unit on another pinned core sends 64-packet logical batches to one peer,
+counted as packets committed by `udp_send`. Each side must reach at least 1.0 million
+datagrams per second. A 64 × 1,200-byte batch is 76,800 bytes, so it goes to the kernel as
+two trains under the 65,507-byte limit (54 and 10 packets). The matched peer is `quinn-udp`
+(`recvmmsg` with `UDP_GRO`, `sendmsg` with `UDP_SEGMENT`) on the same CPUs, kernel and packet
+size, run from a minimal Rust loop with the same two-train split. Both arms report
+instructions and cycles per datagram. A group's receive rate is bounded by its one intake
+core in W0.1, and the target does not claim that it scales per core.

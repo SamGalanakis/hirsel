@@ -16,8 +16,12 @@ Charges cover every block, node, region allocation, queue, task record, cause ce
 grant a program makes. They do not cover the call stack, host memory behind provider
 operations ([CAP-5](capabilities.md#cap-5-provider-operations)), or the engine's own
 bookkeeping: drop flags and the limit records of MEM-20. The one provider memory they do
-cover is a `UdpSocket`'s receive pool, whose size the program chooses
-([NET-16](net.md#net-16-udp-sockets-and-batches)).
+cover is a `UdpSocket`'s receive pool and a group's queues, whose size the program chooses
+([NET-16](net.md#net-16-udp-sockets-and-batches)). That charge is refunded at the pool's
+recorded retirement, not at the drop, so its credit never funds new storage while the old
+storage is live. The kernel's socket queues behind a `UdpSocket` are not charged here; the
+run's UDP host allowance bounds them, and a refusal there is a provider error, not a refused
+admission.
 
 ### MEM-20: Limit records and hand-over
 
@@ -125,7 +129,7 @@ is the most any build charges for the allocation (MEM-28):
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |
 | region allocation | its byte count, rounded up to 8 |
-| `UdpSocket` receive pool ([NET-16](net.md#net-16-udp-sockets-and-batches)) | slots × slot bytes, per member |
+| `UdpSocket` receive pool ([NET-16](net.md#net-16-udp-sockets-and-batches)) | slots × slot bytes; a group: (members + 1) × slots × slot bytes; refunded at retirement |
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
 | a `build_in` or `build_stream_in` allocation | `n`, rounded up to 8; after `finish_trim`, its used bytes, rounded up to 8 |
@@ -376,8 +380,11 @@ is core's plain record `{ steps: u64 }`.
   hash or a caller names a cost that no limit bounds ([core](core.md#argon2id)).
   `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
   16 KiB chunk, including a final partial chunk. `host.udp_recv` takes one further step for each 64 entries, or part of 64, of
-  its `out` spare capacity, and `host.udp_send` one for each 64 packets, or part of 64, of its
-  `pkts`, at the call and before issue ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
+  its `out` spare capacity, and one for each 16 KiB, or part, of the most it can deliver
+  (`min(r, e × (slot_bytes − 256))`). `host.udp_send` takes one for each 64 packets, or part
+  of 64, of its `pkts`, and after validating them one for each 16 KiB, or part, of the sum of
+  their lengths. All are taken at the call and before issue
+  ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
   takes no steps. This is the **reference count**, the count the reference evaluator takes;
   a build may count otherwise (Determinism, below).
 - **The current bound.** At each point exactly one step bound is current, or none: the

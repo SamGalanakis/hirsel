@@ -68,6 +68,7 @@ pub enum HostOp {
     EnvNarrow = 36,
     ProvideClock = hirsel_core_ids::host_op::PROVIDE_CLOCK as isize,
     ProvideRandom = hirsel_core_ids::host_op::PROVIDE_RANDOM as isize,
+    ProvideRandomTape = hirsel_core_ids::host_op::PROVIDE_RANDOM_TAPE as isize,
     ProvideProcess = hirsel_core_ids::host_op::PROVIDE_PROCESS as isize,
     ClockAdvance = hirsel_core_ids::host_op::CLOCK_ADVANCE as isize,
     ClockSetWall = hirsel_core_ids::host_op::CLOCK_SET_WALL as isize,
@@ -217,6 +218,7 @@ impl HostOp {
         HostOp::EnvNarrow,
         HostOp::ProvideClock,
         HostOp::ProvideRandom,
+        HostOp::ProvideRandomTape,
         HostOp::ProvideProcess,
         HostOp::ClockAdvance,
         HostOp::ClockSetWall,
@@ -337,6 +339,7 @@ impl HostOp {
             HostOp::EnvNarrow => "env_narrow",
             HostOp::ProvideClock => "provide_clock",
             HostOp::ProvideRandom => "provide_random",
+            HostOp::ProvideRandomTape => "provide_random_tape",
             HostOp::ProvideProcess => "provide_process",
             HostOp::ClockAdvance => "clock_advance_to",
             HostOp::ClockSetWall => "clock_set_wall",
@@ -419,6 +422,7 @@ impl HostOp {
             Self::EnvNarrow => "hirsel_core_env_narrow",
             Self::ProvideClock => "hirsel_core_provide_clock",
             Self::ProvideRandom => "hirsel_core_provide_random",
+            Self::ProvideRandomTape => "hirsel_core_provide_random_tape",
             Self::ProvideProcess => "hirsel_core_provide_process",
             Self::ClockAdvance => "hirsel_core_clock_advance_to",
             Self::ClockSetWall => "hirsel_core_clock_set_wall",
@@ -505,6 +509,7 @@ impl HostOp {
                 | HostOp::EnvNarrow
                 | HostOp::ProvideClock
                 | HostOp::ProvideRandom
+                | HostOp::ProvideRandomTape
                 | HostOp::ProvideProcess
                 | HostOp::ClockAdvance
                 | HostOp::ClockSetWall

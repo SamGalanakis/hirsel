@@ -114,6 +114,7 @@ host_ops! {
     CALL_PAYLOAD_PREFIX = 118,
     MKSTEMP = 119,
     ZERO_EXTENSION = 124,
+    PROVIDE_RANDOM_TAPE = 131,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.

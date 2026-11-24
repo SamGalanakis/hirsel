@@ -285,6 +285,7 @@ HirselCoreHostOutcome hirsel_core_exec_signal(HirselCoreContext *, uint64_t, uin
    key). The last argument of each call is the site. */
 HirselCoreHostOutcome hirsel_core_provide_clock(HirselCoreContext *, uint64_t mono, uint64_t wall, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_random(HirselCoreContext *, uint64_t seed, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_random_tape(HirselCoreContext *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_process(HirselCoreContext *, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_advance_to(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t hand, uint64_t wall, uint64_t);

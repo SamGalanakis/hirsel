@@ -1243,10 +1243,9 @@ impl RtOp {
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
-            RtOp::StepLeave => (vec![], vec![]),
+            RtOp::StepLeave | RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
-            RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::IsolateCatch => (vec![], vec![p]),
             RtOp::Host(op) => {
                 let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
@@ -1439,12 +1438,13 @@ impl RtOp {
                     | HostOp::EnvLen
                     | HostOp::ProvideRandom
                     | HostOp::ClockIdle
-                    | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
-                    HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideDir
+                    | HostOp::ProcessTrigger
+                    | HostOp::ProvideDir
                     | HostOp::ProvideNet
                     | HostOp::ProvideExec
                     | HostOp::PortNext => (vec![V(u64_)], outcome),
+                    HostOp::ProvideProcess => (vec![], outcome),
+                    HostOp::ProvideRandomTape => (vec![V(p)], outcome),
                     HostOp::ProvideStdout | HostOp::ProvideStderr => {
                         (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
                     }

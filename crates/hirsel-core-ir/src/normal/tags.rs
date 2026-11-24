@@ -521,6 +521,7 @@ tags!(HostOp {
     135 => SecretVerifyHmacSha512,
     136 => SecretJwsHmacSign,
     137 => SecretJwsHmacVerify,
+    138 => ProvideRandomTape,
 });
 
 tags!(RaiseCause {

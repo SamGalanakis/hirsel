@@ -43,6 +43,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         | HostOp::ClockIdle
         | HostOp::ProcessTrigger => &["u64"],
         HostOp::ProvideProcess => &[],
+        HostOp::ProvideRandomTape => &["ptr"],
         HostOp::ProvideDir | HostOp::ProvideNet | HostOp::ProvideExec | HostOp::PortNext => {
             &["u64"]
         }

@@ -36,7 +36,10 @@ use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
     cleanup_class, compute, field_size, map_entry,
 };
-use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse, secret_aead::SecretBytes};
+use hirsel_core_net::{
+    Name, SecretGrant, SecretPolicy, SecretUse, random_stream::RandomStream,
+    secret_aead::SecretBytes,
+};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use zeroize::Zeroizing;
@@ -303,7 +306,7 @@ enum VirtualCell {
         /// Tasks in `clock.idle`, and whether quiescence has woken each.
         idle: Vec<(usize, bool)>,
     },
-    Random(u64),
+    Random(RandomStream),
     Process {
         stopped: bool,
         waiters: Vec<usize>,
@@ -3005,7 +3008,14 @@ impl Machine<'_> {
                 );
                 ok(h, h)
             }
-            HostOp::ProvideRandom => ok(new(&mut self.world, VirtualCell::Random(a[0])), 0),
+            HostOp::ProvideRandom => ok(
+                new(
+                    &mut self.world,
+                    VirtualCell::Random(RandomStream::Seeded(a[0])),
+                ),
+                0,
+            ),
+            HostOp::ProvideRandomTape => self.provide_random_tape(t, a[0]),
             HostOp::ProvideProcess => {
                 let process = VirtualCell::Process {
                     stopped: false,
@@ -3360,27 +3370,7 @@ impl Machine<'_> {
                         }
                         ok(0, 0)
                     }
-                    HostOp::Random => {
-                        let (_, data, len, cap) = self.carrier(a[1]);
-                        let spare = cap.saturating_sub(len) as usize;
-                        let VirtualCell::Random(state) = &mut self.world.cells[c] else {
-                            unreachable!()
-                        };
-                        let mut bytes = Vec::with_capacity(spare);
-                        while bytes.len() < spare {
-                            // SplitMix64: eight little-endian bytes a step.
-                            *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                            let mut z = *state;
-                            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                            let step = (z ^ (z >> 31)).to_le_bytes();
-                            let n = (spare - bytes.len()).min(8);
-                            bytes.extend_from_slice(&step[..n]);
-                        }
-                        self.put(data + len, &bytes);
-                        self.store(a[1] + 8, 8, len + spare as u64);
-                        ok(0, spare as u64)
-                    }
+                    HostOp::Random => return Some(self.draw_virtual_random(c, a[1])),
                     _ => {
                         let waited = self.cell_wait(
                             t,
@@ -4636,6 +4626,7 @@ impl Machine<'_> {
             | HostOp::EnvNarrow
             | HostOp::ProvideClock
             | HostOp::ProvideRandom
+            | HostOp::ProvideRandomTape
             | HostOp::ProvideProcess
             | HostOp::ClockAdvance
             | HostOp::ClockSetWall

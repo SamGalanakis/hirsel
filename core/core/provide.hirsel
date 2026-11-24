@@ -6,6 +6,8 @@ pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
 
 pub fn random(seed: u64) -> Random
 
+pub fn random_tape(take b: Bytes) -> Random
+
 pub fn process() -> (Process, StopTrigger)
 
 // Served ports. Each operation on the capability waits after issue as a Call

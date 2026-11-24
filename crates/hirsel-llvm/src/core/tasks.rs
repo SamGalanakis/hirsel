@@ -180,6 +180,7 @@ impl FunctionEmitter<'_> {
             | HostOp::EnvNarrow
             | HostOp::ProvideClock
             | HostOp::ProvideRandom
+            | HostOp::ProvideRandomTape
             | HostOp::ProvideProcess
             | HostOp::ClockAdvance
             | HostOp::ClockSetWall

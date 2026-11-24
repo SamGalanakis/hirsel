@@ -1819,9 +1819,11 @@ that answers each draw with the next bytes of `b` in order. A draw longer than w
 faults the drawing task with `Bounds`, as a read past an array does. It is public `provide`
 surface, for vectors that fix a private key. It joins core's `provide` list in T13.
 
-The cell keeps `b` until the last holder of its `Random` drops, then frees it and refunds it
-to the limit that paid for it, after a unit move too (MEM-20). A cursor advances only by
-whole draws. A draw that does not fit consumes nothing.
+The cell admits 32 bytes plus `len(b)` and keeps the tape and its charge until run teardown,
+as for other [virtual cells](core.md#provide). `Random` is a plain, copyable capability, so
+dropping a copy does not release its storage or charge
+([declaration](../../core/core/core.hirsel#L111), [runtime](../../crates/hirsel-core-rt/src/provide.rs#L10-L11)).
+A cursor advances only by whole draws. A draw that does not fit consumes nothing.
 
 When a TLS-8 operation faults this way, nothing it started survives. Its owned provisional
 bytes (rejected and accepted candidates, a half-built PKCS#8 document) are zeroed. Everything

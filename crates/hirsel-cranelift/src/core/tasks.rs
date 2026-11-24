@@ -290,8 +290,7 @@ impl Function<'_, '_, '_> {
                     _ => null,
                 };
                 let mode = if op == HostOp::Open { args[2] } else { no_mode };
-                // The C outcome is always 32 bytes: value at 0, error.tag at 8,
-                // error.code at 12, written at 16, status at 24.
+                // C outcome fields: value at 0, error at 8, written at 16, status at 24.
                 let values = match op {
                     HostOp::Connect
                     | HostOp::Listen
@@ -348,6 +347,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::EnvNarrow
                     | HostOp::ProvideClock
                     | HostOp::ProvideRandom
+                    | HostOp::ProvideRandomTape
                     | HostOp::ProvideProcess
                     | HostOp::ClockAdvance
                     | HostOp::ClockSetWall

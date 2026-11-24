@@ -465,6 +465,7 @@ operations! {
     ("net", "join", Lane::Runtime(Kernel::Net(HostOp::NetJoin)), "B", "small-host-impl-1576", false),
     ("provide", "clock", Lane::Runtime(Kernel::Provide(HostOp::ProvideClock)), "B", "provide-r8a-1533", false),
     ("provide", "random", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandom)), "B", "provide-r8a-1533", false),
+    ("provide", "random_tape", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandomTape)), "B", "media-w0-crypto-build-2282", false),
     ("provide", "process", Lane::Runtime(Kernel::Provide(HostOp::ProvideProcess)), "B", "provide-r8a-1533", false),
     ("clock", "advance_to", Lane::Runtime(Kernel::Provide(HostOp::ClockAdvance)), "B", "provide-r8a-1533", false),
     ("clock", "set_wall", Lane::Runtime(Kernel::Provide(HostOp::ClockSetWall)), "B", "provide-r8a-1533", false),
@@ -896,7 +897,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Env(op) => self.runtime_env(op, vals, result, n),
-            Kernel::Provide(op) => self.runtime_provide(op, vals, result, n),
+            Kernel::Provide(op) => self.runtime_provide(f, op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::StreamTerminal(stream) => {
                 let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
@@ -2441,8 +2442,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => 1,
         };
         if matches!(op, HostOp::Random | HostOp::Stopped) {
-            let _ = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
-            return None;
+            return self.runtime_host_void(op, &args[..len], n);
         }
         if op == HostOp::Close {
             // Explicit CLOSE consumes on error and pre-issue cancellation too.

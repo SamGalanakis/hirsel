@@ -1068,6 +1068,9 @@ pub fn trigger(take t: StopTrigger)
   earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
   answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight
   little-endian bytes per step, so the same seed gives the same bytes on every engine.
+  `provide.random_tape(take b)` supplies successive whole draws from `b`, or raises
+  `Bounds` without moving the cursor if the next draw does not fit. The cell retains
+  its 32-byte charge and `len(b)` until run teardown, as specified in [TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement).
   `provide.process()` gives a `Process` whose `host.stopped` completes once
   `process.trigger` has run, including a trigger before the call; dropping a `StopTrigger`
   without triggering never stops. Dropping a `ClockHand` freezes its clock: pending sleeps

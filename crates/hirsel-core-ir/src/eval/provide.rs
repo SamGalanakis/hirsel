@@ -174,3 +174,38 @@ impl Machine<'_> {
         Ok(answer)
     }
 }
+
+impl Machine<'_> {
+    pub(super) fn provide_random_tape(&mut self, task: &Task, source: u64) -> Vec<u64> {
+        let charge = hirsel_core_layout::charge::PROVIDE_CELL + self.load(source + 8, 8);
+        let payer = task.limits.last().unwrap();
+        if let Err(available) = self.admit(payer, charge) {
+            return vec![charge, 1, 0, available];
+        }
+        let tape = RandomStream::tape(self.carrier_bytes(source).to_vec());
+        let handle = CELL_BASE + self.world.cells.len() as u64;
+        self.world.cells.push(VirtualCell::Random(tape));
+        self.world.grant_charges.push((payer.clone(), charge));
+        vec![handle, 0, 0, 0]
+    }
+
+    pub(super) fn draw_virtual_random(&mut self, cell: usize, carrier: u64) -> X<Vec<u64>> {
+        let (_, data, len, cap) = self.carrier(carrier);
+        let spare = cap.saturating_sub(len) as usize;
+        if spare == 0 {
+            return Ok(vec![]);
+        }
+        let (block, offset) = self.check_write(data + len, spare);
+        let VirtualCell::Random(stream) = &mut self.world.cells[cell] else {
+            unreachable!()
+        };
+        let bytes = &mut self.mem[block].bytes[offset..offset + spare];
+        // SAFETY: MaybeUninit<u8> has the layout of u8 and draw only writes initialized bytes.
+        let out = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), spare) };
+        if !stream.draw(out) {
+            return Err(Stop::Cause("Bounds"));
+        }
+        self.store(carrier + 8, 8, len + spare as u64);
+        Ok(vec![])
+    }
+}

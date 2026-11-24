@@ -12,6 +12,7 @@
 //! a capability is plain and copyable, so nothing earlier proves it gone.
 mod net;
 mod payload;
+pub(crate) mod random;
 mod replies;
 use replies::answers;
 
@@ -22,7 +23,10 @@ use crate::unix_net::{
 };
 use crate::{Context, causes, provider::*};
 use hirsel_core_layout::charge::PROVIDE_CELL;
-use hirsel_core_net::exec::{ExecRules, served as exec};
+use hirsel_core_net::{
+    exec::{ExecRules, served as exec},
+    random_stream::RandomStream,
+};
 use std::{
     collections::BTreeMap,
     mem::ManuallyDrop,
@@ -32,7 +36,7 @@ use std::{
 
 enum Cell {
     Clock(Mutex<ClockCell>),
-    Random(Mutex<u64>),
+    Random(Mutex<RandomStream>),
     Process(Mutex<ProcessCell>),
     Port(Mutex<Port>),
 }
@@ -858,15 +862,6 @@ fn ready_all(tokens: Vec<u64>) {
     }
 }
 
-/// SplitMix64 (Steele, Lea and Flood 2014): eight little-endian bytes a step.
-fn split_mix(state: &mut u64) -> [u8; 8] {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    (z ^ (z >> 31)).to_le_bytes()
-}
-
 /// I: every cell operation finishes here.
 unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: as `wait`; RANDOM's buffer owns its spare capacity.
@@ -883,24 +878,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             }
         }
         (Cell::Random(random), RANDOM) => {
-            let mut random = lock(random);
-            let spare = request.buffer.capacity.saturating_sub(request.buffer.len);
-            let mut filled = 0;
-            while filled < spare {
-                let bytes = split_mix(&mut random);
-                let n = (spare - filled).min(8);
-                // SAFETY: bounded to the carrier's spare capacity.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        request.buffer.data.add(request.buffer.len + filled),
-                        n,
-                    )
-                };
-                filled += n;
-            }
-            request.buffer.len += filled;
-            outcome.written = filled as u64;
+            // SAFETY: the request pins its exclusively writable spare.
+            outcome = unsafe { random::draw_request(&mut lock(random), &mut request.buffer) };
         }
         (Cell::Port(port), PORT_NEXT) => return next_step(state, port, token),
         (Cell::Port(port), RELEASE | CLOSE)
@@ -1092,7 +1071,7 @@ impl Cells {
     unsafe fn add(
         &self,
         context: *mut Context,
-        cell: Cell,
+        make: impl FnOnce() -> Cell,
         charge: u64,
     ) -> Result<Provider, Outcome> {
         // SAFETY: a running context has a current payer.
@@ -1109,8 +1088,9 @@ impl Cells {
             forget: forget_cells,
             drop_cells,
         });
+        let cell = Box::new(make());
         let mut cells = lock(&self.0);
-        cells.push((Box::new(cell), payer, charge));
+        cells.push((cell, payer, charge));
         Ok(Provider {
             state: (&raw const *cells.last().unwrap().0).cast_mut().cast(),
             ..PROVIDER
@@ -1145,11 +1125,13 @@ pub unsafe extern "C" fn hirsel_core_provide_clock(
     let provider = match unsafe {
         files.registry.run_grants().cells.add(
             context,
-            Cell::Clock(Mutex::new(ClockCell {
-                mono,
-                wall,
-                ..ClockCell::default()
-            })),
+            || {
+                Cell::Clock(Mutex::new(ClockCell {
+                    mono,
+                    wall,
+                    ..ClockCell::default()
+                }))
+            },
             PROVIDE_CELL,
         )
     } {
@@ -1176,11 +1158,11 @@ pub unsafe extern "C" fn hirsel_core_provide_random(
     let files = unsafe { files(context) };
     // SAFETY: forwarded.
     let provider = match unsafe {
-        files
-            .registry
-            .run_grants()
-            .cells
-            .add(context, Cell::Random(Mutex::new(seed)), PROVIDE_CELL)
+        files.registry.run_grants().cells.add(
+            context,
+            || Cell::Random(Mutex::new(RandomStream::Seeded(seed))),
+            PROVIDE_CELL,
+        )
     } {
         Ok(provider) => provider,
         Err(refused) => return refused,
@@ -1202,7 +1184,7 @@ pub unsafe extern "C" fn hirsel_core_provide_process(context: *mut Context, _sit
     let provider = match unsafe {
         files.registry.run_grants().cells.add(
             context,
-            Cell::Process(Mutex::new(ProcessCell::default())),
+            || Cell::Process(Mutex::new(ProcessCell::default())),
             PROVIDE_CELL,
         )
     } {
@@ -1420,7 +1402,7 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
             .registry
             .run_grants()
             .cells
-            .add(context, Cell::Port(Mutex::new(port)), charge)
+            .add(context, || Cell::Port(Mutex::new(port)), charge)
     } {
         Ok(provider) => provider,
         Err(refused) => return refused,

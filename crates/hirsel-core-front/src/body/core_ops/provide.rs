@@ -1,11 +1,22 @@
 use super::*;
 
 impl Cx<'_, '_, '_> {
+    pub(super) fn runtime_host_void(
+        &mut self,
+        op: HostOp,
+        args: &[Arg],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        self.runtime_row(RtOp::Host(op), args, n)?;
+        None
+    }
+
     /// `provide.clock/random/process/stdout/stderr`, the hand operations and
     /// the served-port operations (core.md, Provide). A constructor's pair is
     /// (value, written): the capability and its hand or `Served` end.
     pub(super) fn runtime_provide(
         &mut self,
+        f: usize,
         op: HostOp,
         vals: &[Option<ValueId>],
         result: TyId,
@@ -99,6 +110,13 @@ impl Cx<'_, '_, '_> {
                 Some(self.pointer(to, n))
             }
             HostOp::ProvideRandom => Some(value),
+            HostOp::ProvideRandomTape => {
+                let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+                self.raise_unless(ok, value, written, n);
+                self.consume(vals[0], n);
+                self.drop_field(vals[0], self.p.fns[f].params[0].ty, n);
+                Some(value)
+            }
             HostOp::ClockIdle => {
                 let zero = self.konst(u, 0, n)?;
                 let some = self.test(CompareOp::Ne, written, zero, n);

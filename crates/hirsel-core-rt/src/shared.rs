@@ -24,7 +24,7 @@ use crate::{
     units::ledger::{ArrivalRef, Body, Port},
     units_lang::{Cross, LangUnit},
 };
-use hirsel_core_layout::cross::{SEQ, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, FUNCTION, SEQ, SHARED};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::{Arc, Mutex};
@@ -234,6 +234,7 @@ pub(crate) unsafe fn clean(unit: &mut LangUnit, context: *mut Context, node: *mu
                     }
                 }
                 SHARED => release(unit, context, word(at) as *mut u8),
+                CAPABILITY | FUNCTION => {}
                 // Clients and sockets are resources, never shareable (OWN-4).
                 _ => unreachable!("a resource in a Shared payload"),
             }

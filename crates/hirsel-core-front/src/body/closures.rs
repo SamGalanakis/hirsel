@@ -314,7 +314,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let value = if self.live() {
             let result = self.value(Ty::Ptr);
-            self.inst(Inst::FunctionRef { result, function }, n);
+            self.item_value(result, f, &scratch.tys, function, ty, n);
             Some(result)
         } else {
             None

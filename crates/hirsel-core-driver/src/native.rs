@@ -1681,7 +1681,7 @@ fn link_objects(
                     &revision.0,
                     &build.0,
                     &revisions,
-                    (live_sites, spawns_units),
+                    (live_sites, spawns_units, (&*members, &keys)),
                 )
                 .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
             std::fs::write(&entry, &bytes)?;
@@ -2300,7 +2300,7 @@ fn f5 = n5 g5 extern
                     &[0; 32],
                     &[0; 32],
                     &[],
-                    (None, false),
+                    (None, false, (&[], &[])),
                 )
                 .unwrap();
             std::fs::write(path("unit.o"), object.bytes).unwrap();

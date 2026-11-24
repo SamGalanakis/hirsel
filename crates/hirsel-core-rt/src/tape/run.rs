@@ -1,5 +1,6 @@
 //! Run tapes are owned by process startup. Main receives only substitutes;
 //! Replay constructs its grants from the entry signature, with no host provider.
+pub(crate) mod identities;
 mod launch;
 use launch::{read_launch, write_launch};
 
@@ -646,9 +647,11 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
 }
 
 /// Recording entry for a program whose ordinary run can spawn helper units.
+/// `descriptors` is the link's descriptor index ([`identities`]).
 ///
 /// # Safety
-/// As hirsel_core_os_run_recording.
+/// As hirsel_core_os_run_recording; `descriptors` is pinned for the process.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
     input: *const OsConfig,
@@ -658,9 +661,13 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
     build: *const [u8; 32],
+    descriptors: *const u64,
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
-    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision, build) }
+    unsafe {
+        identities::install(descriptors);
+        run_recording::<true>(input, names, sources, entry, identity, revision, build)
+    }
 }
 
 unsafe fn run_recording<const UNITS: bool>(

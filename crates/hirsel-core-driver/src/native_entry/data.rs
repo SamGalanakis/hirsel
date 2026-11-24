@@ -38,6 +38,23 @@ pub(super) fn carrier(
     row[8..16].copy_from_slice(&32u64.to_le_bytes());
     define(object, Some(symbol), row, 8, &[(0, bytes)])
 }
+/// The descriptor index of a recording entry that can spawn units: a `u64`
+/// count, then the address of each code descriptor `names` gives
+/// (`{code, length, revision}` then the identity bytes, PROG-9).
+pub(super) fn descriptors(object: &mut ObjectModule, names: &[Vec<u8>]) -> Result<DataId> {
+    let mut rows = (names.len() as u64).to_le_bytes().to_vec();
+    let mut pointers = Vec::with_capacity(names.len());
+    for name in names {
+        let name = std::str::from_utf8(name).map_err(error)?;
+        let id = object
+            .declare_data(name, Linkage::Import, false, false)
+            .map_err(error)?;
+        pointers.push((u32::try_from(rows.len()).map_err(error)?, id));
+        rows.extend_from_slice(&0u64.to_le_bytes());
+    }
+    define(object, None, rows, 8, &pointers)
+}
+
 fn define(
     object: &mut ObjectModule,
     name: Option<&str>,

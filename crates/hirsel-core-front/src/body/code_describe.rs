@@ -154,7 +154,61 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (result, word)
     }
 
-    fn code_identity_recipe(
+    /// Item `f` at `types` as a plain `fn` value of type `ty`, calling row
+    /// `function`, into `result`.
+    ///
+    /// A unit's entry is a plain `fn(take X) -> R` value that may arrive
+    /// through any parameter, so a recorded spawn finds its PROG-9 identity
+    /// by its code word ([recording](../../../../docs/recording.md), "Helper
+    /// stream header"). Each item made such a value defines the descriptor of
+    /// the row its value calls; the link indexes every descriptor.
+    pub(super) fn item_value(
+        &mut self,
+        result: ValueId,
+        f: usize,
+        types: &[TyId],
+        function: FuncId,
+        ty: TyId,
+        n: NodeId,
+    ) {
+        self.inst(Inst::FunctionRef { result, function }, n);
+        let TyKind::Fn(params, _, _, Callable::Plain) = self.t.kind(ty) else {
+            return;
+        };
+        if !matches!(params[..], [(Mode::Take, _)]) {
+            return;
+        }
+        let Ok((raw, _)) = self.instance_row(f, types) else {
+            return;
+        };
+        let Some(recipe) = self.code_identity_recipe(f, raw, types) else {
+            return;
+        };
+        let depends_on_enclosing = self.p.fns[f]
+            .generics
+            .iter()
+            .zip(types)
+            .any(|(g, &ty)| !g.region && has_param(&self.t, ty));
+        let identity = if depends_on_enclosing {
+            // Rendered per instance, as a described generic's is.
+            self.descriptor_recipes.insert(function, recipe);
+            self.e.static_bytes(&[1])
+        } else {
+            let bytes = recipe.render(&[]).expect("closed descriptor recipe");
+            self.e.static_bytes(&bytes)
+        };
+        let result = self.value(Ty::Ptr);
+        self.inst(
+            Inst::DescriptorRef {
+                result,
+                function,
+                identity,
+            },
+            n,
+        );
+    }
+
+    pub(super) fn code_identity_recipe(
         &self,
         item: usize,
         raw: FuncId,

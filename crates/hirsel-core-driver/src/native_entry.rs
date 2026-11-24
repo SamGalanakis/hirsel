@@ -26,6 +26,11 @@ use code::{Code, I8, I32, I64};
 pub(crate) use data::source_site;
 pub(crate) use sites::{Referenced, check_linked_sites, live_site_words, runtime_sources};
 type Result<T> = std::result::Result<T, String>;
+/// The link's members and their keys (`runtime_sources`).
+type Inputs<'a> = (
+    &'a [std::sync::Arc<[u8]>],
+    &'a [(hirsel_core_ids::ContentHash, u64)],
+);
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -113,6 +118,21 @@ pub(crate) fn policy(
     )
 }
 impl<'a> Plan<'a> {
+    /// A recording entry of a program that can spawn units: it hands the
+    /// runtime the link's descriptor index.
+    pub(crate) fn recording_units(&self, spawns_units: bool) -> bool {
+        self.recording && self.replay.is_none() && spawns_units
+    }
+
+    /// The link's descriptor names for [`Self::recording_units`], else none.
+    pub(crate) fn descriptors(
+        &self,
+        spawns_units: bool,
+        members: &[std::sync::Arc<[u8]>],
+        keys: &[(hirsel_core_ids::ContentHash, u64)],
+    ) -> std::io::Result<Vec<Vec<u8>>> {
+        sites::descriptors(self.recording_units(spawns_units), members, keys)
+    }
     pub(crate) fn new(
         symbol: String,
         identity: String,
@@ -279,7 +299,7 @@ impl<'a> Plan<'a> {
         revision: &[u8; 32],
         build: &[u8; 32],
         revisions: &[(String, [u8; 32])],
-        (live_sites, spawns_units): (Option<&BTreeSet<u64>>, bool),
+        (live_sites, spawns_units, (members, keys)): (Option<&BTreeSet<u64>>, bool, Inputs<'_>),
     ) -> Result<Vec<u8>> {
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
@@ -299,6 +319,14 @@ impl<'a> Plan<'a> {
         } else {
             None
         };
+        let descriptors = if self.recording_units(spawns_units) {
+            let names = self
+                .descriptors(spawns_units, members, keys)
+                .map_err(error)?;
+            Some(data::descriptors(&mut object, &names)?)
+        } else {
+            None
+        };
         let signature = signature(&object, &[I64, I64, I64], Some(I8));
         let entry = object
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
@@ -313,6 +341,7 @@ impl<'a> Plan<'a> {
             waits,
             spawns_units,
             build,
+            descriptors,
         )?;
         let mut product = object.finish();
         unwind.write(&mut product).map_err(error)?;

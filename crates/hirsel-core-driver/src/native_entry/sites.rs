@@ -43,6 +43,23 @@ pub(crate) fn runtime_sources(
     })
 }
 
+/// The link names of every code descriptor the inputs define, sorted: the
+/// index a recording entry gives the runtime, which finds a spawned
+/// helper's entry identity by its code word (docs/recording.md).
+/// None unless `indexed`.
+pub(super) fn descriptors(
+    indexed: bool,
+    members: &[std::sync::Arc<[u8]>],
+    keys: &[(hirsel_core_ids::ContentHash, u64)],
+) -> std::io::Result<Vec<Vec<u8>>> {
+    let mut names = BTreeSet::new();
+    for (n, key) in keys.iter().enumerate().filter(|_| indexed) {
+        let scan = crate::resident::REFERENCED.get_or(Some(*key), || referenced(&members[n]))?;
+        names.extend(scan.descriptors.iter().cloned());
+    }
+    Ok(names.into_iter().collect())
+}
+
 /// [`filter`]'s result for `sources` from its result `prior` for the map
 /// `transition` was rebased from: none when the files it keeps would change.
 fn rebase(
@@ -199,6 +216,8 @@ fn named_items(sources: &SourceMap, names: &HashSet<&[u8]>) -> Vec<bool> {
 pub(crate) struct Referenced {
     items: std::sync::Arc<[Vec<u8>]>,
     spawns_units: bool,
+    /// The code descriptors (PROG-9) the object defines, by link name.
+    descriptors: std::sync::Arc<[Vec<u8>]>,
     digest: hirsel_core_ids::ContentHash,
 }
 
@@ -206,6 +225,17 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let mut items = HashSet::new();
     let mut spawns_units = false;
     let object = object::File::parse(input).map_err(std::io::Error::other)?;
+    let mut descriptors = BTreeSet::new();
+    for symbol in object.symbols() {
+        if symbol.is_definition()
+            && symbol.is_global()
+            && let Ok(name) = symbol.name_bytes()
+            && name.ends_with(b"$static")
+        {
+            descriptors.insert(name.to_vec());
+        }
+    }
+    let descriptors: Vec<_> = descriptors.into_iter().collect();
     for section in object.sections() {
         if !allocatable(&section) {
             continue;
@@ -229,12 +259,16 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let mut items: Vec<_> = items.into_iter().collect();
     items.sort_unstable();
     let digest = hirsel_core_ids::ContentHash::of_parts(
-        "hirsel.site-references.v1",
-        std::iter::once(&[u8::from(spawns_units)][..]).chain(items.iter().map(Vec::as_slice)),
+        "hirsel.site-references.v2",
+        std::iter::once(&[u8::from(spawns_units)][..])
+            .chain(items.iter().map(Vec::as_slice))
+            .chain(std::iter::once(&b"descriptors"[..]))
+            .chain(descriptors.iter().map(Vec::as_slice)),
     );
     Ok(Referenced {
         items: items.into(),
         spawns_units,
+        descriptors: descriptors.into(),
         digest,
     })
 }

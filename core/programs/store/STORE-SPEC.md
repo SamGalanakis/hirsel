@@ -1,4 +1,14 @@
-# STORE-SPEC v2.81: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.82: the M4 store library (lane store-spec-1001)
+
+v2.82 (journal-prealloc-spec-r2-2173, astra journal-prealloc-attack-2168): text only, **not yet built**. Revises v2.80's zero window on six points (CHANGES-v2.82):
+- **Admission.** The window runs only where the directory's provider guarantees that a byte newly exposed past the old file end reads, after a crash, as zero or as the byte written. The host answers one probe at open: ext4 with a positive `data=ordered` or `data=journal`, tmpfs, and the sim fs and crash bridge say yes; everything else says no. Elsewhere T = 0, which is today's append path.
+- **Commit law.** acked ⊆ recovered ⊆ issued, with recovered a commit-order prefix. A window zero can complete an issued frame before its ack, as a fresh segment already could.
+- **Follower witness.** The walk binds its stop, never canonicalizes a full nonzero head that does not fit, witnesses a short HEADER by its bytes, and reads each chunk once. It builds on follower-durable-2172's live-capture barrier.
+- **Disk.** T = min(W, ⌊f / 4,096⌋ × 4,096) and a step never runs past e + T. So the bytes past a segment's last frame never exceed its frame bytes f, at every crash cut. No truncate is needed, and a segment under 4 KiB of frames has no window.
+- **Latency.** A burst gate measures queue-inclusive latency.
+- **L86.** L86 states the reader's byte-image contract; writer invariants move to real-worker cases.
+
+Reversible: code, as v2.80.
 
 v2.81 (m3-s5-cell-2164, M3 S5): **built** for reads and the cut's fold edits. The attempt record of §13.3 is one `core.Cell[TieredTouchSet]` that the driver creates outside the body's isolation and step bound, so a step stop or a caught failure anywhere in a touch leaves it whole. A first touch commits by one assignment of an `intent`, made after every step that can stop or refuse, and every access to the record settles a pending intent first. The 24 B/slot exact-growth reservation and the `touch_slots` option are deleted: the touched set grows one reservation per first touch and is priced as `charge.map(bytes[u64], bytes[()], n)`. The attempt's frame list is deleted: the pin map the driver holds unchanged for the attempt anchors every returned view. Reversible: a code change, with no format change.
 
@@ -193,6 +203,77 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.82 (journal-prealloc-spec-r2-2173: the zero window after astra's attack 2168; not yet built)
+
+Astra's review of v2.80 (`journal-prealloc-attack-2168/ATTACK.md`) returned IMPLEMENT WITH FIXES. Each row answers one of its sections. The prize is unchanged: on this host's ext4 a synced 4 KiB overwrite of written blocks costs 20 µs and a synced append 96 µs (research-1124 `iouring-completion/PLAN.md`). This host mounts every ext4 file system `data=ordered` (`/proc/fs/ext4/*/options`), so the window is admitted where Store runs here.
+
+| Item | v2.82 decision | Where |
+|---|---|---|
+| Writeback exposure (ATTACK §2, §5) | The window runs only where the host's `zero_extension(d)` probe says the provider guarantees zero-or-written extension: ext4 with a positive `data=ordered`/`data=journal` in `/proc/fs/ext4/<name>/options`, tmpfs, the sim fs and the crash bridge. Elsewhere T = 0, the same code as today's append. The mount property is probed, not a store option: the mount is outside input, and an option that is wrong on a writeback mount makes one crash refuse `open` | §3.3a Admission |
+| Commit law (ATTACK §1) | acked ⊆ recovered ⊆ issued, recovered a commit-order prefix. This is the contract before v2.80. A window zero adds a way for an issued frame to recover before its ack. "Exactly acked" is not the law | §3.3a, §3.6, L86 |
+| Follower witness (ATTACK §6, Other) | The walk rule below. The live-capture durability barrier and the size refresh are follower-durable-2172's rule, and the window's implementation lands after it | §3.3a, below |
+| Disk (ATTACK §7) | T rounds down: T = min(W, ⌊f / 4,096⌋ × 4,096) ≤ f, and a step never writes past e + T. So bytes past a segment's frames are at most its frame bytes, at every cut, with no per-segment term. No truncate on close or cut. v2.80's Σ(T_i + 4,096), its factor of two and its one-window `ENOSPC` claim are withdrawn | §3.3a Disk, §11.11 C-4 |
+| Step size (ATTACK §7 SPEC-TEXT) | s = min(E, T − (w − e)), never zero when due. §3.2's "write E" becomes s. "Allocates nothing" is narrowed to the step and its chunk | §3.2, §3.3a |
+| Latency (ATTACK §8) | A frame's ack can wait behind the step already running plus each 64th-group step due ahead of it. The one-step claim and "once per E of frames" are withdrawn. The gate measures queue-inclusive burst latency (IMPL) | §3.3a Delay |
+| Unused-space damage (ATTACK Other) | Media damage turning the first window byte into a reserved kind makes `open` refuse. Stated, not repaired | §3.3a |
+| Recycling (ATTACK §3) | The exclusion is narrowed to retaining unsanitized payload. A scrub-then-publish scheme is reader-compatible and not taken | §3.3a |
+| L86 (ATTACK SPEC-TEXT) | The reader's byte-image contract. Writer offsets, ack counts and the bound past e move to the real-worker cases | §5 L86 |
+
+**The follower witness (v2.82).** `log_journal_witness` (`store-manifest.hirsel` 894) must make equal witnesses imply equal recovery results, so that a reused capture is the capture a fresh read would make. Middle segments are unchanged: they hash [0, `prev_end`). For the terminal segment:
+1. Read the END boundary first and hash it, as today. Call it d, or 72 when there is no good END.
+2. **A short HEADER.** When the size is below 72, hash a short-header tag, the size and the bytes [0, size), and stop. There is no walk and no 72-byte extent. The existing recovery rule decides what such a segment means (§3.4 step 5).
+3. **The walk.** From 72, read heads, hash [0, z) and stop at the first position z where one of these holds:
+   - **short:** fewer than 16 bytes remain before the size;
+   - **zero:** the head's kind is 0;
+   - **no fit:** the head's kind is nonzero and its frame (16 bytes plus its `len`, §2.1) runs past the size.
+
+   A frame that fits is stepped over and hashed, whatever its kind, flags or checksum. The walk raises no reader error: it never calls `disk_read_frame_head`. So a reserved kind, a bad flag or an oversize declaration is bound to the witness as bytes and left to recovery.
+4. **The stop record.** Hash z. Then:
+   - if z ≥ d and the stop is short or zero, hash one canonical torn token;
+   - otherwise, hash the stop's class, the bytes present in [z, min(z + 16, size)), and the size.
+
+   Recovery reads a short or zero head at or past `d` as the torn tail, whatever its bytes. So zeros a step adds past the stop leave the witness unchanged. Below `d` the same heads are different errors (`Truncated`, `Corrupt`), and a full nonzero head that does not fit can be `Unsupported`, `Flags`, `Malformed` or torn depending on its bytes. Those are bound, never canonicalized. ATTACK 2168 §6's images A (16 zeros at e) and B (a reserved-kind head declaring one byte, with only the head present) differ.
+5. **Recovery's stop is at or before z.** Recovery also stops at a fitting frame with a bad check. Where it stops, and with which result, is then a function of the hashed bytes [0, z), the stop record and d.
+6. **Reads.** One 64 KiB chunk is kept with its offset. The walk reads the next chunk only when a head or the hashed range passes the chunk's end, and each byte is read once. A head that straddles two chunks is assembled from both. A host read shorter than requested is continued and is not EOF before the size.
+7. **Live capture.** The witness covers the bytes the capture actually read. follower-durable-2172 makes those bytes durable on the same handle before a live follower publishes, and refreshes the size on that handle before it concludes truncation. v2.82 builds on that rule and does not restate it. The window widens the window of that race: frames written in place fall inside the stat size. So the window's implementation lands only after 2172's SHA is on main.
+
+**The export copy (v2.80, completed).** For each middle segment, `copy_log_export` copies exactly its successor HEADER's `prev_end`, read through `journal_header` (`store-manifest.hirsel` 859). An early EOF is an error. A successor HEADER that is missing or torn while the lease holds the range is also an error: export withholds EXPORT completion and propagates it. The lease keeps every successor it needs, including the captured terminal.
+
+**L86 in full.** The §5 row is the summary.
+- **Images.** HEADER(role 2, seq, `prev_end`), A acked COMMIT frames, then one group of three or more COMMIT frames, one of them larger than 4 KiB. Each image is a resulting byte string R:
+  - The fresh kind keeps group bytes [0, k) and ends the file there.
+  - The windowed kind uses w − e ∈ {0, 1, a group's length − 1, a multiple of 4,096 up to W}. It keeps bytes [0, k) and leaves the rest of the window zero.
+  - Page-subset images keep a later 4,096-byte page of the group and zero an earlier one.
+  - k runs over every frame boundary, ±1 around each, and every 4,096-byte page boundary inside the group.
+  - Each image is written once with `j-<seq>.end` naming the acked end, and once with no END.
+- **Missing bytes that equal zero.** One group frame is ATTACK 2168's 42-byte empty COMMIT for the next branch version, whose last four payload bytes are zero (`store_crash_laws.hirsel` 814). The images hold its first 41, 40 and 38 bytes over zeros. The same cuts are also built with the file ending there. Every other frame is chosen so that the byte at each chosen cut is nonzero, so a case meant to stop stops.
+- **Expected.** Walk the group's frames in order at their known offsets. A frame is present when R holds exactly the bytes the law encoded for it at its offset, with every byte inside the file. Recovery applies the A acked frames plus the group's frames up to the first absent one. The law computes this from its own encoded frames and R. It never calls `journal_scan`, `journal_read_frame` or `disk_read_frame_head`. So the 41-of-42 image over zeros recovers that COMMIT, and the same cut at EOF does not. The ordinary case, the whole group present before its ack, is one of the images.
+- **Witness clause.** These images are built by hand, with no writer:
+  - two images that differ only in zeros past the stop at or past `d` have equal witnesses;
+  - images A and B above have different witnesses;
+  - two images that differ only in a frame written in place over zeros have different witnesses;
+  - two terminal segments shorter than 72 bytes and of different lengths have different witnesses.
+- **What moved to the real-worker cases.** No byte image can show these writer invariants:
+  - where a group is written (at e, never at w);
+  - when w moves (after the step's sync);
+  - that window bytes are never counted in `Journaled`, U or `d`;
+  - the bound past e;
+  - which operation a failed step stops at.
+
+  L3, L8, L10 and the journal worker laws observe write offsets, ack counts and file sizes (IMPL).
+
+**Prior art (v2.82).**
+- **TigerBeetle** (`/tmp/ref-tigerbeetle` a2a3c70) writes every WAL slot at format time (`src/vsr/replica_format.zig` `queue_format_wal`). It then writes with O_DSYNC, and with O_DIRECT where the file system supports it (`src/stdx/io/linux.zig` 1456, 1529, 1563). It uses `fallocate` only to reserve space and warns that without it "an ENOSPC will panic". So it never relies on what a file system exposes past a crash-time EOF: every byte it reads back was written first. ADAPTED: the window also writes before it relies, and keeps rotating segments and the format. The written zeros' own extension needs the provider guarantee, which TigerBeetle avoids by formatting once.
+- **RocksDB** (`/tmp/ref-rocksdb` 8582ee9) preallocates WAL space with `fallocate(FALLOC_FL_KEEP_SIZE)` (`env/io_posix.cc` 1674), which does not move i_size, so a crash cannot expose it. It truncates the extra space when the file is closed (`include/rocksdb/options.h`, `allow_fallocate`). Its reader skips a zero-type, zero-length record from preallocated regions (`db/log_reader.cc` 611). `recycle_log_file_num` needs recyclable records that carry the log number. Open disables it with `kTolerateCorruptedTailRecords` and `kAbsoluteConsistency` (`db/db_impl/db_impl_open.cc` 109–125), because it relies on reading a corrupt record as the end of new data.
+  - KEEP_SIZE preallocation: REPLACED. It measured 69 µs per synced write here, because the unwritten extents still convert at the first sync.
+  - Truncate at close: NOT TAKEN. The target rule bounds what it would reclaim, and a crash before it keeps the bytes anyway.
+  - Recycling: NOT TAKEN, as above.
+- **Goose** has no WAL preallocation (CHANGES-v2.80): nothing to take.
+
+**Format verdict:** NONE. `DISK_FORMAT` is unchanged. A reader of any version opens a directory with or without windows.
+
+Reversibility: code. The probe and the target are one function each, and dropping the window is T = 0.
 
 ## CHANGES-v2.80 (journal-prealloc-spec-2153: a zero window ahead of the journal's write head; not yet built)
 
@@ -2226,12 +2307,12 @@ AP1b specifies PREPARED validation and the target limits in §3.5a.
 
 **The journal task, per group** (§3.3):
 1. Drain: one `receive`, then `try_receive` while the group is under 64 frames and 4 MiB.
-2. `host.write_at` the frames at the frame end e, in the order received: over the zero window where it reaches, extending the file past it otherwise (v2.80, §3.3a).
+2. `host.write_at` the frames at the frame end e, in the order received: over the zero window where it reaches, extending the file past it otherwise (v2.80, §3.3a). With no admitted provider e is the file end, so this is an append.
 3. `host.sync` the segment.
 4. Send `Synced(last seq, end)`.
 5. **Barrier: no ack before the sync returns `Ok`.**
 6. END write when due (§2.4).
-7. A window step when due (§3.3a), after the ack and the END.
+7. A window step when due (§3.3a), after the ack and the END. Never on a provider that is not admitted (v2.82).
 
 `durable(Journal(s))` receives acks until the acked sequence reaches `s`. Every frame up to `s` is already queued, so it hands nothing over.
 
@@ -2241,7 +2322,7 @@ AP1b specifies PREPARED validation and the target limits in §3.5a.
 |---|---|---|
 | group commit | write, then `sync(segment)`, then ack | a ticket is durable only after the bytes are |
 | END write | ack first; then write END(d) with `Write`, then `sync(end file)` | `d` never names an unsynced byte; it never delays an ack |
-| window step (v2.80) | write E zero bytes at w, `sync(segment)`, *then* w += E | a group is written in place only over zeros that are already durable, so a crash leaves every byte past the frames either zero or never written by this step |
+| window step (v2.80, v2.82) | write s zero bytes at w, `sync(segment)`, *then* w += s; only on an admitted provider | a group is written in place only over zeros that are already durable. On an admitted provider (§3.3a) a crash leaves every byte past the frames zero, written or absent |
 | segment creation (at open and at each cut) | write HEADER, `sync(segment)`, write END(72), `sync(end file)`, `sync_dir`, *then* the first frame is sent | a lost directory entry would lose acked frames (ALICE, §10); a durable END name implies a durable header |
 | checkpoint | pack: write `.tmp`, `sync`, rename, `sync_dir`; manifest: write `.tmp`, `sync`, rename, `sync_dir`; *then* remove retired files | the manifest must never name a missing file, and a removed file must never be named by a durable manifest |
 | open | `sync_dir` after selecting or creating MANIFEST (O1), before any removal. `sync` each live segment before reading it | O1 makes the selected manifest durable before cleanup can remove files the previous manifest needs. The segment sync prevents recording an unsynced page-cache tail as `prev_end`. |
@@ -2251,7 +2332,7 @@ AP1b specifies PREPARED validation and the target limits in §3.5a.
 | Operation | Syncs |
 |---|---|
 | a group of commits | 1, plus 1 for END when the queue is idle or on every 64th group |
-| a window step (v2.80) | 1, never on an ack's path: while the queue is empty, or after the 64th group's END |
+| a window step (v2.80) | 1, not on the ack path of the group that triggered it: while the queue is empty, or after the 64th group's END. A frame that arrives during a step waits for it (§3.3a, Delay) |
 | a checkpoint | 7: segment file, END file, directory, pack, directory, manifest, directory |
 | a checkpoint with no new nodes | 5: there is no pack |
 | an open | one extra `sync_dir` for O1, in addition to the other open barriers |
@@ -2266,7 +2347,7 @@ AP1b specifies PREPARED validation and the target limits in §3.5a.
 **The journal task's loop:**
 ```
 loop {
-  while e > 72 and w - e < T/2 and try_receive(rx) is Empty { window step }   // v2.80 §3.3a; a message found is the next group's first
+  while T > 0 and w - e < T/2 and try_receive(rx) is Empty { window step }   // v2.82 §3.3a; a message found is the next group's first
   let first = receive(rx)                 // Closed: nothing queued and the sender is gone → finish
   group = [first]
   while group.frames < group_commits and group.bytes < group_bytes {
@@ -2282,7 +2363,7 @@ loop {
   if answering { try_send(written, Written) }           // write barrier, before the sync (W2)
   if group has frames { sync; send Synced(last seq, end) }   // nothing is acked before its sync; a frameless group syncs and acks nothing (X1)
   if idle or groups_since_end == 64 { write END(end); sync END }
-  if that END was the 64th group's and w - e < T/2 { window step }   // v2.80 §3.3a, saturation
+  if that END was the 64th group's and T > 0 and w - e < T/2 { window step }   // v2.82 §3.3a, saturation
   if rotating { write END(end); sync END; close the old segment; switch to the new one }
   if closing { write END(end); sync END; end the task }
 }
@@ -2303,26 +2384,53 @@ loop {
 - **Backpressure, not a second buffer.** When 128 frames are queued, the writer's `send` waits. There is no writer-side group buffer, so no frame is ever stranded waiting for the writer's next call.
 - The one-slot `try_send` fallback of v1 is deleted.
 
-### 3.3a Preallocated journal window (v2.80, IOC-3; not yet built)
+### 3.3a Preallocated journal window (v2.80, revised v2.82; IOC-3; not yet built)
 
-**Terms.** For the open segment, e is the frame end: 72 plus the bytes of every frame written to it. This is the `end` that `Synced` and END carry. w is the window end. Every byte in [e, w) is a zero that this journal task wrote to this segment and synced, and every byte below w that was ever written is synced. At segment creation and after each rotation, w = e = 72.
+**Terms.** For the open segment, e is the frame end: 72 plus the bytes of every frame written to it. This is the `end` that `Synced` and END carry. f = e − 72 is the segment's frame bytes. w is the window end. Every byte in [e, w) is a zero that this journal task wrote to this segment and synced, and every byte below w that was ever written is synced. At segment creation and after each rotation, w = e = 72.
 
-**Constants.** E = 1,048,576, the largest step. W = max(E, ⌈`group_bytes` / E⌉ × E), the largest target, which is 4,194,304 at the default `group_bytes`. Z = 32,768, the zero chunk. The target is T = min(W, ⌈(e − 72) / 4,096⌉ × 4,096): it follows the frame bytes the segment already holds, so a segment that receives few frames gets a small window. E and Z are build constants and the gate may retune them (IMPL). Neither is an option, and neither touches the format.
+**Admission (v2.82).** The window runs only on a provider that guarantees **zero-or-written extension**: after any crash, every byte past the file's last durable end that a reader can see reads as zero or as a byte that was written there. The rest of the store needs no such guarantee and keeps none of it.
+- **The probe.** `open` asks the host once, on the store's directory handle: `host.zero_extension(d: Dir) -> Result[bool, IoError]` (new, `core/core/host.hirsel`). An `Io` error fails `open` like any other open I/O. The answer is fixed for the Db's life and passed to the journal task at spawn, with its other parameters.
+- **What answers yes.** Only these, each from a positive fact:
+  - **ext4** (`fstatfs` magic 0xEF53) whose `/proc/fs/ext4/<name>/options` lists `data=ordered` or `data=journal`. `<name>` is the `/proc/partitions` name for the directory's `st_dev`. The options file prints every option (`nodefs`), so a missing `data=` token means no journal (`fs/ext4/super.c` clears the data flags without one), and that answers no. `/proc/self/mountinfo` is not used, because it omits `data=` when the mode is the superblock default (`super.c` show_options). ext4 refuses to change the data mode on remount (`super.c`, "Cannot change data mode on remount"), so one probe at open holds for the Db's life.
+  - **tmpfs** (magic 0x01021994). Its pages are zero-filled, and a crash that ends the process cannot expose any byte that was not written. Laws run there (`/dev/shm`), so the law suites exercise the window.
+  - **The sim fs** (`core/std/sim/fs.hirsel`) answers the probe's `DirOp` with yes. Its crash keeps whole synced versions, each the exact written bytes.
+  - **The crash bridge** (`core/tools/store_crash_bridge.rs`) answers yes for the same reason.
+- **What answers no.** Everything else, including ext4 with `data=writeback` or no journal, XFS, btrfs, any file system the host cannot name, and any probe step that cannot read its `/proc` file. ext4 `data=writeback` admits stale blocks past a committed i_size (ATTACK 2168 §2). XFS is not admitted in v2.82: it moves its on-disk size at I/O completion (`fs/xfs/xfs_aops.c` `xfs_setfilesize`), but this spec does not yet cite a guarantee for its in-EOF allocations. Adding it is one probe arm with that citation.
+- **Not a store option.** An option that claimed the guarantee on a writeback mount would make a reserved-kind stale head reachable after one crash, and the store would refuse to open (§3.4 step 5). The mount is outside input, so the store reads it and does not take it on trust.
+- **No admission, no window.** On a provider that answers no, T = 0. The task runs the same code: `write_at` at e, which is the file end, so it is today's append. No step ever runs. There is no second write path.
+
+**Constants.** E = 1,048,576, the largest step. W = max(E, ⌈`group_bytes` / E⌉ × E), computed in u64 (the largest legal W is 4,294,967,296), and 4,194,304 at the default `group_bytes`. Z = 32,768, the zero chunk. The target is
+
+  T = 0 when the provider is not admitted, else T = min(W, ⌊f / 4,096⌋ × 4,096).
+
+T rounds **down**, so T ≤ f: a segment with under 4 KiB of frames has no window, and a window never holds more bytes than its segment's frames (Disk, below). E and Z are build constants, and the gate may retune them (IMPL). Neither is an option, and neither touches the format.
 
 **Rules.**
-- **Frames go in place.** A group is written with `write_at(segment, e, bytes)`. The segment is opened `Write`, so nothing is appended implicitly. When e + g ≤ w the group overwrites zeros. Otherwise the part past w extends the file, at today's cost. After the group's sync, e += g and w = max(w, e). The window is never a reason to delay or split a group.
-- **A step.** Its size is s = min(E, ⌈(T − (w − e)) / 4,096⌉ × 4,096). It writes zeros over [w, w + s) in writes of at most Z bytes, then `sync(segment)`, then w += s. A step finishes before the task reads another message, so a group is never written while a step is unsynced. The chunk is one `Bytes` of Z zeros, allocated at spawn with the task's other scratch (`journal_buffers`) inside `JOURNAL_WORKER_SLACK`. Nothing is allocated after spawn (Q1a).
-- **When.** No step runs while e = 72, so an open's rotation or a cut that leaves a segment empty leaves it without a window. **Idle:** before each blocking `receive`, while w − e < T/2, the task calls `try_receive`. On `Empty` it runs a step. A message ends the extension and is the next group's first message. **Load:** after the END written at the 64th group, if w − e < T/2, the task runs one step. `disk_new_segment` writes no window, and `Rotate` switches to a segment with w = 72. A cut's ack wait or its `Rotate` can still queue behind a step that already started, so a cut's pause can grow by at most one step (one sync and up to E bytes).
-- **Counters.** Window bytes are not frames. `Synced`/`Journaled`'s byte count, F, U, `since`, `d` and `prev_end` are as before v2.80. So 0 ≤ w − e < T + 4,096 ≤ min(W, e − 72 + 4,095) + 4,096 at every point: a step starts only below T/2 and adds at most T − (w − e) rounded up to 4 KiB, and T never shrinks while e grows.
-- **Failure.** A failed chunk write or step sync is a failed write or sync of the segment, and it poisons the store (§3.8), `ENOSPC` included. One rule for every failed sync. A store near a full disk poisons up to W + 4,096 bytes earlier than it would without the window.
-- **No truncate.** A rotated segment keeps its unused window. Retired segments are removed whole (§3.5, AP21).
+- **Frames go in place.** A group is written with `write_at(segment, e, bytes)`. The segment is opened `Write`, so nothing is appended implicitly. When e + g ≤ w the group overwrites zeros. Otherwise the part past w extends the file, at today's cost. After the group's sync, e += g and w = max(w, e). The window is never a reason to delay or split a group. A group is never written at w.
+- **A step.** It runs only when T > 0 and w − e < T/2. Its size is s = min(E, T − (w − e)). T − (w − e) > T/2 ≥ 2,048, so s ≥ min(E, 2,048) > 0: a due step is never empty, and the idle loop ends. It writes zeros over [w, w + s) in writes of at most Z bytes, then `sync(segment)`, then w += s. A step finishes before the task reads another message, so a group is never written while a step is unsynced. The chunk is one `Bytes` of Z zeros, allocated at spawn with the task's other scratch (`journal_buffers`) inside `JOURNAL_WORKER_SLACK`; a last partial chunk is a `list.slice` of it. **The step allocates nothing.** This is a claim about the step and its chunk only. The worker's group buffer is still acquired and dropped as before v2.80.
+- **When.** Each trigger is a check of w − e < T/2:
+  - **Idle:** before each blocking `receive`, the task calls `try_receive`. On `Empty` it runs a step, and checks again. A message ends the extension and is the next group's first message.
+  - **Load:** after the END written at the 64th group, the task runs at most one step.
+  - Nothing else triggers a step. In particular there is no rate of one step per E bytes of frames: under load a group can consume the window between 64th-group ENDs and extend the file, and under bursty traffic whose groups each find `Empty`, only the idle check runs.
+- **Delay a step can add.** A step is at most E bytes and one sync. A frame's ack can wait behind the step already running when the frame arrives, plus each 64th-group step that falls due in the groups ahead of it in the queue. There is no bound of one step end to end. A cut's ack wait and its `Rotate` are queued messages under the same rule.
+- **Counters.** Window bytes are not frames. `Synced`/`Journaled`'s byte count, F, U, `since`, `d` and `prev_end` are as before v2.80.
+- **Failure.** A failed chunk write or step sync is a failed write or sync of the segment, and it poisons the store (§3.8), `ENOSPC` included. One rule for every failed sync. A step can hit `ENOSPC` when the next frames alone would still have fit, so a store near a full disk can poison earlier than without the window. The window bytes it holds are bounded under Disk.
+- **Disk (v2.82).** A step never writes past e + T, and T ≤ min(W, f): a step starts below T/2 and stops at e + T, and e and T only grow within a segment. This holds at every crash cut, counted as file bytes past e and not as w, because a step cut short leaves the file no longer than e + T. So the windows of the retained segments total at most their frame bytes, with no per-segment term. A segment with no frames or under 4 KiB of frames has none. Torn tails (issued frames past the recovered end), HEADERs, ENDs, and segments an export lease retains are counted apart (§11.11 C-4). **No truncate:** rotation and close keep the window, and retired segments are removed whole (§3.5, AP21). The target rule bounds what a truncate would reclaim, and a truncate would not survive a crash before it.
+- **No recycling.** Retired segment files are not reused. A recycled file can show unsanitized payload past the new frame end, including a reserved kind at the scan's stop, which `disk_read_frame_head` refuses before any check. Only retaining unsanitized payload is excluded. A scheme that scrubs a retired file under a private name, syncs it and then publishes it is reader-compatible, but it writes the whole retained length before reuse, and v2.82 does not take it.
 
 **Why recovery needs no new rule** (§3.4 step 5):
-- **Zeros past the frames.** In the last segment, recovery reads from `d` until the first bad frame. A zero head has kind 0, which is a bad frame and torn (`journal_torn`), so recovery stops at e or at the first frame not wholly durable, exactly as at today's torn tail. Below `d` a bad frame is `Corrupt`, as before. `d` ≤ e ≤ size, so "shorter than `d`" stays the rule for missing synced bytes.
-- **Reserved kinds.** Every journal kind is below 0x0100, so the kind field's high byte is 0 in every frame and in every zero. A partly persisted 2-byte kind field reads as the written kind or as 0, never as a reserved kind that `disk_read_frame_head` refuses before the checksum.
-- **A group cut inside the window.** Any subset of the group's pages may be durable over zeros. Recovery stops at the first frame that is not wholly durable: a zero head, a zero tail that fails the check, or a short frame. Frames after it may be durable, but they are never read, and none was acked because the group never synced. A group whose first page also holds acked bytes rewrites that page as an append does today.
-- **A step cut before its sync.** The region past w may be absent, zero or partly zero. Under ext4 `data=writeback` alone it may be stale blocks with i_size committed: the same residual a torn append has today, and it is reachable only when e = w at the crash. `data=ordered`, this host's mount, exposes no stale block.
+- **Zeros past the frames.** In the last segment, recovery reads from `d` until the first bad frame. A full zero head has kind 0, a bad frame and torn (`journal_torn`). A head shorter than 16 bytes is Truncated, also torn. So recovery stops at e or earlier. Below `d` a bad frame is `Corrupt`, as before. `d` ≤ e ≤ size, so "shorter than `d`" stays the rule for missing synced bytes.
+- **What a reader can see past e.** On an admitted provider every byte past the last frame is a written byte, a zero, or past EOF. The kind field's high byte is 0 in every journal frame and in every zero, so a partly persisted kind reads as the written kind or as 0, never as 0x0020, 0x0030 or 0x0050. A reader classifies only the head at the stop. A buffered read may fetch more bytes past it, but nothing interprets them.
+- **A group cut inside the window.** Any subset of the group's pages may be durable over zeros. Recovery applies the longest run of consecutive frames from e whose bytes in the resulting image are exactly the bytes written. That includes a frame some of whose bytes never reached the disk but whose intended values were zero, as with the last four payload bytes of an empty COMMIT (ATTACK 2168 §1). No acked frame is lost, and a recovered unacked frame is an issued one: the commit law below.
+- **A step cut before its sync.** The region past w is absent, zero, or partly zero. It lies past every frame.
 - **Middle segments** end at the successor's `prev_end`, the e that recovery found, and their windows lie past it.
+- **Damage in unused space.** The format has no authenticated marker where padding starts, and `d` may lag real frames. So media damage that turns the first window byte into a reserved kind (one bit 0 → 0x20) makes `open` refuse with `Unsupported`, with every frame, END and checksum intact. This is media damage, not a crash image. v2.82 states it as a refusal it may produce and does not repair it. Tolerating it would need a versioned reader rule.
+
+**The commit law (v2.82).** For every crash image the writer can produce, the recovered COMMITs satisfy
+
+  acked ⊆ recovered ⊆ issued,
+
+and recovered is a prefix of issued in commit order. Acked means `Synced` covered it before the crash; issued means it was sent on the journal channel. This is the contract before v2.80 too: a group can be durable after its sync and before the writer receives the ack. The window adds a second way, where a missing byte's intended value equals the zero under it. Neither way recovers a frame that was not issued, or a frame after a gap. The law does not say "exactly acked". No storage order makes that true without a commit protocol that writes a second record after the ack.
 
 ### 3.4 Recovery, step by step (`open`)
 
@@ -2355,7 +2463,7 @@ loop {
    - **A bad last header.** If the last segment's HEADER is short or bad:
      - and its END file is good, the result is `Corrupt(Header)`. A durable END name implies a durable header (§3.2).
      - and its END file is missing or bad, recovery treats the segment as absent: it was a crash during segment creation. The segment before it then becomes the last one and follows the rule above. Its own END file gives its `d`.
-   - **A zero window (v2.80, §3.3a).** Zeros past the last frame are a kind-0 head, a bad frame. This rule reads them with no change: past `d` they are the torn tail, and below `d` they are `Corrupt`. The size is used only as the bound of reads and for "shorter than `d`". A recycled segment is not a case, because v2.80 does not recycle (CHANGES-v2.80).
+   - **A zero window (v2.80, v2.82; §3.3a).** Zeros past the last frame are a kind-0 head, a bad frame. This rule reads them with no change: past `d` they are the torn tail, and below `d` they are `Corrupt`. The size is used only as the bound of reads and for "shorter than `d`". Windows exist only on an admitted provider, so nothing past the last frame is a stale block. A recycled segment is not a case, because Store does not recycle. A reserved kind in unused space after media damage is refused (`Unsupported`), as §3.3a states.
    - **What a damaged END file costs.** Only detection. A flip in the END file, or an END not yet rewritten, falls back to the torn-tail rule over a longer region. It never makes a good store refuse to open.
 6. **Apply.** Apply COMMIT frames in order. The branch must exist, else `Corrupt(Gap)`. The version must be the head + 1. New nodes take ids from `next_node` upward.
 7. **Account.** Compute the resident account (§1.11). Past `resident_limit`, the result is `Full(Capacity)`.
@@ -2467,8 +2575,8 @@ the point of no return. Publish the new head and report its version only on
 | after `sync`, before the ack is received | present. `durable` had not returned. |
 | after `durable` returned | present (law L3) |
 | END write or END sync | the old or the new `d`, or a bad END file (= no `d`). Each is at most the synced end, so every case reopens to the prefix. |
-| commit into the zero window (v2.80), during `write` or before `sync` | any subset of the group's pages over synced zeros. Recovery stops at the group's first frame not wholly present. Nothing of the group was acked. |
-| window step (v2.80), during its writes or before its sync | the region past w is absent, zero, or under `data=writeback` stale (the torn-append residual). It lies past every frame. Recovery stops at e, except over stale blocks, which can only be read when e = w at the crash, the same residual as a torn append (§3.3a). |
+| commit into the zero window (v2.80), during `write` or before `sync` | any subset of the group's pages over synced zeros. Recovery applies the group's frames up to the first whose bytes in the image differ from the bytes written, and none after it. A frame whose missing bytes were meant to be zero is present. Nothing of the group was acked, and every recovered frame was issued (§3.3a, the commit law). |
+| window step (v2.80), during its writes or before its sync | the region past w is absent or zero, on an admitted provider, the only kind that runs steps (v2.82). It lies past every frame. Recovery stops at e. |
 | segment creation, any step | the segment is missing, or has a bad header with no good END file, so it is treated as absent. No frame was sent into it yet. Every frame of the segment before it was synced before creation began (§3.5 step 0, X1), so if the new segment survives, its `prev_end` is covered. |
 | pack `.tmp` written or synced, not renamed | a leftover with seq ≥ `next_pack`: never loaded; removed at open if it is found, else replaced by the next cut (H2) |
 | pack renamed, before the cut's `sync_dir` | any subset of the cut's packs may survive under their names. No manifest names them; the same as the row above. |
@@ -2486,7 +2594,7 @@ the point of no return. Publish the new head and report its version only on
 | during a prepared install MANIFEST rename and directory sync | a complete old or new generation with its own catalog, activation and counters |
 | prepared install loses its ack after directory sync | NEW's durable generation selects NEW |
 
-All of these cuts, and the damage cases, run in the model (§3.9), except v2.80's two window rows. Those are covered by L86's hand-built images and by the W2 laws until the model gains a window.
+All of these cuts, and the damage cases, run in the model (§3.9), except the two window rows. L86's hand-built images cover their byte images, and the real-worker laws L3, L8 and L10 cover the writer, until the model gains a window.
 
 ### 3.7 Cancellation at each wait (C5)
 
@@ -2696,7 +2804,7 @@ Every expected value comes from M, from hand-derived arithmetic, or from a publi
 | **L19 identity** | (a) two stores created in one run have different `identity`; (b) `identity` is the same after reopen; (c) a pack or segment copied from store B over a file store A's manifest names makes A's open `Corrupt(Header)`; (d) one frame of B spliced into one of A's files at a frame boundary makes the open `Corrupt(Checksum)` (E3) | W2, F | an identity drawn at each open instead of at genesis; a header identity that is not checked; a constant identity |
 | **L20 foreign handles** | every handle of store B used with a Db of store A (Table, Index, Branch, Snapshot, Ticket), and a Snapshot or Ticket from an earlier open of A used in `fork`, `pin` or `durable`, returns `Foreign`, and A's state still equals M | M | a missing store check; `durable` of an old ticket returning `Ok`; a fork from a stale Snapshot whose node ids collide with this open's |
 | **L21 close, drop and poison** | (a) after `close` returns, an `open` of the same directory in the same run succeeds (LOCK released) and the state equals M at the last commit, because every commit's frame was sent at `run` and `close` waited for the last one's ack; `close` makes no cut (T1); (b) after an injected sync failure, `close` returns `Poisoned(e)` with the injected `e`, and then (a)'s `open` succeeds and gives a prefix; (c) dropping a Db without `close` releases LOCK, and reopen gives a crash prefix (L3); (d) a second `open` while a Db is live is `Held`; (e) `open` with `group_commits` = 0 or `group_bytes` = 0 returns `Missing` with that field's name, takes no LOCK and creates no file, and with both set to 1 every write holds one frame, and reopen gives M (W1) | W1 injection, W2, M | a close that refuses when poisoned; a close that skips the join or the LOCK release on an error path; a close that reports a later error instead of the first; a drop that leaks LOCK; an open that spins on, or is stuck at, a zero group bound |
-| **L86 `journal_window_prefix`** | (v2.80, not yet built) One law with two parameters: the crash point k and the segment kind (fresh, or zero-windowed with w − e ∈ {0, 1, a group's length − 1, T}). The law builds the segment image itself: HEADER, the acked frames, then a group of three or more frames (one of them larger than 4 KiB), of which bytes [0, k) are durable and the rest are the window's zeros. A fresh segment's image ends at k instead. k runs over every frame boundary, ±1 around each, and every 4,096-byte page boundary inside the group. It also makes images where a later page of the group is durable and an earlier one is zero. After `journal_recover`, the head equals the acked frames plus exactly the group frames that lie wholly in the durable prefix ending at the first non-durable byte. No frame from beyond it is applied. The oracle is the frame lengths the law encoded and the acked-frame list it kept, never `journal_scan`. A `log_journal_witness` before and after a step that only adds zeros is equal, and one after a group written in place is not. A store that commits one 97-byte frame and closes leaves a terminal segment of at most 72 + 97 + 4,096 bytes (the window bound, by hand from §3.3a) | M, hand-built images | an in-place write placed at w instead of e (`write_at_window_end`: acked frames followed by a zero gap, recovery stops early); a window counted in `Journaled` bytes or U (`window_in_written`: `d` past the frames, so zeros below `d` read `Corrupt`); an unsynced step treated as window (`w_before_sync`); a witness hashed to the size (`witness_by_size`: recapture after every step); a fixed full-size window (`fixed_window`: 4 MiB after one commit) |
+| **L86 `journal_window_prefix`** | (v2.80, v2.82; not yet built) The reader's byte-image contract. For every hand-built terminal-segment image of CHANGES-v2.82 "L86 in full" (fresh and windowed kinds, cuts k at every frame and page boundary, page subsets, the 42-byte COMMIT with missing bytes that equal zero), `journal_recover` applies the A acked frames plus the group's frames up to the first one whose encoded bytes R does not hold exactly at its offset, and none after it: acked ⊆ recovered ⊆ issued, in commit order (§3.3a). The oracle compares the law's own encoded frames with R and never calls `journal_scan`, `journal_read_frame` or `disk_read_frame_head`. The witness is equal across zeros past the stop at or past `d`, differs for a reserved-kind head that does not fit, differs for a frame written in place, and witnesses a HEADER shorter than 72 bytes by its bytes. Writer invariants are not in this law: they belong to L3, L8, L10 and the journal worker laws | M, hand-built images | a reader that treats a zero head below `d` as torn (the zero-gap images with an END); a reader or witness that runs past a zero head; a witness that canonicalizes a reserved-kind head that does not fit (image B); a witness hashed to the size; a witness that fabricates a 72-byte extent for a short HEADER |
 
 L5 counts frames because incrementality is itself a count. The bound is derived from the tree, not taken from a run, so it is not a pinned number.
 
@@ -3390,7 +3498,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
       The way out is `checkpoint` or any cut-made operation. Open itself needs no cut.
     - **Three attempts at the defaults.** Suppose every cut is refused, nothing makes an explicit attempt, and there is enough admissible traffic after each refusal. Each attempt fires when `since` passes 64 MiB, so it fires at most 67,108,864 + 16,777,296 = 83,886,160 bytes after the previous one. Three attempts fit, because 3 × 83,886,160 = 251,658,480 < 268,435,456 = J. A fourth would need more than J. These are attempts, not fixed offsets. Frames that reach exactly 67,108,864 bytes and then add one 16,777,296-byte frame attempt at 83,886,160, 167,772,320 and 251,658,480 bytes, just past 80, 160 and 240 MiB. A large frame refused below J does not close the writer to a smaller frame that still fits.
     - **At the cap** no frame is handed over, so no threshold cut fires. The way out is a `checkpoint` call, any cut-made operation, or a reopen with a larger `journal_limit`. Open never refuses for U: it recovers whatever U it finds, which may exceed J, and then every frame is refused until a cut publishes.
-    - **Disk (C-4).** The uncovered journal holds U accepted bytes, at most J (or the U that open recovered). Beside them are extension frames and a torn tail, which U does not count, and one HEADER and one END per segment. A segment is made by each open's initial rotation (§3.4 step 8) and by each cut that rotates in AP16 step 3, whether it publishes or is refused. So at fixed U, repeated opens or refused cuts that rotate add HEADER/END pairs without limit. **v2.80:** a segment with f frame bytes also carries a zero window of fewer than min(W, ⌈f / 4,096⌉ × 4,096) + 4,096 ≤ f + 8,192 bytes past its last frame (§3.3a), so the windows add at most the live segments' frame bytes plus 8 KiB per segment. It is never truncated, so it lasts until the segment is retired. A segment with no frame has none. U counts frames, never file sizes, so the window changes neither U nor J's floor proof. M1 states no physical-disk bound for the journal directory. Such a bound would be a separate contract with its own option and refusal, not U. An export lease keeps the segments it captured, at most the uncovered journal at its capture. Packs hold the live frames plus dead copies awaiting compaction, about 2 × live (GUESS), plus the leftovers of the largest refused cut (H2).
+    - **Disk (C-4).** The uncovered journal holds U accepted bytes, at most J (or the U that open recovered). Beside them are extension frames and a torn tail, which U does not count, and one HEADER and one END per segment. A segment is made by each open's initial rotation (§3.4 step 8) and by each cut that rotates in AP16 step 3, whether it publishes or is refused. So at fixed U, repeated opens or refused cuts that rotate add HEADER/END pairs without limit. **v2.82:** a segment with f frame bytes also carries at most min(W, ⌊f / 4,096⌋ × 4,096) ≤ f zero bytes past its last frame, at every crash cut and only on an admitted provider (§3.3a Disk). So the windows of the retained segments add at most those segments' frame bytes, with no per-segment term. A segment an export lease keeps carries its window with it. The window is never truncated, so it lasts until the segment is retired. (v2.80's bound, fewer than Σ(T_i + 4,096) over framed retained segments, let repeated small opens pile up 4 KiB per segment, and its "at most double" and single-window `ENOSPC` claims did not hold. v2.82 replaces all three.) U counts frames, never file sizes, so the window changes neither U nor J's floor proof. M1 states no physical-disk bound for the journal directory. Such a bound would be a separate contract with its own option and refusal, not U. An export lease keeps the segments it captured, at most the uncovered journal at its capture. Packs hold the live frames plus dead copies awaiting compaction, about 2 × live (GUESS), plus the leftovers of the largest refused cut (H2).
   - **A cut's memory** is the writer's, allocated fallibly while it is paused and freed when the cut ends (AP16).
   So, in wire lengths and capacities, journaling holds at most 2 × `FRAME_LIMIT` + the index list's granted capacity 8 × G (its occupied 8n bytes are below 8/9 × `FRAME_LIMIT`) + the group buffer + the worker's 161 bytes of scratch and, from v2.80, its 32,768-byte zero chunk + fixed encoder scratch, beside the segment reader and a cut's memory. In charges the same parts are at most 2 × `FRAME_LIMIT` + 7 × (the frames in F, plus one) + 8 × G + the group buffer + 168 + the zero chunk's charge, plus the three channels. The zero chunk is paid from `JOURNAL_WORKER_SLACK`, so no grant figure changes. A `memory` store has no frames.
 - **Settle (AF1, I4 restated).** A settle computes the exact logical account of a set of roots and replaces A by it. Every commit path settles before it refuses for the limit, as §1.11 says: when the conservative figure would pass `resident_limit`, it computes the exact logical account of the roots the commit would publish (the walk below, over the proposed head and every other participating root) and admits or refuses on that, so a `Refused` or `Full` rests on the exact figure, and A becomes that exact figure when the commit is admitted. A `memory` store settles the same way and at the same cuts. On a store with a Tiered collection (§13.8, v2.64) a commit's settle walks and replaces the Memory class only, `account_memory`, because resident admission counts that class alone. `account_tiered` is settled only by a cut.

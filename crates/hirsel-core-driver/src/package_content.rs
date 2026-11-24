@@ -1,4 +1,5 @@
 use crate::package_dir::{module_path, package_name, path_rule};
+use bytes::Bytes;
 use hirsel_core_ids::{ContentHash, PackageId};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -612,7 +613,7 @@ impl<'a> Reader<'a> {
 
 pub(crate) struct Library {
     pub(crate) content: Content,
-    pub(crate) encoded: Arc<[u8]>,
+    pub(crate) encoded: Bytes,
 }
 
 pub(crate) struct PackageArchive {
@@ -636,7 +637,7 @@ impl PackageArchive {
             let mut bytes = Vec::new();
             file.take(ARCHIVE_LIMIT as u64 + 1)
                 .read_to_end(&mut bytes)?;
-            let archive = Self::decode(&bytes)?;
+            let archive = Self::decode(bytes.into())?;
             let id = &archive.entries[&archive.head].content.id;
             archive.verify(id, archive.head, "archive")?;
             Ok(archive)
@@ -660,8 +661,8 @@ impl PackageArchive {
         out.finish()
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let mut input = Reader::new(bytes, ARCHIVE_LIMIT)?;
+    pub(crate) fn decode(bytes: Bytes) -> Result<Self, String> {
+        let mut input = Reader::new(&bytes, ARCHIVE_LIMIT)?;
         if input.text()? != ARCHIVE_TAG {
             return Err("unknown package archive tag".into());
         }
@@ -692,7 +693,7 @@ impl PackageArchive {
                 root,
                 Library {
                     content,
-                    encoded: encoded.into(),
+                    encoded: bytes.slice_ref(encoded),
                 },
             );
         }

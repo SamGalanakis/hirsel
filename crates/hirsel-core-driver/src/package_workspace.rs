@@ -66,7 +66,7 @@ fn parent(directory: &File) -> io::Result<File> {
     }
 }
 
-fn identity(directory: &File) -> io::Result<FileId> {
+pub(crate) fn identity(directory: &File) -> io::Result<FileId> {
     directory.metadata().map(|metadata| FileId::of(&metadata))
 }
 
@@ -94,7 +94,7 @@ fn capture_manifest(
     })
 }
 
-fn read_manifest(dir: &File, path: &Path) -> Result<Option<Captured>, String> {
+pub(crate) fn read_manifest(dir: &File, path: &Path) -> Result<Option<Captured>, String> {
     let manifest = path.join(MANIFEST);
     let file = match walk(dir, Path::new(MANIFEST)) {
         Ok(file) => file,
@@ -194,7 +194,31 @@ impl Workspace {
         dir: &Path,
         needs_package: bool,
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        let mut manifests = BTreeMap::new();
+        Self::discover_with(dir, needs_package, BTreeMap::new())
+    }
+
+    pub(crate) fn scope(dir: &Path) -> Result<File, Box<dyn std::error::Error>> {
+        let (root, _) = discover(dir, &mut BTreeMap::new())?
+            .ok_or("no package manifest here; pass --workspace to declare it for the workspace")?;
+        Ok(root.dir)
+    }
+
+    pub(crate) fn with_manifest(
+        &self,
+        dir: &Path,
+        target: &File,
+        manifest: Captured,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let mut manifests = self.manifests.clone();
+        manifests.insert(identity(target)?, Some(manifest));
+        Self::discover_with(dir, true, manifests)
+    }
+
+    fn discover_with(
+        dir: &Path,
+        needs_package: bool,
+        mut manifests: Manifests,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let Some((root, selected)) = discover(dir, &mut manifests)? else {
             return Ok(None);
         };
@@ -522,6 +546,13 @@ impl Workspace {
                 .any(|manifest| manifest.identity == identity)
     }
 
+    pub(crate) fn captured_manifest(&self, directory: &File) -> io::Result<Option<&Captured>> {
+        Ok(self
+            .manifests
+            .get(&identity(directory)?)
+            .and_then(Option::as_ref))
+    }
+
     pub(crate) fn record_input(&mut self, identity: FileId) {
         self.inputs.insert(identity);
     }
@@ -557,7 +588,7 @@ impl Member {
     }
 }
 
-fn archive_path(from: &Path, path: &str) -> Option<String> {
+pub(crate) fn archive_path(from: &Path, path: &str) -> Option<String> {
     if path.is_empty() || path.starts_with('/') {
         return None;
     }

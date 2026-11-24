@@ -1,5 +1,8 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
+    AddRoot,
+    AddUpdate,
+    AddDryRun,
     CoreIr,
     Json,
     Recipe,

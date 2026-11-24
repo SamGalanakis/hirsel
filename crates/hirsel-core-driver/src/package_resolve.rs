@@ -2,6 +2,7 @@ use crate::package_content::{Id, Library, PackageArchive, Root, check_identity};
 use crate::package_manifest::SourceLocation;
 use crate::package_store::{Entry, PackageStore};
 use crate::package_workspace::{Edge, Workspace};
+use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 type Failure = Box<dyn std::error::Error>;
@@ -189,6 +190,7 @@ fn fetch(
     declaration: &(Id, SourceLocation),
     root: Root,
     cached: &mut Libraries,
+    fetched: &mut BTreeSet<String>,
 ) -> Result<(), Failure> {
     let (id, source) = declaration;
     let (archive, identity) = store.fetch(&workspace.root, id, root, source)?;
@@ -196,14 +198,31 @@ fn fetch(
         workspace.record_input(identity);
     }
     cached.extend(archive.entries);
+    fetched.insert(source.to_string());
     Ok(())
 }
 
 impl Resolution {
     pub(crate) fn resolve(
+        workspace: Workspace,
+        store: PackageStore,
+        frozen: bool,
+    ) -> Result<Self, Failure> {
+        Self::resolve_cached(
+            workspace,
+            store,
+            frozen,
+            BTreeMap::new(),
+            &mut BTreeSet::new(),
+        )
+    }
+
+    pub(crate) fn resolve_cached(
         mut workspace: Workspace,
         store: PackageStore,
         frozen: bool,
+        mut cached: Libraries,
+        fetched: &mut BTreeSet<String>,
     ) -> Result<Self, Failure> {
         let mut declared = BTreeMap::new();
         for member in workspace.members.values() {
@@ -216,7 +235,6 @@ impl Resolution {
             }
         }
         let mut libraries = BTreeMap::new();
-        let mut cached = BTreeMap::new();
         loop {
             let mut pending = Vec::new();
             let mut seen = BTreeSet::new();
@@ -259,7 +277,14 @@ impl Resolution {
                 if !cached.contains_key(root)
                     && let Some(declaration) = declared.get(root)
                 {
-                    fetch(&mut workspace, &store, declaration, *root, &mut cached)?;
+                    fetch(
+                        &mut workspace,
+                        &store,
+                        declaration,
+                        *root,
+                        &mut cached,
+                        fetched,
+                    )?;
                 }
                 if let Some(library) = cached.remove(root) {
                     check_identity(id, *root, &library.content.id)?;
@@ -285,6 +310,7 @@ impl Resolution {
                         &declared[&nearest],
                         nearest,
                         &mut cached,
+                        fetched,
                     )?;
                     found_carrier = true;
                 }
@@ -418,7 +444,7 @@ impl Resolution {
         Ok(self.encoded[id].0)
     }
 
-    pub(crate) fn make_archive(&mut self, id: &Id) -> Result<(Vec<u8>, PackageArchive), String> {
+    pub(crate) fn make_archive(&mut self, id: &Id) -> Result<(Bytes, PackageArchive), String> {
         let head = self.member_root(id)?;
         let member_content: BTreeMap<_, _> = self
             .encoded
@@ -444,8 +470,8 @@ impl Resolution {
                 },
             );
         }
-        let bytes = PackageArchive::encode(head, &reached)?;
-        let decoded = PackageArchive::decode(&bytes)?;
+        let bytes = Bytes::from(PackageArchive::encode(head, &reached)?);
+        let decoded = PackageArchive::decode(bytes.clone())?;
         decoded.verify(id, head, "pack output")?;
         Ok((bytes, decoded))
     }

@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub(crate) struct PackageStore {
     path: PathBuf,
 }
@@ -36,21 +37,21 @@ impl PackageStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
             Err(error) => return Err(error),
         };
-        let captured = match walk(&directory, Path::new(&root.hex()))
-            .and_then(|file| file.read(CONTENT_LIMIT))
+        let (bytes, _) = match walk(&directory, Path::new(&root.hex()))
+            .and_then(|file| file.read_vec(CONTENT_LIMIT))
         {
             Ok(captured) => captured,
             Err(WalkError::Missing) => return Ok(Entry::Missing),
             Err(WalkError::Unsupported) => return Err(io::ErrorKind::Unsupported.into()),
             Err(_) => return Ok(Entry::Damaged),
         };
-        if Root::of(&captured.bytes) != root {
+        if Root::of(&bytes) != root {
             return Ok(Entry::Damaged);
         }
-        match Content::decode(&captured.bytes) {
+        match Content::decode(&bytes) {
             Ok(content) => Ok(Entry::Present(Library {
                 content,
-                encoded: captured.bytes,
+                encoded: bytes.into(),
             })),
             Err(_) => Ok(Entry::Damaged),
         }
@@ -62,6 +63,29 @@ impl PackageStore {
             atomic_write(&self.path.join(root.hex()), &library.encoded)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn install_entry(&self, root: Root, encoded: &[u8]) -> io::Result<bool> {
+        fs::create_dir_all(&self.path)?;
+        let directory = open_directory(&self.path)?;
+        let name = root.hex();
+        if let Ok((mut file, _)) =
+            walk(&directory, Path::new(&name)).and_then(|entry| entry.reader())
+        {
+            let mut buffer = [0; 16384];
+            if file.metadata()?.len() == encoded.len() as u64
+                && encoded.chunks(buffer.len()).all(|chunk| {
+                    let bytes = &mut buffer[..chunk.len()];
+                    file.read_exact(bytes).is_ok() && bytes == chunk
+                })
+            {
+                return Ok(false);
+            }
+        }
+        use std::os::fd::AsRawFd;
+        let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+        atomic_write(&path, encoded)?;
+        Ok(true)
     }
 
     pub(crate) fn identities_include(&self, id: FileId) -> io::Result<bool> {
@@ -95,31 +119,31 @@ impl PackageStore {
         let (bytes, identity) = match source {
             SourceLocation::Archive(path) => {
                 let file = walk(directory, Path::new(path))
-                    .and_then(|file| file.read(ARCHIVE_LIMIT))
+                    .and_then(|file| file.read_vec(ARCHIVE_LIMIT))
                     .map_err(|error| {
                         format!(
                             "{id}: {source} {}",
                             error.explain("workspace", "a regular file")
                         )
                     })?;
-                (file.bytes, Some(file.identity))
+                (file.0, Some(file.1))
             }
             SourceLocation::Url(url) => (
                 fetch_https(url)
-                    .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?
-                    .into(),
+                    .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?,
                 None,
             ),
         };
-        let archive = PackageArchive::decode(&bytes)
+        let archive = PackageArchive::decode(bytes.into())
             .map_err(|error| format!("{id}: {source} is not a package archive: {error}"))?;
         archive.verify(id, pin, &source.to_string())?;
-        self.install(&archive)?;
+        self.install(&archive)
+            .map_err(|error| format!("{id}: admitting {source}: {error}\n  cache: partial"))?;
         Ok((archive, identity))
     }
 }
 
-fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub(crate) fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let system_roots = rustls_native_certs::load_native_certs();
     let roots = RootCerts::from(

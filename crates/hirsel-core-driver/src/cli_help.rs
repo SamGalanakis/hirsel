@@ -1,4 +1,4 @@
-use super::{COMMANDS, CommandSpec, OPTIONS, OptionId, OptionSpec};
+use super::{COMMANDS, CommandSpec, OptionId, OptionSpec, options};
 
 pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
     COMMANDS
@@ -8,9 +8,7 @@ pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
 }
 
 pub(super) fn is_help(name: &str) -> bool {
-    OPTIONS
-        .iter()
-        .any(|option| option.id == OptionId::Help && option.names.contains(&name))
+    options().any(|option| option.id == OptionId::Help && option.names.contains(&name))
 }
 
 pub(super) fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
@@ -68,7 +66,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             }
             return result;
         }
-        for option in OPTIONS.iter().filter(|o| applies(o, command)) {
+        for option in options().filter(|o| applies(o, command)) {
             let label = format!(
                 "{}{}",
                 option.names.join(", "),

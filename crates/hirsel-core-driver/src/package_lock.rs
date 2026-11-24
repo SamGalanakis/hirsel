@@ -1,5 +1,5 @@
 use crate::package_content::{Id, Root};
-use crate::package_files::{FileId, WalkError, open_directory, walk};
+use crate::package_files::{Captured, FileId, WalkError, open_directory, walk};
 use crate::package_resolve::Resolution;
 use crate::package_store::atomic_write;
 use crate::package_workspace::Workspace;
@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-const NAME: &str = "hirsel.lock";
+pub(crate) const NAME: &str = "hirsel.lock";
 const PREFIX: &str = "# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n";
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -280,22 +280,31 @@ pub(crate) struct Lock {
 
 impl Lock {
     pub(crate) fn compare(resolution: &Resolution, mode: Mode) -> Result<Self, String> {
-        let workspace = &resolution.workspace;
+        let captured = Self::capture(&resolution.workspace)?;
+        Self::compare_captured(resolution, mode, captured.as_ref())
+    }
+
+    pub(crate) fn capture(workspace: &Workspace) -> Result<Option<Captured>, String> {
+        match walk(&workspace.root, Path::new(NAME))
+            .and_then(|object| object.read(crate::package_content::ARCHIVE_LIMIT))
+        {
+            Ok(captured) => Ok(Some(captured)),
+            Err(WalkError::Missing) => Ok(None),
+            Err(error) => Err(format!(
+                "{NAME}: {}",
+                error.explain("workspace", "a regular file")
+            )),
+        }
+    }
+
+    pub(crate) fn compare_captured(
+        resolution: &Resolution,
+        mode: Mode,
+        captured: Option<&Captured>,
+    ) -> Result<Self, String> {
         let rows = make_rows(resolution);
         let derived = encode(&rows);
-        let prior = walk(&workspace.root, Path::new(NAME))
-            .and_then(|object| object.read(crate::package_content::ARCHIVE_LIMIT));
-        let captured = match prior {
-            Ok(captured) => Some(captured),
-            Err(WalkError::Missing) => None,
-            Err(error) => {
-                return Err(format!(
-                    "{NAME}: {}",
-                    error.explain("workspace", "a regular file")
-                ));
-            }
-        };
-        let identity = captured.as_ref().map(|lock| lock.identity);
+        let identity = captured.map(|lock| lock.identity);
         let pending = match captured {
             Some(prior) if prior.bytes.as_ref() == derived.as_bytes() => None,
             Some(prior) => {
@@ -313,6 +322,12 @@ impl Lock {
             }
         };
         Ok(Self { pending, identity })
+    }
+
+    pub(crate) fn pending(&self) -> Option<(&str, &str)> {
+        self.pending
+            .as_ref()
+            .map(|(text, message)| (text.as_str(), message.as_str()))
     }
 
     pub(crate) fn commit(self, workspace: &Workspace) -> std::io::Result<()> {

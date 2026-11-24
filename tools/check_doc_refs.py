@@ -31,7 +31,8 @@ SHELL_SEPARATOR = re.compile(r'\s+(?:&&|\|\||[;|])\s+|\s+#.*$')
 
 
 def cli_names(root):
-    source = (root / DRIVER).read_text(encoding='utf-8')
+    driver = root / DRIVER
+    source = driver.read_text(encoding='utf-8')
     catalogue = source.split('\ncommands! {', 1)[1].split('\n}', 1)[0]
     commands = {}
     for name, usage in re.findall(r'^\s*"([\w -]+)", "((?:[^"\\]|\\.)*)"', catalogue, re.M):
@@ -42,12 +43,14 @@ def cli_names(root):
         elif match := re.match(r'[\w-]+ ([a-z][\w-]*)\b', usage):
             children.add(match[1])
 
-    options = source.split('\nstatic OPTIONS:', 1)[1].split('\n];', 1)[0]
     flags = set()
-    for names in re.findall(r'option!\(\s*\w+,\s*\[([^\]]+)\]', options):
-        flags.update(FLAG.findall(names))
+    package_options = driver.with_name('cli_package_options.rs').read_text(encoding='utf-8')
+    for module in (source, package_options):
+        options = module.split('static OPTIONS:', 1)[1].split('\n];', 1)[0]
+        for names in re.findall(r'option!\(\s*\w+,\s*\[([^\]]+)\]', options):
+            flags.update(FLAG.findall(names))
     # Top-level switches such as --version are handled directly by parse().
-    parser = (root / DRIVER).with_name('cli_parse.rs').read_text(encoding='utf-8')
+    parser = driver.with_name('cli_parse.rs').read_text(encoding='utf-8')
     flags.update(re.findall(r'\bif name == "(--[\w-]+)"', parser))
     if not commands or not flags:
         raise ValueError('empty command or option catalogue')

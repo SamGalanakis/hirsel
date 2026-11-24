@@ -78,7 +78,7 @@ struct WorkspacePackage {
     charge: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SourceLocation {
     Archive(String),
     Url(String),

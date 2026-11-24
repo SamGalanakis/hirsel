@@ -1872,9 +1872,7 @@ pub(crate) mod tests {
     include!("callable_native.rs");
     include!("finalizer_native.rs");
     include!("startup_native.rs");
-    include!("test_rules_native.rs");
-    include!("test_run_native.rs");
-    include!("test_run_laws_native.rs");
+    include!("test_run_suite.rs");
     include!("clone_native.rs");
     include!("record_native.rs");
     include!("source_sites_native.rs");

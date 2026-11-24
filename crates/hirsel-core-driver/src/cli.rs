@@ -29,6 +29,7 @@ commands! {
     "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
     "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
+    "add", "add SOURCE [--root sha256:HEX] [--update] [--dry-run] [--package-store DIR] [--json]", "Bind a verified library in the current package.";
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
@@ -79,69 +80,6 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
-    option!(
-        PackageStore,
-        ["--package-store"],
-        Some("DIR"),
-        [
-            "check",
-            "build",
-            "publish",
-            "run",
-            "test",
-            "inspect",
-            "replay",
-            "sdk",
-            "lock",
-            "fetch",
-            "pack",
-            "laws check",
-            "laws write"
-        ],
-        "Select the verified library store."
-    ),
-    option!(
-        Locked,
-        ["--locked"],
-        None,
-        [
-            "check",
-            "build",
-            "publish",
-            "run",
-            "test",
-            "inspect",
-            "replay",
-            "sdk",
-            "lock",
-            "fetch",
-            "pack",
-            "laws check",
-            "laws write"
-        ],
-        "Require a current workspace lock."
-    ),
-    option!(
-        Frozen,
-        ["--frozen"],
-        None,
-        [
-            "check",
-            "build",
-            "publish",
-            "run",
-            "test",
-            "inspect",
-            "replay",
-            "sdk",
-            "lock",
-            "fetch",
-            "pack",
-            "laws check",
-            "laws write"
-        ],
-        "Require a current workspace lock and use only the package store."
-    ),
     option!(
         Interface,
         ["--interface"],
@@ -715,6 +653,7 @@ static OPTIONS: &[OptionSpec] = &[
             "core-product",
             "std-product",
             "env",
+            "add",
             "explain"
         ],
         "Print structured JSON."
@@ -1067,6 +1006,11 @@ static OPTIONS: &[OptionSpec] = &[
         "Create lib.hirsel and a runnable main that exercises it."
     ),
 ];
+#[path = "cli_package_options.rs"]
+mod cli_package_options;
+fn options() -> impl Iterator<Item = &'static OptionSpec> {
+    cli_package_options::OPTIONS.iter().chain(OPTIONS)
+}
 #[path = "cli_help.rs"]
 mod help_text;
 pub use help_text::help;

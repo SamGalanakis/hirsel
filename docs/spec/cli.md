@@ -104,15 +104,13 @@ fixed for the session.
 
 ## Adding a dependency
 
-*Specified, not built; [packages](packages.md#adding-a-dependency) is the full text.*
-`hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel add SOURCE [--root sha256:HEX] [--update] [--dry-run] [--package-store DIR] [--json]`
 binds one dependency in the nearest package manifest and updates `hirsel.lock`. `SOURCE` is an
-`https://` URL, `github:OWNER/REPO[/PACKAGE][@TAG]`, a `.hpkg` path, a `sha256:` root already in
-the package store, a toolchain `NAME@MAJOR`, or a member directory. It verifies the archive and
-resolves the workspace before it writes anything, and publishes one manifest at a time. It
-exits 0 for added, updated, unchanged or a dry run, 2 for a refusal (nothing written), and 1 for
-a failure after a manifest was written, including a partial `--workspace`<!-- doc-ref: planned -->
-placement that the same command completes when run again.
+`https://` URL, a `.hpkg` path, or a `sha256:` root already in the package store. It verifies
+the archive and resolves the workspace before publishing the manifest. It exits 0 for added,
+updated, unchanged or a dry run, 2 for a refusal before publication, and 1 for a failure after
+publication begins. The full package specification also covers the planned GitHub references,
+workspace placement, toolchain names and member directories. [Packages](packages.md#adding-a-dependency)
 
 ## CPU profiles
 

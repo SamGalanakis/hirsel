@@ -830,7 +830,7 @@ R built from it, equal those of a build from fresh source.
 | `hirsel pack [DIR] --output FILE` | publishes the member at DIR (section 6) |
 | `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
-| `hirsel add SOURCE`<!-- doc-ref: planned --> | binds one dependency in a manifest and updates the lock (below; not built) |
+| `hirsel add SOURCE` | binds one dependency in a manifest and updates the lock |
 
 Inspect a dependency by its manifest name from the package that declares it.
 An archive supplies its head package and verified dependency closure.
@@ -845,8 +845,9 @@ library is published by `pack`.
 
 ### Adding a dependency
 
-*Specified, not built (the dev/add design's slices S6-S9).* `hirsel add`<!-- doc-ref: planned --> is the one command
-that edits a manifest. It adds or updates one dependency binding and the lock with it:
+`hirsel add` edits a manifest and updates its lock. The implemented forms accept HTTPS URLs,
+`.hpkg` paths and package-store roots. GitHub references, workspace placement, toolchain names
+and member directories are planned.
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
@@ -1310,7 +1311,7 @@ app` reports now names its site in `json@1/new.hirsel`, and `hirsel publish app`
 prints the R of a cold run with no image, on the warm image path as on the cold one. The law
 catches an image keyed without file names and a producer that synthesises names.
 
-**Laws for `hirsel add`<!-- doc-ref: planned -->** (specified, not built; the design slice's own number in parentheses).
+**Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`. L23–L29 specify the later slices.
 X and Y are `jx`'s and `jy`'s roots and W is `wrap@1`'s (L6). Each `add` runs in a workspace
 whose `hirsel.toml` and `hirsel.lock` bytes the law records before it starts.
 

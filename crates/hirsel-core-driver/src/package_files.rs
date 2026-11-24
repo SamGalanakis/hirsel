@@ -60,7 +60,7 @@ pub(crate) fn open_directory(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Captured {
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) identity: FileId,
@@ -80,7 +80,7 @@ impl Walked {
         Ok(self.file)
     }
 
-    pub(crate) fn read(self, limit: usize) -> Result<Captured, WalkError> {
+    pub(crate) fn reader(self) -> Result<(File, FileId), WalkError> {
         if !self.metadata.is_file() {
             return Err(WalkError::WrongType);
         }
@@ -98,6 +98,11 @@ impl Walked {
         if FileId::of(&file.metadata()?) != identity {
             return Err(WalkError::Unsupported);
         }
+        Ok((file, identity))
+    }
+
+    pub(crate) fn read_vec(self, limit: usize) -> Result<(Vec<u8>, FileId), WalkError> {
+        let (file, identity) = self.reader()?;
         let mut bytes = Vec::new();
         file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
         if bytes.len() > limit {
@@ -105,6 +110,11 @@ impl Walked {
                 "over the limit of {limit} bytes"
             ))));
         }
+        Ok((bytes, identity))
+    }
+
+    pub(crate) fn read(self, limit: usize) -> Result<Captured, WalkError> {
+        let (bytes, identity) = self.read_vec(limit)?;
         Ok(Captured {
             bytes: bytes.into(),
             identity,

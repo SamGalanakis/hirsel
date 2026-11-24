@@ -46,6 +46,7 @@ mod native_entry;
 mod native_facts;
 mod native_object;
 mod native_sources;
+mod package_add;
 mod package_content;
 mod package_dir;
 mod package_files;
@@ -86,12 +87,6 @@ mod resident;
 mod reuse;
 mod source_delta;
 mod store;
-pub use meter::{Measurements, Meter, Stage};
-pub use reuse::DefinitionKey;
-use reuse::{Keys, compiler_identity};
-pub use store::Store;
-pub use tool_inputs::link_driver;
-
 use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId, encoding};
 use hirsel_core_ir::Module;
@@ -100,11 +95,16 @@ use hirsel_core_resolve::{
     Refusal, Resolution, ResolutionScratch, Site, SourceId,
 };
 use hirsel_core_syntax::{Symbols, SyntaxFile};
+pub use meter::{Measurements, Meter, Stage};
+pub use reuse::DefinitionKey;
+use reuse::{Keys, compiler_identity};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+pub use store::Store;
+pub use tool_inputs::link_driver;
 
 #[cfg(test)]
 hirsel_guard::install!();

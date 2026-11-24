@@ -1,5 +1,5 @@
 use super::help_text::{applies, is_help, named};
-use super::{CommandSpec, Invocation, OPTIONS, OptionId, help};
+use super::{CommandSpec, Invocation, OptionId, help, options};
 
 pub enum Action {
     Help(String),
@@ -66,8 +66,7 @@ pub(super) fn invocation(
                 && invocation.positional.is_some()
                 && invocation.arguments.is_empty())
         {
-            let option = OPTIONS
-                .iter()
+            let option = options()
                 .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
                 .ok_or_else(|| {
                     format!("unknown option `{argument}` for {name}; use help {name}")

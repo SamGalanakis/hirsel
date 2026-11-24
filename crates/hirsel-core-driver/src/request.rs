@@ -78,29 +78,27 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = invocation.command.name;
-    if command == "launcher" {
-        match crate::launcher::run(invocation)? {}
-    }
-    if command == "serve" {
-        if crate::resident::serving() {
-            return Err("a resident compiler serves build and run requests only".into());
-        }
-        let serve = crate::resident::Serve::read(invocation)?;
-        return conclude(Outcome::Exit(crate::resident::run(serve)?));
-    }
-    if command == "host" {
-        match crate::operator_cli::host(invocation)? {}
-    }
-    if command == "register" {
-        return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?));
-    }
     match command {
+        "add" => return conclude(Outcome::Exit(crate::package_add::run(invocation)?)),
+        "launcher" => match crate::launcher::run(invocation)? {},
+        "serve" => {
+            if crate::resident::serving() {
+                return Err("a resident compiler serves build and run requests only".into());
+            }
+            let serve = crate::resident::Serve::read(invocation)?;
+            return conclude(Outcome::Exit(crate::resident::run(serve)?));
+        }
+        "host" => match crate::operator_cli::host(invocation)? {},
+        "register" => return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?)),
+        "deploy" => return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?)),
+        "call" => {
+            return conclude(Outcome::Exit(crate::call::run(
+                crate::call::Options::read(invocation)?,
+            )?));
+        }
         "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
         "dry-run" => return conclude(Outcome::Exit(launch::dry_run::run(invocation)?)),
         _ => {}
-    }
-    if command == "deploy" {
-        return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?));
     }
     if command == "replay"
         && invocation
@@ -109,11 +107,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .any(|(option, _)| *option == Opt::HostState)
     {
         return conclude(Outcome::Exit(crate::operator_cli::replay(invocation)?));
-    }
-    if command == "call" {
-        return conclude(Outcome::Exit(crate::call::run(
-            crate::call::Options::read(invocation)?,
-        )?));
     }
     if matches!(command, "sdk ts" | "sdk json") {
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
@@ -470,6 +463,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::PackageStore
             | Opt::Locked
             | Opt::Frozen
+            | Opt::AddRoot
+            | Opt::AddUpdate
+            | Opt::AddDryRun
             | Opt::Url
             | Opt::Control
             | Opt::HostState

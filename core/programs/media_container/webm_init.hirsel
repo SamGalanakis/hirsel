@@ -1,0 +1,155 @@
+pub type TrackInfo {
+    number: u64,
+    kind: u64,
+    default_duration: u64,
+    codec_delay: u64,
+    seek_preroll: u64
+}
+
+pub type SegmentInfo {
+    timestamp_scale: u64,
+    next_element: u64,
+    declared_end: Option[u64]
+}
+
+fn track_info(input: Bytes, entry: Element, receive: scoped fn(TrackInfo, Bytes, Bytes)) -> Result[(), Error] {
+    let mut info = TrackInfo(number: 0, kind: 0, default_duration: 0, codec_delay: 0, seek_preroll: 0)
+    let mut codec_lo = 0u64
+    let mut codec_hi = 0u64
+    let mut private_lo = 0u64
+    let mut private_hi = 0u64
+    let mut at = entry.body
+    while at < entry.next {
+        let e = read_element(input, at, entry.next)?
+        if !e.known_size {
+            return Error(InvalidTrack)
+        }
+        match e.id {
+            0xd7 => {
+                info.number = uint(input, e.body, e.next)?
+            },
+            0x83 => {
+                info.kind = uint(input, e.body, e.next)?
+            },
+            0x23e383 => {
+                info.default_duration = uint(input, e.body, e.next)?
+            },
+            0x56aa => {
+                info.codec_delay = uint(input, e.body, e.next)?
+            },
+            0x56bb => {
+                info.seek_preroll = uint(input, e.body, e.next)?
+            },
+            0x86 => {
+                codec_lo = e.body
+                codec_hi = e.next
+            },
+            0x63a2 => {
+                private_lo = e.body
+                private_hi = e.next
+            },
+            _ => {},
+        }
+        at = e.next
+    }
+    if info.number == 0 || info.kind == 0 || codec_lo == codec_hi {
+        return Error(InvalidTrack)
+    }
+    receive(info, list.slice(input, codec_lo, codec_hi), list.slice(input, private_lo, private_hi))
+    Ok(())
+}
+
+fn timestamp_scale(input: Bytes, info: Element) -> Result[u64, Error] {
+    let mut at = info.body
+    while at < info.next {
+        let e = read_element(input, at, info.next)?
+        if !e.known_size {
+            return Error(InvalidElement)
+        }
+        if e.id == 0x2ad7b1 {
+            let scale = uint(input, e.body, e.next)?
+            if scale == 0 {
+                return Error(InvalidElement)
+            }
+            return Ok(scale)
+        }
+        at = e.next
+    }
+    Ok(1000000)
+}
+
+fn doctype(input: Bytes, header: Element) -> Result[(), Error] {
+    let mut at = header.body
+    while at < header.next {
+        let e = read_element(input, at, header.next)?
+        if !e.known_size {
+            return Error(InvalidElement)
+        }
+        if e.id == 0x4282 {
+            let kind = list.slice(input, e.body, e.next)
+            if kind == b"webm" || kind == b"matroska" {
+                return Ok(())
+            }
+            return Error(Unsupported)
+        }
+        at = e.next
+    }
+    Error(InvalidElement)
+}
+
+// This takes the prefix through Segment Info and Tracks. A known Segment can
+// declare bytes beyond the supplied window. The returned cursor is ready for
+// the next Segment child and the byte loans cover each track's codec fields.
+pub fn read_init(input: Bytes, at: u64, receive: scoped fn(TrackInfo, Bytes, Bytes)) -> Result[SegmentInfo, Error] {
+    let limit = list.len(input)
+    let ebml = read_element(input, at, limit)?
+    if ebml.id != 0x1a45dfa3 || !ebml.known_size {
+        return Error(InvalidElement)
+    }
+    doctype(input, ebml)?
+    let segment = element_header(input, ebml.next, limit)?
+    if segment.id != SEGMENT {
+        return Error(InvalidElement)
+    }
+    let end_window = if segment.next < limit {
+        segment.next
+    } else {
+        limit
+    }
+    let mut cursor = segment.body
+    let mut info: Option[Element] = None
+    let mut tracks: Option[Element] = None
+    while cursor < end_window {
+        let entry = read_element(input, cursor, end_window)?
+        if !entry.known_size || entry.id == CLUSTER {
+            return Error(Unsupported)
+        }
+        if entry.id == 0x1549a966 {
+            info = Some(entry)
+        } else if entry.id == 0x1654ae6b {
+            tracks = Some(entry)
+        }
+        cursor = entry.next
+        if let (Some(metadata), Some(entries)) = (info, tracks) {
+            let scale = timestamp_scale(input, metadata)?
+            let mut position = entries.body
+            let mut found = false
+            while position < entries.next {
+                let track = read_element(input, position, entries.next)?
+                if !track.known_size {
+                    return Error(InvalidTrack)
+                }
+                if track.id == 0xae {
+                    track_info(input, track, receive)?
+                    found = true
+                }
+                position = track.next
+            }
+            if !found {
+                return Error(InvalidTrack)
+            }
+            return Ok(SegmentInfo(timestamp_scale: scale, next_element: cursor, declared_end: element_next(segment)))
+        }
+    }
+    Error(Truncated)
+}

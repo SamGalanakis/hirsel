@@ -1,0 +1,110 @@
+// FFmpeg 6.1.1 libopus, 660 Hz sine, 60 ms, mono, bitexact.
+@test
+fn webm_reference() -> Result[(), ()] {
+    let source = webm_fixture()
+    let mut rebuilt: Bytes = list.with_capacity(1024)
+    let mut prefix: Bytes = list.with_capacity(64)
+    let mut suffix: Bytes = list.with_capacity(16)
+    let mut tracks = 0u64
+    let init = result.unwrap(webm.read_init(source, 0, scoped fn(track: webm.TrackInfo, codec: Bytes, private_data: Bytes) {
+        if track.number != 1 || track.kind != 2 || track.codec_delay != 6500000 || track.seek_preroll != 80000000 || codec != b"A_OPUS" {
+            fail("track metadata differs from the FFmpeg fixture")
+        }
+        let head = result.unwrap(opus.read_head(private_data))
+        result.unwrap(webm.write_init(mut rebuilt, track.number, 1000000, Opus(head.channels, head.pre_skip), private_data))
+        tracks += 1
+    }))
+    if tracks != 1 || init.timestamp_scale != 1000000 || init.declared_end != Some(list.len(source)) {
+        fail("reference Segment extent or scale")
+    }
+    let hashes: Inline[String, 4] =[string.from("4a70a44719870fb3d4b42f2860d79c035b1b3d365481390a5374ccfd9b0ba36d"), string.from("0236b0705e25e3b43e2b8789748bbaea345273b90e6f9a6d329e5441573c7fad"), string.from("0c6f73be84840faf8984d154bae10b1feaa0555f8c52deba48ad8bbb6e695a40"), string.from("fa64c2ff796235596a860dc05cbd35e7ecc4359b1983a451666dcf4e78f33e9d")]
+    let sizes: Inline[u64, 4] =[109, 69, 73, 66]
+    // ffprobe's PTS values are -7, 14, 34 and 54 after subtracting CodecDelay.
+    let timestamps: Inline[i64, 4] =[0, 21, 41, 61]
+    let mut count = 0u64
+    let mut at = init.next_element
+    let first_rebuilt_cluster = list.len(rebuilt)
+    while at < list.len(source) {
+        let element = result.unwrap(webm.read_element(source, at, list.len(source)))
+        if webm.element_id(element) == 0x1f43b675 {
+            at = result.unwrap(webm.read_cluster(source, at, list.len(source), true, scoped fn(frame: webm.Frame, payload: Bytes) {
+                if count >= 4 || frame.track != 1 || frame.timestamp != timestamps[count] || !frame.key || list.len(payload) != sizes[count] || digest(payload) != hashes[count] {
+                    fail("frame differs from ffprobe")
+                }
+                let padding = if count == 3 {
+                    13500000i64
+                } else {
+                    0i64
+                }
+                if frame.discard_padding != padding {
+                    fail("padding differs from ffprobe's last 648 discarded samples")
+                }
+                if padding == 0 {
+                    result.unwrap(webm.write_frame(mut prefix, 1, int.truncate(frame.timestamp), true, list.len(payload)))
+                    list.append(mut rebuilt, prefix)
+                    list.append(mut rebuilt, payload)
+                } else {
+                    result.unwrap(webm.write_padded_frame(mut prefix, mut suffix, 1, int.truncate(frame.timestamp), list.len(payload), padding))
+                    list.append(mut rebuilt, prefix)
+                    list.append(mut rebuilt, payload)
+                    list.append(mut rebuilt, suffix)
+                }
+                count += 1
+            }))
+        } else {
+            at = option.unwrap(webm.element_next(element))
+        }
+    }
+    if count != 4 {
+        fail("reference packet count")
+    }
+    at = first_rebuilt_cluster
+    count = 0
+    while at < list.len(rebuilt) {
+        at = result.unwrap(webm.read_cluster(rebuilt, at, list.len(rebuilt), true, scoped fn(frame: webm.Frame, payload: Bytes) {
+            if count >= 4 || frame.timestamp != timestamps[count] || digest(payload) != hashes[count] || (count == 3 && frame.discard_padding != 13500000) {
+                fail("remuxed WebM packet differs from the FFmpeg fixture")
+            }
+            count += 1
+        }))
+    }
+    if count != 4 {
+        fail("remuxed packet count")
+    }
+    // Matroska SimpleBlock vectors for Xiph, fixed-size, and EBML lacing.
+    let variable: Inline[String, 3] =[string.from("a"), string.from("bc"), string.from("def")]
+    let fixed: Inline[String, 3] =[string.from("ab"), string.from("cd"), string.from("ef")]
+    check_laces(b"\x1f\x43\xb6\x75\x92\xe7\x81\x00\xa3\x8d\x81\x00\x00\x82\x02\x01\x02abcdef", variable)
+    check_laces(b"\x1f\x43\xb6\x75\x90\xe7\x81\x00\xa3\x8b\x81\x00\x00\x84\x02abcdef", fixed)
+    check_laces(b"\x1f\x43\xb6\x75\x92\xe7\x81\x00\xa3\x8d\x81\x00\x00\x86\x02\x81\xc0abcdef", variable)
+    Ok(())
+}
+
+fn check_laces(cluster: Bytes, expected: Inline[String, 3]) {
+    let mut index = 0u64
+    let limit = list.len(cluster)
+    let end_cluster = result.unwrap(webm.read_cluster(cluster, 0, limit, true, scoped fn(frame: webm.Frame, payload: Bytes) {
+        if index >= 3 || frame.lace_count != 3 || frame.lace_index != int.truncate(index) || payload != string.as_bytes(expected[index]) {
+            fail("Matroska lace length or frame bytes")
+        }
+        index += 1
+    }))
+    if index != 3 || end_cluster != limit {
+        fail("Matroska lace extent")
+    }
+}
+
+fn webm_fixture() -> Bytes {
+    let mut encoded: Bytes = list.with_capacity(1092)
+    list.append(mut encoded, b"GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwEAAAAAAAMDEU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHGTbuMU6uEElTD")
+    list.append(mut encoded, b"Z1OsggEwTbuMU6uEHFO7a1OsggLt7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    list.append(mut encoded, b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmoCrXsYMPQkBNgIRMYXZmV0GETGF2ZkSJiEBRAAAAAAAAFlSua+WuAQAAAAAAAFzXgQFzxYgAAAAA")
+    list.append(mut encoded, b"AAAAAZyBACK1nIN1bmSIgQCGhkFfT1BVU1aqg2MuoFa7hATEtACDgQLhkZ+BAbWIQOdwAAAAAABiZIEQY6KTT3B1c0hlYWQBATgBgLsAAAAAABJUw2fRc3PO")
+    list.append(mut encoded, b"Y8CLY8WIAAAAAAAAAAFnyJlFo4dFTkNPREVSRIeMTGF2YyBsaWJvcHVzZ8ihRaOIRFVSQVRJT05Eh5MwMDowMDowMC4wNjgwMDAwMDAAH0O2dUFh54EAo/GB")
+    list.append(mut encoded, b"AACAeIHT8wfDwm8AAAAPR0eRBuZ4IYpzp1MkvUQBjrHluwnGrn7ms6zyMVRqE66cpGQSjY5N5R4//O7LXIXudm3XKJOe4TYkDURpiH8FCMHSa7mKqfa2XMyt")
+    list.append(mut encoded, b"0bq0ShxAC+i8bzNigPylJR6U+U+icqPJgQAVgHieHpNiGBBtIJ4s1HOIs2aSdV8PNSHFwK/g0f+o6tFTYZ0mXvOln/Qr8R+tVdng0AWN/KkvpmzR5oyqGm9w")
+    list.append(mut encoded, b"HbgplWvMvqPNgQApgHiZv1E0D3QMOgkxPHpTbrUTeybmkXnuLUAvYtXIIqz2WQ2qEnI8teKqk+0N0ysFweIV5g10BnjF9OG5+9O0GZLerUCQAa+26Fegz6HG")
+    list.append(mut encoded, b"gQA9AHgGMBiCYpZvm5wtgMtw/Vig1VvyM28KWiLFzSsPkGSGeY9Hcfw00CKH10uMIBUyEL7NKUTF/O4V8El8NngC+M2uOHWihADN/mAcU7trkbuPs4EAt4r3")
+    list.append(mut encoded, b"gQHxggGG8IED")
+    option.unwrap(std.base64.decode(encoded))
+}

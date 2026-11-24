@@ -207,7 +207,7 @@ store@1/store/test_memory_identity src=df5d7dff1ec718cd sig=480e382971012191 run
 store@1/store/test_memory_no_frame_limit src=85d66f02e5e776cc sig=3557fd02c3511712 run=ad14684581476a83 bug=- oracle=- rows=pending
 store@1/store/test_migrate src=fcea4bdd1e379ae1 sig=6a79e57c110c1b8b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_migration_preview_conflict src=f19a90187093625a sig=90120f983adcd11f run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/test_model src=36489d44b6990961 sig=70fbc75b7ec8ad75 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/test_model src=340959342437d12c sig=75515de0f81d7887 run=579dcac8588fe904 bug=- oracle=- rows=pending
 store@1/store/test_node_ids src=37be0815d508165c sig=84564dfb42de281e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_overwrite_account src=6548942978e8c017 sig=c486ac72964577df run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_paged_collection_paths src=3eac467b5608ff80 sig=84e33715f3304ef6 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

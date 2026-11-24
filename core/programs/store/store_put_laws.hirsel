@@ -123,16 +123,46 @@ fn value_at(s: Snapshot, k: u64) -> u64 {
 // The commands come from a std.prop tape, so a failing sequence shrinks to a
 // minimal one. A command is (kind, slot): kind 0 deletes, 1 and 2 put, 3 puts
 // then aborts, 4 puts then faults. Command i runs at wall i and puts wall + 1.
-pub fn law_model() -> Result[(), ()] {
-    let commands = std.prop.list_of(std.prop.pair(std.prop.u64_in(0, 4), std.prop.u64_in(0, 23)), 0, 64)
-    std.prop.check(std.prop.config(), take commands, fn(tape: List[(u64, u64)]) -> Result[(), String] {
-        model_run(tape)
-    })
+pub fn law_model(seed: u64) -> Result[(), ()] {
+    let command = std.prop.pair(std.prop.u64_in(0, 4), std.prop.u64_in(0, 23))
+    let commands = std.prop.make(fn(mut src: std.prop.Source) -> List[(u64, u64)] {
+        let mut tape: List[(u64, u64)] = list.new()
+        for i in 0u64 ..= 128 {
+            let drawn = std.prop.span(mut src, 1, fn(mut choice: std.prop.Source) -> Option[(u64, u64)] {
+                // 99% continuation puts about half the tapes at depth 64.
+                // Record a stop at the cap too, so deleting a span still replays.
+                let more = std.prop.weighted(mut choice, if i < 128 { 99 } else { 0 }, 100)
+                if more && i < 128 { Some(std.prop.draw(mut choice, command)) } else { None }
+            })
+            let Some(operation) = drawn else { break }
+            list.push(mut tape, operation)
+        }
+        take tape
+    }, model_show_tape)
+    let mut config = std.prop.config()
+    config.seed = seed
+    std.prop.check(config, take commands, model_run)
+}
+
+fn model_show_tape(tape: List[(u64, u64)], mut out: String) {
+    string.push(mut out, "[")
+    let mut sep = ""
+    for (kind, slot) in tape {
+        string.push(mut out, sep)
+        string.push(mut out, "(")
+        string.push_u64(mut out, kind)
+        string.push(mut out, ", ")
+        string.push_u64(mut out, slot)
+        string.push(mut out, ")")
+        sep = ", "
+    }
+    string.push(mut out, "]")
 }
 
 // A closure cannot capture the test's Clock (LANG-14), so each run takes a
 // virtual one; the store reads no time beyond the wall each command passes.
 fn model_run(tape: List[(u64, u64)]) -> Result[(), String] {
+    let _ = std.prop.sometimes("64 or more commands", list.len(tape) >= 64)
     let (c, _hand) = provide.clock(0u64, 0u64)
     let mut db = raw_test_db(c, 1073741824)
     let mut model: List[u64] = list.with_capacity(24)
@@ -372,8 +402,8 @@ fn model_step(mut db: Db, wall: u64, kind: u64, k: u64) -> bool {
 }
 
 @test
-fn test_model() -> Result[(), ()] {
-    law_model()
+fn test_model(seed_grant: Env) -> Result[(), ()] {
+    law_model(bucket_law_seed(seed_grant, 0))
 }
 
 @test

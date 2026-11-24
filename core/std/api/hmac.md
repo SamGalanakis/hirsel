@@ -1,4 +1,4 @@
-# HMAC-SHA256
+# HMAC
 
 [API overview](../API.md). [Operations and contracts](../hmac.hirsel). [SHA-256](sha256.md).
 [TLS and secrets](../../../docs/spec/tls.md#tls-5-secrets).
@@ -31,6 +31,19 @@ differ, as Go's `hmac.Equal` and `subtle.ConstantTimeCompare` do. Unequal length
   and `finish` O(1). A truncated tag is a slice of the 32 bytes.
 - **Replay.** These are pure computation. They pass no replay point and are recomputed on
   replay.
+
+For protocols that require HMAC-SHA1, the corresponding operations have
+the same range, allocation and finish semantics and return a 20-byte tag.
+The oracle is RFC 2202.
+
+```
+pub opaque type HmacSha1
+pub fn hmac.start_sha1(key: Bytes) -> HmacSha1
+pub fn hmac.add_sha1(mut h: HmacSha1, input: Bytes, lo: u64, hi: u64)
+pub fn hmac.add_sha1_byte(mut h: HmacSha1, x: u8)
+pub fn hmac.finish_sha1(h: HmacSha1) -> Inline[u8, 20]
+pub fn hmac.sha1(key: Bytes, data: Bytes) -> Inline[u8, 20]
+```
 
 ## Secret keys
 

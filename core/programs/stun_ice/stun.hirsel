@@ -285,10 +285,9 @@ pub fn verify(packet: Bytes, key: Bytes, mut scratch: Bytes) -> Result[Message, 
             return Error(BufferTooSmall(need))
         }
         let tag = sha1_prefix(key, packet, p.sha1_at, mut scratch)
-        let mut diff = 0u32
-        for i in 0u64 .. 5 {
-            let word: u32 = list.word_be(packet, p.sha1_at + 4 + i * 4)
-            diff |= tag[i] ^ word
+        let mut diff = 0u8
+        for i in 0u64 .. 20 {
+            diff |= tag[i] ^ packet[p.sha1_at + 4 + i]
         }
         if diff != 0 {
             return Error(BadIntegrity)
@@ -352,7 +351,9 @@ fn finish(mut out: Bytes, key: Bytes, mut scratch: Bytes, at: u64, integrity: In
     if integrity == Sha1 || integrity == Both {
         let tag = sha1_prefix(key, out, next, mut scratch)
         attribute(mut out, next, 0x0008, 20)
-        write_digest(mut out, next + 4, tag)
+        for i in 0u64 .. 20 {
+            out[next + 4 + i] = tag[i]
+        }
         next += 24
     }
     if integrity == Sha256 || integrity == Both {

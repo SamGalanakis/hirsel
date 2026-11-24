@@ -53,11 +53,7 @@ fn history_fill_key(mut key: String, lead: String, reference: HistoryRef) {
     string.push_char(mut key, '-')
     history_number(mut key, reference.epoch)
     string.push_char(mut key, '-')
-    let digits = "0123456789abcdef"
-    for i in 0u64 .. 16 {
-        let digit = (reference.digest >> (4 * (15 - i))) & 15
-        string.push(mut key, string.slice(digits, digit, digit + 1))
-    }
+    std.hex.push_u64(mut key, reference.digest)
 }
 
 fn history_key(lead: String, reference: HistoryRef) -> String {

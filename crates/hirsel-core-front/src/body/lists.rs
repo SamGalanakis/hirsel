@@ -1625,9 +1625,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// SHA-2 `blocks`: Bounds unless the full block range fits, checked before
+    /// SHA block ranges: Bounds unless the full block range fits, checked before
     /// the state changes; no data address is formed for zero blocks.
-    pub(super) fn sha2_blocks(
+    pub(super) fn sha_blocks(
         &mut self,
         op: hirsel_core_ir::RtOp,
         state: ValueId,
@@ -1640,7 +1640,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let block_size = match op {
-            hirsel_core_ir::RtOp::Sha256Blocks => 64,
+            hirsel_core_ir::RtOp::Sha1Compress | hirsel_core_ir::RtOp::Sha256Blocks => 64,
             hirsel_core_ir::RtOp::Sha512Blocks => 128,
             _ => unreachable!(),
         };
@@ -1673,8 +1673,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// SHA-2 `block`: one block from an Inline array; nothing to check.
-    pub(super) fn sha2_block(
+    /// SHA `block`: one block from an Inline array; nothing to check.
+    pub(super) fn sha_block(
         &mut self,
         op: hirsel_core_ir::RtOp,
         state: ValueId,

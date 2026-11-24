@@ -1,23 +1,8 @@
 // Byte vectors for the launcher session (module launcher). The expected bytes were
 // derived from core/std/api/codec.md's format by an encoder written apart from std.codec;
 // crates/hirsel-core-driver/src/launcher/session.rs checks the same bytes in Rust.
-fn digit(x: u8) -> u8 {
-    if x <= b'9' {
-        x - b'0'
-    } else {
-        x - b'a' + 10u8
-    }
-}
-
 fn hex(s: String) -> Bytes {
-    let raw = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(raw) / 2u64)
-    let mut i = 0u64
-    while i < list.len(raw) {
-        list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64]))
-        i += 2u64
-    }
-    out
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
 }
 
 fn one[T](take x: T) -> List[T] {

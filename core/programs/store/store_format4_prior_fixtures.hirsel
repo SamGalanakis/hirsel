@@ -2,15 +2,8 @@
 // collection 1, key 7 holds four zero bytes. The suffix overwrites it
 // with 01 00 00 00 a5. Both put grammars consume the same frame boundary.
 
-fn frozen_nibble(octet: u8) -> u8 {
-    if octet <= b'9' { octet - b'0' } else { octet - b'a' + 10 }
-}
-
 fn append_frozen(mut raw: Bytes, encoded: String) {
-    let hex = string.as_bytes(encoded)
-    for i in 0u64 .. list.len(hex) / 2 {
-        list.push(mut raw, (frozen_nibble(hex[2 * i]) << 4) | frozen_nibble(hex[2 * i + 1]))
-    }
+    list.append(mut raw, option.unwrap(std.hex.decode(string.as_bytes(encoded))))
 }
 
 fn frozen_format4_directory() -> List[(String, Bytes)] {

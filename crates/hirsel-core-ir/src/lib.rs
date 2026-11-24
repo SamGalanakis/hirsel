@@ -457,12 +457,12 @@
 //!
 //! # SHA-1
 //!
-//! `rt.sha1_blocks(state, data, len)` applies RFC 3174 block compression in
-//! order to `len` readable bytes and their SHA-1 padding. It updates five
-//! `u32` state words in place. An empty span only compresses the padding.
-//! The call admits no bytes and costs one step (MEM-30). The portable and
-//! instruction kernels update the same state (SEM-8). Engines map the row to
-//! `void hirsel_core_sha1_blocks(uint32_t *, const uint8_t *, uint64_t)`.
+//! `rt.sha1_blocks(state, data, len)` compresses `len` readable bytes and
+//! their RFC 3174 padding. `rt.sha1_compress(state, data, blocks)` compresses
+//! `blocks` complete 64-byte blocks without padding. Both update five `u32`
+//! state words in one step, admit no bytes (MEM-30), and use the same
+//! portable and instruction kernels (SEM-8). Engines map both rows to
+//! `hirsel_core_sha1_*` with `(uint32_t *, const uint8_t *, uint64_t)`.
 //!
 //! # SHA-256
 //!

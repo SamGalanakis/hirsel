@@ -403,6 +403,7 @@ tags!(RtOp {
     79 => RsaVerifyPkcs1Sha256,
     80 => RsaVerifyPssSha256,
     81 => Argon2id,
+    82 => Sha1Compress,
 });
 
 tags!(Wait {

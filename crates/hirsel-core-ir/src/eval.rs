@@ -18,6 +18,7 @@ mod map;
 mod provide;
 mod secret_kdf;
 mod secret_key;
+mod sha1;
 mod sha512;
 mod signature;
 mod simd;
@@ -6569,17 +6570,23 @@ impl Machine<'_> {
                 }
                 vec![]
             }
-            RtOp::Sha1Blocks => {
+            RtOp::Sha1Blocks | RtOp::Sha1Compress => {
                 let mut h = [0u32; 5];
                 for (word, bytes) in h.iter_mut().zip(self.get(a[0], 20).as_chunks::<4>().0) {
                     *word = u32::from_le_bytes(*bytes);
                 }
-                let data = if a[2] == 0 {
+                let compress_only = op == RtOp::Sha1Compress;
+                let bytes = if compress_only { a[2] * 64 } else { a[2] };
+                let data = if bytes == 0 {
                     &[]
                 } else {
-                    self.get(a[1], a[2] as usize)
+                    self.get(a[1], bytes as usize)
                 };
-                sha1_blocks(&mut h, data);
+                if compress_only {
+                    sha1::compress(&mut h, data.as_chunks::<64>().0);
+                } else {
+                    sha1::padded(&mut h, data);
+                }
                 let mut encoded = [0; 20];
                 for (word, bytes) in h.into_iter().zip(encoded.as_chunks_mut::<4>().0) {
                     *bytes = word.to_le_bytes();
@@ -8138,45 +8145,6 @@ const SHA256_K: [u32; 64] = [
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
-
-/// RFC 3174 sections 4 and 6.1. The evaluator always uses scalar rounds.
-fn sha1_blocks(h: &mut [u32; 5], data: &[u8]) {
-    let (blocks, tail) = data.as_chunks::<64>();
-    let mut padding = [0u8; 128];
-    padding[..tail.len()].copy_from_slice(tail);
-    padding[tail.len()] = 0x80;
-    let end = if tail.len() < 56 { 64 } else { 128 };
-    padding[end - 8..end].copy_from_slice(&((data.len() as u64) << 3).to_be_bytes());
-
-    for block in blocks.iter().chain(padding[..end].as_chunks::<64>().0) {
-        let mut w = [0u32; 80];
-        for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
-            *word = u32::from_be_bytes(*bytes);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = *h;
-        for (i, word) in w.into_iter().enumerate() {
-            let (f, k) = match i {
-                0..20 => ((b & c) | (!b & d), 0x5a827999),
-                20..40 => (b ^ c ^ d, 0x6ed9eba1),
-                40..60 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                _ => (b ^ c ^ d, 0xca62c1d6),
-            };
-            let next = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(word);
-            (a, b, c, d, e) = (next, a, b.rotate_left(30), c, d);
-        }
-        for (word, update) in h.iter_mut().zip([a, b, c, d, e]) {
-            *word = word.wrapping_add(update);
-        }
-    }
-}
 
 /// `rt.sha256_blocks` (crate docs, "SHA-256"): FIPS 180-4 section 6.2.2 over
 /// each 64-byte block of `data`, in order. The evaluator's own portable

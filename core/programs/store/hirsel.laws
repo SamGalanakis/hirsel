@@ -120,7 +120,7 @@ store@1/store/journal_test_segment src=250f0847ffd92316 sig=fc6eb5c5983512bd run
 store@1/store/journal_test_step_stop src=8d2a266683ef556f sig=1bab4cc4d9f9d9fd run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_streams src=741f29359a442258 sig=b723df49abd805bd run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_table_priors src=3ea10af914e0fc39 sig=b3e79ea542bac521 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/journal_test_v264_recovery src=9fb978ee089b3ff9 sig=6f483fb7d9254e71 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/journal_test_v264_recovery src=3e0ad7ace9142801 sig=87302c20873dee82 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/journal_test_worker src=246d11ec4fcd4617 sig=3e25d28e36f236fb run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/journal_window_prefix src=44013812f71276c3 sig=ec997d6219fbe1b6 run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/log_changes_and_tail_window src=17ed4efb7b796d0f sig=9636abfb76af1e6b run=aff7b6b8625190d8 bug=- oracle=- rows=pending

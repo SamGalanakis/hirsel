@@ -1,7 +1,13 @@
-// RFC 2104 with SHA-256's 64-byte block size.
+// RFC 2104 with SHA-256 and SHA-1's 64-byte block size.
 pub opaque type Hmac {
     inner: sha256.Sha256,
     outer: sha256.Sha256,
+}
+
+fn mask_block(mut block: Inline[u8, 64], mask: u8) {
+    for i in 0u64 .. 64u64 {
+        block[i] ^= mask
+    }
 }
 
 /// Prepare the two SHA-256 states. Alloc: none. Cost: O(len(key)).
@@ -18,13 +24,9 @@ pub fn start(key: Bytes) -> Hmac {
             block[i] = key[i]
         }
     }
-    for i in 0u64 .. 64u64 {
-        block[i] ^= 0x36
-    }
+    mask_block(mut block, 0x36)
     let inner = sha256.start_block(block)
-    for i in 0u64 .. 64u64 {
-        block[i] ^= 0x6a // 0x36 XOR 0x5c
-    }
+    mask_block(mut block, 0x6a) // 0x36 XOR 0x5c
     Hmac(inner: inner, outer: sha256.start_block(block))
 }
 
@@ -54,6 +56,61 @@ pub fn sha256(key: Bytes, data: Bytes) -> Inline[u8, 32] {
     let mut h = start(key)
     add(mut h, data, 0, list.len(data))
     finish(h)
+}
+
+pub opaque type HmacSha1 {
+    inner: sha1.Sha1,
+    outer: sha1.Sha1,
+}
+
+/// Prepare the two SHA-1 states. Alloc: none. Cost: O(len(key)).
+pub fn start_sha1(key: Bytes) -> HmacSha1 {
+    let n = list.len(key)
+    let mut block: Inline[u8, 64] =[0; 64]
+    if n > 64 {
+        let mut hash = sha1.start()
+        sha1.add(mut hash, key, 0, n)
+        let digest = sha1.finish(hash)
+        for i in 0u64 .. 20u64 {
+            block[i] = digest[i]
+        }
+    } else {
+        for i in 0u64 .. n {
+            block[i] = key[i]
+        }
+    }
+    mask_block(mut block, 0x36)
+    let inner = sha1.start_block(block)
+    mask_block(mut block, 0x6a) // 0x36 XOR 0x5c
+    HmacSha1(inner: inner, outer: sha1.start_block(block))
+}
+
+/// Append input[lo, hi), with list.slice's checked range semantics.
+/// Alloc: none. Cost: O(hi-lo).
+pub fn add_sha1(mut h: HmacSha1, input: Bytes, lo: u64, hi: u64) {
+    sha1.add(mut h.inner, input, lo, hi)
+}
+
+/// Append one byte. Alloc: none. Cost: O(1).
+pub fn add_sha1_byte(mut h: HmacSha1, x: u8) {
+    sha1.add_byte(mut h.inner, x)
+}
+
+/// Return the current tag. Alloc: none. Cost: O(1).
+pub fn finish_sha1(h: HmacSha1) -> Inline[u8, 20] {
+    let digest = sha1.finish(h.inner)
+    let mut outer = h.outer
+    for x in digest {
+        sha1.add_byte(mut outer, x)
+    }
+    sha1.finish(outer)
+}
+
+/// Authenticate all data. Alloc: none. Cost: O(len(key) + len(data)).
+pub fn sha1(key: Bytes, data: Bytes) -> Inline[u8, 20] {
+    let mut h = start_sha1(key)
+    add_sha1(mut h, data, 0, list.len(data))
+    finish_sha1(h)
 }
 
 /// Compare tags in time that depends only on their lengths. Alloc: none.

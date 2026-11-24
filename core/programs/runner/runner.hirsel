@@ -1798,20 +1798,15 @@ pub fn launch_prepare_args(a: Args) -> Result[Option[PrepareArgs], Exit] {
 // The launcher passes the attempt and image digest as fixed-width hex.
 fn prepare_hex(text: String, count: u64) -> Option[Bytes] {
     let raw = string.as_bytes(text)
-    if list.len(raw) != 2u64 * count { return None }
-    let mut out: Bytes = list.with_capacity(count)
-    for i in 0u64 .. count {
-        let Some(hi) = hex_digit(raw[2u64 * i]) else { return None }
-        let Some(lo) = hex_digit(raw[2u64 * i + 1u64]) else { return None }
-        list.push(mut out, (hi << 4u8) | lo)
+    if list.len(raw) != 2u64 * count {
+        return None
     }
-    Some(take out)
-}
-
-fn hex_digit(byte: u8) -> Option[u8] {
-    if byte >= b'0' && byte <= b'9' { return Some(byte - b'0') }
-    if byte >= b'a' && byte <= b'f' { return Some(byte - b'a' + 10u8) }
-    None
+    for byte in raw {
+        if byte >= b'A' && byte <= b'F' {
+            return None
+        }
+    }
+    std.hex.decode(raw)
 }
 
 fn prepare_result[T](take outcome: Result[T, store.DeployError]) -> Result[T, PrepareError] {

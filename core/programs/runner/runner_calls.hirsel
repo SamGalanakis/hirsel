@@ -15,15 +15,7 @@ type Calls = runner.Registry[(), Hd]
 
 fn digest_matches(exported: List[runner.Exported], expected: String) -> bool {
     let digest = result.unwrap(runner.release_digest(exported))
-    let digits = string.as_bytes("0123456789abcdef")
-    let encoded = string.as_bytes(expected)
-    if list.len(digest) != 32u64 { return false }
-    for index in 0u64 .. 32u64 {
-        let byte = digest[index]
-        if digits[int.widen(byte >> 4)] != encoded[index * 2u64] { return false }
-        if digits[int.widen(byte & 15u8)] != encoded[index * 2u64 + 1u64] { return false }
-    }
-    true
+    list.len(digest) == 32u64 && std.hex.encode(digest) == expected
 }
 
 fn digest_bytes(text: String) -> Bytes {

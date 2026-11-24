@@ -665,9 +665,10 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_xxh3_stripes", &[P, P, P, U], &[], &args[..4])?;
                 0
             }
-            RtOp::Sha1Blocks | RtOp::Sha256Blocks | RtOp::Sha512Blocks => {
+            RtOp::Sha1Blocks | RtOp::Sha1Compress | RtOp::Sha256Blocks | RtOp::Sha512Blocks => {
                 let symbol = match op {
                     RtOp::Sha1Blocks => "hirsel_core_sha1_blocks",
+                    RtOp::Sha1Compress => "hirsel_core_sha1_compress",
                     RtOp::Sha256Blocks => "hirsel_core_sha256_blocks",
                     RtOp::Sha512Blocks => "hirsel_core_sha512_blocks",
                     _ => unreachable!(),

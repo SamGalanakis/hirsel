@@ -1,12 +1,10 @@
 // Module harness: outside payloads. Blob staging for results too large to inline, and
 // the granted worker that makes a sealed effect's one outside call and settles it.
 fn blob_key(hash: Bytes) -> String {
-    let digits = string.as_bytes("0123456789abcdef")
     let mut key = string.into_bytes("sha256/")
-    for b in hash {
-        list.push(mut key, digits[int.widen(b >> 4u8)])
-        list.push(mut key, digits[int.widen(b & 15u8)])
-    }
+    std.hex.append_from(mut key, list.len(hash), scoped fn(i: u64) -> u8 {
+        hash[i]
+    })
     result.unwrap(string.from_utf8(take key))
 }
 

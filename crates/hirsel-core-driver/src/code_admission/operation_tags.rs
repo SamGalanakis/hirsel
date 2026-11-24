@@ -45,6 +45,7 @@ fn runtime_probes() -> Module {
         RtOp::LaunchTarget { view: ITEM },
         RtOp::DescribeEmit,
         RtOp::Sha1Blocks,
+        RtOp::Sha1Compress,
         RtOp::Xxh3Short,
         RtOp::Xxh3Stripes,
         RtOp::LaunchHandle,

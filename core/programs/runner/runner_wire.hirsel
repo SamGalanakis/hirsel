@@ -1,23 +1,8 @@
 // Generated from frame-vectors.json by core/tools/runner_tests.py, then
 // formatted; the r0 frame_vectors part refuses a stale copy.
 // Value construction for frame-vectors.json; expected bytes never use std.codec.
-fn digit(x: u8) -> u8 {
-    if x <= b'9' {
-        x - b'0'
-    } else {
-        x - b'a' + 10u8
-    }
-}
-
 fn b(s: String) -> Bytes {
-    let raw = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(raw) / 2u64)
-    let mut i = 0u64
-    while i < list.len(raw) {
-        list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64]))
-        i += 2u64
-    }
-    out
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
 }
 
 fn one[T](take x: T) -> List[T] {

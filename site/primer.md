@@ -441,7 +441,7 @@ fn serve(take job: Server) waits {
     let mut builder: std.router.Builder[()] = std.router.builder()
     result.unwrap(std.router.add(mut builder, "GET", "/", std.router.raw(hello)))
     let routes = result.unwrap(std.router.build(take builder))
-    let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    let cfg = std.http.defaults()
     result.unwrap(std.http.serve(take listeners, c, tasks, take cfg, take routes, ()))
 }
 

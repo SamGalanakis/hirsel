@@ -19,6 +19,7 @@ pub(super) fn neutral_runtime(op: RtOp) -> bool {
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
+            | RtOp::Sha1Compress
             | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
             | RtOp::Sha512Blocks

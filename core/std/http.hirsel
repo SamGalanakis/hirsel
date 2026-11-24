@@ -653,6 +653,11 @@ pub type Config: shareable + send {
     lease_ms: u64
 }
 
+/// Limits for a small HTTP server, with upgrades and event streams disabled.
+pub fn defaults() -> Config {
+    Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+}
+
 pub opaque scoped type Request {
     input: View[Bytes],
     head: View[http1.Head],
@@ -2026,18 +2031,13 @@ fn bytes_for_connection(cfg: Config) -> u64 {
 }
 
 fn valid_config(cfg: Config) -> bool {
-    if cfg.head_max == 0 || cfg.head_max > 8192 || cfg.fields_max > 64 || cfg.inbox_cap == 0 {
-        return false
-    }
-    if cfg.streams_max != 0 && cfg.heartbeat_ms == 0 {
-        return false
-    }
-    // Reserve only arithmetic room here. Actual population storage and
-    // task allocations still use checked Capacity.
+    let valid_head = cfg.head_max > 0 && cfg.head_max <= 8192 && cfg.fields_max <= 64 && cfg.inbox_cap > 0
+    let valid_stream = cfg.streams_max == 0 || cfg.heartbeat_ms > 0
+    // Check arithmetic room here. Storage and tasks still use checked Capacity.
     let input_size = int.saturating_add(cfg.pipeline_max, cfg.body_inline)
     let with_output = int.saturating_add(input_size, cfg.out_cap)
     let total = int.saturating_add(with_output, cfg.handler_bytes)
-    total <= 18446744073709551615 - 32768 && cfg.state_max <= 18446744073709551608
+    valid_head && valid_stream && total <= 18446744073709551615 - 32768 && cfg.state_max <= 18446744073709551608
 }
 
 fn source_key(ip: Ip) -> (u64, u64, u64) {

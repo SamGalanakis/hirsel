@@ -3,6 +3,9 @@
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
 [Outbound HTTP/1.1](http_client.md).
 
+`defaults()` returns the limits used in the primer's small server example.
+It permits two HTTP connections and disables upgrades and event streams.
+
 `serve(take listeners, clock, tasks, take config, take routes, take state)`
 serves HTTP/1.1 and HTTP/1.0 on listeners from `Net`. The supplied
 `Tasks` capability owns the acceptors, connection tasks and refusal

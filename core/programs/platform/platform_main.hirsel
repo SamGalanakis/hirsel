@@ -187,7 +187,7 @@ pub fn read_pin(d: Dir, c: Clock, out: Stdout, argv: Args) -> Result[(), Exit] w
     let Some(text) = args.get(argv, 0u64) else {
         return Error(Exit(status: 64u8))
     }
-    let Some(id) = unhex(text) else {
+    let Some(id) = std.hex.decode(string.as_bytes(text)) else {
         return Error(Exit(status: 64u8))
     }
     if list.len(id) != 16u64 {
@@ -207,23 +207,6 @@ pub fn read_pin(d: Dir, c: Clock, out: Stdout, argv: Args) -> Result[(), Exit] w
         Ok(_) => Ok(()),
         Error(_) => Error(Exit(status: 74u8)),
     }
-}
-
-fn unhex(s: String) -> Option[Bytes] {
-    let n = string.byte_len(s)
-    if n % 2u64 != 0u64 {
-        return None
-    }
-    let mut out: Bytes = list.with_capacity(n / 2u64)
-    let mut i = 0u64
-    while i < n {
-        let Ok(v) = int.parse_uint(string.slice(s, i, i + 2u64), 16u32) else {
-            return None
-        }
-        list.push(mut out, int.narrow(v))
-        i += 2u64
-    }
-    Some(out)
 }
 
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Result[(), Exit] waits {

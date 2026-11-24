@@ -497,6 +497,11 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Sha1Compress => self.native_call(
+                "hirsel_core_sha1_compress",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
             RtOp::ZeroBytes => self.native_call(
                 "hirsel_core_zero_bytes",
                 &[],

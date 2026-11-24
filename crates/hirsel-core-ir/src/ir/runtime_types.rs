@@ -45,6 +45,7 @@ impl RtOp {
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
+            | RtOp::Sha1Compress
             | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
             | RtOp::Sha512Blocks
@@ -79,5 +80,28 @@ impl RtOp {
             | RtOp::StepLeave
             | RtOp::StepCatch => vec![],
         }
+    }
+
+    /// Whether a call of this row can fail, and so returns the failure status
+    /// (crate docs, "Native ABI").
+    pub fn fails(self) -> bool {
+        matches!(
+            self,
+            RtOp::Join { .. }
+                | RtOp::Spawn { .. }
+                | RtOp::CheckCancel
+                | RtOp::Argon2id
+                | RtOp::ChannelNew { .. }
+                | RtOp::Send { .. }
+                | RtOp::Receive { .. }
+                | RtOp::ReceiveRec { .. }
+                | RtOp::ConnNew { .. }
+                | RtOp::ConnSend { .. }
+                | RtOp::ConnTrySend { .. }
+                | RtOp::ConnReceive { .. }
+                | RtOp::SpawnUnit { .. }
+                | RtOp::IsolateCatch
+                | RtOp::Flow(_)
+        ) || matches!(self, RtOp::Host(_) | RtOp::Returnable(_))
     }
 }

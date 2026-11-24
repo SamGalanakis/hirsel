@@ -1,5 +1,15 @@
 use crate::{RtOp, Wait};
 
+pub(super) fn sha(name: &str) -> Option<RtOp> {
+    Some(match name {
+        "sha1_blocks" => RtOp::Sha1Blocks,
+        "sha1_compress" => RtOp::Sha1Compress,
+        "sha256_blocks" => RtOp::Sha256Blocks,
+        "sha512_blocks" => RtOp::Sha512Blocks,
+        _ => return None,
+    })
+}
+
 pub(super) fn rt(op: RtOp) -> String {
     match op {
         RtOp::Spawn { x, r } => format!("rt.spawn[t{}, t{}]", x.0, r.0),
@@ -43,6 +53,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::Xxh3Short => "rt.xxh3_short".into(),
         RtOp::Xxh3Stripes => "rt.xxh3_stripes".into(),
         RtOp::Sha1Blocks => "rt.sha1_blocks".into(),
+        RtOp::Sha1Compress => "rt.sha1_compress".into(),
         RtOp::ZeroBytes => "rt.zero_bytes".into(),
         RtOp::Sha256Blocks => "rt.sha256_blocks".into(),
         RtOp::Sha512Blocks => "rt.sha512_blocks".into(),

@@ -134,12 +134,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if let Some(op) = match module {
             [m] if m == "sha256" => Some(RtOp::Sha256Blocks),
+            [m] if m == "sha1" => Some(RtOp::Sha1Compress),
             [m] if m == "sha512" => Some(RtOp::Sha512Blocks),
             _ => None,
         } {
             return match name {
-                "blocks" => Some(self.sha2_blocks(op, vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
-                "block" => Some(self.sha2_block(op, vals[0]?, vals[1]?, n)),
+                "blocks" | "compress" => {
+                    Some(self.sha_blocks(op, vals[0]?, vals[1]?, vals[2]?, vals[3]?, n))
+                }
+                "block" => Some(self.sha_block(op, vals[0]?, vals[1]?, n)),
                 _ => None,
             };
         }

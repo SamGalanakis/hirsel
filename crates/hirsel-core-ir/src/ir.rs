@@ -1022,6 +1022,8 @@ pub enum RtOp {
         x: TypeId,
         r: TypeId,
     },
+    /// SHA-1 compression of complete blocks, without padding.
+    Sha1Compress,
 }
 
 /// The waits with a returnable row ([`RtOp::Returnable`]), each the stackful
@@ -1109,6 +1111,7 @@ impl RtOp {
     /// | `xxh3_short` | `data: ptr`, `len: u64` | `u64`: XXH3-64 (crate docs, "XXH3") |
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
+    /// | `sha1_compress` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-1") |
     /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
     /// | `sha512_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-512") |
@@ -1215,7 +1218,7 @@ impl RtOp {
             RtOp::MapHashFinish => (vec![V(p)], vec![u64_]),
             RtOp::Xxh3Short => (vec![V(p), V(u64_)], vec![u64_]),
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
-            RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha1Blocks | RtOp::Sha1Compress => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks | RtOp::Sha512Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Crc32c => {
@@ -1545,29 +1548,6 @@ impl RtOp {
             }
         };
         Signature::new(params, results, None)
-    }
-
-    /// Whether a call of this row can fail, and so returns the failure status
-    /// (crate docs, "Native ABI").
-    pub fn fails(self) -> bool {
-        matches!(
-            self,
-            RtOp::Join { .. }
-                | RtOp::Spawn { .. }
-                | RtOp::CheckCancel
-                | RtOp::Argon2id
-                | RtOp::ChannelNew { .. }
-                | RtOp::Send { .. }
-                | RtOp::Receive { .. }
-                | RtOp::ReceiveRec { .. }
-                | RtOp::ConnNew { .. }
-                | RtOp::ConnSend { .. }
-                | RtOp::ConnTrySend { .. }
-                | RtOp::ConnReceive { .. }
-                | RtOp::SpawnUnit { .. }
-                | RtOp::IsolateCatch
-                | RtOp::Flow(_)
-        ) || matches!(self, RtOp::Host(_) | RtOp::Returnable(_))
     }
 }
 

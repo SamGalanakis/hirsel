@@ -16,7 +16,7 @@ mod provide;
 mod secret_kdf;
 mod secret_key;
 #[cfg(test)]
-pub(crate) use declarations::assert_declarations;
+pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
@@ -514,6 +514,8 @@ operations! {
     ("host", "send_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramSend)), "B", "exec-unix-impl-c-1627", false),
     ("host", "send_to", Lane::Runtime(Kernel::Net(HostOp::DatagramSendTo)), "B", "exec-unix-impl-c-1627", false),
     ("host", "recv_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramRecv)), "B", "exec-unix-impl-c-1627", false),
+    ("sha1", "compress", Lane::Value, "A", "sha1-hardware", false),
+    ("sha1", "block", Lane::Value, "A", "sha1-hardware", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
@@ -1636,100 +1638,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-}
-
-/// CAP-6: a kernel that observes outside its operands (the host, the standard streams,
-/// the process arguments) is reached only through an operation with an authority
-/// operand: a capability, `Args`, or a core resource made from one (CAP-7). The match
-/// has no wildcard, so a new kernel is classified before it can bind.
-#[cfg(test)]
-pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
-    fn ambient(k: Kernel) -> bool {
-        match k {
-            Kernel::Stream(_)
-            | Kernel::StreamTerminal(_)
-            | Kernel::Host(_)
-            | Kernel::Net(_)
-            | Kernel::ArgsLen
-            | Kernel::ArgsGet
-            | Kernel::Env(_) => true,
-            // A virtual provider observes only run state the program made.
-            Kernel::Provide(_)
-            | Kernel::ReadOnlyDir
-            | Kernel::CarrierMove
-            | Kernel::CarrierView
-            | Kernel::SecretSeal
-            | Kernel::SecretRender
-            | Kernel::StringShorten
-            | Kernel::StringList(_)
-            | Kernel::Unique
-            | Kernel::NewOwner(_)
-            | Kernel::Share(_)
-            | Kernel::TryUnwrap(_)
-            | Kernel::WithUnique(_)
-            | Kernel::Unbox
-            | Kernel::Spawn
-            | Kernel::TrySpawn
-            | Kernel::CheckCancel
-            | Kernel::Cancel
-            | Kernel::Join
-            | Kernel::ChannelNew
-            | Kernel::SpawnUnit
-            | Kernel::ConnNew
-            | Kernel::ConnClient
-            | Kernel::SecretShare
-            | Kernel::ConnSend
-            | Kernel::ConnTrySend
-            | Kernel::ConnReceive
-            | Kernel::ConnTryReceive
-            | Kernel::LatestNew
-            | Kernel::LatestHandle
-            | Kernel::LatestPublish
-            | Kernel::LatestRead
-            | Kernel::SharedNew
-            | Kernel::SharedShare
-            | Kernel::ChannelSender
-            | Kernel::Send
-            | Kernel::TrySend
-            | Kernel::TryReceive
-            | Kernel::Receive
-            | Kernel::RootLimit
-            | Kernel::CodeIdentity
-            | Kernel::CodeRevision
-            | Kernel::CodeCallable
-            | Kernel::CodeDescribe
-            | Kernel::Cell(_)
-            | Kernel::Flow(_) => false,
-        }
-    }
-    for (f, fd) in p.fns.iter().enumerate() {
-        let Some(i) = p.core_operations[f] else {
-            continue;
-        };
-        if i >= u16::MAX - 4 {
-            continue;
-        }
-        let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {
-            continue;
-        };
-        if !ambient(kernel) {
-            continue;
-        }
-        let authority = fd.params.iter().any(|param| match p.types.kind(param.ty) {
-            TyKind::Adt(d, _) => {
-                let decl = &p.decls[d.index()];
-                crate::layout::handle(decl)
-                    || decl.repr == crate::decls::Repr::Resource
-                        && decl.path.package_is("core", "1")
-            }
-            _ => false,
-        });
-        assert!(
-            authority,
-            "CAP-6: {} observes outside its operands without an authority operand",
-            fd.path
-        );
     }
 }
 

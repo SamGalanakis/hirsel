@@ -70,7 +70,7 @@ fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: s
     result.unwrap(store.close(take db))
 }
 
-fn read_mcp_request(mut r: ReadHalf, clock: Clock, until: u64) -> bool waits {
+fn read_mcp_request(mut r: ReadHalf) -> bool waits {
     let mut input: Bytes = list.with_capacity(8192u64)
     let mut head = std.http1.head()
     let mut cursor = std.http1.cursor()
@@ -80,18 +80,32 @@ fn read_mcp_request(mut r: ReadHalf, clock: Clock, until: u64) -> bool waits {
             Partial => (),
             _ => return false,
         }
-        let Ok(size) = host.recv_bounded(mut r, mut input, 8192u64, At(clock, until)) else { return false }
+        let Ok(size) = host.recv_bounded(mut r, mut input, 8192u64, Never) else { return false }
         if size == 0u64 { return false }
     }
     let Ok(ContentLength(size)) = std.http.framing(input, view head, 8192u64 - head.end) else { return false }
     while list.len(input) < head.end + size {
         let remaining = head.end + size - list.len(input)
-        let Ok(got) = host.recv_bounded(mut r, mut input, remaining, At(clock, until)) else { return false }
+        let Ok(got) = host.recv_bounded(mut r, mut input, remaining, Never) else { return false }
         if got == 0u64 { return false }
     }
     let body = std.http.copy_bytes(list.slice(input, head.end, head.end + size))
     let Ok(request) = string.from_utf8(take body) else { return false }
     string.find(request, 0u64, "\"tools/call\"") != None && string.find(request, 0u64, "\"echo\"") != None
+}
+
+fn write_mcp_response(mut w: WriteHalf, head: Bytes, body: Bytes) -> Result[(), NetError] waits {
+    let boundary = list.len(head)
+    let end = boundary + list.len(body)
+    let mut sent = 0u64
+    while sent < end {
+        let prefix = list.slice(head, order.min(sent, boundary), boundary)
+        let tail = list.slice(body, int.saturating_sub(sent, boundary), list.len(body))
+        let n = host.send_pair(mut w, prefix, tail, Never)?
+        if n == 0u64 { return Error(Reset) }
+        sent += n
+    }
+    Ok(())
 }
 
 fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: Tasks, net: Net, socket: std.wsock.Config) -> bool waits {
@@ -138,12 +152,11 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     let socket = runner.wire_defaults(65536u64).socket
     let (running, _stop, status) = launch(tasks, take config)
-    let until = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
-    let (take conn, _) = result.unwrap(host.accept(mut listener, At(clock, until)))
+    let (take conn, _) = result.unwrap(host.accept(mut listener, Never))
     let (take reader, take output) = net.split(take conn)
     let mut r = take reader
     let mut writer = take output
-    if !read_mcp_request(mut r, clock, until) { return Error(1u64) }
+    if !read_mcp_request(mut r) { return Error(1u64) }
     let Some(address) = latest.read(status).addr else { return Error(2u64) }
     let working = mcp_status(address, credential, clock, random, tasks, network, socket)
     let mut body = string.into_bytes("{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"")
@@ -152,7 +165,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let mut head = string.from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ")
     string.push_u64(mut head, list.len(body))
     string.push(mut head, "\r\n\r\n")
-    let sent = std.http.write_wire(mut writer, string.as_bytes(head), body, clock, until)
+    let sent = write_mcp_response(mut writer, string.as_bytes(head), body)
     drop(take writer)
     drop(take r)
     let _ = result.unwrap(result.unwrap(task.join(take running)))

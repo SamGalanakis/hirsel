@@ -725,14 +725,13 @@ const HEDGE_ENTRY_BYTES: u64 = 1048576u64
 
 type HedgePeer: send { listener: Listener, clock: Clock, hedge: bool }
 
-fn provider_socket(mut listener: Listener, clock: Clock) -> (ReadHalf, WriteHalf) waits {
-    let Ok((take c, _)) = host.accept(mut listener, later(clock)) else { fail("hedge peer: accept failed") }
+fn provider_socket(mut listener: Listener) -> (ReadHalf, WriteHalf) waits {
+    let Ok((take c, _)) = host.accept(mut listener, Never) else { fail("hedge peer: accept failed") }
     let (take input, take output) = net.split(take c)
     let mut reader = take input
     let mut received: Bytes = list.with_capacity(8192u64)
-    let until = later(clock)
     loop {
-        let Ok(n) = host.recv_bounded(mut reader, mut received, 8192u64, until) else { fail("hedge peer: read failed") }
+        let Ok(n) = host.recv_bounded(mut reader, mut received, 8192u64, Never) else { fail("hedge peer: read failed") }
         if n == 0u64 { fail("hedge peer: incomplete request") }
         if complete_request(received) { return (take reader, take output) }
     }
@@ -753,14 +752,14 @@ fn serve_hedge_peer(take job: HedgePeer) -> u64 waits {
     let sse = bytes_of("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
     let fast = if hedge { 9u64 } else { 0u64 }
     for _ in 0u64 .. fast {
-        let (take request_in, take output) = provider_socket(mut listener, clock)
+        let (take request_in, take output) = provider_socket(mut listener)
         let mut writer = take output
         if let Error(_) = std.http.write_wire(mut writer, head, sse, clock, std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)) {
             fail("hedge peer: fast reply failed")
         }
         drop(take request_in)
     }
-    let (take slow_in, take slow_out) = provider_socket(mut listener, clock)
+    let (take slow_in, take slow_out) = provider_socket(mut listener)
     let mut slow = take slow_out
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
     if let Error(_) = std.http.write_wire(mut slow, head, b"", clock, deadline) { fail("hedge peer: response head failed") }
@@ -769,7 +768,7 @@ fn serve_hedge_peer(take job: HedgePeer) -> u64 waits {
         if let Error(_) = std.http.write_wire(mut slow, sse, b"", clock, deadline) { fail("hedge peer: slow reply failed") }
         return 1u64
     }
-    let (take winner_in, take winner_out) = provider_socket(mut listener, clock)
+    let (take winner_in, take winner_out) = provider_socket(mut listener)
     let mut winner = take winner_out
     let won = bytes_of("data: {\"choices\":[{\"delta\":{\"content\":\"winner\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
     if let Error(_) = std.http.write_wire(mut winner, head, won, clock, deadline) { fail("hedge peer: hedge reply failed") }

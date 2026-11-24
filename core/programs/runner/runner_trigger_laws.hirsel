@@ -883,20 +883,22 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     if list.len(reruns) != 2 || !reruns[0].1 || !reruns[1].1 {
         return false
     }
-    let projected = step(mut b, db)
-    if list.len(projected) != 2 {
+    b.newest = Some(store.snapshot(db))
+    let mut fenced = Fenced(sessions: map.new())
+    let projected = round(mut b, mut fenced)
+    // Both read sets hit. The prefix moves its cover from key 3 to key 2.
+    // The exhausted cursor still covers key 8, so its unit result and rows send no group.
+    if map.len(fenced.sessions) != 2 || !map.contains(fenced.sessions, 1u64) || !map.contains(fenced.sessions, 2u64) {
         return false
     }
-    for owed in projected {
-        if owed.session == 1 {
-            if list.len(owed.rows) != 2 {
-                return false
-            }
-        } else if owed.session != 2 || list.len(owed.rows) != 0 {
-            return false
-        }
-    }
-    true
+    if list.len(projected) != 1 || projected[0].session != 1 || list.len(projected[0].rows) != 2 ||
+        list.len(projected[0].groups) != 1 || projected[0].reset || list.len(projected[0].ended) != 0 { return false }
+    let rows = view projected[0].rows
+    let inserted = view rows[0]
+    let removed = view rows[1]
+    inserted.sub == 1 && removed.sub == 1 && inserted.value == Some(clone(b"\x14\x00\x00\x00\x00\x00\x00\x00")) && removed.value == None
+        && list.slice(inserted.key, 4u64, list.len(inserted.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x02"
+        && list.slice(removed.key, 4u64, list.len(removed.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x03"
 }
 
 @test

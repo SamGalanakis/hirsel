@@ -15,7 +15,7 @@ runner@1/runner/test_join_waits src=fc049bf9f27b311e sig=d38226455ac119c7 run=db
 runner@1/runner/test_named_slots src=f67459ea41151fa7 sig=5fa2f480362cdfb9 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_pool_releases_cancelled_reader src=ef0509ace0d6f695 sig=0177c1b6561aa04c run=9db96dd71cd83a70 bug=- oracle=- rows=pending
 runner@1/runner/test_projection_isolated src=858ef8f06c684ad5 sig=a10809bbcbe611f6 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_range_reruns src=f5d237c83f3ef86b sig=3181adcea5a41fb7 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+runner@1/runner/test_range_reruns src=88fac0aab925ccf3 sig=0486fc1862ddc609 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_release_after_durable src=0891f81896ea930c sig=df2709436d09547e run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_removal_waits_for_writer src=2217eda463eca243 sig=762512e75b0b0262 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_coalesced src=c55f62cc622265d6 sig=e97159e740c83ddd run=dbf6722727633166 bug=- oracle=- rows=pending

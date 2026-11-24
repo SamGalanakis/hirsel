@@ -1,4 +1,6 @@
-# STORE-SPEC v2.89: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.90: the M4 store library (lane store-spec-1001)
+
+v2.90 (journal-tail-2187): **built.** A zero step is due only when the journal task's last 64 groups were each under B = 65,536 bytes (§3.3a Bulk). A group of B or more already amortizes its file extension, and refilling behind it writes every frame byte twice. At 4 KiB × 64-frame bursts on four stores that doubled the device's sync-write bytes, and each store's 1 MiB idle step (2.2 ms alone, 3.8 ms beside three others) outlasted the 0–2 ms gap before its next burst, which queued behind it. The rule only removes steps: every §3.3a invariant, the Disk bound and the commit law hold as written. Bursts of eight or fewer frames and every 97-byte row write groups under 32 KiB and keep the window. See CHANGES-v2.90. Reversible: one counter in the journal task.
 
 v2.89 (log-retire-2165, MEM-29 Log retirement): **built**. A call's issued node ids are one high-watermark `Cell[u64]`, not a `Log[u64]` folded after the body: a reservation is one `cell.replace` (two after an overrun's rollback lowered the end), and finalization is one `cell.into_inner`. The draft's issued node is 8 bytes, not 24, so L33's 1024-byte plan leaves 48 bytes, not 32, beside the reply, and L22's `look` admits at 64 bytes, not 80. AM5's K_id term no longer pays for a loop and stays as slack until K_fixed counts M3 S5's attempt calls. Reversible: the code and spec only.
 
@@ -222,6 +224,14 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.90 (journal-tail-2187: no zero steps behind bulk groups)
+
+| Item | v2.90 | Where |
+|---|---|---|
+| Bulk | B = 65,536, a build constant. The task counts the groups since its last group of B bytes or more, saturating at 64, and starts at 64. Both triggers (idle and the 64th-group END) run a step only when the count is 64. A cut or rotation does not reset it: it describes the load, not the segment | §3.3a When |
+| Why | Measured on this host's ext4 `data=ordered`: a group of ≥ B bytes saves one extension (~76 µs) and costs ~2 µs per KiB of zeros, so the window loses past a few tens of KiB per group. Group writes at b ≤ 8 and at 97 B are under 32 KiB; at 4 KiB b = 64 they are 32–512 KiB | REPORT journal-tail-2187 |
+| Durability | Removing steps changes no invariant: w moves only after a step's sync, groups go at e, T and the Disk bound are as v2.82. A bulk load past w extends the file, today's append | §3.3a |
 
 ## CHANGES-v2.84 (readonly-barrier-2178: the read-only open returns only durable frames)
 
@@ -2446,6 +2456,7 @@ T rounds **down**, so T ≤ f: a segment with under 4 KiB of frames has no windo
 - **When.** Each trigger is a check of w − e < T/2:
   - **Idle:** before each blocking `receive`, the task calls `try_receive`. On `Empty` it runs a step, and checks again. A message ends the extension and is the next group's first message.
   - **Load:** after the END written at the 64th group, the task runs at most one step.
+  - **Bulk (v2.90):** both triggers are off until the task's last 64 groups were each under B = 65,536 bytes. A group of B or more amortizes its own extension, and a step behind it writes each of its bytes a second time and can hold the next burst behind a sync. The count starts at 64 and survives rotation.
   - Nothing else triggers a step. In particular there is no rate of one step per E bytes of frames: under load a group can consume the window between 64th-group ENDs and extend the file, and under bursty traffic whose groups each find `Empty`, only the idle check runs.
 - **Delay a step can add.** A step is at most E bytes and one sync. A frame's ack can wait behind the step already running when the frame arrives, plus each 64th-group step that falls due in the groups ahead of it in the queue. There is no bound of one step end to end. A cut's ack wait and its `Rotate` are queued messages under the same rule.
 - **Counters.** Window bytes are not frames. `Synced`/`Journaled`'s byte count, F, U, `since`, `d` and `prev_end` are as before v2.80.

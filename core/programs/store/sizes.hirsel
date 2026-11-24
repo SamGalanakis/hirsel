@@ -292,6 +292,7 @@ fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkp
 const JOURNAL_WORKER_SLACK: u64 = 65536
 const JOURNAL_WINDOW_STEP: u64 = 1048576
 const JOURNAL_ZERO_CHUNK: u64 = 32768
+const JOURNAL_BULK_GROUP: u64 = 65536
 
 const JOURNAL_TIMER_GRANT: u64 = 4096
 

@@ -142,6 +142,10 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     } else {
         0u64
     }
+    // Groups since the last one of JOURNAL_BULK_GROUP bytes or more. A
+    // group that large amortizes its own extension, so zero steps wait until
+    // 64 smaller groups in a row (§3.3a Bulk).
+    let mut small_groups = 64u64
     let mut deferred: Option[JournalMsg] = None
     let mut idle_at: Option[u64] = None
     loop {
@@ -164,7 +168,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                 }
             }
             if let None = next_message {
-                let target = journal_window_target(end, window_limit)
+                let target = if small_groups >= 64 { journal_window_target(end, window_limit) } else { 0u64 }
                 while window - end < target / 2 {
                     match channel.try_receive(receive) {
                         Ok(take msg) => {
@@ -294,6 +298,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             // After the ack, so a writer woken by this notice finds it.
             let _ = channel.try_send(synced, ())
             groups += 1
+            small_groups = if group_bytes >= JOURNAL_BULK_GROUP { 0u64 } else { order.min(64u64, small_groups + 1) }
         }
         let rotate_now = match rotating {
             Some(_) => true,
@@ -306,7 +311,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             end_named = end
             groups = 0
             let target = journal_window_target(end, window_limit)
-            if load_end && window - end < target / 2 {
+            if load_end && small_groups >= 64 && window - end < target / 2 {
                 let width = order.min(JOURNAL_WINDOW_STEP, target - (window - end))
                 journal_window_step(mut segment_file, window, width, zeros)?
                 window += width

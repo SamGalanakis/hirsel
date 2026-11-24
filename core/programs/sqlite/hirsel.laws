@@ -1,4 +1,5 @@
 hirsel.laws 1
+sqlite@1/example/sum_orders src=282575d3097a194f sig=1a8c7358c052ea30 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
 sqlite@1/sqlite/fl20_error_buffer src=a06b7d6f9f10a3bf sig=e05c1da6580e1ade run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 sqlite@1/tests/fl10_ambient_authority src=35bd3bfbbe4404ce sig=4449ed4c5bb00e69 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
 sqlite@1/tests/fl10_random src=1ff43f4977dac5da sig=bc234dcac1ea1733 run=91e7b34efc6c2e03 bug=- oracle=- rows=pending

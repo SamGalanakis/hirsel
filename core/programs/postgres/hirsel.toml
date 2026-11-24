@@ -15,3 +15,4 @@ grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]
 
 [tests.sources]
 "sim_tests.hirsel" = "sim_tests"
+"example.hirsel" = "example"

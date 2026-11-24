@@ -18,3 +18,4 @@ grants = ["Clock", "Random", "Tasks"]
 
 [tests.sources]
 "tests.hirsel" = "tests"
+"example.hirsel" = "example"

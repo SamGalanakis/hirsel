@@ -1,0 +1,15 @@
+@test
+fn read_tool_catalog() -> Result[(), ()] {
+    let wire = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"tools\":[{\"name\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}}"
+    let Reply(id, take body) = rpc.incoming(wire)? else {
+        return Error(())
+    }
+    if !rpc.same_id(id, option.unwrap(rpc.id_value("7"))) {
+        return Error(())
+    }
+    let tools = metadata.tools(body)?
+    if list.len(tools) != 1 || metadata.tool_name(tools[0]) != "echo" {
+        fail("expected the catalog's echo tool")
+    }
+    Ok(())
+}

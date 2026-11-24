@@ -21,3 +21,4 @@ dirs = ["."]
 [tests.sources]
 "error_buffer_test.hirsel" = "sqlite"
 "tests.hirsel" = "tests"
+"example.hirsel" = "example"

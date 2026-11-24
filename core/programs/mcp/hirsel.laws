@@ -1,2 +1,3 @@
 hirsel.laws 1
+mcp@1/example/read_tool_catalog src=a71be38bfbda4b25 sig=7c40eb10655d233f run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
 mcp@1/laws/jsonrpc_framing src=5c792091e2ee9e57 sig=80f9934fc0589598 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending

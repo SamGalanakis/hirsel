@@ -1,0 +1,19 @@
+// Read one typed column, then drain the cursor and recover the connection.
+pub fn select_answer(mut conn: postgres.Conn) -> Result[i32, postgres.Error] waits {
+    let mut rows = postgres.query(mut conn, "SELECT 6 * 7 AS answer", list.new())?
+    if !postgres.next(mut rows)? {
+        fail("expected one PostgreSQL row")
+    }
+    let answer = {
+        let row = option.unwrap(postgres.row(rows))
+        let Some(postgres.Field(value: Int4(value), ..)) = postgres.field(row, 0) else {
+            fail("expected an int4 column")
+        }
+        value
+    }
+    if postgres.next(mut rows)? {
+        fail("expected one PostgreSQL row")
+    }
+    conn = postgres.finish(take rows)
+    Ok(answer)
+}

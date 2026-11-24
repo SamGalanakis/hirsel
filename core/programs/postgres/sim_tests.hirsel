@@ -1,4 +1,4 @@
-type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost
+type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost | SelectAnswer
 
 type Link: send {
     port: Served[NetOp],
@@ -147,6 +147,30 @@ fn peer(take input: Peer) waits {
             expect_eof(mut reader)
             return
         },
+        SelectAnswer => {
+            authenticate(mut reader, mut writer)
+            send_frame(mut writer, b'Z', b"I")
+            expect_frame(mut reader, b'P', b"\0SELECT 6 * 7 AS answer\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'1', b"")
+            send_frame(mut writer, b't', b"\0\0")
+            // One int4 column, with no source table or typmod.
+            send_frame(mut writer, b'T', b"\0\x01answer\0\0\0\0\0\0\0\0\0\0\x17\0\x04\xff\xff\xff\xff\0\0")
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\x01\0\x01\0\0\0\x01\0\x01")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'2', b"")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'D', b"\0\x01\0\0\0\x04\0\0\0\x2a")
+            send_frame(mut writer, b'C', b"SELECT 1\0")
+            expect_frame(mut reader, b'C', b"Phirsel_rows\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'3', b"")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'Z', b"I")
+            expect_frame(mut reader, b'X', b"")
+        },
         CommaHost => return,
     }
     expect_eof(mut reader)
@@ -209,6 +233,13 @@ fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
                 fail("a connection shut down during Sync must be retired")
             }
         },
+        SelectAnswer => {
+            let mut conn = result.unwrap(take opened)
+            if result.unwrap(example.select_answer(mut conn)) != 42 {
+                fail("SELECT 6 * 7 must return 42")
+            }
+            result.unwrap(postgres.close(take conn))
+        },
     }
 }
 
@@ -232,6 +263,12 @@ fn test_seed(e: Env) -> u64 {
         Some(active) => active,
         None => 0,
     }
+}
+
+@test
+fn select_answer(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), SelectAnswer)
+    Ok(())
 }
 
 @test

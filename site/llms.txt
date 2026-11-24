@@ -50,3 +50,16 @@ The TypeScript SDK exposes a frozen subscription image through `rows(slot)`, `ma
 ## Runnable examples
 
 - [Subscription cache](https://github.com/samgalanakis/hirsel/blob/main/sdk/client/tests/subscription-cache.ts) reads a store row from a runner subscription, observes cache changes, and applies an optimistic edit. [Run the SDK check](https://github.com/samgalanakis/hirsel/blob/main/sdk/client/README.md#run-the-subscription-example).
+- [PostgreSQL](https://github.com/samgalanakis/hirsel/blob/main/core/programs/postgres/example.hirsel) reads a typed column and drains the cursor before reusing the connection.
+- [SQLite](https://github.com/samgalanakis/hirsel/blob/main/core/programs/sqlite/example.hirsel) binds a customer ID and reads the total from an in-memory database.
+- [MCP](https://github.com/samgalanakis/hirsel/blob/main/core/programs/mcp/example.hirsel) decodes a tool-list reply and reads the tool name.
+- [Search](https://github.com/samgalanakis/hirsel/blob/main/core/programs/search/example.hirsel) indexes two recipes in store and queries a snapshot for the published match.
+
+Run the package examples from the repository root with the Hirsel toolchain.
+
+```sh
+hirsel test core/programs/postgres --exact postgres@1/sim_tests/select_answer
+hirsel test core/programs/sqlite --exact sqlite@1/example/sum_orders --grant Foreign=sqlite@1/sqlite/Sqlite
+hirsel test core/programs/mcp --exact mcp@1/example/read_tool_catalog
+hirsel test core/programs/search --exact search@1/example/find_document
+```

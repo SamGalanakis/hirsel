@@ -39,6 +39,7 @@ mod check_index;
 mod executable;
 mod flow;
 mod instances;
+mod law_lock;
 mod native;
 pub mod native_debug;
 mod native_entry;

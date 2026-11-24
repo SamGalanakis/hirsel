@@ -7,7 +7,7 @@ use std::{
     process::{ExitStatus, Output},
 };
 
-const TEST_PASS_SCHEMA: u32 = 3;
+const TEST_PASS_SCHEMA: u32 = 4;
 
 /// Reused passes of determined tests (PROG-4).
 pub struct TestCache {

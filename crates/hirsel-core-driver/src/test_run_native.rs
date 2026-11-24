@@ -795,7 +795,7 @@ impl PackageLaw {
     fn with_store(&self, arguments: &[&str], store: &str) -> (Option<i32>, String, String) {
         let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
-        if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect") {
+        if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect" | "laws") {
             if !arguments.contains(&"--recipe") {
                 args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
             }
@@ -807,7 +807,7 @@ impl PackageLaw {
         if matches!(arguments[0], "run" | "test" | "build") {
             let options = native_options(Backend::Cranelift, self.dir.path());
             let Link::Driver(cc) = options.link else { unreachable!() };
-            let runtime = if arguments.contains(&"--laws") { env_record_runtime() } else { options.runtime };
+            let runtime = if arguments.contains(&"--laws") || arguments.contains(&"--write-laws") { env_record_runtime() } else { options.runtime };
             args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
             args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
@@ -982,6 +982,29 @@ fn step_bound() -> Result[(), ()] {
         "callee": "all", "site": "app@1/main/second_site#2", "class": "held",
         "numbers": [10, 0], "bound": null, "per_build": false, "witnessed": {}
     }]));
+}
+
+#[test]
+fn law_lock_checks_static_columns_and_preserves_unselected_lines() {
+    let law = prop_law_package();
+    PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    PackageLaw::pass(law.run(&["laws", "check", "app"]));
+    law.write("app/main.hirsel", PROP_LAW_PACKAGE.replace("c.cases = 5", "c.cases = 6"));
+    let (status, stdout, stderr) = law.run(&["laws", "check", "app"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert!(lines[0].starts_with("app@1/main/catch_all: src "), "{stdout}");
+    PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    PackageLaw::pass(law.run(&["laws", "check", "app"]));
+
+    const OTHERS: &str = "app@1/main/discards src=0000000000000001 sig=0000000000000002 run=0000000000000003 bug=- oracle=- rows=all#1:vacuous:0/4\n";
+    const SELECTED: &str = "app@1/main/catch_all src=0000000000000004 sig=0000000000000005 run=0000000000000006 bug=- oracle=-";
+    let path = "app/hirsel.laws";
+    law.write(path, format!("hirsel.laws 1\n{SELECTED} rows=pending\n{OTHERS}"));
+    PackageLaw::pass(law.run(&["test", "app", "--laws", "--write-laws", "--filter", "catch_all"]));
+    assert_eq!(std::fs::read_to_string(law.path(path)).unwrap(),
+        format!("hirsel.laws 1\n{SELECTED} rows=all#1:truncated:6/0\n{OTHERS}"));
 }
 
 #[test]

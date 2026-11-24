@@ -170,11 +170,11 @@ run tests in parallel, and `--sim` / `--seed` / `--seeds` / `--property-corpus` 
 deterministic simulation and property campaigns.
 
 `hirsel test app --laws` adds a strength column (held, truncated, vacuous, …) beside pass
-and fail ([law table](laws.md)). The planned `--write-laws` <!-- doc-ref: planned --> rewrites the rows
+and fail ([law table](laws.md)). `--write-laws` rewrites the rows
 of the tests it ran in `hirsel.laws`; `--laws-baseline FILE` <!-- doc-ref: planned -->
 compares a full run with the lock exported from the approved ref and exits 1 on a weaker
-row. `hirsel laws check app` <!-- doc-ref: planned --> checks lock currency without running
-tests, and `hirsel laws write app` <!-- doc-ref: planned --> refreshes its static columns.
+row. `hirsel laws check app` checks lock currency without running tests, and
+`hirsel laws write app` refreshes its static columns.
 `--locked` keeps its package meaning.
 
 Version note (2026-11-24, verify-phase-spec-2034): names the planned law-table commands.

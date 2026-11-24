@@ -10,7 +10,7 @@ mod laws;
 pub use cache::TestCache;
 use cache::test_key;
 use laws::LawCapture;
-pub(crate) use laws::LawReport;
+pub(crate) use laws::{LawReport, LawRow};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -163,7 +163,7 @@ impl Source {
 /// PROG-4: of its run's grants a test is granted only those its parameters
 /// take, so a test without parameters is granted nothing and a grant one
 /// test needs never reaches another test's launch.
-fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
+pub(crate) fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     let kind = |ty: &str| ty.strip_prefix("core@1/core/").and_then(crate::grant_kind);
     let named = |name: &str| crate::grant_kind(name).unwrap();
     let mut taken = 0u64;

@@ -284,6 +284,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut product_name = None;
     let mut entry = None;
     let test_command = command == "test";
+    let static_laws = matches!(command, "laws check" | "laws write");
     let recipe_command = matches!(command, "build" | "publish");
     let native_command = recipe_command || command == "run" || replay_command || test_command;
     let mut recipe_root = None;
@@ -324,6 +325,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut replay_tape = None;
     let mut test_replay = false;
     let mut test_laws = false;
+    let mut test_write_laws = false;
     let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
@@ -358,6 +360,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
             Opt::Laws => test_laws = true,
+            Opt::WriteLaws => test_write_laws = true,
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
@@ -509,6 +512,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
+    test_laws |= test_write_laws;
+    if test_write_laws && manifest.is_some() {
+        return Err("test: --write-laws requires a package directory".into());
+    }
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
     }
@@ -546,7 +553,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     .or_else(|| {
         (manifest.is_none()
             && recipe_root.is_none()
-            && matches!(command, "check" | "build" | "publish" | "run" | "test"))
+            && (static_laws || matches!(command, "check" | "build" | "publish" | "run" | "test")))
         .then(|| PathBuf::from("."))
     });
     let mut workspace_app = None;
@@ -567,10 +574,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )?);
         }
         workspace_app = Some(crate::package_dir::PackageDir::from_archive(&archive)?);
-    } else if matches!(
-        command,
-        "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
-    ) {
+    } else if static_laws
+        || matches!(
+            command,
+            "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+        )
+    {
         if let Some(directory) = &app_directory {
             if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
                 let member = workspace.selected()?;
@@ -1076,7 +1085,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
-    let test_runs = if test_command {
+    let test_runs = if test_command || static_laws {
         request.entry = None;
         Some(match manifest_runs {
             Some(runs) => {
@@ -1089,7 +1098,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 runs
             }
             None => {
-                if !explicit_limit {
+                if test_command && !explicit_limit {
                     return Err("test requires an explicit --limit <bytes> for each run".into());
                 }
                 // A test runs in a working directory of its own; a directory
@@ -1120,6 +1129,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     let selected_entry = request.entry.clone();
     request.capture_sources()?;
+    let law_files = (static_laws || test_write_laws).then(|| crate::law_lock::test_files(&request));
+    let law_directory = dir.as_deref().unwrap_or(Path::new("."));
     let sources = crate::SourceFiles::of(&request);
     if let Some(owner) = &test_owner {
         if let Some(image) = image {
@@ -1220,6 +1231,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let record = match &mut prepared {
         _ if command == "image"
             || test_command
+            || static_laws
             || recipe_command
             || !grants.foreign.is_empty()
             || inspection.is_some()
@@ -1331,6 +1343,30 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
+    if static_laws && accepted {
+        let tests = product
+            .tests()
+            .filter(|path| {
+                test_owner
+                    .as_ref()
+                    .is_none_or(|owner| &path.0.package == owner)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let runs = test_runs.as_ref().unwrap();
+        runs.check_names(&tests.iter().collect())?;
+        let current =
+            crate::law_lock::Inventory::of(&product, &tests, law_files.as_ref().unwrap(), runs)?;
+        if command == "laws write" {
+            crate::law_lock::update(law_directory, |lock| lock.refresh(current))?;
+            return conclude(Outcome::Exit(0));
+        }
+        let differences = crate::law_lock::read(law_directory)?.differences(&current);
+        for difference in &differences {
+            println!("{difference}");
+        }
+        return conclude(Outcome::Exit(i32::from(!differences.is_empty())));
+    }
     if accepted && let Some(inspection) = inspection {
         inspection.write(&product, selected_entry.as_ref(), json)?;
         return conclude(Outcome::Exit(0));
@@ -1367,6 +1403,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             })
             .cloned()
             .collect();
+        let law_inventory = law_files
+            .as_ref()
+            .map(|files| crate::law_lock::Inventory::of(&product, &tests, files, &test_runs))
+            .transpose()?;
+        let mut observations =
+            std::collections::BTreeMap::<String, crate::test_run::LawReport>::new();
         let corpus = corpus_path
             .as_deref()
             .map(crate::property_corpus::Corpus::open)
@@ -1405,7 +1447,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 }),
                 expect_verdict: expect_verdict.as_deref(),
                 cache: cache.as_ref(),
-                rerun: test_rerun,
+                rerun: test_rerun || test_write_laws,
                 seed,
                 corpus: corpus.as_ref(),
             };
@@ -1460,7 +1502,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                             outcome.laws.print();
                         }
                         row["law_strength"] = strength.into();
-                        row["laws"] = serde_json::json!(outcome.laws.rows());
+                        row["laws"] = outcome.laws.json_rows();
+                    }
+                    if test_write_laws {
+                        match observations.entry(test.to_string()) {
+                            std::collections::btree_map::Entry::Occupied(mut held) => held.get_mut().merge(outcome.laws),
+                            std::collections::btree_map::Entry::Vacant(slot) => { slot.insert(outcome.laws); }
+                        }
                     }
                     row
                 }
@@ -1488,6 +1536,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
             rows.push(row);
         });
+        }
+        if let Some(current) = law_inventory {
+            crate::law_lock::update(law_directory, |lock| lock.record(&current, &observations))?;
         }
         let passed = !tests.is_empty() && !failed;
         if json {

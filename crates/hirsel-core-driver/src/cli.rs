@@ -17,6 +17,7 @@ pub enum OptionId {
     Tape,
     Replay,
     Laws,
+    WriteLaws,
     ExpectVerdict,
     IncludeCredentials,
     Diagnose,
@@ -142,6 +143,9 @@ commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
+    "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
+    "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
+    "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
@@ -194,8 +198,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--package-store"],
         Some("DIR"),
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Select the verified library store."
     ),
@@ -204,8 +219,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--locked"],
         None,
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Require a current workspace lock."
     ),
@@ -214,8 +240,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--frozen"],
         None,
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Require a current workspace lock and use only the package store."
     ),
@@ -568,6 +605,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["test"],
         "Observe settled law verdicts in the recording build."
+    ),
+    option!(
+        WriteLaws,
+        ["--write-laws"],
+        None,
+        ["test"],
+        "Observe laws and update the executed tests' rows in hirsel.laws."
     ),
     option!(
         IncludeCredentials,
@@ -1007,7 +1051,17 @@ static OPTIONS: &[OptionSpec] = &[
         ["--libraries"],
         Some("ROOT"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "inspect", "sdk"
+            "check",
+            "image",
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "inspect",
+            "sdk",
+            "laws check",
+            "laws write"
         ],
         "Select a root containing core/ and std/."
     ),
@@ -1027,7 +1081,9 @@ static OPTIONS: &[OptionSpec] = &[
             "core-product",
             "std-product",
             "sdk",
-            "serve"
+            "serve",
+            "laws check",
+            "laws write"
         ],
         "Select the request or product store."
     ),
@@ -1156,7 +1212,10 @@ pub fn help(command: Option<&CommandSpec>) -> String {
     } else {
         let mut result =
             "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
-        for command in COMMANDS.iter().filter(|c| !c.name.starts_with("prof ")) {
+        for command in COMMANDS
+            .iter()
+            .filter(|c| !c.name.starts_with("prof ") && !c.name.starts_with("laws "))
+        {
             result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
         }
         result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");
@@ -1183,11 +1242,11 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
-    if name == "prof" {
+    if matches!(name.as_str(), "prof" | "laws") {
         match arguments.next() {
-            None => return Ok(Action::Help(help(Some(named("prof")?)))),
+            None => return Ok(Action::Help(help(Some(named(&name)?)))),
             Some(subcommand) if is_help(&subcommand) => {
-                return Ok(Action::Help(help(Some(named("prof")?))));
+                return Ok(Action::Help(help(Some(named(&name)?))));
             }
             Some(subcommand) => name.push_str(&format!(" {subcommand}")),
         }
@@ -1207,7 +1266,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
                 if is_help(&name) {
                     Ok(command)
                 } else {
-                    if name == "prof"
+                    if matches!(name.as_str(), "prof" | "laws")
                         && let Some(subcommand) = arguments.next()
                     {
                         name.push_str(&format!(" {subcommand}"));

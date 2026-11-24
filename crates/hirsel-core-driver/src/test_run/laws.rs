@@ -15,6 +15,7 @@ pub(crate) struct LawRow {
     pub bound: Option<String>,
     pub per_build: bool,
     pub witnessed: BTreeMap<String, u64>,
+    pub(crate) kind: Option<u64>,
 }
 
 impl LawRow {
@@ -29,13 +30,14 @@ impl LawRow {
         }
     }
 
-    fn strength(&self) -> (u8, &[u64], bool, &str, &Option<String>) {
+    fn strength(&self) -> (u8, &[u64], bool, &str, &Option<String>, Option<u64>) {
         (
             self.rank(),
             &self.numbers,
             !self.per_build,
             &self.class,
             &self.bound,
+            self.kind,
         )
     }
 
@@ -83,6 +85,33 @@ impl LawReport {
             Self::Observed(rows) => rows,
             _ => &[],
         }
+    }
+
+    pub(crate) fn json_rows(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.rows().iter().map(|row| serde_json::json!({
+            "callee": row.callee, "site": row.site, "class": row.class, "numbers": row.numbers,
+            "bound": row.bound, "per_build": row.per_build, "witnessed": row.witnessed,
+        })).collect())
+    }
+
+    pub(crate) fn merge(&mut self, next: Self) {
+        *self = match (std::mem::take(self), next) {
+            (Self::Observed(rows), Self::Observed(next)) => {
+                let mut all = BTreeMap::new();
+                if rows
+                    .into_iter()
+                    .chain(next)
+                    .try_for_each(|row| combine(&mut all, row))
+                    .is_some()
+                {
+                    Self::Observed(all.into_values().collect())
+                } else {
+                    Self::Unobserved
+                }
+            }
+            (Self::Foreign, Self::Foreign) => Self::Foreign,
+            _ => Self::Unobserved,
+        };
     }
 
     pub(crate) fn strength(&self) -> &str {
@@ -185,6 +214,7 @@ fn parse(summary: &str, places: &Sites) -> Option<Vec<LawRow>> {
                     bound: None,
                     per_build: false,
                     witnessed: BTreeMap::from([(label, count)]),
+                    kind: None,
                 }
             }
             "row" => prop_row(fields.by_ref(), places)?,
@@ -193,16 +223,27 @@ fn parse(summary: &str, places: &Sites) -> Option<Vec<LawRow>> {
         if fields.next().is_some() {
             return None;
         }
-        let key = (row.callee.clone(), row.site.clone());
-        rows.entry(key)
-            .and_modify(|held| {
-                if row.strength() < held.strength() {
-                    *held = row.clone();
-                }
-            })
-            .or_insert(row);
+        combine(&mut rows, row)?;
     }
     Some(rows.into_values().collect())
+}
+
+fn combine(rows: &mut BTreeMap<(String, String), LawRow>, mut row: LawRow) -> Option<()> {
+    let key = (row.callee.clone(), row.site.clone());
+    if let Some(old) = rows.get_mut(&key) {
+        if row.callee == "sometimes" {
+            for (label, count) in &mut row.witnessed {
+                *count = count.checked_add(*old.witnessed.get(label).unwrap_or(&0))?;
+                row.numbers[0] = *count;
+            }
+            *old = row;
+        } else if row.strength() < old.strength() {
+            *old = row;
+        }
+    } else {
+        rows.insert(key, row);
+    }
+    Some(())
 }
 
 fn prop_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> Option<LawRow> {
@@ -257,5 +298,6 @@ fn prop_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> Op
         bound,
         per_build,
         witnessed: BTreeMap::new(),
+        kind: (class == "falsified").then_some(failure),
     })
 }

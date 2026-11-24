@@ -1,7 +1,7 @@
 # Law table and law lock
 
-The law table is available in `hirsel test --laws`. The remaining lock and baseline
-items are in `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
+`hirsel test --laws` reports law strength. `hirsel laws write` and `--write-laws`
+generate the lock, and `hirsel laws check` checks its static columns.
 
 Version note (2026-11-24, verify-phase-spec-2034): first text. This document specifies the
 2026-11-22 ratified item 3 (`hirsel.laws`, the verdict table that never rounds up) as
@@ -220,8 +220,8 @@ Fields:
 - **`src`.** The first 8 bytes, in hex, of SHA-256 over every test-source definition
   reachable from the test without passing through a production definition. Each
   contributes its full path and its source bytes without doc comments, in path order.
-- **`sig`.** The same, over the PROG-5 identity bytes of each production definition those
-  definitions name directly. Signatures are covered, not bodies.
+- **`sig`.** The same, over the PROG-5 identity and checked signature digest of each
+  production definition those definitions name directly, in path order.
 - **`run`.** The same, over the test's effective run configuration from `hirsel.toml`:
   root limit, grants, directories and environment values.
 - **`bug` and `oracle`.** The same, over the text of the test's `/// bug:` and
@@ -230,6 +230,12 @@ Fields:
 - **`rows`.** The count rows, as `callee#ordinal:class:numbers`. A per-build row is
   written `callee#ordinal:class:per-build`. `sometimes:LABEL` lists each label with a
   nonzero count, and its count is not locked. `-` means none.
+
+Each `src` and `sig` input is framed by its length in eight little-endian bytes.
+`run` hashes the canonical JSON tuple of the limit, grant mask, network grants,
+credentials, environment selection, directories, foreign grants and exec grants.
+A call in a helper uses `callee@DEFINITION#ordinal` to keep sites in different
+definitions distinct. A falsified row records its failure class as `falsified/KIND`.
 
 **Commands.**
 
@@ -247,13 +253,14 @@ Fields:
 `hirsel test PKG --laws-baseline FILE` implies `--laws` and compares each observed row with
 the line for the same test and site in FILE.
 
-FILE is the `hirsel.laws` exported from the human-approved target ref, for example with
-`git show REF:pkg/hirsel.laws`. The working tree's `hirsel.laws` is never the comparison
-input. Sam's 2026-11-22 ruling protects `hirsel.laws` from autonomous agent writes. This
-document realizes it at that ref: an agent never moves the approved ref or edits its copy.
-On main, agents change `hirsel.laws` only through `laws write` and `--write-laws`, never by
-hand, so the land-time currency check can be kept green. Neither can weaken a comparison,
-because FILE never comes from main.
+FILE is the `hirsel.laws` committed on main. For the nightly board use the copy at
+the last complete board's commit, for example `git show COMMIT:pkg/hirsel.laws`.
+`hirsel laws write` and `hirsel test --write-laws` generate the working copy and
+follow the normal landing workflow.
+
+Version note (2026-11-24, verify-observer-2037): Sam confirmed that `hirsel.laws`
+is an ordinary generated lock file. The nightly uses the last complete board's
+commit on main as its comparison point.
 
 A row is **red** when:
 
@@ -269,9 +276,8 @@ A row is **red** when:
   instead.
 
 A baseline per-build row is satisfied by any row except a negative one. A line marked
-`pending` in the working tree is compared against FILE all the same. FILE comes from the approved ref,
-so rewriting a working-tree line cannot weaken the comparison. A stronger row is never
-red, and moving the baseline up is a human's act.
+`pending` in the working tree is compared against FILE all the same. A stronger
+row passes the comparison.
 
 **Narrowed runs are refused.** `--laws-baseline` refuses `--filter`, `--seed`, `--sim`,
 `--seeds`, `--property-corpus` and `--replay` with

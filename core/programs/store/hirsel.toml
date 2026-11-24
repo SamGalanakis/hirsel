@@ -155,6 +155,7 @@ dirs = ["."]
 "tiered_tx_read_laws.hirsel" = "store"
 "tiered_residency_laws.hirsel" = "store"
 "tiered_crash_arm_laws.hirsel" = "store"
+"tiered_random_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"
@@ -364,6 +365,15 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_crash_arm_mid_probe_after_rename"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l69_random_seed_1"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l69_random_seed_2"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l69_random_seed_3"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows"]

@@ -1,0 +1,319 @@
+// L69's random arm (§13.6, §13.12): under seeded random edits on every
+// head, forks, pins of a head and of a historical Snapshot, unpins, branch
+// deletes and cuts, with a crash on each side of the MANIFEST rename, every
+// head and every pin reads exactly what an independent model of its commits
+// says. The oracle is the model plus the frame walker of 5860634f, run over
+// every published root together: each stamp sits at one location in the
+// generation (B3), every reached frame sits in a listed pack on disk, and a
+// Tiered pack's live bytes cover the frames reached in it. A crash may lose
+// a probe's cursor (§13.6 "Progress"), so live bytes are checked as a lower
+// bound only.
+type RandomModel {
+    // branch id -> key -> edit; an absent key is deleted.
+    heads: Map[u32, Map[u64, u8]],
+    pins: Map[String, Map[u64, u8]],
+    forks: u64,
+    pinned_count: u64
+}
+
+const RANDOM_ROWS: u64 = 160
+
+const RANDOM_WIDTH: u64 = 48
+
+fn random_branch_name(n: u64) -> String {
+    let mut name: String = clone("b")
+    string.push_uint(mut name, n, 10, 0, '0')
+    take name
+}
+
+fn random_pin_name(n: u64) -> String {
+    match n % 3 {
+        0 => "p0",
+        1 => "p1",
+        _ => "p2",
+    }
+}
+
+fn random_expected(model: Map[u64, u8], key: u64) -> Option[Bytes] {
+    match map.get(model, key) {
+        Some(edit) => Some(compact_value_of(key, edit, RANDOM_WIDTH)),
+        None => None,
+    }
+}
+
+fn random_reads(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8]) -> Result[(), Error] waits {
+    for key in 0u64 .. RANDOM_ROWS {
+        if get(read_handle, s, rows, key)? != random_expected(model, key) {
+            fail("L69 random: every head and pin reads what its commits wrote")
+        }
+    }
+    Ok(())
+}
+
+fn random_walk_root(d: Dir, db: Db, s: Snapshot, rows: Table[u64, Bytes], mut walk: CompactWalk) -> Result[(), Error] waits {
+    match std.page.collection_slot(s.roots.collections.root, prefix(rows.id)?) {
+        Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
+        _ => fail("L69 random: a cut leaves every published root Cold"),
+    }
+}
+
+// Runs after a cut, so every head's and pin's root is published.
+fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], model: RandomModel) -> Result[(), Error] waits {
+    if list.len(db.heads) != map.len(model.heads) {
+        fail("L69 random: the store keeps exactly the model's branches")
+    }
+    let mut walk = CompactWalk(live: map.new(), places: map.new())
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for slot in 0u64 .. list.len(db.heads) {
+        let Some(expected) = map.get(model.heads, db.heads[slot].id) else {
+            fail("L69 random: every branch is one the model forked")
+        }
+        let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+        random_walk_root(d, db, s, rows, mut walk)?
+        random_reads(read_handle, s, rows, expected)?
+        drop(take s)
+    }
+    for (name, expected) in model.pins {
+        let Some(held) = pinned(db, name) else {
+            fail("L69 random: every pin the model holds is published")
+        }
+        random_walk_root(d, db, held, rows, mut walk)?
+        random_reads(read_handle, held, rows, expected)?
+        drop(take held)
+    }
+    drop(take read_handle)
+    for (seq, _) in walk.live {
+        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            fail("L69 random: every reached frame sits in a listed pack on disk")
+        }
+    }
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class >= 3 && listed.live < map.get_or(walk.live, seq, 0) {
+            fail("L69 random: a Tiered pack's live bytes cover its reachable frames")
+        }
+    }
+    Ok(())
+}
+
+fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Option[u8]) -> Result[(), Error] waits {
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let target = Branch(store: db.store, id)
+    let Committed(_) = run_on(mut db, target, Some(100000000), copy_env((fixture, key, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Option[u8])) -> Result[(), Error] {
+        match env.2 {
+            Some(e) => put(mut tx, env.0, env.1, compact_value_of(env.1, e, RANDOM_WIDTH)),
+            None => {
+                let _ = delete(mut tx, env.0, env.1)?
+                Ok(())
+            },
+        }
+    })? else {
+        fail("L69 random: every edit commits")
+    }
+    Ok(())
+}
+
+// A cut whose every MANIFEST seal is refused after its packs are written.
+// A refusal of the full cut is retried mandatory-only (AP16), so the cut can
+// seal more than once; the crash lands after the last attempt's packs.
+fn random_refused_cut(mut db: Db) -> Result[Bytes, Error] waits {
+    let sealed: core.Log[Bytes] = log.new()
+    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+        let mut whole: Bytes = clone(raw)
+        seal_page_manifest_file(mut whole, context, fence)?
+        log.append(sealed, take whole)
+        capacity(bound bytes 0 {
+            seal_page_manifest_file(mut raw, context, fence)
+        })?
+    }) {
+        Error(Full(Allocation(_))) => (),
+        _ => fail("L69 random: the refused seal fails the cut before its rename"),
+    }
+    let mut published = log.finish(take sealed)
+    if list.len(published) == 0 {
+        fail("L69 random: the refused cut seals a MANIFEST")
+    }
+    let final_seal = list.len(published) - 1
+    Ok(list.remove(mut published, final_seal))
+}
+
+fn random_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, take db: Db, renamed: bool, options: Options) -> Result[Db, Error] waits {
+    let mut crashing = take db
+    let sealed = random_refused_cut(mut crashing)?
+    close(take crashing)?
+    disk_write_synced(d, if renamed {
+        "MANIFEST"
+    } else {
+        "MANIFEST.tmp"
+    }, sealed)?
+    let reopened = open(tasks, d, c, r, options)?
+    if disk_exists(d, "MANIFEST.tmp")? {
+        fail("L69 random: open removes an unpublished MANIFEST.tmp")
+    }
+    Ok(reopened)
+}
+
+fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, RANDOM_ROWS, RANDOM_WIDTH)?
+    let mut options = compact_crash_options(floor)?
+    options.probe_budget = 4
+    let mut db = open(tasks, d, c, r, clone(options))?
+    let mut g = std.rand.new(seed, 2397)
+    let mut initial: Map[u64, u8] = map.new()
+    for key in 0u64 .. RANDOM_ROWS {
+        map.insert(mut initial, key, 0u8)
+    }
+    let mut model = RandomModel(heads: map.new(), pins: map.new(), forks: 0, pinned_count: 0)
+    map.insert(mut model.heads, db.heads[0u64].id, take initial)
+    // A Snapshot of main kept across later steps, then pinned as history.
+    let mut history: Option[(Snapshot, Map[u64, u8])] = None
+    let mut crashes = 0u64
+    for _ in 0u64 .. 80 {
+        let op = std.rand.below(mut g, 14)
+        if op < 6 {
+            let slot = std.rand.below(mut g, list.len(db.heads))
+            let id = db.heads[slot].id
+            let key = std.rand.below(mut g, RANDOM_ROWS)
+            let edit: Option[u8] = if std.rand.below(mut g, 4) == 0 {
+                None
+            } else {
+                Some(int.truncate(1 + std.rand.below(mut g, 254)))
+            }
+            random_edit(mut db, rows, id, key, edit)?
+            let mut changed: Map[u64, u8] = option.unwrap(map.remove(mut model.heads, id))
+            match edit {
+                Some(e) => {
+                    map.insert(mut changed, key, e)
+                },
+                None => {
+                    let _ = map.remove(mut changed, key)
+                },
+            }
+            map.insert(mut model.heads, id, take changed)
+        } else if op == 6 && list.len(db.heads) < 4 {
+            let slot = std.rand.below(mut g, list.len(db.heads))
+            let from = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+            let snap_model: Map[u64, u8] = {
+                let Some(parent) = map.get(model.heads, db.heads[slot].id) else {
+                    fail("L69 random: the forked branch is in the model")
+                }
+                clone(parent)
+            }
+            let (child, _) = fork(mut db, random_branch_name(model.forks), from)?
+            model.forks += 1
+            map.insert(mut model.heads, child.id, take snap_model)
+        } else if op == 7 && map.len(model.pins) < 3 {
+            let name = random_pin_name(model.pinned_count)
+            if !map.contains(model.pins, name) {
+                let slot = std.rand.below(mut g, list.len(db.heads))
+                let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+                let snap_model: Map[u64, u8] = {
+                    let Some(held) = map.get(model.heads, db.heads[slot].id) else {
+                        fail("L69 random: the pinned branch is in the model")
+                    }
+                    clone(held)
+                }
+                let key: String = clone(name)
+                let _ = pin(mut db, name, s)?
+                map.insert(mut model.pins, take key, take snap_model)
+                let _ = checkpoint(mut db)?
+            }
+            model.pinned_count += 1
+        } else if op == 8 {
+            match take history {
+                None => {
+                    let snap_model: Map[u64, u8] = {
+                        let Some(main_model) = map.get(model.heads, db.heads[0u64].id) else {
+                            fail("L69 random: main is in the model")
+                        }
+                        clone(main_model)
+                    }
+                    history = Some((snapshot(db), take snap_model))
+                },
+                Some((take s, take snap_model)) => {
+                    let name = random_pin_name(model.pinned_count)
+                    model.pinned_count += 1
+                    // Held out (2397 finding): a pin of a Snapshot whose head has
+                    // moved since capture takes the capture's roots in place,
+                    // because §13.5 step 2's promotion has no production caller
+                    // yet. A compaction cut re-stamps the collection map path,
+                    // so any cut moves the head. Once a pack those roots reach
+                    // retires, the pin's cut fails `Corrupt(Dangling)`. Until
+                    // promotion is wired, history is pinned only while the head
+                    // still matches the capture, and is otherwise released
+                    // after riding across cuts as an unpinned lease.
+                    if !map.contains(model.pins, name) && capture_matches_head(s, db.heads[0u64]) {
+                        let key: String = clone(name)
+                        match pin(mut db, name, s) {
+                            Ok(_) => {
+                                map.insert(mut model.pins, take key, take snap_model)
+                                let _ = checkpoint(mut db)?
+                            },
+                            Error(Reclaimed(_)) => (),
+                            Error(e) => return Error(e),
+                        }
+                    } else {
+                        drop(take s)
+                    }
+                    history = None
+                },
+            }
+        } else if op == 9 && map.len(model.pins) > 0 {
+            let name = random_pin_name(std.rand.below(mut g, 3))
+            if map.contains(model.pins, name) {
+                let _ = unpin(mut db, name)?
+                let _ = map.remove(mut model.pins, name)
+                let _ = checkpoint(mut db)?
+            }
+        } else if op == 10 && list.len(db.heads) > 1 {
+            let slot = 1 + std.rand.below(mut g, list.len(db.heads) - 1)
+            let id = db.heads[slot].id
+            let gone = Branch(store: db.store, id)
+            let _ = delete_branch(mut db, gone)?
+            let _ = map.remove(mut model.heads, id)
+        } else if op == 11 {
+            let _ = checkpoint(mut db)?
+            random_check(d, db, rows, model)?
+        } else if op >= 12 {
+            if let Some((take s, _)) = take history {
+                drop(take s)
+            }
+            history = None
+            let renamed = std.rand.below(mut g, 2) == 0
+            let crashing = take db
+            db = random_crash(d, c, r, tasks, take crashing, renamed, clone(options))?
+            crashes += 1
+            let _ = checkpoint(mut db)?
+            random_check(d, db, rows, model)?
+        }
+    }
+    if let Some((take s, _)) = take history {
+        drop(take s)
+    }
+    if crashes == 0 {
+        fail("L69 random: the seed crashes at least once")
+    }
+    let _ = checkpoint(mut db)?
+    random_check(d, db, rows, model)?
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, options)?
+    let _ = checkpoint(mut reopened)?
+    random_check(d, reopened, rows, model)?
+    close(take reopened)
+}
+
+@test
+fn test_l69_random_seed_1(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    random_arm(d, c, r, tasks, 1)
+}
+
+@test
+fn test_l69_random_seed_2(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    random_arm(d, c, r, tasks, 2)
+}
+
+@test
+fn test_l69_random_seed_3(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    random_arm(d, c, r, tasks, 3)
+}

@@ -12,6 +12,27 @@ pub type Side = Client | Server
 
 pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
 
+pub type PacketCipher: key = Aes128CmHmacSha1_80 | Aes128Gcm | Aes256Gcm | ChaCha20Poly1305
+
+pub type SpaceInfo {
+    cipher: PacketCipher,
+    send: bool,
+    receive: bool
+}
+
+pub fn inspect(s: Schedule, space: packet.Space) -> Result[SpaceInfo, ScheduleError] {
+    let (algorithm, directions) = space_info_raw(s, space)?
+    let cipher: PacketCipher = match algorithm {
+        0 => Aes128CmHmacSha1_80,
+        1 => Aes128Gcm,
+        2 => Aes256Gcm,
+        _ => ChaCha20Poly1305,
+    }
+    Ok(SpaceInfo(cipher, send: directions & 1 != 0, receive: directions & 2 != 0))
+}
+
+fn space_info_raw(s: Schedule, space: packet.Space) -> Result[(u64, u64), ScheduleError]
+
 pub fn quic_initial(side: Side, dcid: Bytes) -> Result[Schedule, ScheduleError]
 
 pub fn tls13(p: Profile13, side: Side, take k: secret.KeyShare, peer: Bytes, hello_hash: Bytes) -> Result[Schedule, (ScheduleError, Option[secret.KeyShare])]
@@ -35,6 +56,8 @@ pub fn finished(s: Schedule, of: Side, transcript_hash: Bytes, mut out: Bytes) -
 pub fn verify_finished(s: Schedule, of: Side, transcript_hash: Bytes, received: Bytes) -> Result[bool, ScheduleError]
 
 pub fn sealer(mut s: Schedule, space: packet.Space, domain: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
+
+pub fn sealer_pair(mut s: Schedule, first: packet.Space, second: packet.Space, domain: u64, first_floor: u64, second_floor: u64) -> Result[(packet.Sealer, packet.Sealer), ScheduleError]
 
 pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]
 

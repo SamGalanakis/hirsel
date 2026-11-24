@@ -1,7 +1,9 @@
 //! Protocol state holds keys by direction and packet space.
 use crate::{
     ImportKind, ImportUse,
-    packet_epoch::{DirectionKeys, Epoch, ImportError, IssueError, tls13_labels, traffic_profile},
+    packet_epoch::{
+        DirectionKeys, Epoch, ImportError, IssueError, Sealer, tls13_labels, traffic_profile,
+    },
     packet_nonce::NonceFormat,
     secret_aead::AeadAlg,
     srtp_cipher::{SrtpKeys, SrtpProfile},
@@ -67,6 +69,22 @@ enum Kind {
         local: bool,
         traffic: Option<Tls13Direction>,
     },
+}
+
+pub struct SealerPair<'a, C> {
+    epochs: [&'a mut Epoch<C>; 2],
+    domain: u64,
+}
+
+impl<'a, C> SealerPair<'a, C> {
+    pub fn issue(self, floors: [u64; 2], charges: [(C, C); 2]) -> [Sealer<'a, C>; 2] {
+        let [first, second] = self.epochs;
+        let [first_charge, second_charge] = charges;
+        [
+            first.issue_sealer(self.domain, floors[0], first_charge),
+            second.issue_sealer(self.domain, floors[1], second_charge),
+        ]
+    }
 }
 
 impl<C> Schedule<C> {
@@ -252,6 +270,30 @@ impl<C> Schedule<C> {
     pub fn view_epoch(&self, space: u64) -> Result<&Epoch<C>, IssueError> {
         self.space_error(space)?;
         Ok(self.spaces[space as usize].as_deref().unwrap())
+    }
+
+    pub fn check_sealer_pair(
+        &mut self,
+        first: u64,
+        second: u64,
+        domain: u64,
+    ) -> Result<SealerPair<'_, C>, IssueError> {
+        if first == second {
+            return Err(IssueError::Invalid);
+        }
+        self.view_epoch(first)?.check_sealer(domain)?;
+        self.view_epoch(second)?.check_sealer(domain)?;
+        let [first, second] = self
+            .spaces
+            .get_disjoint_mut([first as usize, second as usize])
+            .unwrap();
+        Ok(SealerPair {
+            epochs: [
+                first.as_deref_mut().unwrap(),
+                second.as_deref_mut().unwrap(),
+            ],
+            domain,
+        })
     }
 
     fn space_error(&self, space: u64) -> Result<(), IssueError> {

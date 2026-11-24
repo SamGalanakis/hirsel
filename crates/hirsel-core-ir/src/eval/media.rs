@@ -117,6 +117,20 @@ impl Machine<'_> {
                 Ok(self.import_schedule(payer, op, a))
             }
             HostOp::ScheduleSrtp => Ok(self.srtp_child(payer, a)),
+            HostOp::ScheduleSpaceInfo => {
+                let Payload::Schedule(schedule) =
+                    &self.world.media[a[0] as usize].as_ref().unwrap().payload
+                else {
+                    unreachable!()
+                };
+                Ok(schedule
+                    .view_epoch(a[1])
+                    .and_then(Epoch::info)
+                    .map_or_else(issue_error, |(cipher, directions)| {
+                        vec![cipher, 0, 0, directions]
+                    }))
+            }
+            HostOp::ScheduleSealerPair => Ok(self.sealer_pair(payer, a)),
             HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
             HostOp::ScheduleDtls12 => Ok(self.dtls12(payer, a)),
             HostOp::ScheduleApplication | HostOp::ScheduleKeyUpdate | HostOp::ScheduleRetire => {
@@ -190,6 +204,45 @@ impl Machine<'_> {
                 let (value, error, written) = packet_aead::outcome(outcome?);
                 Ok(vec![value, error as u64, 0, written])
             }
+        }
+    }
+
+    fn sealer_pair(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
+        let slot = a[0] as usize;
+        let mut held = self.world.media[slot].take().unwrap();
+        let Payload::Schedule(schedule) = &mut held.payload else {
+            unreachable!()
+        };
+        let requested = 2 * (packet_epoch::CIPHER_CHARGE + packet_epoch::DOMAIN_CHARGE);
+        let result = schedule
+            .check_sealer_pair(a[1], a[2], a[3])
+            .and_then(|pair| {
+                self.admit(&payer, requested)
+                    .map_err(|available| IssueError::Capacity {
+                        requested,
+                        available,
+                    })?;
+                Ok(pair
+                    .issue(
+                        [a[4], a[5]],
+                        std::array::from_fn(|_| (payer.clone(), payer.clone())),
+                    )
+                    .map(|issued| {
+                        Payload::Sealer(
+                            issued.counter,
+                            issued.algorithm,
+                            Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
+                        )
+                    }))
+            });
+        self.world.media[slot] = Some(held);
+        match result {
+            Ok([first, second]) => {
+                let a = self.media_hold(payer.clone(), first)[0];
+                let b = self.media_hold(payer, second)[0];
+                vec![a, 0, 0, b]
+            }
+            Err(error) => issue_error(error),
         }
     }
 

@@ -13,8 +13,7 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
-    /// of `shift + size(ty)`: the buffer's bytes, then each owner row.
+    /// A `Cross` stores the value bytes at `shift`, followed by its owner rows.
     fn cross(&mut self, ty: TypeId, shift: u64) -> Result<Value> {
         let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(ty))?;
         let owners = hirsel_core_layout::cross::owners(
@@ -49,8 +48,7 @@ impl Function<'_, '_, '_> {
         }
         Ok(at)
     }
-    /// A task's entry buffer: the adapter code word, then the wrapped input at
-    /// its offset. Returns the buffer and the input's offset.
+    /// Returns the entry buffer with its code word and the offset of its wrapped input.
     fn task_input(&mut self, x: TypeId, code: Value, value: Value) -> Result<(Value, u64)> {
         let (bytes, align) = place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
         let offset = task_entry::input_offset(self.input, self.layouts, x)?;
@@ -342,6 +340,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::ScheduleDtls12
                     | HostOp::ScheduleImportSrtp
                     | HostOp::ScheduleSrtp
+                    | HostOp::ScheduleSpaceInfo
+                    | HostOp::ScheduleSealerPair
                     | HostOp::ScheduleSealer
                     | HostOp::ScheduleOpener
                     | HostOp::ScheduleHeaderMask

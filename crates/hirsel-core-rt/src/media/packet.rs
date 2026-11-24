@@ -81,11 +81,12 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             let body = &bytes[aad.end..];
             let body_len = body.len();
             let append = body_len + tag_len;
+            let origin = sealer_origin(sealer);
             let args = capture::arguments(
                 6,
                 (buf.capacity - buf.len) as u64,
                 &[
-                    &sealer.origin.to_le_bytes(),
+                    &origin[..8 + usize::from(sealer.origin_member != 0)],
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
                     &at.to_le_bytes(),
@@ -206,11 +207,12 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
         #[cfg(feature = "record")]
         if sealer.origin != 0 {
             use super::capture::{self, Delivery};
+            let origin = sealer_origin(sealer);
             let args = capture::arguments(
                 7,
                 available as u64,
                 &[
-                    &sealer.origin.to_le_bytes(),
+                    &origin[..8 + usize::from(sealer.origin_member != 0)],
                     &seq.to_le_bytes(),
                     &from.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -561,6 +563,14 @@ fn with_aad<T>(
     joined.extend_from_slice(header);
     joined.extend_from_slice(extra);
     Ok(use_aad((&joined, &[])))
+}
+
+#[cfg(feature = "record")]
+fn sealer_origin(sealer: &super::schedule::Sealer) -> [u8; 9] {
+    let mut origin = [0; 9];
+    origin[..8].copy_from_slice(&sealer.origin.to_le_bytes());
+    origin[8] = sealer.origin_member;
+    origin
 }
 
 /// # Safety

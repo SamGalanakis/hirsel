@@ -247,6 +247,33 @@ impl<C> Epoch<C> {
         Self::with_algorithm(format, algorithm, send, receive)
     }
 
+    pub fn info(&self) -> Result<(u64, u64), IssueError> {
+        if self.retired() {
+            return Err(IssueError::Spent);
+        }
+        let cipher = match self.algorithm {
+            Algorithm::Cm => 0,
+            Algorithm::Aead(AeadAlg::Aes128Gcm) => 1,
+            Algorithm::Aead(AeadAlg::Aes256Gcm) => 2,
+            Algorithm::Aead(AeadAlg::ChaCha20Poly1305) => 3,
+        };
+        let send = u64::from(self.send.validate().is_ok());
+        let receive = u64::from(self.receive.validate().is_ok());
+        Ok((cipher, send | (receive << 1)))
+    }
+
+    pub(super) fn check_sealer(&self, domain: u64) -> Result<(), IssueError> {
+        self.send.validate()?;
+        if !self.format.valid_domain(domain) {
+            return Err(IssueError::Invalid);
+        }
+        let ledger = self.domains.as_ref().ok_or(IssueError::Spent)?;
+        if ledger.contains_key(&domain) {
+            return Err(IssueError::Issued);
+        }
+        Ok(())
+    }
+
     /// The caller admits the cipher and entry together, then partitions their charges.
     pub fn sealer(
         &mut self,
@@ -254,31 +281,32 @@ impl<C> Epoch<C> {
         floor: u64,
         admit: impl FnOnce(u64) -> Result<(C, C), u64>,
     ) -> Result<Sealer<'_, C>, IssueError> {
-        self.send.validate()?;
-        if !self.format.valid_domain(domain) {
-            return Err(IssueError::Invalid);
-        }
-        let ledger = self.domains.as_mut().ok_or(IssueError::Spent)?;
-        let entry = match ledger.entry(domain) {
-            std::collections::btree_map::Entry::Occupied(_) => return Err(IssueError::Issued),
-            std::collections::btree_map::Entry::Vacant(entry) => entry,
-        };
+        self.check_sealer(domain)?;
         let requested = CIPHER_CHARGE + DOMAIN_CHARGE;
         let (charge, domain_charge) =
             admit(requested).map_err(|available| IssueError::Capacity {
                 requested,
                 available,
             })?;
+        Ok(self.issue_sealer(domain, floor, (charge, domain_charge)))
+    }
+
+    pub(super) fn issue_sealer(
+        &mut self,
+        domain: u64,
+        floor: u64,
+        (charge, domain_charge): (C, C),
+    ) -> Sealer<'_, C> {
         let counter =
             SenderCounter::with_base(self.format, self.send.base(self.algorithm), domain, floor)
                 .unwrap();
-        entry.insert(domain_charge);
-        Ok(Sealer {
+        self.domains.as_mut().unwrap().insert(domain, domain_charge);
+        Sealer {
             counter,
             algorithm: self.algorithm,
             key: self.send.key(),
             charge,
-        })
+        }
     }
 
     pub fn opener(

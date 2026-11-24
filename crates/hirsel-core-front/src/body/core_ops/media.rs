@@ -26,6 +26,8 @@ impl Cx<'_, '_, '_> {
         let tag_index = match op {
             HostOp::ScheduleQuicInitial => Some(0),
             HostOp::ScheduleSealer
+            | HostOp::ScheduleSealerPair
+            | HostOp::ScheduleSpaceInfo
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask
             | HostOp::ScheduleRetire
@@ -37,18 +39,11 @@ impl Cx<'_, '_, '_> {
         if let Some(index) = tag_index {
             let (_, place) =
                 self.runtime_place(self.p.fns[f].params[index].ty, values[index], n)?;
-            let case = self.net_case(place, n);
-            let tag = self.value(word);
-            self.inst(
-                Inst::Convert {
-                    result: tag,
-                    flag: None,
-                    operand: case,
-                    mode: ConvertMode::Widen,
-                },
-                n,
-            );
-            operands[index] = tag;
+            operands[index] = self.case_as_word(place, n);
+        }
+        if op == HostOp::ScheduleSealerPair {
+            let (_, place) = self.runtime_place(self.p.fns[f].params[2].ty, values[2], n)?;
+            operands[2] = self.case_as_word(place, n);
         }
         let mut args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
         if op == HostOp::PacketMask {
@@ -78,7 +73,13 @@ impl Cx<'_, '_, '_> {
                 if let Some(out) =
                     cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                 {
-                    if op == HostOp::ScheduleVerifyFinished {
+                    if matches!(op, HostOp::ScheduleSealerPair | HostOp::ScheduleSpaceInfo) {
+                        for (i, part) in [value, available].into_iter().enumerate() {
+                            if let Some((_, field)) = cx.net_field(ty, out, i, n) {
+                                cx.runtime_store(field, &[], word, part, n);
+                            }
+                        }
+                    } else if op == HostOp::ScheduleVerifyFinished {
                         if let Some(valid) = cx.runtime_compare(word, value, 1, n) {
                             cx.runtime_store(out, &[], Ty::Scalar(Scalar::Bool), valid, n);
                         }

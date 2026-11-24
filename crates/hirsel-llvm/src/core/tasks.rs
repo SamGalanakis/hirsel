@@ -189,6 +189,8 @@ impl FunctionEmitter<'_> {
             | HostOp::ScheduleDtls12
             | HostOp::ScheduleImportSrtp
             | HostOp::ScheduleSrtp
+            | HostOp::ScheduleSpaceInfo
+            | HostOp::ScheduleSealerPair
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

@@ -1119,6 +1119,8 @@ pub type SrtpProfile = Aes128CmHmacSha1_80 | AeadAes128Gcm | AeadAes256Gcm
 pub type Space = Initial | Handshake | Application | Rtp | Rtcp
 pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
 pub type PacketError = Reused | Range | TooLong | Tampered | Capacity(Capacity)
+pub type PacketCipher: key = Aes128CmHmacSha1_80 | Aes128Gcm | Aes256Gcm | ChaCha20Poly1305
+pub type SpaceInfo { cipher: PacketCipher, send: bool, receive: bool }
 
 // module secret
 pub fn key_share(r: Random, g: Group, mut public: Bytes) -> Result[KeyShare, KeyError]
@@ -1138,6 +1140,8 @@ pub fn srtp(mut s: Schedule, p: SrtpProfile) -> Result[Schedule, ScheduleError]
 pub fn finished(s: Schedule, of: Side, transcript_hash: Bytes, mut out: Bytes) -> Result[u64, ScheduleError]
 pub fn verify_finished(s: Schedule, of: Side, transcript_hash: Bytes, received: Bytes) -> Result[bool, ScheduleError]
 pub fn sealer(mut s: Schedule, space: Space, domain: u64, floor: u64) -> Result[Sealer, ScheduleError]
+pub fn sealer_pair(mut s: Schedule, first: Space, second: Space, domain: u64, first_floor: u64, second_floor: u64) -> Result[(Sealer, Sealer), ScheduleError]
+pub fn inspect(s: Schedule, space: Space) -> Result[SpaceInfo, ScheduleError]
 pub fn opener(s: Schedule, space: Space) -> Result[Opener, ScheduleError]
 pub fn header_mask(s: Schedule, space: Space, local: bool) -> Result[HeaderMask, ScheduleError]
 
@@ -1150,6 +1154,12 @@ pub fn mask(m: HeaderMask, sample: Bytes, at: u64) -> Inline[u8, 5]
 ```
 
 The `sign` operation takes the `Random` used by ECDSA (randomness, below).
+
+`inspect` reads a space's packet cipher and permitted directions without issuing a key.
+It answers `Invalid` for an absent space and `Spent` for a retired space.
+`sealer_pair` issues two distinct spaces for the same domain, with a floor per space.
+It validates both spaces and admits both cipher and ledger charges together. On refusal
+neither domain is marked issued. A recorded pair binds each sealer to its position in the issue.
 
 | type | kind | bounds | logical size | cleanup |
 |---|---|---|---|---|

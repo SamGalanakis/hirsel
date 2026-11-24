@@ -135,6 +135,8 @@ pub enum HostOp {
     ScheduleDtls12 = hirsel_core_ids::host_op::SCHEDULE_DTLS12 as isize,
     ScheduleImportSrtp = hirsel_core_ids::host_op::SCHEDULE_IMPORT_SRTP as isize,
     ScheduleSrtp = hirsel_core_ids::host_op::SCHEDULE_SRTP as isize,
+    ScheduleSpaceInfo = hirsel_core_ids::host_op::SCHEDULE_SPACE_INFO as isize,
+    ScheduleSealerPair = hirsel_core_ids::host_op::SCHEDULE_SEALER_PAIR as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
@@ -257,6 +259,8 @@ impl HostOp {
         HostOp::ScheduleDtls12,
         HostOp::ScheduleImportSrtp,
         HostOp::ScheduleSrtp,
+        HostOp::ScheduleSpaceInfo,
+        HostOp::ScheduleSealerPair,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
         HostOp::ScheduleHeaderMask,
@@ -547,7 +551,8 @@ impl HostOp {
                 outcome,
             ),
             HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
-            HostOp::ScheduleOpener => (vec![V(u64_), V(u64_)], outcome),
+            HostOp::ScheduleSealerPair => (vec![V(u64_); 6], outcome),
+            HostOp::ScheduleOpener | HostOp::ScheduleSpaceInfo => (vec![V(u64_); 2], outcome),
             HostOp::ScheduleHeaderMask => {
                 (vec![V(u64_), V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
             }
@@ -731,6 +736,8 @@ impl HostOp {
             HostOp::ScheduleDtls12 => "schedule_dtls12",
             HostOp::ScheduleImportSrtp => "schedule_import_srtp",
             HostOp::ScheduleSrtp => "schedule_srtp",
+            HostOp::ScheduleSpaceInfo => "schedule_space_info",
+            HostOp::ScheduleSealerPair => "schedule_sealer_pair",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
@@ -794,6 +801,8 @@ impl HostOp {
                 | HostOp::ScheduleDtls12
                 | HostOp::ScheduleImportSrtp
                 | HostOp::ScheduleSrtp
+                | HostOp::ScheduleSpaceInfo
+                | HostOp::ScheduleSealerPair
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask

@@ -551,6 +551,8 @@ tags!(HostOp {
     164 => ScheduleDtls12,
     165 => ScheduleImportSrtp,
     166 => ScheduleSrtp,
+    167 => ScheduleSpaceInfo,
+    168 => ScheduleSealerPair,
 });
 
 tags!(RaiseCause {

@@ -364,6 +364,8 @@ operations! {
     ("schedule", "quic_initial", Lane::Runtime(Kernel::Media(HostOp::ScheduleQuicInitial)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "import_traffic", Lane::Runtime(Kernel::Media(HostOp::ScheduleImportTraffic)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "sealer", Lane::Runtime(Kernel::Media(HostOp::ScheduleSealer)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "space_info_raw", Lane::Runtime(Kernel::Media(HostOp::ScheduleSpaceInfo)), "A", "srtp-sessions-2349", false),
+    ("schedule", "sealer_pair", Lane::Runtime(Kernel::Media(HostOp::ScheduleSealerPair)), "A", "srtp-sessions-2349", false),
     ("schedule", "opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleOpener)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "header_mask", Lane::Runtime(Kernel::Media(HostOp::ScheduleHeaderMask)), "A", "media-w0-crypto-build-2282", false),
     ("packet", "seal", Lane::Runtime(Kernel::Media(HostOp::PacketSeal)), "A", "media-w0-crypto-build-2282", false),

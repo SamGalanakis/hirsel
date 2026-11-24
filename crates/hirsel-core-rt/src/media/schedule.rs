@@ -5,7 +5,7 @@ use crate::{
 };
 use hirsel_core_net::{
     packet_cipher::HeaderMask,
-    packet_epoch::{DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
+    packet_epoch::{CIPHER_CHARGE, DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
     packet_nonce::{ReceiverNonce, SenderCounter},
     packet_protection::{self, Algorithm},
     packet_schedule,
@@ -27,6 +27,8 @@ pub(super) struct Sealer {
     pub(super) algorithm: Algorithm,
     pub(super) cipher: Option<Cipher>,
     pub(super) origin: u64,
+    #[cfg(feature = "record")]
+    pub(super) origin_member: u8,
     _charge: Paid,
 }
 
@@ -174,10 +176,98 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
                     .key
                     .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
                 origin,
+                #[cfg(feature = "record")]
+                origin_member: 0,
                 _charge: issued.charge,
             })
         }
         Err(error) => refusal(error),
+    }
+}
+
+/// # Safety
+/// The schedule is live and borrowed for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_space_info(
+    _context: *mut Context,
+    schedule: u64,
+    space: u64,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: checked lowering supplies the borrowed schedule.
+    let schedule = unsafe { media::loan::<Schedule>(schedule) };
+    match schedule.state.view_epoch(space).and_then(Epoch::info) {
+        Ok((value, written)) => Outcome {
+            value,
+            written,
+            ..Outcome::default()
+        },
+        Err(error) => refusal(error),
+    }
+}
+
+/// # Safety
+/// The context is live and the schedule is exclusively borrowed for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
+    context: *mut Context,
+    schedule: u64,
+    first: u64,
+    second: u64,
+    domain: u64,
+    first_floor: u64,
+    second_floor: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: checked lowering supplies the mutable schedule and running context.
+    let schedule = unsafe { media::loan_mut::<Schedule>(schedule) };
+    let pair = match schedule.state.check_sealer_pair(first, second, domain) {
+        Ok(pair) => pair,
+        Err(error) => return refusal(error),
+    };
+    let requested = 2 * (CIPHER_CHARGE + DOMAIN_CHARGE);
+    let mut charge = match admit(unsafe { &*context }, requested) {
+        Ok(charge) => charge,
+        Err(available) => {
+            return refusal(IssueError::Capacity {
+                requested,
+                available,
+            });
+        }
+    };
+    let fields = [first, second, domain, first_floor, second_floor].map(u64::to_le_bytes);
+    const SEALER_PAIR: u8 = 18;
+    // SAFETY: the running context and pinned fields remain live through delivery.
+    let origin =
+        match unsafe { media::issue_child(context, schedule.origin, SEALER_PAIR, &fields, site) } {
+            Ok(origin) => origin,
+            Err(outcome) => return outcome,
+        };
+    let charges = std::array::from_fn(|_| {
+        // SAFETY: the running context owns the admitted charge.
+        let context = unsafe { &*context };
+        let cipher = track(context, charge.partition(CIPHER_CHARGE));
+        let ledger = track(context, charge.partition(DOMAIN_CHARGE));
+        (cipher, ledger)
+    });
+    let [first, second] = pair.issue([first_floor, second_floor], charges);
+    let hold = |issued: hirsel_core_net::packet_epoch::Sealer<'_, Paid>, _member| {
+        media::hold(Sealer {
+            counter: issued.counter,
+            algorithm: issued.algorithm,
+            cipher: issued
+                .key
+                .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
+            origin,
+            #[cfg(feature = "record")]
+            origin_member: _member,
+            _charge: issued.charge,
+        })
+    };
+    Outcome {
+        value: hold(first, 1),
+        written: hold(second, 2),
+        ..Outcome::default()
     }
 }
 

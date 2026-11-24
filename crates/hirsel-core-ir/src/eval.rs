@@ -2178,6 +2178,7 @@ impl Machine<'_> {
         let tasks = &self.sched.tasks;
         let parked = |k: usize| tasks[k].state == State::Provider;
         let mut woken = Vec::new();
+        let mut advances = false; // if no woken idle advances time, empty `next`s answer None
         for cell in &mut self.world.cells {
             if let VirtualCell::Clock {
                 timers,
@@ -2192,22 +2193,21 @@ impl Machine<'_> {
                     if !*flag && parked(*k) {
                         *flag = true;
                         woken.push(*k);
+                        advances |= !timers.is_empty();
                     }
                 }
             }
         }
-        if woken.is_empty() {
-            // No idle wait: a `next` with nothing queued answers None.
-            for cell in &mut self.world.cells {
-                if let VirtualCell::Port { .. } = cell
-                    && cell.queued().is_none()
-                    && let VirtualCell::Port { servers, .. } = cell
-                {
-                    for (k, flag) in servers.iter_mut() {
-                        if !*flag && parked(*k) {
-                            *flag = true;
-                            woken.push(*k);
-                        }
+        for cell in &mut self.world.cells {
+            if let VirtualCell::Port { .. } = cell
+                && !advances
+                && cell.queued().is_none()
+                && let VirtualCell::Port { servers, .. } = cell
+            {
+                for (k, flag) in servers.iter_mut() {
+                    if !*flag && parked(*k) {
+                        *flag = true;
+                        woken.push(*k);
                     }
                 }
             }

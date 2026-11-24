@@ -1,0 +1,61 @@
+// FAIL-15 quiescence across independent simulations (failure.md, FAIL-15):
+// before a run stops with Deadlock, each clock.idle wait is woken with its
+// clock's earliest pending deadline, and if none of them advances time, each
+// server waiting in provide.next with no queued call is woken with None.
+type IdleDriver: send {
+    hand: ClockHand,
+    stop: Receiver[()]
+}
+
+// Drives one simulation's virtual clock: advances to each deadline idle
+// answers and, when it answers None, asks again unless told to stop.
+fn idle_driver(take input: IdleDriver) waits {
+    let IdleDriver(hand: take h, stop: take stop) = take input
+    let mut hand = take h
+    loop {
+        match clock.idle(mut hand) {
+            Some(at) => clock.advance_to(mut hand, at),
+            None => if let Ok(()) = channel.try_receive(stop) {
+                return
+            }
+        }
+    }
+}
+
+fn idle_server(take s: Served[DirOp]) -> bool waits {
+    let mut served = take s
+    match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+}
+
+// FAIL-15: two independent simulations, each a served Dir and a driver on
+// its own virtual clock. Simulation a's driver is stopped and its server
+// joined while b's driver still runs. No sleeper is pending on either clock,
+// so every woken idle wait answers None and none advances time: each server
+// waiting in next with no queued call is woken with None, and a's join
+// returns while b's driver is still asking.
+// expect: run independent_quiescence(tasks) = true
+fn independent_quiescence(tasks: Tasks) -> bool waits {
+    let (_ca, ha) = provide.clock(0, 0)
+    let (_cb, hb) = provide.clock(0, 0)
+    let (_da, sa) = provide.dir(bytes 64)
+    let (_db, sb) = provide.dir(bytes 64)
+    let (stop_a, stopping_a): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (stop_b, stopping_b): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver_a = task.spawn(tasks, bytes 65536, IdleDriver(hand: take ha, stop: take stopping_a), idle_driver)
+    let driver_b = task.spawn(tasks, bytes 65536, IdleDriver(hand: take hb, stop: take stopping_b), idle_driver)
+    let server_a = task.spawn(tasks, bytes 65536, take sa, idle_server)
+    let server_b = task.spawn(tasks, bytes 65536, take sb, idle_server)
+    result.unwrap(channel.send(stop_a, ()))
+    let ended_a = result.unwrap(task.join(take server_a))
+    result.unwrap(task.join(take driver_a))
+    result.unwrap(channel.send(stop_b, ()))
+    result.unwrap(task.join(take driver_b))
+    let ended_b = result.unwrap(task.join(take server_b))
+    ended_a && ended_b
+}

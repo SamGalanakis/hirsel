@@ -1969,6 +1969,7 @@ fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
         .filter(|&(&token, _)| live(token))
         .map(|(&token, &cell)| (token, cell))
         .collect();
+    let mut advances = false; // a woken idle wait answers a deadline
     for &(token, state) in &woken {
         idle.remove(&token);
         // SAFETY: a parked idle wait pins its run and so its cell.
@@ -1976,6 +1977,7 @@ fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
             let mut clock = lock(clock);
             clock.timers.retain(|&(_, t)| live(t));
             clock.wall_timers.retain(|&(_, t)| live(t));
+            advances |= !clock.timers.is_empty();
             if let Some(entry) = clock.idle.iter_mut().find(|(t, _)| *t == token) {
                 entry.1 = true;
             }
@@ -1985,32 +1987,28 @@ fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
     for &(token, _) in &woken {
         crate::tasks::hirsel_core_ready(token);
     }
-    // No idle wait: a `next` with nothing queued answers None (NOTES 19).
-    let served = if woken.is_empty() {
-        let servers: Vec<(u64, usize)> = lock(&SERVERS)
-            .iter()
-            .filter(|&(&token, _)| live(token))
-            .map(|(&token, &cell)| (token, cell))
-            .collect();
-        servers
-            .into_iter()
-            .filter(|&(token, state)| {
-                // SAFETY: a parked `next` pins its run and so its port.
-                let Cell::Port(port) = (unsafe { cell(state as *mut u8) }) else {
-                    return false;
-                };
-                let mut port = lock(port);
-                if port.queued().is_some() {
-                    return false;
-                }
-                let entry = port.servers.iter_mut().find(|(t, _)| *t == token);
-                entry.map(|e| e.1 = true).is_some()
-            })
-            .map(|(token, _)| token)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // No woken idle wait advances time: an empty `next` answers None (FAIL-15).
+    let servers: Vec<(u64, usize)> = lock(&SERVERS)
+        .iter()
+        .filter(|&(&token, _)| !advances && live(token))
+        .map(|(&token, &cell)| (token, cell))
+        .collect();
+    let served: Vec<u64> = servers
+        .into_iter()
+        .filter(|&(token, state)| {
+            // SAFETY: a parked `next` pins its run and so its port.
+            let Cell::Port(port) = (unsafe { cell(state as *mut u8) }) else {
+                return false;
+            };
+            let mut port = lock(port);
+            if port.queued().is_some() {
+                return false;
+            }
+            let entry = port.servers.iter_mut().find(|(t, _)| *t == token);
+            entry.map(|e| e.1 = true).is_some()
+        })
+        .map(|(token, _)| token)
+        .collect();
     let any = !woken.is_empty() || !served.is_empty();
     ready_all(served);
     any

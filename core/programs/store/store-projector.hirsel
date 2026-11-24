@@ -25,7 +25,7 @@ pub type Projection: codec + key {
     again: bool
 }
 
-pub type Source = Local()
+pub type Source = Local | Follower(Follower)
 
 pub opaque type ProjectionDecl: shareable + send {
     rows: Table[String, Projection],
@@ -86,8 +86,8 @@ pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
     Ok(ProjectionDecl(rows: take rows, name: named(name)?))
 }
 
-pub fn projector[K, V](decl: ProjectionDecl, input: Table[K, V], from: Source, take r: Reader) -> Projector[K, V] {
-    Projector(decl: clone(decl), input: clone(input), from: from, reads: take r, base: None, target: None, observed: None)
+pub fn projector[K, V](decl: ProjectionDecl, input: Table[K, V], take from: Source, take r: Reader) -> Projector[K, V] {
+    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, base: None, target: None, observed: None)
 }
 
 pub fn binding[K, V](input: Table[K, V], b: Branch) -> Binding {
@@ -117,37 +117,57 @@ fn read_projection(db: Db, decl: ProjectionDecl) -> Result[Projection, Error] wa
     }
 }
 
-fn project_target[K, V](mut p: Projector[K, V], db: Db) -> Result[Snapshot, Error] {
+fn project_target[K, V](mut p: Projector[K, V], db: Db) -> Result[Snapshot, Error] waits {
     match p.from {
-        Local() => Ok(snapshot(db)),
+        Local => Ok(snapshot(db)),
+        Follower(mut remote) => fresh(mut remote, 18446744073709551615u64),
     }
 }
 
 fn project_binding[K, V](p: Projector[K, V], db: Db) -> Result[Binding, Error] {
-    if !same(p.input.store, db.store) { return Error(Foreign) }
-    Ok(binding(p.input, main_branch(db)))
+    let source_branch = match p.from {
+        Local => main_branch(db),
+        Follower(remote) => follower_main(remote),
+    }
+    if !same(p.input.store, source_branch.store) { return Error(Foreign) }
+    Ok(binding(p.input, source_branch))
 }
 
 fn same_project_snapshot(s: Snapshot, b: Binding, head: u64) -> bool {
     same(s.store, b.store) && s.branch == b.branch && version(s) == head
 }
 
-fn borrowed_projection_base[K, V](p: Projector[K, V], db: Db, b: Binding, image: Image) -> Result[Option[Snapshot], Error] {
+fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, image: Image) -> Result[Option[Snapshot], Error] waits {
     if let Some(held) = p.base {
         if same_project_snapshot(held, b, image.position) { return Ok(Some(clone(held))) }
     }
-    let selected = pinned(db, projector_pin_name(p.decl.name, image.slot))
+    let selected = match p.from {
+        Local => pinned(db, projector_pin_name(p.decl.name, image.slot)),
+        Follower(mut remote) => exact_follower_checkpoint(mut remote, image.position)?,
+    }
     match take selected {
         Some(take retained) if same_project_snapshot(retained, b, image.position) => Ok(Some(take retained)),
         _ => Ok(None),
     }
 }
 
-fn held_projection_target[K, V](p: Projector[K, V], b: Binding, pass: Pass) -> Result[Option[Snapshot], Error] {
+fn held_projection_target[K, V](mut p: Projector[K, V], b: Binding, pass: Pass) -> Result[Option[Snapshot], Error] waits {
     if let Some(held) = p.target {
         if same_project_snapshot(held, b, pass.target) { return Ok(Some(clone(held))) }
     }
-    Ok(None)
+    match p.from {
+        Local => Ok(None),
+        Follower(mut remote) => exact_follower_checkpoint(mut remote, pass.target),
+    }
+}
+
+fn exact_follower_checkpoint(mut remote: Follower, wanted: u64) -> Result[Option[Snapshot], Error] waits {
+    match follower_floor(mut remote, wanted) {
+        Ok(Some(take captured)) if version(captured) == wanted => Ok(Some(take captured)),
+        Ok(_) => Ok(None),
+        Error(Reclaimed(_)) => Ok(None),
+        Error(take problem) => Error(take problem),
+    }
 }
 
 fn projection_page[K, V](p: Projector[K, V], base: Option[Snapshot], target: Snapshot, resume: Option[Bytes], limits: Limits) -> Result[ChangePage, Error] waits {
@@ -171,11 +191,12 @@ fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, 
         None => 0u8,
     }
     match p.from {
-        Local() => {
+        Local => {
             let name = projector_pin_name(p.decl.name, slot)
             let _ = replace_projector_pin(mut db, name, target)?
             Ok(slot)
         },
+        Follower(_) => Ok(0),
     }
 }
 
@@ -323,7 +344,7 @@ fn publish_projection_page[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db
 
 fn continue_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, source_binding: Binding,
     pass: Pass, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
-    let Some(take target) = held_projection_target(p, source_binding, pass) ?=> Store else {
+    let Some(take target) = held_projection_target(mut p, source_binding, pass) ?=> Store else {
         return discard_projection_pass(mut p, mut db, row, pass, fold)
     }
     let page = match projection_page(p, None, target, pass.resume, limits) {
@@ -351,7 +372,7 @@ pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limit
     let target = project_target(mut p, db) ?=> Store
     let mut new_pass = true
     if let Some(image) = row.image {
-        if let Some(take base) = borrowed_projection_base(p, db, source_binding, image) ?=> Store {
+        if let Some(take base) = borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
             if version(base) == version(target) {
                 new_pass = row.again
             } else {

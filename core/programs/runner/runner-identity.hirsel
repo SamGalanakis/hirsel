@@ -70,7 +70,8 @@ pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes),
     let captured = store.snapshot_follower(f, main_branch)?
     let read_handle = store.follower_reader(f, 0u64)?
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
-    let releases = store.follower_table(f, "hirsel.runner.releases", std.codec.key_u64(), codec)?
+    let mut declaration = store.declare_follower(f)
+    let releases = store.declare_release_table(mut declaration, codec)?
     let Some(release) = store.get(read_handle, captured, releases, current.activation)? else {
         return Error(Missing("activation release"))
     }

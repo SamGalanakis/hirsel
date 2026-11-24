@@ -438,6 +438,14 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
     let chain = history_suffix(mut source.client, head, head.checkpoint, source.deadline)?
     let (take mark, take checkpoint_data) = history_checkpoint(mut source.client, head, source.deadline)?
     let manifest = history_read_manifest(mut source.client, head.store, mark, head.checkpoint.seq, source.deadline)?
+    let (take replay, take loaded) = history_open_checkpoint(mut source, head, mark, checkpoint_data, take manifest, ceiling)?
+    let mut recovered = take replay
+    history_apply_suffix(mut source.client, head, head.checkpoint.seq, chain, mut recovered, ceiling, source.deadline)?
+    Ok((take recovered, take loaded))
+}
+
+fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes,
+    take manifest: PageManifest, ceiling: u64) -> Result[(JournalReplay, LoadedPageStore), Error] waits {
     source.locator = history_locator(mut source.client, head, mark, checkpoint_data, source.deadline)?
     let name = history_key("m-", mark.manifest)
     let validated = history_validate_manifest(mut source.client, source.locator, source.deadline, head.store, name, take manifest)?
@@ -445,8 +453,7 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
     let initial = disk_allocation(scoped fn() -> Result[State, Error] {
         capacity(manifest_state(loaded.manifest, loaded.holders))
     })?
-    let mut replay = journal_replay_manifest(take initial, loaded.manifest)?
+    let replay = journal_replay_manifest(take initial, loaded.manifest)?
     over_ceiling(journal_account(replay)?, ceiling)?
-    history_apply_suffix(mut source.client, head, head.checkpoint.seq, chain, mut replay, ceiling, source.deadline)?
     Ok((take replay, take loaded))
 }

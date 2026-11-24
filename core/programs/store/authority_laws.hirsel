@@ -80,7 +80,10 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     if found.open == also.open || version(found) != frontier || version(also) != frontier {
         fail("log followers did not keep distinct capture identities")
     }
-    let source = follower_table(second, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let mut schema = declare_follower(second)
+    let declared_rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let source = finish(mut schema, take declared_rows)?
+    seal_follower(second, take schema)?
     if get(result.unwrap(follower_reader(second, 0u64)), also, source, 7)? != Some(70) || get(result.unwrap(follower_reader(first, 0u64)), found, source, 7)? != Some(70) {
         fail("the follower missed the committed row")
     }

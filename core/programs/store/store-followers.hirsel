@@ -91,7 +91,7 @@ pub fn follower(mut source: Followers, tasks: Tasks, take authority: Authority, 
             let deadline = std.object.deadline_after_ms(client, op_ms)
             let (take requests, take workers) = std.object.split(take client)
             let mut io = ObjectFollowerIo(requests: Some(take requests), workers: take workers, op_ms)
-            let Some(take initial) = object_follow_private(tasks, mut io, None, o.expect, o.resident_limit, deadline)? else {
+            let Some(take initial) = object_follow_private(tasks, mut io, Advance(None), o.expect, o.resident_limit, deadline)? else {
                 return Error(NotFound)
             }
             (FollowObject(take io), take initial)
@@ -99,14 +99,6 @@ pub fn follower(mut source: Followers, tasks: Tasks, take authority: Authority, 
     }
     source.issued = minted
     Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, backend: take backend, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
-}
-
-pub fn follower_table[K, V](f: Follower, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let copied_name = string.from(name)
-    match catalog_handle(f.capture.store, f.capture.state.tips[0].roots.catalog, take copied_name, take key, take value) {
-        Error(Schema(n)) if n != 0 => Error(Missing("schema")),
-        other => take other,
-    }
 }
 
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
@@ -169,7 +161,7 @@ pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] wa
         FollowObject(mut io) => {
             let due = order.min(clock.deadline_after_ms(host.mono_ns(f.clock), io.op_ms), deadline_ns)
             let previous_capture = arc.share(f.capture)
-            object_follow_private(f.tasks, mut io, Some(take previous_capture), Some(f.capture.store), f.ceiling, due)
+            object_follow_private(f.tasks, mut io, Advance(Some(take previous_capture)), Some(f.capture.store), f.ceiling, due)
         },
     }
     let newer = match take update {
@@ -232,8 +224,48 @@ pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapsh
     }
 }
 
-pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    let catalog = view f.capture.state.tips[0].roots.catalog
-    let (take catalog_key, take record) = read_catalog_index(f.capture.store, catalog, t, name, by, key)?
-    catalog_index_handle(catalog, t, record, take catalog_key, take key, None, std.codec.of_unit())
+
+fn read_only_checkpoint(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[JournalReplay, Error] waits {
+    let validated = validate_page_manifest(d, id, take manifest)?
+    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[State, Error] {
+        let holders = attach_manifest_holders(selected, pages, empty_collection)
+        capacity(manifest_state(selected, holders))
+    })?
+    journal_replay_manifest(take state, selected)
+}
+
+fn log_floor(directory: Dir, store_id: StoreId, opened: u64, ceiling: u64, at_most: u64) -> Result[Option[Snapshot], Error] waits {
+    let (take raw, id, take manifest) = read_only_manifest(directory)?
+    check_expected_store(Some(store_id), id)?
+    if manifest.branches[0u64].version > at_most { return Ok(None) }
+    let recovered = read_only_checkpoint(directory, id, take manifest)?
+    over_ceiling(journal_account(recovered)?, ceiling)?
+    check_read_only_manifest(directory, raw)?
+    let tip = view recovered.state.tips[0u64]
+    Ok(Some(Snapshot(store: id, open: opened, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?)))
+}
+
+pub fn follower_floor(mut f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits {
+    let id = f.capture.store
+    let needed = f.ceiling - f.capture.resident
+    match f.backend {
+        FollowLog(directory) => log_floor(directory, id, f.open, needed, at_most),
+        FollowObject(mut io) => {
+            let due = clock.deadline_after_ms(host.mono_ns(f.clock), io.op_ms)
+            let found = object_follow_private(f.tasks, mut io, Floor(at_most), Some(id), needed, due)?
+            match found {
+                Some(captured) => {
+                    let tip = view captured.state.tips[0u64]
+                    Ok(Some(Snapshot(store: id, open: f.open, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: captured.watermark)))
+                },
+                None => Ok(None),
+            }
+        },
+    }
 }

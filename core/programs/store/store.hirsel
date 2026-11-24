@@ -5861,19 +5861,9 @@ fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
 }
 
 fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, barriers: bool) -> Result[JournalReplay, Error] waits {
-    let validated = validate_page_manifest(d, id, take manifest)?
-    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
-    let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let state = disk_allocation(scoped fn() -> Result[State, Error] {
-        let holders = attach_manifest_holders(selected, pages, empty_collection)
-        capacity(manifest_state(selected, holders))
-    })?
-    let replay = journal_replay_manifest(take state, selected)?
-    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, selected.first_live, barriers, take replay)?
+    let first_live = manifest.first_live
+    let replay = read_only_checkpoint(d, id, take manifest)?
+    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, first_live, barriers, take replay)?
     Ok(take recovered)
 }
 

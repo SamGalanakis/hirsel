@@ -515,7 +515,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
     }
     let narrow = Limits(rows: 1, byte_limit: 1024)
     let wide = Limits(rows: 8, byte_limit: 4096)
-    let mut original = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+    let mut original = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
     if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
     if let Paged(1) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
     if live(read_projection(db, fixture.decl)?, source_binding) != None { return Error(MigrationFault) }
@@ -533,7 +533,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
         Ok(())
     })?
     if let Committed(_) = removed {} else { return Error(MigrationFault) }
-    let mut restart = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+    let mut restart = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
     if let Reloaded = project_step_law(mut restart, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
     project_until_idle(mut restart, mut db, fixture, narrow)?
     let current = read_projection(db, fixture.decl)?
@@ -560,7 +560,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
     if !typed_put(mut db, fixture.second_table, 4, 44) { return Error(MigrationFault) }
     let second_binding = binding(fixture.second_table, main_branch(db))
     if live(read_projection(db, fixture.decl)?, second_binding) != None { return Error(MigrationFault) }
-    let mut second = projector(fixture.decl, fixture.second_table, Local(), reader(db, 0)?)
+    let mut second = projector(fixture.decl, fixture.second_table, Local, reader(db, 0)?)
     project_until_idle(mut second, mut db, fixture, wide)?
     let Some(second_generation) = live(read_projection(db, fixture.decl)?, second_binding) else { return Error(MigrationFault) }
     if image_row(db, fixture, second_generation, 4)? != Some(44u64) || image_row(db, fixture, second_generation, 9)? != None {
@@ -577,7 +577,7 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     {
         let mut db = open(tasks, directory, c, r, options)?
         let fixture = projector_fixture(mut db, Migrate)?
-        let mut worker = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+        let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
         if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
         project_until_idle(mut worker, mut db, fixture, limits)?
         let row = read_projection(db, fixture.decl)?
@@ -591,7 +591,7 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let saved_binding = binding(loaded.source_table, main_branch(reopened))
     let Some(generation) = live(read_projection(reopened, loaded.decl)?, saved_binding) else { return Error(MigrationFault) }
     if image_row(reopened, loaded, generation, 3)? != Some(30u64) { return Error(MigrationFault) }
-    let mut resumed = projector(loaded.decl, loaded.source_table, Local(), reader(reopened, 0)?)
+    let mut resumed = projector(loaded.decl, loaded.source_table, Local, reader(reopened, 0)?)
     if let Updated(1) = project_step_law(mut resumed, mut reopened, loaded, limits)? {} else { return Error(MigrationFault) }
     if image_row(reopened, loaded, generation, 3)? != Some(31u64) { return Error(MigrationFault) }
     let _ = close(take reopened)?
@@ -602,4 +602,79 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 fn test_local_projector_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     law_projector_memory(c)?
     law_projector_disk(d, c, r, tasks)
+}
+
+fn followed_rows(f: Follower) -> Result[Table[u64, u64], Error] {
+    let mut schema = declare_follower(f)
+    let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut schema, take declared)?
+    seal_follower(f, take schema)?
+    Ok(take rows)
+}
+
+fn first_follower_versions(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(u64, u64), Error] waits {
+    let mut writer = open(tasks, directory, c, r, options)?
+    let mut schema = declare(writer, Migrate)?
+    let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut schema, take declared)?
+    let _ = seal(mut writer, take schema)?
+    if !typed_put(mut writer, rows, 1, 10) { return Error(MigrationFault) }
+    let floor_version = version(snapshot(writer))
+    let _ = checkpoint(mut writer)?
+    if !typed_put(mut writer, rows, 1, 20) { return Error(MigrationFault) }
+    let image_version = version(snapshot(writer))
+    close(take writer)?
+    Ok((floor_version, image_version))
+}
+
+@test
+fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_io(host.mkdir(d, "follower-projector"))?
+    let directory = disk_io(host.open_dir(d, "follower-projector"))?
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let (floor_version, image_version) = first_follower_versions(directory, c, r, tasks, options)?
+    let mut destination = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut destination, Migrate)?
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    let mut ids = followers()
+    let original_generation = {
+        let mut upstream = follower(mut ids, tasks, log_authority(directory), c, options)?
+        let rows = followed_rows(upstream)?
+        let source_binding = binding(rows, follower_main(upstream))
+        let read_handle = follower_reader(upstream, 0)?
+        let Some(take lower) = follower_floor(mut upstream, image_version)? else { return Error(MigrationFault) }
+        if version(lower) != floor_version || get(read_handle, lower, rows, 1)? != Some(10u64) {
+            return Error(MigrationFault)
+        }
+        if let Some(_) = follower_floor(mut upstream, floor_version - 1)? { return Error(MigrationFault) }
+        let mut worker = projector(fixture.decl, rows, Follower(take upstream), take read_handle)
+        project_until_idle(mut worker, mut destination, fixture, limits)?
+        let saved = read_projection(destination, fixture.decl)?
+        let Some(generation) = live(saved, source_binding) else { return Error(MigrationFault) }
+        if image_row(destination, fixture, generation, 1)? != Some(20u64) { return Error(MigrationFault) }
+        generation
+    }
+    {
+        let mut writer = open(tasks, directory, c, r, options)?
+        let mut schema = declare(writer, Open)?
+        let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        let rows = finish(mut schema, take declared)?
+        let _ = seal(mut writer, take schema)?
+        if !typed_put(mut writer, rows, 1, 10) { return Error(MigrationFault) }
+        close(take writer)?
+    }
+    let mut reopened = follower(mut ids, tasks, log_authority(directory), c, options)?
+    let rows = followed_rows(reopened)?
+    let source_binding = binding(rows, follower_main(reopened))
+    let read_handle = follower_reader(reopened, 0)?
+    let Some(take retained) = follower_floor(mut reopened, image_version)? else { return Error(MigrationFault) }
+    if version(retained) != floor_version || floor_version >= image_version { return Error(MigrationFault) }
+    let mut worker = projector(fixture.decl, rows, Follower(take reopened), take read_handle)
+    project_until_idle(mut worker, mut destination, fixture, limits)?
+    let Some(rebuilt) = live(read_projection(destination, fixture.decl)?, source_binding) else { return Error(MigrationFault) }
+    if rebuilt == original_generation || image_row(destination, fixture, rebuilt, 1)? != Some(10u64) {
+        return Error(MigrationFault)
+    }
+    if list.len(destination.pins) != 0 { return Error(MigrationFault) }
+    Ok(())
 }

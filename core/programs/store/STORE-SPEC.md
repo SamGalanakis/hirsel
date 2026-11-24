@@ -1644,7 +1644,7 @@ pub type Fold[E: inert, K, V, A] { env: E, apply: fn(mut Tx, E, Delta[K, V]) -> 
 pub type Stepped = Updated(u64) | Paged(u64) | Published(u64) | Dropped(u32) | Reloaded | Idle
 pub type ProjectError[A] = Store(Error) | Apply(A)
 pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
-pub fn projector[K, V](decl: ProjectionDecl, source: Table[K, V], from: Source, r: Reader) -> Projector[K, V]   // r reads the source (§13.4)
+pub fn projector[K, V](decl: ProjectionDecl, source: Table[K, V], take from: Source, take r: Reader) -> Projector[K, V]   // r reads the source (§13.4)
 pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
 pub fn binding[K, V](source: Table[K, V], b: Branch) -> Binding          // the binding a reader compares (`live`)
@@ -3967,7 +3967,7 @@ pub opaque type Followers
 pub fn followers() -> Followers
 pub fn follower(mut source: Followers, tasks: Tasks, a: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits
 // v2.57: follower_table and follower_index are deleted; `declare_follower(f)` binds handles in mode Follower (§1.2)
-pub fn follower_floor(f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits   // v2.57 (M2): the newest retained checkpoint at or below a version, for a projector's base (§1.14)
+pub fn follower_floor(mut f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits   // v2.57 (M2): the newest retained checkpoint at or below a version, for a projector's base (§1.14)
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch]
 pub fn applied(f: Follower, b: Branch) -> Result[Position, Error]
 pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] waits   // main's applied Position

@@ -52,9 +52,11 @@ type ObjectFollowAnswer: send {
     outcome: Result[Option[Arc[FollowCapture]], Error]
 }
 
+type ObjectFollowRequest: send = Advance(Option[Arc[FollowCapture]]) | Floor(u64)
+
 type ObjectFollowJob: send {
     requests: std.object.Requests,
-    previous: Option[Arc[FollowCapture]],
+    request: ObjectFollowRequest,
     expect: Option[StoreId],
     ceiling: u64,
     deadline: u64,
@@ -150,21 +152,24 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
 }
 
 fn object_follow_job(take job: ObjectFollowJob) waits {
-    let ObjectFollowJob(requests: take requests, previous: take previous, expect, ceiling, deadline, response: take response) = take job
+    let ObjectFollowJob(requests: take requests, request: take request, expect, ceiling, deadline, response: take response) = take job
     let client = std.object.attach(take requests)
     let mut source = history_reader(take client, deadline)
-    let outcome = object_follow_capture(mut source, previous, expect, ceiling)
+    let outcome = match take request {
+        Advance(take previous) => object_follow_capture(mut source, previous, expect, ceiling),
+        Floor(at_most) => object_follow_floor(mut source, expect, ceiling, at_most),
+    }
     let ObjectPackRead(client: take remote, ..) = take source
     let (take returned, _) = std.object.split(take remote)
     let _ = channel.send(response, ObjectFollowAnswer(requests: take returned, outcome: take outcome))
 }
 
-fn object_follow_private(tasks: Tasks, mut io: ObjectFollowerIo, take previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, deadline: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn object_follow_private(tasks: Tasks, mut io: ObjectFollowerIo, take request: ObjectFollowRequest, expected: Option[StoreId], ceiling: u64, deadline: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
     let (response, answer): (Sender[ObjectFollowAnswer], Receiver[ObjectFollowAnswer]) = channel.new(1)
     let Some(take requests) = replace(mut io.requests, None) else {
         return Error(Io(Closed))
     }
-    let job = ObjectFollowJob(requests: take requests, previous: take previous, expect: expected, ceiling, deadline, response: take response)
+    let job = ObjectFollowJob(requests: take requests, request: take request, expect: expected, ceiling, deadline, response: take response)
     let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, object_follow_job)
     let worker = match take first {
         Ok(take running) => take running,
@@ -192,4 +197,54 @@ fn object_follow_private(tasks: Tasks, mut io: ObjectFollowerIo, take previous: 
         },
         Error(_) => Error(Io(Closed)),
     }
+}
+
+fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: HistoryMark, raw: Bytes,
+    at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let manifest = history_read_manifest(mut source.client, captured.store, mark, captured.checkpoint.seq, source.deadline)?
+    if manifest.branches[0u64].version > at_most { return Ok(None) }
+    let (take recovered, _) = history_open_checkpoint(mut source, captured, mark, raw, take manifest, ceiling)?
+    let resident = journal_account(recovered)?
+    let JournalReplay(state: take state, next_node: stamp, ..) = take recovered
+    Ok(Some(arc.new(FollowCapture(store: captured.store, state: arc.new(take state), resident: resident, remote: None, watermark: stamp_after(stamp)?))))
+}
+
+fn check_floor_missing[T](mut source: ObjectPackRead, captured: HistoryHead, take loaded: Result[T, Error], mut scratch: Bytes) -> Result[T, Error] waits {
+    match take loaded {
+        Error(HistoryMissing(file, missing)) => {
+            let witness = history_witness(mut source.client, captured, None, file, missing, mut scratch, source.deadline)?
+            match witness {
+                HistoryEvicted(newer) => Error(Reclaimed(newer.head.floor)),
+                _ => Error(Remote(Retriable(Deadline))),
+            }
+        },
+        Error(take problem) => Error(take problem),
+        Ok(take ready) => Ok(take ready),
+    }
+}
+
+fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let mut scratch: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let fetched = object_follow_head(mut source, None, mut scratch)?
+    let Some((take current, _)) = take fetched else { return Error(NotFound) }
+    let head = current.head
+    check_expected_store(expected, head.store)?
+    let latest_mark = history_checkpoint(mut source.client, head, source.deadline)
+    let (take mark, take raw) = check_floor_missing(mut source, head, take latest_mark, mut scratch)?
+    let latest = object_floor_loaded(mut source, head, mark, raw, at_most, ceiling)
+    if let Some(take chosen) = check_floor_missing(mut source, head, take latest, mut scratch)? { return Ok(Some(take chosen)) }
+    let mut remaining = list.len(mark.retained)
+    while remaining > 0 {
+        remaining -= 1
+        let reference = mark.retained[remaining]
+        let mut older = head
+        older.checkpoint = reference
+        let name = history_key("e-", reference)
+        let older_mark = history_read_object(mut source.client, name, reference, source.deadline)
+        let earlier_raw = check_floor_missing(mut source, older, take older_mark, mut scratch)?
+        let earlier = history_read_mark(name, head.store, reference, earlier_raw)?
+        let selected = object_floor_loaded(mut source, older, earlier, earlier_raw, at_most, ceiling)
+        if let Some(take chosen) = check_floor_missing(mut source, older, take selected, mut scratch)? { return Ok(Some(take chosen)) }
+    }
+    Ok(None)
 }

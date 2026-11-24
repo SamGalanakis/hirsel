@@ -97,6 +97,13 @@ pub fn declare_table[K, V](mut d: Declare, name: String, take key: std.codec.Key
     declare_table_inner(mut d, name, key, value)
 }
 
+// The release witness reads this reserved table before application handles exist.
+pub fn declare_release_table[V](mut d: Declare, take value: std.codec.Codec[V]) -> Result[Table[u64, V], Error] {
+    let Follower = d.mode else { return Error(Foreign) }
+    let declared = declare_table_inner(mut d, "hirsel.runner.releases", std.codec.key_u64(), value)?
+    finish(mut d, take declared)
+}
+
 fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[TableDecl[K, V], Error] {
     if d.failed {
         return Error(MigrationFault)

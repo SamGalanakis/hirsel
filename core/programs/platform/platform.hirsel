@@ -502,11 +502,11 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     let mut db = take opened
     let t = st(make_tables(mut db))?
     let made = store.run(mut db, None, (store.copy_env(first), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-        if let None = st(store.fetch(tx, call_env.1.config, 0u64))? {
-            st(store.put(mut tx, call_env.1.config, 0u64, call_env.0))?
+        if let None = st(store.fetch(tx, call_env.1 .config, 0u64))? {
+            st(store.put(mut tx, call_env.1 .config, 0u64, call_env.0))?
         }
-        if let None = st(store.fetch(tx, call_env.1.meta, 0u64))? {
-            st(store.put(mut tx, call_env.1.meta, 0u64, Meta(dirty: 0u64, next_incarnation: 1u64, next_attempt: 1u64)))?
+        if let None = st(store.fetch(tx, call_env.1 .meta, 0u64))? {
+            st(store.put(mut tx, call_env.1 .meta, 0u64, Meta(dirty: 0u64, next_incarnation: 1u64, next_attempt: 1u64)))?
         }
         Ok(())
     })
@@ -1105,7 +1105,9 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
             }
             let held = cut.held
             finish_ended_cut(mut h, name, take cut, now, mut out)
-            if held { return }
+            if held {
+                return
+            }
         },
         None => {
             if run_gen(h, name) == Some(gen) {
@@ -1145,19 +1147,19 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(name), store.copy_env(candidate), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found_w) = st(store.fetch(tx, call_env.2.wake, call_env.0))? else {
+            let Some(found_w) = st(store.fetch(tx, call_env.2 .wake, call_env.0))? else {
                 return Error(Unknown)
             }
             let mut w = found_w
-            let Some(grp) = st(store.fetch(tx, call_env.2.groups, call_env.0))? else {
+            let Some(grp) = st(store.fetch(tx, call_env.2 .groups, call_env.0))? else {
                 return Error(Unknown)
             }
-            let Some(d) = st(store.fetch(tx, call_env.2.deploys, call_env.0))? else {
+            let Some(d) = st(store.fetch(tx, call_env.2 .deploys, call_env.0))? else {
                 return Error(Missing("deploy"))
             }
             w.wake = Dirty(call_env.1)
-            st(store.put(mut tx, call_env.2.wake, call_env.0, w))?
-            st(store.put(mut tx, call_env.2.dirty, call_env.0, call_env.1))?
+            st(store.put(mut tx, call_env.2 .wake, call_env.0, w))?
+            st(store.put(mut tx, call_env.2 .dirty, call_env.0, call_env.1))?
             install_new(mut tx, call_env.2, call_env.0, take grp, take d)
         })
     }
@@ -1172,7 +1174,9 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
     }
     let mut v = vol_read(h, name)
     v.cut = None
-    let Ok(Some(installed)) = group_row(h, name) else { return }
+    let Ok(Some(installed)) = group_row(h, name) else {
+        return
+    }
     v.run = Some(Run(gen: candidate, phase: phase, selected: launcher.Selection(activation: installed.activation, assembly: clone(installed.assembly))))
     vol_put(mut h, name, take v)
     if let Some(e) = cut.candidate_end {
@@ -1189,7 +1193,7 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(name), store.copy_env(why), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, call_env.2.deploys, call_env.0))? else {
+            let Some(found_d) = st(store.fetch(tx, call_env.2 .deploys, call_env.0))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -1229,18 +1233,18 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
         let t = view h.t
         let k = view cut
         store.run(mut h.db, None, (store.copy_env(name), store.copy_env(t), store.copy_env(k)), fn(mut tx, call_env) -> Result[Option[DeployRow], Refused] {
-            let Some(found_d) = st(store.fetch(tx, call_env.1.deploys, call_env.0))? else {
+            let Some(found_d) = st(store.fetch(tx, call_env.1 .deploys, call_env.0))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
             let ours = match d.outcome {
-                Pending => d.attempt.hi == call_env.2.attempt.hi && d.attempt.lo == call_env.2.attempt.lo,
+                Pending => d.attempt.hi == call_env.2 .attempt.hi && d.attempt.lo == call_env.2 .attempt.lo,
                 _ => false
             }
             if !ours {
                 return Error(Missing("deploy"))
             }
-            if !is_none(d.retry_of) || call_env.2.old_ended {
+            if !is_none(d.retry_of) || call_env.2 .old_ended {
                 d.outcome = Failed("drift")
                 put_deploy(mut tx, call_env.1, call_env.0, d, abort_class("drift"))?
                 return Ok(None)
@@ -1283,7 +1287,7 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, call_env.1.deploys, call_env.0))? else {
+            let Some(found_d) = st(store.fetch(tx, call_env.1 .deploys, call_env.0))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -1303,19 +1307,29 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
 }
 
 fn cutover_result(mut h: Host, c: launcher.Child, attempt: launcher.Attempt, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
-    let Some(g) = current(h, c) else { return }
-    let Serving(gen) = c.role else { return }
+    let Some(g) = current(h, c) else {
+        return
+    }
+    let Serving(gen) = c.role else {
+        return
+    }
     let name = string.from(c.group.name)
-    let Some(take pending) = cut_of(h, name) else { return }
+    let Some(take pending) = cut_of(h, name) else {
+        return
+    }
     let mut cut = take pending
-    if gen != cut.old || attempt.hi != cut.attempt.hi || attempt.lo != cut.attempt.lo { return }
+    if gen != cut.old || attempt.hi != cut.attempt.hi || attempt.lo != cut.attempt.lo {
+        return
+    }
     let ack_old = cut.held && !is_none(cut.old_end)
     let ack_new = cut.held && !is_none(cut.candidate_end)
     let candidate = child_of(name, cut.incarnation, cut.candidate)
     cut.held = false
     match reply {
         PlaceInstalled(v, _) => {
-            if v != cut.activation { return }
+            if v != cut.activation {
+                return
+            }
             commit_cut(mut h, name, take cut, now, mut out)
         },
         PlaceDrift => drift(mut h, name, g, take cut, now, mut out),
@@ -1327,10 +1341,16 @@ fn cutover_result(mut h: Host, c: launcher.Child, attempt: launcher.Attempt, rep
         _ => return,
     }
     if let Some(remaining) = cut_of(h, name) {
-        if remaining.held { return }
+        if remaining.held {
+            return
+        }
     }
-    if ack_old { list.push(mut out, Acknowledge(clone(c))) }
-    if ack_new { list.push(mut out, Acknowledge(take candidate)) }
+    if ack_old {
+        list.push(mut out, Acknowledge(clone(c)))
+    }
+    if ack_new {
+        list.push(mut out, Acknowledge(take candidate))
+    }
 }
 
 fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
@@ -1349,7 +1369,9 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
             None => false,
         }
         if !is_current {
-            if !is_candidate { return }
+            if !is_candidate {
+                return
+            }
             if !opens_cutover(h, name, ready) {
                 list.push(mut out, Kill(clone(c)))
                 return
@@ -1401,7 +1423,9 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
         None => {
             let Vol(run: take running, ..) = vol_read(h, name)
             if let Some(run) = take running {
-                if run.gen != gen { return }
+                if run.gen != gen {
+                    return
+                }
                 match reply {
                     PlaceOpened(ready) => {
                         report_recovery(mut h, name, gen, ready.version, run.selected, ready.read, true)
@@ -1449,7 +1473,7 @@ fn adopt_genesis(mut h: Host, name: String, incarnation: u64, version: u64) -> b
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(incarnation), store.copy_env(name), store.copy_env(version), store.copy_env(t)), fn(mut tx, call_env) -> Result[bool, Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.3.groups, call_env.1))? else {
+            let Some(found) = st(store.fetch(tx, call_env.3 .groups, call_env.1))? else {
                 return Ok(false)
             }
             if found.incarnation != call_env.0 || found.activation != 0u64 {
@@ -1460,7 +1484,7 @@ fn adopt_genesis(mut h: Host, name: String, incarnation: u64, version: u64) -> b
             }
             let mut g = found
             g.activation = call_env.2
-            st(store.put(mut tx, call_env.3.groups, call_env.1, g))?
+            st(store.put(mut tx, call_env.3 .groups, call_env.1, g))?
             Ok(true)
         })
     }
@@ -1549,7 +1573,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
         vol_put(mut h, name, take v)
     }
     let mut answers: List[(launcher.Child, runner.HostReply)] = list.new()
-    let mut ends: List[(launcher.Child, launcher.End)] = list.new()
+    let mut ends: List[(launcher.Child, launcher.End, bool)] = list.new()
     for s in children {
         let c = s.child
         let Some(_) = current(h, c) else {
@@ -1603,14 +1627,34 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
             stop_or_ack(c, s.phase, mut out);
             continue
         }
-        if let Some(reply) = s.answer { list.push(mut answers, (clone(c), clone(reply))) }
+        if let Some(reply) = s.answer {
+            list.push(mut answers, (clone(c), clone(reply)))
+        }
         if let Exited(e) = s.phase {
-            list.push(mut ends, (clone(c), e))
+            list.push(mut ends, (clone(c), e, authoritative))
         }
     }
-    for (c, reply) in answers { placed(mut h, c, reply, now, mut out) }
-    for (c, e) in ends {
+    for (c, reply) in answers {
+        placed(mut h, c, reply, now, mut out)
+    }
+    for (c, e, authoritative) in ends {
+        let unclean = authoritative && is_none(clean_report(e))
+        let name = string.from(c.group.name)
+        let gen = match c.role {
+            Serving(g) => g,
+            _ => 0u64,
+        }
         ended(mut h, c, e, now, mut out)
+        // An authoritative child that ended without a clean report while no host watched
+        // left its row Dirty with no child: the start its end applied is the restart's
+        // probe of that row (§14.5).
+        if unclean {
+            if let Some(next) = run_gen(h, name) {
+                if next > gen {
+                    h.probes += 1u64
+                }
+            }
+        }
     }
     resume_cuts(mut h, held, mut out)
     for name in dirty_names(h) {
@@ -1688,7 +1732,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
             let made = {
                 let t = view h.t
                 store.run(mut h.db, None, (store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-                    let Some(found_d) = st(store.fetch(tx, call_env.1.deploys, call_env.0))? else {
+                    let Some(found_d) = st(store.fetch(tx, call_env.1 .deploys, call_env.0))? else {
                         return Error(Missing("deploy"))
                     }
                     let mut row = found_d
@@ -1901,7 +1945,7 @@ fn set_max_places_turn(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Re
             }
             let mut c = config_of(tx, call_env.1)?
             c.max_places = call_env.0
-            st(store.put(mut tx, call_env.1.config, 0u64, c))
+            st(store.put(mut tx, call_env.1 .config, 0u64, c))
         })
     }
     decided(mut h, take made)?
@@ -1920,13 +1964,13 @@ fn set_quota_turn(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[Lis
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(q), store.copy_env(tenant), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
             let u = usage_of(tx, call_env.2, call_env.1)?
-            if call_env.0.live < u.live {
+            if call_env.0 .live < u.live {
                 return Error(Busy(u.live))
             }
-            if call_env.0.groups < u.groups {
+            if call_env.0 .groups < u.groups {
                 return Error(Busy(u.groups))
             }
-            st(store.put(mut tx, call_env.2.quotas, call_env.1, call_env.0))
+            st(store.put(mut tx, call_env.2 .quotas, call_env.1, call_env.0))
         })
     }
     decided(mut h, take made)?
@@ -1961,7 +2005,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(assemble_ns), store.copy_env(assembly), store.copy_env(attempt), store.copy_env(fetch_ns), store.copy_env(image_digest), store.copy_env(name), store.copy_env(request), store.copy_env(shown), store.copy_env(g), store.copy_env(old), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(w) = st(store.fetch(tx, call_env.10.wake, call_env.5))? else {
+            let Some(w) = st(store.fetch(tx, call_env.10 .wake, call_env.5))? else {
                 return Error(Unknown)
             }
             let Dirty(a) = w.wake else {
@@ -1971,14 +2015,14 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
                 return Error(Busy(a))
             }
             // An unresolved deploy's row is the only record of its NEW root.
-            if let Some(prior) = st(store.fetch(tx, call_env.10.deploys, call_env.5))? {
+            if let Some(prior) = st(store.fetch(tx, call_env.10 .deploys, call_env.5))? {
                 match prior.outcome {
                     Installed => (),
                     Failed(_) => (),
                     _ => return Error(Busy(a)),
                 }
             }
-            let row = DeployRow(request: clone(call_env.6), attempt: call_env.2, assembly: clone(call_env.1), image: clone(call_env.4), old_assembly: clone(call_env.8.assembly), old_binding: None, binding: None, new_retained: retains(call_env.8, call_env.1), digest: list.new(), release: list.new(), activation: 0u64, old: call_env.9, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(call_env.3), assemble_ns: Some(call_env.0), preview: clone(call_env.7))
+            let row = DeployRow(request: clone(call_env.6), attempt: call_env.2, assembly: clone(call_env.1), image: clone(call_env.4), old_assembly: clone(call_env.8 .assembly), old_binding: None, binding: None, new_retained: retains(call_env.8, call_env.1), digest: list.new(), release: list.new(), activation: 0u64, old: call_env.9, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(call_env.3), assemble_ns: Some(call_env.0), preview: clone(call_env.7))
             put_deploy(mut tx, call_env.10, call_env.5, row, StoreClass)
         })
     }
@@ -2278,7 +2322,7 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(class), store.copy_env(d), store.copy_env(why), store.copy_env(t)), fn(mut tx, call_env) -> Result[Option[launcher.Group], Refused] {
-            let Some(r) = st(store.fetch(tx, call_env.3.requests, call_env.1))? else {
+            let Some(r) = st(store.fetch(tx, call_env.3 .requests, call_env.1))? else {
                 return Ok(None)
             }
             if let Some(_) = r.done {
@@ -2288,19 +2332,19 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
             let Some(RegisterAsk(_, _, _, _, _)) = operator.decode_ask(r.begin) else {
                 return Ok(None)
             }
-            if let Some(_) = st(store.fetch(tx, call_env.3.wake, r.group.name))? {
+            if let Some(_) = st(store.fetch(tx, call_env.3 .wake, r.group.name))? {
                 return Ok(None)
             }
-            let Some(g) = st(store.fetch(tx, call_env.3.groups, r.group.name))? else {
+            let Some(g) = st(store.fetch(tx, call_env.3 .groups, r.group.name))? else {
                 return Ok(None)
             }
             if g.incarnation != r.group.incarnation {
                 return Ok(None)
             }
-            let _ = st(store.delete(mut tx, call_env.3.groups, r.group.name))?
+            let _ = st(store.delete(mut tx, call_env.3 .groups, r.group.name))?
             let mut u = usage_of(tx, call_env.3, g.tenant)?
             u.groups -= 1u64
-            st(store.put(mut tx, call_env.3.usage, g.tenant, u))?
+            st(store.put(mut tx, call_env.3 .usage, g.tenant, u))?
             Ok(Some(clone(r.group)))
         })
     }
@@ -2391,14 +2435,14 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         let t = view h.t
         let name = view g.name
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(g), store.copy_env(input), store.copy_env(now), store.copy_env(canonical), store.copy_env(t), store.copy_env(name)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
-            if let Some(x) = st(store.fetch(tx, call_env.5.active, call_env.6))? {
+            if let Some(x) = st(store.fetch(tx, call_env.5 .active, call_env.6))? {
                 if x != call_env.0 {
                     return Error(Busy(0u64))
                 }
             }
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5.requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3.wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
-            st(store.put(mut tx, call_env.5.active, call_env.6, call_env.0))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
+            st(store.put(mut tx, call_env.5 .active, call_env.6, call_env.0))?
             Ok(a)
         })
     }
@@ -2488,13 +2532,13 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.1.requests, call_env.0))? else {
+            let Some(found) = st(store.fetch(tx, call_env.1 .requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
             let mut row = found
             let a = fresh_attempt(mut tx, call_env.1)?
             row.attempt = a
-            st(store.put(mut tx, call_env.1.requests, call_env.0, row))?
+            st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(a)
         })
     }
@@ -2887,22 +2931,22 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(assemble_ns), store.copy_env(d), store.copy_env(fetch_ns), store.copy_env(key), store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.5.groups, call_env.4))? else {
+            let Some(found) = st(store.fetch(tx, call_env.5 .groups, call_env.4))? else {
                 return Error(Unknown)
             }
-            if found.incarnation != call_env.1.incarnation {
+            if found.incarnation != call_env.1 .incarnation {
                 return Error(Unknown)
             }
-            if let Some(_) = st(store.fetch(tx, call_env.5.wake, call_env.4))? {
+            if let Some(_) = st(store.fetch(tx, call_env.5 .wake, call_env.4))? {
                 return Error(Exists)
             }
             let mut g = found
             g.assembly = clone(call_env.3)
             g.activation = 0u64
-            st(store.put(mut tx, call_env.5.groups, call_env.4, g))?
-            st(store.put(mut tx, call_env.5.wake, call_env.4, WakeRow(wake: Clean(None), gen: 0u64)))?
+            st(store.put(mut tx, call_env.5 .groups, call_env.4, g))?
+            st(store.put(mut tx, call_env.5 .wake, call_env.4, WakeRow(wake: Clean(None), gen: 0u64)))?
             let report = operator.Report(fetch_ns: Some(call_env.2), assemble_ns: Some(call_env.0), pause: NotStarted, preview: operator.no_preview())
-            finish_request(mut tx, call_env.5, call_env.4, call_env.1.request, InstalledPhase(0u64, clone(call_env.3), report))
+            finish_request(mut tx, call_env.5, call_env.4, call_env.1 .request, InstalledPhase(0u64, clone(call_env.3), report))
         })
     }
     list.push(mut out, Release(d.attempt))
@@ -2963,25 +3007,25 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(input), store.copy_env(now), store.copy_env(spec), store.copy_env(canonical), store.copy_env(t)), fn(mut tx, call_env) -> Result[(GroupRow, launcher.Attempt), Refused] {
-            if let Some(_) = st(store.fetch(tx, call_env.5.groups, call_env.3.name))? {
+            if let Some(_) = st(store.fetch(tx, call_env.5 .groups, call_env.3 .name))? {
                 return Error(Exists)
             }
-            let mut u = usage_of(tx, call_env.5, call_env.3.tenant)?
-            if let Some(q) = quota_of(tx, call_env.5, call_env.3.tenant)? {
+            let mut u = usage_of(tx, call_env.5, call_env.3 .tenant)?
+            if let Some(q) = quota_of(tx, call_env.5, call_env.3 .tenant)? {
                 if u.groups >= q.groups {
-                    return Error(Full(Groups(string.from(call_env.3.tenant), q.groups)))
+                    return Error(Full(Groups(string.from(call_env.3 .tenant), q.groups)))
                 }
             }
             let mut meta = meta_of(tx, call_env.5)?
             let g = registered_row(call_env.3, meta.next_incarnation)
             meta.next_incarnation += 1u64
-            st(store.put(mut tx, call_env.5.meta, 0u64, meta))?
-            st(store.put(mut tx, call_env.5.groups, call_env.3.name, g))?
+            st(store.put(mut tx, call_env.5 .meta, 0u64, meta))?
+            st(store.put(mut tx, call_env.5 .groups, call_env.3 .name, g))?
             u.groups += 1u64
-            st(store.put(mut tx, call_env.5.usage, call_env.3.tenant, u))?
+            st(store.put(mut tx, call_env.5 .usage, call_env.3 .tenant, u))?
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5.requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3.name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2.wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
-            st(store.put(mut tx, call_env.5.active, call_env.3.name, call_env.0))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
+            st(store.put(mut tx, call_env.5 .active, call_env.3 .name, call_env.0))?
             Ok((g, a))
         })
     }
@@ -3132,11 +3176,15 @@ fn old_entries(b: Bytes) -> Option[(Bytes, List[runner.Exported], Binding)] {
     let Some(take describe) = runner.decode_description(b) else {
         return None
     }
-    let Some(take binding) = binding_of(describe) else { return None }
+    let Some(take binding) = binding_of(describe) else {
+        return None
+    }
     let runner.Describe(exported: take exported, ..) = take describe
     let list_codec: std.codec.Codec[List[runner.Exported]] = std.codec.of_list()
     let mut raw: Bytes = list.new()
-    if let Error(_) = std.codec.encode(list_codec, exported, mut raw) { return None }
+    if let Error(_) = std.codec.encode(list_codec, exported, mut raw) {
+        return None
+    }
     Some((take raw, take exported, take binding))
 }
 
@@ -3149,7 +3197,9 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner
     if description.digest != p.image || description.target != p.target || description.n_place != p.n_place {
         return Error("preview does not describe the selected assembly")
     }
-    if list.len(description.revision) != 32u64 { return Error("preview: entry revision is unavailable") }
+    if list.len(description.revision) != 32u64 {
+        return Error("preview: entry revision is unavailable")
+    }
     if list.len(release) != 32u64 {
         return Error("preview: the release is not 32 bytes")
     }
@@ -3267,12 +3317,12 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
         let t = view h.t
         let shown = view p.preview
         store.run(mut h.db, None, (store.copy_env(name), store.copy_env(class), store.copy_env(why), store.copy_env(attempt), store.copy_env(t), store.copy_env(shown)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, call_env.4.deploys, call_env.0))? else {
+            let Some(found_d) = st(store.fetch(tx, call_env.4 .deploys, call_env.0))? else {
                 return Ok(())
             }
             let mut d = found_d
             let ours = match d.outcome {
-                Preparing => d.attempt.hi == call_env.3.hi && d.attempt.lo == call_env.3.lo,
+                Preparing => d.attempt.hi == call_env.3 .hi && d.attempt.lo == call_env.3 .lo,
                 _ => false
             }
             if !ours {
@@ -3429,48 +3479,52 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
         let t = view h.t
         let q = view p
         store.run(mut h.db, None, (store.copy_env(digest), store.copy_env(name), store.copy_env(activation), store.copy_env(now_s), store.copy_env(t), store.copy_env(q)), fn(mut tx, call_env) -> Result[(GroupRow, u64, bool), Refused] {
-            let Some(g) = st(store.fetch(tx, call_env.4.groups, call_env.1))? else {
+            let Some(g) = st(store.fetch(tx, call_env.4 .groups, call_env.1))? else {
                 return Error(Unknown)
             }
             if let Some(_) = g.retiring {
                 return Error(Retiring)
             }
-            if g.incarnation != call_env.5.incarnation {
+            if g.incarnation != call_env.5 .incarnation {
                 return Error(Unknown)
             }
-            let Some(w) = st(store.fetch(tx, call_env.4.wake, call_env.1))? else {
+            let Some(w) = st(store.fetch(tx, call_env.4 .wake, call_env.1))? else {
                 return Error(Unknown)
             }
             let Dirty(a) = w.wake else {
                 return Error(Busy(w.gen))
             }
-            if a != call_env.5.old {
+            if a != call_env.5 .old {
                 return Error(Busy(a))
             }
-            let Some(found_d) = st(store.fetch(tx, call_env.4.deploys, call_env.1))? else {
+            let Some(found_d) = st(store.fetch(tx, call_env.4 .deploys, call_env.1))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
             let ours = match d.outcome {
-                Preparing => d.attempt.hi == call_env.5.attempt.hi && d.attempt.lo == call_env.5.attempt.lo,
+                Preparing => d.attempt.hi == call_env.5 .attempt.hi && d.attempt.lo == call_env.5 .attempt.lo,
                 _ => false
             }
             if !ours {
                 return Error(Missing("deploy"))
             }
             let c = w.gen + 1u64
-            st(store.put(mut tx, call_env.4.wake, call_env.1, WakeRow(wake: Dirty(a), gen: c)))?
+            st(store.put(mut tx, call_env.4 .wake, call_env.1, WakeRow(wake: Dirty(a), gen: c)))?
             d.digest = clone(call_env.0)
-            d.release = clone(call_env.5.release)
-            d.describe = clone(call_env.5.describe)
-            d.old_binding = clone(call_env.5.old_binding)
-            let Some(description) = runner.decode_description(call_env.5.describe) else { return Error(Missing("preview description")) }
-            let Some(take binding) = binding_of(description) else { return Error(Missing("release identity")) }
+            d.release = clone(call_env.5 .release)
+            d.describe = clone(call_env.5 .describe)
+            d.old_binding = clone(call_env.5 .old_binding)
+            let Some(description) = runner.decode_description(call_env.5 .describe) else {
+                return Error(Missing("preview description"))
+            }
+            let Some(take binding) = binding_of(description) else {
+                return Error(Missing("release identity"))
+            }
             d.binding = Some(take binding)
             d.activation = call_env.2
             d.candidate = c
             d.outcome = Pending
-            d.preview = clone(call_env.5.preview)
+            d.preview = clone(call_env.5 .preview)
             pin_start(mut tx, call_env.4, g, c, d.assembly, call_env.3)?
             let retried = !is_none(d.retry_of)
             put_deploy(mut tx, call_env.4, call_env.1, d, StoreClass)?
@@ -3571,7 +3625,7 @@ fn keep_pin_turn(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Resul
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(assembly), store.copy_env(expires), store.copy_env(id), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            st(store.put(mut tx, call_env.3.pins, call_env.2, Pin(assembly: clone(call_env.0), expires: call_env.1)))
+            st(store.put(mut tx, call_env.3 .pins, call_env.2, Pin(assembly: clone(call_env.0), expires: call_env.1)))
         })
     }
     decided(mut h, take made)
@@ -3588,7 +3642,7 @@ fn forget_pin_turn(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(id), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let _ = st(store.delete(mut tx, call_env.1.pins, call_env.0))?
+            let _ = st(store.delete(mut tx, call_env.1 .pins, call_env.0))?
             Ok(())
         })
     }
@@ -3741,7 +3795,10 @@ pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[lau
         Got(take e) => event(mut h, take e, now),
         DueAt(_) => tick(mut h, now),
         RetryAt(_) => tick(mut h, now),
-        CollectTick => match collect(mut h) { Ok(take reqs) => take reqs, Error(_) => list.new() },
+        CollectTick => match collect(mut h) {
+            Ok(take reqs) => take reqs,
+            Error(_) => list.new()
+        },
         Asked(conn, body) => asked(mut h, conn, body, now),
         HungUp(conn) => detach(mut h, conn),
         Flushed(conn) => detach(mut h, conn),

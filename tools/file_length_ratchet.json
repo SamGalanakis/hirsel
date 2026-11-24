@@ -18,8 +18,9 @@
     "reason": "vopr-harness-platform-2004"
   },
   "core/programs/platform/platform.hirsel": {
-    "lines": 3972,
-    "reason": "release-publish-1912"
+    "lines": 3851,
+    "raise_revision": 1,
+    "reason": "platform-l42-2063"
   },
   "core/programs/platform/platform_laws.hirsel": {
     "lines": 2020,

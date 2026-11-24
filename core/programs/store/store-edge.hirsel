@@ -26,7 +26,11 @@ pub fn edge_delete[A, B](mut tx: Tx, edge: Edge[A, B], pair: (A, B)) -> Result[b
 }
 
 pub fn edge_out[A, B](tx: Tx, edge: Edge[A, B], source: A) -> Result[TxRows[(A, B), ()], Error] in tx {
-    range_prefix(tx, edge.table, source, edge.source_key)
+    edge_out_prefix(tx, edge, source, edge.source_key)
+}
+
+pub fn edge_out_prefix[A, B, Q](tx: Tx, edge: Edge[A, B], source: Q, take key: std.codec.Key[Q]) -> Result[TxRows[(A, B), ()], Error] in tx {
+    range_prefix(tx, edge.table, source, key)
 }
 
 pub fn edge_in[A, B: shareable](tx: Tx, edge: Edge[A, B], target: B) -> Result[IndexRows[(A, B), ()], Error] in tx {

@@ -54,6 +54,10 @@ each admitted shape, `a < b` iff `encode(a) < encode(b)` bytewise, with the lang
 `ordered` comparison as the oracle). `Desc(value: x)` wraps and `.value` unwraps. In
 a value codec, `Desc[T]` is written as T.
 
+`key_prefix.matches(full, leading)` checks ordered key codecs for prefix reads. It compares
+complete leading components through tuple and record nesting, which adds no bytes.
+A `Desc` component matches as a whole because it inverts its payload's bytes.
+
 **Format.** Integers at their width, a float as its IEEE bits and a char as a u32, all
 little-endian; bool one byte; `()` nothing. String, Bytes, List and Map: a u32 count, then the
 bytes, the elements, or key and value per entry in insertion order. Option, Result and a

@@ -370,16 +370,28 @@ fn stream_quota_preserves_eviction_floor(c: Clock) -> Result[(), u64] waits {
     let first = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 2u64))
     let second = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 3u64))
     let digest = digest_for("same request")
-    if let Admitted(_) = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(1u64) }
-    if let HistoryUnavailable = result.unwrap(admit(mut db, older, 0u64, digest)) {} else { return Error(2u64) }
-    if let StreamOverloaded = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(3u64) }
+    if let Admitted(_) = result.unwrap(admit(mut db, first, 0u64, digest)) {} else {
+        return Error(1u64)
+    }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, older, 0u64, digest)) {} else {
+        return Error(2u64)
+    }
+    if let StreamOverloaded = result.unwrap(admit(mut db, second, 0u64, digest)) {} else {
+        return Error(3u64)
+    }
     let raw = result.unwrap(stream_key_bytes(first))
     let committed = result.unwrap(run(mut db, None, raw, fn(mut tx, key) -> Result[(), Error] {
         reply(mut tx, key, 0u64, clone(b"result"))
     }))
-    if let Committed(_) = committed {} else { return Error(4u64) }
-    if let Admitted(_) = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(5u64) }
-    if let HistoryUnavailable = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(6u64) }
+    if let Committed(_) = committed {} else {
+        return Error(4u64)
+    }
+    if let Admitted(_) = result.unwrap(admit(mut db, second, 0u64, digest)) {} else {
+        return Error(5u64)
+    }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, first, 0u64, digest)) {} else {
+        return Error(6u64)
+    }
     Ok(())
 }
 
@@ -865,10 +877,60 @@ fn prefix_observation(s: Snapshot, sh: Table[u64, u64], reverse: bool, steps: u6
     }
 }
 
+fn nested_edge_key(a: String, b: u64, c: u64) -> ((String, u64), ((String, u64), u64)) {
+    ((string.from(a), b), ((string.from(a), b), c))
+}
+
+fn nested_edge_prefix(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let mut schema = declare(db, Migrate)?
+    let pair: std.codec.Key[((String, u64), ((String, u64), u64))] = std.codec.key_of()
+    let source: std.codec.Key[(String, u64)] = std.codec.key_of()
+    let target: std.codec.Key[((String, u64), u64)] = std.codec.key_of()
+    let edge = declare_edge(mut schema, "nested_edges", "reverse", pair, source, target)?
+    let _ = seal(mut db, take schema)?
+    let inserted = run(mut db, None, edge, fn(mut tx, e) -> Result[(), Error] {
+        edge_put(mut tx, e, nested_edge_key("abc", 0, 0))?
+        edge_put(mut tx, e, nested_edge_key("ab", 2, 0))?
+        edge_put(mut tx, e, nested_edge_key("ab", 1, 9))?
+        edge_put(mut tx, e, nested_edge_key("aa", 0, 0))?
+        edge_put(mut tx, e, nested_edge_key("ab", 1, 3))
+    })?
+    let Committed(_) = inserted else {
+        return Error(MigrationFault)
+    }
+    let observed = look(reader(db, 0)?, snapshot(db), None, edge, fn(tx, e) -> Result[(), Error] {
+        let key = std.codec.key_string()
+        let mut rows = edge_out_prefix(tx, e, "ab", key)?
+        let mut indexed = lookup_prefix(tx, e.targets, "ab", key)?
+        for (b, suffix) in[(1u64, 3u64), (1u64, 9u64), (2u64, 0u64)] {
+            let row = Some((nested_edge_key("ab", b, suffix), ()))
+            if next_in(tx, mut rows)? != row || next_indexed(mut indexed)? != row {
+                return Error(MigrationFault)
+            }
+        }
+        if next_in(tx, mut rows)? != None || next_indexed(mut indexed)? != None {
+            return Error(MigrationFault)
+        }
+        let mut outgoing = edge_out(tx, e, ("ab", 1u64))?
+        if next_in(tx, mut outgoing)? != Some((nested_edge_key("ab", 1, 3), ())) || next_in(tx, mut outgoing)? != Some((nested_edge_key("ab", 1, 9), ())) || next_in(tx, mut outgoing)? != None {
+            return Error(MigrationFault)
+        }
+        Ok(())
+    })?
+    match take observed {
+        Seen(Seen(value: Ok(()), ..)) => Ok(()),
+        _ => Error(MigrationFault),
+    }
+}
+
 // With keys 3 and 7, a forward step inspects [1,3] and a reverse step inspects
 // [7,10). Inserts in those gaps invalidate the read. A probe returning None
 // inspects the terminal gap, so those inserts invalidate an exhausted scan too.
 pub fn law_range_prefix(c: Clock) -> bool waits {
+    if let Error(_) = nested_edge_prefix(c) {
+        return false
+    }
     let mut db = test_db(c, 1073741824)
     let dictionary = std.codec.of_u64()
     result.unwrap(create_table(mut db, spec("prefix", std.codec.key_u64(), dictionary)))

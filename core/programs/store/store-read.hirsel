@@ -86,13 +86,17 @@ pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result
 
 pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change], Error] waits {
     read_access(r, rows.capture)?
-    if rows.done { return Ok(None) }
+    if rows.done {
+        return Ok(None)
+    }
     let selected = if let Some(inventory) = view rows.capture.roots.collections.paging {
         snapshot_tiered_span_step(r, rows.capture, inventory, rows.low, rows.high, rows.last)?
     } else {
         disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
             let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
-            let Some((take key, take value)) = next_bytes(mut cursor)? else { return Ok(None) }
+            let Some((take key, take value)) = next_bytes(mut cursor)? else {
+                return Ok(None)
+            }
             let resume = copied(key)?
             Ok(Some((take key, take value, take resume)))
         })?
@@ -112,7 +116,9 @@ pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change],
 pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits {
     read_access(r, s)?
     let mut out: List[Change] = list.new()
-    if hi <= lo { return Ok(take out) }
+    if hi <= lo {
+        return Ok(take out)
+    }
     if let Some(inventory) = view s.roots.collections.paging {
         return snapshot_tiered_span(r, s, inventory, lo, hi)
     }
@@ -164,7 +170,9 @@ fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[
 
 pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) { return Error(Foreign) }
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut key = prefixed(t.id, 8, false)?
     std.codec.encode_key(t.key, k, mut key)
@@ -178,7 +186,9 @@ pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[
 
 pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) { return Error(Foreign) }
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
@@ -249,7 +259,9 @@ fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes
 
 fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, t.store) { return Error(Foreign) }
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let captured: Snapshot = clone(s)
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
@@ -267,7 +279,9 @@ pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], 
 
 pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
-    if !same(s.store, ix.store) { return Error(Foreign) }
+    if !same(s.store, ix.store) {
+        return Error(Foreign)
+    }
     readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let captured: Snapshot = clone(s)
     let low = index_bound(ix.id, ix.key, lo, false)?
@@ -289,8 +303,7 @@ fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes
     byte_cursor(data, take start, high)
 }
 
-fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, inventory: TieredReadInventory, edge: std.page.Slot,
-    descriptor: Bytes) -> Result[Option[(Bytes, (K, V))], Error] waits {
+fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, inventory: TieredReadInventory, edge: std.page.Slot, descriptor: Bytes) -> Result[Option[(Bytes, (K, V))], Error] waits {
     let mut start = copied(rows.low)?
     let mut stop = copied(rows.high)?
     if let Some(previous) = view rows.last {
@@ -322,7 +335,9 @@ fn decode_snapshot_next[K, V](r: Reader, s: Snapshot, decoder: RowDecoder[K, V],
 
 pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Error] waits {
     read_access(r, rows.capture)?
-    if rows.done { return Ok(None) }
+    if rows.done {
+        return Ok(None)
+    }
     readable(rows.capture.roots, rows.catalog_key, rows.catalog_page, rows.source)?
     let selected = {
         let data = view rows.capture.roots.collections
@@ -364,7 +379,9 @@ pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -
 }
 
 fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
-    if !same(tx.store, t.store) { return Error(Foreign) }
+    if !same(tx.store, t.store) {
+        return Error(Foreign)
+    }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)
 }
 
@@ -433,58 +450,13 @@ fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: B
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
 // gives the Span a fully consumed range over the same bounds covers.
 fn prefix_limits[K, Q](id: u32, full: std.codec.Key[K], leading: std.codec.Key[Q], q: Q) -> Result[(Bytes, Bytes), Error] {
-    let whole = std.codec.key_schema(full) ?=> |_| Schema(0)
-    let part = std.codec.key_schema(leading) ?=> |_| Schema(0)
-    if !key_schema_prefix(whole, part) { return Error(Schema(0)) }
+    let matches = std.key_prefix.matches(full, leading) ?=> |_| Schema(0)
+    if !matches {
+        return Error(Schema(0))
+    }
     let low = logical_key(id, encode_key(leading, q)?)?
     let high = prefix_after(low)?
     Ok((take low, take high))
-}
-
-fn key_components(raw: Bytes) -> Option[(u64, u64)] {
-    if list.len(raw) < 6 || raw[0] != 4 || read_le(raw, 1, 4) != 0 { return None }
-    if raw[5] == 0 && list.len(raw) == 6 { return Some((6u64, 0u64)) }
-    if raw[5] != 18 { return Some((5u64, 1u64)) }
-    if list.len(raw) < 10 { return None }
-    Some((10u64, read_le(raw, 6, 4)))
-}
-
-// A generated key's nominal records describe themselves as tuples. Each base
-// atom consumes its whole schema expression, including nested tuples and Desc.
-fn key_component_end(raw: Bytes, start: u64, parts: u64) -> Option[u64] {
-    let mut at = start
-    let mut remaining = parts
-    while remaining > 0 {
-        if at >= list.len(raw) { return None }
-        let op = raw[at]
-        at += 1
-        remaining -= 1
-        if op == 14 || op == 16 || op == 21 {
-            remaining += 1
-        } else if op == 15 || op == 17 {
-            remaining += 2
-        } else if op == 18 {
-            if list.len(raw) - at < 4 { return None }
-            remaining += read_le(raw, at, 4)
-            at += 4
-        } else if op > 13 {
-            return None
-        }
-    }
-    Some(at)
-}
-
-fn key_schema_prefix(whole: Bytes, part: Bytes) -> bool {
-    if whole == part { return true }
-    let Some((part_start, part_count)) = key_components(part) else { return false }
-    if key_component_end(part, part_start, part_count) != Some(list.len(part)) { return false }
-    if part_count == 0 { return true }
-    let Some((whole_start, whole_count)) = key_components(whole) else { return false }
-    if part_count > whole_count || key_component_end(whole, whole_start, whole_count) != Some(list.len(whole)) {
-        return false
-    }
-    let Some(component_end) = key_component_end(whole, whole_start, part_count) else { return false }
-    list.slice(whole, whole_start, component_end) == list.slice(part, part_start, list.len(part))
 }
 
 pub scoped type IndexRows[K, V] {
@@ -509,7 +481,9 @@ pub opaque scoped type IndexEntries[J, K, P] {
 }
 
 fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
-    if !same(tx.store, ix.store) { return Error(Foreign) }
+    if !same(tx.store, ix.store) {
+        return Error(Foreign)
+    }
     readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id)
 }
 
@@ -539,12 +513,13 @@ pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Boun
     let high = index_bound(ix.id, ix.key, hi, true)?
     let tree = transaction_collection_pages(tx)?
     let cursor = byte_cursor(tree, Included(copied(low)?), high)?
-    Ok(IndexEntries(cursor: take cursor, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind,
-        key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec))
+    Ok(IndexEntries(cursor: take cursor, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec))
 }
 
 fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), Error] {
-    if low >= high { return Ok(()) }
+    if low >= high {
+        return Ok(())
+    }
     let end = match last_key {
         Some(key) => {
             let mut after = copied(key)?
@@ -589,9 +564,13 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
     let mut at = 4u64
     let j = decoded(std.codec.take_key_with(key, mut at, r.key))?
     let payload_start = if let Unique = r.kind {
-        if at != list.len(key) { return Error(malformed(at)) }
+        if at != list.len(key) {
+            return Error(malformed(at))
+        }
         unique_owner_end(raw)?
-    } else { 0u64 }
+    } else {
+        0u64
+    }
     let primary = if let Unique = r.kind {
         list.slice(raw, 4, payload_start)
     } else {

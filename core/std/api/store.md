@@ -116,9 +116,11 @@ including the table or index id prefix, with half-open span bounds.
 decoding the row. A probe that returns None records the rest of the requested
 interval. Constructing a cursor records nothing. `range_prefix(tx, t, q, key_of[Q]())`
 and `lookup_prefix(tx, ix, q, key_of[Q]())` read every key whose leading components
-equal `q`. Q's key schema must be a component prefix of the key's, or the call is
-`Schema(0)`. The span is `[enc(q), successor(enc(q)))`, where `successor` drops trailing
-`0xff` bytes and increments the last byte; a prefix of all `0xff` is bounded by the end
+equal `q`. Q's key schema must be a component prefix of the key's, including through
+tuple nesting, or the call returns `Schema(0)`. `edge_out_prefix(tx, edge, q, key_of[Q]())`
+uses the same rule, so a nested source can be scanned by its leading components.
+The span is `[enc(q), successor(enc(q)))`, where `successor` drops trailing `0xff`
+bytes and increments the last byte. A prefix of all `0xff` is bounded by the end
 of the id's range. `count(tx, t, lo, hi)` records one Span and costs O(log N).
 `lookup` returns `IndexRows` scoped to its Tx and joins each entry to its primary row.
 Each `next_indexed` records the index gap it scanned in full (J, K) order, ties

@@ -109,6 +109,7 @@ dirs = ["."]
 "store_pages_paged_laws.hirsel" = "store"
 "tiered_laws.hirsel" = "store"
 "tiered_read_laws.hirsel" = "store"
+"tiered_fold_laws.hirsel" = "store"
 "tiered_plan_laws.hirsel" = "store"
 "tiered_snapshot_laws.hirsel" = "store"
 "tiered_pager_batch_laws.hirsel" = "store"

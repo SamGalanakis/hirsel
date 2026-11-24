@@ -211,11 +211,15 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
 }
 
 fn tiered_pager_demand_target(demand: TieredPointDemand, edge: TieredTarget) -> Result[TieredPagerTarget, Error] {
+    tiered_pager_target(demand.packs, demand.next_stamp, demand.deadline, demand.direction, edge)
+}
+
+fn tiered_pager_target(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, direction: TieredDirection, edge: TieredTarget) -> Result[TieredPagerTarget, Error] {
     let facts = tiered_frame_id(edge)
-    let Some(pack) = std.omap.get(demand.packs, facts.pack) else {
+    let Some(pack) = std.omap.get(packs, facts.pack) else {
         return Error(disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
     }
-    Ok(TieredPagerTarget(edge: clone(edge), direction: demand.direction, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline))
+    Ok(TieredPagerTarget(edge: clone(edge), direction: direction, inventory: pack.inventory, object: pack.object, next_stamp: next_stamp, deadline: deadline))
 }
 
 fn tiered_pager_point_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand, edge: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {

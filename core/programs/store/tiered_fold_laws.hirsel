@@ -1,0 +1,79 @@
+fn l79_fold_base(d: Dir, owner: StoreId) -> Result[std.page.PagePtr, Error] waits {
+    let mut rows: List[std.page.Entry] = list.with_capacity(3)
+    for seq in 0u64 .. 3 {
+        list.push(mut rows, std.page.Entry(key: key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
+    }
+    let image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    l68_write_page_pack(d, owner, 8, 40, std.page.payload(image))
+}
+
+fn l79_fold_trims(first_charge: u64, final_charge: u64) -> Result[Arc[ReplayOverlay], Error] {
+    let mut overlay = empty_replay_overlay(Some(3u64))
+    let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
+    let middle = replay_overlay_trim(mut overlay, "j-1", 72, ReplayOrigin(ordinal: 1, branch: 0), 9, initial, JournalTrim(floor: 2, dropped: first_charge))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 90, ReplayOrigin(ordinal: 2, branch: 0), 9, middle, JournalTrim(floor: 3, dropped: final_charge))?
+    Ok(take overlay)
+}
+
+fn l79_fold_checks(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    // Each of the three rows costs 62 + round8(12) + round8(6) = 86.
+    // Its leaf frame costs 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
+    let cut = TieredCutInput(source: view source, pin_bytes: 89)
+    verify_tiered_fold(cut, base, l79_fold_trims(172, 86)?)?
+    let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(cut, base, l79_fold_trims(180, 78)?) else {
+        fail("L79: individually wrong trim charges passed with the right sum")
+    }
+    let mut overlay = empty_replay_overlay(None)
+    let key = log_key(9, 4)?
+    replay_overlay_edit(mut overlay, "j-1", 110, ReplayOrigin(ordinal: 1, branch: 0), key, 7, ReplayAbsent)?
+    let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(cut, base, overlay) else {
+        fail("L68: fold accepted a recorded prior for an absent key")
+    }
+    l79_fold_materializes(cut, base)
+}
+
+fn l79_fold_materializes(cut: TieredCutInput, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut overlay = empty_replay_overlay(Some(3u64))
+    let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
+    let _ = replay_overlay_trim(mut overlay, "j-1", 72, ReplayOrigin(ordinal: 1, branch: 0), 9, initial, JournalTrim(floor: 2, dropped: 172))?
+    let next_key = log_key(9, 3)?
+    replay_overlay_edit(mut overlay, "j-1", 90, ReplayOrigin(ordinal: 2, branch: 0), next_key, 0,
+        ReplayPut(arc.new(string.into_bytes(string.from("next")))))?
+    verify_tiered_fold(cut, base, overlay)?
+    let small = TieredCutInput(source: view cut.source, pin_bytes: 88)
+    let limits = LogBounds(first: 0, next: 3)
+    let empty = std.page.empty(0, 0, Collection)
+    let mut stamp = 41u64
+    let Error(Full(Cache(Capacity(requested: 89u64, available: 88u64)))) =
+        fold_materialize_trim(small, ColdPage(base), empty, limits, 258, 2, mut stamp) else {
+        fail("L64: a fold edit must use the cut's own quota")
+    }
+    if stamp != 41 { fail("L64: a refused cut edit must not install a candidate") }
+    let kept = fold_materialize_trim(cut, ColdPage(base), empty, limits, 258, 2, mut stamp)?
+    let appended = option.unwrap(replay_overlay_at(overlay, next_key))
+    let ready = fold_materialize_row(cut, HotPage(take kept), empty, next_key, appended, 1024, true, 41, mut stamp)?
+    if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, key_word(0)) != None ||
+        std.page.lookup(ready, key_word(1)) != None || std.page.lookup(ready, key_word(2)) != Some(string.as_bytes("stored")) ||
+        std.page.lookup(ready, key_word(3)) != Some(string.as_bytes("next")) {
+        fail("L79: only the retained Cold row and the replay append belong to the fold")
+    }
+    Ok(())
+}
+
+@test
+fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = l79_fold_base(fixtures, owner)?
+    let width: u64 = int.widen(base.len)
+    let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
+    let source = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 41, deadline: 0)
+    let checked = l79_fold_checks(source, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}

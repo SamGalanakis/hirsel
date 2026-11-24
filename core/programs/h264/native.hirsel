@@ -1,0 +1,15 @@
+pub fn decoder_create(f: Foreign[h264.H264]) -> Option[foreign.Ptr[h264.DecoderHandle]] waits
+
+pub fn decoder_destroy(f: Foreign[h264.H264], take decoder: foreign.Ptr[h264.DecoderHandle]) waits
+
+pub fn decode(f: Foreign[h264.H264], decoder: foreign.Ptr[h264.DecoderHandle], nal: Bytes, timestamp: u64, mut out: Bytes) -> i64 waits
+
+pub fn finish(f: Foreign[h264.H264], decoder: foreign.Ptr[h264.DecoderHandle], mut out: Bytes) -> i64 waits
+
+pub fn encoder_create(f: Foreign[h264.H264], width: u32, height: u32, fps: u32, bitrate: u32, main: u8) -> Option[foreign.Ptr[h264.EncoderHandle]] waits
+
+pub fn encoder_destroy(f: Foreign[h264.H264], take encoder: foreign.Ptr[h264.EncoderHandle]) waits
+
+pub fn encode(f: Foreign[h264.H264], encoder: foreign.Ptr[h264.EncoderHandle], i420: Bytes, timestamp: u64) -> i32 waits
+
+pub fn copy_packet(f: Foreign[h264.H264], encoder: foreign.Ptr[h264.EncoderHandle], mut out: Bytes) -> i32 waits

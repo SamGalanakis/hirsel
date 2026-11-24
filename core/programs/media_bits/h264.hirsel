@@ -318,8 +318,10 @@ pub opaque type Sps {
     level: u64,
     chroma: u64,
     depth_minus_8: u64,
+    chroma_depth_minus_8: u64,
     width_in_mbs: u64,
     map_units: u64,
+    frame_factor: u64,
     width: u64,
     height: u64
 }
@@ -335,6 +337,12 @@ pub type Sequence {
 
 pub fn sequence(sps: Sps) -> Sequence {
     Sequence(id: sps.id, profile: sps.profile, constraints: sps.constraints, level: sps.level, width: sps.width, height: sps.height)
+}
+
+/// Coded width and height before cropping, and whether the stream is progressive 8-bit 4:2:0.
+pub fn coded_format(sps: Sps) -> (u64, u64, bool) {
+    (sps.width_in_mbs * 16, sps.map_units / sps.width_in_mbs * sps.frame_factor * 16,
+        sps.frame_factor == 1 && sps.chroma == 1 && sps.depth_minus_8 == 0 && sps.chroma_depth_minus_8 == 0)
 }
 
 fn extended_profile(profile: u64) -> bool {
@@ -356,13 +364,14 @@ pub fn parse_sps(unit: Bytes) -> Result[Sps, Error] {
     let mut chroma: u64 = 1
     let mut separate = false
     let mut depth: u64 = 0
+    let mut chroma_depth: u64 = 0
     if extended_profile(profile) {
         chroma = ue(unit, mut cursor, 3)?
         if chroma == 3 {
             separate = bit(unit, mut cursor)? == 1
         }
         depth = ue(unit, mut cursor, 6)?
-        let _ = ue(unit, mut cursor, 6)?
+        chroma_depth = ue(unit, mut cursor, 6)?
         let _ = bit(unit, mut cursor)?
         if bit(unit, mut cursor)? == 1 {
             scaling_lists(unit, mut cursor, if chroma == 3 {
@@ -432,7 +441,7 @@ pub fn parse_sps(unit: Bytes) -> Result[Sps, Error] {
         vui(unit, mut cursor)?
     }
     trailing(unit, mut cursor)?
-    Ok(Sps(id: id, profile: profile, constraints: constraints, level: level, chroma: chroma, depth_minus_8: depth, width_in_mbs: width_mbs, map_units: map_units, width: width, height: height))
+    Ok(Sps(id: id, profile: profile, constraints: constraints, level: level, chroma: chroma, depth_minus_8: depth, chroma_depth_minus_8: chroma_depth, width_in_mbs: width_mbs, map_units: map_units, frame_factor: frame_factor, width: width, height: height))
 }
 
 pub type Picture {

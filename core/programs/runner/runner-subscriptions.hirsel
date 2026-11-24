@@ -345,7 +345,7 @@ fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
 type TerminalUpdate: send { sub: u32, generation: u64, version: u64, outcome: Outcome }
 
-type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], groups: List[OwedGroup], ended: List[TerminalUpdate], group_bytes: u64, frame_limit: u64, reset: bool, read_failed: bool }
+type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[SubRow], groups: List[OwedGroup], ended: List[TerminalUpdate], group_bytes: u64, frame_limit: u64, reset: bool, read_failed: bool }
 
 type PublisherReads: send {
     changes: own[send] fn(store.Reader, Option[store.Snapshot], store.Snapshot, Bytes, Bytes, store.Limits) -> Result[store.ChangePage, store.Error] waits,
@@ -385,7 +385,7 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
 
 fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads,
     read_handle: store.Reader, at: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot,
-    old: Option[View[List[Cover]]], rows: Log[SlotRow]) -> Queried waits {
+    old: Option[View[List[Cover]]], rows: Log[Row]) -> Queried waits {
     let Some(Query(_, _, registered)) = map.get(r.slots, input.key) else { return Stopped(Refused(NoEntry)) }
     let bindings = option.unwrap(map.get(r.bound_slots, input.key))
     (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
@@ -485,7 +485,7 @@ fn append_terminal(mut out: Owe, sub: u32, generation: u64, take why: Outcome) {
     list.push(mut out.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: take why))
 }
 
-fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewKey, input: SubscriptionInput, rows: Log[SlotRow]) -> Result[Arc[Viewed], Queried] waits {
+fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewKey, input: SubscriptionInput, rows: Log[Row]) -> Result[Arc[Viewed], Queried] waits {
     if let Some(serial) = map.get(b.subs.views, key) {
         let existing = option.unwrap(map.get(b.subs.indexed, serial))
         let Some(image) = existing.image else { fail("runner: missing live view image") }
@@ -524,7 +524,7 @@ fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64
     Ok(())
 }
 
-fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: List[Cover], rows: Log[SlotRow]) -> Result[(), Queried] waits {
+fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: List[Cover], rows: Log[Row]) -> Result[(), Queried] waits {
     match map.get(b.r.slots, key) {
         Some(Query(allowance, steps, _)) => {
             let bindings = option.unwrap(map.get(b.r.bound_slots, key))
@@ -606,13 +606,13 @@ fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u
     end_entry(mut subs, id.who, id.sub)
 }
 
-fn append_round_group(mut out: Owe, id: SubId, generation: u64, projected: List[SlotRow], packed: Arc[Bytes], limit: u64) -> bool {
+fn append_round_group(mut out: Owe, id: SubId, generation: u64, projected: List[Row], packed: Arc[Bytes], limit: u64) -> bool {
     if out.reset { return true }
     out.group_bytes = int.saturating_add(out.group_bytes, 4u64 + list.len(packed))
     if limit < out.frame_limit { out.frame_limit = limit }
     if !owe_frame_fits(out) { return false }
     for row in projected {
-        list.push(mut out.rows, Row(sub: id.sub, key: clone(row.key), value: clone(row.value)))
+        list.push(mut out.rows, SubRow(sub: id.sub, key: clone(row.key), value: clone(row.value)))
     }
     list.push(mut out.groups, OwedGroup(sub: id.sub, payload: arc.share(packed)))
     stamp_rows(mut out.generations, id.sub, generation)
@@ -624,7 +624,7 @@ fn owe_frame_fits(out: Owe) -> bool {
     int.saturating_add(envelope, out.group_bytes) <= out.frame_limit
 }
 
-type SubUpdate = Rows(Log[SlotRow]) | Refreshed(Viewed, Log[SlotRow], bool) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
+type SubUpdate = Rows(Log[Row]) | Refreshed(Viewed, Log[Row], bool) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
 
 fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot, entry: Sub, image: Viewed, read: bool) -> SubUpdate waits {
     let rows = match row_log() {

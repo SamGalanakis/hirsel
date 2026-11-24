@@ -58,7 +58,7 @@ fn close_code(code: u16) -> std.websocket.Control {
 }
 
 fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result[(), std.wsock.Error] waits {
-    let std.wsock.Upgraded(reader: input, writer: initial_writer, source: _, timers: initial_time, pending: slot) = take upgraded
+    let std.wsock.Upgraded(reader: input, writer: initial_writer, source: _, timers: initial_time, pending: slot, ..) = take upgraded
     let mut time = take initial_time
     std.wsock.welcomed(mut time)
     std.wsock.hello_accepted(take slot)

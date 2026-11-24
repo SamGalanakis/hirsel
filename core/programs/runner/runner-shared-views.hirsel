@@ -156,7 +156,7 @@ fn subscription_charge(subs: Subscriptions, who: u64, sub: u32, input: Subscript
     Ok(requested)
 }
 
-fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, image: Viewed, rows: Log[SlotRow]) -> Result[(), Queried] waits {
+fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, image: Viewed, rows: Log[Row]) -> Result[(), Queried] waits {
     let Some(Query(allowance, steps, _)) = map.get(b.r.slots, key) else { return Error(Stopped(Refused(NoEntry))) }
     let bindings = option.unwrap(map.get(b.r.bound_slots, key))
     let projected = bound bytes allowance {
@@ -178,7 +178,7 @@ fn subscription_frame_limit(input: SubscriptionInput) -> u64 {
     }
 }
 
-fn slot_payload_size(value_len: u64, projected: List[SlotRow]) -> u64 {
+fn slot_payload_size(value_len: u64, projected: List[Row]) -> u64 {
     let mut wanted = value_len
     for row in projected {
         // Slot u16, key length u32, and Option tag u32 precede the key and optional value.

@@ -8,15 +8,15 @@ pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
     let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
     let (write, pending): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
-    let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new())))
-    let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new())))
+    let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new()), list.new()))
+    let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new()), list.new()))
     result.unwrap(channel.try_send(write, take first))
-    let before_write = match wire_pack(pool, one_to, one_from, Reset(23u64, list.new())) { Error(Protocol(1013u16)) => true, _ => false }
+    let before_write = match wire_pack(pool, one_to, one_from, Reset(23u64, list.new()), list.new()) { Error(Protocol(1013u16)) => true, _ => false }
     let writing = result.unwrap(channel.try_receive(pending))
-    let during_write = match wire_pack(pool, two_to, two_from, Reset(29u64, list.new())) { Error(Protocol(1013u16)) => true, _ => false }
+    let during_write = match wire_pack(pool, two_to, two_from, Reset(29u64, list.new()), list.new()) { Error(Protocol(1013u16)) => true, _ => false }
     let bytes_sent = list.len(writing)
     let _ = take writing
-    let third = result.unwrap(wire_pack(pool, one_to, one_from, Reset(31u64, list.new())))
+    let third = result.unwrap(wire_pack(pool, one_to, one_from, Reset(31u64, list.new()), list.new()))
     let other_bytes = list.len(second)
     let _ = take pooled_task
     before_write && during_write && bytes_sent == 18u64 && other_bytes == 18u64 && list.len(third) == 18u64
@@ -53,7 +53,7 @@ type PoolCallOwner: send {
 fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
     let PoolCallOwner(tasks: tasks, clock: clock, config: config, pool: take pool,
         upgraded: take upgraded, ready: take ready, proceed: take proceed) = take owner
-    let std.wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
+    let std.wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease, ..) = take upgraded
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
     result.unwrap(channel.try_send(credit, ()))
@@ -157,7 +157,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (reply, result_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) =
         channel.new(1u64)
-    let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new())))
+    let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new()), list.new()))
     let mut arg: Bytes = list.new()
     std.codec.put_u32(7u32, mut arg)
     let call_frame = Call(0u32, 0u64, 0u32, 10000u32, take arg)
@@ -181,9 +181,9 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     // so even one retained decoder charge refuses it until the refund.
     let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, clone(payload),
         scoped fn() -> bool waits {
-            match wire_pack(pool, reply, result_from, pool_full_frame()) { Error(Protocol(1013u16)) => true, _ => false }
+            match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) { Error(Protocol(1013u16)) => true, _ => false }
         })
-    let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame()) {
+    let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) {
         Ok(body) => list.len(body) == 32u64,
         _ => false,
     }
@@ -337,7 +337,7 @@ fn write_rig(tasks: Tasks, clock: Clock, random: Random, network: Net, config: s
     let peer = WritePeer(stream: take stream, clock: clock, random: random, socket: config, go: take go_from, heard: take heard_to)
     let running = task.spawn(tasks, bytes 2097152u64, take peer, write_peer)
     let socket = result.unwrap(std.net.accept_from(mut listener, addr, deadline))
-    let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: _) =
+    let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: _, ..) =
         result.unwrap(std.wsock.server(take socket, take wire_slot, addr.ip, list.new(), config, clock, host.mono_ns(clock)))
     WriteRig(writer: box.new(take writer), reader: take reader, peer: take running, go: take go, heard: take heard)
 }

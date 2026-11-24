@@ -167,14 +167,14 @@ fn image_law_number(n: u64) -> Bytes {
     take raw
 }
 
-fn image_law_rows(mut rows: List[SlotRow], position: u16, id: u8, lo: u64, hi: u64, inserting: bool) {
+fn image_law_rows(mut rows: List[Row], position: u16, id: u8, lo: u64, hi: u64, inserting: bool) {
     for seq in lo .. hi {
         let value = if inserting { Some(image_law_number(1000u64 * int.widen(id) + seq)) } else { None }
-        list.push(mut rows, SlotRow(slot: position, key: image_law_key(id, Some(seq)), value: take value))
+        list.push(mut rows, Row(slot: position, key: image_law_key(id, Some(seq)), value: take value))
     }
 }
 
-fn image_law_expect(owing: Owe, rows: List[SlotRow], value: Option[u64], complete: bool, message: String) -> Result[(), String] {
+fn image_law_expect(owing: Owe, rows: List[Row], value: Option[u64], complete: bool, message: String) -> Result[(), String] {
     let Some(payload) = group_payload(owing) else { return Error(clone(message)) }
     let expected = match value { Some(n) => image_law_number(n), None => list.new() }
     if owing.reset || list.len(owing.ended) != 0u64 || (list.len(owing.complete) == 1u64) != complete ||
@@ -210,7 +210,7 @@ fn image_law_cover_only(clock: Clock, random: Random) -> Result[(), String] wait
     image_law_write(mut db, h, Fill(100u64, 0u64))
     let (take configured, take key) = image_law_board(db, h)
     let mut board = take configured
-    let mut want: List[SlotRow] = list.new()
+    let mut want: List[Row] = list.new()
     image_law_rows(mut want, 0u16, 1u8, 85u64, 100u64, true)
     image_law_expect(image_law_sub(mut board, key, 1u64, Mixed), want, Some(0u64), true, "mixed Subscribe image")?
     image_law_expect(image_law_sub(mut board, key, 2u64, Mixed), want, Some(0u64), true, "mixed join image")?
@@ -252,7 +252,7 @@ fn image_law_resize(clock: Clock, random: Random) -> Result[(), String] waits {
     image_law_write(mut db, h, Setting(3u64))
     let (take configured, take key) = image_law_board(db, h)
     let mut board = take configured
-    let mut want: List[SlotRow] = list.new()
+    let mut want: List[Row] = list.new()
     image_law_rows(mut want, 0u16, 1u8, 0u64, 5u64, true)
     image_law_rows(mut want, 0u16, 1u8, 7u64, 10u64, true)
     image_law_expect(image_law_sub(mut board, key, 1u64, Grow), want, Some(0u64), true, "mixed rerun initial image")?
@@ -285,7 +285,7 @@ fn image_law_move(clock: Clock, random: Random) -> Result[(), String] waits {
     image_law_write(mut db, h, Setting(0u64))
     let (take configured, take key) = image_law_board(db, h)
     let mut board = take configured
-    let mut want: List[SlotRow] = list.new()
+    let mut want: List[Row] = list.new()
     image_law_rows(mut want, 0u16, 1u8, 2u64, 5u64, true)
     image_law_expect(image_law_sub(mut board, key, 1u64, Move), want, Some(0u64), true, "Log move initial image")?
     image_law_write(mut db, h, Setting(1u64))
@@ -332,16 +332,16 @@ fn image_law_bounds_and_cell(clock: Clock, random: Random) -> Result[(), String]
         latest.read(cover_only.fence).latest != 0u64 || list.len(delta) != 0u64 {
         return Error("bounds-only commit must fence just the Point and Span readers and sends no group")
     }
-    let mut want: List[SlotRow] = list.new()
-    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(9u64))))
+    let mut want: List[Row] = list.new()
+    list.push(mut want, Row(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(9u64))))
     image_law_expect(image_law_sub(mut board, key, 4u64, CellCover), want, Some(0u64), true, "inline Cell initial image")?
     image_law_write(mut db, h, Setting(12u64))
     want = list.new()
-    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(12u64))))
+    list.push(mut want, Row(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(12u64))))
     image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "Cell update codec")?
     image_law_write(mut db, h, Clear)
     want = list.new()
-    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: None))
+    list.push(mut want, Row(slot: 3u16, key: image_law_key(4u8, None), value: None))
     image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "Cell deletion")?
     result.unwrap(store.close(take db))
     Ok(())
@@ -380,7 +380,7 @@ pub fn slot_image_retention(clock: Clock, random: Random, argv: Args) -> Result[
     }
     let (take initial, take key) = image_law_board(db, h)
     let mut board = take initial
-    let mut want: List[SlotRow] = list.new()
+    let mut want: List[Row] = list.new()
     let (position, id, next) = if long { (0u16, 1u8, 100000u64) } else { (1u16, 2u8, 100u64) }
     image_law_rows(mut want, position, id, next - length, next, true)
     image_law_expect(image_law_sub(mut board, key, 1u64, Probe(long, length)), want, Some(0u64), true, "retention Subscribe image") ?=> |_| Exit(status: 3)
@@ -388,7 +388,7 @@ pub fn slot_image_retention(clock: Clock, random: Random, argv: Args) -> Result[
     task.check_cancel()
     if mode == "1" {
         image_law_write(mut db, h, Fill(3u64, 0u64))
-        let mut delta: List[SlotRow] = list.new()
+        let mut delta: List[Row] = list.new()
         image_law_rows(mut delta, 0u16, 1u8, 99990u64, 99993u64, false)
         image_law_rows(mut delta, 0u16, 1u8, 100000u64, 100003u64, true)
         image_law_expect(image_law_one(image_law_cover_round(mut board, db)), delta, None, false, "large Log append") ?=> |_| Exit(status: 4)

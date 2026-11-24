@@ -81,9 +81,9 @@ fn sample(i: u64, state: u64) -> runner.Frame {
             } else {
                 list.new()
             }
-            let r = runner.Row(sub: 1u32, key: raw("01"), value: Some(raw("03")))
+            let r = runner.Row(slot: 0u16, key: raw("01"), value: Some(raw("03")))
             let d = runner.Done(stream: id, p: p, outcome: Returned(raw("04")))
-            Batch(state, take complete, singleton(take r), singleton(take d))
+            Batch(state, take complete, singleton(runner.Group(sub: id, value: list.new(), rows: singleton(take r))), singleton(take d))
         }
         7 => {
             let outcome: runner.Outcome = if i % 2 == 0 {

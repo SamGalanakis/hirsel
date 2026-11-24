@@ -58,7 +58,7 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
 }
 
 fn query_projection[H: inert + send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R],
-    codec: std.codec.Codec[R], declared: Slots[H], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[SlotRow], old: Option[View[List[Cover]]]) -> Queried waits {
+    codec: std.codec.Codec[R], declared: Slots[H], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let steps = attempt.steps
     match store.look(read_handle, newest, None, attempt, query_attempt) {
         Ok(Seen(take answer)) => {
@@ -94,7 +94,7 @@ fn query_projection[H: inert + send, A, R](access: PublisherReads, read_handle: 
 
 fn adapt_query[H: inert + send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R],
     declared: Slots[H], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: H, caller: Caller, arg: Bytes,
-    n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[SlotRow], old: Option[View[List[Cover]]]) -> Queried waits {
+    n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let result = bound bytes n {
         let attempt = QueryAttempt(body: body, args: ca, handles: store.copy_env(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
         bound steps steps {
@@ -111,7 +111,7 @@ fn adapt_query[H: inert + send, A, R](body: QueryBody[H, A, R], ca: std.codec.Co
 type QueryEntry[H: send]: send {
     by_caller: bool,
     slots: Slots[H],
-    run: own[send] fn(Slots[H], List[BoundSlot], PublisherReads, store.Reader, H, Caller, Bytes, store.Snapshot, store.Snapshot, Log[SlotRow], Option[View[List[Cover]]]) -> Queried waits
+    run: own[send] fn(Slots[H], List[BoundSlot], PublisherReads, store.Reader, H, Caller, Bytes, store.Snapshot, store.Snapshot, Log[Row], Option[View[List[Cover]]]) -> Queried waits
 }
 
 pub fn query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
@@ -136,7 +136,7 @@ fn register_query[G: send, H: shareable + inert + send, A: codec, R: codec](mut 
     let (take key, take d) = described_query ?=> |_| Bounds
     register_check(mut r, key, ca, n, s)?
     let go = fn(declared: Slots[H], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: H, caller: Caller, arg: Bytes,
-        newest: store.Snapshot, prior: store.Snapshot, rows: Log[SlotRow], old: Option[View[List[Cover]]]) -> Queried waits {
+        newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
         adapt_query(body, ca, cr, declared, bindings, access, read_handle, h, caller, arg, n, s, newest, prior, rows, old)
     }
     let by_caller = match body { As(_) => true, Plain(_) => false }

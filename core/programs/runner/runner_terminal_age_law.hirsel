@@ -1,3 +1,13 @@
+fn fixture_owed_group(sub: u32, rows: List[SubRow]) -> OwedGroup {
+    let mut members: List[Row] = list.with_capacity(list.len(rows))
+    for row in rows {
+        if row.sub == sub {
+            list.push(mut members, Row(slot: 0u16, key: clone(row.key), value: clone(row.value)))
+        }
+    }
+    OwedGroup(sub: sub, payload: result.unwrap(pack_group(list.new(), members)))
+}
+
 fn terminal_age_owe(task: u64, at: u64, sub: u32) -> List[Owe] {
     let mut updates: List[Owe] = list.new()
     let row = owe(mut updates, task, at)
@@ -22,6 +32,7 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let fresh_index = owe(mut fresh, 1u64, 9u64)
     list.push(mut fresh[fresh_index].generations, (3u32, 1u64))
     list.push(mut fresh[fresh_index].complete, 3u32)
+    list.push(mut fresh[fresh_index].groups, fixture_owed_group(3u32, list.new()))
     settle(mut active, mut joined, mut waiting, take fresh, 9u64)
     let event = result.unwrap(channel.try_receive(inbox))
     let Notice(e: Updated(take pending)) = publisher_notice(take event) else { return Error("missing owner update") }

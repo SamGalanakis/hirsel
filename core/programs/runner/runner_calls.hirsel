@@ -937,8 +937,8 @@ fn keyed(take outcomes: List[runner.Done]) -> List[runner.KeyedDone] {
 
 fn projected(take f: runner.Frame) -> runner.Down {
     match take f {
-        Batch(v, take complete, take rows, take outcomes) =>
-            Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: keyed(take outcomes))),
+        Batch(v, take complete, take groups, take outcomes) =>
+            Batched(runner.KeyedBatch(version: v, complete: take complete, rows: runner.publication_rows(take groups), outcomes: keyed(take outcomes))),
         Ended(sub, take o) => Ended(sub, take o),
         Reset(v, take outcomes) => KeyedReset(v, keyed(take outcomes)),
         _ => fail("calls: unexpected wire frame"),
@@ -1091,7 +1091,7 @@ fn apply(mut c: Cache, take d: runner.Down) {
             }
             for take row in rows {
                 want(row.sub == 1u32, "repair: A's rows are sub 1's")
-                let runner.Row(sub: _, key: take key, value: take value) = take row
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
                 match take value {
                     Some(take v) => map.insert(mut c.rows, take key, take v),
                     None => { let _ = map.remove(mut c.rows, key) },
@@ -1250,7 +1250,7 @@ fn follow(mut i: Image, take d: runner.Down, who: String) {
             }
             for take row in rows {
                 want(row.sub == 1u32, clone(who))
-                let runner.Row(sub: _, key: take key, value: take value) = take row
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
                 match take value {
                     Some(take v) => map.insert(mut i.rows, take key, take v),
                     None => { let _ = map.remove(mut i.rows, key) },

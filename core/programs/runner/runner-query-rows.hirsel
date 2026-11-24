@@ -1,27 +1,25 @@
-type SlotRow: codec + send { slot: u16, key: Bytes, value: Option[Bytes] }
-
 // Allocate the log in the publisher's budget before a query enters its bindings.
-fn row_log() -> Result[Log[SlotRow], Capacity] {
-    let output: Log[SlotRow] = log.new()
-    log.append(output, SlotRow(slot: 0u16, key: list.new(), value: None))
+fn row_log() -> Result[Log[Row], Capacity] {
+    let output: Log[Row] = log.new()
+    log.append(output, Row(slot: 0u16, key: list.new(), value: None))
     Ok(take output)
 }
 
-fn slot_rows(take output: Log[SlotRow]) -> List[SlotRow] {
+fn slot_rows(take output: Log[Row]) -> List[Row] {
     let mut rows = log.finish(take output)
     let _ = list.remove(mut rows, 0u64)
     take rows
 }
 
-fn read_rows(take output: Log[SlotRow], sub: u32) -> List[Row] {
+fn read_rows(take output: Log[Row], sub: u32) -> List[SubRow] {
     wire_rows(slot_rows(take output), sub)
 }
 
-fn wire_rows(take projected: List[SlotRow], sub: u32) -> List[Row] {
-    let mut rows: List[Row] = list.with_capacity(list.len(projected))
+fn wire_rows(take projected: List[Row], sub: u32) -> List[SubRow] {
+    let mut rows: List[SubRow] = list.with_capacity(list.len(projected))
     for take item in take projected {
-        let SlotRow(key: take key, value: take value, ..) = take item
-        list.push(mut rows, Row(sub: sub, key: take key, value: take value))
+        let Row(key: take key, value: take value, ..) = take item
+        list.push(mut rows, SubRow(sub: sub, key: take key, value: take value))
     }
     take rows
 }
@@ -81,13 +79,13 @@ fn published_slot(row: CoverRow, bindings: List[BoundSlot]) -> Result[Option[Byt
     (bindings[int.widen(row.slot)].publish_value)(row.change)
 }
 
-fn projection_row(out: Log[SlotRow], take row: CoverRow, take value: Option[Bytes]) {
+fn projection_row(out: Log[Row], take row: CoverRow, take value: Option[Bytes]) {
     let CoverRow(slot: position, change: store.Change(tree_key: take key, ..)) = take row
-    log.append(out, SlotRow(slot: position, key: take key, value: take value))
+    log.append(out, Row(slot: position, key: take key, value: take value))
 }
 
 fn cover_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], out: Log[SlotRow]) -> Result[(), store.Error] waits {
+    spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), store.Error] waits {
     if has_tail(spans) {
         let image = image_spans(read_handle, at, spans, bindings)?
         return complete_rows(access, read_handle, at, image, bindings, out)
@@ -96,7 +94,7 @@ fn cover_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snaps
 }
 
 fn complete_rows(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], out: Log[SlotRow]) -> Result[(), store.Error] waits {
+    spans: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), store.Error] waits {
     let mut cursor = cover_cursor()
     while let Some(take changed) = next_cover_row(access, read_handle, at, spans, mut cursor)? {
         let value = published_slot(changed, bindings)?
@@ -112,7 +110,7 @@ fn compare_projected(a: CoverRow, b: CoverRow) -> Order {
 }
 
 fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover],
-    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[SlotRow]) -> Result[(), store.Error] waits {
+    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), store.Error] waits {
     if has_tail(old) || has_tail(new) {
         let old_image = image_spans(read_handle, a, old, bindings)?
         let new_image = image_spans(read_handle, b, new, bindings)?
@@ -122,7 +120,7 @@ fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapsh
 }
 
 fn diff_image_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: List[Cover],
-    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[SlotRow]) -> Result[(), store.Error] waits {
+    b: store.Snapshot, new: List[Cover], bindings: List[BoundSlot], out: Log[Row]) -> Result[(), store.Error] waits {
     let mut before = cover_cursor()
     let mut after = cover_cursor()
     let mut previous = next_cover_row(access, read_handle, a, old, mut before)?
@@ -156,11 +154,11 @@ fn diff_image_rows(access: PublisherReads, read_handle: store.Reader, a: store.S
     }
 }
 
-fn covered_rows(changes: List[store.Change], span: Cover, bindings: BoundSlot, out: Log[SlotRow]) -> Result[(), store.Error] {
+fn covered_rows(changes: List[store.Change], span: Cover, bindings: BoundSlot, out: Log[Row]) -> Result[(), store.Error] {
     for changed in changes {
         let value = (bindings.publish_value)(changed)?
         let key: Bytes = clone(changed.tree_key)
-        log.append(out, SlotRow(slot: span.slot, key: take key, value: take value))
+        log.append(out, Row(slot: span.slot, key: take key, value: take value))
     }
     Ok(())
 }
@@ -175,13 +173,13 @@ fn cover_projection(take projected: Result[Result[Result[(), store.Error], Cause
 }
 
 fn cover_delta_span(access: PublisherReads, reader: store.Reader, at: store.Snapshot, position: u16,
-    lo: Bytes, hi: Bytes, inserting: bool, binding: BoundSlot, out: Log[SlotRow]) -> Result[(), Queried] waits {
+    lo: Bytes, hi: Bytes, inserting: bool, binding: BoundSlot, out: Log[Row]) -> Result[(), Queried] waits {
     let mut source = store.open_span_changes(reader, at, lo, hi) ?=> |e| projection_error(take e, list.new())
     let mut first = true
     while let Some(take item) = (access.span)(reader, mut source, first) ?=> |e| projection_error(take e, list.new()) {
         let projected = isolate(scoped fn() -> Result[(), store.Error] {
             let value = if inserting { (binding.publish_value)(item)? } else { None }
-            log.append(out, SlotRow(slot: position, key: clone(item.tree_key), value: take value))
+            log.append(out, Row(slot: position, key: clone(item.tree_key), value: take value))
             Ok(())
         })
         cover_projection(take projected)?
@@ -191,7 +189,7 @@ fn cover_delta_span(access: PublisherReads, reader: store.Reader, at: store.Snap
 }
 
 fn covered_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    span: Cover, bindings: BoundSlot, rows: Log[SlotRow]) -> Result[(), Queried] waits {
+    span: Cover, bindings: BoundSlot, rows: Log[Row]) -> Result[(), Queried] waits {
     let base: Option[store.Snapshot] = Some(clone(a))
     let mut low: Bytes = clone(span.low)
     loop {
@@ -219,7 +217,7 @@ fn add_cover_edges(mut edges: List[CoverEdge], spans: List[Cover], before: bool)
 }
 
 fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], rows: Log[SlotRow]) -> Result[(), Queried] waits {
+    spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
     let before = image_spans(reader, a, spans, bindings) ?=> |e| projection_error(take e, list.new())
     let after = image_spans(reader, b, spans, bindings) ?=> |e| projection_error(take e, list.new())
     let mut edges: List[CoverEdge] = list.with_capacity(2u64 * (list.len(before) + list.len(after)))
@@ -250,7 +248,7 @@ fn covered_window_pages(access: PublisherReads, reader: store.Reader, a: store.S
 }
 
 fn covered_all_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot,
-    spans: List[Cover], bindings: List[BoundSlot], rows: Log[SlotRow]) -> Result[(), Queried] waits {
+    spans: List[Cover], bindings: List[BoundSlot], rows: Log[Row]) -> Result[(), Queried] waits {
     if has_tail(spans) {
         return covered_window_pages(access, read_handle, a, b, spans, bindings, rows)
     }

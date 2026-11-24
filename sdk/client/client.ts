@@ -2,13 +2,15 @@ export type Option<T> = {tag: 'None'} | {tag: 'Some'; value: T};
 export interface Want { identity: Uint8Array; args_fp: bigint; result_fp: bigint }
 export interface Room { requested: bigint; available: bigint }
 export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: Room}
-  | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'};
+  | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'} | {tag: 'Conflict'; value: string};
 export type Refusal = {tag: 'NoEntry' | 'Overloaded' | 'Deadline' | 'NotAllowed' | 'RequestMismatch' | 'HistoryUnavailable'}
   | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room};
 type WireOutcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
   | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt'};
 export type Outcome<R> = WireOutcome<R> | {tag: 'LocallyUnknown' | 'RequestMismatch'};
-export interface Row { sub: number; key: Uint8Array; value: Option<Uint8Array> }
+export interface SlotRow { slot: number; key: Uint8Array; value: Option<Uint8Array> }
+export interface Row extends SlotRow { sub: number }
+export interface Group { sub: number; value: Uint8Array; rows: SlotRow[] }
 export interface Done {stream: number; p: bigint; outcome: Outcome<Uint8Array>}
 export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
 export interface Caller { issuer: number; subject: Uint8Array }
@@ -18,7 +20,7 @@ export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
   | {tag: 'Unsubscribe'; value: number}
   | {tag: 'Welcome'; values: [Caller, number, bigint, Uint8Array, string, bigint]}
   | {tag: 'Placed'; value: Entry}
-  | {tag: 'Batch'; values: [bigint, number[], Row[], Done[]]}
+  | {tag: 'Batch'; values: [bigint, number[], Group[], Done[]]}
   | {tag: 'Ended'; values: [number, WireOutcome<Uint8Array>]}
   | {tag: 'Reset'; values: [bigint, Done[]]};
 export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
@@ -230,7 +232,7 @@ export class Client implements Transport {
     for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
     const epoch = ++this.epoch;
     let socket: Socket;
-    try { socket = (this.options.socket ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as Socket))(this.options.url, 'hirsel.2'); }
+    try { socket = (this.options.socket ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as Socket))(this.options.url, 'hirsel.3'); }
     catch { this.transient(); return; }
     this.socket = socket; socket.binaryType = 'arraybuffer';
     socket.onopen = () => { void this.enqueue(async () => {
@@ -327,14 +329,14 @@ export class Client implements Transport {
     }
     if (this.state !== 'Ready') { await this.incompatible(1008); return; }
     if (frame.tag === 'Batch') {
-      const [version, complete, rows, outcomes] = frame.values;
+      const [version, complete, groups, outcomes] = frame.values;
       if (version < this.version) { await this.incompatible(1008); return; }
       const changed = new Map<Sub, {rows: Row[]; replace: boolean}>();
       for (const sub of this.subs) {
         if (sub.id !== undefined && complete.includes(sub.id)) changed.set(sub, {rows: [], replace: true});
       }
-      for (const row of rows) {
-        const sub = [...this.subs].find(s => s.active && s.id === row.sub);
+      for (const group of groups) {
+        const sub = [...this.subs].find(s => s.active && s.id === group.sub);
         if (!sub) continue;
         let update = changed.get(sub);
         if (!update) {
@@ -342,7 +344,7 @@ export class Client implements Transport {
           update = {rows: [], replace: false};
           changed.set(sub, update);
         }
-        update.rows.push(row);
+        for (const row of group.rows) update.rows.push({...row, sub: group.sub});
       }
       this.notifications = [];
       await this.outcomes(outcomes);
@@ -353,7 +355,7 @@ export class Client implements Transport {
         if ('cache' in delivery) {
           if (update.replace) delivery.cache.clear();
           for (const row of update.rows) {
-            const id = key(row.key);
+            const id = `${row.slot}:${key(row.key)}`;
             if (row.value.tag === 'None') delivery.cache.delete(id);
             else delivery.cache.set(id, structuredClone(row));
           }

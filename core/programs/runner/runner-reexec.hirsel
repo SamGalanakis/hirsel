@@ -61,7 +61,7 @@ fn failed_stop(stop: store.Stop) -> Result[Outcome, store.Error] {
         Raised(reason) => Ok(Failed(Raised(reason))),
         OutOfSteps(steps) => Ok(Failed(OutOfTime(steps))),
         OutOfBytes(problem) => Ok(Failed(OutOfBytes(room(problem)))),
-        Conflict(name) => Error(Conflict(clone(name))),
+        Conflict(name) => Ok(Failed(Conflict(clone(name)))),
     }
 }
 

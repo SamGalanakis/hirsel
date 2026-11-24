@@ -5,6 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -350,7 +351,10 @@ fn memory_snapshot(
 }
 
 // Service ping/pong while a socket waits for the memory sample.
-async fn hold_idle(mut socket: Socket) -> String {
+async fn hold_idle<S>(mut socket: tokio_tungstenite::WebSocketStream<S>) -> String
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     while let Some(message) = socket.next().await {
         match message {
             Ok(Message::Ping(_)) => {
@@ -411,7 +415,7 @@ async fn observe(
                 let (at, frame) = frame?;
                 match frame {
                     Frame::Batch(version, _, rows, _) => {
-                        let chunks = rows.iter().map(|r| u32::from_be_bytes(r.key[4..8].try_into().unwrap())).collect();
+                        let chunks = rows.iter().flat_map(|group| &group.rows).map(|r| u32::from_be_bytes(r.key[4..8].try_into().unwrap())).collect();
                         events.send(Event::Observed { version, chunks, at }).await?;
                     }
                     Frame::Reset(..) => return Err("measurement observer overran; run is incomplete".into()),

@@ -31,7 +31,7 @@ impl Client {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "hirsel.2".parse()?);
+            .insert("Sec-WebSocket-Protocol", "hirsel.3".parse()?);
         let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
             request,
             Some(crate::websocket_config()),
@@ -100,7 +100,11 @@ impl Client {
             if let Frame::Batch(_, complete, rows, _) = self.receive().await?
                 && complete.contains(&self.sub)
             {
-                return Ok(rows.iter().filter(|row| row.sub == self.sub).count());
+                return Ok(rows
+                    .iter()
+                    .filter(|group| group.sub == self.sub)
+                    .map(|group| group.rows.len())
+                    .sum());
             }
         }
     }
@@ -173,9 +177,12 @@ fn apply_batch(
     pending: &mut bool,
     sub: u32,
     complete: &[u32],
-    rows: &[codec::Row],
+    groups: &[codec::Group],
 ) -> Result<bool> {
-    let ours = rows.iter().filter(|row| row.sub == sub);
+    let ours = groups
+        .iter()
+        .filter(|group| group.sub == sub)
+        .flat_map(|group| &group.rows);
     if complete.contains(&sub) {
         let mut whole = vec![0; IMAGE_BYTES];
         for row in ours {
@@ -186,7 +193,7 @@ fn apply_batch(
         *pending = false;
         return Ok(repaired);
     }
-    if *pending && rows.iter().any(|row| row.sub == sub) {
+    if *pending && groups.iter().any(|group| group.sub == sub) {
         return Err("live subscription row arrived before its complete marker".into());
     }
     for row in ours {
@@ -212,7 +219,7 @@ mod tests {
                 &mut pending,
                 2,
                 &[],
-                &[codec::chunk_row(2, 0, &bits)]
+                &[codec::Group::board(2, vec![codec::chunk_row(0, &bits)])]
             )
             .is_err()
         );
@@ -221,7 +228,7 @@ mod tests {
             &mut pending,
             2,
             &[2],
-            &[codec::chunk_row(2, 0, &bits)]
+            &[codec::Group::board(2, vec![codec::chunk_row(0, &bits)])]
         )?);
         assert_eq!(image[0], 2);
         assert!(apply_batch(&mut image, &mut pending, 2, &[2], &[])?);

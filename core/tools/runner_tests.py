@@ -412,7 +412,7 @@ def host_law(args, root, work, engine, name):
             with peer.makefile('rb') as stream:
                 peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
                               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
-                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.2\r\n'
+                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.3\r\n'
                               'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
                 assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
                 for line in stream:

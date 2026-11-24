@@ -317,14 +317,14 @@ export async function laws(codec, only, mutant) {
     h.opts.onPrediction=p=>predictions.push(new Map(p));
     h.client.subscribe(want,bytes(1),rows=>caches.push(rows));await settle();
     const a=h.client.call(want,bytes(7),x=>x,'overlay');await settle();assert.equal(h.client.predictions.size,1);
-    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}],[{stream:0,p:0n,outcome:returned(7)}]]});await settle();await a;
+    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}]}],[{stream:0,p:0n,outcome:returned(7)}]]});await settle();await a;
     assert.equal(h.client.predictions.size,0);assert.equal(caches[0][0].value.value[0],2);
     h.server.emit(h.server.sockets[0],{tag:'Reset',values:[2n,[]]});await settle();assert.equal(caches.length,1);
-    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[],[{sub:0,key:bytes(1),value:{tag:'None'}}],[]]});await settle();assert.equal(caches.length,1);
-    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[1],[],[]]});await settle();assert.deepEqual(caches,[caches[0],[]]);
+    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'None'}}]}],[]]});await settle();assert.equal(caches.length,1);
+    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[1],[{sub:1,value:bytes(),rows:[]}],[]]});await settle();assert.deepEqual(caches,[caches[0],[]]);
     const before=caches.length;
     h.server.emit(h.server.sockets[0],{tag:'Reset',values:[3n,[]]});await settle();
-    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[3n,[],[{sub:2,key:bytes(1),value:{tag:'Some',value:bytes(3)}}],[]]});await settle();
+    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[3n,[],[{sub:2,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(3)}}]}],[]]});await settle();
     assert.equal(h.client.state,'Incompatible');assert.equal(caches.length,before);
   };
   tests.subscription_end_after_reset=async()=>{

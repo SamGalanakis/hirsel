@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {setTimeout as pause} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
-import {loadRuntime} from '../store/tests/client.mjs';
+import {loadRuntime} from '../runner/tests/client.mjs';
 import {canvasMatches, openBrowser} from './browser-laws.mjs';
 
 export function seeded(seed) {

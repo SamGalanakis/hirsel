@@ -1,7 +1,7 @@
 mod admission;
 use admission::{Admission, Calls, HeldRefusal, Rates};
 
-use crate::codec::{self, Bad, Done, Entry, Frame, Outcome, Refusal, Row, Want};
+use crate::codec::{self, Bad, Done, Entry, Frame, Group, Outcome, Refusal, Row, Want};
 use crate::{BITS, CHUNKS, IMAGE_BYTES, MAX_FRAME, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
@@ -265,7 +265,7 @@ impl Peer {
         };
         let rows_over = match &combined {
             Frame::Batch(_, complete, rows, _) => {
-                24 + 4 * complete.len() + rows.iter().map(row_bytes).sum::<usize>()
+                24 + 4 * complete.len() + rows.iter().map(group_bytes).sum::<usize>()
                     > MAX_FRAME - crate::OUTCOME_RESERVE
             }
             _ => false,
@@ -290,7 +290,11 @@ impl Peer {
 }
 
 fn row_bytes(row: &Row) -> usize {
-    4 + 4 + row.key.len() + 4 + row.value.as_ref().map_or(0, |v| 4 + v.len())
+    2 + 4 + row.key.len() + 4 + row.value.as_ref().map_or(0, |v| 4 + v.len())
+}
+
+fn group_bytes(group: &Group) -> usize {
+    12 + group.value.len() + group.rows.iter().map(row_bytes).sum::<usize>()
 }
 
 fn coalesce(old: Frame, new: Frame) -> Option<Frame> {
@@ -299,12 +303,26 @@ fn coalesce(old: Frame, new: Frame) -> Option<Frame> {
             Frame::Batch(_, mut complete, rows, mut done),
             Frame::Batch(version, completed, newer, outcomes),
         ) => {
-            let mut kept: BTreeMap<(u32, Vec<u8>), Row> = rows
-                .into_iter()
-                .map(|r| ((r.sub, r.key.clone()), r))
-                .collect();
-            for row in newer {
-                kept.insert((row.sub, row.key.clone()), row);
+            let mut kept: BTreeMap<u32, Group> =
+                rows.into_iter().map(|group| (group.sub, group)).collect();
+            for new_group in newer {
+                if completed.contains(&new_group.sub) {
+                    kept.insert(new_group.sub, new_group);
+                } else if let Some(prior) = kept.get_mut(&new_group.sub) {
+                    let mut rows: BTreeMap<(u16, Vec<u8>), Row> = std::mem::take(&mut prior.rows)
+                        .into_iter()
+                        .map(|row| ((row.slot, row.key.clone()), row))
+                        .collect();
+                    for row in new_group.rows {
+                        rows.insert((row.slot, row.key.clone()), row);
+                    }
+                    prior.rows = rows.into_values().collect();
+                    if !new_group.value.is_empty() {
+                        prior.value = new_group.value;
+                    }
+                } else {
+                    kept.insert(new_group.sub, new_group);
+                }
             }
             done.extend(outcomes);
             complete.extend(completed);
@@ -474,10 +492,10 @@ impl Head {
             for sub in &completing {
                 let rows: Vec<Row> = (0..CHUNKS)
                     .filter(|c| self.wal.present.contains(c))
-                    .map(|c| codec::chunk_row(*sub, c, &self.wal.bitmap))
+                    .map(|c| codec::chunk_row(c, &self.wal.bitmap))
                     .collect();
                 let requested = rows.iter().map(row_bytes).sum::<usize>();
-                let available = MAX_FRAME - crate::OUTCOME_RESERVE - 28;
+                let available = MAX_FRAME - crate::OUTCOME_RESERVE - 40;
                 if requested > available {
                     peer.subs.remove(sub);
                     if !peer.send(Frame::Ended(
@@ -492,17 +510,23 @@ impl Head {
                 } else if !peer.send(Frame::Batch(
                     version,
                     vec![*sub],
-                    rows,
+                    vec![Group::board(*sub, rows)],
                     std::mem::take(&mut done),
                 )) {
                     return false;
                 }
             }
             let mut rows = Vec::new();
-            for sub in &peer.subs {
-                if !completing.contains(sub) {
-                    for chunk in &changed {
-                        rows.push(codec::chunk_row(*sub, *chunk, &self.wal.bitmap));
+            if !changed.is_empty() {
+                for sub in &peer.subs {
+                    if !completing.contains(sub) {
+                        rows.push(Group::board(
+                            *sub,
+                            changed
+                                .iter()
+                                .map(|chunk| codec::chunk_row(*chunk, &self.wal.bitmap))
+                                .collect(),
+                        ));
                     }
                 }
             }
@@ -634,6 +658,7 @@ struct Ingress {
 fn handshake(
     request: &tokio_tungstenite::tungstenite::handshake::server::Request,
     mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    retired: &mut bool,
 ) -> std::result::Result<
     tokio_tungstenite::tungstenite::handshake::server::Response,
     tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
@@ -642,19 +667,27 @@ fn handshake(
     if request.uri().path() != "/hirsel" {
         return Err(Response::builder().status(404).body(None).unwrap());
     }
-    if let Some(protocols) = request.headers().get("Sec-WebSocket-Protocol") {
-        if !protocols
-            .to_str()
-            .unwrap_or("")
-            .split(',')
-            .any(|p| p.trim() == "hirsel.2")
-        {
-            return Err(Response::builder().status(400).body(None).unwrap());
-        }
-        response
-            .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "hirsel.2".parse().unwrap());
-    }
+    let offered = request
+        .headers()
+        .get("Sec-WebSocket-Protocol")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim);
+    let selected = if offered.clone().any(|token| token == "hirsel.3") {
+        "hirsel.3"
+    } else if let Some(token) = offered
+        .into_iter()
+        .find(|token| matches!(*token, "hirsel.1" | "hirsel.2"))
+    {
+        *retired = true;
+        token
+    } else {
+        return Err(Response::builder().status(400).body(None).unwrap());
+    };
+    response
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", selected.parse().unwrap());
     Ok(response)
 }
 
@@ -668,15 +701,30 @@ async fn session(
     launch: Arc<Launch>,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
+    let mut retired = false;
+    #[allow(
+        clippy::result_large_err,
+        reason = "Tungstenite's Callback API returns the HTTP response by value."
+    )]
+    let negotiate = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response| { handshake(request, response, &mut retired) };
     let mut ws = tokio::time::timeout(
         Duration::from_millis(5000),
         tokio_tungstenite::accept_hdr_async_with_config(
             socket,
-            handshake,
+            negotiate,
             Some(crate::websocket_config()),
         ),
     )
     .await??;
+    if retired {
+        ws.close(Some(CloseFrame {
+            code: CloseCode::Size,
+            reason: "hirsel.3".into(),
+        }))
+        .await?;
+        return Ok(());
+    }
     let first = tokio::time::timeout(Duration::from_millis(10000), async {
         loop {
             match ws.next().await.transpose()? {
@@ -837,182 +885,4 @@ async fn session(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn calls(principal: Principal) -> Arc<Calls> {
-        Arc::new(Calls::new(
-            principal,
-            vec![Some(0)],
-            Limits::benchmark(),
-            Arc::new(Mutex::new(HashMap::new())),
-        ))
-    }
-
-    #[test]
-    fn rows_allowance_keeps_the_v211_refusal_reserve() {
-        fn send(count: u32) -> Output {
-            let (tx, mut rx) = mpsc::channel(1);
-            let mut peer = Peer {
-                principal: [0; 16],
-                slots: vec![],
-                subs: HashSet::from([1, 2]),
-                tx,
-                pending: None,
-                calls: calls([0; 16]),
-                overrun: false,
-            };
-            let image = vec![0; IMAGE_BYTES];
-            let rows = (0..count)
-                .map(|i| codec::chunk_row(1 + i / CHUNKS, i % CHUNKS, &image))
-                .collect();
-            let done = vec![Done {
-                stream: 0,
-                p: 0,
-                outcome: Outcome::Returned(vec![0, 0, 0, 0, 1]),
-            }];
-            assert!(matches!(
-                peer.calls.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
-                Admission::Forward
-            ));
-            assert!(peer.send(Frame::Batch(1, vec![1], rows, done)));
-            rx.try_recv().unwrap()
-        }
-        // At 92 B per Row, 2,401 fit in 220,976 B; 2,402 exceed it by eight bytes.
-        assert!(matches!(
-            send(2401),
-            Output::Frame(Frame::Batch(1, _, _, _))
-        ));
-        let Output::Frame(Frame::Reset(1, done)) = send(2402) else {
-            panic!("must retain the V1 refusal reserve");
-        };
-        assert_eq!(done[0].outcome, Outcome::Returned(vec![0, 0, 0, 0, 1]));
-        assert_eq!(crate::DONE_MAX, 8192);
-        assert_eq!(crate::REPLY_MAX, 8172);
-    }
-    #[test]
-    fn failed_group_sync_publishes_neither_rows_nor_outcomes() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut wal = Wal::open(&dir.path().join("wal"))?;
-        wal.fail_sync = true;
-        let (tx, mut rx) = mpsc::channel(1);
-        let mut head = Head {
-            wal,
-            peers: HashMap::from([(
-                1,
-                Peer {
-                    principal: [3; 16],
-                    slots: vec![Some(0)],
-                    subs: HashSet::from([1]),
-                    tx,
-                    pending: None,
-                    calls: calls([3; 16]),
-                    overrun: false,
-                },
-            )]),
-            board_runs: 1,
-            groups: 0,
-        };
-        assert!(matches!(
-            head.peers[&1]
-                .calls
-                .admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
-            Admission::Forward
-        ));
-        assert!(
-            head.execute(vec![Command::Frame(
-                1,
-                Frame::Call(0, 0, 0, 30_000, 0u32.to_le_bytes().to_vec())
-            )])
-            .is_err()
-        );
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        Ok(())
-    }
-    #[test]
-    fn wal_recovery_replays_identity_and_truncates_torn_tail() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("wal");
-        let mut wal = Wal::open(&path)?;
-        let (o, fresh) = wal.toggle([7; 16], 3, 0, 999_999)?;
-        assert!(fresh);
-        assert_eq!(o, Outcome::Returned(vec![0, 0, 0, 0, 1]));
-        wal.file.sync_data()?;
-        drop(wal);
-        OpenOptions::new()
-            .append(true)
-            .open(&path)?
-            .write_all(&[7; 10])?;
-        let mut wal = Wal::open(&path)?;
-        assert_eq!(wal.bitmap[124999], 128);
-        assert_eq!(wal.version, 1);
-        assert_eq!(wal.toggle([7; 16], 3, 0, 999_999)?, (o, false));
-        assert_eq!(
-            wal.toggle([7; 16], 3, 0, 0)?,
-            (Outcome::Refused(Refusal::RequestMismatch), false)
-        );
-        assert_eq!(wal.version, 1);
-        assert_eq!(wal.file.metadata()?.len(), 8 + RECORD as u64);
-        assert!(wal.toggle([7; 16], 3, 1, 0)?.1);
-        assert_eq!(
-            wal.toggle([7; 16], 3, 0, 999_999)?,
-            (Outcome::Refused(Refusal::HistoryUnavailable), false)
-        );
-        Ok(())
-    }
-    #[test]
-    fn slow_reader_coalesces_latest_chunk_without_losing_outcomes() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let mut p = Peer {
-            principal: [0; 16],
-            slots: vec![],
-            subs: HashSet::new(),
-            tx,
-            pending: None,
-            calls: calls([0; 16]),
-            overrun: false,
-        };
-        for n in 1..=3 {
-            let row = Row {
-                sub: 1,
-                key: vec![0],
-                value: Some(vec![n as u8]),
-            };
-            assert!(matches!(
-                p.calls.admit(1, n, 0, 30000, &0u32.to_le_bytes()),
-                Admission::Forward
-            ));
-            assert!(p.send(Frame::Batch(
-                n,
-                vec![],
-                vec![row],
-                vec![Done {
-                    stream: 1,
-                    p: n,
-                    outcome: Outcome::Returned(vec![1])
-                }]
-            )));
-        }
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            Output::Frame(Frame::Batch(1, _, _, _))
-        ));
-        assert!(p.flush());
-        let Output::Frame(Frame::Batch(v, _, rows, done)) = rx.try_recv().unwrap() else {
-            panic!()
-        };
-        assert_eq!(v, 3);
-        assert_eq!(rows[0].value, Some(vec![3]));
-        assert_eq!(done.iter().map(|d| d.p).collect::<Vec<_>>(), [2, 3]);
-        let Some(Frame::Reset(version, kept)) = coalesce(
-            Frame::Batch(3, vec![], vec![], done.clone()),
-            Frame::Reset(4, vec![]),
-        ) else {
-            panic!("Reset must retain pending outcomes");
-        };
-        assert_eq!(version, 4);
-        assert_eq!(kept, done);
-    }
-}
+mod tests;

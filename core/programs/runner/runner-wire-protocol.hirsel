@@ -1,0 +1,118 @@
+fn close_retired_upgrade(take upgraded: std.wsock.Upgraded, config: std.wsock.Config, clock: Clock) -> Result[(), std.wsock.Error] waits {
+    let std.wsock.Upgraded(reader: take input, writer: take output, ..) = take upgraded
+    let mut reader = take input
+    let mut writer = take output
+    std.wsock.finish_read(mut reader)
+    let mut encoder = std.wsock.outbound(Server, config, None)?
+    let close_bytes = std.wsock.encode(mut encoder, true, 8u8, b"\x03\xf1hirsel.3")?
+    std.wsock.stage(mut writer, take close_bytes) ?=> |_| Busy
+    let end = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), config.close_ms))
+    while !std.wsock.flush(mut writer, mut encoder, end)? {}
+    Ok(())
+}
+
+// The local row callback carries its subscription id on each row.
+pub fn publication_rows(take groups: List[Group]) -> List[SubRow] {
+    let mut output: List[SubRow] = list.new()
+    for take group in groups {
+        let Group(sub: sub, rows: take members, ..) = take group
+        for take row in members {
+            let Row(key: take key, value: take value, ..) = take row
+            list.push(mut output, SubRow(sub: sub, key: take key, value: take value))
+        }
+    }
+    take output
+}
+
+fn unpack_group(packed: OwedGroup) -> Group {
+    let payload_codec: std.codec.Codec[(Bytes, List[Row])] = std.codec.of()
+    let (take value, take rows) = result.unwrap(std.codec.decode(payload_codec, packed.payload))
+    Group(sub: packed.sub, value: take value, rows: take rows)
+}
+
+fn wire_groups_size(groups: List[Group]) -> u64 {
+    let mut total = 0u64
+    for group in groups {
+        total += 12u64 + slot_payload_size(list.len(group.value), group.rows)
+    }
+    total
+}
+
+fn retained_groups_charge(groups: List[Group]) -> u64 {
+    let mut room_needed = wire_round(52u64 * list.capacity(groups))
+    for group in groups {
+        room_needed += wire_round(list.capacity(group.value)) + wire_round(58u64 * list.capacity(group.rows))
+        for row in group.rows {
+            room_needed += wire_round(list.capacity(row.key))
+            if let Some(value) = row.value { room_needed += wire_round(list.capacity(value)) }
+        }
+    }
+    std.order.max(room_needed, wire_groups_size(groups))
+}
+
+fn cached_groups_size(packed: List[OwedGroup]) -> u64 {
+    let mut total = 0u64
+    for group in packed { total += 4u64 + list.len(group.payload) }
+    total
+}
+
+fn cached_charge(packed: List[OwedGroup]) -> u64 {
+    let mut room_needed = wire_round(12u64 * list.capacity(packed))
+    for group in packed { room_needed += wire_round(list.capacity(group.payload)) + 32u64 }
+    room_needed
+}
+
+fn materialize_frame(take frame: Frame, tapes: List[OwedGroup]) -> Frame {
+    if list.len(tapes) == 0u64 { return take frame }
+    let Batch(version, take complete, _, take done) = take frame else { fail("runner: group tapes outside Batch") }
+    let mut groups: List[Group] = list.with_capacity(list.len(tapes))
+    for group in tapes { list.push(mut groups, unpack_group(group)) }
+    Batch(version, take complete, take groups, take done)
+}
+
+fn encode_published_frame(out: std.wsock.Outbound, frame: Frame, tapes: List[OwedGroup]) -> Result[Bytes, std.wsock.Error] {
+    if list.len(tapes) == 0u64 { return wire_encode(out, frame) }
+    let Batch(version, complete, _, done) = view frame else { fail("runner: group tapes outside Batch") }
+    let size = wire_output_size(frame) + cached_groups_size(tapes)
+    std.wsock.try_encode_parts(out, size, scoped fn(mut bytes_out: Bytes) -> Result[(), u16] {
+        std.codec.put_u32(6u32, mut bytes_out)
+        std.codec.put_u64(version, mut bytes_out)
+        let ids: std.codec.Codec[List[u32]] = std.codec.of_list()
+        std.codec.encode(ids, complete, mut bytes_out) ?=> |_| 1011u16
+        std.codec.put_u32(int.truncate(list.len(tapes)), mut bytes_out)
+        for group in tapes {
+            std.codec.put_u32(group.sub, mut bytes_out)
+            list.append(mut bytes_out, group.payload)
+        }
+        let outcomes: std.codec.Codec[List[Done]] = std.codec.of_list()
+        std.codec.encode(outcomes, done, mut bytes_out) ?=> |_| 1011u16
+        Ok(())
+    })
+}
+
+fn filter_output_groups(take output: WireOutput, stamps: List[(u32, u64)], present: bool) -> Option[WireOutput] {
+    let WireOutput(frame: take frame, tapes: take packed, marks: take marks, generations: take generations, external: external, check: check) = take output
+    let Batch(version, take ids, take groups, take done) = take frame else { return None }
+    let mut complete = take ids
+    filter_content(mut complete, stamps, present, fn(sub: u32) -> u32 { sub })
+    let mut held = take groups
+    filter_content(mut held, stamps, present, fn(group: Group) -> u32 { group.sub })
+    let mut tapes = take packed
+    filter_content(mut tapes, stamps, present, fn(group: OwedGroup) -> u32 { group.sub })
+    let content = list.len(complete) != 0u64 || list.len(held) != 0u64 || list.len(tapes) != 0u64
+    if !content && list.len(done) == 0u64 { return None }
+    Some(WireOutput(frame: Batch(version, take complete, take held, take done), tapes: take tapes,
+        marks: take marks, generations: take generations, external: external, check: if content { check } else { None }))
+}
+
+fn filter_content[T](mut items: List[T], stamps: List[(u32, u64)], present: bool, sub_of: fn(T) -> u32) {
+    let mut kept = 0u64
+    for index in 0u64 .. list.len(items) {
+        let listed = match sub_generation(stamps, sub_of(items[index])) { Some(_) => true, None => false }
+        if listed == present {
+            list.swap(mut items, kept, index)
+            kept += 1u64
+        }
+    }
+    while list.len(items) > kept { let _ = list.pop(mut items) }
+}

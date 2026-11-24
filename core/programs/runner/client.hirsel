@@ -11,13 +11,13 @@ pub type Replied[R] {
 
 pub type Seen {
     version: u64,
-    rows: List[runner.Row]
+    rows: List[runner.SubRow]
 }
 
 
 type Sub {
     ready: bool,
-    rows: Map[Bytes, runner.Row],
+    rows: Map[Bytes, runner.SubRow],
 }
 
 type In: send = Frame(runner.Frame) | Ping(std.websocket.Control) | Wake | Alarm | Gone
@@ -182,18 +182,18 @@ pub fn close(take c: Client) -> () waits {
     let _ = wire_client.send(mut w, mut out, 8u8, list.new(), clock)
 }
 
-fn apply(mut c: Client, version: u64, complete: List[u32], take rows: List[runner.Row]) {
+fn apply(mut c: Client, version: u64, complete: List[u32], take rows: List[runner.SubRow]) {
     for id in complete {
         if let Some(_) = map.remove(mut c.subs, id) {
             map.insert(mut c.subs, id, Sub(ready: true, rows: map.new()))
         }
     }
     for take row in take rows {
-        let runner.Row(sub, key: take key, value: take value) = take row
+        let runner.SubRow(sub, key: take key, value: take value) = take row
         if let Some(take held) = map.remove(mut c.subs, sub) {
             let mut s = take held
             match take value {
-                Some(take data) => map.insert(mut s.rows, clone(key), runner.Row(sub: sub, key: take key, value: Some(take data))),
+                Some(take data) => map.insert(mut s.rows, clone(key), runner.SubRow(sub: sub, key: take key, value: Some(take data))),
                 None => { let _ = map.remove(mut s.rows, key) },
             }
             map.insert(mut c.subs, sub, take s)
@@ -256,7 +256,8 @@ fn consume(mut c: Client, take next: In) -> Result[bool, CallError] waits {
 
 fn step(mut c: Client, take f: runner.Frame, want: Option[u64]) -> Result[Option[runner.Done], CallError] {
     match take f {
-        Batch(version, take complete, take rows, take done) => {
+        Batch(version, take complete, take groups, take done) => {
+            let rows = runner.publication_rows(take groups)
             apply(mut c, version, complete, take rows)
             for take d in take done {
                 if d.stream == 0u32 && want == Some(d.p) { return Ok(Some(take d)) }
@@ -316,7 +317,7 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
                     Ok(take value) => Returned(take value),
                     Error(d) => return Error(Decode(d)),
                 },
-                Failed(fault) => Failed(fault),
+                Failed(fault) => Failed(clone(fault)),
                 Refused(why) => Refused(why),
                 Abandoned => Abandoned,
                 InDoubt => return Error(Protocol("InDoubt")),
@@ -360,9 +361,9 @@ pub fn unsubscribe(mut c: Client, sub: u32) -> () waits {
 pub fn current(c: Client, sub: u32, version: u64) -> Result[Option[Seen], CallError] {
     if !opened(c, sub, version)? { return Ok(None) }
     let s = option.unwrap(map.get(c.subs, sub))
-    let mut rows: List[runner.Row] = list.with_capacity(map.len(s.rows))
+    let mut rows: List[runner.SubRow] = list.with_capacity(map.len(s.rows))
     for (_, row) in s.rows { list.push(mut rows, clone(row)) }
-    std.list.sort(mut rows, fn(a: runner.Row, b: runner.Row) -> Order { list.compare_bytes(a.key, b.key) })
+    std.list.sort(mut rows, fn(a: runner.SubRow, b: runner.SubRow) -> Order { list.compare_bytes(a.key, b.key) })
     Ok(Some(Seen(version: c.version, rows: take rows)))
 }
 

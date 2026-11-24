@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {setTimeout as pause} from 'node:timers/promises';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {loadRuntime} from '../store/tests/client.mjs';
+import {loadRuntime} from '../runner/tests/client.mjs';
 
 const [name, origin, generated] = process.argv.slice(2);
 const url = new URL('/hirsel', origin);
@@ -22,7 +22,7 @@ const some = value => ({tag: 'Some', value});
 const none = {tag: 'None'};
 
 async function raw(credential = some(randomBytes(16)), entries = want) {
-  const socket = new WebSocket(url, 'hirsel.2');
+  const socket = new WebSocket(url, 'hirsel.3');
   sockets.add(socket);
   socket.binaryType = 'arraybuffer';
   const queue = [];
@@ -71,11 +71,13 @@ async function image(client, sub) {
   for (;;) {
     const update = await client.next();
     assert.equal(update.tag, 'Batch');
-    const [, complete, rows] = update.values;
+    const [, complete, groups] = update.values;
     if (!complete.includes(sub)) continue;
+    const group = groups.find(g => g.sub === sub);
+    assert.ok(group);
     const result = new Uint8Array(125000);
-    for (const row of rows) {
-      if (row.sub !== sub || row.value.tag !== 'Some') continue;
+    for (const row of group.rows) {
+      if (row.value.tag !== 'Some') continue;
       const start = keys.u32.decode(row.key.subarray(4)) * 64;
       result.set(values.bytes.decode(row.value.value).subarray(0, result.length - start), start);
     }
@@ -130,7 +132,8 @@ async function toggle_no_rerun() {
     const initial = await peer.next();
     assert.equal(initial.tag, 'Batch');
     assert.deepEqual(initial.values[1], [sub]);
-    assert.deepEqual(initial.values[2], [{sub, key: new Uint8Array(), value: none}]);
+    assert.deepEqual(initial.values[2], [{sub, value: new Uint8Array(),
+      rows: [{slot: 0, key: new Uint8Array(), value: none}]}]);
   }));
   let runs = subscribers.length;
   for (let i = 0; i < 1000; i++) {
@@ -147,7 +150,7 @@ async function toggle_no_rerun() {
       const update = await peer.next();
       assert.equal(update.tag, 'Batch');
       assert.equal(update.values[0], response.values[0]);
-      const rows = update.values[2];
+      const rows = update.values[2].find(group => group.sub === sub).rows;
       const boardRows = rows.filter(row => row.key.length > 0);
       runs += rows.length - boardRows.length;
       const chunk = new Uint8Array(64);
@@ -166,7 +169,7 @@ function upgradeStatus() {
   return new Promise((finish, reject) => {
     const upgrade = request(new URL('/hirsel', origin), {headers: {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
-      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': 'hirsel.2',
+      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': 'hirsel.3',
     }}, response => {
       response.resume();
       finish(response.statusCode);

@@ -350,7 +350,7 @@ fn send_rows(mut w: WriteHalf, f: Front, image: runner.client.Seen, mut sent: Ma
 }
 
 // A query row's key carries the table's prefix before the u64 key.
-fn position(r: runner.Row) -> Option[u64] {
+fn position(r: runner.SubRow) -> Option[u64] {
     let width = list.len(r.key)
     if width < 8u64 {
         return None

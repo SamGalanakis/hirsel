@@ -20,7 +20,8 @@ failure or cancellation. The runner calls `hello_accepted` only after decoding
 and admitting Hello; `welcomed` clears the separate Hello deadline.
 
 `server` consumes a Socket and pending lease, validates the bounded request
-and source, writes the 101 response and returns `Upgraded`. Its reader keeps
+and source, writes the 101 response and returns `Upgraded` with the selected protocol and
+read-ahead length. Its reader keeps
 only the request's frame read-ahead, copied into storage of exactly its length
 and charged to the connection; the 8192-byte request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a
 source policy after sanitization and before 101, under the original accept
@@ -62,8 +63,9 @@ buffer reserves exactly payload+14 capacity, at most round8(max_frame+14)
 charged bytes. `try_encode_with` is the server's encode for a codec value of known
 exact length: `websocket.binary_head` writes the header and the codec writes the
 payload behind it in the same buffer, so the payload is never copied. The initial reservation returns Allocation
-on refusal. A codec
-that writes any other length fails closed with 1011. `stage` moves one such buffer to the sole Writer. Busy returns
+on refusal. `try_encode_parts` writes already encoded components through an
+append callback in the same buffer. A writer that produces any other length
+fails closed with 1011. `stage` moves one such buffer to the sole Writer. Busy returns
 the offered bytes unchanged. `flush` commits send prefixes and retains its
 cursor across TimedOut. Completion frees the buffer before the next encode.
 `pong` records an inline control debt, even while a frame is blocked. It drains

@@ -13,7 +13,7 @@ fn value_group_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
     query(mut r, code.describe(value_group_query), take declarations, 65536u64, DEFAULT_STEPS)
 }
 
-type GroupLawPayload: codec { value: Bytes, rows: List[SlotRow] }
+type GroupLawPayload: codec { value: Bytes, rows: List[Row] }
 
 fn group_payload(owing: Owe) -> Option[GroupLawPayload] {
     if list.len(owing.groups) != 1u64 { return None }

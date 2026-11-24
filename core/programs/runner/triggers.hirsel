@@ -18,7 +18,7 @@ pub type Error: send = Store(store.Error) | StaleAttempt | MissingEntry | Alread
 
 type State: codec + send = Waiting | Running | Parked(Hold)
 
-type Row: codec + send {
+type SubRow: codec + send {
     path: Bytes,
     schema: Bytes,
     arg: Bytes,
@@ -31,8 +31,8 @@ type Row: codec + send {
 }
 
 pub opaque type Tables: shareable + send {
-    rows: store.Table[Id, Row],
-    due: store.Index[u64, Id, Row, ()],
+    rows: store.Table[Id, SubRow],
+    due: store.Index[u64, Id, SubRow, ()],
     outcomes: store.Table[Id, Terminal]
 }
 
@@ -47,10 +47,10 @@ pub opaque type Entries: send { listed: List[EntryRef] }
 
 pub opaque type Pending: send {
     id: Id,
-    row: Row
+    row: SubRow
 }
 
-pub opaque type PendingRows { rows: store.Rows[Id, Row] }
+pub opaque type PendingRows { rows: store.Rows[Id, SubRow] }
 
 pub opaque type Attempt: send { id: Id, number: u64 }
 
@@ -90,10 +90,10 @@ fn id_key() -> std.codec.Key[Id] {
     std.codec.key_make(put_id, take_id, id_schema)
 }
 
-fn row_due(row: Row) -> Result[u64, Capacity] { Ok(row.due) }
+fn row_due(row: SubRow) -> Result[u64, Capacity] { Ok(row.due) }
 
 pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
-    let value: std.codec.Codec[Row] = std.codec.of()
+    let value: std.codec.Codec[SubRow] = std.codec.of()
     let terminal: std.codec.Codec[Terminal] = std.codec.of()
     let pending = store.declare_table(mut d, rows_name(), id_key(), value)?
     let due = store.declare_single_index(mut d, pending, "due", code.describe(row_due), std.codec.key_u64())?
@@ -111,7 +111,7 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 }
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let value: std.codec.Codec[Row] = std.codec.of()
+    let value: std.codec.Codec[SubRow] = std.codec.of()
     let terminal: std.codec.Codec[Terminal] = std.codec.of()
     let mut spec = store.spec(rows_name(), id_key(), value)
     store.with_index(mut spec, "due", code.describe(row_due), std.codec.key_u64())?
@@ -119,8 +119,8 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     created(store.migration_create_table(mut phase, store.spec(outcomes_name(), id_key(), terminal)))
 }
 
-fn pending_table(source: store.Schema) -> Result[store.Table[Id, Row], store.Error] {
-    let value: std.codec.Codec[Row] = std.codec.of()
+fn pending_table(source: store.Schema) -> Result[store.Table[Id, SubRow], store.Error] {
+    let value: std.codec.Codec[SubRow] = std.codec.of()
     store.schema_table(source, rows_name(), id_key(), value)
 }
 
@@ -132,7 +132,7 @@ pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
     Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
 }
 
-pub opaque type PendingTable { table: Option[store.Table[Id, Row]] }
+pub opaque type PendingTable { table: Option[store.Table[Id, SubRow]] }
 
 pub fn pending_table_if_present(source: store.Schema) -> Result[PendingTable, store.Error] {
     match pending_table(source) {
@@ -231,7 +231,7 @@ pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A],
     let due = match when { AfterCommit => info.at, At(at) => at }
     let mut encoded: Bytes = list.new()
     std.codec.encode(target.codec, arg, mut encoded) ?=> |_| Store(Limit(Value))
-    let row = Row(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,
+    let row = SubRow(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,
         granted: target.ref.granted, attempt: 0u64, revision: list.new(), state: Waiting, cancel: false)
     stored(store.put(mut tx, t.rows, id, row))?
     Ok(id)
@@ -269,7 +269,7 @@ pub fn matches(p: Pending, identity: Bytes, schema: Bytes) -> bool {
 
 pub fn cancelling(p: Pending) -> bool { p.row.cancel }
 
-fn revision_mismatch(row: Row, image: Bytes) -> bool {
+fn revision_mismatch(row: SubRow, image: Bytes) -> bool {
     row.attempt != 0u64 && row.revision != image
 }
 
@@ -277,7 +277,7 @@ pub fn held_on_start(p: Pending, image: Bytes) -> bool {
     parked(p.row.state) || (p.row.granted && revision_mismatch(p.row, image))
 }
 
-fn read(tx: store.Tx, t: Tables, id: Id) -> Result[Row, Error] {
+fn read(tx: store.Tx, t: Tables, id: Id) -> Result[SubRow, Error] {
     match stored(store.fetch(tx, t.rows, id))? {
         Some(take row) => Ok(take row),
         None => Error(StaleAttempt),
@@ -292,11 +292,11 @@ fn running(state: State) -> bool {
     match state { Running => true, _ => false }
 }
 
-fn current_attempt(row: Row, a: Attempt) -> bool {
+fn current_attempt(row: SubRow, a: Attempt) -> bool {
     row.attempt == a.number && running(row.state)
 }
 
-fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[Row, Error] {
+fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[SubRow, Error] {
     let row = read(tx, t, a.id)?
     if !current_attempt(row, a) { return Error(StaleAttempt) }
     Ok(take row)
@@ -309,7 +309,7 @@ pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
 
 pub fn hold_mark(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Hold], store.Error] waits {
     match store.get(read_handle, s, t.rows, id)? {
-        Some(Row(state: Parked(take mark), ..)) => Ok(Some(take mark)),
+        Some(SubRow(state: Parked(take mark), ..)) => Ok(Some(take mark)),
         _ => Ok(None),
     }
 }

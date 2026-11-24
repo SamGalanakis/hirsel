@@ -1,6 +1,6 @@
 use hirsel_wire_bench::Result;
 use hirsel_wire_bench::codec::{
-    self, Bad, Done, Entry, Fault, Frame, Outcome, Refusal, Room, Row, Want,
+    self, Bad, Done, Entry, Fault, Frame, Group, Outcome, Refusal, Room, Row, Want,
 };
 
 const N: u32 = 0x01020304;
@@ -40,7 +40,7 @@ fn row(chunk: u32) -> Row {
     let mut value = 64u32.to_le_bytes().to_vec();
     value.extend((0u8..64).map(|i| if chunk == 1953 && i >= 8 { 0 } else { i }));
     Row {
-        sub: 7,
+        slot: 0,
         key,
         value: Some(value),
     }
@@ -89,18 +89,36 @@ fn frame(name: &str) -> Frame {
         "row_removed" => Frame::Batch(
             V,
             vec![],
-            vec![Row {
-                sub: N,
-                key: bytes("0102030405060708"),
-                value: None,
-            }],
+            vec![Group::board(
+                N,
+                vec![Row {
+                    slot: 0,
+                    key: bytes("0102030405060708"),
+                    value: None,
+                }],
+            )],
             vec![],
         ),
-        "row" | "viewer_update" => Frame::Batch(V, vec![], vec![row(0x05060708)], vec![]),
+        "row" | "viewer_update" => Frame::Batch(
+            V,
+            vec![],
+            vec![Group::board(7, vec![row(0x05060708)])],
+            vec![],
+        ),
         "batch_empty" => Frame::Batch(V, vec![], vec![], vec![]),
-        "empty_initial" => Frame::Batch(V, vec![7], vec![], vec![]),
-        "caller_update" => Frame::Batch(V, vec![], vec![row(0x05060708)], vec![done()]),
-        "full_board" => Frame::Batch(V, vec![7], (0..1954).map(row).collect(), vec![]),
+        "empty_initial" => Frame::Batch(V, vec![7], vec![Group::board(7, vec![])], vec![]),
+        "caller_update" => Frame::Batch(
+            V,
+            vec![],
+            vec![Group::board(7, vec![row(0x05060708)])],
+            vec![done()],
+        ),
+        "full_board" => Frame::Batch(
+            V,
+            vec![7],
+            vec![Group::board(7, (0..1954).map(row).collect())],
+            vec![],
+        ),
         "reset_empty" => Frame::Reset(V, vec![]),
         other => {
             let outcome = match other {
@@ -155,6 +173,9 @@ fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
             "Row" => {
                 prefix.extend(6u32.to_le_bytes());
                 prefix.extend(V.to_le_bytes());
+                prefix.extend(0u32.to_le_bytes());
+                prefix.extend(1u32.to_le_bytes());
+                prefix.extend(7u32.to_le_bytes());
                 prefix.extend(0u32.to_le_bytes());
                 prefix.extend(1u32.to_le_bytes());
                 suffix.extend(0u32.to_le_bytes());

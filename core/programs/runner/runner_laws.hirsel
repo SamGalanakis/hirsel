@@ -198,6 +198,7 @@ fn same_fault(a: runner.Fault, b: runner.Fault) -> bool {
         OutOfBytes(x) => match b { OutOfBytes(y) => same_room(x, y), _ => false },
         OutOfTime(x) => match b { OutOfTime(y) => x == y, _ => false },
         Gone => match b { Gone => true, _ => false },
+        Conflict(x) => match b { Conflict(y) => x == y, _ => false },
     }
 }
 

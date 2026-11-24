@@ -60,7 +60,8 @@ type D: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock
 // The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
 fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
     match wire_client.next(cn) {
-        Ok(Batch(_, take complete, take got, _)) => {
+        Ok(Batch(_, take complete, take groups, _)) => {
+            let got = runner.publication_rows(take groups)
             if list.len(complete) != 1u64 || complete[0u64] != sub || list.len(got) != rows {
                 fail("runner_cover: an initial Batch not whole")
             }

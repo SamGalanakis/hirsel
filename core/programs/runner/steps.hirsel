@@ -8,7 +8,7 @@ pub opaque scoped type Ctx[G: send] {
 }
 
 type Fingerprint: codec + send { contract: Bytes }
-type Row: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
+type SubRow: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
 type Mode: codec + send = First | Resend | Lookup
 type Begin: codec + send { index: u64, fingerprint: Fingerprint, mode: Mode }
 type Finish: codec + send { step: Begin, raw: Bytes }
@@ -20,7 +20,7 @@ const TRANSACTION: u8 = 1
 
 type Tables {
     caps: store.Table[Bytes, u64],
-    rows: store.Table[Bytes, Row],
+    rows: store.Table[Bytes, SubRow],
     triggers: triggers.Tables,
 }
 
@@ -30,7 +30,7 @@ fn rows_name() -> String { "store.steps.rows" }
 pub fn declare_tables(mut d: store.Declare) -> Result[(), store.Error] {
     let caps = store.declare_table(mut d, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
     let _ = store.finish(mut d, take caps)?
-    let row: std.codec.Codec[Row] = std.codec.of()
+    let row: std.codec.Codec[SubRow] = std.codec.of()
     let rows = store.declare_table(mut d, rows_name(), std.codec.key_bytes(), row)?
     let _ = store.finish(mut d, take rows)?
     Ok(())
@@ -38,7 +38,7 @@ pub fn declare_tables(mut d: store.Declare) -> Result[(), store.Error] {
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     ensure_table(store.migration_create_table(mut phase, store.spec(caps_name(), std.codec.key_bytes(), std.codec.of_u64())))?
-    let row: std.codec.Codec[Row] = std.codec.of()
+    let row: std.codec.Codec[SubRow] = std.codec.of()
     ensure_table(store.migration_create_table(mut phase, store.spec(rows_name(), std.codec.key_bytes(), row)))
 }
 
@@ -48,7 +48,7 @@ fn ensure_table(take made: Result[(), store.Error]) -> Result[(), store.Error] {
 
 fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
     let caps = store.schema_table(schema, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
-    let row: std.codec.Codec[Row] = std.codec.of()
+    let row: std.codec.Codec[SubRow] = std.codec.of()
     let rows = store.schema_table(schema, rows_name(), std.codec.key_bytes(), row)?
     Ok(Tables(caps: take caps, rows: take rows, triggers: triggers.tables(schema)?))
 }

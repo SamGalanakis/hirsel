@@ -944,7 +944,7 @@ fn float(x: f64, canonical_nan: bool) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// One RFC 6455 client session speaking hirsel.2
+// One RFC 6455 client session speaking hirsel.3
 
 struct Url {
     host: String,
@@ -1016,7 +1016,7 @@ impl Session {
         };
         let key = base64(&random::<16>()?);
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.2\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.3\r\n\r\n",
             url.path, url.host, url.port
         );
         session.stream.write_all(request.as_bytes())?;
@@ -1050,8 +1050,8 @@ impl Session {
         if header("Sec-WebSocket-Accept").as_deref() != Some(accept.as_str()) {
             return Err("server's Sec-WebSocket-Accept does not answer our key".into());
         }
-        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.2") {
-            return Err("server did not select the hirsel.2 subprotocol".into());
+        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.3") {
+            return Err("server did not select the hirsel.3 subprotocol".into());
         }
         Ok(session)
     }

@@ -419,7 +419,8 @@ fn wire_deliver_content(mut owner: WireSession[(), ()], mut work: WireWork, inbo
 
 fn wire_initial_count(frame: Option[Frame], sub: u32, count: u64) -> bool {
     match frame {
-        Some(Batch(_, complete, rows, done)) => list.len(complete) == 1u64 && complete[0] == sub && list.len(rows) == count && list.len(done) == 0u64,
+        Some(Batch(_, complete, groups, done)) => list.len(complete) == 1u64 && complete[0] == sub &&
+            list.len(groups) == 1u64 && list.len(groups[0u64].rows) == count && list.len(done) == 0u64,
         _ => false,
     }
 }
@@ -481,7 +482,8 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     wire_deliver_content(mut owner, mut work, inbox)
     let after_end = transport_receive(mut owner, mut work)
     let other_sub_kept = match take after_end {
-        Some(Batch(_, complete, rows, _)) => list.len(complete) == 0u64 && list.len(rows) == 1u64 && rows[0].sub == 10u32,
+        Some(Batch(_, complete, groups, _)) => list.len(complete) == 0u64 &&
+            list.len(groups) == 1u64 && groups[0u64].sub == 10u32 && list.len(groups[0u64].rows) == 1u64,
         _ => false,
     }
     let renewed = transport_receive(mut owner, mut work)
@@ -591,14 +593,14 @@ fn test_dropped_keeps_outcomes(tasks: Tasks, clock: Clock, random: Random) -> Re
 const REPAIR_KEYS: u64 = 10u64
 const REPAIR_VALUE: u64 = 20000u64
 
-fn repair_board(mark: u8) -> List[Row] {
-    let mut rows: List[Row] = list.new()
+fn repair_board(mark: u8) -> List[SubRow] {
+    let mut rows: List[SubRow] = list.new()
     for k in 0u64 .. REPAIR_KEYS {
         let mut key: Bytes = list.new()
         std.codec.put_u64(k, mut key)
         let mut value: Bytes = list.new()
         for _ in 0u64 .. REPAIR_VALUE { list.push(mut value, mark) }
-        list.push(mut rows, Row(sub: 1u32, key: take key, value: Some(take value)))
+        list.push(mut rows, SubRow(sub: 1u32, key: take key, value: Some(take value)))
     }
     take rows
 }
@@ -625,7 +627,10 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
         list.push(mut generations, (1u32, 1u64))
         let mut complete: List[u32] = list.new()
         list.push(mut complete, 1u32)
-        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let rows = repair_board(mark)
+        let mut groups: List[OwedGroup] = list.new()
+        list.push(mut groups, fixture_owed_group(1u32, rows))
+        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
         if let Error(_) = wire_update(mut owner, mut work, Update(version: version, content: Some(take owed), outcomes: list.new())) { delivered = false }
     }
     // The client's image: every `complete` naming sub 1 replaces it from empty.
@@ -633,10 +638,11 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
     let mut reset = false
     while let Some(take frame) = transport_receive(mut owner, mut work) {
         match take frame {
-            Batch(_, take complete, take rows, _) => {
+            Batch(_, take complete, take groups, _) => {
+                let rows = publication_rows(take groups)
                 if list.len(complete) == 1u64 && complete[0] == 1u32 { image = map.new() }
                 for take row in rows {
-                    let Row(sub: _, key: take key, value: take value) = take row
+                    let SubRow(sub: _, key: take key, value: take value) = take row
                     if let Some(take v) = take value { map.insert(mut image, take key, take v) }
                 }
             },

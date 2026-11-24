@@ -810,17 +810,17 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         def record_definition(name, field, ty):
                             return (blob(name.encode()) + count(0) + bytes([0])
                                     + count(1) + bytes([0]) + blob(field.encode()) + ty)
-                        # Scripted entries exercise the generator and stubs without
-                        # depending on the launch/Describe producer. Frame comes
-                        # from the actual runner declaration through std.codec.
+                        # Scripted Describe entries exercise the generator, with Frame from std.codec.
                         returned = (bytes([3]) + count(2) + record_definition('fixture.main.Reply', 'n', bytes([6]))
                                     + record_definition('fixture.main.Problem', 'message', bytes([13]))
                                     + bytes([17, 19]) + count(0) + bytes([19]) + count(1))
                         transaction = (count(1) + blob(b'\x01fixture@1/main/commit(take u64)->core@1/core/Result[fixture@1/main/Reply,fixture@1/main/Problem]')
                                        + blob(bytes([3, 0, 0, 0, 0, 6])) + blob(returned)
                                        + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)))
-                        row_schemas = blob(bytes([4, 0, 0, 0, 0, 6])) + blob(bytes([3, 0, 0, 0, 0, 14, 3]))
-                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + count(3)
+                        row_schemas = (blob(bytes([3, 0, 0, 0, 0, 0])) + count(1)
+                                       + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
+                                       + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
+                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(3)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
                                        + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', row_schemas, 2, 3) + transaction)
                         description_file.write_bytes(description)

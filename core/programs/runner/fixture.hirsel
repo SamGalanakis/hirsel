@@ -13,7 +13,7 @@ pub type Replied[R] {
 
 pub type Seen {
     version: u64,
-    rows: List[runner.Row]
+    rows: List[runner.SubRow]
 }
 
 // What the fixture's own tasks spend beyond operate's allowance: the phase forwarder,
@@ -55,7 +55,7 @@ type Sub: send {
     id: u32,
     ready: bool,
     ended: bool,
-    rows: List[runner.Row]
+    rows: List[runner.SubRow]
 }
 
 pub opaque type Client {
@@ -330,7 +330,7 @@ fn named(ids: List[u32], id: u32) -> bool {
 
 // Applies one Batch to the subscription caches as the client cache does: a sub named in
 // `complete` restarts from an empty image, then each row replaces or removes its key.
-fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row]) {
+fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.SubRow]) {
     for i in 0u64 .. list.len(c.subs) {
         if named(complete, c.subs[i].id) {
             c.subs[i].rows = list.new()
@@ -339,7 +339,7 @@ fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row
     }
     for row in rows {
         if let Some(at) = find_sub(c.subs, row.sub) {
-            let mut kept: List[runner.Row] = list.new()
+            let mut kept: List[runner.SubRow] = list.new()
             for old in c.subs[at].rows {
                 if old.key != row.key {
                     list.push(mut kept, clone(old))
@@ -368,7 +368,8 @@ fn step(mut c: Client, want: Option[u64]) -> Step waits {
         return Gone
     }
     match wire_client.wait(c.conn) {
-        Got(Batch(version, take complete, take rows, take done)) => {
+        Got(Batch(version, take complete, take groups, take done)) => {
+            let rows = runner.publication_rows(take groups)
             apply(mut c, version, complete, rows)
             if let Some(p) = want {
                 for take d in take done {
@@ -541,6 +542,6 @@ pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[
         None => return Error(Closed)
     }
     wait_until(mut c, within_ms, Reached(at, version))?
-    let rows: List[runner.Row] = clone(c.subs[at].rows)
+    let rows: List[runner.SubRow] = clone(c.subs[at].rows)
     Ok(Seen(version: c.version, rows: take rows))
 }

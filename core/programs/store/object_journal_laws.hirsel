@@ -69,6 +69,13 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     durable(mut incumbent, first_write.ticket)?
     let saved = position(mut incumbent, first_write.ticket)?
     let _ = checkpoint(mut incumbent)?
+    // Issue the old holder's ticket before the new claim, with its journal
+    // paused. The claim cannot race admission of the ticket under test.
+    let (take paused, take resume) = take_object_journal(mut incumbent)?
+    let late = run(mut incumbent, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 8, call_env.1)
+    })?
+    let Committed(losing) = late else { fail("the losing write could not be staged") }
     let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     options.create = false
     options.expect = Some(saved.store)
@@ -78,10 +85,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     if get(result.unwrap(reader(surviving, 0u64)), current, rows, 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
         fail("a new holder did not recover the durable checkpoint")
     }
-    let late = run(mut incumbent, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
-        put(mut tx, call_env.0, 8, call_env.1)
-    })?
-    let Committed(losing) = late else { fail("the losing write could not be staged") }
+    return_object_journal(take paused, resume)?
     if let Error(Fenced(1)) = durable(mut incumbent, losing.ticket) {} else {
         fail("a stale holder acknowledged a fenced group")
     }

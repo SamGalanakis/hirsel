@@ -338,7 +338,9 @@ impl CheckProduct {
     /// image only.
     fn image_side(&self) -> Result<(SideUnits, Vec<ModuleRoots>), NativeStop> {
         let plain = self.std_plain_roots()?;
-        let mut materialized = crate::instances::InstanceSet::default();
+        // Every reached instance stays materialised until partitioning, so
+        // each keeps a compact recipe, decoded only while it is used.
+        let mut materialized = crate::instances::InstanceSet::compact();
         // A root whose walk stops is left out alone; a program reaching it
         // lowers it itself and stops there.
         let mut walks = Vec::new();
@@ -352,7 +354,7 @@ impl CheckProduct {
         let mut held = BTreeSet::new();
         for (root, _) in &walks {
             let instance = materialized.get(root);
-            if held_root(instance.ir()?, instance.function) {
+            if held_root(&*instance.transient_ir()?, instance.function) {
                 held.insert(root.clone());
             }
         }
@@ -373,12 +375,7 @@ impl CheckProduct {
         }
         let items = reached
             .iter()
-            .map(|i| {
-                materialized
-                    .get(i)
-                    .ir()
-                    .map(hirsel_core_ir::source::anchored_items)
-            })
+            .map(|i| materialized.get(i).anchored_items())
             .collect::<io::Result<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -388,8 +385,11 @@ impl CheckProduct {
         let mut units = BTreeMap::new();
         for identity in reached {
             let instance = materialized.get(&identity);
-            let unit =
-                super::recipe_build::prepare_unit(instance.ir()?, instance.function, &sources);
+            let unit = super::recipe_build::prepare_unit(
+                &*instance.transient_ir()?,
+                instance.function,
+                &sources,
+            );
             units.insert(identity, unit);
         }
         let weights: BTreeMap<_, usize> = units

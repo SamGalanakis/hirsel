@@ -253,6 +253,17 @@ impl InstanceBody {
             (None, None) => unreachable!("a glue instance is materialised"),
         }
     }
+    /// The module, decoded afresh from a compact recipe and not kept, so a
+    /// caller visiting many instances holds one decoding at a time.
+    pub(crate) fn transient_ir(&self) -> io::Result<std::borrow::Cow<'_, Module>> {
+        use std::borrow::Cow;
+        match self.module.as_deref() {
+            Some(MaterializedModule::Recipe { sites, decoded }) => Ok(decoded
+                .get()
+                .map_or_else(|| Cow::Owned(sites.restore(&self.code)), Cow::Borrowed)),
+            _ => self.ir().map(Cow::Borrowed),
+        }
+    }
     pub(crate) fn anchored_items(&self) -> io::Result<Vec<DefPath>> {
         match self.module.as_deref() {
             Some(MaterializedModule::Recipe { sites, .. }) => Ok(sites.anchored_items()),
@@ -294,6 +305,14 @@ impl InstanceBody {
     }
 }
 impl InstanceSet {
+    /// A set that keeps each materialised module as a compact recipe and
+    /// otherwise walks as the default set does.
+    pub(crate) fn compact() -> Self {
+        Self {
+            compact_recipe: true,
+            ..Self::default()
+        }
+    }
     pub(crate) fn for_reach(compact_recipe: bool) -> Self {
         Self {
             summarize_foreign: true,

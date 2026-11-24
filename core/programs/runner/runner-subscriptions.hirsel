@@ -228,19 +228,20 @@ fn unregister_routes(mut root: Option[Box[Route]], keys: List[RouteKey]) {
     }
 }
 
-fn route_key(root: Option[Box[Route]], key: Bytes, mut hits: Map[u64, bool]) -> Result[(), Capacity] {
+fn route_hit(root: Option[Box[Route]], low: Bytes, high: Option[View[Bytes]], read_only: bool, mut hits: Map[u64, bool]) -> Result[(), Capacity] {
     let Some(node) = view root else { return Ok(()) }
-    if !end_reaches(node.max, key) { return Ok(()) }
-    route_key(node.left, key, mut hits)?
-    let low: View[Bytes] = node.key.low
-    if key < low { return Ok(()) }
-    if end_reaches(node.end, key) {
-        let read = node.key.route_position > COVER_MAX
+    if !end_reaches(node.max, low) { return Ok(()) }
+    route_hit(node.left, low, high, read_only, mut hits)?
+    let route_low: View[Bytes] = node.key.low
+    let past = match high { Some(end) => route_low >= end, None => route_low > low }
+    if past { return Ok(()) }
+    let read = node.key.route_position > COVER_MAX
+    if (read || !read_only) && end_reaches(node.end, low) {
         if read || !map.contains(hits, node.key.serial) {
             map.insert(mut hits, node.key.serial, read)
         }
     }
-    route_key(node.right, key, mut hits)
+    route_hit(node.right, low, high, read_only, mut hits)
 }
 
 fn sub_at(subs: Subscriptions, who: u64, sub: u32) -> Option[View[Sub]] in subs {
@@ -576,7 +577,13 @@ fn affected_routes[G: send, H: shareable + inert + send](b: Board[G, H], newest:
     loop {
         let page = (b.reads.changes)(b.read_handle, base, newest, low, high, publication_page_limits())?
         for ch in page.changes {
-            route_key(b.subs.root, ch.tree_key, mut hits) ?=> |problem| Full(Allocation(problem))
+            route_hit(b.subs.root, ch.tree_key, None, false, mut hits) ?=> |problem| Full(Allocation(problem))
+        }
+        for trim in page.trimmed {
+            route_hit(b.subs.root, trim.lo, Some(view trim.hi), false, mut hits) ?=> |problem| Full(Allocation(problem))
+        }
+        for id in page.bounds {
+            route_hit(b.subs.root, id, None, true, mut hits) ?=> |problem| Full(Allocation(problem))
         }
         let store.ChangePage(next: take resume, ..) = take page
         match take resume {

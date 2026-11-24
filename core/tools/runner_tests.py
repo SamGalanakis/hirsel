@@ -74,7 +74,7 @@ WIRE_TEST_INSTRUCTIONS = {
 WIDE_WINDOW_LAWS = {'runner@1/runner_calls/law_calls_session_charge'}
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'range_reruns', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released')
+SUBS = ('subs_main', 'range_reruns', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released', 'slot_images')
 
 
 def counted(name, report):
@@ -135,26 +135,26 @@ def hung_count(events, steps):
 
 
 # L4 compares the exact retained peak for 10 and 10,000 malformed calls on one build.
-def charged(args, root, work, engine, module, modes, figure, cc=None):
-    """Build programs/runner/<module>.hirsel on the charge-observation runtime and run it in
+def charged(args, root, work, engine, module, modes, figure, cc=None, entry=None):
+    """Build an entry on the charge-observation runtime and run it in
     each (argv, label) mode: {label: (exit status, figure(charge report))}, or None and the
     build's error."""
-    name = module
-    inputs_path = manifest(root, work, name, extra=[(root / f'core/programs/runner/{module}.hirsel', module)])
-    binary = work / f'{name}_{engine}'
-    charges = work / f'{name}_{engine}.json'
+    extra = () if entry else [(root / f'core/programs/runner/{module}.hirsel', module)]
+    inputs_path = manifest(root, work, module, extra=extra)
+    binary = work / f'{module}_{engine}'
+    charges = work / f'{module}_{engine}.json'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(args.observed.resolve()),
-               '--store', str(work / f'store-{name}-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
-               '--grant', 'Random', '--entry', f'runner@1/{module}/main',
+               '--store', str(work / f'store-{module}-{engine}'), '--grant', 'Clock',
+               '--grant', 'Random', '--entry', f"runner@1/{entry or module + '/main'}",
                '--logical-charge-report', str(charges), '-o', str(binary)]
     if module in ('runner_rss', 'runner_cover'):
-        command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
-        if engine == 'llvm':
-            command.append('--release')
+        command += ['--grant', 'Tasks', '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+    if engine == 'llvm':
+        command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    built = run_case(f'{name}:build', engine, command, capture_output=True, text=True)
+    built = run_case(f'{module}:build', engine, command, capture_output=True, text=True)
     if built.returncode != 0:
         return None, built.stderr[-2000:]
     figures = {}
@@ -163,9 +163,9 @@ def charged(args, root, work, engine, module, modes, figure, cc=None):
         charges.unlink(missing_ok=True)
         command = [str(binary), mode]
         if module == 'runner_rss':
-            peak = work / f'{name}_{engine}_{label}.rss'
+            peak = work / f'{module}_{engine}_{label}.rss'
             command = ['/usr/bin/time', '-f', '%M', '-o', str(peak), *command]
-        run = run_case(f'{name}:{label}', engine, command, capture_output=True)
+        run = run_case(f'{module}:{label}', engine, command, capture_output=True)
         figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
         if run.returncode:
             figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
@@ -186,19 +186,16 @@ def l4_retained(args, root, work, engine):
     return held, figures
 
 
-# L20 (RUNNER-SPEC v2.11 §8, cover_only_retention): runner_cover.hirsel's program, linked
-# with core/tools/runner_mark.c, which records the checkpoint "subscribed" when the client
-# has dropped its initial Batch. The program stores 1,954 rows and holds one subscription,
-# whose Cover spans 10 rows (mode 0) or all 1,954 (mode 1). Both exit 0 and the
-# checkpoint's retained_bytes (live backing requests at that moment) are equal: a
-# subscription that keeps a copy of its covered rows raises mode 1's.
+# L20 uses runner_mark.c to observe retained bytes after dropping the initial Batch.
+# The Table covers span 10 or all 1,954 rows. The Log covers select windows of 10
+# over Logs of 100 and 100,000 rows, or a window of 100 over the larger Log.
 def subscribed_bytes(report):
     marks = [p for p in report['phases'] if p['name'] == 'subscribed']
     return marks[0]['retained_bytes'] if len(marks) == 1 else None
 
 
-def l20_retained(args, root, work, engine):
-    name = 'runner_cover'
+def l20_retained(args, root, work, engine, modes=(('0', 'ten'), ('1', 'all')), entry=None):
+    name = 'slot_image_retention' if entry else 'runner_cover'
     cc = c_compiler(args)
     support = work / f'{name}_mark_{engine}.o'
     run_case(f'{name}:observer', engine, [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
@@ -207,12 +204,11 @@ def l20_retained(args, root, work, engine):
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
                        + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
     wrapper.chmod(0o755)
-    figures, error = charged(args, root, work, engine, 'runner_cover', (('0', 'ten'), ('1', 'all')),
-                             subscribed_bytes, wrapper)
+    figures, error = charged(args, root, work, engine, name, modes, subscribed_bytes, wrapper, entry)
     if figures is None:
         return None, {'build': error}
-    ran = figures['ten'][0] == 0 and figures['all'][0] == 0 and figures['ten'][1] is not None and figures['all'][1] is not None
-    return ran and figures['ten'][1] == figures['all'][1], figures if ran else {'run': figures}
+    samples = [figures[label] for _, label in modes]
+    return all(status == 0 and size is not None and size == samples[0][1] for status, size in samples), figures
 
 
 def p19_module(path):
@@ -1462,6 +1458,8 @@ def main():
                     row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
                     held, figures = l20_retained(args, root, work, engine)
                     row(engine=engine, law='l20_cover_only_retention', passed=bool(held), result=figures)
+                    held, figures = l20_retained(args, root, work, engine, (('0', 'short'), ('1', 'long'), ('2', 'wide')), 'runner/slot_image_retention')
+                    row(engine=engine, law='l20_tail_retention', passed=bool(held), result=figures)
                     try:
                         row(engine=engine, law='l1_crash', passed=True,
                             result=crashes(args, root, work, engine, engine))

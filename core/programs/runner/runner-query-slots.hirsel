@@ -1,4 +1,4 @@
-pub type SlotKind: codec + send = Table()
+pub type SlotKind: codec + send = Table() | Cell() | Log()
 
 pub type SlotSchema: codec + send {
     name: String,
@@ -8,8 +8,9 @@ pub type SlotSchema: codec + send {
 }
 
 type BoundSlot: send {
-    table: (store.StoreId, u32),
-    publish_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error]
+    collection: (store.StoreId, u32),
+    publish_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error],
+    tail_window: Option[own[send] fn(store.Reader, store.Snapshot, u64) -> Result[store.LogBounds, store.Error] waits]
 }
 
 type SlotDeclaration[H: send]: send {
@@ -26,33 +27,77 @@ pub fn slots[H: send]() -> Slots[H] {
     Slots(declared: list.new(), numbers: map.new())
 }
 
-pub fn slot[H: send, K: codec, V: codec](mut s: Slots[H], take name: String,
-    select: StaticFn[fn(H) -> store.Table[K, V]]) -> Result[(), RegisterError] {
+fn declare_slot[H: send, V: codec](mut s: Slots[H], take name: String, kind: SlotKind, take key: Bytes,
+    value_codec: std.codec.Codec[V], take bind: own[send] fn(H, SlotSchema) -> Result[BoundSlot, RegisterError]) -> Result[(), RegisterError] {
     let position = list.len(s.declared)
     if position == 65536u64 { return Error(Bounds) }
     if map.contains(s.numbers, name) {
         let duplicate: Bytes = clone(string.as_bytes(name))
         return Error(AlreadyRegistered(take duplicate))
     }
+    let value = std.codec.schema(value_codec) ?=> |_| Bounds
+    list.reserve(mut s.declared, 1u64)
+    map.insert(mut s.numbers, clone(name), int.truncate(position))
+    let description = SlotSchema(name: take name, kind: kind, key: take key, value: take value)
+    list.push(mut s.declared, SlotDeclaration(description: take description, bind: take bind))
+    Ok(())
+}
+
+fn check_slot_schema(actual: store.RowSchemas, definition: SlotSchema) -> Result[(), RegisterError] {
+    if actual.key != definition.key || actual.value != definition.value { return Error(Bounds) }
+    Ok(())
+}
+
+pub fn slot[H: send, K: codec, V: codec](mut s: Slots[H], take name: String,
+    select: StaticFn[fn(H) -> store.Table[K, V]]) -> Result[(), RegisterError] {
     let key_codec: std.codec.Key[K] = std.codec.key_of()
     let key = std.codec.key_schema(key_codec) ?=> |_| Bounds
     let value_codec: std.codec.Codec[V] = std.codec.of()
-    let value = std.codec.schema(value_codec) ?=> |_| Bounds
     let bind = fn(h: H, definition: SlotSchema) -> Result[BoundSlot, RegisterError] {
         let table = (code.callable(select))(h)
-        let schemas = store.row_schemas(table)
-        if schemas.key != definition.key || schemas.value != definition.value { return Error(Bounds) }
+        check_slot_schema(store.row_schemas(table), definition)?
         let identity = store.table_identity(table)
         let publication = fn(change: store.Change) -> Result[Option[Bytes], store.Error] {
             store.published_value(table, change)
         }
-        Ok(BoundSlot(table: identity, publish_value: take publication))
+        Ok(BoundSlot(collection: identity, publish_value: take publication, tail_window: None))
     }
-    list.reserve(mut s.declared, 1u64)
-    map.insert(mut s.numbers, clone(name), int.truncate(position))
-    let description = SlotSchema(name: take name, kind: Table(), key: take key, value: take value)
-    list.push(mut s.declared, SlotDeclaration(description: take description, bind: take bind))
-    Ok(())
+    declare_slot(mut s, take name, Table(), take key, value_codec, take bind)
+}
+
+pub fn slot_cell[H: send, V: codec](mut s: Slots[H], take name: String,
+    select: StaticFn[fn(H) -> store.Cell[V]]) -> Result[(), RegisterError] {
+    let value_codec: std.codec.Codec[V] = std.codec.of()
+    let bind = fn(h: H, definition: SlotSchema) -> Result[BoundSlot, RegisterError] {
+        let cell = (code.callable(select))(h)
+        check_slot_schema(store.cell_schemas(cell), definition)?
+        let identity = store.cell_identity(cell)
+        let publication = fn(change: store.Change) -> Result[Option[Bytes], store.Error] {
+            store.published_cell(cell, change)
+        }
+        Ok(BoundSlot(collection: identity, publish_value: take publication, tail_window: None))
+    }
+    declare_slot(mut s, take name, Cell(), list.new(), value_codec, take bind)
+}
+
+pub fn slot_log[H: send, V: codec](mut s: Slots[H], take name: String,
+    select: StaticFn[fn(H) -> store.Log[V]]) -> Result[(), RegisterError] {
+    let key = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Bounds
+    let value_codec: std.codec.Codec[V] = std.codec.of()
+    let bind = fn(h: H, definition: SlotSchema) -> Result[BoundSlot, RegisterError] {
+        let log = (code.callable(select))(h)
+        check_slot_schema(store.log_schemas(log), definition)?
+        let identity = store.log_identity(log)
+        let tail_log: store.Log[V] = clone(log)
+        let publication = fn(change: store.Change) -> Result[Option[Bytes], store.Error] {
+            store.published_log(log, change)
+        }
+        let window = fn(reader: store.Reader, at: store.Snapshot, length: u64) -> Result[store.LogBounds, store.Error] waits {
+            store.tail_window(reader, at, tail_log, length)
+        }
+        Ok(BoundSlot(collection: identity, publish_value: take publication, tail_window: Some(take window)))
+    }
+    declare_slot(mut s, take name, Log(), take key, value_codec, take bind)
 }
 
 pub fn table_slot[H: send, K: codec, V: codec](take name: String, select: StaticFn[fn(H) -> store.Table[K, V]]) -> Result[Slots[H], RegisterError] {
@@ -73,9 +118,10 @@ pub const COVER_MAX: u64 = 16u64
 
 type CoverSelection: send {
     name: String,
-    table: (store.StoreId, u32),
+    collection: (store.StoreId, u32),
     low: Bytes,
-    high: Bytes
+    high: Bytes,
+    tail: Option[u64]
 }
 
 pub opaque type CoverSet: send { spans: List[CoverSelection] }
@@ -92,8 +138,46 @@ pub fn covers() -> CoverSet {
 pub fn cover[K, V](mut c: CoverSet, take name: String, t: store.Table[K, V], lo: store.Bound[K], hi: store.Bound[K]) -> Result[(), store.Error] {
     if list.len(c.spans) == COVER_MAX { return Error(Limit(Key)) }
     let Span(take low, take high) = store.key_span(t, lo, hi)? else { fail("store.key_span returned a point") }
-    let table = store.table_identity(t)
-    list.push(mut c.spans, CoverSelection(name: take name, table: table, low: take low, high: take high))
+    list.push(mut c.spans, CoverSelection(name: take name, collection: store.table_identity(t), low: take low, high: take high, tail: None))
+    Ok(())
+}
+
+fn cover_prefix(id: u32, width: u64) -> Bytes {
+    let mut key: Bytes = list.with_capacity(width)
+    list.put_word_be(mut key, id)
+    take key
+}
+
+fn cover_log_key(id: u32, seq: u64) -> Bytes {
+    let mut key = cover_prefix(id, 12u64)
+    list.put_word_be(mut key, seq)
+    take key
+}
+
+pub fn cover_cell[V](mut c: CoverSet, take name: String, cell: store.Cell[V]) -> Result[(), store.Error] {
+    if list.len(c.spans) == COVER_MAX { return Error(Limit(Key)) }
+    let identity = store.cell_identity(cell)
+    let mut high = cover_prefix(identity.1, 5u64)
+    list.push(mut high, 0u8)
+    list.push(mut c.spans, CoverSelection(name: take name, collection: identity,
+        low: cover_prefix(identity.1, 4u64), high: take high, tail: None))
+    Ok(())
+}
+
+pub fn cover_log[V](mut c: CoverSet, take name: String, log: store.Log[V], lo: u64, hi: u64) -> Result[(), store.Error] {
+    if list.len(c.spans) == COVER_MAX { return Error(Limit(Key)) }
+    let identity = store.log_identity(log)
+    list.push(mut c.spans, CoverSelection(name: take name, collection: identity,
+        low: cover_log_key(identity.1, lo), high: cover_log_key(identity.1, hi), tail: None))
+    Ok(())
+}
+
+pub fn cover_tail[V](mut c: CoverSet, take name: String, log: store.Log[V], t: u64) -> Result[(), store.Error] {
+    if t == 0u64 { return Error(Missing("n")) }
+    if list.len(c.spans) == COVER_MAX { return Error(Limit(Key)) }
+    let identity = store.log_identity(log)
+    list.push(mut c.spans, CoverSelection(name: take name, collection: identity,
+        low: cover_prefix(identity.1, 4u64), high: cover_prefix(identity.1 + 1u32, 4u64), tail: Some(t)))
     Ok(())
 }
 
@@ -106,40 +190,55 @@ pub fn table_answer[K, V](take name: String, t: store.Table[K, V], lo: store.Bou
     }
 }
 
-type Cover: shareable + send { slot: u16, low: Bytes, high: Bytes }
+type Cover: shareable + send { slot: u16, low: Bytes, high: Bytes, tail: Option[u64] }
 
 fn compare_covers(a: Cover, b: Cover) -> Order {
     if a.slot < b.slot { return Less }
     if a.slot > b.slot { return Greater }
-    list.compare_bytes(a.low, b.low)
+    match (a.tail, b.tail) {
+        (None, Some(_)) => Less,
+        (Some(_), None) => Greater,
+        _ => list.compare_bytes(a.low, b.low),
+    }
 }
 
 fn matched_covers[H: send](take c: CoverSet, declared: Slots[H], bindings: List[BoundSlot]) -> Result[List[Cover], Outcome] {
     let CoverSet(spans: take selections) = take c
     let mut ordered: List[Cover] = list.with_capacity(list.len(selections))
     for take selection in take selections {
-        let CoverSelection(name: take name, table, low: take low, high: take high) = take selection
+        let CoverSelection(name: take name, collection, low: take low, high: take high, tail) = take selection
         let Some(slot_id) = option.copied(map.get(declared.numbers, name)) else { return Error(Failed(Raised(5u32))) }
-        let expected = bindings[int.widen(slot_id)].table
-        if table.0.hi != expected.0.hi || table.0.lo != expected.0.lo || table.1 != expected.1 {
+        let expected = bindings[int.widen(slot_id)].collection
+        if collection != expected {
             return Error(Failed(Raised(5u32)))
         }
-        if low < high { list.push(mut ordered, Cover(slot: slot_id, low: take low, high: take high)) }
+        if low < high { list.push(mut ordered, Cover(slot: slot_id, low: take low, high: take high, tail: tail)) }
     }
+    Ok(merge_covers(take ordered))
+}
+
+fn merge_covers(take collected: List[Cover]) -> List[Cover] {
+    let mut ordered = take collected
     list.sort_stable(mut ordered, compare_covers)
     let mut merged: List[Cover] = list.with_capacity(list.len(ordered))
     for take span in take ordered {
         let count = list.len(merged)
-        if count != 0u64 && span.slot == merged[count - 1u64].slot && span.low <= merged[count - 1u64].high {
-            if span.high > merged[count - 1u64].high {
-                let Cover(high: take high, ..) = take span
-                merged[count - 1u64].high = take high
+        if count != 0u64 && span.slot == merged[count - 1u64].slot {
+            if let (Some(a), Some(b)) = (merged[count - 1u64].tail, span.tail) {
+                merged[count - 1u64].tail = Some(order.max(a, b))
+                continue
             }
-        } else {
-            list.push(mut merged, take span)
+            if span.tail == None && span.low <= merged[count - 1u64].high {
+                if span.high > merged[count - 1u64].high {
+                    let Cover(high: take high, ..) = take span
+                    merged[count - 1u64].high = take high
+                }
+                continue
+            }
         }
+        list.push(mut merged, take span)
     }
-    Ok(take merged)
+    take merged
 }
 
 pub fn query_result_schema[H: send, R](value: std.codec.Codec[R], s: Slots[H]) -> Result[Bytes, std.codec.EncodeError] {

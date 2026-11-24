@@ -13,6 +13,14 @@ pub opaque type Cell[V]: shareable + send {
     key: Arc[Bytes]
 }
 
+pub fn cell_identity[V](c: Cell[V]) -> (StoreId, u32) {
+    (c.binding.store, c.binding.id)
+}
+
+pub fn cell_schemas[V](c: Cell[V]) -> Arc[RowSchemas] {
+    arc.share(c.binding.readers.schemas)
+}
+
 pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Cell[V], Error] {
     let cell_binding = declare_value_collection(mut d, name, 3, list.new(), take value)?
     let key = arc.new(prefix(cell_binding.id)?)

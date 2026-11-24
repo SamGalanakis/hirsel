@@ -7,6 +7,14 @@ pub type LogBounds: shareable + send {
     next: u64
 }
 
+pub fn log_identity[V](l: Log[V]) -> (StoreId, u32) {
+    (l.binding.store, l.binding.id)
+}
+
+pub fn log_schemas[V](l: Log[V]) -> Arc[RowSchemas] {
+    arc.share(l.binding.readers.schemas)
+}
+
 pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Log[V], Error] {
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
     Ok(Log(binding: declare_value_collection(mut d, name, 4, schema, take value)?))

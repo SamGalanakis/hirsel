@@ -1,0 +1,407 @@
+type ImageLawHandles: shareable + send {
+    first: store.Log[u64],
+    second: store.Log[u64],
+    empty: store.Log[u64],
+    setting: store.Cell[u64]
+}
+
+fn image_law_schema(mut d: store.Declare) -> Result[ImageLawHandles, store.Error] {
+    let first = store.declare_log(mut d, "first", std.codec.of_u64())?
+    let second = store.declare_log(mut d, "second", std.codec.of_u64())?
+    let empty = store.declare_log(mut d, "empty", std.codec.of_u64())?
+    let setting = store.declare_cell(mut d, "setting", std.codec.of_u64())?
+    Ok(ImageLawHandles(first: take first, second: take second, empty: take empty, setting: take setting))
+}
+
+fn image_first(h: ImageLawHandles) -> store.Log[u64] { clone(h.first) }
+fn image_second(h: ImageLawHandles) -> store.Log[u64] { clone(h.second) }
+fn image_empty(h: ImageLawHandles) -> store.Log[u64] { clone(h.empty) }
+fn image_setting(h: ImageLawHandles) -> store.Cell[u64] { clone(h.setting) }
+
+type ImageLawCase: codec = Mixed | TwoTails | Grow | TailOnly | Move | Bounds | Last | EmptyCover | CellCover | Probe(bool, u64) | FixedTrim
+
+fn image_law_query(tx: store.Tx, h: ImageLawHandles, take test: ImageLawCase) -> Result[Answer[u64], Capacity] {
+    let mut selected = covers()
+    let value = match test {
+        Mixed => {
+            result.unwrap(cover_log(mut selected, "first", h.first, 85u64, 95u64))
+            result.unwrap(cover_tail(mut selected, "first", h.first, 10u64))
+            0u64
+        },
+        TwoTails => {
+            result.unwrap(cover_tail(mut selected, "first", h.first, 2u64))
+            result.unwrap(cover_tail(mut selected, "first", h.first, 5u64))
+            0u64
+        },
+        Grow => {
+            let n = option.unwrap(result.unwrap(store.cell_fetch(tx, h.setting)))
+            result.unwrap(cover_log(mut selected, "first", h.first, 0u64, 5u64))
+            result.unwrap(cover_tail(mut selected, "first", h.first, n))
+            0u64
+        },
+        TailOnly => {
+            let n = option.unwrap(result.unwrap(store.cell_fetch(tx, h.setting)))
+            result.unwrap(cover_tail(mut selected, "first", h.first, n))
+            0u64
+        },
+        Move => {
+            let which = option.unwrap(result.unwrap(store.cell_fetch(tx, h.setting)))
+            match which {
+                0u64 => result.unwrap(cover_tail(mut selected, "first", h.first, 3u64)),
+                1u64 => result.unwrap(cover_tail(mut selected, "second", h.second, 3u64)),
+                _ => result.unwrap(cover_tail(mut selected, "first", h.second, 3u64)),
+            }
+            which
+        },
+        Bounds => {
+            let ends = result.unwrap(store.bounds(tx, h.empty))
+            result.unwrap(cover_tail(mut selected, "empty", h.empty, 5u64))
+            ends.next - ends.first
+        },
+        Last => {
+            let _ = result.unwrap(store.last(tx, h.empty))
+            0u64
+        },
+        EmptyCover => {
+            result.unwrap(cover_tail(mut selected, "empty", h.empty, 5u64))
+            0u64
+        },
+        CellCover => {
+            result.unwrap(cover_cell(mut selected, "setting", h.setting))
+            0u64
+        },
+        Probe(long, length) => {
+            if long {
+                result.unwrap(cover_tail(mut selected, "first", h.first, length))
+            } else {
+                result.unwrap(cover_tail(mut selected, "second", h.second, length))
+            }
+            0u64
+        },
+        FixedTrim => {
+            result.unwrap(cover_log(mut selected, "first", h.first, 9995u64, 10005u64))
+            0u64
+        },
+    }
+    Ok(Answer(value: value, covers: take selected))
+}
+
+fn image_law_place(mut r: Registry[(), ImageLawHandles]) -> Result[(), RegisterError] {
+    let mut named: Slots[ImageLawHandles] = slots()
+    slot_log(mut named, "first", code.describe(image_first))?
+    slot_log(mut named, "second", code.describe(image_second))?
+    slot_log(mut named, "empty", code.describe(image_empty))?
+    slot_cell(mut named, "setting", code.describe(image_setting))?
+    query(mut r, code.describe(image_law_query), take named, 131072u64, DEFAULT_STEPS)
+}
+
+fn image_law_db(clock: Clock, random: Random) -> (store.Db, ImageLawHandles) waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let handles = result.unwrap(image_law_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
+    (take db, take handles)
+}
+
+fn image_law_board(db: store.Db, h: ImageLawHandles) -> (Board[(), ImageLawHandles], Bytes) waits {
+    let mut registered = result.unwrap(placed(code.describe(image_law_place), 1048576u64))
+    result.unwrap(bind_query_slots(mut registered, h))
+    let key = {
+        let entry = view registered.exported[0u64]
+        entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
+    }
+    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),
+        reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    (take b, take key)
+}
+
+fn image_law_sub(mut b: Board[(), ImageLawHandles], key: Bytes, session: u64, test: ImageLawCase) -> Owe waits {
+    let mut input: Bytes = list.new()
+    let codec: std.codec.Codec[ImageLawCase] = std.codec.of()
+    result.unwrap(std.codec.encode(codec, test, mut input))
+    at_base(mut b, session, 1u32, clone(key), take input)
+}
+
+type ImageLawEdit: shareable + send = Fill(u64, u64) | Trim(u64) | Setting(u64) | Clear | AdvanceEmpty
+
+fn image_law_write(mut db: store.Db, h: ImageLawHandles, edit: ImageLawEdit) waits {
+    let committed = store.run(mut db, None, (store.copy_env(h), edit), fn(mut tx, state) -> Result[(), store.Error] {
+        let (handles, operation) = view state
+        match operation {
+            Fill(first, second) => {
+                let first_seq = store.bounds(tx, handles.first)?.next
+                for next in first_seq .. first_seq + first {
+                    let _ = store.append(mut tx, handles.first, next + 1000u64)?
+                }
+                let other_start = store.bounds(tx, handles.second)?.next
+                for next in other_start .. other_start + second {
+                    let _ = store.append(mut tx, handles.second, next + 2000u64)?
+                }
+                Ok(())
+            },
+            Trim(floor) => store.trim_before(mut tx, handles.first, floor),
+            Setting(n) => store.cell_set(mut tx, handles.setting, n),
+            Clear => store.cell_clear(mut tx, handles.setting),
+            AdvanceEmpty => {
+                let _ = store.append(mut tx, handles.empty, 99u64)?
+                store.trim_before(mut tx, handles.empty, 1u64)
+            },
+        }
+    })
+    if let Ok(Committed(_)) = committed {} else { fail("slot image fixture did not commit") }
+}
+
+// The first three collections have ids 1, 2, and 3 in declaration order.
+// The expected row carries an independently constructed logical key and value.
+fn image_law_key(id: u8, seq: Option[u64]) -> Bytes {
+    let mut key: Bytes = list.new()
+    for _ in 0u64 .. 3u64 { list.push(mut key, 0u8) }
+    list.push(mut key, id)
+    if let Some(n) = seq { list.put_word_be(mut key, n) }
+    take key
+}
+
+fn image_law_number(n: u64) -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_le(mut raw, n)
+    take raw
+}
+
+fn image_law_rows(mut rows: List[SlotRow], position: u16, id: u8, lo: u64, hi: u64, inserting: bool) {
+    for seq in lo .. hi {
+        let value = if inserting { Some(image_law_number(1000u64 * int.widen(id) + seq)) } else { None }
+        list.push(mut rows, SlotRow(slot: position, key: image_law_key(id, Some(seq)), value: take value))
+    }
+}
+
+fn image_law_expect(owing: Owe, rows: List[SlotRow], value: Option[u64], complete: bool, message: String) -> Result[(), String] {
+    let Some(payload) = group_payload(owing) else { return Error(clone(message)) }
+    let expected = match value { Some(n) => image_law_number(n), None => list.new() }
+    if owing.reset || list.len(owing.ended) != 0u64 || (list.len(owing.complete) == 1u64) != complete ||
+        payload.value != expected || list.len(payload.rows) != list.len(rows) {
+        return Error(clone(message))
+    }
+    for i in 0u64 .. list.len(rows) {
+        let got = view payload.rows[i]
+        let want = view rows[i]
+        if got.slot != want.slot || got.key != want.key || got.value != want.value { return Error(clone(message)) }
+    }
+    Ok(())
+}
+
+fn image_law_one(take owing: List[Owe]) -> Owe {
+    if list.len(owing) != 1u64 { fail("expected exactly one publisher update") }
+    let mut pending = take owing
+    option.unwrap(list.pop(mut pending))
+}
+
+fn image_law_cover_round(mut b: Board[(), ImageLawHandles], db: store.Db) -> List[Owe] waits {
+    b.newest = Some(store.snapshot(db))
+    let mut fenced = Fenced(sessions: map.new())
+    let updates = round(mut b, mut fenced)
+    if map.len(fenced.sessions) != 0u64 { fail("cover-only update fenced a session") }
+    take updates
+}
+
+// L20: overlapping fixed spans and windows, and two tails under one slot.
+fn image_law_cover_only(clock: Clock, random: Random) -> Result[(), String] waits {
+    let (take opened, take h) = image_law_db(clock, random)
+    let mut db = take opened
+    image_law_write(mut db, h, Fill(100u64, 0u64))
+    let (take configured, take key) = image_law_board(db, h)
+    let mut board = take configured
+    let mut want: List[SlotRow] = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 85u64, 100u64, true)
+    image_law_expect(image_law_sub(mut board, key, 1u64, Mixed), want, Some(0u64), true, "mixed Subscribe image")?
+    image_law_expect(image_law_sub(mut board, key, 2u64, Mixed), want, Some(0u64), true, "mixed join image")?
+    if !mark_due(mut board.subs, 2u64, 1u32) { return Error("mixed subscriber did not become due") }
+    let initial_version = store.version(board.base)
+    image_law_expect(repair_entry(mut board, 2u64, 1u32, initial_version), want, Some(0u64), true, "mixed repair image")?
+    let _ = remove_sub(mut board.subs, 2u64, 1u32)
+    image_law_write(mut db, h, Trim(92u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 85u64, 92u64, false)
+    image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "mixed trim lost or duplicated deletions")?
+    image_law_write(mut db, h, Fill(3u64, 0u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 100u64, 103u64, true)
+    image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "mixed append dropped a fixed key")?
+    result.unwrap(store.close(take db))
+
+    let (take short_opened, take short_h) = image_law_db(clock, random)
+    let mut short_db = take short_opened
+    image_law_write(mut short_db, short_h, Fill(10u64, 0u64))
+    let (take short_configured, take short_key) = image_law_board(short_db, short_h)
+    let mut short_board = take short_configured
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 5u64, 10u64, true)
+    image_law_expect(image_law_sub(mut short_board, short_key, 1u64, TwoTails), want, Some(0u64), true, "widest tail Subscribe image")?
+    image_law_write(mut short_db, short_h, Fill(1u64, 0u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 5u64, 6u64, false)
+    image_law_rows(mut want, 0u16, 1u8, 10u64, 11u64, true)
+    image_law_expect(image_law_one(image_law_cover_round(mut short_board, short_db)), want, None, false, "two tails did not give the widest window's difference")?
+    result.unwrap(store.close(take short_db))
+    Ok(())
+}
+
+fn image_law_resize(clock: Clock, random: Random) -> Result[(), String] waits {
+    let (take opened, take h) = image_law_db(clock, random)
+    let mut db = take opened
+    image_law_write(mut db, h, Fill(10u64, 0u64))
+    image_law_write(mut db, h, Setting(3u64))
+    let (take configured, take key) = image_law_board(db, h)
+    let mut board = take configured
+    let mut want: List[SlotRow] = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 0u64, 5u64, true)
+    image_law_rows(mut want, 0u16, 1u8, 7u64, 10u64, true)
+    image_law_expect(image_law_sub(mut board, key, 1u64, Grow), want, Some(0u64), true, "mixed rerun initial image")?
+    image_law_write(mut db, h, Setting(10u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 5u64, 7u64, true)
+    image_law_expect(image_law_one(step(mut board, db)), want, None, false, "tail grew into already covered fixed keys")?
+    image_law_write(mut db, h, Setting(3u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 5u64, 7u64, false)
+    image_law_expect(image_law_one(step(mut board, db)), want, None, false, "shrinking tail deleted keys still covered")?
+    let _ = remove_sub(mut board.subs, 1u64, 1u32)
+    image_law_write(mut db, h, Setting(1u64))
+    let _ = step(mut board, db)
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 9u64, 10u64, true)
+    image_law_expect(image_law_sub(mut board, key, 1u64, TailOnly), want, Some(0u64), true, "tail-only initial image")?
+    image_law_write(mut db, h, Setting(3u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 7u64, 9u64, true)
+    image_law_expect(image_law_one(step(mut board, db)), want, None, false, "tail-only rerun used equal lengths")?
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
+fn image_law_move(clock: Clock, random: Random) -> Result[(), String] waits {
+    let (take opened, take h) = image_law_db(clock, random)
+    let mut db = take opened
+    image_law_write(mut db, h, Fill(5u64, 2u64))
+    image_law_write(mut db, h, Setting(0u64))
+    let (take configured, take key) = image_law_board(db, h)
+    let mut board = take configured
+    let mut want: List[SlotRow] = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 2u64, 5u64, true)
+    image_law_expect(image_law_sub(mut board, key, 1u64, Move), want, Some(0u64), true, "Log move initial image")?
+    image_law_write(mut db, h, Setting(1u64))
+    want = list.new()
+    image_law_rows(mut want, 0u16, 1u8, 2u64, 5u64, false)
+    image_law_rows(mut want, 1u16, 2u8, 0u64, 2u64, true)
+    image_law_expect(image_law_one(step(mut board, db)), want, Some(1u64), false, "Log move split rows or value")?
+    image_law_write(mut db, h, Setting(2u64))
+    let refused = image_law_one(step(mut board, db))
+    if list.len(refused.groups) != 0u64 || list.len(refused.ended) != 1u64 {
+        return Error("another Log satisfied a bound slot")
+    }
+    let Failed(Raised(5u32)) = refused.ended[0u64].outcome else { return Error("wrong Log did not raise 5") }
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
+fn image_law_bounds_and_cell(clock: Clock, random: Random) -> Result[(), String] waits {
+    let (take opened, take h) = image_law_db(clock, random)
+    let mut db = take opened
+    image_law_write(mut db, h, Setting(9u64))
+    let (take configured, take key) = image_law_board(db, h)
+    let mut board = take configured
+    image_law_expect(image_law_sub(mut board, key, 1u64, Bounds), list.new(), Some(0u64), true, "bounds query initial image")?
+    image_law_expect(image_law_sub(mut board, key, 2u64, Last), list.new(), Some(0u64), true, "empty last query initial image")?
+    image_law_expect(image_law_sub(mut board, key, 3u64, EmptyCover), list.new(), Some(0u64), true, "empty tail initial image")?
+    let Mailbox(rounds: take reserved, ..) = result.unwrap(mailbox(8u64))
+    let mut rounds = take reserved
+    let mut joined: List[Joiner] = list.new()
+    let point = failed_read_owner(mut joined, mut rounds, 1u64)
+    let span = failed_read_owner(mut joined, mut rounds, 2u64)
+    let cover_only = failed_read_owner(mut joined, mut rounds, 3u64)
+    let base = store.version(board.base)
+    fence_round(mut joined, Fenced(sessions: map.new()), base, mut rounds)
+
+    image_law_write(mut db, h, AdvanceEmpty)
+    board.newest = Some(store.snapshot(db))
+    let mut marks = Fenced(sessions: map.new())
+    let delta = round(mut board, mut marks)
+    let version = store.version(board.base)
+    fence_round(mut joined, take marks, version, mut rounds)
+    if version <= base || latest.read(rounds.round).at != version ||
+        latest.read(point.fence).latest != version || latest.read(span.fence).latest != version ||
+        latest.read(cover_only.fence).latest != 0u64 || list.len(delta) != 0u64 {
+        return Error("bounds-only commit must fence just the Point and Span readers and sends no group")
+    }
+    let mut want: List[SlotRow] = list.new()
+    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(9u64))))
+    image_law_expect(image_law_sub(mut board, key, 4u64, CellCover), want, Some(0u64), true, "inline Cell initial image")?
+    image_law_write(mut db, h, Setting(12u64))
+    want = list.new()
+    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: Some(image_law_number(12u64))))
+    image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "Cell update codec")?
+    image_law_write(mut db, h, Clear)
+    want = list.new()
+    list.push(mut want, SlotRow(slot: 3u16, key: image_law_key(4u8, None), value: None))
+    image_law_expect(image_law_one(image_law_cover_round(mut board, db)), want, None, false, "Cell deletion")?
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
+fn image_law_cases(clock: Clock, random: Random) -> Result[(), String] waits {
+    image_law_cover_only(clock, random)?
+    image_law_resize(clock, random)?
+    image_law_move(clock, random)?
+    image_law_bounds_and_cell(clock, random)
+}
+
+@test
+fn test_slot_images(clock: Clock, random: Random) -> Result[(), String] waits {
+    image_law_cases(clock, random)
+}
+
+pub fn law_slot_images(clock: Clock, random: Random) -> bool waits {
+    match image_law_cases(clock, random) {
+        Ok(()) => true,
+        Error(take message) => fail(take message),
+    }
+}
+
+// The observer measures both fixtures with the same two Logs in memory. The
+// wider third window changes the number of covered rows at the same key width.
+pub fn slot_image_retention(clock: Clock, random: Random, argv: Args) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0u64) else { return Error(Exit(status: 2)) }
+    let long = mode != "0"
+    let length = if mode == "2" { 100u64 } else { 10u64 }
+    let (take opened, take h) = image_law_db(clock, random)
+    let mut db = take opened
+    image_law_write(mut db, h, Fill(0u64, 100u64))
+    for _ in 0u64 .. 1000u64 {
+        image_law_write(mut db, h, Fill(100u64, 0u64))
+    }
+    let (take initial, take key) = image_law_board(db, h)
+    let mut board = take initial
+    let mut want: List[SlotRow] = list.new()
+    let (position, id, next) = if long { (0u16, 1u8, 100000u64) } else { (1u16, 2u8, 100u64) }
+    image_law_rows(mut want, position, id, next - length, next, true)
+    image_law_expect(image_law_sub(mut board, key, 1u64, Probe(long, length)), want, Some(0u64), true, "retention Subscribe image") ?=> |_| Exit(status: 3)
+    drop(take want)
+    task.check_cancel()
+    if mode == "1" {
+        image_law_write(mut db, h, Fill(3u64, 0u64))
+        let mut delta: List[SlotRow] = list.new()
+        image_law_rows(mut delta, 0u16, 1u8, 99990u64, 99993u64, false)
+        image_law_rows(mut delta, 0u16, 1u8, 100000u64, 100003u64, true)
+        image_law_expect(image_law_one(image_law_cover_round(mut board, db)), delta, None, false, "large Log append") ?=> |_| Exit(status: 4)
+        delta = list.new()
+        image_law_rows(mut delta, 0u16, 1u8, 9995u64, 10005u64, true)
+        image_law_expect(image_law_sub(mut board, key, 2u64, FixedTrim), delta, Some(0u64), true, "fixed range before trim") ?=> |_| Exit(status: 5)
+        image_law_write(mut db, h, Trim(10000u64))
+        delta = list.new()
+        image_law_rows(mut delta, 0u16, 1u8, 9995u64, 10000u64, false)
+        let owing = image_law_one(image_law_cover_round(mut board, db))
+        if owing.session != 2u64 { return Error(Exit(status: 6)) }
+        image_law_expect(owing, delta, None, false, "large trim overlapped fixed range") ?=> |_| Exit(status: 7)
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

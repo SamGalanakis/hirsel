@@ -480,7 +480,7 @@ _test_suite = rule(impl = _test_suite_impl, attrs = {
 def _suite(name, tests, **kwargs):
     _test_suite(name = name, tests = tests, inputs = [test + "[inputs]" for test in tests], **kwargs)
 
-def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, host = False, native_tools = False):
+def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, host = False, native_tools = False, extra_env = {}):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
@@ -491,7 +491,7 @@ def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_obser
         name = name, harness = ":" + binary,
         args = args, data = data, cwd = ".",
         bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {}, front_observer_bin_exes = front_observer_bin_exes,
-        bin_exe_dir = BIN_EXE_DIR + "/" + name, files_env = files_env,
+        bin_exe_dir = BIN_EXE_DIR + "/" + name, files_env = files_env, extra_env = extra_env,
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs() if native_tools else {},

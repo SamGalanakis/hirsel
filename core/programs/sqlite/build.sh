@@ -12,7 +12,11 @@ stage=$(mktemp -d)
 test_dir=
 trap 'rm -rf "$stage" ${test_dir:+"$test_dir"}' EXIT
 "$compiler" inspect . --foreign-header sqlite@1/native "$@" > "$stage/native.h"
-(
+# The laws need only sqlite3.h. SQLITE_HEADER names a pinned copy of 3.54.1's
+# (Buck's //tools/buck2:sqlite-header); without it the amalgamation is fetched.
+if [ -n "$test_root" ] && [ -n "${SQLITE_HEADER:-}" ]; then
+    cp "$SQLITE_HEADER" "$stage/sqlite3.h"
+else (
     cd "$stage"
     curl --fail --silent --show-error --location \
         https://sqlite.org/2026/sqlite-amalgamation-3540100.zip -o amalgamation.zip
@@ -23,7 +27,7 @@ trap 'rm -rf "$stage" ${test_dir:+"$test_dir"}' EXIT
         exit 1
     fi
     unzip -q -j amalgamation.zip '*/sqlite3.c' '*/sqlite3.h'
-)
+) fi
 if [ -n "$test_root" ]; then
     # SQLite's public C API stays local in the shipped archive.
     "$llvm/bin/llvm-objcopy" \

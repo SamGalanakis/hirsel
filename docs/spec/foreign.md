@@ -661,6 +661,8 @@ steps, and the pinned archive:
   are the `-shm` allocation law (it needs `DIR` on a filesystem with 32 to 64 KiB free, such
   as a `tmpfs` mounted with `size=64k`), the three dead-man opener cases, the trusted-schema
   and persistent-prepare settings, `POWERSAFE_OVERWRITE` clear, and the two `xSleep`s.
+  `//:core-sqlite-native-laws` runs it on the host, in a 64 KiB tmpfs the test launcher
+  mounts, with `SQLITE_HEADER` naming 3.54.1's `sqlite3.h` in place of the fetched amalgamation.
 
 `SQLITE_THREADSAFE=1` (serialized) is chosen because tasks move between threads, helpers are
 threads, and a statement and its connection are separate handles that two tasks may use at

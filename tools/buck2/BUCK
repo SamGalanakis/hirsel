@@ -39,6 +39,18 @@ http_file(
     visibility = ["PUBLIC"],
 )
 
+# SQLite 3.54.1's sqlite3.h, byte-identical to the amalgamation core/programs/sqlite/build.sh
+# pins, for its native laws: crates.io serves it reliably, sqlite.org refused this host (503).
+http_archive(
+    name = "sqlite-header",
+    urls = ["https://static.crates.io/crates/libsqlite3-sys/0.40.0/download"],
+    type = "tar.gz",
+    sha256 = "b06e69070b7e12262b0cd90832f0a7396f142a2b330181255562decf9f0c6215",
+    strip_prefix = "libsqlite3-sys-0.40.0",
+    sub_targets = ["sqlite3/sqlite3.h"],
+    visibility = ["PUBLIC"],
+)
+
 declare_platforms(
     name = "platforms",
     constraints = ["prelude//os:linux", "prelude//cpu:x86_64"],
@@ -179,6 +191,7 @@ export_file(name = "test_executor.py", visibility = ["PUBLIC"])
 export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["PUBLIC"])
 export_file(name = "runner_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "test_inputs.py", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "core_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "cargo_units.py", mode = "reference", visibility = ["PUBLIC"])

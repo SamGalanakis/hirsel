@@ -21,17 +21,31 @@ fi
 only_lo() {
   [ "$(awk 'NR > 2 { sub(":", "", $1); print $1 }' /proc/self/net/dev)" = lo ]
 }
-if [ -z "${HIRSEL_TEST_NATIVE_EXEC:-}" ] && ! only_lo; then
+# HIRSEL_TEST_SMALL_TMPFS=BYTES asks for a tmpfs of that size, mounted in the same
+# bwrap namespace at HIRSEL_TEST_SMALL_TMPFS_DIR, for laws that need a nearly full
+# filesystem. bwrap cannot nest, so such a test runs on the host, never the pool.
+if [ -z "${HIRSEL_TEST_NATIVE_EXEC:-}" ] && { ! only_lo || [ -n "${HIRSEL_TEST_SMALL_TMPFS:-}" ]; }; then
   # The marker only stops a second entry: the namespace itself decides.
   if [ -n "${HIRSEL_TEST_NETNS_ENTERED:-}" ]; then
-    echo "test_launcher.sh: bwrap --unshare-net did not give a namespace with only lo" >&2
-    exit 2
+    if ! only_lo; then
+      echo "test_launcher.sh: bwrap --unshare-net did not give a namespace with only lo" >&2
+      exit 2
+    fi
+  else
+    if ! command -v bwrap >/dev/null 2>&1; then
+      echo "test_launcher.sh: tests run in a network namespace with only lo; this one has other interfaces and bwrap (bubblewrap) is not on PATH to enter one" >&2
+      exit 2
+    fi
+    if [ -z "${HIRSEL_TEST_SMALL_TMPFS:-}" ]; then
+      HIRSEL_TEST_NETNS_ENTERED=1 exec bwrap --unshare-net --dev-bind / / --die-with-parent sh "$0" "$@"
+    fi
+    small_tmpfs="$(mktemp -d "${TMPDIR:-/tmp}/hirsel-small-tmpfs.XXXXXX")"
+    status=0
+    HIRSEL_TEST_NETNS_ENTERED=1 HIRSEL_TEST_SMALL_TMPFS_DIR="$small_tmpfs" bwrap --unshare-net --dev-bind / / --die-with-parent \
+      --size "$HIRSEL_TEST_SMALL_TMPFS" --tmpfs "$small_tmpfs" sh "$0" "$@" || status=$?
+    rmdir "$small_tmpfs"
+    exit "$status"
   fi
-  if ! command -v bwrap >/dev/null 2>&1; then
-    echo "test_launcher.sh: tests run in a network namespace with only lo; this one has other interfaces and bwrap (bubblewrap) is not on PATH to enter one" >&2
-    exit 2
-  fi
-  HIRSEL_TEST_NETNS_ENTERED=1 exec bwrap --unshare-net --dev-bind / / --die-with-parent sh "$0" "$@"
 fi
 unset HIRSEL_TEST_NETNS_ENTERED
 root="$(pwd)"

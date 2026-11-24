@@ -84,10 +84,11 @@ def main():
     fixtures.mkdir(parents=True, exist_ok=True)
     package = work / "image_webp"
     package.mkdir(exist_ok=True)
-    for name in ("image_core", "media_container"):
+    dependencies = ("image_core", "media_container", "media_bits")
+    for name in dependencies:
         stage_dependency(codec.parent, work, name)
     (work / "hirsel.toml").write_text(
-        '[workspace]\nmembers = ["image_core", "media_container", "image_webp"]\n'
+        "[workspace]\nmembers = " + json.dumps([*dependencies, "image_webp"]) + "\n"
     )
     for filename in ("webp.hirsel", "native.hirsel", "libhirsel_webp.a"):
         shutil.copyfile(codec / filename, package / filename)
@@ -117,6 +118,12 @@ def main():
     encode_input.write_bytes(scaled)
     for mode in ("lossless", "quality"):
         reference(executable, mode, encode_input, fixtures / f"{mode}.webp")
+
+    tiny = fixtures / "tiny.webp"
+    tiny_input = fixtures / "tiny-input.rgba"
+    tiny_input.write_bytes(scaled[:4 * 4 * 4])
+    reference(executable, "tiny", tiny_input, tiny)
+    reference(executable, "still", tiny, fixtures / "tiny.rgba")
 
     first = frame((fixtures / "5.webp").read_bytes(), 256, 256, 2, 4, 30, 2)
     alpha = (fixtures / "9.webp").read_bytes()

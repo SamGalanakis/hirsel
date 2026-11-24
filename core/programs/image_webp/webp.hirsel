@@ -15,6 +15,12 @@ pub type Encoding = Lossless | Lossy(u32)
 
 pub type Error = Header(image_core.image.Error) | WrongFormat | WrongImageKind | InvalidOptions | BufferTooSmall | OutOfMemory | CodecFailure
 
+const STILL_STACK_PIXELS: u64 = 16
+
+const ANIMATION_STACK_PIXELS: u64 = 4
+
+const STACK_INPUT_BYTES: u64 = 256
+
 // A frame's end timestamp is accumulated by libwebp in a signed 32-bit int.
 // Each frame duration is 24 bits, so at most 128 frames fit for every input.
 fn bounded_limits(limits: image_core.image.Limits) -> image_core.image.Limits {
@@ -63,7 +69,7 @@ fn count(status: i32) -> Result[u32, Error] {
 /// Crop origins must be even because libwebp rounds odd origins down. Cropping
 /// precedes scaling. Both use libwebp's decoder options. Input is capped at
 /// 16 MiB and source and output are each capped at 16,777,216 pixels.
-pub fn decode(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, crop: Option[Crop], scale: Option[Size], mut rgba: Bytes) -> Result[Size, Error] {
+pub fn decode(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, crop: Option[Crop], scale: Option[Size], mut rgba: Bytes) -> Result[Size, Error] waits {
     let info = header(input, limits)?
     if info.frame_count != 1 {
         return Error(WrongImageKind)
@@ -90,7 +96,12 @@ pub fn decode(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, c
     if list.len(rgba) < 4 * area {
         return Error(BufferTooSmall)
     }
-    count(native.decode(f, input, source.width, source.height, window.x, window.y, window.size.width, window.size.height, size.width, size.height, mut rgba))?
+    let status = if pixels(source) <= STILL_STACK_PIXELS && area <= STILL_STACK_PIXELS && list.len(input) <= STACK_INPUT_BYTES {
+        native.decode(f, input, source.width, source.height, window.x, window.y, window.size.width, window.size.height, size.width, size.height, mut rgba)
+    } else {
+        native.decode_on_helper(f, input, source.width, source.height, window.x, window.y, window.size.width, window.size.height, size.width, size.height, mut rgba)
+    }
+    count(status)?
     Ok(size)
 }
 
@@ -98,21 +109,27 @@ pub fn decode(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, c
 /// The second buffer receives one little-endian u32 end timestamp in milliseconds
 /// per frame. The whole file must pass the frame cap before either buffer changes.
 /// Input is capped at 16 MiB, 128 frames and 16,777,216 pixels across all canvases.
-pub fn decode_animation(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, mut rgba: Bytes, mut timestamps: Bytes) -> Result[image_core.image.ImageInfo, Error] {
+pub fn decode_animation(f: Foreign[Webp], input: Bytes, limits: image_core.image.Limits, mut rgba: Bytes, mut timestamps: Bytes) -> Result[image_core.image.ImageInfo, Error] waits {
     let info = header(input, limits)?
     let frames: u64 = int.widen(info.frame_count)
     let size = Size(width: info.width, height: info.height)
-    if list.len(rgba) < pixels(size) * frames * 4 || list.len(timestamps) < frames * 4 {
+    let area = pixels(size) * frames
+    if list.len(rgba) < area * 4 || list.len(timestamps) < frames * 4 {
         return Error(BufferTooSmall)
     }
-    count(native.decode_animation(f, input, size.width, size.height, info.frame_count, mut rgba, mut timestamps))?
+    let status = if area <= ANIMATION_STACK_PIXELS && list.len(input) <= STACK_INPUT_BYTES {
+        native.decode_animation(f, input, size.width, size.height, info.frame_count, mut rgba, mut timestamps)
+    } else {
+        native.decode_animation_on_helper(f, input, size.width, size.height, info.frame_count, mut rgba, mut timestamps)
+    }
+    count(status)?
     Ok(info)
 }
 
 /// Encodes tightly packed RGBA into an initialized buffer and returns the byte
 /// count written. Lossless encoding preserves RGB even at zero alpha. The input
 /// is capped at 4,194,304 pixels.
-pub fn encode(f: Foreign[Webp], rgba: Bytes, size: Size, encoding: Encoding, mut output: Bytes) -> Result[u32, Error] {
+pub fn encode(f: Foreign[Webp], rgba: Bytes, size: Size, encoding: Encoding, mut output: Bytes) -> Result[u32, Error] waits {
     let area = pixels(size)
     if area == 0 || size.width > 16383 || size.height > 16383 || list.len(rgba) != 4 * area {
         return Error(InvalidOptions)

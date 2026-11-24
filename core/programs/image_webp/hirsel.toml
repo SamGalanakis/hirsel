@@ -13,5 +13,5 @@ image_core = { major = 1, path = "../image_core" }
 [foreign.native]
 symbols = "hwebp_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_webp.a", sha256 = "d240a13c7188539a99c0c84a7e5981fe1cc2acc9538952a01974bedbeedebfc1" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_webp.a", sha256 = "091f9e1ad48db0367cc1a2e5a4fefe04ac2e18c82bc6c3b46f8970a77e0ef5c4" },
 ]

@@ -15,9 +15,7 @@ fn limits(frames: u32) -> image_core.image.Limits {
     image_core.image.Limits(max_bytes: 16777216, max_pixels: 16777216, max_frames: frames, max_steps: 100000)
 }
 
-fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits {
-    let input = load(d, stem, ".webp")
-    let expected = load(d, stem, ".rgba")
+fn check_still_pixels(f: Foreign[webp.Webp], input: Bytes, expected: Bytes) waits {
     let mut rgba = buffer(list.len(expected))
     let size = result.unwrap(webp.decode(f, input, limits(1), None, None, mut rgba))
     let width: u64 = int.widen(size.width)
@@ -25,6 +23,11 @@ fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits 
     if rgba != expected || list.len(rgba) != 4 * width * height {
         fail("still RGBA differs from libwebp")
     }
+}
+
+fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits {
+    let input = load(d, stem, ".webp")
+    check_still_pixels(f, input, load(d, stem, ".rgba"))
     if scaled {
         let expected_scaled = load(d, stem, ".scaled")
         let mut rgba_scaled = buffer(list.len(expected_scaled))
@@ -34,6 +37,27 @@ fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits 
         if rgba_scaled != expected_scaled || size_scaled.width != 37 || size_scaled.height != 29 {
             fail("cropped and scaled RGBA differs from libwebp")
         }
+    }
+}
+
+fn decode_after_cancel(take args: (Foreign[webp.Webp], Bytes, Bytes, Receiver[()])) waits {
+    let (f, input, expected, take start) = take args
+    // The parent cancels before sending. Polling leaves the request pending.
+    while let Error(Empty) = channel.try_receive(start) {}
+    check_still_pixels(f, input, expected)
+}
+
+fn check_decode_route(f: Foreign[webp.Webp], d: Dir, tasks: Tasks, stem: String, helper: bool) waits {
+    let (start, ready): (Sender[()], Receiver[()]) = channel.new(1)
+    let input = load(d, stem, ".webp")
+    let expected = load(d, stem, ".rgba")
+    let mut child = task.spawn(tasks, bytes 16777216, (f, take input, take expected, take ready), decode_after_cancel)
+    task.cancel(mut child)
+    result.unwrap(channel.try_send(start, ()))
+    match task.join(take child) {
+        Ok(()) if !helper => (),
+        Error(Cancelled(_)) if helper => (),
+        _ => fail("still decode used the wrong foreign call class"),
     }
 }
 
@@ -123,12 +147,14 @@ fn check_limits(f: Foreign[webp.Webp], d: Dir) waits {
 }
 
 @test
-fn libwebp_vectors(f: Foreign[webp.Webp], d: Dir) -> Result[(), ()] waits {
+fn libwebp_vectors(f: Foreign[webp.Webp], d: Dir, tasks: Tasks) -> Result[(), ()] waits {
     for i in 0u64 .. 16 {
         let mut stem = string.with_capacity(2)
         string.push_u64(mut stem, i)
         check_still(f, d, stem, i == 0 || i == 2 || i == 6)
     }
+    check_decode_route(f, d, tasks, "tiny", false)
+    check_decode_route(f, d, tasks, "0", true)
     check_encoding(f, d, "lossless", Lossless)
     check_encoding(f, d, "quality", Lossy(82))
     check_animation(f, d, "animation", 3)

@@ -50,9 +50,8 @@ static void write_still(const WebPData *input, int crop_scale)
     WebPFreeDecBuffer(&config.output);
 }
 
-static void write_encoded(const WebPData *input, int lossless)
+static void write_encoded(const WebPData *input, int width, int height, int lossless)
 {
-    const int width = 37, height = 29;
     require(input->size == (size_t)width * height * 4, "wrong RGBA size");
     WebPConfig config;
     WebPPicture picture;
@@ -89,8 +88,9 @@ int main(int argc, char **argv)
         case 's': write_still(&data, 0); break;
         case 'c': write_still(&data, 1); break;
         case 'a': write_animation(&data); break;
-        case 'l': write_encoded(&data, 1); break;
-        case 'q': write_encoded(&data, 0); break;
+        case 'l': write_encoded(&data, 37, 29, 1); break;
+        case 'q': write_encoded(&data, 37, 29, 0); break;
+        case 't': write_encoded(&data, 4, 4, 1); break;
         default: require(0, "unknown reference mode");
     }
     free(bytes);

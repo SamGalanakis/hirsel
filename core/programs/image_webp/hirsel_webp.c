@@ -50,6 +50,8 @@ int32_t hwebp_decode(const uint8_t *input_ptr, uint64_t input_len,
     return status == VP8_STATUS_OK ? 0 : CODEC_FAILURE;
 }
 
+extern __typeof__(hwebp_decode) hwebp_decode_on_helper __attribute__((alias("hwebp_decode")));
+
 int32_t hwebp_decode_animation(const uint8_t *input_ptr, uint64_t input_len,
                                uint32_t width, uint32_t height, uint32_t frames,
                                uint8_t *rgba_ptr, uint64_t rgba_len,
@@ -94,6 +96,9 @@ int32_t hwebp_decode_animation(const uint8_t *input_ptr, uint64_t input_len,
     WebPAnimDecoderDelete(decoder);
     return status;
 }
+
+extern __typeof__(hwebp_decode_animation) hwebp_decode_animation_on_helper
+    __attribute__((alias("hwebp_decode_animation")));
 
 struct output {
     uint8_t *data;

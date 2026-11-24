@@ -4,7 +4,7 @@ major = 1
 
 [tests]
 limit = 268435456
-grants = ["Foreign=image_webp@1/webp/Webp"]
+grants = ["Foreign=image_webp@1/webp/Webp", "Tasks"]
 dirs = ["fixtures"]
 
 [tests.sources]

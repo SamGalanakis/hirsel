@@ -98,6 +98,9 @@ The [TLS and secrets specification](tls.md) defines the client TLS provider
 operations and `Secret`.
 The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
 and keyed operations (Part B, design).
+The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (design, RTC-1 to RTC-8):
+JSEP SDP, the sans-IO PeerSession, and the room router with dynacast, active speakers and
+the revocation fence.
 The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
 workspaces, library roots and package archives.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over

@@ -29,7 +29,7 @@ struct Constructor {
     peer: [u8; 32],
     input: [u8; 66],
     decisions: usize,
-    delivered: u64,
+    delivered: (u64, u64),
     payer: Arc<AtomicUsize>,
 }
 
@@ -51,7 +51,7 @@ unsafe extern "C" fn construct(context: *mut crate::Context, _: *mut u8, input: 
             7,
         )
     };
-    job.delivered = answer.value;
+    job.delivered = (answer.value, answer.written);
     0
 }
 
@@ -82,7 +82,7 @@ fn root_virtual_agreement_verdicts_are_recorded_and_replayed() {
             peer,
             input,
             decisions: 0,
-            delivered: 0,
+            delivered: (0, 0),
             payer,
         }
     };
@@ -101,7 +101,7 @@ fn root_virtual_agreement_verdicts_are_recorded_and_replayed() {
     };
     let [a, b] = [public(0x31), public(0x42)];
 
-    let mut recorded = [0; 2];
+    let mut recorded = [(0, 0); 2];
     for mode in [Mode::Record, Mode::Replay] {
         in_task(false, &mut |context| {
             // SAFETY: this root pins the store and both jobs until the tape
@@ -154,9 +154,11 @@ fn root_virtual_agreement_verdicts_are_recorded_and_replayed() {
                 hirsel_core_join(context, left, ptr::null_mut(), 0);
                 hirsel_core_join(context, right, ptr::null_mut(), 0);
                 let delivered = [first.delivered, second.delivered];
-                let mut sorted = delivered;
-                sorted.sort_unstable();
-                assert_eq!(sorted, [1, 2]);
+                let mut verdicts = delivered.map(|(verdict, _)| verdict);
+                verdicts.sort_unstable();
+                assert_eq!(verdicts, [1, 2]);
+                assert_ne!(first.delivered.1, second.delivered.1);
+                assert!(delivered.iter().all(|(_, origin)| *origin != 0));
                 for job in [&first, &second] {
                     assert!(job.pending.is_none());
                     assert_eq!(job.payer.load(Relaxed), 0);

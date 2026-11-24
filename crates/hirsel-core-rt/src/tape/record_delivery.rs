@@ -39,7 +39,8 @@ pub(super) unsafe fn record_out(
     let mut answer = o;
     if r.operation == MEDIA_AGREEMENT {
         // The ordinal names the schedule; the frame's value stays the verdict.
-        answer.written = live.schedule.events + 1;
+        o.written = live.schedule.events + 1;
+        answer.written = o.written;
     }
     let mut created = None;
     if ok && udp_operation(r.operation) {

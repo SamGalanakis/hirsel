@@ -8,6 +8,7 @@
 //! holds what `put` gives it until `commit` writes one unsynced pack, and a
 //! lost or damaged object is a miss that the next build writes again.
 
+use crate::package_content::Sha256Writer;
 use crate::store::Store;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::ObjectRef;
@@ -84,9 +85,9 @@ impl ObjectKind {
         match self.domain() {
             Some(domain) => ContentHash::of_stream(domain, length, emit),
             None => {
-                let mut hash = Sha256::new();
+                let mut hash = Sha256Writer::default();
                 emit(&mut hash)?;
-                Ok(ContentHash(hash.finalize().into()))
+                Ok(ContentHash(hash.finish()))
             }
         }
     }

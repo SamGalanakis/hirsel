@@ -11,7 +11,7 @@ Build the Rust partner and check every committed differential vector with:
 python3 core/tools/sha256_reference.py --out /tmp/sha256-reference
 ```
 
-This uses the pinned Rust compiler and Buck dependencies with `sha2` 0.10.9's
+This uses the pinned Rust compiler and the workspace's Buck `sha2` library with
 default backends: SHA-NI when the CPU has it, selected at run time. Hirsel's
 runtime makes the same choice, so both sides use the CPU's SHA-256 instructions
 where they exist. Rust is built at opt-level 3. Its executable uses `-no-pie` for Buck's static rlibs;

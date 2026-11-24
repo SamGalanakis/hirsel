@@ -1486,8 +1486,8 @@ fn cli_tls_replay(with_secret: bool) {
         process::tape_request_command(&call, dir.path())
     };
     let net = format!(
-        "Net=Connect 127.0.0.1/32 {port}-{port};Tls *.test {port}-{port} System;Tls alpha.test {port}-{port} Roots=sha256:{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(CA)
+        "Net=Connect 127.0.0.1/32 {port}-{port};Tls *.test {port}-{port} System;Tls alpha.test {port}-{port} Roots=sha256:{}",
+        crate::package_content::hex(&crate::package_content::archive_digest(CA))
     );
     let mut grants = vec!["--grant", &net, "--grant", "Stdout", "--record", tape_path];
     let file = dir.path().join("local-credential");
@@ -4219,8 +4219,8 @@ fn postgres_scripted_peer_laws() {
 /// recorded run. It must recover the child, pipes and packet only from tape.
 #[test]
 fn exec_unix_recording_replays_without_host_resources() {
+    use crate::package_content::{archive_digest, hex};
     use hirsel_core_net::{GrantRule, UnixDirection, UnixRule};
-    use sha2::{Digest, Sha256};
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
@@ -4228,14 +4228,14 @@ fn exec_unix_recording_replays_without_host_resources() {
     std::fs::create_dir(&work).unwrap();
     let image = work.join("image");
     std::fs::copy("/bin/cat", &image).unwrap();
-    let pin = Sha256::digest(std::fs::read(&image).unwrap());
+    let pin = hex(&archive_digest(&std::fs::read(&image).unwrap()));
     let policy = work.join("policy.toml");
     // The recording must split a valid profile snapshot larger than a tape block.
     let unused_arg = "x".repeat(hirsel_tape_format::MAX_LEN);
     std::fs::write(
         &policy,
         format!(
-            "[cat]\nimage = {:?}\nsha256 = \"{pin:x}\"\nargv0 = \"cat\"\nargs = [[], [\"{unused_arg}\"]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            "[cat]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"cat\"\nargs = [[], [\"{unused_arg}\"]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
             image.to_str().unwrap(),
             work.to_str().unwrap(),
         ),

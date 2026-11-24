@@ -21,11 +21,6 @@ deny = [
     { crate = "openssl-sys", use-instead = "rustls" },
 ]
 skip = [
-    # Existing SHA-256 uses digest 0.10 and cpufeatures 0.2. Argon2 uses digest 0.11 via BLAKE2 and cpufeatures 0.3.
-    "block-buffer@=0.10.4",
-    "cpufeatures@=0.2.17",
-    "crypto-common@=0.1.7",
-    "digest@=0.10.7",
     # supply-chain-1546: ring requires 0.2; tempfile requires 0.4.
     "getrandom@=0.2.17",
     # supply-chain-1546: gimli and the front end use 0.16; Cranelift uses 0.17.

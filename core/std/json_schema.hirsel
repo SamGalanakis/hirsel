@@ -475,3 +475,170 @@ fn zero_text(plan: json.JsonPlan, id: u64, mut memo: List[Option[u64]]) -> Optio
     memo[id] = Some(amount)
     Some(amount)
 }
+
+/// Prepares the shape graph and its depth-independent validation facts.
+pub fn prepare(take description: codec.Schema, profile: json.Profile) -> Result[json.JsonPlan, json.TypedError] {
+    let count = codec.schema_definitions(description)
+    let mut shapes: List[json.Shape] = list.with_capacity(count)
+    let mut pending: List[u64] = list.new()
+    for _ in 0u64 .. count {
+        list.push(mut shapes, Atom(255))
+    }
+    let mut seen: Bytes = list.new()
+    list.fill(mut seen, count, 0)
+    let mut pos: u64 = 0
+    let root = compile_shape(codec.schema_root(description), mut pos, mut shapes, mut seen, mut pending)?
+    while let Some(node) = list.pop(mut pending) {
+        let d = codec.schema_definition(description, node)
+        let shape = compile_definition(d, mut shapes, mut seen, mut pending)?
+        let _ = list.set(mut shapes, node, take shape)
+    }
+    let facts = shape_facts(shapes)?
+    Ok(json.JsonPlan(description: take description, root, shapes: take shapes, facts: take facts, profile))
+}
+
+fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[json.Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[u64, json.TypedError] {
+    let op = b[pos]
+    pos += 1
+    let shape: json.Shape = match op {
+        14 => Array(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
+        15 => {
+            let key = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
+            Pairs(key, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
+        },
+        16 => Optional(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
+        17 => {
+            let ok = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
+            Outcome(ok, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
+        },
+        18 => return Error(Schema(18, Tuple)),
+        19 => {
+            let node = codec.schema_word(b, pos)
+            pos += 4
+            if seen[node] == 0 {
+                seen[node] = 1
+                list.push(mut pending, node)
+            }
+            return Ok(node)
+        },
+        _ => Atom(op),
+    }
+    let node = list.len(shapes)
+    list.push(mut shapes, take shape)
+    Ok(node)
+}
+
+fn schema_name(b: Bytes, mut pos: u64) -> Result[String, json.TypedError] {
+    let n = codec.schema_word(b, pos)
+    pos += 4
+    let mut name: Bytes = list.with_capacity(n)
+    let _ = list.append(mut name, list.slice(b, pos, pos + n))
+    pos += n
+    match string.from_utf8(take name) {
+        Ok(take s) => Ok(take s),
+        Error(_) => fail("codec schema name is UTF-8"),
+    }
+}
+
+fn compile_definition(b: Bytes, mut shapes: List[json.Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[json.Shape, json.TypedError] {
+    let mut pos: u64 = 1
+    if b[0] == 2 {
+        return Ok(Via(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?))
+    }
+    let n = codec.schema_word(b, pos)
+    pos += 4
+    if b[0] == 0 {
+        let mut fields: List[json.Field] = list.new()
+        for _ in 0u64 .. n {
+            let live = b[pos] == 0
+            pos += 1
+            let name = schema_name(b, mut pos)?
+            if live {
+                let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
+                list.push(mut fields, json.Field(name: take name, shape))
+            } else {
+                pos = codec.schema_next(b, pos)
+            }
+        }
+        return Ok(Record(take fields))
+    }
+    let mut variants: List[json.Variant] = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        let live = b[pos] == 0
+        pos += 1
+        let name = schema_name(b, mut pos)?
+        let width = codec.schema_word(b, pos)
+        pos += 4
+        let mut fields: List[u64] = list.new()
+        for _ in 0u64 .. width {
+            if live {
+                let child = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
+                list.push(mut fields, child)
+            } else {
+                pos = codec.schema_next(b, pos)
+            }
+        }
+        list.push(mut variants, json.Variant(name: take name, fields: take fields, live))
+    }
+    Ok(Sum(take variants))
+}
+
+// Only a record or via can follow a required child before consuming any codec
+// bytes. A DFS over just those edges both checks cycles and finds LEAST == 0.
+fn shape_fact(shapes: List[json.Shape], mut facts: List[json.ShapeFact], node: u64) -> Result[(), json.TypedError] {
+    match facts[node].state {
+        2 => return Ok(()),
+        1 => return Error(Schema(19, NonConsumingCycle)),
+        _ => {},
+    }
+    facts[node].state = 1
+    let mut empty = false
+    let mut form = node
+    match shapes[node] {
+        Atom(op) => {
+            empty = op == 0
+        },
+        Via(child) => {
+            shape_fact(shapes, mut facts, child)?
+            empty = facts[child].empty
+            form = facts[child].form
+        },
+        Record(fields) => {
+            empty = true
+            for field in fields {
+                shape_fact(shapes, mut facts, field.shape)?
+                empty = empty && facts[field.shape].empty
+            }
+        },
+        _ => {},
+    }
+    facts[node] = json.ShapeFact(form, empty, state: 2)
+    Ok(())
+}
+
+fn shape_facts(shapes: List[json.Shape]) -> Result[List[json.ShapeFact], json.TypedError] {
+    let mut facts: List[json.ShapeFact] = list.with_capacity(list.len(shapes))
+    for i in 0u64 .. list.len(shapes) {
+        list.push(mut facts, json.ShapeFact(form: i, empty: false, state: 0))
+    }
+    for i in 0u64 .. list.len(shapes) {
+        shape_fact(shapes, mut facts, i)?
+    }
+    for s in shapes {
+        match s {
+            Optional(child) => match shapes[facts[child].form] {
+                Atom(0) => return Error(Schema(16, NullableOption)),
+                Optional(_) => return Error(Schema(16, NullableOption)),
+                _ => {},
+            },
+            Array(child) => if facts[child].empty {
+                return Error(Schema(14, EmptyListElement))
+            },
+            Pairs(key, value) => if facts[key].empty && facts[value].empty {
+                return Error(Schema(15, EmptyMapEntry))
+            },
+            _ => {},
+        }
+    }
+    Ok(take facts)
+}

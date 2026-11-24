@@ -1431,174 +1431,32 @@ fn prepare[T: codec](profile: Profile) -> Result[Format[T], TypedError] {
     Ok(Format(binary, plan: arc.new(take plan)))
 }
 
-/// Prepares a schema and its encoded defaults for B-4 wire values.
-pub fn prepare_schema(take description: codec.Schema, profile: Profile) -> Result[JsonPlan, TypedError] {
-    let count = codec.schema_definitions(description)
-    let mut shapes: List[Shape] = list.with_capacity(count)
-    let mut pending: List[u64] = list.new()
-    for _ in 0u64 .. count {
-        list.push(mut shapes, Atom(255))
+fn uses_codec_key_check(plan: JsonPlan) -> bool {
+    if plan.profile == Strict {
+        return false
     }
-    let mut seen: Bytes = list.new()
-    list.fill(mut seen, count, 0)
-    let mut pos: u64 = 0
-    let root = compile_shape(codec.schema_root(description), mut pos, mut shapes, mut seen, mut pending)?
-    while let Some(node) = list.pop(mut pending) {
-        let d = codec.schema_definition(description, node)
-        let shape = compile_definition(d, mut shapes, mut seen, mut pending)?
-        let _ = list.set(mut shapes, node, take shape)
-    }
-    let facts = shape_facts(shapes)?
-    Ok(JsonPlan(description: take description, root, shapes: take shapes, facts: take facts, profile))
-}
-
-fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[u64, TypedError] {
-    let op = b[pos]
-    pos += 1
-    let shape: Shape = match op {
-        14 => Array(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
-        15 => {
-            let key = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-            Pairs(key, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
-        },
-        16 => Optional(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
-        17 => {
-            let ok = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-            Outcome(ok, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
-        },
-        18 => return Error(Schema(18, Tuple)),
-        19 => {
-            let node = codec.schema_word(b, pos)
-            pos += 4
-            if seen[node] == 0 {
-                seen[node] = 1
-                list.push(mut pending, node)
-            }
-            return Ok(node)
-        },
-        _ => Atom(op),
-    }
-    let node = list.len(shapes)
-    list.push(mut shapes, take shape)
-    Ok(node)
-}
-
-fn schema_name(b: Bytes, mut pos: u64) -> Result[String, TypedError] {
-    let n = codec.schema_word(b, pos)
-    pos += 4
-    let mut name: Bytes = list.with_capacity(n)
-    let _ = list.append(mut name, list.slice(b, pos, pos + n))
-    pos += n
-    match string.from_utf8(take name) {
-        Ok(take s) => Ok(take s),
-        Error(_) => fail("codec schema name is UTF-8"),
-    }
-}
-
-fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[Shape, TypedError] {
-    let mut pos: u64 = 1
-    if b[0] == 2 {
-        return Ok(Via(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?))
-    }
-    let n = codec.schema_word(b, pos)
-    pos += 4
-    if b[0] == 0 {
-        let mut fields: List[Field] = list.new()
-        for _ in 0u64 .. n {
-            let live = b[pos] == 0
-            pos += 1
-            let name = schema_name(b, mut pos)?
-            if live {
-                let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                list.push(mut fields, Field(name: take name, shape))
-            } else {
-                pos = codec.schema_next(b, pos)
-            }
-        }
-        return Ok(Record(take fields))
-    }
-    let mut variants: List[Variant] = list.with_capacity(n)
-    for _ in 0u64 .. n {
-        let live = b[pos] == 0
-        pos += 1
-        let name = schema_name(b, mut pos)?
-        let width = codec.schema_word(b, pos)
-        pos += 4
-        let mut fields: List[u64] = list.new()
-        for _ in 0u64 .. width {
-            if live {
-                let child = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                list.push(mut fields, child)
-            } else {
-                pos = codec.schema_next(b, pos)
-            }
-        }
-        list.push(mut variants, Variant(name: take name, fields: take fields, live))
-    }
-    Ok(Sum(take variants))
-}
-
-// Only a record or via can follow a required child before consuming any codec
-// bytes. A DFS over just those edges both checks cycles and finds LEAST == 0.
-fn shape_fact(shapes: List[Shape], mut facts: List[ShapeFact], node: u64) -> Result[(), TypedError] {
-    match facts[node].state {
-        2 => return Ok(()),
-        1 => return Error(Schema(19, NonConsumingCycle)),
-        _ => {},
-    }
-    facts[node].state = 1
-    let mut empty = false
-    let mut form = node
-    match shapes[node] {
-        Atom(op) => {
-            empty = op == 0
-        },
-        Via(child) => {
-            shape_fact(shapes, mut facts, child)?
-            empty = facts[child].empty
-            form = facts[child].form
-        },
-        Record(fields) => {
-            empty = true
-            for field in fields {
-                shape_fact(shapes, mut facts, field.shape)?
-                empty = empty && facts[field.shape].empty
-            }
-        },
-        _ => {},
-    }
-    facts[node] = ShapeFact(form, empty, state: 2)
-    Ok(())
-}
-
-fn shape_facts(shapes: List[Shape]) -> Result[List[ShapeFact], TypedError] {
-    let mut facts: List[ShapeFact] = list.with_capacity(list.len(shapes))
-    for i in 0u64 .. list.len(shapes) {
-        list.push(mut facts, ShapeFact(form: i, empty: false, state: 0))
-    }
-    for i in 0u64 .. list.len(shapes) {
-        shape_fact(shapes, mut facts, i)?
-    }
-    for s in shapes {
-        match s {
-            Optional(child) => match shapes[facts[child].form] {
-                Atom(0) => return Error(Schema(16, NullableOption)),
-                Optional(_) => return Error(Schema(16, NullableOption)),
-                _ => {},
-            },
-            Array(child) => if facts[child].empty {
-                return Error(Schema(14, EmptyListElement))
-            },
-            Pairs(key, value) => if facts[key].empty && facts[value].empty {
-                return Error(Schema(15, EmptyMapEntry))
+    let mut found = false
+    for shape in plan.shapes {
+        match shape {
+            // A via decoder can fail before the codec reaches a later duplicate.
+            Via(_) => return false,
+            Pairs(key, _) => {
+                found = found || string_map(plan, key)
             },
             _ => {},
         }
     }
-    Ok(take facts)
+    found
+}
+
+/// Prepares a schema and its encoded defaults for B-4 wire values.
+pub fn prepare_schema(take description: codec.Schema, profile: Profile) -> Result[JsonPlan, TypedError] {
+    json_schema.prepare(take description, profile)
 }
 
 type PointerToken = InputMember(u64) | Index(u64) | Declared(u64)
+
+type ReadMode: key = DecodeInput | DiagnoseInput | EncodeWire
 
 type ReadTyped {
     pos: u64,
@@ -1606,7 +1464,16 @@ type ReadTyped {
     declarations: List[String],
     mark_tokens: List[PointerToken],
     marks: List[SourceMark],
-    encoded_keys: bool,
+    mode: ReadMode,
+    parts: List[RecordPart],
+    seen_fields: Bytes,
+    reordered: Bytes,
+}
+
+type TypedLocations {
+    declarations: List[String],
+    mark_tokens: List[PointerToken],
+    marks: List[SourceMark]
 }
 
 type SourceMark {
@@ -1632,8 +1499,18 @@ pub fn decode_typed[T](format: Format[T], take input: Bytes, byte_limit: u64) ->
 
 /// Decodes one JSON value from a borrowed String under the same byte bound.
 pub fn from_string[T](format: Format[T], input: String, byte_limit: u64) -> Result[T, TypedError] {
+    if uses_codec_key_check(format.plan) {
+        let fast = bound bytes byte_limit {
+            decode_profile(format, input, DecodeInput)
+        }
+        if let Ok(Ok(take value)) = take fast {
+            return Ok(take value)
+        }
+    }
+    // Recheck keys in input order before reporting a JSON, codec or byte-bound
+    // error. The successful fast pass uses the codec's map for this check.
     let decoded = bound bytes byte_limit {
-        decode_profile(format, input)
+        decode_profile(format, input, DiagnoseInput)
     }
     match take decoded {
         Ok(take result) => take result,
@@ -1641,8 +1518,8 @@ pub fn from_string[T](format: Format[T], input: String, byte_limit: u64) -> Resu
     }
 }
 
-fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
-    let (take out, take d, start) = read_wire(format.plan, s, false)?
+fn decode_profile[T](format: Format[T], s: String, mode: ReadMode) -> Result[T, TypedError] {
+    let (take out, take d, start) = read_wire(format.plan, s, mode)?
     match codec.decode(format.binary, out) {
         Ok(take value) => Ok(take value),
         Error(e) => codec_input_error(s, d, start, e),
@@ -1651,12 +1528,12 @@ fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
 
 /// Transcodes B-4 JSON into codec bytes without invoking the entry decoder.
 pub fn wire_bytes(plan: JsonPlan, input: String) -> Result[Bytes, TypedError] {
-    let (take out, _, _) = read_wire(plan, input, true)?
+    let (take out, _, _) = read_wire(plan, input, EncodeWire)?
     Ok(take out)
 }
 
-fn read_wire(plan: JsonPlan, s: String, encoded_keys: bool) -> Result[(Bytes, ReadTyped, u64), TypedError] {
-    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), encoded_keys: encoded_keys)
+fn read_wire(plan: JsonPlan, s: String, mode: ReadMode) -> Result[(Bytes, TypedLocations, u64), TypedError] {
+    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), mode, parts: list.new(), seen_fields: list.new(), reordered: list.new())
     skip(s, mut d.pos)
     let start = d.pos
     let mut out: Bytes = list.new()
@@ -1665,10 +1542,11 @@ fn read_wire(plan: JsonPlan, s: String, encoded_keys: bool) -> Result[(Bytes, Re
     if d.pos != string.byte_len(s) {
         return Error(typed_input_issue(s, d, d.pos, ExpectedValue))
     }
-    Ok((take out, take d, start))
+    let ReadTyped(declarations: take declarations, mark_tokens: take mark_tokens, marks: take marks, ..) = take d
+    Ok((take out, TypedLocations(declarations: take declarations, mark_tokens: take mark_tokens, marks: take marks), start))
 }
 
-fn codec_input_error[T](s: String, d: ReadTyped, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
+fn codec_input_error[T](s: String, d: TypedLocations, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
     let (pos, key) = match e {
         Duplicate(p) => (p, true),
         Value(p) => (p, false),
@@ -1917,11 +1795,11 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
                 skip(s, mut d.pos)
                 let source = d.pos
                 let key_start = list.len(out)
-                if !d.encoded_keys {
+                if d.mode != EncodeWire {
                     source_mark(mut d, key_start, true)
                 }
                 read_shape(plan, item, s, depth + 2, mut d, mut out)?
-                if d.encoded_keys {
+                if d.mode == EncodeWire {
                     let encoded = list.slice(out, key_start, list.len(out))
                     if map.contains(keys, encoded) {
                         return Error(typed_input_issue(s, d, source, DuplicateMember))
@@ -1960,6 +1838,7 @@ fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: Rea
     open_typed(s, depth, b'{', mut d)?
     let start = list.len(out)
     codec.put_u32(0, mut out)
+    let mut n: u64 = 0
     let mut seen: Map[String, ()] = map.new()
     let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
@@ -1969,16 +1848,19 @@ fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: Rea
             let mut input = text_input(s)
             let name = typed_string(mut input, true, mut d)?
             list.push(mut d.path, InputMember(pos))
-            remember_member(s, mut seen, string.from(name), pos, d)?
+            if d.mode != DecodeInput {
+                remember_member(s, mut seen, string.from(name), pos, d)?
+            }
             codec.put_string(name, mut out) ?=> |_| LengthOverflow
             read_shape(plan, value, s, depth + 1, mut d, mut out)?
             list.truncate(mut d.path, path)
+            n += 1
             if after_typed(s, b'}', mut d)? {
                 break
             }
         }
     }
-    patch_typed_count(mut out, start, map.len(seen))
+    patch_typed_count(mut out, start, n)
 }
 
 fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), TypedError] {
@@ -2033,16 +1915,18 @@ fn field_index(fields: List[Field], name: String) -> Option[u64] {
     None
 }
 
-// Visit in input order for diagnostics. Only a record stages field runs and
-// moves them into declaration order, keeping source marks with their runs.
+// Append field runs in input order. Only records that need reordering or defaults
+// copy their bytes. The scratch slot and bit ranges nest with read_record calls.
 fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'{', mut d)?
     let count = list.len(fields)
-    let mut parts: List[Option[RecordPart]] = list.with_capacity(count)
-    for _ in 0u64 .. count {
-        list.push(mut parts, None)
-    }
-    let mut staged: Bytes = list.new()
+    let start = list.len(out)
+    let parts = list.len(d.parts)
+    let bits = list.len(d.seen_fields)
+    list.fill(mut d.parts, count, RecordPart(start: 0, end: 0, marks: 0, mark_end: 0))
+    list.fill(mut d.seen_fields, (count + 7) / 8, 0)
+    let mut ordered = true
+    let mut next: u64 = 0
     let mut ignored: Map[String, ()] = map.new()
     let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
@@ -2052,37 +1936,50 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             let mut input = text_input(s)
             let name = typed_string(mut input, true, mut d)?
             list.push(mut d.path, InputMember(member_at))
-            let Some(i) = field_index(fields, name) else {
+            if let Some(i) = field_index(fields, name) {
+                let byte_at = bits + i / 8
+                let mask = (1u8 << int.truncate(i % 8))
+                if d.seen_fields[byte_at] & mask != 0 {
+                    return Error(typed_input_issue(s, d, member_at, DuplicateMember))
+                }
+                d.seen_fields[byte_at] |= mask
+                ordered = ordered && i == next
+                next += 1
+                let field_start = list.len(out)
+                let marks = list.len(d.marks)
+                read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut out)?
+                d.parts[parts + i] = RecordPart(start: field_start, end: list.len(out), marks, mark_end: list.len(d.marks))
+            } else {
                 if plan.profile == Strict {
                     return Error(typed_input_issue(s, d, member_at, UnknownMember))
                 }
                 remember_member(s, mut ignored, string.from(name), member_at, d)?
                 skip_typed(s, depth + 1, mut d)?
-                list.truncate(mut d.path, path)
-                if after_typed(s, b'}', mut d)? {
-                    break
-                }
-                continue
             }
-            if let Some(_) = parts[i] {
-                return Error(typed_input_issue(s, d, member_at, DuplicateMember))
-            }
-            let start = list.len(staged)
-            let marks = list.len(d.marks)
-            read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut staged)?
-            let end = list.len(staged)
-            let mark_end = list.len(d.marks)
-            parts[i] = Some(RecordPart(start, end, marks, mark_end))
             list.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break
             }
         }
     }
-    for i in 0u64 .. count {
-        if let Some(part) = parts[i] {
+    if !ordered || next != count {
+        reorder_record(plan, definition, fields, s, start, parts, bits, mut d, mut out)?
+    }
+    list.truncate(mut d.parts, parts)
+    list.truncate(mut d.seen_fields, bits)
+    Ok(())
+}
+
+fn reorder_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, start: u64, parts: u64, bits: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+    list.clear(mut d.reordered)
+    list.append(mut d.reordered, list.slice(out, start, list.len(out)))
+    list.truncate(mut out, start)
+    let path = list.len(d.path)
+    for i in 0u64 .. list.len(fields) {
+        if d.seen_fields[bits + i / 8] & (1u8 << int.truncate(i % 8)) != 0 {
+            let part = d.parts[parts + i]
             let dest = list.len(out)
-            list.append(mut out, list.slice(staged, part.start, part.end))
+            list.append(mut out, list.slice(d.reordered, part.start - start, part.end - start))
             for mark in part.marks .. part.mark_end {
                 d.marks[mark].pos = dest + (d.marks[mark].pos - part.start)
             }

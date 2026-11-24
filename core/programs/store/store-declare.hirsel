@@ -61,8 +61,8 @@ pub fn declare_follower(f: Follower) -> Declare {
 pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[Declare, Error] waits {
     require_memory_collections(store_has_tiered(db), Migrate)?
     let staged = stage_migration(db, tasks, configure)?
-    let StagedMigration(plan: take plan) = take staged
-    Ok(new_declaration(Migrate, declaration_base(db), take plan, is_disk(db)))
+    let StagedMigration(base, plan: take plan) = take staged
+    Ok(new_declaration(Migrate, base, take plan, is_disk(db)))
 }
 
 fn declaration_name(name: String) -> Result[(), Error] {

@@ -279,18 +279,38 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
     let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    for k in 0u64 .. 10 {
+    for k in 0u64 .. 9 {
         let committed = run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
             put(mut tx, call_env.0, call_env.1, call_env.1)
         })?
         if let Committed(_) = committed {} else { fail("the fixture write was refused") }
     }
-    if version(snapshot(writer)) != 11 { fail("the fixture has the wrong install base") }
-    let mut staged = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
     let description = string.into_bytes(string.from("release 12"))
-    stage_activation(mut staged, 12, None, description, std.codec.of_u64(), 73u64)?
     let mut binding: Bytes = list.with_capacity(32)
     list.fill(mut binding, 32, 91u8)
+    let mut stale = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
+    stage_activation(mut stale, 12, None, description, std.codec.of_u64(), 73u64)?
+    let committed = run(mut writer, None, copy_env(rows), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 9, 9)
+    })?
+    let Committed(take done) = take committed else { fail("the intervening write was refused") }
+    let Journal(_, 0, acknowledged) = done.ticket.mark else { fail("the write has no main journal acknowledgment") }
+    if acknowledged != 11 { fail("the fixture has the wrong install base") }
+    durable(mut writer, done.ticket)?
+    let fence = writer.fence
+    let refused = install_bound_activation(mut writer, take stale, 12, binding)
+    let after = snapshot(writer)
+    if get(result.unwrap(reader(writer, 0u64)), after, rows, 9)? != Some(9u64) {
+        fail("the stale activation lost the acknowledged write")
+    }
+    if let Error(Foreign) = refused {} else { fail("the stale activation was admitted") }
+    if version(after) != acknowledged || writer.fence != fence {
+        fail("the refused activation changed the writer")
+    }
+    let unpublished = system_table(writer, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())
+    if let Error(Missing(_)) = unpublished {} else { fail("the refused activation published its release table") }
+    let mut staged = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
+    stage_activation(mut staged, 12, None, description, std.codec.of_u64(), 73u64)?
     install_bound_activation(mut writer, take staged, 12, binding)?
     let d = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
     let mut process = followers()

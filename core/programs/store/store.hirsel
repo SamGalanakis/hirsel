@@ -3633,10 +3633,6 @@ pub opaque type Migration {
     tiered: bool
 }
 
-pub opaque type StagedMigration {
-    plan: SchemaPlan
-}
-
 type SchemaPlan: send {
     store: StoreId,
     roots: Roots,
@@ -3739,11 +3735,11 @@ pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migratio
         }),
         Error(Cancelled(_)) => return Error(MigrationFault),
     }
-    Ok(StagedMigration(plan: result.unwrap(channel.receive(from))?))
+    Ok(StagedMigration(base: declaration_base(db), plan: result.unwrap(channel.receive(from))?))
 }
 
 pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
-    let StagedMigration(plan: take plan) = stage_migration(db, tasks, configure)?
+    let StagedMigration(plan: take plan, ..) = stage_migration(db, tasks, configure)?
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     } else {
@@ -5924,7 +5920,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned.next_table = staged.meta.next_table
     planned.live = install_account(db, planned.roots)?
     deploy_result(over_ceiling(planned.live, disk_limit))?
-    let mut installation = StagedMigration(plan: take planned)
+    let mut installation = StagedMigration(base: declaration_base(db), plan: take planned)
     let release_at = base.head + 1u64
     let prior = deploy_result(copied(old_describe))?
     let release = release_from(target, request.digest)?
@@ -5939,7 +5935,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = Some(limits)
     })
-    let StagedMigration(plan: take ready) = take installation
+    let StagedMigration(plan: take ready, ..) = take installation
     let installed = publish_schema_plan(mut db, take ready)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = None

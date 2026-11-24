@@ -1,3 +1,8 @@
+pub opaque type StagedMigration {
+    base: DeclarationBase,
+    plan: SchemaPlan
+}
+
 fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let exists = match get_page_row(plan.roots.catalog, table_key(name)?) {
         Some(_) => true,
@@ -62,7 +67,10 @@ pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activa
 
 fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[HistoryActivation]) -> Result[(), Error] waits {
     require_memory_collections(store_has_tiered(db), Install)?
-    let StagedMigration(plan: take plan) = take staged
+    if !same_declaration_base(staged.base, declaration_base(db)) {
+        return Error(Foreign)
+    }
+    let StagedMigration(plan: take plan, ..) = take staged
     let old_fence = db.fence
     if is_disk(db) {
         db.fence = 1

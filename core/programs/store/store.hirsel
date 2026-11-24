@@ -946,8 +946,10 @@ pub type CallReserve {
     steps: u64
 }
 
-// MEM-30 calls on the longest path outside the body's scope: draft_call (1), the
-// isolate (2), the issued cell's into_inner, the read log's finish and finish_stage (3).
+// Outside s_e, each metered draft pays for draft_call (1), isolate and its
+// callback (2), issued-cell into_inner (1), log.finish (1), and finish_stage
+// (1). Calls inside core's log.finish take no steps. A prepared reply has a
+// stream edit, so finish_stage skips the data-row scan.
 const CALL_FIXED_STEPS: u64 = 6
 
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
@@ -956,10 +958,7 @@ pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
     let Some(retained) = int.checked_add(plan.n_e, cause) else {
         return None
     }
-    let Some(fixed) = int.checked_add(plan.s_e, CALL_FIXED_STEPS) else {
-        return None
-    }
-    let Some(steps) = int.checked_add(fixed, plan.n_e / bytes[u64]) else {
+    let Some(steps) = int.checked_add(plan.s_e, CALL_FIXED_STEPS) else {
         return None
     }
     Some(CallReserve(retained: retained, steps: steps))
@@ -6131,10 +6130,10 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
     Ok(key_word(7))
 }
 
-// L33: AM5 and MEM-24 give 4096 + 32 bytes; MEM-30 gives 8192 + 6 + 4096/8 steps.
+// L33: AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 + 6 steps.
 pub fn law_call_reserve(c: Clock) -> bool waits {
     let byte_total = 4128u64
-    let step_total = 8710u64
+    let step_total = 8198u64
     let plan = Plan(n_e: 4096, s_e: 8192, reply_max: 4096)
     let Some(grant) = call_reserves(plan) else {
         return false
@@ -6279,8 +6278,9 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let short = bound steps grant.steps {
-        metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             Ok(key_word(7))
         })
     }

@@ -376,11 +376,9 @@ fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
     Ok(key_word(7))
 }
 
-// L33's grant of s_e + 6 + n_e / 8 steps covers a body that spends its whole
-// s_e after k = 255 puts, at the least n_e that admits them. Since v2.89 the
-// issued ids are one cell, so no step outside the body grows with k; the law
-// keeps the grant honest against the calls outside the body that K_fixed
-// must cover (AM5).
+// L33's six adapter steps cover draft_call, isolate and its callback,
+// issued-cell extraction, log.finish, and finish_stage.
+// Test that exact overhead after 255 puts and a body that spends all of s_e.
 pub fn law_reserve_latches(c: Clock) -> bool waits {
     let k = 255u64
     let mut db = raw_test_db(c, 1073741824)
@@ -414,6 +412,10 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     let Some(grant) = call_reserves(plan) else {
         return false
     }
+    let attempt_steps = 200006u64
+    if grant.steps != attempt_steps {
+        return false
+    }
     // The most steps the body can burn and still return within s_e.
     let mut least = 0u64
     let mut most = s_e
@@ -439,7 +441,18 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
         Ran(_) => (),
         _ => return false,
     }
-    let granted = bound steps grant.steps + 1u64 {
+    // The outer scope also pays the metered_draft entry.
+    let short_grant = CallReserve(retained: grant.retained, steps: attempt_steps - 1u64)
+    let short = bound steps attempt_steps {
+        metered_draft(db, complete, ci, plan, short_grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, saturated)
+        })
+    }
+    match take short {
+        Ok(Error(DraftStopped(OutOfSteps(used)))) if used == short_grant.steps => (),
+        _ => return false,
+    }
+    let granted = bound steps attempt_steps + 1u64 {
         metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             latch_body(mut tx, k, saturated)
         })

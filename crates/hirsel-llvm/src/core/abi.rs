@@ -469,7 +469,7 @@ impl FunctionEmitter<'_> {
             // An infallible private callee has no status; the public caller
             // still returns its constant zero. Its destination can be forwarded
             // even though that return convention prevents a tail jump.
-            let values = self.invoke(&abi, &callee, args, &site_attrs(site));
+            let values = self.invoke(&abi, &callee, args, &self.site_attrs(site));
             if let Some((original, shadow)) = carrier_shadow {
                 self.shadow_copy_back(&original, &shadow);
             }
@@ -490,7 +490,7 @@ impl FunctionEmitter<'_> {
         let values: Vec<_> = args.into_iter().map(|(_, v)| v).collect();
         let attrs = CallAttrs {
             tail: ending.frame_safe,
-            ..site_attrs(site)
+            ..self.site_attrs(site)
         };
         if ending.frame_safe {
             // No argument points into the frame, so the scoped slots end
@@ -660,7 +660,7 @@ impl FunctionEmitter<'_> {
         let callee = self.callee(site.callee, has_status, abi.ok.is_some());
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
-        let mut values = self.invoke(&abi, &callee, args, &site_attrs(site));
+        let mut values = self.invoke(&abi, &callee, args, &self.site_attrs(site));
         if let Some((original, shadow)) = carrier_shadow {
             self.shadow_copy_back(&original, &shadow);
         }
@@ -910,14 +910,22 @@ pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
 /// A call the front marked cold (core-ir CallSite::cold, the growth path) is
 /// cold and not inlined, so the inliner keeps the growth body out of the hot
 /// caller; the branch into its block is weighted unlikely (`cold_edge`).
-fn site_attrs(site: &CallSite) -> CallAttrs {
-    CallAttrs {
-        cold: site.cold,
-        inline: if site.cold {
-            Inline::Never
-        } else {
-            Inline::Default
-        },
-        ..CallAttrs::default()
+impl FunctionEmitter<'_> {
+    fn site_attrs(&self, site: &CallSite) -> CallAttrs {
+        CallAttrs {
+            cold: site.cold,
+            inline: if site.cold {
+                Inline::Never
+            } else if let Some(sites) = &self.items.callback_sites
+                && let Some(caller) = self.function
+                && let Callee::Direct(callee) = site.callee
+                && sites.should_inline(caller, callee)
+            {
+                Inline::Always
+            } else {
+                Inline::Default
+            },
+            ..CallAttrs::default()
+        }
     }
 }

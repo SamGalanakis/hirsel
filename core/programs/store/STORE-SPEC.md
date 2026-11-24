@@ -19,7 +19,7 @@ v2.92 (store-ring-spec-2208, io_uring roadmap step 3, PLAN.md §3 rank 3 and §1
   - EIO is reported for the page it hits and never read as zeros.
   - A short direct write continues at the returned offset when that offset is 4 KiB-aligned.
   - Any other short write, a zero-byte write, or an error poisons the store (§3.8).
-- An attack table closes §3.3b.
+- A 22-row self-attack table closes §3.3b.
 
 Reversible: the journal format is unchanged. A pre-v2.92 reader opens a v2.92 directory, and v2.92 opens an older one. Dropping the discipline is a code change.
 
@@ -2715,6 +2715,34 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
   - **fsync of the file and the directory at open: ADOPTED** as the existing creation barrier (`linux.zig:1652-1659` against §3.2).
   - **TigerBeetle's AOF writes without O_DIRECT** (`src/aof.zig:39`): no bearing.
 - **Goose** (`/tmp/ref-goose` d5ae5bb) has no O_DIRECT, io_uring or fdatasync use: NOT TAKEN, nothing to take.
+
+**Self-attack (v2.92).** Each row is an attack on this section and its answer. "Holds" means the answer is argued above. "Risk" marks an open point for the separate attack before any build.
+
+| # | Attack | Answer | Verdict |
+|---|---|---|---|
+| 1 | **Crash mid-write into the window.** A group's direct write over [⌊e⌋ₐ, ⌈e + g⌉ₐ) persists some sectors only. | Below e, old and new sectors are the same acked bytes, so no acked frame changes. Above e, each sector holds new frame bytes or the window's durable zeros. Recovery stops at the first frame whose image bytes differ from those written. That is v2.82's window row, and no part of the group was acked. | Holds, under the sector-atomicity assumption below |
+| 2 | **Crash with an O_DIRECT write submitted, CQE not yet seen.** Could a frame be durable in the image but unknown to the writer? Could the next open name it by `prev_end` before it is durable? | It can be in the image, and the commit law allows that (recovered ⊆ issued). The order at exit makes the open safe: io_uring cancel waits for every request in flight (`kernel/exit.c:916`, `io_uring/cancel.c:583-603`) before `exit_files` (`:971`) releases `LOCK`. So the opener's `fdatasync` comes after the write finished, and its device flush (`fs/ext4/fsync.c:122-125`, `:178-179`) covers the write. Then open reads and sets `prev_end`. | Holds on ext4. Risk: a provider whose `fdatasync` on a clean file issues no flush. That would be a provider bug against `docs/spec/core.md` sync ("through any handle"), and it was the same before v2.92 |
+| 3 | **An END older than its data.** | END is written after the ack, so `d` ≤ the acked e at every cut. Recovery reads past `d` to the torn tail. An END can only lag: it never names bytes whose write had not completed, because END follows the completion. | Holds |
+| 3b | **An END newer than its data** (the converse). The END write reaches the disk while the group write does not. | Impossible. The END write is issued after the group write's completion, and completion of an O_DSYNC write means durable. | Holds |
+| 4 | **Every reader of a segment's file size.** Padding makes a segment longer than e: A bytes when fresh, ⌈e⌉ₐ or w after that. | Every reader is listed in "Every reader of a segment's file size". None treats size as e: recovery bounds and checks `d` ≤ size, the follower is now bounded by `d`, the witness binds its stop, export reads its scratch copy, and C-4 counts frames. The one test that stats a segment (`store_journal_laws_4.hirsel:779`) is the build lane's to check. | Holds. Risk: a size reader missed by the grep (`stat_file` callers in `store*.hirsel`) |
+| 5 | **Live reader sees an in-flight direct write.** A buffered read fetches bytes from the device cache before the write completes, and a power cut then drops them. | Live capture is END-bounded (above): a reader applies nothing past `d`, and `d` follows completion. v2.83's "the reader's sync makes it durable" is withdrawn for every backend. | Holds; costs follower freshness (row 14) |
+| 6 | **Stale tail image.** After a group, the image is not refreshed, or is refreshed from the wrong bytes, and the next group rewrites acked frames. | The image is taken from the group buffer at completion: the bytes just written. Law case (a) builds the tail-block images. | Holds if built as written; case (a) is the guard |
+| 7 | **The sector-atomicity assumption.** A device tears inside a 512-byte sector during the tail-block rewrite. | Buffered ext4 writeback before v2.92 rewrote the same block, so the exposure is not new. NVMe AWUPF ≥ 1 logical block is the norm. Store states the assumption and does not defend past it. | Risk (stated, not new) |
+| 8 | **The pad on a provider that is not admitted** extends the file. Can a crash expose a stale block at the stop? | The pad is zeros written in the same O_DSYNC write, and a direct extending write moves i_size only at completion (`fs/iomap/direct-io.c:755-756`). On the O_DSYNC-only fallback, the buffered extending write has exactly the pre-v2.92 append exposure. | [D] beyond ext4; no worse than before |
+| 9 | **Unaligned direct writes pass on tmpfs.** | The host checks offset, length and address for every `Direct` handle on every provider (case (b)). The real-worker laws also run on ext4. | Holds |
+| 10 | **`STATX_DIOALIGN` larger than A** (a 64 KiB-sector device), or 0. | The host opens O_DSYNC without O_DIRECT, and the contract and the bytes on disk are the same. | Holds; costs the direct fast path on such devices |
+| 11 | **A short direct write ends unaligned.** | It is `Io(EIO)` and poisons the store. Resubmitting unaligned would be EINVAL, and the bytes already written are past e and unacked. | Holds |
+| 12 | **ENOSPC from the pad.** A group whose frames fit, but whose pad does not. | The write fails, so the store poisons, as v2.80 already accepted for steps. The pad is at most 4,095 bytes per group write. | Holds; earlier poison near a full disk, stated |
+| 13 | **Unit migration.** A unit submits on slot A's ring, parks, and resumes on slot B. Can a CQE be lost, or reaped by the wrong ring? | The CQE carries the `Reply`. Slot A's poller reaps it whatever runs later, and `Reply::complete` wakes the unit wherever it runs. The buffer lives in the parked unit. | Holds. Risk (IMPL): a slot running a long unit reaps late under COOP_TASKRUN, so the poller must reap between units |
+| 14 | **Follower lag** from END-bounded capture under sustained load. | At most 64 groups, and zero at idle. `fresh` and `at_least` wait within their deadlines. | Risk: if a log@1 consumer needs freshness under load, the remedy is a more frequent END. That costs one O_DSYNC END write per group, on io-wq, and is a code change |
+| 15 | **io-wq cap of 2 bounded per slot** holds an FSYNC behind another (open-path syncs, `sync_dir`) and couples units' latency. | No request waits on another request of the same slot, so there is no deadlock. The coupling is latency only, and the constants are IMPL for the gate to tune. | Risk (perf, not safety) |
+| 16 | **Path STAT confinement.** `STATX` takes no `resolve`. | STAT is `OPENAT2`(O_PATH\|O_NOFOLLOW, the `beneath` resolve), then `STATX` on the fd, then `CLOSE`. Confinement is the open's. | Holds; three SQEs, not one |
+| 17 | **Rename, mkdir and remove on the ring** would drop RESOLVE_BENEATH. | They stay on the helper. | Holds |
+| 18 | **`auto` flips the poller to epoll on turbo-class hosts** (PLAN A1 reading). Then the Store ring path does not run there by default. | File ops follow the poller by this section's definition. If the flip lands, separating the file ring from the readiness backend is the lead's call, as the SEND_ZC ring already is. | Risk (scope) |
+| 19 | **Buffered readers in the writer's own process** (`recorded` after `Barrier`) read bytes that were written directly. | `Written` follows completion, and a direct write invalidates the page-cache range after the I/O (`fs/iomap/direct-io.c:139`), so the read sees the new bytes. | Holds |
+| 20 | **EIO zero-fill.** A backend returns zeros for an unreadable page. | Forbidden. Zeros are the torn-tail signal, and below `d` they would turn a read error into `Corrupt`. | Holds |
+| 21 | **Replay identity.** Do ring ops change the tape? | No. The call, result and `DirOp` are the same on both hosts. Only `OpenMode` gains `Durable`, `Direct` and the `zero_at` call, so old tapes replay. | Holds |
+| 22 | **The briefed "FSYNC only for `sync_dir`".** | It holds for the journal path. Pack, MANIFEST, export and open syncs keep FSYNC, because O_DSYNC on many-write files would flush each write (the sync table). | Brief item narrowed, stated |
 
 ### 3.4 Recovery, step by step (`open`)
 

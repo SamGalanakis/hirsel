@@ -101,6 +101,50 @@ fn udp_receive_captures_gro_and_short_slots() {
     assert!(pool.front().is_none());
 }
 
+/// A fresh pool's first read must not fault its slot pages in: at 1M datagrams/s, a
+/// faulting first receive held the reader past what the default socket queue holds.
+#[test]
+fn first_receive_into_a_fresh_pool_takes_no_page_faults() {
+    use crate::udp::{Options, ReceivePool, Socket, TurnBudget, TxPacket, Window};
+
+    fn minor_faults() -> i64 {
+        // SAFETY: zero is valid for every rusage field, and the call writes one rusage.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) },
+            0
+        );
+        usage.ru_minflt
+    }
+
+    // 64 slots of 1,536 bytes span 24 pages; each datagram lands in its own slot.
+    let options = Options::new(64, 1_536).unwrap();
+    let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+    let sender = Socket::open(false, options).unwrap();
+    sender.bind(loopback).unwrap();
+    let receiver = Socket::open(false, options).unwrap();
+    let to = receiver.bind(loopback).unwrap();
+    let data = [0x5a; 1200];
+    let packet = TxPacket {
+        to,
+        at: 0,
+        len: 1200,
+        ecn: 0,
+    };
+    for _ in 0..64 {
+        assert_eq!(
+            sender.send_window(&data, &[packet]).unwrap(),
+            Window::Sent(1)
+        );
+    }
+    let mut pool = ReceivePool::new(options).unwrap();
+    let mut budget = TurnBudget::default();
+    let before = minor_faults();
+    assert_eq!(pool.read(&receiver, None, &mut budget).unwrap(), 64);
+    let faults = minor_faults() - before;
+    assert!(faults <= 2, "first read faulted {faults} pages in");
+}
+
 #[test]
 fn member_reader_never_misses_its_wake() {
     use crate::udp::{Options, member_queue};

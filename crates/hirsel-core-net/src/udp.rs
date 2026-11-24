@@ -232,6 +232,28 @@ impl TurnBudget {
     }
 }
 
+/// Receive storage of `words` elements, every page resident before the socket's first read.
+/// A first receive into untouched storage takes one fault per page inside the kernel copy;
+/// at 1M datagrams/s that held the reader on its CPU for ~250 µs, past what the socket's
+/// default queue holds, and dropped a GSO train. The volatile writes keep the allocation
+/// from staying a lazily mapped zero region.
+fn resident<T>(words: usize, fill: impl FnMut() -> T) -> io::Result<Box<[T]>> {
+    const PAGE: usize = 4096;
+    let mut storage = Vec::new();
+    storage
+        .try_reserve_exact(words)
+        .map_err(|_| socket_error(libc::ENOMEM))?;
+    storage.resize_with(words, fill);
+    let mut storage = storage.into_boxed_slice();
+    let base = storage.as_mut_ptr().cast::<u8>();
+    for offset in (0..words * size_of::<T>()).step_by(PAGE) {
+        // SAFETY: the offset is inside this exclusively owned allocation, and every
+        // element type stored here accepts any byte value.
+        unsafe { base.add(offset).write_volatile(0) };
+    }
+    Ok(storage)
+}
+
 fn socket_error(code: i32) -> io::Error {
     io::Error::from_raw_os_error(code)
 }

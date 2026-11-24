@@ -1,4 +1,4 @@
-use super::{Captured, HEADER_BYTES, Options, socket_error};
+use super::{Captured, HEADER_BYTES, Options};
 use std::{
     cell::UnsafeCell,
     io,
@@ -55,12 +55,7 @@ pub struct MemberReader {
 
 pub fn member_queue(options: Options) -> io::Result<(MemberProducer, MemberReader)> {
     let words = options.slots() * (options.slot_bytes() / 8);
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(words)
-        .map_err(|_| socket_error(libc::ENOMEM))?;
-    bytes.resize_with(words, || UnsafeCell::new(MaybeUninit::uninit()));
-    let mut bytes = bytes.into_boxed_slice();
+    let mut bytes = super::resident(words, || UnsafeCell::new(MaybeUninit::uninit()))?;
     let base = NonNull::new(bytes.as_mut_ptr().cast()).unwrap();
     let storage = Arc::new(Storage {
         _bytes: bytes,

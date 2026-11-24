@@ -56,9 +56,7 @@ impl ReceivePool {
     pub fn new(options: Options) -> io::Result<Self> {
         let words = options.slots() * (options.slot_bytes() / 8);
         let exhausted = |_| socket_error(libc::ENOMEM);
-        let mut slots = Vec::new();
-        slots.try_reserve_exact(words).map_err(exhausted)?;
-        slots.resize_with(words, MaybeUninit::uninit);
+        let slots = super::resident(words, MaybeUninit::uninit)?;
         let mut free = Vec::new();
         free.try_reserve_exact(options.slots()).map_err(exhausted)?;
         free.extend((0..options.slots()).rev());
@@ -68,7 +66,7 @@ impl ReceivePool {
             .map_err(exhausted)?;
         Ok(Self {
             options,
-            slots: slots.into_boxed_slice(),
+            slots,
             free,
             queue,
         })

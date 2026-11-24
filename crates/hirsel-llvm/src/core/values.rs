@@ -24,7 +24,8 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::UpdateMask { result, .. }
                 | Inst::Case { result, .. }
                 | Inst::RegionOpen { result }
-                | Inst::TryUnwrap { result, .. } => Some(result),
+                | Inst::TryUnwrap { result, .. }
+                | Inst::FrameActive { result, .. } => Some(result),
                 _ => None,
             };
             if let Some(v) = result {
@@ -55,7 +56,12 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     define(result);
                     define(available);
                 }
-                Inst::LimitEnter {
+                Inst::FrameAdmit {
+                    admitted,
+                    available,
+                    ..
+                }
+                | Inst::LimitEnter {
                     admitted,
                     available,
                     ..
@@ -156,7 +162,6 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     }
                     if let AllocPlace::Region(v)
                     | AllocPlace::Like(v)
-                    | AllocPlace::Frame(v)
                     | AllocPlace::LentFrame(v)
                     | AllocPlace::ByteTail(v) = place
                     {
@@ -167,7 +172,14 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     read(block);
                     read(charge);
                 }
-                Inst::FrameRefund { charge } => read(charge),
+                Inst::FrameAdmit {
+                    charge, overflow, ..
+                } => {
+                    read(charge);
+                    if let Some(v) = overflow {
+                        read(v);
+                    }
+                }
                 Inst::Grow {
                     charge,
                     overflow,
@@ -243,7 +255,9 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::LimitExit
                 | Inst::Drop { .. }
                 | Inst::Mark { .. }
-                | Inst::Unmark { .. } => {}
+                | Inst::Unmark { .. }
+                | Inst::FrameRefund { .. }
+                | Inst::FrameActive { .. } => {}
             }
         }
         let mut read = |v: ValueId| {
@@ -387,6 +401,8 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::UpdateMask { .. }
                 | Inst::Alloc { .. }
                 | Inst::Free { .. }
+                | Inst::FrameAdmit { .. }
+                | Inst::FrameActive { .. }
                 | Inst::FrameRefund { .. }
                 | Inst::RegionOpen { .. }
                 | Inst::RegionClose { .. }

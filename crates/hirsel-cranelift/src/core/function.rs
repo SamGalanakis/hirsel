@@ -40,6 +40,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     addresses: Vec<AddressValue>,
     pub blocks: Vec<ir::Block>,
     pub slots: Vec<ir::StackSlot>,
+    pub frame_obligations: std::collections::HashMap<AddressId, ir::StackSlot>,
     pub functions: &'c [cranelift_module::FuncId],
     pub statics: &'c [cranelift_module::DataId],
     pub descriptors: &'c [Option<cranelift_module::DataId>],
@@ -211,6 +212,14 @@ pub(super) fn emit(
         ));
     }
     b.switch_to_block(blocks[0]);
+    let mut frame_obligations = std::collections::HashMap::new();
+    for address in body.frame_obligations() {
+        let obligation =
+            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        let inactive = b.ins().iconst(types::I8, 0);
+        b.ins().stack_store(types::I8, inactive, obligation, 8);
+        frame_obligations.insert(address, obligation);
+    }
     let params = b.block_params(blocks[0]).to_vec();
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
@@ -259,6 +268,7 @@ pub(super) fn emit(
         addresses,
         blocks,
         slots,
+        frame_obligations,
         functions,
         statics,
         descriptors: tables.descriptors,

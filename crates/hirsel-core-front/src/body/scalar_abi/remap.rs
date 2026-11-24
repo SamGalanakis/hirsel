@@ -143,7 +143,6 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             match place {
                 AllocPlace::Like(v)
                 | AllocPlace::Region(v)
-                | AllocPlace::Frame(v)
                 | AllocPlace::LentFrame(v)
                 | AllocPlace::ByteTail(v) => f(v),
                 _ => {}
@@ -153,7 +152,22 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             f(block);
             f(charge)
         }
-        Inst::FrameRefund { charge } => f(charge),
+        Inst::FrameAdmit {
+            admitted,
+            available,
+            charge,
+            overflow,
+            ..
+        } => {
+            f(admitted);
+            f(available);
+            f(charge);
+            if let Some(v) = overflow {
+                f(v);
+            }
+        }
+        Inst::FrameActive { result, .. } => f(result),
+        Inst::FrameRefund { .. } => {}
         Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => f(bytes),
         Inst::Grow {
             result,

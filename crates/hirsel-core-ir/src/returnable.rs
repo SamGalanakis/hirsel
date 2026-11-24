@@ -29,6 +29,9 @@
 //! its stack. Below such an entry, a channel receive, or a call of a function
 //! that reaches one, is a site when the caller's shape allows it. Every other
 //! wait keeps the stackful drive.
+mod uses;
+use uses::map_uses;
+
 use crate::extent::{operands, terminator_uses};
 use homes::homed_slots;
 mod homes;
@@ -219,9 +222,11 @@ fn refusal(module: &Module, f: &Function, body: &Body) -> Option<Refusal> {
     for inst in &body.insts {
         let r = match *inst {
             Inst::Alloc {
-                place: AllocPlace::Frame(_) | AllocPlace::LentFrame(_),
+                place: AllocPlace::LentFrame(_),
                 ..
             }
+            | Inst::FrameAdmit { .. }
+            | Inst::FrameActive { .. }
             | Inst::FrameRefund { .. } => Some(Refusal::FrameAlloc),
             Inst::PromoteFrame { .. } => Some(Refusal::PromoteFrame),
             Inst::RegionOpen { .. } | Inst::RegionClose { .. } | Inst::Trim { .. } => {
@@ -605,125 +610,6 @@ fn hoisted(inst: &Inst) -> Option<ValueId> {
         | Inst::LayoutConst { result, .. } => Some(result),
         _ => None,
     }
-}
-
-/// The uses of `inst` mapped through `f`; results, addresses and blocks kept.
-fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> Inst {
-    let mut i = inst.clone();
-    match &mut i {
-        Inst::Const { .. }
-        | Inst::ReadStatic { .. }
-        | Inst::FunctionRef { .. }
-        | Inst::DescriptorRef { .. }
-        | Inst::RegionOpen { .. }
-        | Inst::LayoutConst { .. }
-        | Inst::Address { .. }
-        | Inst::Read { .. }
-        | Inst::Pointer { .. }
-        | Inst::Case { .. }
-        | Inst::SetCase { .. }
-        | Inst::Drop { .. }
-        | Inst::StorageLive { .. }
-        | Inst::StorageDead { .. }
-        | Inst::BuiltinUse { .. }
-        | Inst::LimitExit
-        | Inst::Step { .. }
-        | Inst::PromoteFrame { .. }
-        | Inst::Call { .. } => {}
-        Inst::Simd { first, second, .. } => {
-            *first = f(*first);
-            if let Some(s) = second {
-                *s = f(*s);
-            }
-        }
-        Inst::PutLanes { vector, count, .. } => {
-            *vector = f(*vector);
-            *count = f(*count);
-        }
-        Inst::Unary { operand, .. }
-        | Inst::CompactWidth { word: operand, .. }
-        | Inst::ScalarUnary { operand, .. }
-        | Inst::Convert { operand, .. } => *operand = f(*operand),
-        Inst::Binary { left, right, .. }
-        | Inst::Compare { left, right, .. }
-        | Inst::IntArith { left, right, .. } => {
-            *left = f(*left);
-            *right = f(*right);
-        }
-        Inst::MulAdd {
-            left,
-            right,
-            addend,
-            ..
-        } => {
-            *left = f(*left);
-            *right = f(*right);
-            *addend = f(*addend);
-        }
-        Inst::Store { value, .. } => *value = f(*value),
-        Inst::UpdateMask { mask, .. } => *mask = f(*mask),
-        Inst::Alloc {
-            place,
-            charge,
-            overflow,
-            size,
-            ..
-        } => {
-            if let AllocPlace::Like(x)
-            | AllocPlace::Region(x)
-            | AllocPlace::Frame(x)
-            | AllocPlace::LentFrame(x)
-            | AllocPlace::ByteTail(x) = place
-            {
-                *x = f(*x);
-            }
-            *charge = f(*charge);
-            if let Some(o) = overflow {
-                *o = f(*o);
-            }
-            *size = f(*size);
-        }
-        Inst::Free { block, charge } => {
-            *block = f(*block);
-            *charge = f(*charge);
-        }
-        Inst::FrameRefund { charge } => *charge = f(*charge),
-        Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => *bytes = f(*bytes),
-        Inst::Grow {
-            charge,
-            overflow,
-            size,
-            capacity,
-            moved,
-            refund,
-            ..
-        } => {
-            for v in [charge, size, capacity, moved, refund] {
-                *v = f(*v);
-            }
-            if let Some(o) = overflow {
-                *o = f(*o);
-            }
-        }
-        Inst::RegionClose { region } => *region = f(*region),
-        Inst::Trim {
-            block,
-            region,
-            entry,
-            previous,
-            charge,
-        } => {
-            for v in [block, region, entry, previous, charge] {
-                *v = f(*v);
-            }
-        }
-        Inst::LimitEnter { bytes, .. } => *bytes = f(*bytes),
-        Inst::Share { node, .. } | Inst::Release { node, .. } | Inst::TryUnwrap { node, .. } => {
-            *node = f(*node)
-        }
-        Inst::Mark { count, .. } | Inst::Unmark { count, .. } => *count = f(*count),
-    }
-    i
 }
 
 fn map_fail(inst: &mut Inst, f: impl Fn(BlockId) -> BlockId) {

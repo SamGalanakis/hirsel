@@ -263,7 +263,7 @@ tags!(Inst {
     18 => Pointer { result, address },
     19 => Alloc { result, available, region_entry, kind, place, charge, overflow, size, align },
     20 => Free { block, charge },
-    21 => FrameRefund { charge },
+    // Tag 21 was the count-based frame refund.
     22 => Copy { to, from, bytes },
     23 => Grow { result, available, carrier, charge, overflow, size, align, capacity, moved, refund },
     24 => Case { result, address },
@@ -287,6 +287,9 @@ tags!(Inst {
     42 => PutLanes { to, vector, count },
     43 => BuiltinUse { definition },
     44 => Move { to, from, bytes },
+    45 => FrameAdmit { storage, admitted, available, charge, overflow, replace },
+    46 => FrameActive { storage, result },
+    47 => FrameRefund { storage },
 });
 
 tags!(LayoutQuery {
@@ -307,7 +310,7 @@ tags!(AllocPlace {
     0 => Current,
     1 => Like(part0),
     2 => Region(part0),
-    3 => Frame(part0),
+    // Tag 3 was the untracked lexical frame admission.
     4 => LentFrame(part0),
     5 => ByteHead,
     6 => ByteTail(part0),

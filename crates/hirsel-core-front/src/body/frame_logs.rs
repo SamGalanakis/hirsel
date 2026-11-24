@@ -26,6 +26,12 @@ use hirsel_core_layout::FRAME_LIST_LINK_BYTES;
 const NODE_WORDS: u64 = 3;
 const ENTRY_WORDS: u64 = 4;
 
+#[derive(Clone, Copy)]
+pub(super) struct FrameLog {
+    pub storage: AddressId,
+    pub item: TyId,
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     fn is_core_call(&self, value: NodeId, path: &str) -> bool {
         self.kind(value) == NodeKind::Call
@@ -173,41 +179,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     /// The frame bytes of a log node, for `log.new`'s allocation.
-    pub(super) fn frame_log_bytes(&mut self, n: NodeId) -> Option<ValueId> {
+    pub(super) fn frame_log_bytes(&mut self, n: NodeId) -> Option<AddressId> {
         self.frame_log_slot(NODE_WORDS, n)
     }
 
     pub(super) fn frame_log_entries(&mut self, n: NodeId) -> Option<ValueId> {
-        self.frame_log_slot(ENTRY_WORDS + FRAME_LIST_LINK_BYTES / 8, n)
-    }
-
-    fn frame_log_slot(&mut self, words: u64, n: NodeId) -> Option<ValueId> {
-        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), words));
-        let row = self.place_row(words, "frame log storage without a place", n)?;
-        let bytes = self.entry_slot(PlaceTy::Declared(row), n);
+        let bytes = self.frame_log_slot(ENTRY_WORDS + FRAME_LIST_LINK_BYTES / 8, n)?;
         Some(self.pointer(bytes, n))
     }
 
-    /// Clean the frame log owned at `address`, with entries of type `item`: drop
-    /// its entries, then refund the node's charge; the node stays in the frame.
-    pub(super) fn drop_frame_log(
-        &mut self,
-        address: AddressId,
-        item: TyId,
-        n: NodeId,
-    ) -> Option<()> {
-        let node_at = self.address(
-            AddressBase::Address(address),
-            &[Step::Field(0)],
-            PlaceTy::Value(Ty::Ptr),
-            n,
-        );
-        let node = self.read_bits(node_at, Ty::Ptr, n);
-        let list = self.list_ty(item, n)?;
+    fn frame_log_slot(&mut self, words: u64, n: NodeId) -> Option<AddressId> {
+        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), words));
+        let row = self.place_row(words, "frame log storage without a place", n)?;
+        Some(self.entry_slot(PlaceTy::Declared(row), n))
+    }
+
+    /// Drop the entries before refunding the frame node, including when a
+    /// finalizer in the entries fails.
+    pub(super) fn drop_frame_log(&mut self, frame: FrameLog, n: NodeId) -> Option<()> {
+        let node = self.pointer(frame.storage, n);
+        let list = self.list_ty(frame.item, n)?;
         let list_id = self.runtime_type(list, n)?;
-        self.emit_drop(AddressBase::Value(node), list_id, n);
-        let (charge, _) = self.owner_charge(list, None, n)?;
-        self.inst(Inst::FrameRefund { charge }, n);
+        self.emit_drop_with_refund(AddressBase::Value(node), list_id, Some(frame.storage), n);
         Some(())
     }
 }

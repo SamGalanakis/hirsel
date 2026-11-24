@@ -21,6 +21,8 @@
 //! }
 //! ```
 
+mod allocation;
+
 use crate::ir::*;
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::FieldTy;
@@ -106,6 +108,8 @@ pub fn uses_v1(m: &Module) -> bool {
                             Inst::Alloc { .. }
                                 | Inst::Grow { .. }
                                 | Inst::Free { .. }
+                                | Inst::FrameAdmit { .. }
+                                | Inst::FrameActive { .. }
                                 | Inst::FrameRefund { .. }
                                 | Inst::PromoteFrame { .. }
                                 | Inst::Copy { .. }
@@ -736,7 +740,6 @@ impl Printer {
                             AllocPlace::Current => String::new(),
                             AllocPlace::Like(b) => format!(" like v{}", b.0),
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
-                            AllocPlace::Frame(r) => format!(" frame v{}", r.0),
                             AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
                             AllocPlace::ByteHead => " byte_head".into(),
                             AllocPlace::ByteTail(r) => format!(" byte_tail v{}", r.0),
@@ -777,7 +780,26 @@ impl Printer {
                     Inst::Free { block, charge } => {
                         format!("free {} charge {}", v(block), v(charge))
                     }
-                    Inst::FrameRefund { charge } => format!("frame_refund {}", v(charge)),
+                    Inst::FrameAdmit {
+                        storage,
+                        admitted,
+                        available,
+                        charge,
+                        overflow,
+                        replace,
+                    } => format!(
+                        "{}, {} = frame_admit a{} charge {}{}{}",
+                        def(*admitted),
+                        def(*available),
+                        storage.0,
+                        v(charge),
+                        overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
+                        if *replace { " replace" } else { "" },
+                    ),
+                    Inst::FrameActive { storage, result } => {
+                        format!("{} = frame_active a{}", def(*result), storage.0)
+                    }
+                    Inst::FrameRefund { storage } => format!("frame_refund a{}", storage.0),
                     Inst::PromoteFrame { carrier } => format!("promote_frame a{}", carrier.0),
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
@@ -1466,7 +1488,9 @@ impl BodyParser {
             }
             Some("frame_refund") => {
                 l.next()?;
-                return Ok(Inst::FrameRefund { charge: l.value()? });
+                return Ok(Inst::FrameRefund {
+                    storage: AddressId(l.id('a')?),
+                });
             }
             Some(op @ ("copy" | "move")) => {
                 let overlap = op == "move";
@@ -1642,58 +1666,32 @@ impl BodyParser {
                 fail: l.fail()?,
             }
         } else if op == "alloc" {
-            let (result, available, region_entry) = match defs.as_slice() {
-                [a, b] => (*a, *b, None),
-                [a, b, c] => (*a, *b, Some(*c)),
-                _ => return Err("alloc takes pointer, room and optionally region entry".into()),
-            };
-            let kind = match l.next()? {
-                "for" => AllocKind::Own {
-                    edge: l.field_ty()?,
-                },
-                "env" => AllocKind::Environment { ty: l.tref()? },
-                "region" => AllocKind::Region,
-                "resource" => {
-                    l.expect("grant")?;
-                    AllocKind::Resource { grant: l.num()? }
-                }
-                k => return Err(format!("unknown allocation kind `{k}`")),
-            };
-            let size = l.value()?;
-            l.expect("align")?;
-            let align = l.num()?;
+            allocation::parse(l, &defs)?
+        } else if op == "frame_admit" {
+            let (admitted, available) = pair(&defs)?;
+            let storage = AddressId(l.id('a')?);
             l.expect("charge")?;
             let charge = l.value()?;
-            let place = if l.eat("like") {
-                AllocPlace::Like(l.value()?)
-            } else if l.eat("in") {
-                AllocPlace::Region(l.value()?)
-            } else if l.eat("lent_frame") {
-                AllocPlace::LentFrame(l.value()?)
-            } else if l.eat("frame") {
-                AllocPlace::Frame(l.value()?)
-            } else if l.eat("byte_head") {
-                AllocPlace::ByteHead
-            } else if l.eat("byte_tail") {
-                AllocPlace::ByteTail(l.value()?)
-            } else {
-                AllocPlace::Current
-            };
             let overflow = if l.eat("overflow") {
                 Some(l.value()?)
             } else {
                 None
             };
-            Inst::Alloc {
-                result,
+            Inst::FrameAdmit {
+                storage,
+                admitted,
                 available,
-                region_entry,
-                kind,
-                place,
                 charge,
                 overflow,
-                size,
-                align,
+                replace: l.eat("replace"),
+            }
+        } else if op == "frame_active" {
+            let [result] = defs.as_slice() else {
+                return Err("frame_active takes one result".into());
+            };
+            Inst::FrameActive {
+                storage: AddressId(l.id('a')?),
+                result: *result,
             }
         } else if op == "grow" {
             let (result, available) = pair(&defs)?;

@@ -187,8 +187,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.consume(v, pat);
                     (Binding::Value(v), Origin::Let)
                 };
-                if let Some(&item) = v.and_then(|v| self.frame_logs.get(&v)) {
-                    self.frame_log_owners.insert(b, item);
+                if let Some(&frame) = v.and_then(|v| self.frame_logs.get(&v)) {
+                    self.frame_log_owners.insert(b, frame);
                 }
                 self.declare(b, ty, binding, origin, pat);
                 if let Binding::Slot(Some(address)) = binding

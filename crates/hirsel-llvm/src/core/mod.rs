@@ -23,6 +23,7 @@ mod expose;
 mod fast;
 mod flow;
 mod forward;
+mod frame;
 mod growth;
 mod inlining;
 mod law;
@@ -839,11 +840,7 @@ fn emit_module(
                     e.sink.alloca(Local::Value(i), &ty(*t), 0);
                 }
             }
-            for (i, t) in body.slots.iter().enumerate() {
-                let (bytes, align) = e.place_layout(*t);
-                e.sink
-                    .alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
-            }
+            e.allocate_storage();
             for i in 0..body.addresses.len() {
                 if e.address_slots[i] {
                     e.sink.alloca(Local::Address(i), &Type::Ptr, 0);

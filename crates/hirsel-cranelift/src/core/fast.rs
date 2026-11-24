@@ -172,20 +172,15 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])
     }
-    /// Admit `charge` for frame bytes at `frame` (`alloc .. frame`): the own
-    /// allocation's inline admission, with nothing allocated; a refusal, overflow
+    /// Admit `charge` for frame bytes: the own allocation's inline admission,
+    /// with nothing allocated. A refusal, overflow
     /// or test probe takes `hirsel_core_frame_admit`, which keeps the Capacity event.
     /// Frame charges move only the room: no block names the record.
-    pub fn frame_admit(
-        &mut self,
-        frame: Value,
-        charge: Value,
-        overflow: Option<Value>,
-    ) -> Result<[Value; 2]> {
+    pub fn frame_admit(&mut self, charge: Value, overflow: Option<Value>) -> Result<[Value; 2]> {
         let slow = self.cold_block();
         let fast = self.b.create_block();
         let done = self.b.create_block();
-        self.b.append_block_param(done, types::I64);
+        self.b.append_block_param(done, types::I8);
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
@@ -200,7 +195,8 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(admit);
         self.debit_room(payer, charge, available)?;
         let zero = self.b.ins().iconst(types::I64, 0);
-        self.b.ins().jump(done, &[frame.into(), zero.into()]);
+        let yes = self.b.ins().iconst(types::I8, 1);
+        self.b.ins().jump(done, &[yes.into(), zero.into()]);
         self.b.switch_to_block(slow);
         let values = self.c_call(
             "hirsel_core_frame_admit",
@@ -208,13 +204,27 @@ impl Function<'_, '_, '_> {
             &[P, U, U],
             &[self.context, charge, overflow],
         )?;
-        let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
-        let zero = self.b.ins().iconst(types::I64, 0);
-        let pointer = self.b.ins().select(refused, zero, frame);
-        self.b.ins().jump(done, &[pointer.into(), values[2].into()]);
+        let admitted = self.b.ins().icmp_imm_s(IntCC::NotEqual, values[0], 0);
+        self.b
+            .ins()
+            .jump(done, &[admitted.into(), values[2].into()]);
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])
     }
+    pub(super) fn refund_frame_charge(&mut self, obligation: ir::StackSlot) -> Result<()> {
+        let charge = self
+            .b
+            .ins()
+            .stack_load(types::I64, types::I64, obligation, 0);
+        self.c_call(
+            "hirsel_core_frame_refund",
+            &[P, U],
+            &[],
+            &[self.context, charge],
+        )?;
+        Ok(())
+    }
+
     pub fn region_alloc(
         &mut self,
         slot: Value,
@@ -637,6 +647,8 @@ pub(super) fn empty_bound(body: &Body) -> bool {
             Inst::Alloc { .. }
             | Inst::Grow { .. }
             | Inst::Free { .. }
+            | Inst::FrameAdmit { .. }
+            | Inst::FrameActive { .. }
             | Inst::FrameRefund { .. }
             | Inst::PromoteFrame { .. }
             | Inst::Drop { .. }

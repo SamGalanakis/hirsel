@@ -841,17 +841,13 @@ impl FunctionEmitter<'_> {
                 let payer = match place {
                     AllocPlace::Current
                     | AllocPlace::Like(_)
-                    | AllocPlace::Frame(_)
                     | AllocPlace::LentFrame(_)
                     | AllocPlace::ByteHead
                     | AllocPlace::ByteTail(_) => Payer::Current,
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
-                let (block, room) = if let AllocPlace::Frame(frame) = place {
-                    let frame = self.numeric(frame);
-                    self.frame_admit(&frame, &charge, overflow)
-                } else if let AllocPlace::LentFrame(frame) = place {
+                let (block, room) = if let AllocPlace::LentFrame(frame) = place {
                     let frame = self.numeric(frame);
                     let overflow = overflow.map_or(FALSE, |v| {
                         let flag = self.numeric(v);
@@ -1030,9 +1026,8 @@ impl FunctionEmitter<'_> {
                     self.store_native(&at, 0, Type::Ptr, &promoted);
                 }
             }
-            Inst::FrameRefund { charge } => {
-                let n = self.numeric(charge);
-                self.runtime_void("hirsel_core_frame_refund", &[ptr(CONTEXT), word(n)]);
+            Inst::FrameAdmit { .. } | Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {
+                self.frame(inst);
             }
             Inst::Copy { to, from, bytes } => {
                 let pieces = match self.body.addresses[to.index()].ty {

@@ -1347,9 +1347,9 @@ struct Cx<'c, 'a, 'e> {
     /// Set by a candidate's `let` for the `log.new()` it lowers next.
     frame_log_next: Option<bool>,
     /// The Log values whose node is in this body's frame, with their entry type.
-    frame_logs: HashMap<ValueId, TyId>,
+    frame_logs: HashMap<ValueId, frame_logs::FrameLog>,
     /// The binders that own a frame node, with their log's entry type.
-    frame_log_owners: HashMap<u32, TyId>,
+    frame_log_owners: HashMap<u32, frame_logs::FrameLog>,
     /// Literal copies in an immutable let whose binding is only viewed.
     frame_string_copies: Vec<(NodeId, u64)>,
 }

@@ -1014,7 +1014,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 header,
                 carrier,
                 &plan,
-                [old_cap, new_cap, len, moved],
+                [new_cap, len, moved],
                 owned,
                 [like, current],
                 success,

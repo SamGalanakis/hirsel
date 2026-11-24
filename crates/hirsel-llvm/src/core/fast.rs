@@ -298,7 +298,6 @@ impl FunctionEmitter<'_> {
     /// Frame charges move only the room: no block names the record.
     pub(super) fn frame_admit(
         &mut self,
-        frame: &Value,
         charge: &Value,
         overflow: Option<ValueId>,
     ) -> (Value, Value) {
@@ -338,16 +337,20 @@ impl FunctionEmitter<'_> {
             ],
         );
         let present = self.cmp(Predicate::Ne, &Type::Ptr, &admitted, &Value::Null);
-        let slow_frame = self.emit(Operation::Select(&Type::Ptr, &present, frame, &Value::Null));
         self.br(done);
         self.block(done);
-        let pointer = self.emit(Operation::Phi(
-            &Type::Ptr,
-            &[(frame.clone(), debit), (slow_frame, slow)],
+        let admitted = self.emit(Operation::Phi(
+            &Type::I1,
+            &[(true.into(), debit), (present, slow)],
         ));
         let room = self.emit(Operation::Phi(&i64, &[(int(0), debit), (room, slow)]));
-        (pointer, room)
+        (admitted, room)
     }
+    pub(super) fn refund_frame_charge(&mut self, slot: &Value) {
+        let charge = self.load(&Type::I64, slot, 8);
+        self.runtime_void("hirsel_core_frame_refund", &[ptr(CONTEXT), word(charge)]);
+    }
+
     fn fast_region(
         &mut self,
         slot: &Value,

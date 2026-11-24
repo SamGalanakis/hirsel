@@ -68,7 +68,7 @@ pub(super) struct Own {
 enum Frame {
     List(frame_lists::FrameList),
     /// A log node (frame_logs.rs), with its entry type.
-    Log(TyId),
+    Log(frame_logs::FrameLog),
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -357,7 +357,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 frame = self
                     .frame_list_at(own.address)
                     .map(Frame::List)
-                    .or_else(|| self.frame_log_owners.get(&s).map(|&item| Frame::Log(item)));
+                    .or_else(|| {
+                        self.frame_log_owners
+                            .get(&s)
+                            .map(|&frame| Frame::Log(frame))
+                    });
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -385,15 +389,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match (avail, flag) {
             (Avail::Live, _) => self.drop_owner(base, id, frame, n),
             (Avail::Maybe, Some(flag)) => {
-                let on = self.value(Ty::Scalar(Scalar::Bool));
-                self.inst(
-                    Inst::Read {
-                        result: on,
-                        address: flag,
-                        mode: ReadMode::Bits,
-                    },
-                    n,
-                );
+                let on = if let Some(Frame::Log(frame)) = frame {
+                    self.frame_active(frame.storage, n)
+                } else {
+                    self.read_bits(flag, Ty::Scalar(Scalar::Bool), n)
+                };
                 let yes = self.new_block(&[]);
                 let next = self.new_block(&[]);
                 let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
@@ -496,15 +496,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn drop_owner(&mut self, base: AddressBase, id: TypeId, frame: Option<Frame>, n: NodeId) {
         match (frame, base) {
             (Some(Frame::List(f)), AddressBase::Address(address)) => {
-                let _ = self.drop_frame_list(f, address, id, n);
+                self.drop_frame_list(f, address, id, n);
             }
-            (Some(Frame::Log(item)), AddressBase::Address(address)) => {
-                let _ = self.drop_frame_log(address, item, n);
+            (Some(Frame::Log(frame)), AddressBase::Address(_)) => {
+                let _ = self.drop_frame_log(frame, n);
             }
             _ => self.emit_drop(base, id, n),
         }
     }
     pub(super) fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
+        self.emit_drop_with_refund(base, id, None, n);
+    }
+
+    pub(super) fn emit_drop_with_refund(
+        &mut self,
+        base: AddressBase,
+        id: TypeId,
+        refund: Option<AddressId>,
+        n: NodeId,
+    ) {
         crate::cost_scope!("phase", "cleanup emission");
         let address = match base {
             AddressBase::Address(a) => a,
@@ -519,6 +529,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
+            if let Some(storage) = refund {
+                self.inst(Inst::FrameRefund { storage }, n);
+            }
             return;
         }
         // FAIL-12: a failed drop has cleaned its value's fields. During failure
@@ -527,7 +540,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let fail = if self.failing {
             self.new_block(&[])
         } else {
-            self.drop_failure(n)
+            self.drop_failure(refund, n)
         };
         self.inst(
             Inst::Drop {
@@ -541,10 +554,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.jump(fail, &[], n);
             self.start(fail);
         }
+        if let Some(storage) = refund {
+            self.inst(Inst::FrameRefund { storage }, n);
+        }
     }
     /// The failure block of a drop on a normal edge: the edge's pending result, then
     /// every owner and scope the edge has not cleaned, innermost first, then propagate.
-    fn drop_failure(&mut self, n: NodeId) -> BlockId {
+    fn drop_failure(&mut self, refund: Option<AddressId>, n: NodeId) -> BlockId {
         let edge = self.edge.unwrap_or(Edge {
             from: self.owners.len(),
             keep: None,
@@ -559,6 +575,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let saved = std::mem::replace(&mut self.failing, true);
         let blk = self.new_block(&[]);
         self.start(blk);
+        if let Some(storage) = refund {
+            self.inst(Inst::FrameRefund { storage }, n);
+        }
         if let Some((base, id)) = edge.pending {
             self.emit_drop(base, id, n);
         }

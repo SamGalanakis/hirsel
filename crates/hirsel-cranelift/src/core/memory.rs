@@ -167,11 +167,6 @@ impl Function<'_, '_, '_> {
                     );
                     let zero = self.b.ins().iconst(types::I64, 0);
                     [tag, zero, zero]
-                } else if let AllocPlace::Frame(frame) = place {
-                    let frame = self.get(frame);
-                    let overflow = overflow.map(|v| self.get(v));
-                    let values = self.frame_admit(frame, charge, overflow)?;
-                    [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let AllocPlace::LentFrame(frame) = place {
                     let frame = self.get(frame);
                     let overflow = overflow.map_or_else(
@@ -465,14 +460,44 @@ impl Function<'_, '_, '_> {
                     self.store_word(at, 0, promoted);
                 }
             }
-            Inst::FrameRefund { charge } => {
+            Inst::FrameAdmit {
+                storage,
+                admitted,
+                available,
+                charge,
+                overflow,
+                replace,
+            } => {
+                let obligation = self.frame_obligations[&storage];
                 let charge = self.get(charge);
-                self.c_call(
-                    "hirsel_core_frame_refund",
-                    &[p, u],
-                    &[],
-                    &[self.context, charge],
-                )?;
+                let overflow = overflow.map(|v| self.get(v));
+                let [ok, room] = self.frame_admit(charge, overflow)?;
+                if replace {
+                    let update = self.b.create_block();
+                    let done = self.b.create_block();
+                    self.b.ins().brif(ok, update, &[], done, &[]);
+                    self.b.switch_to_block(update);
+                    self.refund_frame_charge(obligation)?;
+                    self.b.ins().stack_store(types::I64, charge, obligation, 0);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(done);
+                } else {
+                    self.b.ins().stack_store(types::I64, charge, obligation, 0);
+                    self.b.ins().stack_store(types::I8, ok, obligation, 8);
+                }
+                self.set(admitted, ok);
+                self.set(available, room);
+            }
+            Inst::FrameActive { storage, result } => {
+                let obligation = self.frame_obligations[&storage];
+                let live = self.b.ins().stack_load(types::I8, types::I8, obligation, 8);
+                self.set(result, live);
+            }
+            Inst::FrameRefund { storage } => {
+                let obligation = self.frame_obligations[&storage];
+                self.refund_frame_charge(obligation)?;
+                let inactive = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().stack_store(types::I8, inactive, obligation, 8);
             }
             Inst::Copy { to, from, bytes } => {
                 let to = self.addr(to);

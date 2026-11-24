@@ -9,6 +9,7 @@
 
 use crate::*;
 
+mod frame;
 mod places;
 
 type R = Result<(), String>;
@@ -556,6 +557,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     }
     no_catch(b)?;
     available(b)?;
+    frame::obligations(m, b)?;
     written(m, b)?;
     ended(b)
 }
@@ -1172,30 +1174,20 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             }
             if let AllocPlace::Like(v)
             | AllocPlace::Region(v)
-            | AllocPlace::Frame(v)
             | AllocPlace::LentFrame(v)
             | AllocPlace::ByteTail(v) = place
             {
                 c.is(v, Ty::Ptr)?;
             }
-            if matches!(place, AllocPlace::Frame(_) | AllocPlace::LentFrame(_)) {
-                use hirsel_core_layout::FieldTy;
+            if matches!(place, AllocPlace::LentFrame(_)) {
                 need(
                     matches!(
-                        (kind, place),
-                        (
-                            AllocKind::Own {
-                                edge: FieldTy::Seq(_)
-                            },
-                            _
-                        ) | (
-                            AllocKind::Own {
-                                edge: FieldTy::Box(_)
-                            },
-                            AllocPlace::Frame(_)
-                        )
+                        kind,
+                        AllocKind::Own {
+                            edge: hirsel_core_layout::FieldTy::Seq(_)
+                        }
                     ),
-                    || "frame bytes back only sequence storage and log nodes".into(),
+                    || "lent frame bytes back only sequence storage".into(),
                 )?;
             }
             if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
@@ -1290,7 +1282,9 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(block, Ty::Ptr)?;
             c.is(charge, Ty::Scalar(Scalar::U64))
         }
-        Inst::FrameRefund { charge } => c.is(charge, Ty::Scalar(Scalar::U64)),
+        Inst::FrameAdmit { .. } | Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {
+            frame::inst(c, inst)
+        }
         Inst::PromoteFrame { carrier } => {
             c.writes(carrier)?;
             c.place(carrier).map(|_| ())

@@ -291,30 +291,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// MEM-24's charge of `cap` elements of logical size `logical`, for a capacity
-    /// whose charge was admitted, so it cannot overflow.
-    pub(super) fn admitted_list_charge(
+    pub(super) fn frame_admit(
         &mut self,
-        cap: ValueId,
-        logical: ValueId,
+        storage: AddressId,
+        charge: ValueId,
+        overflow: Option<ValueId>,
+        replace: bool,
         n: NodeId,
-    ) -> Option<ValueId> {
-        let (charge, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, logical, n);
-        let seven = self.konst(Ty::Scalar(Scalar::U64), 7, n)?;
-        let (rounded, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, charge, seven, n);
-        let mask = self.konst(Ty::Scalar(Scalar::U64), !7, n)?;
-        let result = self.value(Ty::Scalar(Scalar::U64));
+    ) -> (ValueId, ValueId) {
+        let admitted = self.value(Ty::Scalar(Scalar::Bool));
+        let available = self.value(Ty::Scalar(Scalar::U64));
         self.inst(
-            Inst::Binary {
-                result,
-                op: BinaryOp::BitAnd,
-                left: rounded,
-                right: mask,
-                fail: None,
+            Inst::FrameAdmit {
+                storage,
+                admitted,
+                available,
+                charge,
+                overflow,
+                replace,
             },
             n,
         );
-        Some(result)
+        (admitted, available)
+    }
+
+    pub(super) fn frame_active(&mut self, storage: AddressId, n: NodeId) -> ValueId {
+        let result = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(Inst::FrameActive { storage, result }, n);
+        result
     }
 
     /// Drop the frame list at `address`: storage in its frame bytes is refunded and
@@ -325,33 +329,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         address: AddressId,
         id: TypeId,
         n: NodeId,
-    ) -> Option<()> {
+    ) {
         if f.lent {
             self.emit_drop(AddressBase::Address(address), id, n);
-            return Some(());
+            return;
         }
-        let carrier = self.list_carrier(f.item, n)?;
-        let header = self.pointer(address, n);
-        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-        let frame = self.pointer(f.bytes, n);
-        let framed = self.list_compare(CompareOp::Eq, data, frame, n);
         let (refund, heap, done) = (
             self.new_block(&[]),
             self.new_block(&[]),
             self.new_block(&[]),
         );
+        let framed = self.frame_active(f.bytes, n);
         self.list_branch(framed, refund, heap, n);
         self.start(refund);
-        let cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
-        let logical = self.layout_size(f.item, true, n)?;
-        let charge = self.admitted_list_charge(cap, logical, n)?;
-        self.inst(Inst::FrameRefund { charge }, n);
+        self.inst(Inst::FrameRefund { storage: f.bytes }, n);
         self.jump(done, &[], n);
         self.start(heap);
         self.emit_drop(AddressBase::Address(address), id, n);
         self.jump(done, &[], n);
         self.start(done);
-        Some(())
     }
     /// Growth of the frame list `header` points at, entered where `grow` would
     /// choose between replacing owned storage (`like`) and allocating (`current`).
@@ -365,7 +361,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         header: ValueId,
         carrier: TypeId,
         plan: &super::lists::ListPlan,
-        [old_cap, new_cap, len, moved]: [ValueId; 4],
+        [new_cap, len, moved]: [ValueId; 3],
         owned: ValueId,
         [like, current]: [BlockId; 2],
         success: BlockId,
@@ -383,7 +379,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             None
         } else {
             let [inside, heap] = [(); 2].map(|_| self.new_block(&[]));
-            let framed = self.list_compare(CompareOp::Eq, data, frame, n);
+            let framed = self.frame_active(f.bytes, n);
             self.list_branch(framed, inside, heap, n);
             self.start(heap);
             Some(inside)
@@ -393,13 +389,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_branch(fits, first, current, n);
         // The first storage, or static bytes' copy, in the frame.
         self.start(first);
-        let place = if f.lent {
-            AllocPlace::LentFrame(frame)
+        let (ok, available) = if f.lent {
+            let (block, available) = self.list_allocate(plan, AllocPlace::LentFrame(frame), n);
+            (self.list_compare(CompareOp::Ne, block, null, n), available)
         } else {
-            AllocPlace::Frame(frame)
+            self.frame_admit(f.bytes, plan.charge, Some(plan.overflow), false, n)
         };
-        let (block, available) = self.list_allocate(plan, place, n);
-        let ok = self.list_compare(CompareOp::Ne, block, null, n);
         let (copy, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, copy, refused, n);
         self.start(refused);
@@ -423,18 +418,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let [regrow, spill] = [(); 2].map(|_| self.new_block(&[]));
         self.start(inside);
-        let old_charge = self.admitted_list_charge(old_cap, plan.logical, n)?;
         self.list_branch(fits, regrow, spill, n);
         self.start(regrow);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Frame(frame), n);
-        let ok = self.list_compare(CompareOp::Ne, block, null, n);
+        let (ok, available) = self.frame_admit(f.bytes, plan.charge, Some(plan.overflow), true, n);
         let (grown, refused) = (self.new_block(&[]), self.new_block(&[]));
         self.list_branch(ok, grown, refused, n);
         self.start(refused);
         self.jump(error, &[plan.charge, available], n);
         self.start(grown);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
-        self.inst(Inst::FrameRefund { charge: old_charge }, n);
         self.jump(success, &[], n);
         self.start(spill);
         let (block, available) = self.list_allocate(plan, AllocPlace::Current, n);
@@ -447,7 +439,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.frame_copy(block, frame, moved, n);
         self.set_carrier_word(header, carrier, SeqWord::Data, block, n);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
-        self.inst(Inst::FrameRefund { charge: old_charge }, n);
+        self.inst(Inst::FrameRefund { storage: f.bytes }, n);
         self.jump(success, &[], n);
         Some(())
     }

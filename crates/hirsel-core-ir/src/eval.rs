@@ -11,6 +11,7 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 mod conn;
+mod frame;
 mod launch;
 mod map;
 mod provide;
@@ -7151,38 +7152,6 @@ impl Machine<'_> {
         spans.insert(start, (end, role));
     }
 
-    /// Run one activation of `f`. Its slots are frame memory: they end when the
-    /// activation does, by return or by failure, so a later use of an address into
-    /// them is a stop (crate docs, "Values, slots and addresses").
-    fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
-        let b = self.m.functions[f.index()]
-            .body
-            .as_ref()
-            .expect("external functions do not run here");
-        let slots: Vec<u64> = b
-            .slots
-            .iter()
-            .map(|s| self.block(self.place_size(*s), None, 0, None))
-            .collect();
-        let r = self.frame(t, b, args, &slots, self.inherits[f.index()]);
-        for p in slots {
-            self.mem.remove(split(p).0);
-        }
-        r
-    }
-    fn frame(
-        &mut self,
-        t: &mut Task,
-        b: &Body,
-        args: &[u64],
-        slots: &[u64],
-        inherits: bool,
-    ) -> X<Vec<u64>> {
-        t.at.push((None, inherits));
-        let r = self.blocks(t, b, args, slots);
-        t.at.pop();
-        r
-    }
     /// SITES.md: the innermost anchor of the task's activations that is not in a
     /// core@1 item. A core operation's cause, or an unanchored one's, takes the
     /// site of the call that reached it.
@@ -7217,6 +7186,7 @@ impl Machine<'_> {
         let mut vals = vec![0u64; b.values.len()];
         let mut vectors = simd::Vectors::default();
         let mut places = vec![(0u64, At::Other); b.addresses.len()];
+        let mut frame_charges = HashMap::new();
         let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap().to_vec();
         let mut block = BlockId(0);
         let mut incoming = args.to_vec();
@@ -7262,7 +7232,16 @@ impl Machine<'_> {
                         &places,
                         &b.calls[call.index()],
                     ),
-                    _ => self.inst(t, b, slots, &mut vals, &mut vectors, &mut places, inst),
+                    _ => self.inst(
+                        t,
+                        b,
+                        slots,
+                        &mut vals,
+                        &mut vectors,
+                        &mut places,
+                        &mut frame_charges,
+                        inst,
+                    ),
                 };
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
@@ -7491,6 +7470,7 @@ impl Machine<'_> {
         vals: &mut [u64],
         vectors: &mut simd::Vectors,
         places: &mut [(u64, At)],
+        frame_charges: &mut HashMap<AddressId, u64>,
         inst: &Inst,
     ) -> X<()> {
         let ty = |v: ValueId| b.values[v.index()];
@@ -7843,9 +7823,6 @@ impl Machine<'_> {
                 let n = vals[charge.index()];
                 match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
-                    Ok(()) if let AllocPlace::Frame(at) = place => {
-                        (vals[result.index()], vals[available.index()]) = (vals[at.index()], 0);
-                    }
                     Ok(()) if let AllocPlace::LentFrame(at) = place => {
                         let p = vals[at.index()];
                         let slot = &mut self.mem[split(p).0];
@@ -7935,9 +7912,8 @@ impl Machine<'_> {
                     }
                 }
             }
-            Inst::FrameRefund { charge } => {
-                let l = t.limits.last().unwrap().clone();
-                self.refund(l, vals[charge.index()]);
+            Inst::FrameAdmit { .. } | Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {
+                self.frame_budget(t, vals, frame_charges, inst);
             }
             Inst::Pointer { result, address } => vals[result.index()] = places[address.index()].0,
             Inst::Trim {

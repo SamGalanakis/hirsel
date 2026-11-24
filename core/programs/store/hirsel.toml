@@ -380,3 +380,6 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_set_residency_refused_load_changes_nothing"]
 limit = 536870912
+
+[tests.runs."store@1/store/test_tiered_log_range_reads_cold_leaves_and_staged_tail"]
+limit = 268435456

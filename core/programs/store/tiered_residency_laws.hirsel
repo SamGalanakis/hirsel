@@ -255,3 +255,125 @@ fn test_set_residency_refused_load_changes_nothing(d: Dir, c: Clock, r: Random, 
     }
     close(take db)
 }
+
+fn log_entry(seq: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(48)
+    list.fill(mut body, 48, int.truncate(seq))
+    take body
+}
+
+// The rows `log_range(lo, hi)` must yield: every seq of [first, next) inside
+// the bounds, ascending, each with the value appended at it.
+fn log_range_matches(tx: Tx, events: Log[Bytes], lo: Bound[u64], hi: Bound[u64], first: u64, end: u64) -> Result[u64, Error] {
+    let low = match lo {
+        Unbounded => first,
+        Included(n) => order.max(n, first),
+        Excluded(n) => order.max(n + 1, first),
+    }
+    let high = match hi {
+        Unbounded => end,
+        Included(n) => order.min(n + 1, end),
+        Excluded(n) => order.min(n, end),
+    }
+    let mut rows = log_range(tx, events, lo, hi)?
+    let mut seq = low
+    while let Some((observed, value)) = next_in(tx, mut rows)? {
+        if seq >= high || observed != seq || value != log_entry(seq) {
+            return Ok(1)
+        }
+        seq += 1
+    }
+    if seq < high && low < high {
+        return Ok(1)
+    }
+    Ok(0)
+}
+
+fn log_ranges_check(tx: Tx, events: Log[Bytes], first: u64, end: u64) -> Result[u64, Error] {
+    let mut misses = 0u64
+    misses += log_range_matches(tx, events, Unbounded, Unbounded, first, end)?
+    misses += log_range_matches(tx, events, Included(17), Excluded(203), first, end)?
+    misses += log_range_matches(tx, events, Excluded(99), Included(100), first, end)?
+    misses += log_range_matches(tx, events, Included(end - 1), Unbounded, first, end)?
+    misses += log_range_matches(tx, events, Included(end + 5), Unbounded, first, end)?
+    misses += log_range_matches(tx, events, Unbounded, Excluded(first + 3), first, end)?
+    Ok(misses)
+}
+
+fn log_ranges_look(db: Db, events: Log[Bytes], first: u64, end: u64) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let fixture: Log[Bytes] = clone(events)
+    let Seen(seen) = look(read_handle, s, Some(10000000), copy_env((fixture, first, end)), fn(tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[u64, Error] {
+        log_ranges_check(tx, env.0, env.1, env.2)
+    })? else {
+        fail("Tiered Log: the look runs")
+    }
+    let Ok(0) = view seen.value else {
+        fail("Tiered Log: log_range yields each appended entry inside its bounds, in order")
+    }
+    drop(take s)
+    drop(take read_handle)
+    Ok(())
+}
+
+fn log_append_entries(mut db: Db, events: Log[Bytes], from: u64, to: u64) -> Result[(), Error] waits {
+    let fixture: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000000), copy_env((fixture, from, to)), fn(mut tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[(), Error] {
+        for seq in env.1 .. env.2 {
+            if append(mut tx, env.0, log_entry(seq))? != seq {
+                fail("Tiered Log: appends take dense sequence numbers")
+            }
+        }
+        Ok(())
+    })? else {
+        fail("Tiered Log: the appends commit")
+    }
+    Ok(())
+}
+
+// §14.10 on a Tiered Log: a Log moved to Tiered by `set_residency` reads its
+// ranges through the Cold tree, across leaf boundaries, with bounds clipped
+// to [first, next). A write Tx's range reads committed Cold rows and then its
+// own staged appends. A trim raises `first`. After reopen the ranges read
+// the Cold tree plus replay's overlay of the appends after the last cut.
+@test
+fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let mut declaring = declare(db, Migrate)?
+    let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    log_append_entries(mut db, events, 0, 300)?
+    set_residency(mut db, events.binding.id, Tiered)?
+    if residency_mode(db, events.binding.id)? != (4u8, 1u8) {
+        fail("Tiered Log: main's descriptor names the Log Tiered")
+    }
+    {
+        let Some((ColdPage(_), _)) = std.page.collection_slot(db.heads[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+            fail("Tiered Log: the residency cut leaves the Log's root Cold")
+        }
+    }
+    log_ranges_look(db, events, 0, 300)?
+    // A write Tx reads its committed Cold rows, then its staged tail.
+    let fixture: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000000), copy_env(fixture), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
+        for seq in 300u64 .. 303 {
+            let _ = append(mut tx, l, log_entry(seq))?
+        }
+        if log_range_matches(tx, l, Included(290), Unbounded, 0, 303)? != 0 {
+            fail("Tiered Log: a write Tx's range reads Cold rows and then its staged appends")
+        }
+        trim_before(mut tx, l, 150)
+    })? else {
+        fail("Tiered Log: the append and trim commit")
+    }
+    let _ = checkpoint(mut db)?
+    log_ranges_look(db, events, 150, 303)?
+    // These appends are journaled after the last cut, so reopen replays them.
+    log_append_entries(mut db, events, 303, 320)?
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    log_ranges_look(reopened, events, 150, 320)?
+    close(take reopened)
+}

@@ -1048,6 +1048,401 @@ one record type whatever the key's source. The refresh policy belongs with the S
 doubling, and validates new credentials with a signed `HEAD` of the bucket before it
 replaces the old set, which stays in use until it expires.
 
+### TLS-8: Packet ciphers and key agreement
+
+Datagram security protocols seal every packet under a long-lived key. QUIC
+([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)), DTLS 1.2 and 1.3, and SRTP and SRTCP
+([RFC 3711](https://www.rfc-editor.org/rfc/rfc3711), [RFC 7714](https://www.rfc-editor.org/rfc/rfc7714))
+do this thousands of times a second. They also agree a fresh key with each peer and mask
+packet numbers. TLS-5's AEAD sink suits file formats: it expands the key on every call,
+and the caller picks the nonce. TLS-8 adds what the packet protocols need:
+
+- a **packet cipher** that holds an expanded key for its whole life and derives each nonce
+  from a packet counter;
+- a **header mask** for QUIC header protection and DTLS 1.3 record-number encryption;
+- an ephemeral **key share** for X25519 or P-256 agreement;
+- a P-256 **signing key** generated in the run, for a self-signed DTLS certificate;
+- the key-schedule derivations: HKDF Extract and Expand over SHA-256 or SHA-384, the TLS 1.2
+  PRF and the SRTP key derivation;
+- the Finished MACs: HMAC-SHA384 and TLS 1.2's `verify_data`.
+
+The protocols themselves are library code over these operations. A program still never
+holds a key's bytes. Every key here is a `Secret` designation or a resource whose state is
+run-owned, and the rules of TLS-5 (holders, release, no cleartext accessor, opacity,
+recording) apply to each one unless this section says otherwise.
+
+```hirsel unbuilt
+pub opaque resource type PacketCipher
+pub opaque resource type HeaderMask
+pub opaque resource type KeyShare
+pub type PacketAlg = Aes128Gcm | Aes256Gcm | ChaCha20Poly1305 | Aes128CmHmacSha1_80
+pub type Role = Seal | Open
+pub type MaskAlg = Aes128Ecb | Aes256Ecb | ChaCha20
+pub type Group = X25519 | P256
+pub type KdfHash = Sha256 | Sha384
+pub type PacketError = Reused | Tampered | Capacity(Capacity)
+
+// module packet
+pub fn cipher(alg: PacketAlg, role: Role, key: Secret, iv: Secret, auth: Option[Secret], mask: Bytes) -> Result[PacketCipher, KeyError]
+pub fn seal(mut c: PacketCipher, seq: u64, mut buf: Bytes, aad_at: u64, at: u64, extra: Bytes) -> Result[u64, PacketError]
+pub fn seal_into(mut c: PacketCipher, seq: u64, src: Bytes, from: u64, mut dst: Bytes, aad_at: u64, extra: Bytes) -> Result[u64, PacketError]
+pub fn open(c: PacketCipher, seq: u64, mut buf: Bytes, aad_at: u64, at: u64, extra: Bytes) -> Result[u64, PacketError]
+pub fn open_into(c: PacketCipher, seq: u64, src: Bytes, aad_at: u64, at: u64, extra: Bytes, mut dst: Bytes) -> Result[u64, PacketError]
+pub fn header_mask(alg: MaskAlg, key: Secret) -> Result[HeaderMask, KeyError]
+pub fn mask(m: HeaderMask, sample: Bytes, at: u64) -> Inline[u8, 16]
+
+// module secret
+pub fn key_share(r: Random, g: Group, mut public: Bytes) -> Result[KeyShare, KeyError]
+pub fn agree(take k: KeyShare, peer: Bytes, uses: String) -> Result[Secret, KeyError]
+pub fn p256_key(r: Random, uses: String, mut public: Bytes) -> Result[Secret, KeyError]
+pub fn sign(key: Secret, alg: SignAlg, r: Random, msg: Bytes, mut out: Bytes) -> Result[u64, KeyError]
+pub fn derive_hkdf_extract(salt: Secret, ikm: Secret, hash: KdfHash, uses: String) -> Result[Secret, SecretError]
+pub fn derive_hkdf_expand(prk: Secret, hash: KdfHash, info: Bytes, len: u64, uses: String) -> Result[Secret, SecretError]
+pub fn derive_tls12_prf(s: Secret, hash: KdfHash, label: Bytes, seed: Bytes, skip: u64, len: u64, uses: String) -> Result[Secret, SecretError]
+pub fn derive_srtp(master: Secret, salt: Secret, label: u8, len: u64, uses: String) -> Result[Secret, SecretError]
+pub fn hmac_sha384(s: Secret, data: Bytes) -> Result[Inline[u8, 48], MacError]
+pub fn verify_hmac_sha384(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
+pub fn tls12_finished(master: Secret, hash: KdfHash, server: bool, transcript: Bytes) -> Result[Inline[u8, 12], MacError]
+```
+
+This `sign` replaces TLS-5's when slice T13 lands. It adds the `Random` from which the
+signature's randomness is drawn (randomness, below).
+
+| type | kind | bounds | logical size | cleanup |
+|---|---|---|---|---|
+| `PacketCipher` | resource, mechanical | `send` | 8 | zeroes and refunds its state |
+| `HeaderMask` | resource, mechanical | `send` | 8 | zeroes and refunds its state |
+| `KeyShare` | resource, mechanical | `send` | 8 | zeroes and refunds its private key |
+
+Each of the three types is a capability type in the sense of `Secret`
+([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)): it has neither `key` nor `codec`,
+so a program cannot compare, encode or store one. Each is move-only. `let` moves it, and no
+`Rc` or `Arc` payload holds one. No operation shares one, so each has exactly one holder.
+Each crosses to another unit as a handle ([CONC-15](tasks.md#conc-15-units)), as `Secret`
+does. Its state stays where the runtime put it, and its charge stays with the limit that
+admitted it.
+
+**Uses.** TLS-5's policy table gains these rows. Each new use is distinct from `aead(<alg>)`,
+so a key from an `aead` grant never keys a packet cipher, and a packet key never reaches
+the one-shot sink:
+
+| Use | Permits |
+| --- | --- |
+| `packet(<alg>)` | the key role of `packet.cipher` with `<alg>`, one of `aes128-gcm`, `aes256-gcm`, `chacha20-poly1305`, `aes128-cm` (the cipher key of `Aes128CmHmacSha1_80`) and `hmac-sha1-80` (its authentication key) |
+| `packet_iv` | the `iv` role of `packet.cipher` |
+| `header_mask(<alg>)` | `packet.header_mask` with `<alg>`, one of `aes128-ecb`, `aes256-ecb` and `chacha20` |
+| `tls12_finished` | `secret.tls12_finished` with the secret as master secret |
+
+The canonical text writes the new uses after `open(<alg>)` and before `wrap`: the `packet`
+uses in the order above, then `packet_iv`, the `header_mask` uses in the order above and
+`tls12_finished`. `narrow` keeps each new use when both policies hold it. The derivation
+rule's child set gains all four, so a key schedule can make each of them. `sign(p256)` is
+never a derivation child. Only `p256_key` makes a signing key in the run (below).
+`tls12_finished` is a use of its own, never part of `mac`. The PRF's first block is an HMAC
+of the master secret, so a `mac` master secret would let a program compute the key block
+from two MAC tags.
+
+**Keys enter from a key schedule.** A packet cipher's keys are `Secret` designations. In a
+protocol they are made by the derivations below, from a shared secret that `agree` made,
+and the program never holds them. A grant or a `seal` can also supply them: a grant for a
+pre-shared key, a seal for a test vector or for QUIC's Initial keys, which RFC 9001 §5.2
+derives from public values. `packet.cipher` copies the expanded key into the cipher. The
+designations can then be dropped, and the cipher keeps working.
+
+**The packet cipher.** `packet.cipher(alg, role, key, iv, auth, mask)` makes a cipher for
+one direction. It checks, in this order:
+
+- `Denied` before issue, with no effect: `key` lacks `packet(<alg>)` for the algorithm's
+  key, which is `aes128-cm` for `Aes128CmHmacSha1_80`; or `iv` lacks `packet_iv`; or, for
+  `Aes128CmHmacSha1_80`, `auth` is `None` or lacks `packet(hmac-sha1-80)`.
+- `Invalid` before issue: `auth` is `Some` for an AEAD algorithm, or `mask` is not `N`
+  bytes long.
+- `Capacity(c)` before issue: the current limit refuses the cipher's state (charge, below).
+- `Invalid` as a delivery: a key length other than the algorithm's (16, 32, 32 and 16
+  bytes), an `iv` length other than 4 or 12 bytes for an AEAD algorithm or 14 bytes for
+  `Aes128CmHmacSha1_80`, or an `auth` length other than 20 bytes. Like the AEAD sink's key
+  check, this tells the program only whether the length matches.
+- The cipher.
+
+`N`, the nonce width, is 12 bytes for the AEAD algorithms and 16 for
+`Aes128CmHmacSha1_80`. The cipher keeps the **base**: `iv` placed at the start of `N` zero
+bytes, XORed with `mask`. `mask` is public bytes fixed for the cipher's life, so one key can
+serve several streams with disjoint nonces: an SRTP session key shared by several SSRCs, or
+the path id of multipath QUIC. Each packet's nonce is the base XORed with `seq` as a
+big-endian `u64` ending at byte 12 (bytes 4 to 11). For `Aes128CmHmacSha1_80` the counter
+block is the base XORed with `seq` as a big-endian `u64` ending at byte 14 (bytes 6 to 13).
+That is RFC 3711 §4.1.1's `(k_s · 2^16) ⊕ (SSRC · 2^64) ⊕ (i · 2^16)`, with the session salt
+as `iv` and the SSRC at bytes 4 to 7 of `mask`. Every protocol below fits one of these two
+forms. The consumer table shows the arguments each one passes.
+
+| `alg` | construction | tag |
+| --- | --- | --- |
+| `Aes128Gcm`, `Aes256Gcm` | GCM ([SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final)) with a 96-bit nonce | 16 bytes |
+| `ChaCha20Poly1305` | [RFC 8439 §2.8](https://www.rfc-editor.org/rfc/rfc8439#section-2.8) | 16 bytes |
+| `Aes128CmHmacSha1_80` | AES-128 in counter mode (RFC 3711 §4.1.1), then HMAC-SHA1 (RFC 2104) truncated to its first 10 bytes (RFC 3711 §4.2.1) | 10 bytes |
+
+**Sealing.** `packet.seal(mut c, seq, mut buf, aad_at, at, extra)` seals in place. The
+bytes `buf[aad_at..at]` and then `extra` are authenticated but not encrypted. The bytes
+`buf[at..]` are encrypted where they lie. The tag is appended after them, and the result
+is the tag's length. For an AEAD algorithm the associated data is
+`buf[aad_at..at] ‖ extra`. For `Aes128CmHmacSha1_80` the tag is the HMAC of
+`buf[aad_at..at] ‖ ciphertext ‖ extra`, which is RFC 3711's authenticated portion followed
+by the ROC when `extra` is the ROC. Bytes before `aad_at` are not read or changed, so a
+datagram that coalesces packets seals each one at its own offset.
+
+`packet.seal_into(mut c, seq, src, from, mut dst, aad_at, extra)` seals out of place. The
+associated data is `dst[aad_at..]`, which is the header the caller has just written there,
+followed by `extra`. The ciphertext of `src[from..]` and then the tag are appended to
+`dst`, and the result is the number of bytes appended. A forwarding server writes each
+subscriber's rewritten header into that subscriber's send buffer, then seals the one
+shared payload after it. The plaintext is not copied first.
+
+Each seal checks before issue, with no effect:
+
+- `Bounds` (a fault of the program, as an out-of-range index is): `aad_at <= at <= len(buf)`
+  fails, or `aad_at <= len(dst)` or `from <= len(src)` fails.
+- `Reused`: `c` was made for `Open`, or it has already sealed a counter at least `seq`.
+- `Capacity(c)`: the spare of `buf` or `dst` is shorter than the appended bytes, with their
+  length as `requested`.
+
+A seal then always succeeds. It never waits.
+
+**Opening.** `packet.open(c, seq, mut buf, aad_at, at, extra)` opens in place. The last
+tag-length bytes of `buf` are the tag, and `buf[at..len − tag]` is the ciphertext. When the
+tag verifies, the ciphertext becomes the plaintext in place, the tag is truncated away, and
+the result is the plaintext's length. `packet.open_into(c, seq, src, aad_at, at, extra,
+mut dst)` reads the same layout from `src` and appends the plaintext to the spare of `dst`.
+An open takes `c` as a view. A receiver keeps no counter, because packets arrive reordered
+and lost. Replay protection belongs to the protocol's window: QUIC's duplicate check, and
+SRTP's 64-packet window (RFC 3711 §3.3.2).
+
+Each open checks before issue, with no effect:
+
+- `Bounds`: `aad_at <= at <= len(buf)` fails (or the same for `src`).
+- `Reused`: `c` was made for `Seal`.
+- `Capacity(c)`, `open_into` only: the plaintext does not fit the spare of `dst`.
+
+As a delivery it gives `Tampered` when the bytes after `at` are shorter than the tag, or
+the tag does not verify. A wrong key, nonce, associated datum, ciphertext byte or tag byte
+gives the same answer, and nothing more. After `Tampered`, `open` leaves `buf` at its
+length, with the ciphertext bytes `buf[at..len − tag]` zeroed and all other bytes
+unchanged. `open_into` appends nothing. No unverified plaintext reaches the program: AES-GCM
+and ChaCha20-Poly1305 compare the tags in constant time and zero what they decrypted when
+they differ (ring's `algorithm.rs:103-111`, and `os_tls/gcm.rs`'s `open`).
+`Aes128CmHmacSha1_80` verifies the HMAC in constant time before it decrypts anything.
+
+**Nonce reuse.** Reusing a nonce under one key reveals the XOR of two plaintexts. Under GCM
+it also reveals the authentication key. These checks rule out reuse:
+
+- The program never names a nonce. It names a counter, and the cipher derives the nonce
+  from a base it holds and the program cannot read.
+- A sealer refuses any counter that is not above every counter it has sealed. It may skip
+  counters, as QUIC skips packet numbers. After `seq = 2^64 − 1` it is spent.
+- A cipher's role is fixed when it is made, so an opener never seals.
+- The `packet(<alg>)` use is separate from `aead(<alg>)`, so a packet key never meets a
+  nonce the program chose.
+
+These checks see a single cipher. They do not stop two sealers keyed with the same bytes
+and the same `mask`. That happens when a program makes two sealers from one designation,
+or derives the same key twice. Such a program reuses nonces. The protocol rule that one key
+has one sender is the program's to keep, as rustls and quinn leave it to their callers.
+Each protocol's packet limit is also the protocol's to keep: RFC 9001 §6.6's `2^23` QUIC
+packets under AES-GCM, and SRTP's `2^48` and SRTCP's `2^31` (RFC 7714 §12). The cipher
+enforces only its counter's width.
+
+**The header mask.** `packet.header_mask(alg, key)` makes a mask key after the use check
+(`Denied` before issue), the state admission (`Capacity`) and the key length check
+(`Invalid` as a delivery: 16, 32 and 32 bytes). `packet.mask(m, sample, at)` returns 16
+bytes computed from the 16 bytes `sample[at..at + 16]` (`Bounds` when they are not there):
+
+- for AES, the AES encryption of the sample under the key (RFC 9001 §5.4.3);
+- for `ChaCha20`, the ChaCha20 keystream for 16 zero bytes, with the sample's first 4
+  bytes as the little-endian block counter and its last 12 bytes as the nonce
+  (RFC 9001 §5.4.4).
+
+QUIC XORs the first 5 bytes into the header (RFC 9001 §5.4.1). DTLS 1.3 XORs the first 1
+or 2 bytes into the record number (RFC 9147 §4.2.3). A mask is computed from a public
+sample under a key that has only this use, so returning it to the program reveals nothing
+more than XORing it in would. It cannot fail after its bounds check and never waits.
+
+**Key agreement.** `secret.key_share(r, g, mut public)` generates an ephemeral private key
+for `g` and appends its public key to the spare of `public`: 32 bytes for X25519 (RFC 7748
+§6.1), and the 65-byte uncompressed SEC 1 point for P-256. The private key stays in
+run-owned memory. `secret.agree(take k, peer, uses)` consumes the share, so one share agrees
+at most once (ring's `agree_ephemeral` takes it by value too). It makes a new designation
+with one holder, policy `uses` and the shared secret: the 32-byte X25519 output, or the
+32-byte X coordinate of the P-256 product (SEC 1 §3.3.1, which TLS uses as the premaster
+secret). `uses` follows the derivation rule's child set, and a share charges as a child
+does, so the shared secret is a `kdf` key for the schedule. The results, in this order:
+
+- `key_share`: `Capacity(c)` before issue, when the share's 64 bytes are refused;
+  `Capacity(c)`, as a delivery and with the share released, when `public`'s spare is short.
+- `agree`: `Invalid` before issue when `uses` is outside the child set, then `Capacity(c)`
+  for the child's storage. As a delivery, `Invalid` when `peer` is not a valid public key.
+  For X25519 that is any length but 32, or an output of all zeros: a small-order point,
+  which ring refuses (`x25519.rs:158-161`). For P-256 it is anything but an uncompressed
+  point on the curve and not at infinity (`ecdh.rs:103-106`). The share is consumed either
+  way.
+
+The runtime is ring 0.17.14's `agreement` (`EphemeralPrivateKey::generate`,
+`agree_ephemeral`), with `X25519` and `ECDH_P256`. Every check on the peer's key is ring's.
+
+**Signing key and certificate.** `secret.p256_key(r, uses, mut public)` generates a P-256
+key and makes a new designation of its PKCS#8 document (ring's
+`EcdsaKeyPair::generate_pkcs8`), with policy `uses`, which must be exactly `sign(p256)`. It
+appends the 65-byte public point to `public`. It admits `round_up_8(len + 32)` for the
+document, as `seal` does, so a self-signed key costs one sealed secret. `sign` with that key
+signs the certificate. The DER of the self-signed certificate that WebRTC fingerprints
+(RFC 8122 §5) is library code, in `std.x509_build` over `secret.sign`. It needs no kernel:
+its bytes are public apart from the signature.
+
+**Randomness.** Every operation here that needs randomness takes a `Random`: `key_share`
+and `p256_key` for their private key, and `sign` for ECDSA's nonce and RSA's blinding. The
+draw is made inside the provider operation, and only its results leave it:
+
+- **A host `Random`.** The provider draws from the host's cryptographic source (ring's
+  `SystemRandom`), and the drawn bytes never pass the replay point. The key, or the
+  signature's nonce, is therefore secret from the program and from any recording. A key
+  share or signing key drawn this way is **opaque** (TLS-5's key operations), and so is any
+  secret agreed or derived from it. Its delivery holds the public key and the designation's
+  origin.
+- **A virtual `Random`** ([provide](core.md#provide)). The provider takes the draws from the
+  cell's SplitMix64 stream, in the order a `host.random` on the cell would have taken them.
+  It feeds them to ring through `ring::test::rand::FixedSliceRandom`, which ring 0.17.14
+  exports, so a seeded simulation makes the same keys, public keys and signatures on every
+  run and every engine. X25519 takes 32 bytes. P-256 takes 32 bytes per candidate scalar
+  and draws again when ring refuses one as out of range, for at most 100 candidates, as
+  ring's own loop does (`private_key.rs:33-58`). It then gives `Invalid`, which has
+  probability below `2^-3200`. ECDSA takes ring's nonce input from the stream, and ring
+  still hashes the private key into the nonce (`signing.rs:292-310`). A key drawn this way
+  is **not opaque**: the program could compute it from the seed, as it could compute a
+  sealed key. A simulation exists to be reproduced, and this keeps a bit-identical
+  simulated trace reachable through a DTLS or QUIC handshake.
+
+**Derivations.** The four new derivation sinks follow TLS-5's derivation rule: the parent
+must permit `kdf`; `uses` must lie in the child set; the child's `round_up_8(len + 32)` is
+admitted before issue; one step is taken; the result passes the replay point; the recording
+holds parents, public inputs, child policy and the delivery, never bytes. A child is opaque
+when any of its parents is.
+
+- `derive_hkdf_extract(salt, ikm, hash, uses)` is RFC 5869 §2.2's `HKDF-Extract` over
+  SHA-256 or SHA-384, with both inputs secrets and a child of the hash's length. Both
+  parents need `kdf`. A public input, such as QUIC's Initial salt or TLS 1.3's zero
+  IKM, is sealed first.
+- `derive_hkdf_expand(prk, hash, info, len, uses)` is §2.3's `HKDF-Expand`, with `len` from
+  1 to `255 × HashLen`. TLS 1.3's `HKDF-Expand-Label` and `Derive-Secret` (RFC 8446 §7.1)
+  are this with an `info` that the library encodes. The parent must be at least `HashLen`
+  bytes long, which ring's `Prk::new_less_safe` does not check, so the sink checks it, as a
+  delivered `Invalid`.
+- `derive_tls12_prf(s, hash, label, seed, skip, len, uses)` is RFC 5246 §5's `PRF` with
+  `P_SHA256` or `P_SHA384`, keeping bytes `skip..skip + len` of its output, with
+  `skip + len` at most 1024. TLS 1.2's master secret (RFC 7627's extended master secret
+  included), its key block and the RFC 5705 exporter that DTLS-SRTP keys with
+  (RFC 5764 §4.2) are each this. `skip` splits one output into its keys.
+- `derive_srtp(master, salt, label, len, uses)` is RFC 3711 §4.3.1's AES-CM PRF with key
+  derivation rate 0, as RFC 5764 §4.1.2 requires. `x` is `label` followed by 48 zero bits,
+  XORed with the master salt, the two aligned at their least significant bits. The child is
+  the first `len` bytes (at most 256) of the AES-CM keystream from counter block `x · 2^16`
+  under the master key. A 16-byte master key gives RFC 3711's AES-128 PRF, and a 32-byte
+  master key gives RFC 6188's AES-256 PRF. The salt must be 12 or 14 bytes and permit
+  `kdf`. Labels 0 to 5 are RFC 3711's.
+
+P_hash and the AES-CM PRF are compositions of ring's `hmac` and of the AES block that ring's
+`aes_hw_ctr32_encrypt_blocks` runs. Neither is a new primitive.
+
+**Finished MACs.** `hmac_sha384` and `verify_hmac_sha384` are the MAC sink of TLS-5 over
+HMAC-SHA384, under the same `mac` and `verify` uses, for TLS 1.3 suites over SHA-384.
+`tls12_finished(master, hash, server, transcript)` returns RFC 5246 §7.4.9's 12-byte
+`verify_data`. That is `PRF(master, "server finished" or "client finished", transcript)`,
+where `transcript` is the handshake hash the caller computed. It needs `tls12_finished`.
+Its label is fixed, so a master secret never yields a key-expansion block in program
+memory.
+
+**State, lifetime and zeroing.** A cipher, mask key or share keeps its expanded state in
+run-owned memory that the runtime allocates for it, never in a ring value that ring
+allocates or moves. The OS provider builds the state in place in that storage. It calls
+ring's key-setup routines with that storage as the destination, as `os_tls/gcm.rs` already
+does for AES and GHASH. Dropping the value overwrites the whole storage with zeros, then
+refunds its charge. Zeroing at drop covers every algorithm and every CPU path. It does not
+cover registers or stack spills that ring's code leaves during a call. core.md's open item
+7 is closed for these types, but stays open for the one-shot sinks.
+
+**Charge and steps.** `packet.cipher` admits 1024 bytes, `header_mask` 512, and
+`key_share` 64, each before issue from the current limit. Each is refunded at drop. A
+program can make any number of ciphers, so unlike the one-shot sinks their state is
+charged. Each seal, open and mask takes one step, whatever its lengths, by the rule of the
+AEAD sink: the work is bounded by bytes a limit already bounds. Each other operation in
+this section takes one step. Seals and opens admit nothing: output lands in capacity the
+caller holds. No operation here waits.
+
+**Replay and recording.** Making a cipher, mask key, share, signing key or derived secret
+is a provider operation. Its issue holds the designations of its secret arguments, never
+their bytes, and its delivery holds the result. On replay a designation drawn from a host
+`Random` or a grant has no bytes, so a cipher made from it holds no key.
+
+`seal`, `seal_into`, `open`, `open_into` and `mask` each pass the replay point, as the AEAD
+sink does. The issue holds the cipher's origin, `seq`, the offsets and the canonical form of
+the input bytes. The delivery holds the bytes written, or the refusal. On replay the
+delivery comes from the recording. A recording of `open` therefore holds the plaintext, as
+a recording of received TLS plaintext does.
+
+A build without recording machinery does nothing at these points beyond the operation
+(CAP-8), so the cost target below is a non-recording build's. A recording build writes one
+issue frame and one delivery frame per packet.
+
+**Constant time.** As the AEAD sink: AES runs on AES-NI or VAES where present, else on
+ring's `vpaes` or bitsliced `aes_nohw`. GHASH runs on PCLMULQDQ or VPCLMULQDQ, else on ring's
+constant-time multiply. ChaCha20, Poly1305 and HMAC-SHA1 are fixed instruction sequences.
+Tag comparison is constant time. X25519 and P-256 run ring's constant-time scalar
+multiplication. The runtime may pick a path by CPU, and every path gives the same bytes.
+
+**Cost.** On x86-64 with VAES and VPCLMULQDQ, sealing or opening a 1,200-byte packet with
+`Aes128Gcm`, in place or into a buffer, takes at most 120 ns and allocates nothing, in a
+release build without recording. The OS provider runs the `os_tls/gcm.rs` routines over the
+cipher's held key schedule and GHASH table there. Other algorithms and CPUs have no target.
+The one-shot `aead_seal` and `aead_open` keep their contract: each call expands its key,
+because the sink holds no state. Packet-rate callers use a packet cipher instead.
+
+**Checksums.** SCTP's CRC-32C is `crc32c.update` ([crc32c](../../core/std/api/crc32c.md)),
+with hardware dispatch on x86-64 and AArch64. No second spelling is added.
+
+**Consumers.** Each protocol's per-packet arguments:
+
+| protocol | cipher made with | `seq` | AAD (`buf[aad_at..at]`, `extra`) | header mask |
+| --- | --- | --- | --- | --- |
+| QUIC v1 (RFC 9001 §5.3) | `key`, `iv` (12) from `HKDF-Expand-Label`; `mask` zero, or the path id at bytes 0 to 3 for multipath | packet number | the header, from its first byte; `extra` empty | `hp` key; sample at `pn_offset + 4` |
+| TLS 1.3 / DTLS 1.3 (RFC 8446 §5.3, RFC 9147 §4) | as QUIC, per epoch | record sequence number | the record header; `extra` empty | DTLS 1.3 `sn` key; sample = the first 16 ciphertext bytes |
+| DTLS 1.2 AES-GCM (RFC 5288 §3) | `key`, 4-byte `iv` (salt) from the key block via `skip` | `epoch ‖ seq`, also written as the explicit nonce | none in `buf` (`aad_at = at`); `extra` the 13-byte `seq_num ‖ type ‖ version ‖ length` | — |
+| DTLS 1.2 ChaCha20 (RFC 7905 §2) | `key`, 12-byte `iv` | `epoch ‖ seq` | as AES-GCM | — |
+| SRTP AEAD (RFC 7714 §8) | `derive_srtp` labels 0 and 2; `mask` = `00 00 ‖ SSRC ‖ 0^6` | the 48-bit index `ROC ‖ SEQ` | the RTP header; `extra` empty | — |
+| SRTCP AEAD (RFC 7714 §9) | labels 3 and 5; same `mask` form | the 31-bit SRTCP index | the RTCP header; `extra` = `E ‖ index` (4 bytes), which the caller appends after the tag | — |
+| SRTP CM (RFC 3711 §4) | labels 0, 1, 2; `mask` = `0^4 ‖ SSRC ‖ 0^8` (16) | the 48-bit index | the RTP header; `extra` = the ROC (4 bytes) | — |
+| SRTCP CM (RFC 3711 §3.4) | labels 3, 4, 5 | the SRTCP index | the RTCP header; `extra` = `E ‖ index` | — |
+
+SRTCP CM puts `E ‖ index` before its tag, so its caller moves the 10 tag bytes after
+appending it, 14 bytes of copying on a low-rate stream.
+
+**Laws.**
+
+| law | bug | oracle and setup |
+| --- | --- | --- |
+| **PC1** vectors | a wrong nonce placement, base, AAD order or tag position | AE2's CAVP GCM records and AE1's RFC 8439 case, with the key sealed as `packet(<alg>)`, the record's IV sealed as `packet_iv`, `mask` zero and `seq` 0: `seal` appends AE's `CT` and `Tag` after the AAD at `buf[0..at]`, and `open` restores `PT`. The RFC 9001 Appendix A.2 client Initial and A.5 ChaCha20 short-header packets, from the Appendix's keys, IVs and packet numbers: `seal` gives the listed protected payloads, and `mask` with the listed `hp` and samples gives the listed masks. |
+| **PC2** SRTP vectors | a wrong CM counter block, ROC placement or KDF alignment | RFC 3711 Appendix B.2 (AES-CM keystream) and B.3 (key derivation through `derive_srtp`, checked with `secret.hmac_sha256(child, "x")` against Python `hmac` over the appendix's keys), and the RFC 7714 §16 AEAD packets: `seal` gives the listed SRTP and SRTCP packets, and `open` restores them. |
+| **PC3** counter refuses reuse | a sealer that accepts a counter twice, or a lower one | A sealer seals at `seq` 5, then 7. `seq` 7, 6 and 0 each give `Reused`, with `buf` and its length unchanged and no provider call. `seq` 8 succeeds. An opener given to `seal` gives `Reused`, and a sealer given to `open` gives `Reused`. |
+| **PC4** out of place equals in place | `seal_into` authenticating the wrong `dst` range, or a copy that drops bytes | For every CAVP GCM record, `seal_into` with the AAD already in `dst` gives the same bytes as `seal` over `AAD ‖ PT`. `open_into` of that output gives `PT`. |
+| **PC5** a failed open leaks nothing | unverified plaintext left in `buf`, or a refusal that tells one failure from another | AE4's tag-flipped cases through `open`: `Tampered`, `buf`'s length unchanged, its ciphertext range all zero, its AAD range unchanged. Through `open_into`: `Tampered`, and `dst` unchanged. |
+| **PC6** policy and roles | a packet key used by the one-shot sink, or an `aead` key used by a packet cipher | With a counting provider, `Denied` and no call: `packet.cipher` with a key holding `aead(aes128-gcm)`, `aead_seal` with a key holding `packet(aes128-gcm)`, a CM cipher with `auth = None`, and an `iv` lacking `packet_iv`. |
+| **PC7** key agreement | a missing small-order check, a peer point not on the curve accepted, or two agreements from one share | Wycheproof `x25519_test.json` and `ecdh_secp256r1_ecpoint_test.json` at the pinned commit. For each case, a share is made from a virtual `Random` whose draws are the case's private key, and `agree` with the case's public key. A `valid` case's shared secret, checked through `derive_hkdf_extract` and `hmac_sha256` against Python over the case's `shared`, matches. An `invalid` case, and each `acceptable` case flagged `ZeroSharedSecret` or `LowOrderPublic`, gives `Invalid`. A second `agree` on a moved share is refused by OWN rules. |
+| **PC8** simulation determinism | key generation or ECDSA reading host entropy under a virtual `Random` | Two runs of one program with `provide.random(7)`, each doing `key_share(X25519)`, `p256_key` and `sign(P256)` over the same message, give byte-identical public keys and signatures. The signature verifies with `p256.verify`. With a host `Random`, two runs give different public keys. |
+| **PC9** no key on a tape | private keys, shared secrets or derived keys reaching a frame | Record a run that makes a host-`Random` X25519 share, agrees with a fixed peer, derives a QUIC-style key, iv and hp through `derive_hkdf_expand`, and seals and masks one packet. The tape holds the public key and the sealed packet, and none of the private key, shared secret, PRK, key, iv or hp, raw, hex or base64. Replayed, the run produces the same packet and mask, and ends `Sealed`. |
+| **PC10** derivation vectors | Extract and Expand swapped, a PRF split off by one, or the SHA-384 variants wrong | RFC 5869 A.1 to A.3 through `derive_hkdf_extract` then `derive_hkdf_expand`, checked as KD1. RFC 8448 §3's handshake and application traffic keys and IVs for `TLS_AES_128_GCM_SHA256`, from its ECDHE shared secret sealed as `kdf`. For SHA-384, Wycheproof `hkdf_sha384_test.json`. For `derive_tls12_prf`, the TLS 1.2 PRF vectors that ring's and Go's test suites pin, with `skip` 0 and with the output split at 32: the halves equal the whole's bytes. |
+| **PC11** charge and zeroing | state not admitted, admitted twice, or not refunded at drop | Under the reference count, `bound bytes 1023 { packet.cipher(..) }` gives `Capacity` with `requested` 1024, and `bound bytes 1024` succeeds. After the cipher is dropped, the limit is back to where it was. In the native runtime's unit tests, the cipher's storage is all zeros after drop. |
+
+PC1 to PC6 and PC10 are cases in `core/core/tests/packet_vectors.hirsel`, with the vector
+files next to AE's. PC7 and PC8 are in `core/std/tests/secret_agree.hirsel`. PC9 is in the
+runtime tape laws. PC11 is in the reference evaluator's limit laws and the runtime's unit
+tests.
+
 ## Laws
 
 Each law names the bug it catches and the oracle its expected value comes from. Where a
@@ -1129,6 +1524,10 @@ and L (more than three).
 | **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
 | **T9** AEAD sink | M | T4 | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over ring 0.17.14's `aead` (`LessSafeKey`, sealing and opening in the spare of `out`), and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 in the core and recording law harnesses |
 | **T10** derivation sinks | M | T4, A2 | `derive_hkdf_sha256` over ring's `hkdf` and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
+| **T11** packet cipher | M | T9 | `packet` module: `PacketCipher`, `PacketAlg`, `Role`, `PacketError`; the `packet(<alg>)` and `packet_iv` uses in policy parsing, `narrow`, the canonical text and the derivation child set; `cipher`, `seal`, `seal_into`, `open`, `open_into` in the OS provider (AES-GCM over `os_tls/gcm.rs`'s held `AesKey` and `HTable` on VAES, ring's `aead` elsewhere; AES-CM over `aes_hw_ctr32_encrypt_blocks` and HMAC-SHA1 over ring's `hmac`), the scripted and virtual paths; run-owned state, its admission and zeroing at drop; frames in a recording | PC1–PC6, PC11, and the 120 ns benchmark |
+| **T12** header mask | S | T11 | `HeaderMask`, `MaskAlg`, the `header_mask(<alg>)` use; `header_mask` and `mask` over the AES block and ring's ChaCha20 | PC1's mask cases |
+| **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `agree`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8`; `sign` gains its `Random` (all callers cut over); host and virtual randomness through `SystemRandom` and `FixedSliceRandom`; opacity from a host draw; std `x509_build` self-signed P-256 certificate | PC7, PC8, PC9 |
+| **T14** key-schedule sinks | M | T10 | `KdfHash`; `derive_hkdf_extract`, `derive_hkdf_expand`, `derive_tls12_prf`, `derive_srtp`, `hmac_sha384`, `verify_hmac_sha384`, `tls12_finished` and the `tls12_finished` use, in the OS, scripted and virtual paths | PC2's KDF cases, PC10 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

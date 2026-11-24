@@ -115,6 +115,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `UnixListener`, `UnixDatagram` ([NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)), `Proc` ([EXEC-3](exec.md#exec-3-spawn)) | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Secret` ([TLS-5](tls.md#tls-5-secrets)) | resource, mechanical | `send` | 8 | resource |
+| `PacketCipher`, `HeaderMask`, `KeyShare` ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | resource, mechanical | `send` | 8 | resource |
 | `Foreign[I]` ([FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
 | `Exec` ([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)) | plain | `shareable`, `send` | 8 | capability |
 | `Cred` ([TLS-7](tls.md#tls-7-credential-grants)) | plain | `shareable`, `send` | 8 | capability |
@@ -632,8 +633,9 @@ needs no failure path for them. Together these verify every signature an OpenID 
 provider issues under the algorithms JWS registers for it: `RS256`, `PS256`, `ES256`,
 `ES384` and `EdDSA` with Ed25519 ([RFC 7518 §3.1](https://www.rfc-editor.org/rfc/rfc7518#section-3.1),
 [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)).
-Signing and key agreement are not provided: they need private-key custody, and the
-`Secret` contract ([TLS-5](tls.md#tls-5-secrets)) does not cover keys.
+Signing is `secret.sign` ([TLS-5](tls.md#tls-5-secrets)), and ephemeral key agreement is
+`secret.key_share` and `secret.agree` ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)):
+both keep the private key in a `Secret` or a `KeyShare`, never in program bytes.
 
 - **Ed25519.** `ed25519.verify` is pure Ed25519 ([RFC 8032 §5.1.7](https://www.rfc-editor.org/rfc/rfc8032#section-5.1.7)),
   without context or prehash. `key` is the 32-byte encoding of the point `A`, and `sig` is
@@ -907,9 +909,9 @@ linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
    row in this section over ring's `RSA_PKCS1_2048_8192_SHA384`, `_SHA512`,
    `RSA_PSS_2048_8192_SHA384` or `_SHA512` and its Wycheproof file when a provider needs it.
    `ES512` needs P-521, which ring 0.17.14 lacks, so it would reopen the backend question.
-4. **HKDF on program bytes** and HKDF over SHA-384 or SHA-512 are not specified; the first
-   is library code over `std.hmac` with no kernel, and ring's `HKDF_SHA384` and
-   `HKDF_SHA512` would back the second.
+4. **HKDF on program bytes** and HKDF over SHA-512 are not specified; the first is library
+   code over `std.hmac` with no kernel, and ring's `HKDF_SHA512` would back the second.
+   HKDF over SHA-384 on secrets is TLS-8's `derive_hkdf_extract` and `derive_hkdf_expand`.
 5. **A pepper under `Secret`.** Argon2's secret value `K` is program bytes in `argon2.id`;
    a `secret.argon2id_hash` that takes `K` from a `Secret` is not specified.
 6. **Random-nonce AEAD at scale.** XChaCha20-Poly1305 or AES-GCM-SIV would let callers
@@ -921,6 +923,8 @@ linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
    memory and no charge, not zeroing of that state. The secret's own bytes and Argon2id's
    working memory, which Hirsel holds, are still zeroed as their rules say. Zeroing ring's
    state would need a ring that does it or an allocator that clears what the sinks free.
+   TLS-8's packet ciphers, header masks and key shares hold their state in run-owned
+   storage and zero it at drop, so this item covers only the one-shot sinks.
 
 ## Provide
 

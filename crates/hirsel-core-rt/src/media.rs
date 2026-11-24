@@ -1,6 +1,9 @@
 //! Owned media state is pinned independently of the one-word resource carrier.
 use crate::Context;
 
+#[cfg(feature = "record")]
+pub(crate) mod capture;
+mod import;
 mod packet;
 mod schedule;
 use crate::{
@@ -96,4 +99,54 @@ pub unsafe extern "C" fn hirsel_core_media_drop(_: *mut Context, handle: u64) {
     // SAFETY: the first field of the pinned repr(C) slot is its own destructor.
     let drop = unsafe { *handle.cast::<unsafe fn(*mut u8)>() };
     unsafe { drop(handle) };
+}
+
+/// # Safety
+/// A recorded parent belongs to this running context and its synchronous tape.
+unsafe fn issue_child(
+    context: *mut Context,
+    parent: u64,
+    operation: u8,
+    fields: &[[u8; 8]],
+    site: u64,
+) -> Result<u64, crate::provider::Outcome> {
+    if parent == 0 {
+        return Ok(0);
+    }
+    #[cfg(feature = "record")]
+    {
+        use crate::provider::{Buffer, IoError, Outcome};
+        let parent = parent.to_le_bytes();
+        let mut args: Vec<&[u8]> = vec![&parent];
+        args.extend(fields.iter().map(|field| field.as_slice()));
+        let mut empty = Buffer {
+            data: std::ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+        };
+        // SAFETY: the running context and all operands outlive this synchronous issue.
+        let out = unsafe {
+            capture::issue(
+                context,
+                operation,
+                capture::arguments(operation, 0, &args),
+                capture::Delivery::Child {
+                    admits_invalid: false,
+                },
+                &mut empty,
+                |_| Outcome::default(),
+                site,
+            )
+        };
+        if out.status != 0 || out.error != IoError::OK {
+            Err(out)
+        } else {
+            Ok(out.value)
+        }
+    }
+    #[cfg(not(feature = "record"))]
+    {
+        let _ = (context, operation, fields, site);
+        unreachable!("only recording creates a tape origin")
+    }
 }

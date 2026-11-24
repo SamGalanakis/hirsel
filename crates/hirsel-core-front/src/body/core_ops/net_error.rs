@@ -22,6 +22,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    pub(super) fn runtime_closed(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) {
+        self.runtime_case_payload(to, 0, ty, value, n);
+    }
+
     pub(super) fn runtime_net_error(
         &mut self,
         to: AddressId,

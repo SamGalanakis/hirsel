@@ -186,3 +186,6 @@ fn root_virtual_agreement_verdicts_are_recorded_and_replayed() {
         }
     }
 }
+
+#[path = "media_tests.rs"]
+mod media_tests;

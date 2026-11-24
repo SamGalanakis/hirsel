@@ -54,12 +54,12 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
                     Granted::read(grant.clone(), 0).unwrap().secret
                 } else {
                     assert!(!key_path.exists());
-                    Secret {
-                        origin: Origin::Granted(0),
-                        policy: SecretPolicy::parse(&startup.secret_grants[0].policy).unwrap(),
-                        bytes: None,
-                        seal: None,
-                    }
+                    Secret::new(
+                        Origin::Granted(0),
+                        SecretPolicy::parse(&startup.secret_grants[0].policy).unwrap(),
+                        None,
+                        None,
+                    )
                 };
                 key.origin = Origin::Granted(ordinal_of(handle) as u64);
                 let mut registry = files.registry.run_grants().secrets.lock().unwrap();
@@ -72,16 +72,16 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
                     policy: SecretPolicy::parse("open(chacha20-poly1305)").unwrap(),
                     ..key
                 });
-                let wrong_len = registry.register(Secret {
-                    origin: Origin::Sealed(0),
-                    policy: SecretPolicy::parse(policy).unwrap(),
-                    bytes: (mode == Mode::Record).then(|| {
+                let wrong_len = registry.register(Secret::new(
+                    Origin::Sealed(0),
+                    SecretPolicy::parse(policy).unwrap(),
+                    (mode == Mode::Record).then(|| {
                         std::sync::Arc::new(hirsel_core_net::secret_aead::SecretBytes::new(
                             zeroize::Zeroizing::new(vec![7; 16]),
                         ))
                     }),
-                    seal: None,
-                });
+                    None,
+                ));
                 drop(registry);
 
                 let nonce = view(NONCE);

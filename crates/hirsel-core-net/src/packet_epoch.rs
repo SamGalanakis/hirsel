@@ -71,12 +71,46 @@ pub struct Opener<'a, C> {
     pub charge: C,
 }
 
+pub fn traffic_profile(profile: u64, suite: u64) -> Option<(NonceFormat, AeadAlg)> {
+    let format = match profile {
+        0 => NonceFormat::Quic,
+        1 => NonceFormat::Dtls13,
+        2 => NonceFormat::Tls13,
+        3 => NonceFormat::QuicMultipath,
+        _ => return None,
+    };
+    let algorithm = match suite {
+        0 => AeadAlg::Aes128Gcm,
+        1 => AeadAlg::Aes256Gcm,
+        2 => AeadAlg::ChaCha20Poly1305,
+        _ => return None,
+    };
+    Some((format, algorithm))
+}
+
 impl<C> Epoch<C> {
     pub fn import_traffic(
         format: NonceFormat,
         algorithm: AeadAlg,
         authority: ImportUse,
         secret: &[u8],
+    ) -> Result<Self, ImportError> {
+        Self::traffic_import(format, algorithm, authority, Some(secret))
+    }
+
+    pub fn opaque_traffic_import(
+        format: NonceFormat,
+        algorithm: AeadAlg,
+        authority: ImportUse,
+    ) -> Result<Self, ImportError> {
+        Self::traffic_import(format, algorithm, authority, None)
+    }
+
+    fn traffic_import(
+        format: NonceFormat,
+        algorithm: AeadAlg,
+        authority: ImportUse,
+        secret: Option<&[u8]>,
     ) -> Result<Self, ImportError> {
         let send = match authority {
             ImportUse::TrafficSend => true,
@@ -89,9 +123,12 @@ impl<C> Epoch<C> {
             NonceFormat::Dtls13 => Tls13Labels::Dtls,
             _ => return Err(ImportError::Invalid),
         };
-        let live = Tls13PacketKeys::import(labels, algorithm, secret)
-            .map(DirectionKeys::Live)
-            .ok_or(ImportError::Invalid)?;
+        let live = match secret {
+            Some(secret) => DirectionKeys::Live(
+                Tls13PacketKeys::import(labels, algorithm, secret).ok_or(ImportError::Invalid)?,
+            ),
+            None => DirectionKeys::Opaque,
+        };
         let (send, receive) = if send {
             (live, DirectionKeys::Missing)
         } else {

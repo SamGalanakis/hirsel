@@ -282,14 +282,14 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
         };
         secrets.unwraps += 1;
         let value = secrets.push(
-            Secret {
+            Secret::new(
                 origin,
-                policy: requested,
-                bytes: plain
+                requested,
+                plain
                     .into_inner()
                     .map(|bytes| Arc::new(SecretBytes::new(bytes))),
-                seal: Some(ChargeCell::new(charge)),
-            },
+                Some(ChargeCell::new(charge)),
+            ),
             None,
         );
         Outcome {

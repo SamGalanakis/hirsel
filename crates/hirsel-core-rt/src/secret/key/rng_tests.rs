@@ -60,14 +60,14 @@ fn host_p256_key_load_rng_failure_ends_run() {
         let doc =
             EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
                 .unwrap();
-        let secret = Secret {
-            origin: Origin::Sealed(0),
-            policy: SecretPolicy::parse("sign(p256)").unwrap(),
-            bytes: Some(Arc::new(SecretBytes::new(Zeroizing::new(
+        let secret = Secret::new(
+            Origin::Sealed(0),
+            SecretPolicy::parse("sign(p256)").unwrap(),
+            Some(Arc::new(SecretBytes::new(Zeroizing::new(
                 doc.as_ref().to_vec(),
             )))),
-            seal: None,
-        };
+            None,
+        );
         let args = KeyRequest {
             key: &secret,
             op: KeyOp::Sign {

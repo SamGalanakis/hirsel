@@ -10,12 +10,15 @@ use crate::{
 };
 #[doc(hidden)]
 pub mod agreement;
+mod import_state;
+#[cfg(test)]
+mod import_tests;
 pub(crate) mod kdf;
 pub(crate) mod key;
 pub(crate) mod key_share;
 pub(crate) mod p256_generation;
 use hirsel_core_net::{
-    HmacSha2, Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse,
+    HmacSha2, ImportSpend, Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse,
     secret_aead::SecretBytes,
 };
 pub use kdf::hirsel_core_secret_derive_hmac_sha256;
@@ -79,6 +82,7 @@ pub(crate) struct Secret {
     pub(crate) bytes: Option<Arc<SecretBytes>>,
     /// A sealed secret's charge, shared by every designation of its bytes.
     pub(crate) seal: Option<Arc<ChargeCell>>,
+    pub(crate) import: Option<Arc<ImportSpend>>,
 }
 
 pub(crate) struct Granted {
@@ -108,12 +112,12 @@ impl Granted {
             return None;
         }
         Some(Self {
-            secret: Secret {
-                origin: Origin::Granted(index),
-                policy: SecretPolicy::parse(&record.policy)?,
-                bytes: Some(Arc::new(SecretBytes::new(bytes))),
-                seal: None,
-            },
+            secret: Secret::new(
+                Origin::Granted(index),
+                SecretPolicy::parse(&record.policy)?,
+                Some(Arc::new(SecretBytes::new(bytes))),
+                None,
+            ),
             record,
         })
     }
@@ -517,12 +521,7 @@ unsafe fn store_sealed(
         Origin::Sealed(ordinal)
     });
     let value = secrets.push(
-        Secret {
-            origin,
-            policy,
-            bytes,
-            seal: Some(ChargeCell::new(charge)),
-        },
+        Secret::new(origin, policy, bytes, Some(ChargeCell::new(charge))),
         None,
     );
     Outcome {
@@ -620,7 +619,7 @@ pub(crate) struct MacTape {
     pub(crate) handle: u64,
 }
 
-unsafe fn drive_secret_sink(
+pub(crate) unsafe fn drive_secret_sink(
     context: *mut Context,
     live: Provider,
     request: &mut Request,

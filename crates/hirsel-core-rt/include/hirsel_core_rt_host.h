@@ -372,6 +372,7 @@ HirselCoreHostOutcome hirsel_core_secret_p256_key(HirselCoreContext *, uint64_t,
 HirselCoreHostOutcome hirsel_core_secret_key_share(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
 void hirsel_core_media_drop(HirselCoreContext *, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_quic_initial(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_import_traffic(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_sealer(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_opener(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_header_mask(HirselCoreContext *, uint64_t, uint64_t, bool, uint64_t);

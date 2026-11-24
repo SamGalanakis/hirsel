@@ -49,9 +49,9 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ArgsLen
             | Kernel::ArgsGet
             | Kernel::Env(_) => true,
+            Kernel::Media(op) => op != HostOp::ScheduleQuicInitial,
             // A virtual provider observes only run state the program made.
             Kernel::Provide(_)
-            | Kernel::Media(_)
             | Kernel::ReadOnlyDir
             | Kernel::CarrierMove
             | Kernel::CarrierView

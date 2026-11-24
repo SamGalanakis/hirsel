@@ -12,7 +12,7 @@ use std::mem::MaybeUninit;
 
 pub(super) enum Payload {
     Share(key_share::Share),
-    Schedule(Epoch<Limit>),
+    Schedule { epoch: Epoch<Limit>, space: u64 },
     Sealer(SenderCounter, AeadAlg, PacketCipher),
     Opener(ReceiverNonce, AeadAlg, PacketCipher),
     Mask(HeaderMask),
@@ -46,7 +46,7 @@ impl Machine<'_> {
         let Media { owner, payload } = self.world.media[id as usize].take().unwrap();
         let bytes = match payload {
             Payload::Share(_share) => 64,
-            Payload::Schedule(epoch) => {
+            Payload::Schedule { epoch, .. } => {
                 for paid in epoch.into_ledger() {
                     self.refund(paid, packet_epoch::DOMAIN_CHARGE);
                 }
@@ -78,17 +78,19 @@ impl Machine<'_> {
                     }));
                 }
                 let epoch = Epoch::quic_initial(side, self.carrier_bytes(a[1])).unwrap();
-                Ok(self.media_hold(payer, Payload::Schedule(epoch)))
+                Ok(self.media_hold(payer, Payload::Schedule { epoch, space: 0 }))
             }
+            HostOp::ScheduleImportTraffic => Ok(self.import_traffic(payer, a)),
             HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => {
-                if a[1] != 0 {
-                    return Ok(issue_error(IssueError::Invalid));
-                }
                 let slot = a[0] as usize;
                 let mut held = self.world.media[slot].take().unwrap();
-                let Payload::Schedule(epoch) = &mut held.payload else {
+                let Payload::Schedule { epoch, space } = &mut held.payload else {
                     unreachable!()
                 };
+                if a[1] != *space {
+                    self.world.media[slot] = Some(held);
+                    return Ok(issue_error(IssueError::Invalid));
+                }
                 let child = match op {
                     HostOp::ScheduleSealer => epoch
                         .sealer(a[2], a[3], |n| {
@@ -140,6 +142,57 @@ impl Machine<'_> {
                 self.world.media[slot] = Some(held);
                 let (value, error, written) = packet_aead::outcome(outcome?);
                 Ok(vec![value, error as u64, 0, written])
+            }
+        }
+    }
+
+    fn import_traffic(&mut self, payer: Limit, args: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::{ImportKind, ImportRefusal, packet_epoch::traffic_profile};
+        let key = args[2];
+        let secret = self.secret(key).expect("a live Secret designation");
+        if secret
+            .policy
+            .uses
+            .import()
+            .is_none_or(|use_| use_.kind() != ImportKind::Traffic)
+        {
+            return vec![0, 1, 1, 0];
+        }
+        let mark = secret
+            .import
+            .clone()
+            .expect("import authority carries a spent mark");
+        let bytes = secret.bytes.clone();
+        let request = packet_epoch::SCHEDULE_CHARGE;
+        let issued = mark.issue(ImportKind::Traffic, || {
+            let parsed = traffic_profile(args[0], args[1]).ok_or(IssueError::Invalid)?;
+            self.admit(&payer, request)
+                .map_err(|available| IssueError::Capacity {
+                    requested: request,
+                    available,
+                })?;
+            Ok(parsed)
+        });
+        let (authority, (format, algorithm)) = match issued {
+            Ok(issued) => issued,
+            Err(error) => {
+                let mut row = match error {
+                    ImportRefusal::Denied => vec![0, 1, 0, 0],
+                    ImportRefusal::Spent => issue_error(IssueError::Spent),
+                    ImportRefusal::BeforeIssue(error) => issue_error(error),
+                };
+                row[2] = 1;
+                return row;
+            }
+        };
+        let epoch = Epoch::import_traffic(format, algorithm, authority, &bytes);
+        drop(bytes);
+        self.secret_drop(key);
+        match epoch {
+            Ok(epoch) => self.media_hold(payer, Payload::Schedule { epoch, space: 2 }),
+            Err(_) => {
+                self.refund(payer, request);
+                issue_error(IssueError::Invalid)
             }
         }
     }

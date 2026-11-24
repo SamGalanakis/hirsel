@@ -297,6 +297,9 @@ impl Out {
         if matches!(op, op::MEDIA_P256_KEY | op::MEDIA_KEY_SHARE) && (status != OK || value == 0) {
             return Err(Corrupt);
         }
+        if op == op::MEDIA_CAPTURE && status != OK && status != ERROR {
+            return Err(Corrupt);
+        }
         if op == op::MEDIA_AGREEMENT && (status != OK || value > 2) {
             return Err(Corrupt);
         }

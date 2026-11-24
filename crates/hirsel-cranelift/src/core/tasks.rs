@@ -13,16 +13,6 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    /// An explicit stack slot of its own, for a descriptor passed by pointer
-    /// beside an indirect result that shares the call scratch.
-    fn own_slot(&mut self, size: u32) -> Value {
-        let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-            ir::StackSlotKind::ExplicitSlot,
-            size.max(8).next_multiple_of(8),
-            3,
-        ));
-        self.b.ins().stack_addr(types::I64, slot, 0)
-    }
     /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
     /// of `shift + size(ty)`: the buffer's bytes, then each owner row.
     fn cross(&mut self, ty: TypeId, shift: u64) -> Result<Value> {
@@ -342,6 +332,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretP256Key
                     | HostOp::SecretKeyShare
                     | HostOp::ScheduleQuicInitial
+                    | HostOp::ScheduleImportTraffic
                     | HostOp::ScheduleSealer
                     | HostOp::ScheduleOpener
                     | HostOp::ScheduleHeaderMask

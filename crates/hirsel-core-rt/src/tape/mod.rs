@@ -1832,7 +1832,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         return step;
     }
     let mut outcome = step.outcome;
-    if matches!(r.operation, SECRET_KDF | MEDIA_P256_KEY | MEDIA_KEY_SHARE)
+    if unsafe { secret::designation_delivery(r) }
         && outcome.error == IoError::OK
         && outcome.status == 0
     {

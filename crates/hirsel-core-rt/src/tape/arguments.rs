@@ -68,6 +68,9 @@ unsafe fn operands(r: &Request) -> Args {
             put_varint(&mut random, (r.buffer.capacity - r.buffer.len) as u64);
             return Args::of_parts(&[&random, crate::secret::p256_generation::USE.as_bytes()]);
         }
+        if r.operation == MEDIA_CAPTURE {
+            return crate::media::capture::canonical(r);
+        }
         if r.operation == MEDIA_AGREEMENT {
             let call = &*r.path.cast::<crate::secret::agreement::Call<'_>>();
             return Args::of(call.canonical);

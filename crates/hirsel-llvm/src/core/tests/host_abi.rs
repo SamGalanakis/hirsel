@@ -83,6 +83,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::SecretSign => &["u64", "u64", "u64", "ptr", "ptr"],
         HostOp::SecretP256Key => &["u64", "ptr", "ptr"],
         HostOp::ScheduleQuicInitial => &["u64", "ptr"],
+        HostOp::ScheduleImportTraffic => &["u64"; 3],
         HostOp::ScheduleSealer => &["u64", "u64", "u64", "u64"],
         HostOp::ScheduleOpener => &["u64", "u64"],
         HostOp::ScheduleHeaderMask => &["u64", "u64", "bool"],

@@ -317,6 +317,18 @@ pub(super) unsafe fn replay_out(
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
+    } else if op == MEDIA_CAPTURE {
+        // SAFETY: the operation pins its descriptor and its output carrier.
+        if !unsafe { crate::media::capture::valid(r, &out, live.schedule.events) } {
+            return Err(Fault::Corrupt);
+        }
+        space
+            .ok_or(Fault::Corrupt)?
+            .require([out.payload.len() as u64, 0])?;
+        if !out.payload.is_empty() {
+            // SAFETY: the validated public payload fits the pinned carrier.
+            unsafe { crate::secret::key_share::append(&mut r.buffer, &out.payload) };
+        }
     } else if op == MEDIA_KEY_SHARE {
         let call = unsafe { &*r.path.cast::<crate::secret::key_share::Generation>() };
         if !ok || out.value != live.schedule.events || out.payload.len() != call.group.public_len()

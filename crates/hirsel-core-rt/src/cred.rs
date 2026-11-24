@@ -905,12 +905,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
         let origin = Origin::Fetched(outcome.value);
         let designated = crate::secret::designate(
             context,
-            Secret {
-                origin,
-                policy: grant.policy.clone(),
-                bytes: fetched.secret,
-                seal: None,
-            },
+            Secret::new(origin, grant.policy.clone(), fetched.secret, None),
         );
         if designated.error != IoError::OK {
             return Outcome {

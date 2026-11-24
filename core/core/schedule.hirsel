@@ -10,6 +10,8 @@ pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
 
 pub fn quic_initial(side: Side, dcid: Bytes) -> Result[Schedule, ScheduleError]
 
+pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+
 pub fn sealer(mut s: Schedule, space: packet.Space, domain: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
 
 pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]

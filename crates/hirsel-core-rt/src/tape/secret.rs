@@ -6,11 +6,23 @@ pub(super) fn inline_sink(op: u8) -> Option<Provider> {
         SECRET_MAC => crate::secret::MAC_PROVIDER,
         SECRET_KDF => crate::secret::kdf::KDF_PROVIDER,
         MEDIA_AGREEMENT => crate::secret::agreement::AGREEMENT_PROVIDER,
+        crate::provider::MEDIA_CAPTURE => crate::media::capture::PROVIDER,
         MEDIA_P256_KEY => crate::secret::p256_generation::PROVIDER,
         crate::provider::MEDIA_KEY_SHARE => crate::secret::key_share::PROVIDER,
         SCRAM_VERIFY => crate::scram::VERIFY_PROVIDER,
         _ => return None,
     })
+}
+
+/// # Safety
+/// A media capture request pins its descriptor through delivery.
+pub(super) unsafe fn designation_delivery(r: &Request) -> bool {
+    use crate::provider::{MEDIA_CAPTURE, MEDIA_KEY_SHARE, MEDIA_P256_KEY, SECRET_KDF};
+    if r.operation == MEDIA_CAPTURE {
+        // SAFETY: the descriptor is pinned and the tag identifies its layout.
+        return unsafe { crate::media::capture::creates_child(r) };
+    }
+    matches!(r.operation, SECRET_KDF | MEDIA_P256_KEY | MEDIA_KEY_SHARE)
 }
 
 /// A key operation's canonical arguments: each Secret's origin and policy,

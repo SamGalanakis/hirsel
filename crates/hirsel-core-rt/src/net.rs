@@ -1002,10 +1002,8 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 resolved
                     .iter()
                     .map(|secret| crate::secret::Secret {
-                        origin: secret.origin,
                         policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
-                        bytes: secret.bytes.clone(),
-                        seal: secret.seal.clone(),
+                        ..secret.clone()
                     })
                     .collect()
             })

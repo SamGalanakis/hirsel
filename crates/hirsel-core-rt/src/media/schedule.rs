@@ -12,33 +12,38 @@ use hirsel_core_net::{
 };
 
 const INITIAL: u64 = 0;
-type Paid = media::Payment;
+pub(super) type Paid = media::Payment;
 
 pub(super) struct Schedule {
-    initial: Epoch<Paid>,
-    _charge: Paid,
+    pub(super) epoch: Epoch<Paid>,
+    pub(super) space: u64,
+    pub(super) origin: u64,
+    pub(super) _charge: Paid,
 }
 
 pub(super) struct Sealer {
     pub(super) counter: SenderCounter,
     pub(super) algorithm: AeadAlg,
-    pub(super) cipher: crate::os_tls::packet_cipher::PacketCipher,
+    pub(super) cipher: Option<crate::os_tls::packet_cipher::PacketCipher>,
+    pub(super) origin: u64,
     _charge: Paid,
 }
 
 pub(super) struct Opener {
     pub(super) nonce: ReceiverNonce,
     pub(super) algorithm: AeadAlg,
-    pub(super) cipher: crate::os_tls::packet_cipher::PacketCipher,
+    pub(super) cipher: Option<crate::os_tls::packet_cipher::PacketCipher>,
+    pub(super) origin: u64,
     _charge: Paid,
 }
 
 pub(super) struct Mask {
-    pub(super) key: HeaderMask,
+    pub(super) key: Option<HeaderMask>,
+    pub(super) origin: u64,
     _charge: Paid,
 }
 
-fn refusal(error: IssueError) -> Outcome {
+pub(super) fn refusal(error: IssueError) -> Outcome {
     let (tag, value, written) = match error {
         IssueError::Invalid => (2, 0, 0),
         IssueError::Issued => (3, 0, 0),
@@ -62,7 +67,7 @@ pub(super) fn admit(context: &Context, requested: u64) -> Result<Charge, u64> {
     Ok(Charge::new(payer, requested))
 }
 
-fn track(context: &Context, charge: Charge) -> Paid {
+pub(super) fn track(context: &Context, charge: Charge) -> Paid {
     // SAFETY: the caller entered with a running context.
     unsafe {
         (*context.host_files)
@@ -73,7 +78,7 @@ fn track(context: &Context, charge: Charge) -> Paid {
     }
 }
 
-fn owned<T: Send>(value: T) -> Outcome {
+pub(super) fn owned<T: Send>(value: T) -> Outcome {
     Outcome {
         value: media::hold(value),
         ..Outcome::default()
@@ -112,7 +117,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_quic_initial(
         };
         let initial = Epoch::quic_initial(side, dcid).unwrap();
         owned(Schedule {
-            initial,
+            epoch: initial,
+            space: INITIAL,
+            origin: 0,
             _charge: charge,
         })
     }
@@ -127,30 +134,42 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
     space: u64,
     domain: u64,
     floor: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
-    if space != INITIAL {
-        return refusal(IssueError::Invalid);
-    }
     // SAFETY: the checked caller lends this schedule exclusively.
     let schedule = unsafe { media::loan_mut::<Schedule>(schedule) };
+    if space != schedule.space {
+        return refusal(IssueError::Invalid);
+    }
+    let parent = schedule.origin;
     let admit = |requested| {
         // SAFETY: the context remains live through this synchronous operation.
         let mut charge = admit(unsafe { &*context }, requested)?;
         let ledger = track(unsafe { &*context }, charge.partition(DOMAIN_CHARGE));
         Ok((track(unsafe { &*context }, charge), ledger))
     };
-    match schedule.initial.sealer(domain, floor, admit) {
-        Ok(issued) => owned(Sealer {
-            counter: issued.counter,
-            algorithm: issued.algorithm,
-            cipher: crate::os_tls::packet_cipher::PacketCipher::new(
-                issued.algorithm,
-                issued.key.unwrap(),
-            )
-            .unwrap(),
-            _charge: issued.charge,
-        }),
+    match schedule.epoch.sealer(domain, floor, admit) {
+        Ok(issued) => {
+            let fields = [
+                space.to_le_bytes(),
+                domain.to_le_bytes(),
+                floor.to_le_bytes(),
+            ];
+            // SAFETY: the recorded issue uses only pinned public arguments through delivery.
+            let origin = match unsafe { media::issue_child(context, parent, 3, &fields, site) } {
+                Ok(origin) => origin,
+                Err(outcome) => return outcome,
+            };
+            owned(Sealer {
+                counter: issued.counter,
+                algorithm: issued.algorithm,
+                cipher: issued.key.map(|key| {
+                    crate::os_tls::packet_cipher::PacketCipher::new(issued.algorithm, key).unwrap()
+                }),
+                origin,
+                _charge: issued.charge,
+            })
+        }
         Err(error) => refusal(error),
     }
 }
@@ -162,26 +181,35 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
     context: *mut Context,
     schedule: u64,
     space: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
-    if space != INITIAL {
-        return refusal(IssueError::Invalid);
-    }
     // SAFETY: the checked caller lends this schedule, and context remains running.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
-    match schedule.initial.opener(|requested| {
+    if space != schedule.space {
+        return refusal(IssueError::Invalid);
+    }
+    let parent = schedule.origin;
+    match schedule.epoch.opener(|requested| {
         admit(unsafe { &*context }, requested).map(|charge| track(unsafe { &*context }, charge))
     }) {
-        Ok(issued) => owned(Opener {
-            nonce: issued.nonce,
-            algorithm: issued.algorithm,
-            cipher: crate::os_tls::packet_cipher::PacketCipher::new(
-                issued.algorithm,
-                issued.key.unwrap(),
-            )
-            .unwrap(),
-            _charge: issued.charge,
-        }),
+        Ok(issued) => {
+            // SAFETY: the public space and result remain live through the issue.
+            let origin = match unsafe {
+                media::issue_child(context, parent, 4, &[space.to_le_bytes()], site)
+            } {
+                Ok(origin) => origin,
+                Err(outcome) => return outcome,
+            };
+            owned(Opener {
+                nonce: issued.nonce,
+                algorithm: issued.algorithm,
+                cipher: issued.key.map(|key| {
+                    crate::os_tls::packet_cipher::PacketCipher::new(issued.algorithm, key).unwrap()
+                }),
+                origin,
+                _charge: issued.charge,
+            })
+        }
         Err(error) => refusal(error),
     }
 }
@@ -194,20 +222,30 @@ pub unsafe extern "C" fn hirsel_core_schedule_header_mask(
     schedule: u64,
     space: u64,
     local: bool,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
-    if space != INITIAL {
-        return refusal(IssueError::Invalid);
-    }
     // SAFETY: the checked caller lends this schedule, and context remains running.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
-    match schedule.initial.header_mask(local, |n| {
+    if space != schedule.space {
+        return refusal(IssueError::Invalid);
+    }
+    let parent = schedule.origin;
+    match schedule.epoch.header_mask(local, |n| {
         admit(unsafe { &*context }, n).map(|charge| track(unsafe { &*context }, charge))
     }) {
-        Ok((key, charge)) => owned(Mask {
-            key: key.unwrap(),
-            _charge: charge,
-        }),
+        Ok((key, charge)) => {
+            let fields = [space.to_le_bytes(), u64::from(local).to_le_bytes()];
+            // SAFETY: the public operands remain pinned through the issue.
+            let origin = match unsafe { media::issue_child(context, parent, 5, &fields, site) } {
+                Ok(origin) => origin,
+                Err(outcome) => return outcome,
+            };
+            owned(Mask {
+                key,
+                origin,
+                _charge: charge,
+            })
+        }
         Err(error) => refusal(error),
     }
 }

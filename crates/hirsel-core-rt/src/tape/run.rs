@@ -512,12 +512,12 @@ unsafe extern "C" fn invoke(
                         }
                         if req.kind == entry::SECRET {
                             let mut secret = if run.launch.is_describe() {
-                                crate::secret::Secret {
-                                    origin: crate::secret::Origin::Granted(0),
-                                    policy: hirsel_core_net::SecretPolicy::default(),
-                                    bytes: None,
-                                    seal: None,
-                                }
+                                crate::secret::Secret::new(
+                                    crate::secret::Origin::Granted(0),
+                                    hirsel_core_net::SecretPolicy::default(),
+                                    None,
+                                    None,
+                                )
                             } else if run.mode == 0 {
                                 (*(handle as *const crate::secret::Granted)).secret.clone()
                             } else {
@@ -528,13 +528,12 @@ unsafe extern "C" fn invoke(
                                 if record.parameter.as_bytes() != name {
                                     return stopped(run, Fault::Corrupt);
                                 }
-                                crate::secret::Secret {
-                                    origin: crate::secret::Origin::Granted(0),
-                                    policy: hirsel_core_net::SecretPolicy::parse(&record.policy)
-                                        .unwrap(),
-                                    bytes: None,
-                                    seal: None,
-                                }
+                                crate::secret::Secret::new(
+                                    crate::secret::Origin::Granted(0),
+                                    hirsel_core_net::SecretPolicy::parse(&record.policy).unwrap(),
+                                    None,
+                                    None,
+                                )
                             };
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
                             (*files)

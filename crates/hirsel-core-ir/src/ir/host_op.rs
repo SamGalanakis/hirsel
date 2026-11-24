@@ -125,6 +125,7 @@ pub enum HostOp {
     SecretP256Key = hirsel_core_ids::host_op::MEDIA_P256_KEY as isize,
     SecretKeyShare = hirsel_core_ids::host_op::MEDIA_KEY_SHARE as isize,
     ScheduleQuicInitial = hirsel_core_ids::host_op::SCHEDULE_QUIC_INITIAL as isize,
+    ScheduleImportTraffic = hirsel_core_ids::host_op::SCHEDULE_IMPORT_TRAFFIC as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
@@ -235,6 +236,7 @@ impl HostOp {
         HostOp::SecretP256Key,
         HostOp::SecretKeyShare,
         HostOp::ScheduleQuicInitial,
+        HostOp::ScheduleImportTraffic,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
         HostOp::ScheduleHeaderMask,
@@ -499,6 +501,7 @@ impl HostOp {
             | HostOp::SecretWrap
             | HostOp::SecretKeyShare => (vec![V(u64_), V(u64_), V(p)], outcome),
             HostOp::ScheduleQuicInitial => (vec![V(u64_), V(p)], outcome),
+            HostOp::ScheduleImportTraffic => (vec![V(u64_); 3], outcome),
             HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::ScheduleOpener => (vec![V(u64_), V(u64_)], outcome),
             HostOp::ScheduleHeaderMask => {
@@ -674,6 +677,7 @@ impl HostOp {
             HostOp::SecretP256Key => "secret_p256_key",
             HostOp::SecretKeyShare => "secret_key_share",
             HostOp::ScheduleQuicInitial => "schedule_quic_initial",
+            HostOp::ScheduleImportTraffic => "schedule_import_traffic",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
@@ -776,6 +780,7 @@ impl HostOp {
             Self::SecretP256Key => "hirsel_core_secret_p256_key",
             Self::SecretKeyShare => "hirsel_core_secret_key_share",
             Self::ScheduleQuicInitial => "hirsel_core_schedule_quic_initial",
+            Self::ScheduleImportTraffic => "hirsel_core_schedule_import_traffic",
             Self::ScheduleSealer => "hirsel_core_schedule_sealer",
             Self::ScheduleOpener => "hirsel_core_schedule_opener",
             Self::ScheduleHeaderMask => "hirsel_core_schedule_header_mask",
@@ -839,6 +844,7 @@ impl HostOp {
         matches!(
             self,
             HostOp::ScheduleQuicInitial
+                | HostOp::ScheduleImportTraffic
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask
@@ -905,6 +911,7 @@ impl HostOp {
                 | HostOp::SecretP256Key
                 | HostOp::SecretKeyShare
                 | HostOp::ScheduleQuicInitial
+                | HostOp::ScheduleImportTraffic
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask

@@ -461,6 +461,7 @@ operations! {
     ("secret", "p256_key", Lane::Runtime(Kernel::Net(HostOp::SecretP256Key)), "B", "media-w0-crypto-build-2282", false),
     ("secret", "key_share", Lane::Runtime(Kernel::Net(HostOp::SecretKeyShare)), "B", "media-w0-crypto-build-2282", false),
     ("schedule", "quic_initial", Lane::Runtime(Kernel::Media(HostOp::ScheduleQuicInitial)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "import_traffic", Lane::Runtime(Kernel::Media(HostOp::ScheduleImportTraffic)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "sealer", Lane::Runtime(Kernel::Media(HostOp::ScheduleSealer)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleOpener)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "header_mask", Lane::Runtime(Kernel::Media(HostOp::ScheduleHeaderMask)), "A", "media-w0-crypto-build-2282", false),
@@ -1482,10 +1483,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-
-    fn runtime_closed(&mut self, to: AddressId, ty: TyId, value: Option<ValueId>, n: NodeId) {
-        self.runtime_case_payload(to, 0, ty, value, n);
     }
 
     fn runtime_receive(

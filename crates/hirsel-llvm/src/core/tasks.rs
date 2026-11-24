@@ -179,6 +179,7 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretP256Key
             | HostOp::SecretKeyShare
             | HostOp::ScheduleQuicInitial
+            | HostOp::ScheduleImportTraffic
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

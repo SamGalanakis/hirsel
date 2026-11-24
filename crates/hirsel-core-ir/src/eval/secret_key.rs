@@ -1,6 +1,63 @@
 use super::*;
 
 impl Machine<'_> {
+    pub(super) fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
+            .ok()
+            .and_then(SecretPolicy::parse)
+        else {
+            return vec![0, 1, 0, 0];
+        };
+        let (policy, len) = if op == HostOp::SecretSeal {
+            (policy, self.load(a[0] + 8, 8))
+        } else {
+            let Some(parent) = self.secret(a[0]) else {
+                return vec![0, 1, 0, 0];
+            };
+            let Some(intersection) = parent.policy.intersect(&policy) else {
+                return vec![0, 1, 0, 0];
+            };
+            (intersection, 0)
+        };
+        let size = SecretGrant::logical_size(&policy.send, len);
+        let charge = size.unwrap_or(u64::MAX);
+        let payer = t.limits.last().unwrap();
+        if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
+            return vec![charge, 2, 0, available];
+        }
+        let (bytes, seal, opaque, import) = if op == HostOp::SecretSeal {
+            let data = self.load(a[0], 8);
+            let bytes = Zeroizing::new(self.carrier_bytes(a[0]).to_vec());
+            if !bytes.is_empty() && self.load(a[0] + 16, 8) != 0 {
+                let (block, offset) = split(data);
+                use zeroize::Zeroize;
+                self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
+            }
+            let key = self.store_sealed(policy, bytes, payer.clone(), charge, false);
+            return vec![key, 0, 0, 0];
+        } else {
+            let parent = self.secret(a[0]).unwrap();
+            (
+                parent.bytes.clone(),
+                parent.seal.clone(),
+                parent.opaque,
+                parent.import.clone(),
+            )
+        };
+        let payer = payer.clone();
+        let key = self.designate(
+            EvalSecret {
+                opaque,
+                policy,
+                bytes,
+                seal,
+                import,
+            },
+            (payer, charge),
+        );
+        vec![key, 0, 0, 0]
+    }
+
     pub(super) fn secret(&self, key: u64) -> Option<&EvalSecret> {
         let slot = self.world.secrets.get(key as usize)?.as_ref()?;
         Some(&slot.secret)
@@ -31,6 +88,7 @@ impl Machine<'_> {
         self.designate(
             EvalSecret {
                 opaque,
+                import: hirsel_core_net::ImportSpend::new(policy.uses).map(Arc::new),
                 policy,
                 bytes: Arc::new(SecretBytes::new(bytes)),
                 seal,
@@ -177,6 +235,7 @@ impl Machine<'_> {
                     .push((Arc::downgrade(&seal), payer.clone(), charge));
                 let key = self.designate(
                     EvalSecret {
+                        import: None,
                         opaque: key.opaque,
                         policy: requested,
                         bytes: Arc::new(SecretBytes::new(plain)),

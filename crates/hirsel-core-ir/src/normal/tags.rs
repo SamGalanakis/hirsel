@@ -541,6 +541,7 @@ tags!(HostOp {
     154 => PacketOpen,
     155 => PacketOpenInto,
     156 => PacketMask,
+    157 => ScheduleImportTraffic,
 });
 
 tags!(RaiseCause {

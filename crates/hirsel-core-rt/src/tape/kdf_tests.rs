@@ -91,12 +91,12 @@ fn kdf_grants_charge_before_issue_and_replay_without_keys() {
                             .find(|saved| saved.parameter == grant.parameter)
                             .unwrap()
                             .policy;
-                        Secret {
-                            origin: Origin::Granted(ordinal),
-                            policy: SecretPolicy::parse(policy).unwrap(),
-                            bytes: None,
-                            seal: None,
-                        }
+                        Secret::new(
+                            Origin::Granted(ordinal),
+                            SecretPolicy::parse(policy).unwrap(),
+                            None,
+                            None,
+                        )
                     };
                     (*(*context).host_files)
                         .registry

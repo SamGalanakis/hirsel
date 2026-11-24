@@ -464,6 +464,7 @@ struct EvalSecret {
     opaque: bool,
     policy: SecretPolicy,
     bytes: Arc<SecretBytes>,
+    import: Option<Arc<hirsel_core_net::ImportSpend>>,
     /// The seal's token, shared by every designation of the bytes.
     seal: Arc<()>,
 }
@@ -4166,57 +4167,6 @@ impl Machine<'_> {
         vec![key, 0, 0, 0]
     }
 
-    fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
-            .ok()
-            .and_then(SecretPolicy::parse)
-        else {
-            return vec![0, 1, 0, 0];
-        };
-        let (policy, len) = if op == HostOp::SecretSeal {
-            (policy, self.load(a[0] + 8, 8))
-        } else {
-            let Some(parent) = self.secret(a[0]) else {
-                return vec![0, 1, 0, 0];
-            };
-            let Some(intersection) = parent.policy.intersect(&policy) else {
-                return vec![0, 1, 0, 0];
-            };
-            (intersection, 0)
-        };
-        let size = SecretGrant::logical_size(&policy.send, len);
-        let charge = size.unwrap_or(u64::MAX);
-        let payer = t.limits.last().unwrap();
-        if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
-            return vec![charge, 2, 0, available];
-        }
-        let (bytes, seal, opaque) = if op == HostOp::SecretSeal {
-            let data = self.load(a[0], 8);
-            let bytes = Zeroizing::new(self.carrier_bytes(a[0]).to_vec());
-            if !bytes.is_empty() && self.load(a[0] + 16, 8) != 0 {
-                let (block, offset) = split(data);
-                use zeroize::Zeroize;
-                self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
-            }
-            let key = self.store_sealed(policy, bytes, payer.clone(), charge, false);
-            return vec![key, 0, 0, 0];
-        } else {
-            let parent = self.secret(a[0]).unwrap();
-            (parent.bytes.clone(), parent.seal.clone(), parent.opaque)
-        };
-        let payer = payer.clone();
-        let key = self.designate(
-            EvalSecret {
-                opaque,
-                policy,
-                bytes,
-                seal,
-            },
-            (payer, charge),
-        );
-        vec![key, 0, 0, 0]
-    }
-
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
         let words = |this: &Self, carrier: u64| -> Vec<u64> {
@@ -4255,6 +4205,7 @@ impl Machine<'_> {
                 policy: SecretPolicy::exactly(name),
                 bytes: secret.bytes.clone(),
                 seal: secret.seal.clone(),
+                import: secret.import.clone(),
             });
         }
         if let Some((c, id, live)) = self.port_socket(key, 3) {
@@ -4499,6 +4450,7 @@ impl Machine<'_> {
             | HostOp::SecretP256Key
             | HostOp::SecretKeyShare
             | HostOp::ScheduleQuicInitial
+            | HostOp::ScheduleImportTraffic
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

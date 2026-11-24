@@ -181,22 +181,29 @@ fn inline_thumbhash(raster: image_core.image.Raster, limits: image_core.image.Li
     Ok((inline, int.narrow(length)))
 }
 
+/// Encodes a prepared RGBA raster using the pipeline's WebP settings.
+pub fn encode_webp(f: Foreign[image_webp.webp.Webp], raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[Bytes, PipelineError] waits {
+    let size = image_core.image.Size(width: raster.width, height: raster.height)
+    require_size(size.width, size.height, limits)?
+    if !webp_size(size.width, size.height) {
+        return Error(PipelineUnsupported)
+    }
+    let capacity = order.min(limits.max_bytes, area(size.width, size.height) * 4 + 4096)
+    let mut out = buffer(capacity, 0)?
+    match image_webp.webp.encode(f, raster.rgba, size, Lossy(85), mut out) {
+        Error(e) => Error(PipelineWebp(e)),
+        Ok(n) => {
+            list.truncate(mut out, int.widen(n))
+            Ok(take out)
+        },
+    }
+}
+
 fn encode(codecs: Codecs, raster: image_core.image.Raster, format: OutputFormat, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[Bytes, PipelineError] waits {
     match format {
         OutputJpeg => jpeg_encode(codecs.jpeg, raster, limits, max_native_bytes),
-        OutputAvif => avif_encode(codecs, raster, limits),
-        OutputWebp => {
-            let size = image_core.image.Size(width: raster.width, height: raster.height)
-            let capacity = order.min(limits.max_bytes, area(size.width, size.height) * 4 + 4096)
-            let mut out = buffer(capacity, 0)?
-            match image_webp.webp.encode(codecs.webp, raster.rgba, size, Lossy(85), mut out) {
-                Error(e) => Error(PipelineWebp(e)),
-                Ok(n) => {
-                    list.truncate(mut out, int.widen(n))
-                    Ok(take out)
-                },
-            }
-        },
+        OutputAvif => avif_encode(codecs.av1_encode, codecs.yuv, raster, limits),
+        OutputWebp => encode_webp(codecs.webp, raster, limits),
     }
 }
 

@@ -1,0 +1,114 @@
+fn limits() -> thumb.FrameLimits {
+    thumb.FrameLimits(packet_bytes: 10000000, decoded_pixels: 8847360, image: image_core.image.Limits(max_bytes: 67108864, max_header_bytes: 1048576, max_pixels: 8847360, max_frames: 1, max_steps: 100000000))
+}
+
+fn index_limits() -> thumb.IndexLimits {
+    thumb.IndexLimits(container: media_container.probe.Limits(metadata_bytes: 1000000, top_elements: 10000, tracks: 8), samples: 1000000)
+}
+
+fn record(out: Stdout, name: String, ns: u64, octets: u64, sse: u64) waits {
+    let mut message = string.from(name)
+    string.push_char(mut message, ' ')
+    string.push_u64(mut message, ns)
+    string.push_char(mut message, ' ')
+    string.push_u64(mut message, octets)
+    string.push_char(mut message, ' ')
+    string.push_u64(mut message, sse)
+    string.push_char(mut message, '\n')
+    result.unwrap(stdout.write(out, message))
+}
+
+fn poster_oracle(dir: Dir, name: String, expected: String, codecs: thumb.Decode, clock: Clock, out: Stdout) -> Result[(), thumb.Error] waits {
+    let mut file = result.unwrap(std.file.open(dir, name, Read))
+    let stat = result.unwrap(std.file.stat(mut file))
+    if stat.size < 1000000000 {
+        fail("fixture is smaller than 1 GB")
+    }
+    let mut octets = 0u64
+    let start = host.mono_ns(clock)
+    let index = thumb.index(stat.size, index_limits(), scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.probe.Error] waits {
+        let raw = media_container.probe.pread(mut file, at, n)?
+        octets += list.len(raw)
+        Ok(take raw)
+    })?
+    let poster = thumb.poster(index, 1000, None, codecs, limits(), scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.probe.Error] waits {
+        let raw = media_container.probe.pread(mut file, at, n)?
+        octets += list.len(raw)
+        Ok(take raw)
+    })?
+    let ns = host.mono_ns(clock) - start
+    if poster.time_ms != 1000 || poster.frame.width != 3840 || poster.frame.height != 2160 || list.len(poster.thumbhash) == 0 {
+        fail("missing the 1-second 4K poster or its ThumbHash")
+    }
+    if octets >= 10000000 {
+        fail("poster read 10 MB or more")
+    }
+    let reference = result.unwrap(std.file.read(dir, expected))
+    if list.len(reference) != list.len(poster.frame.rgba) {
+        fail("poster RGBA size differs from ffmpeg")
+    }
+    let mut sse = 0u64
+    for i in 0u64 .. list.len(reference) {
+        let want: i32 = int.widen(reference[i])
+        let got: i32 = int.widen(poster.frame.rgba[i])
+        let delta = want - got
+        let square: u64 = int.narrow(delta * delta)
+        sse += square
+    }
+    record(out, name, ns, octets, sse)
+    // 40 dB PSNR on 3 RGB channels. Both decoders produce opaque alpha.
+    if 10000 * sse > 65025 * 3840 * 2160 * 3 {
+        fail("poster is below 40 dB PSNR against ffmpeg")
+    }
+    Ok(())
+}
+
+fn sprite_oracle(dir: Dir, codecs: thumb.Decode, webp: Foreign[image_webp.webp.Webp], avif: Foreign[av1.EncoderCodec]) -> Result[(), thumb.Error] waits {
+    let mut file = result.unwrap(std.file.open(dir, "av1.webm", Read))
+    let stat = result.unwrap(std.file.stat(mut file))
+    let index = thumb.index(stat.size, index_limits(), scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.probe.Error] waits {
+        media_container.probe.pread(mut file, at, n)
+    })?
+    let layout = thumb.SpriteLayout(tile: image_core.image.Size(width: 64, height: 64), columns: 2, from_ms: 0, until_ms: 2250, interval_ms: 1000, sprite_url: "sheet.webp")
+    let web = thumb.sprite(index, layout, WebP(webp), codecs, limits(), scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.probe.Error] waits {
+        media_container.probe.pread(mut file, at, n)
+    })?
+    let expected = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nsheet.webp#xywh=0,0,64,64\n\n00:00:01.000 --> 00:00:02.000\nsheet.webp#xywh=64,0,64,64\n\n00:00:02.000 --> 00:00:02.250\nsheet.webp#xywh=0,64,64,64\n\n"
+    if web.vtt != expected {
+        fail("WebVTT disagrees with the row-major sprite layout")
+    }
+    let web_info = result.unwrap(image_core.image.probe(web.image, limits().image))
+    let is_webp = match web_info.format {
+        Webp => true,
+        _ => false
+    }
+    if !is_webp || web_info.width != 128 || web_info.height != 128 {
+        fail("expected a 128x128 WebP sprite")
+    }
+    let avif_layout = thumb.SpriteLayout(tile: layout.tile, columns: layout.columns, from_ms: layout.from_ms, until_ms: layout.until_ms, interval_ms: layout.interval_ms, sprite_url: "sheet.avif")
+    let av = thumb.sprite(index, avif_layout, AVIF(avif), codecs, limits(), scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.probe.Error] waits {
+        media_container.probe.pread(mut file, at, n)
+    })?
+    if av.vtt != "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nsheet.avif#xywh=0,0,64,64\n\n00:00:01.000 --> 00:00:02.000\nsheet.avif#xywh=64,0,64,64\n\n00:00:02.000 --> 00:00:02.250\nsheet.avif#xywh=0,64,64,64\n\n" {
+        fail("AVIF WebVTT disagrees with the row-major sprite layout")
+    }
+    let av_info = result.unwrap(image_core.image.probe(av.image, limits().image))
+    let is_avif = match av_info.format {
+        Avif => true,
+        _ => false
+    }
+    if !is_avif || av_info.width != 128 || av_info.height != 128 {
+        fail("expected a 128x128 AVIF sprite")
+    }
+    Ok(())
+}
+
+/// bug: Seeking decodes the wrong keyframe, fetches media outside the requested ranges, or emits unusable sprite cues.
+/// oracle: ffmpeg -ss 1 -frames:v 1 on 1 GB 4K AVC and AV1 MP4 files, 40 dB RGB PSNR, and hand-derived 2-column WebVTT cues.
+@test
+fn sparse_posters_and_sprite_cues(avc: Foreign[h264.H264], dav: Foreign[av1.DecoderCodec], svt: Foreign[av1.EncoderCodec], yuv: Foreign[video_yuv.Yuv], webp: Foreign[image_webp.webp.Webp], clock: Clock, out: Stdout, dir: Dir) -> Result[(), thumb.Error] waits {
+    let codecs = thumb.Decode(avc: avc, av1: dav, yuv: yuv)
+    poster_oracle(dir, "h264.mp4", "h264.rgba", codecs, clock, out)?
+    poster_oracle(dir, "av1.mp4", "av1.rgba", codecs, clock, out)?
+    sprite_oracle(dir, codecs, webp, svt)
+}

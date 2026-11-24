@@ -1,0 +1,224 @@
+pub type Poster {
+    time_ms: u64,
+    frame: image_core.image.Raster,
+    thumbhash: Bytes
+}
+
+pub type SpriteEncoding = WebP(Foreign[image_webp.webp.Webp]) | AVIF(Foreign[av1.EncoderCodec])
+
+pub type SpriteLayout {
+    tile: image_core.image.Size,
+    columns: u32,
+    from_ms: u64,
+    until_ms: u64,
+    interval_ms: u64,
+    sprite_url: String
+}
+
+pub type Sprite {
+    size: image_core.image.Size,
+    image: Bytes,
+    vtt: String
+}
+
+fn oriented(size: image_core.image.Size, orientation: u8) -> image_core.image.Size {
+    if orientation >= 5 {
+        image_core.image.Size(width: size.height, height: size.width)
+    } else {
+        size
+    }
+}
+
+fn frame_size(size: image_core.image.Size, limits: image_core.image.Limits) -> Result[u64, Error] {
+    let pixels = area(size)
+    if pixels == 0 || pixels > limits.max_pixels {
+        return Error(Limit)
+    }
+    let n = yuv_result(video_yuv.rgb_size(size.width, size.height))?
+    if n > limits.max_bytes {
+        return Error(Limit)
+    }
+    Ok(n)
+}
+
+fn render(planes: Planes, size: image_core.image.Size, orientation: u8, yuv: Foreign[video_yuv.Yuv], matrix: video_yuv.Matrix, limits: image_core.image.Limits) -> Result[image_core.image.Raster, Error] {
+    let rgb_size = frame_size(size, limits)?
+    let input_size = yuv_result(video_yuv.yuv_size(I420, planes.size.width, planes.size.height))?
+    if planes.offset + input_size > list.len(planes.raw) {
+        return Error(BadPacket)
+    }
+    let pixels = list.slice(planes.raw, planes.offset, planes.offset + input_size)
+    let target = oriented(size, orientation)
+    let mut rgba = buffer(rgb_size)?
+    if planes.size.width == target.width && planes.size.height == target.height {
+        yuv_result(video_yuv.to_rgb(yuv, I420, Rgba, matrix, target.width, target.height, pixels, mut rgba))?
+    } else {
+        let n = yuv_result(video_yuv.yuv_size(I420, target.width, target.height))?
+        let mut scaled = buffer(n)?
+        yuv_result(video_yuv.scale(yuv, I420, Box, planes.size.width, planes.size.height, target.width, target.height, pixels, mut scaled))?
+        yuv_result(video_yuv.to_rgb(yuv, I420, Rgba, matrix, target.width, target.height, scaled, mut rgba))?
+    }
+    let raster = image_core.image.Raster(width: target.width, height: target.height, rgba: take rgba)
+    if orientation == 1 {
+        Ok(take raster)
+    } else {
+        image_result(image_core.image.auto_orient(raster, orientation, limits))
+    }
+}
+
+fn hash_size(size: image_core.image.Size) -> image_core.image.Size {
+    let longest = std.order.max(size.width, size.height)
+    if longest <= 64 {
+        return size
+    }
+    image_core.image.Size(width: std.order.max(1, 64 * size.width / longest), height: std.order.max(1, 64 * size.height / longest))
+}
+
+/// Decodes the latest keyframe at or before time_ms. A missing size keeps the
+/// full display dimensions. The ThumbHash comes from the same decoded frame.
+pub fn poster(source: Index, time_ms: u64, size: Option[image_core.image.Size], codecs: Decode, limits: FrameLimits, read: scoped fn(u64, u64) -> Result[Bytes, media_container.probe.Error] waits) -> Result[Poster, Error] waits {
+    let key = source.keys[key_index(source, time_ms)?]
+    let planes = decode_key(source, key, codecs, limits, read)?
+    let full = oriented(planes.size, source.orientation)
+    let target = match size {
+        Some(value) => value,
+        None => full
+    }
+    let frame = render(planes, target, source.orientation, codecs.yuv, source.matrix, limits.image)?
+    let small = hash_size(target)
+    let hash = if small.width == target.width && small.height == target.height {
+        image_result(image_core.image.thumbhash(frame, limits.image))?
+    } else {
+        let input = render(planes, small, source.orientation, codecs.yuv, source.matrix, limits.image)?
+        image_result(image_core.image.thumbhash(input, limits.image))?
+    }
+    Ok(Poster(time_ms: key.time_ms, frame: take frame, thumbhash: take hash))
+}
+
+fn timestamp(mut out: String, ms: u64) {
+    string.push_uint(mut out, ms / 3600000, 10, 2, '0')
+    string.push_char(mut out, ':')
+    string.push_uint(mut out, ms / 60000 % 60, 10, 2, '0')
+    string.push_char(mut out, ':')
+    string.push_uint(mut out, ms / 1000 % 60, 10, 2, '0')
+    string.push_char(mut out, '.')
+    string.push_uint(mut out, ms % 1000, 10, 3, '0')
+}
+
+fn vtt_cue(mut out: String, layout: SpriteLayout, start: u64, stop: u64, x: u64, y: u64) {
+    timestamp(mut out, start)
+    string.push(mut out, " --> ")
+    timestamp(mut out, stop)
+    string.push_char(mut out, '\n')
+    string.push(mut out, layout.sprite_url)
+    string.push(mut out, "#xywh=")
+    string.push_u64(mut out, x)
+    string.push_char(mut out, ',')
+    string.push_u64(mut out, y)
+    string.push_char(mut out, ',')
+    string.push_u64(mut out, int.widen(layout.tile.width))
+    string.push_char(mut out, ',')
+    string.push_u64(mut out, int.widen(layout.tile.height))
+    string.push(mut out, "\n\n")
+}
+
+fn sprite_size(layout: SpriteLayout, encoding: SpriteEncoding, count: u64) -> Result[image_core.image.Size, Error] {
+    let columns = std.order.min(count, int.widen(layout.columns))
+    let rows = 1 + (count - 1) / columns
+    let Some(w) = int.checked_mul(columns, int.widen(layout.tile.width)) else {
+        return Error(Limit)
+    }
+    let Some(h) = int.checked_mul(rows, int.widen(layout.tile.height)) else {
+        return Error(Limit)
+    }
+    match encoding {
+        WebP(_) => {
+            if w > 8192 || h > 8192 || w * h > 4194304 {
+                return Error(Limit)
+            }
+        },
+        AVIF(_) => {
+            if w < 64 || h < 64 || w > 4096 || h > 2304 || w % 2 != 0 || h % 2 != 0 {
+                return Error(BadLayout)
+            }
+        },
+    }
+    Ok(image_core.image.Size(width: int.narrow(w), height: int.narrow(h)))
+}
+
+fn encode_sprite(encoding: SpriteEncoding, yuv: Foreign[video_yuv.Yuv], raster: image_core.image.Raster, limits: FrameLimits) -> Result[Bytes, Error] waits {
+    let encoded = match encoding {
+        WebP(codec) => image_pipeline.pipeline.encode_webp(codec, raster, limits.image),
+        AVIF(codec) => image_pipeline.pipeline.encode_avif(codec, yuv, raster, limits.image),
+    }
+    match take encoded {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Pipeline(e)),
+    }
+}
+
+fn copy_tile(mut dst: Bytes, tile: image_core.image.Raster, stride: u64, x: u64, y: u64) {
+    let width: u64 = int.widen(tile.width)
+    let w = 4 * width
+    for line in 0u64 .. int.widen(tile.height) {
+        let at = line * w
+        list.copy_from_slice(mut dst, (y + line) * stride + 4 * x, list.slice(tile.rgba, at, at + w))
+    }
+}
+
+/// Produces one row-major sheet. Each interval uses the keyframe visible at
+/// its start. Adjacent intervals that select the same keyframe reuse its tile.
+pub fn sprite(source: Index, layout: SpriteLayout, encoding: SpriteEncoding, codecs: Decode, limits: FrameLimits, read: scoped fn(u64, u64) -> Result[Bytes, media_container.probe.Error] waits) -> Result[Sprite, Error] waits {
+    if layout.interval_ms == 0 || layout.from_ms >= layout.until_ms || layout.columns == 0 || layout.tile.width == 0 || layout.tile.height == 0 || string.byte_len(layout.sprite_url) == 0 {
+        return Error(BadLayout)
+    }
+    for byte in string.as_bytes(layout.sprite_url) {
+        if byte <= 32 || byte >= 127 || byte == 35 {
+            return Error(BadLayout)
+        }
+    }
+    let count = 1 + (layout.until_ms - layout.from_ms - 1) / layout.interval_ms
+    let size = sprite_size(layout, encoding, count)?
+    let mut sheet = buffer(frame_size(size, limits.image)?)?
+    let mut vtt = string.from("WEBVTT\n\n")
+    let mut start = layout.from_ms
+    let mut tile: Option[(u64, image_core.image.Raster)] = None
+    let columns = std.order.min(count, int.widen(layout.columns))
+    let sheet_width: u64 = int.widen(size.width)
+    for i in 0u64 .. count {
+        let chosen = key_index(source, start)?
+        let previous = match view tile {
+            Some((key, _)) => Some(key),
+            None => None
+        }
+        if previous != Some(chosen) {
+            let planes = decode_key(source, source.keys[chosen], codecs, limits, read)?
+            let frame = render(planes, layout.tile, source.orientation, codecs.yuv, source.matrix, limits.image)?
+            tile = Some((chosen, take frame))
+        }
+        let Some((_, frame)) = view tile else {
+            return Error(BadLayout)
+        }
+        let x = i % columns * int.widen(layout.tile.width)
+        let y = i / columns * int.widen(layout.tile.height)
+        copy_tile(mut sheet, frame, 4 * sheet_width, x, y)
+        let stop = start + std.order.min(layout.interval_ms, layout.until_ms - start)
+        vtt_cue(mut vtt, layout, start, stop, x, y)
+        start = stop
+    }
+    if count % columns != 0 {
+        let w: u64 = int.widen(layout.tile.width)
+        let h: u64 = int.widen(layout.tile.height)
+        let used = count % columns * w
+        let row = count / columns * h
+        for y in row .. row + h {
+            let at = y * sheet_width
+            for x in used .. sheet_width {
+                sheet[4 * (at + x) + 3] = 255
+            }
+        }
+    }
+    let raster = image_core.image.Raster(width: size.width, height: size.height, rgba: take sheet)
+    let image = encode_sprite(encoding, codecs.yuv, raster, limits)?
+    Ok(Sprite(size: size, image: take image, vtt: take vtt))
+}

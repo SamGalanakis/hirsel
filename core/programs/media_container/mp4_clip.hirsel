@@ -195,6 +195,51 @@ fn track_timeline(vod: Vod, index: u64, track: TrackIndex) -> Result[Timeline, C
     Ok(map)
 }
 
+/// Visits sync sample ranges with their edited presentation time in milliseconds.
+pub fn vod_sync_samples(vod: Vod, index: u64, max_samples: u64, receive: scoped fn(u64, VodSample)) -> Result[(), ClipError] {
+    let (track, _) = clip_error(vod_track(vod, index))?
+    let map = track_timeline(vod, index, track)?
+    let movie_scale = vod.movie.timescale
+    let span = scale_ticks(map.span, movie_scale, track.timescale, true)?
+    clip_error(visit_samples(vod, index, max_samples, true, scoped fn(sample: VodSample) -> Result[(), VodError] {
+        match sync_time(sample, map, span, movie_scale, track.timescale) {
+            Ok(Some(time)) => receive(time, sample),
+            Ok(None) => {},
+            Error(_) => return Error(BadTable),
+        }
+        Ok(())
+    }))
+}
+
+fn sync_time(sample: VodSample, map: Timeline, span: u64, movie_scale: u32, track_scale: u32) -> Result[Option[u64], ClipError] {
+    let pts = presentation(sample)?
+    let Some(time): Option[u64] = int.try_narrow(pts) else {
+        return Ok(None)
+    }
+    if time < map.media_start || time - map.media_start >= span {
+        return Ok(None)
+    }
+    let ticks = time - map.media_start
+    let delay = scale_ticks(map.delay, movie_scale, 1000, false)?
+    let elapsed = scale_ticks(ticks, track_scale, 1000, false)?
+    let movie: u64 = int.widen(movie_scale)
+    let track: u64 = int.widen(track_scale)
+    let delay_fraction = ((map.delay % movie) * 1000) % movie
+    let elapsed_fraction = ((ticks % track) * 1000) % track
+    let carry = if delay_fraction * track >= (track - elapsed_fraction) * movie {
+        1u64
+    } else {
+        0u64
+    }
+    let Some(total) = int.checked_add(delay, elapsed) else {
+        return Error(InvalidWindow)
+    }
+    let Some(ms) = int.checked_add(total, carry) else {
+        return Error(InvalidWindow)
+    }
+    Ok(Some(ms))
+}
+
 fn nal_length(vod: Vod, index: u64, codec: u32) -> Result[u64, ClipError] {
     let is_hevc = codec == 0x68766331 || codec == 0x68657631
     if !is_hevc && codec != 0x61766331 && codec != 0x61766333 {

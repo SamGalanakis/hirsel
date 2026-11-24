@@ -63,15 +63,23 @@ pub fn file_probe(mut source: HostFile, limits: Limits) -> Result[Format, Error]
         Error(e) => return Error(Io(e)),
     }
     video_probe(stat.size, limits, scoped fn(at: u64, n: u64) -> Result[Bytes, Error] waits {
-        let mut raw: Bytes = list.with_capacity(n)
-        while list.len(raw) < n {
-            let pos = at + list.len(raw)
-            match std.file.read_at(mut source, pos, mut raw) {
-                Ok(0) => return Error(ShortRead),
-                Ok(_) => {},
-                Error(e) => return Error(Io(e)),
-            }
-        }
-        Ok(take raw)
+        pread(mut source, at, n)
     })
+}
+
+/// Reads one exact range from an already opened file.
+pub fn pread(mut source: HostFile, at: u64, n: u64) -> Result[Bytes, Error] waits {
+    if n > 0xffffffffffffffff - at {
+        return Error(ShortRead)
+    }
+    let mut raw: Bytes = list.with_capacity(n)
+    while list.len(raw) < n {
+        let pos = at + list.len(raw)
+        match std.file.read_at(mut source, pos, mut raw) {
+            Ok(0) => return Error(ShortRead),
+            Ok(_) => {},
+            Error(e) => return Error(Io(e)),
+        }
+    }
+    Ok(take raw)
 }

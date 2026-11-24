@@ -226,6 +226,10 @@ fn media_range(media: List[FileRange], offset: u64) -> Result[FileRange, VodErro
 // Visits a track's samples in decode order. The callback receives file
 // positions only after their full byte ranges have been checked against mdat.
 pub fn vod_samples(vod: Vod, track: u64, max_samples: u64, receive: scoped fn(VodSample) -> Result[(), VodError]) -> Result[(), VodError] {
+    visit_samples(vod, track, max_samples, false, receive)
+}
+
+fn visit_samples(vod: Vod, track: u64, max_samples: u64, sync_only: bool, receive: scoped fn(VodSample) -> Result[(), VodError]) -> Result[(), VodError] {
     if track >= list.len(vod.tracks) {
         return Error(BadMovie)
     }
@@ -291,7 +295,9 @@ pub fn vod_samples(vod: Vod, track: u64, max_samples: u64, receive: scoped fn(Vo
                     }
                 }
             }
-            receive(VodSample(offset: offset, size: size, decode_time: dts, duration: duration, composition_offset: cto, sync: sync))?
+            if !sync_only || sync {
+                receive(VodSample(offset: offset, size: size, decode_time: dts, duration: duration, composition_offset: cto, sync: sync))?
+            }
             let step: u64 = int.widen(duration)
             dts += step
             offset += n

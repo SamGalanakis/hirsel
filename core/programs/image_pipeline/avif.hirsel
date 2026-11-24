@@ -125,13 +125,13 @@ fn avif_configuration(packet: Bytes) -> Result[Bytes, PipelineError] {
     Error(PipelineAv1(Invalid))
 }
 
-fn avif_encode(codecs: Codecs, raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[Bytes, PipelineError] waits {
+fn avif_encode(f: Foreign[av1.EncoderCodec], yuv: Foreign[video_yuv.Yuv], raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[Bytes, PipelineError] waits {
     let w = raster.width
     let h = raster.height
     let mut pixels = buffer(yuv_result(video_yuv.yuv_size(I420, w, h))?, 0)?
-    yuv_result(video_yuv.from_rgb(codecs.yuv, I420, Rgba, Bt601, w, h, raster.rgba, mut pixels))?
+    yuv_result(video_yuv.from_rgb(yuv, I420, Rgba, Bt601, w, h, raster.rgba, mut pixels))?
     let cfg = av1.EncodeConfig(width: w, height: h, bit_depth: 8, enc_mode: 10, fast_decode: 0, level_of_parallelism: 1, avif: true, qp: 22, fps_num: 1, fps_den: 1)
-    let mut e = av1_result(av1.encoder(codecs.av1_encode, cfg))?
+    let mut e = av1_result(av1.encoder(f, cfg))?
     av1_result(av1.encode_send(mut e, pixels))?
     let capacity = order.min(limits.max_bytes, area(w, h) * 4 + 4096)
     let mut packet = buffer(capacity, 0)?
@@ -155,4 +155,15 @@ fn avif_encode(codecs: Codecs, raster: image_core.image.Raster, limits: image_co
     let primary = image_core.image.AvifSource(av1: take packet, configuration: take configuration)
     let options = image_core.image.AvifOptions(width: w, height: h, bit_depth: 8, orientation: 1, monochrome: false, color_space: Unspecified)
     image_result(image_core.image.mux_avif(primary, None, options, limits))
+}
+
+/// Encodes a prepared, opaque RGBA raster using the pipeline's AVIF settings.
+pub fn encode_avif(f: Foreign[av1.EncoderCodec], yuv: Foreign[video_yuv.Yuv], raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[Bytes, PipelineError] waits {
+    let w = raster.width
+    let h = raster.height
+    require_size(w, h, limits)?
+    if !avif_size(w, h) || list.len(raster.rgba) != 4 * area(w, h) || !opaque_pixels(raster) {
+        return Error(PipelineUnsupported)
+    }
+    avif_encode(f, yuv, raster, limits)
 }

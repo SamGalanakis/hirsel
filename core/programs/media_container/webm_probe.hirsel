@@ -425,3 +425,116 @@ pub fn probe_cues(probe: WebmProbe, receive: scoped fn(Cue)) {
         receive(cue)
     }
 }
+
+fn sparse_block(group: Element, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Option[Element], ProbeError] waits {
+    let mut at = group.body
+    let mut block: Option[Element] = None
+    let mut reference = false
+    while at < group.next {
+        let e = sparse_element(at, group.next, read)?
+        if !e.known_size {
+            return Error(ProbeFraming(InvalidBlock))
+        }
+        if e.id == BLOCK {
+            if let Some(_) = block {
+                return Error(ProbeFraming(InvalidBlock))
+            }
+            block = Some(e)
+        } else if e.id == 0xfb {
+            reference = true
+        }
+        at = e.next
+    }
+    if reference {
+        Ok(None)
+    } else {
+        Ok(block)
+    }
+}
+
+fn cue_payload(cue: Cue, block: Element, base: i64, max_bytes: u64, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Option[Bytes], ProbeError] waits {
+    let mut track: Bytes = list.with_capacity(8)
+    let width = read_vint_prefix(block.body, block.next, 8, mut track, read)?
+    let id = webm_error(read_vint(track, 0, width, 8))?
+    let at = block.body + width
+    if block.next - at < 3 {
+        return Error(ProbeFraming(InvalidBlock))
+    }
+    let prefix = read_exact(at, 3, read)?
+    let raw_delta: u16 = list.word_be(prefix, 0)
+    let delta: i16 = int.truncate(raw_delta)
+    let Some(time) = int.checked_add(base, int.widen(delta)) else {
+        return Error(ProbeFraming(InvalidBlock))
+    }
+    let flags = prefix[2]
+    let timestamp: u64 = int.truncate(time)
+    if id.value != cue.track || time < 0 || timestamp != cue.time || (block.id == SIMPLE_BLOCK && (flags & 128) == 0) || (flags & 8) != 0 {
+        return Ok(None)
+    }
+    if (flags & 0x76) != 0 || (block.id == BLOCK && (flags & 0x81) != 0) {
+        return Error(ProbeFraming(Unsupported))
+    }
+    let start = at + 3
+    let n = block.next - start
+    if n == 0 {
+        return Error(ProbeFraming(InvalidBlock))
+    }
+    if n > max_bytes {
+        return Error(ProbeLimit)
+    }
+    Ok(Some(read_exact(start, n, read)?))
+}
+
+/// Reads the visible, unlaced keyframe identified by a Cue. A Cue with no
+/// relative position uses block headers and timestamps to locate its frame.
+pub fn read_cue(cue: Cue, max_bytes: u64, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Bytes, ProbeError] waits {
+    let cluster = sparse_element(cue.cluster_start, cue.cluster_end, read)?
+    if cluster.id != CLUSTER || !cluster.known_size || cluster.next != cue.cluster_end {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    let mut limit = cluster.next
+    if let Some(relative) = cue.relative_position {
+        if relative >= cluster.next - cluster.body {
+            return Error(ProbeFraming(InvalidElement))
+        }
+        limit = cluster.body + relative
+    }
+    let mut at = cluster.body
+    let mut base: Option[i64] = None
+    while at < cluster.next {
+        let e = sparse_element(at, cluster.next, read)?
+        if !e.known_size || at > limit {
+            return Error(ProbeFraming(InvalidElement))
+        }
+        if e.id == TIMESTAMP {
+            if e.next - e.body == 0 || e.next - e.body > 8 {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            if let Some(_) = base {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            let raw = read_exact(e.body, e.next - e.body, read)?
+            let time = webm_error(uint(raw, 0, list.len(raw)))?
+            let Some(ticks): Option[i64] = int.try_narrow(time) else {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            base = Some(ticks)
+        } else if (at == limit || limit == cluster.next) && (e.id == SIMPLE_BLOCK || e.id == GROUP) {
+            let Some(ticks) = base else {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            let block = if e.id == GROUP {
+                sparse_block(e, read)?
+            } else {
+                Some(e)
+            }
+            if let Some(found) = block {
+                if let Some(take packet) = cue_payload(cue, found, ticks, max_bytes, read)? {
+                    return Ok(take packet)
+                }
+            }
+        }
+        at = e.next
+    }
+    Error(ProbeFraming(InvalidBlock))
+}

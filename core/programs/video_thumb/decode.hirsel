@@ -1,0 +1,216 @@
+pub type Decode {
+    avc: Foreign[h264.H264],
+    av1: Foreign[av1.DecoderCodec],
+    yuv: Foreign[video_yuv.Yuv]
+}
+
+pub type FrameLimits {
+    packet_bytes: u64,
+    decoded_pixels: u32,
+    image: image_core.image.Limits
+}
+
+type Planes {
+    size: image_core.image.Size,
+    offset: u64,
+    raw: Bytes
+}
+
+fn buffer(n: u64) -> Result[Bytes, Error] {
+    let mut raw: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut raw, n) {
+        return Error(Limit)
+    }
+    list.fill(mut raw, n, 0)
+    Ok(take raw)
+}
+
+fn avc_result[T](take value: Result[T, h264.Error]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Avc(e)),
+    }
+}
+
+fn av1_result[T](take value: Result[T, av1.Av1Error]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Av1(e)),
+    }
+}
+
+fn yuv_result[T](take value: Result[T, video_yuv.YuvError]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Yuv(e)),
+    }
+}
+
+fn image_result[T](take value: Result[T, image_core.image.Error]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Image(e)),
+    }
+}
+
+fn area(size: image_core.image.Size) -> u64 {
+    let w: u64 = int.widen(size.width)
+    let h: u64 = int.widen(size.height)
+    w * h
+}
+
+fn read_nal(data: Bytes, mut at: u64, width: u64) -> Result[(u64, u64), Error] {
+    let end = list.len(data)
+    if width > end - at {
+        return Error(BadPacket)
+    }
+    let mut n = 0u64
+    for i in at .. at + width {
+        let byte: u64 = int.widen(data[i])
+        n = (n << 8) | byte
+    }
+    at += width
+    if n == 0 || n > end - at {
+        return Error(BadPacket)
+    }
+    Ok((at, at + n))
+}
+
+fn avc_nal(mut decoder: h264.Decoder, data: Bytes, mut annex: Bytes, mut out: Bytes) -> Result[Option[h264.Frame], Error] waits {
+    list.clear(mut annex)
+    list.append(mut annex, b"\x00\x00\x01")
+    list.append(mut annex, data)
+    avc_result(h264.decode(mut decoder, annex, 0, mut out))
+}
+
+fn parameter_sets(mut decoder: h264.Decoder, config: Bytes, count: u64, kind: u8, mut at: u64, mut annex: Bytes, mut out: Bytes) -> Result[(), Error] waits {
+    for _ in 0u64 .. count {
+        let (start, end) = read_nal(config, mut at, 2)?
+        if (config[start] & 31) != kind {
+            return Error(BadPacket)
+        }
+        if let Some(_) = avc_nal(mut decoder, list.slice(config, start, end), mut annex, mut out)? {
+            return Error(BadPacket)
+        }
+        at = end
+    }
+    Ok(())
+}
+
+fn decode_avc(f: Foreign[h264.H264], size: image_core.image.Size, config: Bytes, data: Bytes, max_pixels: u32) -> Result[Planes, Error] waits {
+    if list.len(config) < 7 || config[0] != 1 || (config[4] & 0xfc) != 0xfc || (config[5] & 0xe0) != 0xe0 || (config[4] & 3) == 2 {
+        return Error(BadPacket)
+    }
+    let width: u64 = int.widen((config[4] & 3) + 1)
+    if size.width == 0 || size.height == 0 || size.width > 4096 || size.height > 4096 {
+        return Error(Limit)
+    }
+    let w = (size.width + 15) / 16 * 16
+    let h = (size.height + 15) / 16 * 16
+    if area(image_core.image.Size(width: w, height: h)) > int.widen(max_pixels) {
+        return Error(Limit)
+    }
+    let mut decoder = avc_result(h264.decoder(f, w, h))?
+    let mut pixels = buffer(h264.decoded_capacity(decoder))?
+    let mut annex: Bytes = list.new()
+    let mut at = 6u64
+    parameter_sets(mut decoder, config, int.widen(config[5] & 31), 7, mut at, mut annex, mut pixels)?
+    if at == list.len(config) {
+        return Error(BadPacket)
+    }
+    let pictures: u64 = int.widen(config[at])
+    at += 1
+    parameter_sets(mut decoder, config, pictures, 8, mut at, mut annex, mut pixels)?
+    // A sync flag cannot turn an AVC inter picture into an independent frame.
+    at = 0
+    let mut idr = false
+    while at < list.len(data) {
+        let (start, end) = read_nal(data, mut at, width)?
+        let kind = data[start] & 31
+        if kind == 1 {
+            return Error(NoKeyframe)
+        }
+        idr = idr || kind == 5
+        at = end
+    }
+    if !idr {
+        return Error(NoKeyframe)
+    }
+    at = 0
+    while at < list.len(data) {
+        let (start, end) = read_nal(data, mut at, width)?
+        if let Some(frame) = avc_nal(mut decoder, list.slice(data, start, end), mut annex, mut pixels)? {
+            return Ok(Planes(size: image_core.image.Size(width: frame.width, height: frame.height), offset: 8, raw: take pixels))
+        }
+        at = end
+    }
+    let Some(frame) = avc_result(h264.finish(mut decoder, mut pixels))? else {
+        return Error(NoKeyframe)
+    }
+    Ok(Planes(size: image_core.image.Size(width: frame.width, height: frame.height), offset: 8, raw: take pixels))
+}
+
+fn av1_obu(data: Bytes, at: u64) -> Result[media_bits.av1.Obu, Error] {
+    match media_bits.av1.parse_obu(data, at) {
+        Ok(obu) => Ok(obu),
+        Error(_) => Error(BadPacket),
+    }
+}
+
+fn av1_sequence(data: Bytes, start: u64) -> Result[Option[media_bits.av1.Obu], Error] {
+    let mut at = start
+    while at < list.len(data) {
+        let obu = av1_obu(data, at)?
+        if obu.kind == 1 {
+            return Ok(Some(obu))
+        }
+        if obu.kind == 3 || obu.kind == 6 {
+            return Ok(None)
+        }
+        at = obu.end
+    }
+    Ok(None)
+}
+
+fn decode_av1(f: Foreign[av1.DecoderCodec], size: image_core.image.Size, config: Bytes, data: Bytes, max_pixels: u32) -> Result[Planes, Error] waits {
+    if area(size) > int.widen(max_pixels) {
+        return Error(Limit)
+    }
+    if list.len(config) != 0 && (list.len(config) < 4 || config[0] != 0x81) {
+        return Error(BadPacket)
+    }
+    let mut decoder = av1_result(av1.decoder(f, max_pixels))?
+    let n = yuv_result(video_yuv.yuv_size(I420, size.width, size.height))?
+    let mut pixels = buffer(n)?
+    let in_band = av1_sequence(data, 0)?
+    let has_sequence = match in_band {
+        Some(_) => true,
+        None => false
+    }
+    if !has_sequence && list.len(config) > 4 {
+        av1_result(av1.decode_send(mut decoder, list.slice(config, 4, list.len(config))))?
+        if let Some(_) = av1_result(av1.decode_receive(mut decoder, mut pixels))? {
+            return Error(BadPacket)
+        }
+    }
+    av1_result(av1.decode_send(mut decoder, data))?
+    let Some(frame) = av1_result(av1.decode_receive(mut decoder, mut pixels))? else {
+        return Error(NoKeyframe)
+    }
+    let planar = match frame.layout {
+        Yuv420 => true,
+        _ => false
+    }
+    if frame.bit_depth != 8 || !planar {
+        return Error(Unsupported)
+    }
+    Ok(Planes(size: image_core.image.Size(width: frame.width, height: frame.height), offset: 0, raw: take pixels))
+}
+
+fn decode_key(source: Index, key: Key, codecs: Decode, limits: FrameLimits, read: scoped fn(u64, u64) -> Result[Bytes, media_container.probe.Error] waits) -> Result[Planes, Error] waits {
+    let data = read_packet(key.location, limits.packet_bytes, read)?
+    match source.codec {
+        H264 => decode_avc(codecs.avc, source.size, source.config, data, limits.decoded_pixels),
+        Av1Codec => decode_av1(codecs.av1, source.size, source.config, data, std.order.min(limits.decoded_pixels, 8847360)),
+    }
+}

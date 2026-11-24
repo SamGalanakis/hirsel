@@ -165,7 +165,7 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
     Ok(at + width)
 }
 
-fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J], take revision: Bytes) -> Result[(), Error] {
+fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J], take revision: Bytes) -> Result[IndexRegistration, Error] {
     let k = catalog_index_key(t.id, name)?
     if let Some(_) = get_page_row(plan.roots.catalog, k) {
         return Error(Exists(named(name)?))
@@ -173,7 +173,8 @@ fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: St
     let record = Catalog(kind: 2, id: plan.next_table, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)),
         schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, index_kind: Many, payload_schemas: list.new(), projection: None)
     let schema_binding = bind_index(t, record, by, key)
-    stage_index_backfill(mut plan, t, k, name, record, schema_binding.index)
+    stage_index_backfill(mut plan, t, k, name, record, schema_binding.index)?
+    Ok(take schema_binding)
 }
 
 fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, record: Catalog, schema_binding: RegisteredIndex) -> Result[(), Error] {

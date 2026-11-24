@@ -47,10 +47,11 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     schema_change.ceiling = disk_limit
     planned_catalog(mut schema_change, staged.delta)?
     planned_ranges(mut schema_change, staged.ranges)?
+    apply_import_rewrites(mut schema_change, staged.rewrites)?
     schema_change.next_table = staged.meta.next_table
     schema_change.live = install_account(db, schema_change.roots)?
     deploy_result(over_ceiling(schema_change.live, disk_limit))?
-    let mut installation = StagedMigration(base: declaration_base(db), plan: take schema_change, declared: false)
+    let mut installation = staged_migration(db, take schema_change, false)
     let Some(release_at) = int.checked_add(base.head, 1u64) else { return Error(Store(Limit(Ids))) }
     let activation_update = if object_writer_open(db) {
         let Some(schema_binding) = target_binding else { return Error(Store(Missing("binding"))) }
@@ -94,7 +95,7 @@ pub fn perform_bound_cutover[V](mut db: Db, request: Cutover, current_activation
 }
 
 fn perform_cutover_with[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], target_binding: Option[Inline[u8, 32]], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
-    deploy_result(require_memory_collections(store_has_tiered(db), Install))?
+    deploy_result(activation_install_allowed(db))?
     let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from, target_binding, before_cut)
     if is_disk(db) {
         forget_import(mut db)

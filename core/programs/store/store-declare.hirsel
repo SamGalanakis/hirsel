@@ -105,8 +105,8 @@ pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Erro
     let Migrate = d.mode else { return Error(Foreign) }
     if !same_declaration_base(d.base, declaration_base(db)) { return Error(Foreign) }
     complete_declaration(d)?
-    let Declare(base, plan: take plan, ..) = take d
-    Ok(StagedMigration(base, plan: take plan, declared: true))
+    let Declare(plan: take plan, ..) = take d
+    Ok(staged_migration(db, take plan, true))
 }
 
 pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]]) -> Result[Declare, Error] waits {
@@ -237,7 +237,7 @@ pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: S
     let lookup_key = catalog_index_key(t.handle.id, name)?
     if let Migrate = d.mode {
         let missing = match get_page_row(d.plan.roots.catalog, lookup_key) { None => true, Some(_) => false }
-        if missing { stage_create_index(mut d.plan, t.handle, name, by, key)? }
+        if missing { let _ = stage_create_index(mut d.plan, t.handle, name, by, key)? }
     }
     let (take address, take record) = read_catalog_index(d.plan.store, d.plan.roots.catalog, t.handle, name, by, key)?
     if map.contains(d.indexes, record.id) { return Error(Exists(named(name)?)) }

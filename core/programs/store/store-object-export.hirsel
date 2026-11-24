@@ -113,7 +113,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, t
     let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(copied(attempt))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
-    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
+    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), collections: share_page_tree(db.heads[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
     Ok(ExportCopy(source: ExportObject(take source), scratch, stamp: take stamp, lease: take lease))
 }

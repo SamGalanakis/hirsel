@@ -14,6 +14,8 @@ pub type ExportStamp: codec + send {
 type ExportLease: shareable + send {
     attempt: Bytes,
     packs: List[u64],
+    // M2 needs the exported rows even when OLD has advanced.
+    collections: PageTree,
     first: u64,
     terminal: u64,
     end: u64,
@@ -179,7 +181,7 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
         Ok(live_pack_sequences(disk_state(db).pages.locations))
     }))?
-    let kept = ExportLease(attempt: take lease_attempt, packs: take packs, first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    let kept = ExportLease(attempt: take lease_attempt, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     let lease = arc.new(take kept)
     let job = ExportCopy(source: ExportLog(from, take raw), scratch, stamp: take stamp, lease: arc.share(lease))
     write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {

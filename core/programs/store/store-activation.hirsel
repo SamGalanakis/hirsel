@@ -1,7 +1,104 @@
 pub opaque type StagedMigration {
     base: DeclarationBase,
     plan: SchemaPlan,
-    declared: bool
+    declared: bool,
+    first_table: u32,
+    base_rows: PageTree,
+    rewrites: Map[(u32, Bytes), ()]
+}
+
+type ActivationRewrite: codec + send {
+    id: u32,
+    key: Bytes,
+    value: Bytes
+}
+
+fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool) -> StagedMigration {
+    StagedMigration(base: declaration_base(db), plan: take plan, declared, first_table: db.next_table, base_rows: share_page_tree(db.heads[0].roots.collections), rewrites: map.new())
+}
+
+fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
+    match order.compare(a.id, id) {
+        Equal => list.compare_bytes(a.key, key),
+        different => different,
+    }
+}
+
+fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old: Bytes, raw: Bytes) -> Result[(), Error] {
+    let mut indexes = byte_cursor(plan.roots.catalog, Included(index_prefix(id)?), index_prefix(id + 1)?)?
+    while let Some((name_key, encoded)) = next_bytes(mut indexes)? {
+        let record = decode_catalog(encoded)?
+        let mut verified = false
+        let bindings = list.len(plan.bindings)
+        for i in 0u64 .. bindings {
+            let registered = view plan.bindings[bindings - 1 - i]
+            let ix = view registered.index
+            if registered.table == id && ix.id == record.id && ix.schema == schema && ix.by == record.by && ix.key == record.key {
+                let before = (ix.extract)(old, key)?
+                let after = (ix.extract)(raw, key)?
+                if before.keys != after.keys || before.payload != after.payload {
+                    return Error(Changed(declaration_index_name(name_key)?))
+                }
+                verified = true
+                break
+            }
+        }
+        if !verified {
+            return Error(Stale(id))
+        }
+    }
+    Ok(())
+}
+
+pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    let (take key, take logical, take raw, live_bytes) = {
+        let plan = view staged.plan
+        if !same(plan.store, t.store) {
+            return Error(Foreign)
+        }
+        let record = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
+        if record.kind != 1 || record.id != t.id || t.id >= staged.first_table {
+            return Error(Stale(t.id))
+        }
+        let current = record.schemas[list.len(record.schemas) - 1]
+        if t.readers.current != current.number || t.readers.schemas.value != current.schema || t.readers.schemas.key != record.key {
+            return Error(Schema(int.widen(current.number)))
+        }
+        let key = encode_key(t.key, k)?
+        let logical = logical_key(t.id, key)?
+        let Some(old) = get_page_row(staged.base_rows, logical) else { return Error(Missing("row")) }
+        let mut raw: Bytes = list.new()
+        capacity(le(mut raw, int.widen(current.number), 2))?
+        std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+        if list.len(raw) > VALUE_LIMIT {
+            return Error(Limit(Value))
+        }
+        let _ = row_value(t.readers, t.id, raw)?
+        check_rewrite_indexes(plan, t.id, current.number, key, old, raw)?
+        let mut kept = plan.live
+        if !plan.retained {
+            if let Some(previous) = get_page_row(plan.roots.collections, logical) {
+                kept -= entry(logical, previous)
+            }
+        }
+        let live_bytes = int.saturating_add(kept, entry(logical, raw))
+        over_ceiling(live_bytes, plan.ceiling)?
+        (take key, take logical, take raw, live_bytes)
+    }
+    let address = (t.id, take key)
+    if map.contains(staged.rewrites, address) {
+        return Error(Exists("rewrite"))
+    }
+    let mut roots = share_roots(staged.plan.roots)
+    let mut ids = staged.plan.next_node
+    let _ = insert_row(mut ids, mut roots, take logical, take raw)?
+    capacity(map.try_reserve(mut staged.rewrites, 1))?
+    map.insert(mut staged.rewrites, take address, ())
+    staged.plan.roots = take roots
+    staged.plan.next_node = ids
+    staged.plan.live = live_bytes
+    staged.plan.changed = true
+    Ok(())
 }
 
 fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -47,12 +144,18 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
     stage_system_put(mut staged.plan, releases, release_at, release)
 }
 
+pub fn activation_install_allowed(db: Db) -> Result[(), Error] {
+    require_memory_collections(store_has_tiered(db), Install)
+}
+
 pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
+    activation_install_allowed(db)?
     if object_writer_open(db) { return Error(Missing("binding")) }
     install_activation_layout(mut db, take staged, None)
 }
 
 pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activation: u64, schema_binding: Bytes) -> Result[(), Error] waits {
+    activation_install_allowed(db)?
     let update = if object_writer_open(db) {
         if list.len(schema_binding) != 32 { return Error(Missing("binding")) }
         let Some(expected) = int.checked_add(db.heads[0].head, 1) else { return Error(Limit(Ids)) }
@@ -67,7 +170,6 @@ pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activa
 }
 
 fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[HistoryActivation]) -> Result[(), Error] waits {
-    require_memory_collections(store_has_tiered(db), Install)?
     if !same_declaration_base(staged.base, declaration_base(db)) {
         return Error(Foreign)
     }
@@ -112,4 +214,139 @@ fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation
     let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
     publish(take publication)
     Ok(commit_ticket)
+}
+
+fn encode_rewrite_frame(staged: StagedMigration) -> Result[Option[Bytes], DeployError] {
+    if map.len(staged.rewrites) == 0 {
+        return Ok(None)
+    }
+    let mut rows: List[ActivationRewrite] = list.new()
+    let mut size = 4u64
+    let limit = option.unwrap(disk_kind_limit(0x0085))
+    for ((id, key), _) in staged.rewrites {
+        let logical = deploy_result(logical_key(id, key))?
+        let Some(raw) = get_page_row(staged.plan.roots.collections, logical) else { return Error(Store(Missing("row"))) }
+        size = int.saturating_add(size, 12 + list.len(key) + list.len(raw))
+        if size > limit {
+            return Error(Scratch(Limit(Triggers)))
+        }
+        list.push(mut rows, ActivationRewrite(id, key: deploy_result(copied(key))?, value: deploy_result(copied(raw))?))
+    }
+    list.sort(mut rows, fn(a: ActivationRewrite, b: ActivationRewrite) -> Order { compare_rewrite(a, b.id, b.key) })
+    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
+    let mut raw: Bytes = list.with_capacity(size)
+    std.codec.encode(codec, rows, mut raw) ?=> |_| Scratch(Limit(Triggers))
+    Ok(Some(take raw))
+}
+
+type PreparedInput {
+    file: HostFile,
+    ctx: DiskContext,
+    offset: u64,
+    digest: std.sha256.Sha256
+}
+
+fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
+    let mut out: Bytes = list.with_capacity(n)
+    while list.len(out) < n {
+        let room = n - list.len(out)
+        // Keep the old temporary's admission before issuing the read.
+        let charge = ((room + 7u64) / 8u64) * 8u64
+        capacity(bound bytes charge {})?
+        if disk_io(host.read(mut file, mut out))? == 0 {
+            // The old temporary was still charged when the eight-byte name
+            // was cloned. Check both charges before cloning in the caller.
+            if let Error(c) = bound bytes (charge + 8u64) {} {
+                return Error(Full(Allocation(Capacity(requested: 8, available: c.available - charge))))
+            }
+            return Error(disk_fault("PREPARED", list.len(out), Truncated))
+        }
+    }
+    Ok(take out)
+}
+
+fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
+    let raw = scratch_result(prepared_read(mut input.file, 16u64))?
+    let encoded = prepared_payload(mut input, kind, raw)?
+    match std.codec.decode(codec, encoded) {
+        Error(_) => Error(ImportMalformed),
+        Ok(take value) => Ok(take value),
+    }
+}
+
+fn prepared_payload(mut input: PreparedInput, kind: u16, raw: Bytes) -> Result[Bytes, DeployError] waits {
+    let n = read_le(raw, 4u64, 4u64)
+    if read_le(raw, 0u64, 2u64) != int.widen(kind) || read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
+        return Error(ImportMalformed)
+    }
+    let encoded = scratch_result(prepared_read(mut input.file, n))?
+    let check = deploy_result(capacity(disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
+    if check != read_le(raw, 8u64, 8u64) {
+        return Error(ImportMalformed)
+    }
+    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
+    std.sha256.add(mut input.digest, encoded, 0u64, n)
+    input.offset += 16u64 + n
+    Ok(take encoded)
+}
+
+fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite], DeployError] waits {
+    let mut first: Bytes = list.with_capacity(1)
+    if scratch_result(disk_io(host.read(mut input.file, mut first)))? == 0 {
+        return Ok(list.new())
+    }
+    if first[0] != 0x85 {
+        return Error(ImportMalformed)
+    }
+    let rest = scratch_result(prepared_read(mut input.file, 15))?
+    list.append(mut first, rest)
+    let offset = input.offset
+    let payload = prepared_payload(mut input, 0x0085, first)?
+    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
+    let rewrites = std.codec.decode(codec, payload) ?=> |_| Scratch(disk_fault("PREPARED", offset, Malformed))
+    if list.len(rewrites) == 0 {
+        return Error(ImportMalformed)
+    }
+    for i in 0u64 .. list.len(rewrites) {
+        let row = rewrites[i]
+        if list.len(row.value) > VALUE_LIMIT || (i != 0 && compare_rewrite(rewrites[i - 1], row.id, row.key) != Less) {
+            return Error(ImportMalformed)
+        }
+    }
+    list.clear(mut first)
+    if scratch_result(disk_io(host.read(mut input.file, mut first)))? != 0 {
+        return Error(ImportMalformed)
+    }
+    Ok(take rewrites)
+}
+
+fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), DeployError] {
+    if list.len(imported.rewrites) == 0 {
+        return Ok(())
+    }
+    let Some(lease) = disk_state(db).lease else { return Error(ExportMismatch) }
+    let tree = view lease.collections
+    for row in imported.rewrites {
+        if row.id == 0 || row.id >= imported.meta.base.next_table {
+            return Error(ImportMalformed)
+        }
+        if let Ok(_) = list.binary_search_by(imported.ranges, scoped fn(checked_range: ValidatedRange) -> Order { order.compare(checked_range.id, row.id) }) {
+            return Error(ImportMalformed)
+        }
+        if collection_kind(tree, deploy_result(prefix(row.id))?) != Some(1u8) {
+            return Error(ImportMalformed)
+        }
+        let logical = logical_key(row.id, row.key) ?=> |_| ImportMalformed
+        let Some(_) = get_page_row(tree, logical) else { return Error(ImportMalformed) }
+    }
+    Ok(())
+}
+
+fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployError] {
+    for row in rewrites {
+        let key = deploy_result(logical_key(row.id, row.key))?
+        let raw = deploy_result(copied(row.value))?
+        let _ = deploy_result(insert_row(mut plan.next_node, mut plan.roots, take key, take raw))?
+    }
+    Ok(())
 }

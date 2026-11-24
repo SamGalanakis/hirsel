@@ -62,7 +62,7 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
         0x0040 => true,
         0x0060 => true,
         0x0070 => true,
-        _ => kind >= 0x0080 && kind <= 0x0084,
+        _ => kind >= 0x0080 && kind <= 0x0085,
     }
     if known {
         return Error(disk_fault(path, at, Kind(int.widen(kind))))

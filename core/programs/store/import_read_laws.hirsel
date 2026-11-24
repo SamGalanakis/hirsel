@@ -74,7 +74,7 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     }
     let PreparedInput(file: take done, digest: take hashed, ..) = take input
     scratch_result(disk_io(host.close(take done)))?
-    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), charge: 0))
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: list.new(), digest: std.sha256.finish(hashed), charge: 0))
 }
 
 fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {
@@ -306,4 +306,156 @@ fn disk_test_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> Result[()
     } else {
         Error(())
     }
+}
+
+// L51 (e″). The old snapshot and the index give independent views of the cut.
+type RewriteLawRow: codec + send { due: u64, body: u64 }
+
+fn rewrite_law_due(row: RewriteLawRow) -> Result[u64, Capacity] {
+    Ok(row.due)
+}
+
+fn rewrite_law_schema(mut migration: Migration) -> Result[(), Error] {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
+    let _ = migration_index(mut migration, rows, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
+    Ok(())
+}
+
+fn rewrite_law_refusals(mut staged: StagedMigration, rows: Table[u64, RewriteLawRow]) -> () {
+    match stage_rewrite(mut staged, rows, 3, RewriteLawRow(due: 10, body: 3)) {
+        Error(Missing(name)) if name == "row" => (),
+        _ => fail("L51(e″): staged a rewrite of an absent key"),
+    }
+    match stage_rewrite(mut staged, rows, 1, RewriteLawRow(due: 11, body: 3)) {
+        Error(Changed(name)) if name == "due" => (),
+        _ => fail("L51(e″): staged a rewrite that changed due"),
+    }
+}
+
+fn rewrite_law_replace(mut migration: Migration) -> Result[(), Error] {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
+    migration_migrate(mut migration, take rows, spec("rewrite", std.codec.key_u64(), codec),
+        fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] { Ok(Some((k, clone(row)))) })
+}
+
+fn rewrite_law_target() -> PreparedTarget {
+    PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: 2097152, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
+}
+
+fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), truncated: bool) -> Result[(), DeployError] waits {
+    let header = deploy_result(disk_read_header("PREPARED", base, 6, None, None))?
+    let mut payload: Bytes = list.new()
+    let row_count: u32 = if let Some(_) = keys.1 { 2u32 } else { 1u32 }
+    list.put_word_le(mut payload, row_count)
+    for i in 0u32 .. row_count {
+        let key = if i == 0 { keys.0 } else { option.unwrap(keys.1) }
+        list.put_word_le(mut payload, id)
+        list.put_word_le(mut payload, 8u32)
+        list.put_word_be(mut payload, key)
+        list.put_word_le(mut payload, 18u32)
+        list.put_word_le(mut payload, 0u16)
+        list.put_word_le(mut payload, 10u64)
+        list.put_word_le(mut payload, 5u64)
+    }
+    let frame = deploy_result(capacity(disk_seal(header.context, list.len(base), 0x0085, 1, payload)))?
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
+    match host.write(mut file, base) {
+        Error(problem) => return Error(Scratch(Io(problem.error))),
+        Ok(()) => (),
+    }
+    let end = list.len(frame) - if truncated { 1u64 } else { 0u64 }
+    match host.write(mut file, list.slice(frame, 0, end)) {
+        Error(problem) => return Error(Scratch(Io(problem.error))),
+        Ok(()) => (),
+    }
+    scratch_result(disk_io(host.close(take file)))
+}
+
+fn rewrite_law_import_refused(mut db: Db, scratch: Dir, base: u64) -> () waits {
+    let imported = match validate_prepared(scratch) {
+        Ok(take checked) => reserve_import(mut db, take checked),
+        Error(take error) => Error(take error),
+    }
+    if let Error(ImportMalformed) = imported {} else { fail("L51(e″): imported a malformed rewrite") }
+    if version(snapshot(db)) != base { fail("L51(e″): refused rewrite changed OLD") }
+}
+
+@test
+fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let mut db = deploy_result(open(tasks, disk_test_directory(d), c, r, disk_crash_options("install")))?
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let mut spec_rows = spec("rewrite", std.codec.key_u64(), codec)
+    deploy_result(with_index(mut spec_rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
+    let _ = deploy_result(create_table(mut db, take spec_rows))?
+    let rows = deploy_result(table(mut db, "rewrite", std.codec.key_u64(), codec))?
+    let due = deploy_result(bind_table_index(mut db, rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
+    let Committed(_) = result.unwrap(run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, RewriteLawRow]) -> Result[(), Error] {
+        put(mut tx, t, 1, RewriteLawRow(due: 10, body: 1))?
+        put(mut tx, t, 2, RewriteLawRow(due: 20, body: 2))
+    })) else { fail("L51(e″): seed rows") }
+    let mut standalone = deploy_result(stage_migration(db, tasks, code.describe(rewrite_law_schema)))?
+    rewrite_law_refusals(mut standalone, rows)
+    deploy_result(stage_rewrite(mut standalone, rows, 1, RewriteLawRow(due: 10, body: 4)))?
+    deploy_result(install_activation(mut db, take standalone))?
+    let prior = snapshot(db)
+    let attempt = install_fixture_bytes(16, 7)
+    let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let exported_rows = deploy_result(catalog_handle(source.db.store, source.db.heads[0].roots.catalog, "rewrite", std.codec.key_u64(), codec))?
+    let replaced = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace)))?
+    write_prepared(source, replaced, scratch, rewrite_law_target())?
+    let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    rewrite_law_append(scratch, replacement, exported_rows.id, (1u64, None), false)?
+    rewrite_law_import_refused(mut db, scratch, base)
+
+    let mut staged = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_schema)))?
+    rewrite_law_refusals(mut staged, exported_rows)
+    write_prepared(source, staged, scratch, rewrite_law_target())?
+    let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    if list.len(empty) != 332 { fail("L51(e″): preparation without rewrites has a suffix") }
+    rewrite_law_append(scratch, empty, exported_rows.id, (3u64, None), false)?
+    rewrite_law_import_refused(mut db, scratch, base)
+    for keys in [(2u64, Some(1u64)), (1u64, Some(1u64))] {
+        rewrite_law_append(scratch, empty, exported_rows.id, keys, false)?
+        rewrite_law_import_refused(mut db, scratch, base)
+    }
+    rewrite_law_append(scratch, empty, exported_rows.id, (1u64, None), true)?
+    if let Error(Scratch(Corrupt(Fault(why: Truncated, ..)))) = validate_prepared(scratch) {} else {
+        fail("L51(e″): truncated rewrite payload did not return Corrupt")
+    }
+    deploy_result(stage_rewrite(mut staged, exported_rows, 1, RewriteLawRow(due: 10, body: 5)))?
+    rewrite_law_append(scratch, empty, exported_rows.id, (1u64, None), false)?
+    let expected = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    write_prepared(source, staged, scratch, rewrite_law_target())?
+    let coded = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    if coded != expected { fail("L51(e″): wrong rewrite frame bytes") }
+    let work = reserve_import(mut db, validate_prepared(scratch)?)?
+    let ready = import_trees(take work)?
+    let digest = imported_digest(ready)
+    keep_import(mut db, take ready)?
+    if crash_apply(mut db, attempt, digest)? != base + 1 {
+        fail("L51(e″): wrong activation version")
+    }
+    let current = snapshot(db)
+    let read = deploy_result(reader(db, 0))?
+    if let Some(row) = deploy_result(get(read, prior, rows, 1))? {
+        if row.due != 10 || row.body != 4 { fail("L51(e″): old snapshot changed") }
+    } else { fail("L51(e″): old row is missing") }
+    if let Some(row) = deploy_result(get(read, current, rows, 1))? {
+        if row.due != 10 || row.body != 5 { fail("L51(e″): rewritten row missing at activation") }
+    } else { fail("L51(e″): rewritten row is missing") }
+    if let Some(row) = deploy_result(get(read, current, rows, 2))? {
+        if row.due != 20 || row.body != 2 { fail("L51(e″): untargeted row changed") }
+    } else { fail("L51(e″): untargeted row is missing") }
+    for (deadline, key) in [(10u64, 1u64), (20u64, 2u64)] {
+        let mut index_key = deploy_result(prefix(due.id))?
+        list.put_word_be(mut index_key, deadline)
+        list.put_word_be(mut index_key, key)
+        let Some(before) = get_page_row(prior.roots.collections, index_key) else { fail("L51(e″): seed index missing") }
+        let Some(after) = get_page_row(current.roots.collections, index_key) else { fail("L51(e″): cut index missing") }
+        if list.compare_bytes(before, after) != Equal { fail("L51(e″): cut index changed") }
+    }
+    deploy_result(close(take db))
 }

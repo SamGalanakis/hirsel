@@ -2487,16 +2487,19 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String,
 pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] waits {
     healthy(db)?
     let mut plan = schema_plan(db)
-    stage_create_index(mut plan, t, name, by, take key)?
+    let _ = stage_create_index(mut plan, t, name, by, take key)?
     publish_schema_plan(mut db, take plan)
 }
 
 pub fn migration_create_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
     application_name(name)?
-    stage_create_index(mut phase.plan, t, name, by, take key)
+    capacity(list.try_reserve(mut phase.plan.bindings, 1))?
+    let registered = stage_create_index(mut phase.plan, t, name, by, take key)?
+    list.push(mut phase.plan.bindings, take registered)
+    Ok(())
 }
 
-fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
+fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[IndexRegistration, Error] {
     stage_versioned_index(mut plan, t, name, by, key, list.new())
 }
 
@@ -3137,6 +3140,7 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0082 => Some(2097480),
         0x0083 => Some(20),
         0x0084 => Some(16715784),
+        0x0085 => Some(16715784),
         _ => None
     }
 }
@@ -3176,7 +3180,7 @@ fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, 
     if kind == 0x0020 || kind == 0x0030 {
         return Error(Unsupported(int.widen(kind)))
     }
-    if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0084 && ctx.role != 6) {
+    if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0085 && ctx.role != 6) {
         return Error(disk_fault(file, at, Malformed))
     }
     if let None = disk_kind_limit(kind) {
@@ -3681,6 +3685,7 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
     if list.len(encoded_meta) > 1048832 {
         return Error(Scratch(Limit(Value)))
     }
+    let rewrites = encode_rewrite_frame(staged)?
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
     let header = scratch_result(capacity(disk_header_bytes(ctx, 0u64, 0)))?
     if let Error(e) = host.write(mut file, header) {
@@ -3704,54 +3709,11 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
             scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0084, row_codec, row))?
         }
     }
+    if let Some(raw) = rewrites {
+        scratch_result(write_prepared_payload(mut file, ctx, mut offset, 0x0085, raw))?
+    }
     scratch_result(disk_io(host.sync(mut file)))?
     scratch_result(disk_io(host.close(take file)))
-}
-
-type PreparedInput {
-    file: HostFile,
-    ctx: DiskContext,
-    offset: u64,
-    digest: std.sha256.Sha256
-}
-
-fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
-    let mut out: Bytes = list.with_capacity(n)
-    while list.len(out) < n {
-        let room = n - list.len(out)
-        // Keep the old temporary's admission before issuing the read.
-        let charge = ((room + 7u64) / 8u64) * 8u64
-        capacity(bound bytes charge {})?
-        if disk_io(host.read(mut file, mut out))? == 0 {
-            // The old temporary was still charged when the eight-byte name
-            // was cloned. Check both charges before cloning in the caller.
-            if let Error(c) = bound bytes (charge + 8u64) {} {
-                return Error(Full(Allocation(Capacity(requested: 8, available: c.available - charge))))
-            }
-            return Error(disk_fault("PREPARED", list.len(out), Truncated))
-        }
-    }
-    Ok(take out)
-}
-
-fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
-    let raw = scratch_result(prepared_read(mut input.file, 16u64))?
-    let n = read_le(raw, 4u64, 4u64)
-    if read_le(raw, 0u64, 2u64) != int.widen(kind) || read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
-        return Error(ImportMalformed)
-    }
-    let encoded = scratch_result(prepared_read(mut input.file, n))?
-    let check = deploy_result(capacity(disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
-    if check != read_le(raw, 8u64, 8u64) {
-        return Error(ImportMalformed)
-    }
-    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
-    std.sha256.add(mut input.digest, encoded, 0u64, n)
-    input.offset += 16u64 + n
-    match std.codec.decode(codec, encoded) {
-        Error(_) => Error(ImportMalformed),
-        Ok(take value) => Ok(take value),
-    }
 }
 
 fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
@@ -3847,6 +3809,7 @@ pub opaque type ValidatedImport: send {
     meta: PreparedMeta,
     delta: List[CatalogChange],
     ranges: List[ValidatedRange],
+    rewrites: List[ActivationRewrite],
     digest: Inline[u8, 32],
     charge: u64
 }
@@ -3944,13 +3907,10 @@ pub fn validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
         let checked_range = read_valid_range(mut input, needed[i], desc, row_codec, mut charge)?
         list.push(mut ranges, take checked_range)
     }
-    let mut extra: Bytes = list.with_capacity(1)
-    if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 {
-        return Error(ImportMalformed)
-    }
+    let rewrites = read_rewrite_frame(mut input)?
     let PreparedInput(file: take done, digest: take hashed, ..) = take input
     scratch_result(disk_io(host.close(take done)))?
-    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), charge: charge))
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: std.sha256.finish(hashed), charge: charge))
 }
 
 type ImportedRange: send {
@@ -3963,6 +3923,7 @@ pub opaque type Imported: send {
     meta: PreparedMeta,
     delta: List[CatalogChange],
     ranges: List[ImportedRange],
+    rewrites: List[ActivationRewrite],
     digest: Inline[u8, 32],
     charge: u64
 }
@@ -3975,11 +3936,12 @@ pub opaque type ImportWork: send {
 }
 
 pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[ImportWork, DeployError] {
-    deploy_result(require_memory_collections(store_has_tiered(db), Install))?
+    deploy_result(activation_install_allowed(db))?
     deploy_result(healthy(db))?
     if !is_disk(db) || validated.meta.base.opened != open_number(db) || validated.meta.base.store_hi != db.store.hi || validated.meta.base.store_lo != db.store.lo || !matches_export(db, validated.meta.base) {
         return Error(ExportMismatch)
     }
+    validate_rewrite_base(db, validated)?
     let current = disk_state(db).options.resident_limit
     let s = deploy_result(capacity(current_state(db)))?
     let exact = deploy_result(capacity(state_account(s)))?
@@ -4033,7 +3995,7 @@ fn matches_export(db: Db, base: ExportStamp) -> bool {
 
 pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
     let ImportWork(payload: take payload, low: low, high: high, inline: inline) = take work
-    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: digest, charge: charge, ..) = take payload
+    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: digest, charge: charge, ..) = take payload
     let mut ids = low + 1
     let mut imported: List[ImportedRange] = list.with_capacity(list.len(ranges))
     for checked_range in ranges {
@@ -4047,7 +4009,7 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
         }
         list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take built))
     }
-    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, digest: digest, charge: charge))
+    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, rewrites: take rewrites, digest: digest, charge: charge))
 }
 
 pub fn imported_digest(value: Imported) -> Inline[u8, 32] {

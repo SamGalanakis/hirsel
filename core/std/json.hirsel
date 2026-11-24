@@ -1455,7 +1455,7 @@ pub fn prepare_schema(take description: codec.Schema, profile: Profile) -> Resul
     let mut shapes: List[Shape] = list.with_capacity(count)
     let mut pending: List[u64] = list.new()
     for _ in 0u64 .. count {
-        shape_push(mut shapes, Atom(255))?
+        list.push(mut shapes, Atom(255))
     }
     let mut seen: Bytes = list.new()
     list.fill(mut seen, count, 0)
@@ -1468,11 +1468,6 @@ pub fn prepare_schema(take description: codec.Schema, profile: Profile) -> Resul
     }
     let facts = shape_facts(shapes)?
     Ok(JsonPlan(description: take description, root, shapes: take shapes, facts: take facts, profile))
-}
-
-fn shape_push[T](mut values: List[T], take x: T) -> Result[(), TypedError] {
-    list.push(mut values, take x)
-    Ok(())
 }
 
 fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[u64, TypedError] {
@@ -1495,14 +1490,14 @@ fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Byte
             pos += 4
             if seen[node] == 0 {
                 seen[node] = 1
-                shape_push(mut pending, node)?
+                list.push(mut pending, node)
             }
             return Ok(node)
         },
         _ => Atom(op),
     }
     let node = list.len(shapes)
-    shape_push(mut shapes, take shape)?
+    list.push(mut shapes, take shape)
     Ok(node)
 }
 
@@ -1533,7 +1528,7 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
             let name = schema_name(b, mut pos)?
             if live {
                 let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, Field(name: take name, shape))?
+                list.push(mut fields, Field(name: take name, shape))
             } else {
                 pos = codec.schema_next(b, pos)
             }
@@ -1551,12 +1546,12 @@ fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pe
         for _ in 0u64 .. width {
             if live {
                 let child = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, child)?
+                list.push(mut fields, child)
             } else {
                 pos = codec.schema_next(b, pos)
             }
         }
-        shape_push(mut variants, Variant(name: take name, fields: take fields, live))?
+        list.push(mut variants, Variant(name: take name, fields: take fields, live))
     }
     Ok(Sum(take variants))
 }
@@ -1597,7 +1592,7 @@ fn shape_fact(shapes: List[Shape], mut facts: List[ShapeFact], node: u64) -> Res
 fn shape_facts(shapes: List[Shape]) -> Result[List[ShapeFact], TypedError] {
     let mut facts: List[ShapeFact] = list.with_capacity(list.len(shapes))
     for i in 0u64 .. list.len(shapes) {
-        shape_push(mut facts, ShapeFact(form: i, empty: false, state: 0))?
+        list.push(mut facts, ShapeFact(form: i, empty: false, state: 0))
     }
     for i in 0u64 .. list.len(shapes) {
         shape_fact(shapes, mut facts, i)?
@@ -1621,9 +1616,13 @@ fn shape_facts(shapes: List[Shape]) -> Result[List[ShapeFact], TypedError] {
     Ok(take facts)
 }
 
+type PointerToken = InputMember(u64) | Index(u64) | Declared(u64)
+
 type ReadTyped {
     pos: u64,
-    path: String,
+    path: List[PointerToken],
+    declarations: List[String],
+    mark_tokens: List[PointerToken],
     marks: List[SourceMark],
     encoded_keys: bool,
 }
@@ -1631,7 +1630,8 @@ type ReadTyped {
 type SourceMark {
     pos: u64,
     source: u64,
-    path: String,
+    path_start: u64,
+    path_end: u64,
     key: bool
 }
 
@@ -1663,7 +1663,7 @@ fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
     let (take out, take d, start) = read_wire(format.plan, s, false)?
     match codec.decode(format.binary, out) {
         Ok(take value) => Ok(take value),
-        Error(e) => codec_input_error(d, start, e),
+        Error(e) => codec_input_error(s, d, start, e),
     }
 }
 
@@ -1674,20 +1674,19 @@ pub fn wire_bytes(plan: JsonPlan, input: String) -> Result[Bytes, TypedError] {
 }
 
 fn read_wire(plan: JsonPlan, s: String, encoded_keys: bool) -> Result[(Bytes, ReadTyped, u64), TypedError] {
-    let mut d = ReadTyped(pos: 0, path: string.new(), marks: list.new(), encoded_keys: encoded_keys)
+    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), encoded_keys: encoded_keys)
     skip(s, mut d.pos)
     let start = d.pos
     let mut out: Bytes = list.new()
     read_shape(plan, plan.root, s, 0, mut d, mut out)?
     skip(s, mut d.pos)
     if d.pos != string.byte_len(s) {
-        let stop = d.pos
-        return input_error(mut d, stop, ExpectedValue)
+        return input_error(s, d, d.pos, ExpectedValue)
     }
     Ok((take out, take d, start))
 }
 
-fn codec_input_error[T](d: ReadTyped, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
+fn codec_input_error[T](s: String, d: ReadTyped, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
     let (pos, key) = match e {
         Duplicate(p) => (p, true),
         Value(p) => (p, false),
@@ -1695,42 +1694,57 @@ fn codec_input_error[T](d: ReadTyped, start: u64, e: codec.DecodeError) -> Resul
     }
     for mark in d.marks {
         if mark.pos == pos && mark.key == key {
-            let path = string.from(mark.path)
+            let path = render_pointer(s, d.declarations, list.slice(d.mark_tokens, mark.path_start, mark.path_end))
             return Error(Input(mark.source, take path, CodecValue(e)))
         }
     }
     Error(Input(start, string.new(), CodecValue(e)))
 }
 
-fn input_error[T](mut d: ReadTyped, pos: u64, issue: InputIssue) -> Result[T, TypedError] {
-    let path = replace(mut d.path, string.new())
+fn input_error[T](s: String, d: ReadTyped, pos: u64, issue: InputIssue) -> Result[T, TypedError] {
+    let path = render_pointer(s, d.declarations, d.path)
     Error(Input(pos, take path, issue))
 }
 
-fn read_error[T](take r: Result[T, Error], mut d: ReadTyped) -> Result[T, TypedError] {
+fn read_error[T](s: String, take r: Result[T, Error], d: ReadTyped) -> Result[T, TypedError] {
     match take r {
         Ok(take x) => Ok(take x),
-        Error(Syntax(pos)) => input_error(mut d, pos, ExpectedValue),
-        Error(NotFinite(pos)) => input_error(mut d, pos, InvalidNumber),
+        Error(Syntax(pos)) => input_error(s, d, pos, ExpectedValue),
+        Error(NotFinite(pos)) => input_error(s, d, pos, InvalidNumber),
         _ => fail("typed JSON uses lexical readers"),
     }
 }
 
-fn field_path(mut d: ReadTyped, name: String) -> Result[(), TypedError] {
-    json_schema.pointer_token(mut d.path, name)
-    Ok(())
+fn render_pointer(s: String, declarations: List[String], tokens: List[PointerToken]) -> String {
+    let mut path = string.new()
+    for token in tokens {
+        match token {
+            InputMember(pos) => {
+                let name = result.unwrap(decode_string(s, pos + 1))
+                json_schema.pointer_token(mut path, name)
+            },
+            Index(n) => {
+                string.push(mut path, "/")
+                string.push_u64(mut path, n)
+            },
+            Declared(i) => json_schema.pointer_token(mut path, declarations[i]),
+        }
+    }
+    take path
 }
 
-fn index_path(mut d: ReadTyped, n: u64) -> Result[(), TypedError] {
-    string.push(mut d.path, "/")
-    string.push_u64(mut d.path, n)
-    Ok(())
+fn declared_path(mut d: ReadTyped, name: String) {
+    let slot = list.len(d.declarations)
+    list.push(mut d.declarations, string.from(name))
+    list.push(mut d.path, Declared(slot))
 }
 
-fn source_mark(mut d: ReadTyped, pos: u64, key: bool) -> Result[(), TypedError] {
-    let path = string.from(d.path)
+fn source_mark(mut d: ReadTyped, pos: u64, key: bool) {
+    let path_start = list.len(d.mark_tokens)
+    list.append(mut d.mark_tokens, d.path)
+    let path_end = list.len(d.mark_tokens)
     let source = d.pos
-    shape_push(mut d.marks, SourceMark(pos, source, path: take path, key))
+    list.push(mut d.marks, SourceMark(pos, source, path_start, path_end, key))
 }
 
 const TYPED_DEPTH: u64 = 64
@@ -1738,45 +1752,41 @@ const TYPED_DEPTH: u64 = 64
 fn open_typed(s: String, depth: u64, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
     skip(s, mut d.pos)
     if depth == TYPED_DEPTH && at(s, d.pos) == bracket {
-        let pos = d.pos
-        return input_error(mut d, pos, DepthLimit)
+        return input_error(s, d, d.pos, DepthLimit)
     }
     let opened = opening(s, mut d.pos, bracket)
-    read_error(take opened, mut d)
+    read_error(s, take opened, d)
 }
 
 fn after_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[bool, TypedError] {
     let after = after_item(s, mut d.pos, bracket)
-    read_error(take after, mut d)
+    read_error(s, take after, d)
 }
 
 fn close_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
     let closed = opening(s, mut d.pos, bracket)
-    read_error(take closed, mut d)
+    read_error(s, take closed, d)
 }
 
 fn typed_string(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
-    let start = d.pos + 1
-    let opened = at(s, d.pos) == b'"'
-    if !opened {
-        let pos = d.pos
-        return input_error(mut d, pos, ExpectedValue)
+    if at(s, d.pos) != b'"' {
+        return input_error(s, d, d.pos, ExpectedValue)
     }
+    let start = d.pos + 1
     let measured = string_size(s, mut d.pos)
-    let _ = read_error(take measured, mut d)?
-    read_error(decode_string(s, start), mut d)
+    let _ = read_error(s, take measured, d)?
+    read_error(s, decode_string(s, start), d)
 }
 
 fn typed_name(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
-    skip(s, mut d.pos)
     let name = typed_string(s, mut d)?
     close_typed(s, b':', mut d)?
     Ok(take name)
 }
 
-fn remember_member(mut seen: Map[String, ()], take name: String, pos: u64, mut d: ReadTyped) -> Result[(), TypedError] {
+fn remember_member(s: String, mut seen: Map[String, ()], take name: String, pos: u64, d: ReadTyped) -> Result[(), TypedError] {
     if let Some(_) = map.get(seen, name) {
-        return input_error(mut d, pos, DuplicateMember)
+        return input_error(s, d, pos, DuplicateMember)
     }
     map.insert(mut seen, take name, ())
     Ok(())
@@ -1786,25 +1796,25 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
     skip(s, mut d.pos)
     let start = d.pos
     let head = value_start(s, mut d.pos)
-    let close: u8 = match read_error(take head, mut d)? {
+    let close: u8 = match read_error(s, take head, d)? {
         JsonArray => b']',
         JsonObject => b'}',
         JsonString => {
             let measured = string_size(s, mut d.pos)
-            let _ = read_error(take measured, mut d)?
+            let _ = read_error(s, take measured, d)?
             return Ok(())
         },
         JsonNumber => {
             let measured = number_size(s, mut d.pos)
-            let _ = read_error(take measured, mut d)?
+            let _ = read_error(s, take measured, d)?
             return Ok(())
         },
         _ => return Ok(()),
     }
     if depth == TYPED_DEPTH {
-        return input_error(mut d, start, DepthLimit)
+        return input_error(s, d, start, DepthLimit)
     }
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     let mut seen: Map[String, ()] = map.new()
     let mut i: u64 = 0
     if !ends(s, mut d.pos, close) {
@@ -1813,14 +1823,14 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
                 skip(s, mut d.pos)
                 let pos = d.pos
                 let name = typed_name(s, mut d)?
-                field_path(mut d, name)?
-                remember_member(mut seen, take name, pos, mut d)?
+                list.push(mut d.path, InputMember(pos))
+                remember_member(s, mut seen, take name, pos, d)?
             } else {
-                index_path(mut d, i)?
+                list.push(mut d.path, Index(i))
                 i += 1
             }
             skip_typed(s, depth + 1, mut d)?
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if after_typed(s, close, mut d)? {
                 break
             }
@@ -1842,9 +1852,7 @@ fn patch_typed_count(mut out: Bytes, start: u64, n: u64) -> Result[(), TypedErro
     if n > 4294967295 {
         return Error(LengthOverflow)
     }
-    for i in 0u64 .. 4 {
-        out[start + i] = int.truncate(n >> (8 * i))
-    }
+    list.set_word_le(mut out, start, (int.truncate(n) : u32))
     Ok(())
 }
 
@@ -1852,7 +1860,7 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
     skip(s, mut d.pos)
     let form = plan.facts[shape].form
     if form != shape {
-        source_mark(mut d, list.len(out), false)?
+        source_mark(mut d, list.len(out), false)
     }
     match plan.shapes[form] {
         Atom(op) => read_atom(plan.profile, op, s, mut d, mut out),
@@ -1869,7 +1877,7 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
         Optional(item) => {
             if at(s, d.pos) == b'n' {
                 let parsed = literal(s, mut d.pos, "null")
-                read_error(take parsed, mut d)?
+                read_error(s, take parsed, d)?
                 codec.put_tag(0, mut out)
                 Ok(())
             } else {
@@ -1888,7 +1896,7 @@ fn read_base64(s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedE
     let start = d.pos
     let spelling = typed_string(s, mut d)?
     let Some(decoded) = base64.decode(string.as_bytes(spelling)) else {
-        return input_error(mut d, start, InvalidBase64)
+        return input_error(s, d, start, InvalidBase64)
     }
     put_typed_count(list.len(decoded), mut out)?
     list.append(mut out, decoded)
@@ -1901,40 +1909,40 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
     codec.put_u32(0, mut out)
     let mut n: u64 = 0
     let mut keys: Map[Bytes, ()] = map.new()
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b']') {
         loop {
-            index_path(mut d, n)?
+            list.push(mut d.path, Index(n))
             if let Some(child) = value {
                 open_typed(s, depth + 1, b'[', mut d)?
-                let pair = string.byte_len(d.path)
-                index_path(mut d, 0)?
+                let pair = list.len(d.path)
+                list.push(mut d.path, Index(0))
                 skip(s, mut d.pos)
                 let source = d.pos
                 let key_start = list.len(out)
                 if !d.encoded_keys {
-                    source_mark(mut d, key_start, true)?
+                    source_mark(mut d, key_start, true)
                 }
                 read_shape(plan, item, s, depth + 2, mut d, mut out)?
                 if d.encoded_keys {
                     let encoded = list.slice(out, key_start, list.len(out))
                     if map.contains(keys, encoded) {
-                        return input_error(mut d, source, DuplicateMember)
+                        return input_error(s, d, source, DuplicateMember)
                     }
                     let mut key: Bytes = list.with_capacity(list.len(encoded))
                     list.append(mut key, encoded)
                     map.insert(mut keys, take key, ())
                 }
-                string.truncate(mut d.path, pair)
+                list.truncate(mut d.path, pair)
                 close_typed(s, b',', mut d)?
-                index_path(mut d, 1)?
+                list.push(mut d.path, Index(1))
                 read_shape(plan, child, s, depth + 2, mut d, mut out)?
-                string.truncate(mut d.path, pair)
+                list.truncate(mut d.path, pair)
                 close_typed(s, b']', mut d)?
             } else {
                 read_shape(plan, item, s, depth + 1, mut d, mut out)?
             }
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             n += 1
             if after_typed(s, b']', mut d)? {
                 break
@@ -1956,20 +1964,20 @@ fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: Rea
     let start = list.len(out)
     codec.put_u32(0, mut out)
     let mut seen: Map[String, ()] = map.new()
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
         loop {
             skip(s, mut d.pos)
             let pos = d.pos
             let name = typed_name(s, mut d)?
-            field_path(mut d, name)?
+            list.push(mut d.path, InputMember(pos))
             if let Some(_) = map.get(seen, name) {
-                return input_error(mut d, pos, DuplicateMember)
+                return input_error(s, d, pos, DuplicateMember)
             }
             codec.put_string(name, mut out) ?=> |_| LengthOverflow
             map.insert(mut seen, take name, ())
             read_shape(plan, value, s, depth + 1, mut d, mut out)?
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break
             }
@@ -1985,11 +1993,11 @@ fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), Ty
     skip(s, mut d.pos)
     let start = d.pos
     let extra = typed_name(s, mut d)?
-    field_path(mut d, extra)?
+    list.push(mut d.path, InputMember(start))
     if extra == name {
-        input_error(mut d, start, DuplicateMember)
+        input_error(s, d, start, DuplicateMember)
     } else {
-        input_error(mut d, start, UnknownMember)
+        input_error(s, d, start, UnknownMember)
     }
 }
 
@@ -1998,8 +2006,8 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
     skip(s, mut d.pos)
     let start = d.pos
     let name = typed_name(s, mut d)?
-    let path = string.byte_len(d.path)
-    field_path(mut d, name)?
+    let path = list.len(d.path)
+    list.push(mut d.path, InputMember(start))
     if name == "ok" {
         codec.put_tag(0, mut out)
         read_shape(plan, ok, s, depth + 1, mut d, mut out)?
@@ -2007,9 +2015,9 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
         codec.put_tag(1, mut out)
         read_shape(plan, err, s, depth + 1, mut d, mut out)?
     } else {
-        return input_error(mut d, start, UnknownMember)
+        return input_error(s, d, start, UnknownMember)
     }
-    string.truncate(mut d.path, path)
+    list.truncate(mut d.path, path)
     single_member_end(s, name, mut d)
 }
 
@@ -2036,31 +2044,31 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
     let count = list.len(fields)
     let mut parts: List[Option[RecordPart]] = list.with_capacity(count)
     for _ in 0u64 .. count {
-        shape_push(mut parts, None)?
+        list.push(mut parts, None)
     }
     let mut staged: Bytes = list.new()
     let mut ignored: Map[String, ()] = map.new()
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
         loop {
             skip(s, mut d.pos)
             let member_at = d.pos
             let name = typed_name(s, mut d)?
-            field_path(mut d, name)?
+            list.push(mut d.path, InputMember(member_at))
             let Some(i) = field_index(fields, name) else {
                 if plan.profile == Strict {
-                    return input_error(mut d, member_at, UnknownMember)
+                    return input_error(s, d, member_at, UnknownMember)
                 }
-                remember_member(mut ignored, take name, member_at, mut d)?
+                remember_member(s, mut ignored, take name, member_at, d)?
                 skip_typed(s, depth + 1, mut d)?
-                string.truncate(mut d.path, path)
+                list.truncate(mut d.path, path)
                 if after_typed(s, b'}', mut d)? {
                     break
                 }
                 continue
             }
             if let Some(_) = parts[i] {
-                return input_error(mut d, member_at, DuplicateMember)
+                return input_error(s, d, member_at, DuplicateMember)
             }
             let start = list.len(staged)
             let marks = list.len(d.marks)
@@ -2068,7 +2076,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             let end = list.len(staged)
             let mark_end = list.len(d.marks)
             parts[i] = Some(RecordPart(start, end, marks, mark_end))
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break
             }
@@ -2085,15 +2093,14 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             list.append(mut out, value)
         } else if let Optional(_) = plan.shapes[plan.facts[fields[i].shape].form] {
             if fields[i].shape != plan.facts[fields[i].shape].form {
-                field_path(mut d, fields[i].name)?
-                source_mark(mut d, list.len(out), false)?
-                string.truncate(mut d.path, path)
+                declared_path(mut d, fields[i].name)
+                source_mark(mut d, list.len(out), false)
+                list.truncate(mut d.path, path)
             }
             codec.put_tag(0, mut out)
         } else {
-            field_path(mut d, fields[i].name)?
-            let close = d.pos - 1
-            return input_error(mut d, close, MissingMember)
+            declared_path(mut d, fields[i].name)
+            return input_error(s, d, d.pos - 1, MissingMember)
         }
     }
     Ok(())
@@ -2111,40 +2118,40 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
     } else {
         typed_string(s, mut d)?
     }
-    let path = string.byte_len(d.path)
-    field_path(mut d, name)?
+    let path = list.len(d.path)
+    list.push(mut d.path, InputMember(start))
     for tag in 0u64 .. list.len(variants) {
         let v = variants[tag]
         if v.live && v.name == name {
             let fields = v.fields
             let n = list.len(fields)
             if wrapped != (n != 0) {
-                return input_error(mut d, start, ExpectedValue)
+                return input_error(s, d, start, ExpectedValue)
             }
             put_typed_count(tag, mut out)?
             if n == 1 {
                 read_shape(plan, fields[0], s, depth + 1, mut d, mut out)?
             } else if n > 1 {
                 open_typed(s, depth + 1, b'[', mut d)?
-                let variant = string.byte_len(d.path)
+                let variant = list.len(d.path)
                 for i in 0u64 .. n {
                     if i != 0 {
                         close_typed(s, b',', mut d)?
                     }
-                    index_path(mut d, i)?
+                    list.push(mut d.path, Index(i))
                     read_shape(plan, fields[i], s, depth + 2, mut d, mut out)?
-                    string.truncate(mut d.path, variant)
+                    list.truncate(mut d.path, variant)
                 }
                 close_typed(s, b']', mut d)?
             }
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if wrapped {
                 single_member_end(s, name, mut d)?
             }
             return Ok(())
         }
     }
-    input_error(mut d, start, UnknownMember)
+    input_error(s, d, start, UnknownMember)
 }
 
 fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
@@ -2152,7 +2159,7 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
     match op {
         0 => {
             let parsed = literal(s, mut d.pos, "null")
-            read_error(take parsed, mut d)
+            read_error(s, take parsed, d)
         },
         1 => {
             let yes = at(s, start) == b't'
@@ -2161,17 +2168,17 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
             } else {
                 "false"
             })
-            read_error(take parsed, mut d)?
+            read_error(s, take parsed, d)?
             codec.put_bool(yes, mut out)
             Ok(())
         },
         2 => {
             let text = typed_string(s, mut d)?
             let Some((scalar, end)) = string.next_scalar(text, 0) else {
-                return input_error(mut d, start, ExpectedValue)
+                return input_error(s, d, start, ExpectedValue)
             }
             if end != string.byte_len(text) {
-                return input_error(mut d, start, ExpectedValue)
+                return input_error(s, d, start, ExpectedValue)
             }
             codec.put_char(scalar, mut out)
             Ok(())
@@ -2183,7 +2190,7 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
             codec.put_string(text, mut out) ?=> |_| LengthOverflow
             Ok(())
         },
-        20 => input_error(mut d, start, ExpectedValue),
+        20 => input_error(s, d, start, ExpectedValue),
         _ => read_integer(profile, op, s, mut d, mut out),
     }
 }
@@ -2192,7 +2199,7 @@ fn bare_number(s: String, mut d: ReadTyped) -> Result[u64, TypedError] {
     let start = d.pos
     let first = at(s, start)
     if first != b'-' && !int.is_ascii_digit(first) {
-        return input_error(mut d, start, ExpectedValue)
+        return input_error(s, d, start, ExpectedValue)
     }
     d.pos = number_end(s, start)
     Ok(d.pos)
@@ -2216,64 +2223,57 @@ fn read_integer(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: 
     let start = d.pos
     if profile == Strict && (op == 6 || op == 10) {
         let spelling = typed_string(s, mut d)?
-        return put_integer(op, spelling, start, mut d, mut out)
+        return put_integer(s, op, spelling, start, d, mut out)
     }
     let end = bare_number(s, mut d)?
-    put_integer(op, string.slice(s, start, end), start, mut d, mut out)
+    put_integer(s, op, string.slice(s, start, end), start, d, mut out)
 }
 
-fn put_integer(op: u8, spelling: String, start: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+fn put_integer(s: String, op: u8, spelling: String, start: u64, d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     if !canonical_decimal(spelling) {
-        return input_error(mut d, start, InvalidNumber)
+        return input_error(s, d, start, InvalidNumber)
     }
     match op {
         3 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u8, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u8, ParseError]), start, d)?
             codec.put_u8(n, mut out)
-            Ok(())
         },
         4 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u16, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u16, ParseError]), start, d)?
             codec.put_u16(n, mut out)
-            Ok(())
         },
         5 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u32, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u32, ParseError]), start, d)?
             codec.put_u32(n, mut out)
-            Ok(())
         },
         6 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u64, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u64, ParseError]), start, d)?
             codec.put_u64(n, mut out)
-            Ok(())
         },
         7 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i8, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i8, ParseError]), start, d)?
             codec.put_i8(n, mut out)
-            Ok(())
         },
         8 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i16, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i16, ParseError]), start, d)?
             codec.put_i16(n, mut out)
-            Ok(())
         },
         9 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i32, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i32, ParseError]), start, d)?
             codec.put_i32(n, mut out)
-            Ok(())
         },
         _ => {
-            let n = read_integer_value((int.parse(spelling) : Result[i64, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i64, ParseError]), start, d)?
             codec.put_i64(n, mut out)
-            Ok(())
         },
     }
+    Ok(())
 }
 
-fn read_integer_value[T](take parsed: Result[T, ParseError], start: u64, mut d: ReadTyped) -> Result[T, TypedError] {
+fn read_integer_value[T](s: String, take parsed: Result[T, ParseError], start: u64, d: ReadTyped) -> Result[T, TypedError] {
     match take parsed {
         Ok(take n) => Ok(take n),
-        Error(_) => input_error(mut d, start, InvalidNumber),
+        Error(_) => input_error(s, d, start, InvalidNumber),
     }
 }
 
@@ -2288,7 +2288,7 @@ fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: By
         } else if word == "-Infinity" {
             0xfff0000000000000
         } else {
-            return input_error(mut d, start, InvalidNumber)
+            return input_error(s, d, start, InvalidNumber)
         }
         if op == 11 {
             let negative: u32 = int.truncate((bits >> 32) & 0x80000000)
@@ -2306,10 +2306,10 @@ fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: By
     if op == 12 {
         let first = at(s, start)
         if first != b'-' && !int.is_ascii_digit(first) {
-            return input_error(mut d, start, ExpectedValue)
+            return input_error(s, d, start, ExpectedValue)
         }
         let parsed = read_number(s, mut d.pos)
-        let value = read_error(take parsed, mut d)?
+        let value = read_error(s, take parsed, d)?
         codec.put_f64(value, mut out)
         return Ok(())
     }
@@ -2319,8 +2319,8 @@ fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: By
             codec.put_f32(v, mut out)
             Ok(())
         },
-        Error(Invalid(i)) => input_error(mut d, start + i, ExpectedValue),
-        Error(_) => input_error(mut d, start, InvalidNumber),
+        Error(Invalid(i)) => input_error(s, d, start + i, ExpectedValue),
+        Error(_) => input_error(s, d, start, InvalidNumber),
     }
 }
 

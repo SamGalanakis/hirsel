@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "core" / "programs"
 FOREIGN_GRANTS = {
     "ffi_laws": ("Foreign=ffi_laws@1/laws/Laws",),
+    "h264": ("Foreign=h264@1/h264/H264",),
     "image_pipeline": (
         "Foreign=image_jpeg@1/image_jpeg/Jpeg",
         "Foreign=image_webp@1/webp/Webp",

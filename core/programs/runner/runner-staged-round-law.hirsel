@@ -1,0 +1,111 @@
+// L61. The head seals a real Directory ticket, and the publisher prepares
+// its update before the head calls durable. Only the Release installs it.
+fn staged_law_table(mut d: store.Declare) -> Result[store.Table[u64, u64], store.Error] {
+    let declared = store.declare_table(mut d, "data", std.codec.key_u64(), std.codec.of_u64())?
+    store.finish(mut d, take declared)
+}
+
+fn staged_law_write(mut tx: store.Tx, data: store.Table[u64, u64]) -> Result[(), store.Error] {
+    store.put(mut tx, data, 0u64, 2u64)?
+    store.put(mut tx, data, 1u64, 7u64)
+}
+
+@test
+fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
+    let mut name = string.with_capacity(64u64)
+    let dir = result.unwrap(std.dir.create_temp(d, mut name))
+    let opts = result.unwrap(store.sized(Directory, 134217728u64))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, opts))
+    let mut schema = result.unwrap(store.declare(db, Migrate))
+    let data = result.unwrap(staged_law_table(mut schema))
+    let schema_ticket = result.unwrap(store.seal(mut db, take schema))
+    result.unwrap(store.durable(mut db, schema_ticket))
+    set(mut db, data, 0u64, 1u64)
+    set(mut db, data, 1u64, 3u64)
+    set(mut db, data, 2u64, 4u64)
+    let at = store.snapshot(db)
+    let a = store.version(at)
+    let handles = Qh(t: clone(data))
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let mut registered = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    result.unwrap(bind_query_slots(mut registered, handles))
+    let mut b = Board(r: take registered, h: arc.new(take handles), read_handle: take read_handle, reads: publisher_reads(), base: take at, newest: None, subs: subscriptions())
+    let Mailbox(to: take out, from: take inbox, rounds: take reserved) = result.unwrap(mailbox(8u64))
+    let mut rounds = take reserved
+    let mut joined: List[Joiner] = list.new()
+    let owner = failed_read_owner(mut joined, mut rounds, 1u64)
+    fence_round(mut joined, Fenced(sessions: map.new()), a, mut rounds)
+    let visible = latest.handle(rounds.round)
+    let initial = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
+    if list.len(initial.complete) != 1u64 {
+        return Error("initial subscription")
+    }
+    let before = option.unwrap(sub_at(b.subs, 1u64, 1u32)).charge
+    let written: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        staged_law_write(mut tx, bound_data)
+    })
+    let outcome = result.unwrap(take written)
+    let Committed(store.Done(ticket: ticket, ..)) = outcome else {
+        return Error("group did not commit")
+    }
+    let empty_registry: Registry[(), ()] = registry()
+    let mut hd: Head[(), ()] = Head(db: take db, r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
+    close_group(mut hd)
+    let Ok(PubIn(e: Staged(take next))) = channel.try_receive(inbox) else {
+        return Error("head did not stage the sealed group")
+    }
+    let v = store.version(next)
+    let Some(take prepared) = stage_round(b, next, 1048576u64) else {
+        return Error("publisher did not stage the update")
+    }
+    if store.version(b.base) != a || latest.read(visible).at != a || !release_load(visible, owner.fence, a) || option.unwrap(sub_at(b.subs, 1u64, 1u32)).charge != before {
+        return Error("staging changed visible publication state")
+    }
+    if let Error(Empty) = channel.try_receive(owner.from) {} else {
+        return Error("owner got bytes before durable")
+    }
+    if let Error(Empty) = channel.try_receive(inbox) {} else {
+        return Error("head released before durable")
+    }
+    // Losing the prepared pass leaves the read, fence and output work for Release.
+    b.reads = failing_reads(ReclaimedBlock, ViewRead)
+    if let Some(_) = stage_round(b, next, 1048576u64) {
+        return Error("partial reads were staged")
+    }
+    if !release_load(visible, owner.fence, a) {
+        return Error("failed staging advanced a fence")
+    }
+    b.reads = publisher_reads()
+    result.unwrap(release_held(mut hd, true))
+    let Ok(PubIn(e: Released(Release(version: released, snapshot: Some(take snapshot), answers: take answers)))) = channel.try_receive(inbox) else {
+        return Error("durable group did not release")
+    }
+    if released != v {
+        return Error("Release changed the staged version")
+    }
+    let mut fenced = Fenced(sessions: map.new())
+    let owes = install_staged(mut b, mut fenced, take snapshot, take prepared)
+    fence_round(mut joined, take fenced, v, mut rounds)
+    if latest.read(visible).at != v || release_load(visible, owner.fence, a) {
+        return Error("Release omitted the fence")
+    }
+    let mut waiting: List[Replies] = list.new()
+    keep_answers(mut waiting, take answers)
+    settle(mut b.subs, mut joined, mut waiting, take owes, v)
+    let Ok(WireEvent(e: FromRunner(Notice(e: Updated(received))))) = channel.try_receive(owner.from) else {
+        return Error("Release did not deliver")
+    }
+    let Some(content) = view received.content else {
+        return Error("Release omitted the group")
+    }
+    if received.version != v || list.len(content.groups) != 1u64 || content.groups[0u64].sub != 1u32 {
+        return Error("released group version or subscriber")
+    }
+    if list.compare_bytes(content.groups[0u64].payload, b"\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00\x00\x00\x08\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00") != Equal {
+        return Error("released group bytes differ from the slot-zero row update")
+    }
+    let Head(db: take completed, ..) = take hd
+    result.unwrap(store.close(take completed))
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

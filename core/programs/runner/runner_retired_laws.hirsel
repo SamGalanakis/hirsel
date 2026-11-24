@@ -87,7 +87,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     }
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
-    publisher(take bound_registry, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds)
+    publisher(take bound_registry, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds, 1048576u64)
     match channel.try_receive(told_from) {
         Ok(a) => if a.who != 1u64 { return false },
         _ => return false,
@@ -181,7 +181,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let v2 = store.version(c2)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -632,7 +632,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 524288u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -686,7 +686,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let vb = store.version(bs)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),

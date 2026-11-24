@@ -624,7 +624,16 @@ fn owe_frame_fits(out: Owe) -> bool {
     int.saturating_add(envelope, out.group_bytes) <= out.frame_limit
 }
 
-type SubUpdate = Rows(Log[Row]) | Refreshed(Viewed, Log[Row], bool) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
+type GroupProjection { rows: List[Row], packed: Result[Arc[Bytes], Capacity] }
+type SubUpdate = Rows(Option[GroupProjection]) | Refreshed(Viewed, Option[GroupProjection]) |
+    EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
+
+fn project_group(take output: Log[Row], value: Bytes, changed: bool) -> Option[GroupProjection] {
+    let rows = slot_rows(take output)
+    if !changed && list.len(rows) == 0u64 { return None }
+    let packed = if changed { pack_group(value, rows) } else { pack_group(list.new(), rows) }
+    Some(GroupProjection(rows: take rows, packed: take packed))
+}
 
 fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot, entry: Sub, image: Viewed, read: bool) -> SubUpdate waits {
     let rows = match row_log() {
@@ -636,7 +645,8 @@ fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: st
         return match run_query(b.r, b.h, b.reads, b.read_handle, newest, entry.input, b.base, Some(previous_spans), rows) {
             Covered(take v) => {
                 let changed = v.value != image.value
-                Refreshed(take v, take rows, changed)
+                let group = project_group(take rows, v.value, changed)
+                Refreshed(take v, take group)
             },
             Stopped(take why) => EndSub(take why),
             Faulted(take why, take reads) => EndRead(take why, take reads),
@@ -644,7 +654,7 @@ fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: st
         }
     }
     match project_changes(b, entry.input.key, newest, image.covers, rows) {
-        Ok(()) => Rows(take rows),
+        Ok(()) => Rows(project_group(take rows, list.new(), false)),
         Error(Stopped(take why)) => EndSub(take why),
         Error(Lost(problem, _)) => ResetSubs(read_failed(problem)),
         Error(_) => ResetSubs(false),
@@ -673,31 +683,12 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
             return take owes
         },
     }
+    mark_round_hits(b.subs, hits, mut fenced)
     for (serial, read) in hits {
-        if !read { continue }
-        let shared = option.unwrap(map.get(b.subs.indexed, serial))
-        for (_, id) in shared.subscribers {
-            map.insert(mut fenced.sessions, id.who, ())
+        if let Some(take planned) = view_round(b, newest, serial, read) {
+            let ViewRound(key: take key, members: take members, update: take progress) = take planned
+            apply_view_round(mut b.subs, mut owes, mut fenced, take key, members, version, take progress)
         }
-    }
-    for (serial, read) in hits {
-        let action = {
-            let Some(shared) = map.get(b.subs.indexed, serial) else { continue }
-            let Some(key) = shared.key else { continue }
-            let Some(image) = shared.image else { fail("runner: missing live view image") }
-            let mut members: List[SubId] = list.with_capacity(shared.live)
-            for (_, id) in shared.subscribers {
-                let entry = option.unwrap(sub_at(b.subs, id.who, id.sub))
-                if entry.live { list.push(mut members, id) }
-            }
-            let first = members[0u64]
-            let entry = option.unwrap(sub_at(b.subs, first.who, first.sub))
-            let progress = advance_view(b, newest, entry, image, read)
-            let key_copy: ViewKey = clone(key)
-            (take key_copy, take members, take progress)
-        }
-        let (take key, take members, take progress) = take action
-        apply_view_round(mut b.subs, mut owes, mut fenced, take key, members, version, take progress)
     }
     b.base = take newest
     take owes
@@ -713,28 +704,17 @@ fn live_instance(subs: Subscriptions, id: SubId) -> Option[(u64, bool, u64)] {
 fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fenced, take key: ViewKey,
     members: List[SubId], version: u64, take progress: SubUpdate) {
     match take progress {
-        Rows(take output) => {
-            let projected = slot_rows(take output)
-            if list.len(projected) == 0u64 { return }
-            let empty: Bytes = list.new()
-            let packed = pack_group(empty, projected)
+        Rows(None) => (),
+        Rows(Some(take group)) => {
             for id in members {
                 let Some((generation, due, limit)) = live_instance(subs, id) else { continue }
                 if due { continue }
-                deliver_round_group(mut subs, mut owes, id, version, generation, limit, projected, packed)
+                deliver_round_group(mut subs, mut owes, id, version, generation, limit, group.rows, group.packed)
             }
         },
-        Refreshed(take current, take output, changed) => {
+        Refreshed(take current, take packed) => {
             let image = arc.new(take current)
             let size = view_charge(image)
-            let projected = slot_rows(take output)
-            let packed = if changed {
-                Some(pack_group(image.value, projected))
-            } else if list.len(projected) != 0u64 {
-                Some(pack_group(list.new(), projected))
-            } else {
-                None
-            }
             let new_routes = index_view(mut subs, Some(arc.share(image)), list.new())
             for id in members {
                 let Some((generation, due, limit)) = live_instance(subs, id) else { continue }
@@ -743,7 +723,7 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
                         move_subscription(mut subs, id, next, charge, true)
                         if !due {
                             if let Some(encoded_group) = packed {
-                                deliver_round_group(mut subs, mut owes, id, version, generation, limit, projected, encoded_group)
+                                deliver_round_group(mut subs, mut owes, id, version, generation, limit, encoded_group.rows, encoded_group.packed)
                             }
                         }
                     },

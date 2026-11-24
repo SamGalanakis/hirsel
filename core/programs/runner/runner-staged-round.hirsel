@@ -1,0 +1,108 @@
+// A staged round owns its read results and encoded bytes in the publisher.
+// It has no session reservation and cannot reach an owner until Release.
+type ViewRound {
+    key: ViewKey,
+    members: List[SubId],
+    update: SubUpdate
+}
+
+type StagedRound {
+    base: u64,
+    version: u64,
+    fenced: Fenced,
+    views: List[ViewRound]
+}
+
+fn mark_round_hits(subs: Subscriptions, hits: List[(u64, bool)], mut fenced: Fenced) {
+    for (serial, read) in hits {
+        if !read {
+            continue
+        }
+        let shared = option.unwrap(map.get(subs.indexed, serial))
+        for (_, id) in shared.subscribers {
+            map.insert(mut fenced.sessions, id.who, ())
+        }
+    }
+}
+
+fn view_round[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot, serial: u64, read: bool) -> Option[ViewRound] waits {
+    let shared = map.get(b.subs.indexed, serial)?
+    let Some(key) = shared.key else {
+        return None
+    }
+    let Some(image) = shared.image else {
+        fail("runner: missing live view image")
+    }
+    let mut members: List[SubId] = list.with_capacity(shared.live)
+    for (_, id) in shared.subscribers {
+        let member = option.unwrap(sub_at(b.subs, id.who, id.sub))
+        if member.live {
+            list.push(mut members, id)
+        }
+    }
+    let first = members[0u64]
+    let member = option.unwrap(sub_at(b.subs, first.who, first.sub))
+    let progress = advance_view(b, newest, member, image, read)
+    Some(ViewRound(key: clone(key), members: take members, update: take progress))
+}
+
+fn packed_for_stage(group: Option[GroupProjection]) -> bool {
+    match group {
+        Some(projected) => match projected.packed {
+            Ok(_) => true,
+            _ => false
+        },
+        None => true,
+    }
+}
+
+fn staged_view_ok(progress: SubUpdate) -> bool {
+    match progress {
+        Rows(group) => packed_for_stage(group),
+        Refreshed(_, group) => packed_for_stage(group),
+        EndSub(_) => true,
+        EndRead(_, _) => true,
+        ResetSubs(_) => false,
+    }
+}
+
+fn stage_round[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot, allowance: u64) -> Option[StagedRound] waits {
+    let attempted = bound bytes allowance {
+        plan_staged(b, newest)
+    }
+    match take attempted {
+        Ok(take prepared) => take prepared,
+        Error(_) => None
+    }
+}
+
+fn plan_staged[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot) -> Option[StagedRound] waits {
+    let hits = match affected_routes(b, newest) {
+        Ok(take hits) => take hits,
+        Error(_) => return None
+    }
+    let mut fenced = Fenced(sessions: map.new())
+    mark_round_hits(b.subs, hits, mut fenced)
+    let mut views: List[ViewRound] = list.with_capacity(list.len(hits))
+    for (serial, read) in hits {
+        if let Some(take next) = view_round(b, newest, serial, read) {
+            if !staged_view_ok(next.update) {
+                return None
+            }
+            list.push(mut views, take next)
+        }
+    }
+    Some(StagedRound(base: store.version(b.base), version: store.version(newest), fenced: take fenced, views: take views))
+}
+
+fn install_staged[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: Fenced, take released: store.Snapshot, take prepared: StagedRound) -> List[Owe] {
+    let StagedRound(version: version, fenced: take hits, views: take plans, ..) = take prepared
+    fenced = take hits
+    let mut owes: List[Owe] = list.new()
+    for take planned in plans {
+        let ViewRound(key: take key, members: take members, update: take progress) = take planned
+        apply_view_round(mut b.subs, mut owes, mut fenced, take key, members, version, take progress)
+    }
+    b.base = take released
+    take owes
+}

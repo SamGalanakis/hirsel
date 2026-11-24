@@ -598,7 +598,7 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], 
         let Some(old) = transaction_row(tx, p)? else {
             return Ok(false)
         }
-        let previous = entry(p, old)
+        let previous = memory_data_charge(tx, p, old)
         let refund = if tx.retain_old { 0u64 } else { previous }
         let mut pending = IndexEdits(probes: list.new(), first: None, rest: list.new())
         for (_, ix) in indexes {

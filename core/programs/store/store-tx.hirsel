@@ -212,7 +212,7 @@ fn edit_frame(ops: DataOps, below: List[Arc[Staged]], extra: u64, key: Bytes, va
 }
 
 fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
-    let charge = entry(p, val)
+    let charge = memory_data_charge(tx, p, val)
     let (old_charge, height) = put_charge(tx, p)?
     let _ = reserve_ids(mut tx, height)?
     let value = stage_value(take val, tx.roots.collections.inline)
@@ -230,7 +230,7 @@ fn put_charge(tx: Tx, key: Bytes) -> Result[(u64, u64), Error] {
         let previous = transaction_row(tx, key)?
         let height = transaction_write_height(tx, key)?
         let charge = match previous {
-            Some(value) => entry(key, value),
+            Some(value) => memory_data_charge(tx, key, value),
             None => 0,
         }
         return Ok((if tx.retain_old { 0u64 } else { charge }, height))
@@ -279,7 +279,7 @@ fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[u64], Error] {
     Ok(match transaction_row(tx, key)? {
         Some(v) => {
             // As in apply_put: both retention modes take the same steps.
-            let previous = entry(key, v)
+            let previous = memory_data_charge(tx, key, v)
             Some(if tx.retain_old {
                 0u64
             } else {
@@ -374,4 +374,14 @@ fn check_write_attempt(tx: Tx) -> Result[(), Error] {
         }
     }
     Ok(())
+}
+
+
+fn memory_data_charge(tx: Tx, key: Bytes, raw: Bytes) -> u64 {
+    if let Some(_) = tx.attempt {
+        if tiered_data_key(tx.roots.collections, key) {
+            return 0
+        }
+    }
+    entry(key, raw)
 }

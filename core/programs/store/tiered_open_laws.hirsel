@@ -35,6 +35,14 @@ fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let _ = cut_install(mut db, NoHolderChange)?
     close(take db)?
 
+    // The fixture produced the Cold graph. The three 6-byte values with
+    // 12-byte keys each cost 62 + 16 + 8 in the Tiered account.
+    let (_, id, take selected) = read_only_manifest(d)?
+    let mut manifest = take selected
+    manifest.account_tiered = 258
+    let memory_bytes = manifest.account_memory
+    publish_page_manifest_bytes(d, disk_page_manifest_bytes(id, manifest)?)?
+
     let below = l70_open_options(floor - 1)?
     if below.cache_bytes != 0 {
         fail("L70: one byte below the floor no Tiered plan is feasible")
@@ -47,6 +55,10 @@ fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     }
 
     let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let recovered = accounts(reopened)
+    if recovered.tiered != 258 || recovered.logical != memory_bytes + 258 {
+        fail("L70: the reopened logical account includes the Tiered total")
+    }
     let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[Option[u32], Error] {
         fetch(tx, handle, 3u64)

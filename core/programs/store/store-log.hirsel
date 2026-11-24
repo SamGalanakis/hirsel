@@ -104,7 +104,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
     }
     let key = log_key(id, seq)?
     let _ = reserve_ids(mut tx, current.height)?
-    let charge = entry(key, raw)
+    let charge = memory_data_charge(tx, key, raw)
     let staged = stage_value(take raw, tx.roots.collections.inline)
     let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged))
     current.limits.next = following
@@ -271,7 +271,7 @@ pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
     for old_seq in order.max(current.head.next, current.limits.first) .. floor {
         let key = log_key(id, old_seq)?
         let Some(raw) = transaction_row(tx, key)? else { fail("store: missing staged Log append") }
-        masked_charge += entry(key, raw)
+        masked_charge += memory_data_charge(tx, key, raw)
         if let Some(_) = tx.frame_bytes {
             masked_wire += 25 + list.len(raw)
         }
@@ -359,7 +359,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
         }
         let key = prefix(id)?
         let dropped = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
-        if !tx.retain_old {
+        if !tx.retain_old && !tiered_data_key(tx.roots.collections, key) {
             tx.resident = int.saturating_sub(tx.resident, dropped)
         }
         push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped))))

@@ -60,3 +60,41 @@ fn admit_tiered_commit(mut dirty: TieredDirty, br: u32, images: u64, take replac
     dirty.dropped_rows = dropped_rows
     Ok(images != 0 && images >= limit / 2)
 }
+
+// The deciding and proposed collection maps are Memory. Settling a commit
+// needs only their descriptors and its final staged puts (§13.1, §13.8).
+fn tiered_data_key(tree: PageTree, key: Bytes) -> bool {
+    let Some(descriptor) = std.page.lookup(tree.root, list.slice(key, 0, 4)) else {
+        return false
+    }
+    descriptor[53u64] == 1
+}
+
+fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: PageTree, operations: DataRows) -> Result[u64, Error] {
+    let order = capacity(data_order(operations))?
+    let mut prior_collection: Option[u32] = None
+    let mut charged = total
+    for slot in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot)
+        let id = list.slice(op.key, 0, 4)
+        let Some(before) = std.page.lookup(base.root, id) else {
+            continue
+        }
+        if before[53u64] != 1 {
+            continue
+        }
+        if retained {
+            if let Some(raw) = view op.value {
+                charged = replay_charge("MANIFEST", charged, 0, entry(op.key, staged_bytes(raw)))?
+            }
+        } else {
+            let collection: u32 = list.word_be(id, 0)
+            if prior_collection != Some(collection) {
+                prior_collection = Some(collection)
+                let after = option.unwrap(std.page.lookup(proposed.root, id))
+                charged = replay_charge("MANIFEST", charged, list.word_le(before, 44), list.word_le(after, 44))?
+            }
+        }
+    }
+    Ok(charged)
+}

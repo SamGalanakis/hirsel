@@ -1,0 +1,291 @@
+// The admission bound, then the commit on branch `i` (section 1.11, run step 4).
+type AdmittedDraft[R, A] = Ready(Ran[R, A], Publication) | OverLimit(Ran[R, A], StoreCapacity)
+
+fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[(), Error] {
+    if ran.prepared_roots || (ran.edits.count == 0 && ran.replies.count == 0) {
+        return Ok(())
+    }
+    let (take candidate, after) = disk_allocation(scoped fn() -> Result[(Roots, u64), Error] {
+        let Some(base) = view ran.roots else {
+            fail("store: draft has no base roots")
+        }
+        let mut first = ran.first_stamp
+        if tree_stamp(base.collections) != tree_stamp(db.heads[i].roots.collections) {
+            let Some(fresh_start) = int.checked_add(db.next_node, 1) else {
+                return Error(Limit(Ids))
+            }
+            first = fresh_start
+        }
+        let mut roots = share_roots(base)
+        let mut stamp_out = first
+        materialize_rows(mut roots.collections, ran.edits, first, mut stamp_out)?
+        materialize_rows(mut roots.streams, ran.replies, first, mut stamp_out)?
+        canonical_roots(mut roots)?
+        Ok((take roots, stamp_out))
+    })?
+    db.next_node = order.max(db.next_node, after - 1)
+    ran.roots = Some(take candidate)
+    ran.prepared_roots = true
+    Ok(())
+}
+
+fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[bool, Capacity] {
+    if ran.prepared_roots {
+        return Ok(false)
+    }
+    if let Some(_) = db.heads[i].following {
+        return Ok(false)
+    }
+    let data_count = ran.edits.count
+    let reply_count = ran.replies.count
+    if data_count + reply_count == 0 || (reply_count != 0 && data_count + reply_count != 1) {
+        return Ok(false)
+    }
+    let Some(take base) = replace(mut ran.roots, None) else {
+        fail("store: draft has no base roots")
+    }
+    if tree_stamp(base.collections) != tree_stamp(db.heads[i].roots.collections) {
+        ran.roots = Some(take base)
+        return Ok(false)
+    }
+    let _ = take base
+    let changed_roots = if data_count != 0 {
+        direct_data_edits(mut db, i, ran)?
+    } else {
+        let op = data_row(ran.replies, 0u64)
+        match view op.value {
+            None => false,
+            Some(raw) => {
+                let inline = db.heads[i].roots.streams.inline
+                let empty_key: Bytes = list.new()
+                let mut stamps = ran.first_stamp
+                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, staged_bytes(raw), inline, mut stamps)?
+            },
+        }
+    }
+    if !changed_roots {
+        ran.roots = Some(share_roots(db.heads[i].roots))
+    }
+    Ok(changed_roots)
+}
+
+// Writes each row in place when every row is an inline put into a collection
+// no other row of the commit touches. All rows are checked, with their leaf
+// room reserved, before any is written, so a false or a refusal leaves the
+// head's rows as they were. The paths take stamps in turn from first_stamp,
+// inside the interval the body reserved for them.
+fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, Capacity] {
+    let inline = db.heads[i].roots.collections.inline
+    // put_inline_unique takes no stamp above this bound; each path is far shorter than 512.
+    let rows = ran.edits.count
+    if ran.first_stamp == 0 || rows > 1024 || ran.first_stamp > 18446744073709551103u64 - 512 * rows {
+        return Ok(false)
+    }
+    for e in 0u64 .. rows {
+        let op = data_row(ran.edits, e)
+        let Some(raw) = view op.value else {
+            return Ok(false)
+        }
+        let collection = list.slice(op.key, 0, 4)
+        if collection_kind(db.heads[i].roots.collections, collection) == Some(3u8) {
+            return Ok(false)
+        }
+        for prior in 0u64 .. e {
+            if list.compare_bytes(list.slice(data_row(ran.edits, prior).key, 0, 4), collection) == Equal {
+                return Ok(false)
+            }
+        }
+        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline)? {
+            return Ok(false)
+        }
+    }
+    let mut stamps = ran.first_stamp
+    for slot in 0u64 .. ran.edits.count {
+        let op = data_row(ran.edits, slot)
+        let Some(raw) = view op.value else {
+            fail("store: a checked direct edit lost its value")
+        }
+        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline, mut stamps) {
+            Ok(true) => (),
+            _ => fail("store: a checked direct edit did not apply"),
+        }
+    }
+    Ok(true)
+}
+
+fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] {
+    if over_bound(db, ran) {
+        let needed = ran.live
+        return Ok(OverLimit(take ran, Resident(Capacity(requested: needed, available: db.ceiling))))
+    }
+    let mut draft = take ran
+    match prepare_direct_edit(mut db, i, mut draft) {
+        Ok(true) => return Ok(Ready(take draft, Publication(followed: None))),
+        Ok(false) => (),
+        Error(c) => return Ok(OverLimit(take draft, Allocation(c))),
+    }
+    match prepare_edited_roots(mut db, i, mut draft) {
+        Ok(()) => (),
+        Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+        Error(take problem) => return Error(take problem),
+    }
+    if let Some(_) = draft.tiered {
+        let total = {
+            let Some(roots) = view draft.roots else {
+                fail("store: Tiered draft has no candidate")
+            }
+            settled_tiered_bytes(db.tiered, retaining(db), db.heads[i].roots.collections, roots.collections, draft.edits)
+        }
+        match total {
+            Ok(n) => { draft.tiered = Some(n) },
+            Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    if let None = db.heads[i].following {
+        return Ok(Ready(take draft, Publication(followed: None)))
+    }
+    let drafted_publication = disk_allocation(scoped fn() -> Result[Publication, Error] {
+        let Some(roots) = view draft.roots else {
+            fail("store: prepared draft has no roots")
+        }
+        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots, db.next_node))
+    })
+    let publication = match take drafted_publication {
+        Ok(take plan) => take plan,
+        Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+        Error(take problem) => return Error(take problem),
+    }
+    Ok(Ready(take draft, take publication))
+}
+
+fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
+    let Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    match db.disk {
+        Some(mut state) => {
+            db.file_end += match frame {
+                Some(raw) => list.len(raw),
+                None => 0u64
+            }
+            state.pending = take frame
+            db.frame_seq += 1
+        },
+        None => {
+            let _ = take frame
+        },
+    }
+    if let Some(take candidate) = take roots {
+        let PageRoots(collections: take collections, streams: take streams, catalog: take catalog) = take candidate
+        install_page_tree(mut db.heads[i].roots.collections, take collections)
+        install_page_tree(mut db.heads[i].roots.streams, take streams)
+        install_page_tree(mut db.heads[i].roots.catalog, take catalog)
+    }
+    db.resident = live_bytes
+    if let Some(n) = tiered {
+        db.tiered = n
+    }
+    db.heads[i].head += 1
+    db.heads[i].at = ci.at
+    db.changes += 1
+    if exact {
+        db.settled = db.changes
+    }
+    publish(take publication)
+    let sent_sequence = if !is_disk(db) {
+        db.changes
+    } else {
+        db.frame_seq
+    }
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
+    match take value {
+        Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: ci, reads: take seen)),
+        Error(take a) => Aborted(Undone(value: take a, ticket: Some(commit_ticket)))
+    }
+}
+
+fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
+    disk_allocation(scoped fn() -> Result[u64, Error] {
+        let mut roots: List[Roots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
+        for slot in 0u64 .. list.len(db.heads) {
+            let root = if slot == i {
+                share_roots(proposed)
+            } else {
+                share_roots(db.heads[slot].roots)
+            }
+            list.push(mut roots, take root)
+        }
+        for held in db.pins {
+            list.push(mut roots, share_roots(held.roots))
+        }
+        Ok(page_row_account(roots))
+    })
+}
+
+// AP15: an over-bound retained-root draft is admitted on its proposed union.
+// If settling old charges rotates the journal, rebind the staged frame.
+fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] waits {
+    if is_disk(db) {
+        let refusal = match ran.frame {
+            Some(raw) => journal_refusal(disk_state(db).uncovered, list.len(raw), disk_state(db).options.journal_limit),
+            None => None,
+        }
+        if let Some(overflow) = refusal {
+            return Ok(OverLimit(take ran, Journal(overflow)))
+        }
+    }
+    if !over_bound(db, ran) || !retaining(db) {
+        wait_for_frame_room(mut db, ran.frame)?
+        return prepare_run_commit(mut db, i, take ran)
+    }
+    let mut settled = take ran
+    match prepare_edited_roots(mut db, i, mut settled) {
+        Ok(()) => (),
+        Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
+        Error(take problem) => return Error(take problem),
+    }
+    let counted = {
+        let Some(roots) = view settled.roots else {
+            fail("store: settled draft has no roots")
+        }
+        draft_row_account(db, i, roots)
+    }
+    let live_bytes = match take counted {
+        Ok(live_bytes) => live_bytes,
+        Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
+        Error(take problem) => return Error(take problem),
+    }
+    settled.live = live_bytes
+    settled.exact = true
+    let checked = prepare_run_commit(mut db, i, take settled)?
+    let (take admitted, take publication) = match take checked {
+        Ready(take ready, take plan) => (take ready, take plan),
+        OverLimit(take rejected, problem) => return Ok(OverLimit(take rejected, problem)),
+    }
+    let mut draft = take admitted
+    if db.settled != db.changes && draft.tiered == None {
+        match cut_install(mut db, NoHolderChange) {
+            Ok(_) => {},
+            Error(Full(c)) => return Ok(OverLimit(take draft, c)),
+            Error(take e) => return Error(take e)
+        }
+        if let Some(take frame) = replace(mut draft.frame, None) {
+            let mut raw = take frame
+            if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
+                return Ok(OverLimit(take draft, Allocation(c)))
+            }
+            draft.frame = Some(take raw)
+        }
+    }
+    wait_for_frame_room(mut db, draft.frame)?
+    Ok(Ready(take draft, take publication))
+}
+
+fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] waits {
+    let checked = settle_draft(mut db, i, take ran)?
+    match take checked {
+        Ready(take draft, take publication) => {
+            Ok(commit_prepared(mut db, i, take draft, take publication))
+        },
+        OverLimit(_, c) => Ok(Refused(c)),
+    }
+}

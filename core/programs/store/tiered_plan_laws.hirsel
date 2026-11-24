@@ -24,6 +24,12 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     push_data_row(mut operations, DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None))
     let attempt = tiered_attempt(75, 0)
     let plan = prepare_tiered_writes(attempt, visible, base, operations, 101)?
+    // K=12 and V=6 charge 86 in either mode. The overwrite adds
+    // nothing in exact mode and adds one final staged value when retained.
+    if settled_tiered_bytes(172, false, base, plan.tree, operations)? != 258 ||
+        settled_tiered_bytes(172, true, base, plan.tree, operations)? != 344 {
+        fail("L63: exact and conservative Tiered totals follow the final ops")
+    }
     let owner = StoreId(hi: 3, lo: 4)
     let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
     let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, 1, 72))?

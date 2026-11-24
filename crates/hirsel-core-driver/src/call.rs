@@ -26,6 +26,7 @@ pub struct Options {
     pub n_place: u64,
     pub place_timeout: Duration,
     pub timeout: Duration,
+    stream: Option<(u64, u64)>,
     /// The entry name and its flags, after `--`.
     pub call: Vec<String>,
 }
@@ -54,6 +55,7 @@ impl Options {
             n_place: 16 * 1024 * 1024,
             place_timeout: Duration::from_secs(10),
             timeout: Duration::from_secs(10),
+            stream: None,
             call: invocation.arguments,
         };
         for (id, value) in invocation.options {
@@ -69,6 +71,17 @@ impl Options {
                     options.place_timeout = seconds("--place-timeout", &text)?
                 }
                 OptionId::CallTimeout => options.timeout = seconds("--timeout", &text)?,
+                OptionId::CallStream => {
+                    let bytes: [u8; 16] =
+                        from_hex(&text)
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .ok_or("--stream expects exactly 32 hexadecimal digits")?;
+                    let (t, n) = bytes.split_at(8);
+                    options.stream = Some((
+                        u64::from_be_bytes(t.try_into()?),
+                        u64::from_be_bytes(n.try_into()?),
+                    ));
+                }
                 _ => return Err("unsupported call option".into()),
             }
         }
@@ -137,15 +150,7 @@ fn run_with(
             .ok_or("call requires --url ws://HOST:PORT/PATH")?,
     )?;
     let frame = Schema::read(crate::sdk_command::FRAME_SCHEMA)?;
-    let outcome = exchange(
-        &url,
-        &frame,
-        &description,
-        name,
-        entry,
-        argument,
-        options.timeout,
-    )?;
+    let outcome = exchange(&url, &frame, &description, name, entry, argument, &options)?;
     let returned = outcome["tag"] == "Returned";
     let shown = if returned {
         let bytes = from_hex(outcome["value"].as_str().unwrap_or_default())
@@ -1149,8 +1154,8 @@ impl Session {
     }
 }
 
-/// Hello for one entry, Welcome, Placed, then one Call at position 0 on a
-/// fresh stream. The Call is sent only once the server has
+/// Hello for one entry, Welcome, Placed, then one Call at position 0.
+/// The Call is sent only once the server has
 /// placed the entry under the Describe fingerprints; it is never resent.
 fn exchange(
     url: &Url,
@@ -1159,8 +1164,9 @@ fn exchange(
     name: &str,
     entry: &Exported,
     argument: Vec<u8>,
-    timeout: Duration,
+    options: &Options,
 ) -> Result<Value, Error> {
+    let timeout = options.timeout;
     let deadline = Instant::now() + timeout;
     let mut session = Session::open(url, deadline)?;
     let want = json!({"identity": hex(&entry.identity), "args_fp": entry.args_fp, "result_fp": entry.result_fp});
@@ -1188,7 +1194,11 @@ fn exchange(
                     return Err("Welcome Caller subject exceeds 64 bytes".into());
                 }
                 let now = values[6].as_u64().ok_or("Welcome has no keyed time")?;
-                stream = Some(json!({"t": now, "n": u64::from_le_bytes(random::<8>()?)}));
+                let (t, n) = match options.stream {
+                    Some(id) => id,
+                    None => (now, u64::from_le_bytes(random::<8>()?)),
+                };
+                stream = Some(json!({"t": t, "n": n}));
                 let digest = from_hex(values[3].as_str().unwrap_or_default()).unwrap_or_default();
                 let target = values[4].as_str().unwrap_or_default();
                 let n_place = values[5].as_u64().unwrap_or_default();
@@ -1323,65 +1333,4 @@ pub(crate) fn base64(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn call_wrong_typed_flags_refuse_before_any_connection() {
-        // Bug: encoding a flag without checking it against the Describe schema.
-        // Oracle: docs/spec/sdk.md, "Calling an entry from the terminal": a flag
-        // that does not fit its type is refused before anything is sent.
-        // Args = record R { n: u64, label: String }; the server is a stub that
-        // only answers Describe, and --url names a port nothing listens on, so
-        // an unchecked flag would fail later with a probe or connect error.
-        let dir = tempfile::tempdir().unwrap();
-        let mut args = vec![3u8, 1, 0, 0, 0, 1, 0, 0, 0, b'R', 0, 0, 0, 0, 0, 2, 0, 0, 0];
-        args.extend([0, 1, 0, 0, 0, b'n', 6]);
-        args.extend([0, 5, 0, 0, 0]);
-        args.extend(b"label");
-        args.extend([13, 19, 0, 0, 0, 0]);
-        let identity = b"\x01app@1/m/record(take app@1/m/R)->u64";
-        let mut describe = Vec::new();
-        let blob = |out: &mut Vec<u8>, b: &[u8]| {
-            out.extend((b.len() as u32).to_le_bytes());
-            out.extend(b);
-        };
-        blob(&mut describe, &[]);
-        blob(&mut describe, b"t");
-        describe.extend(17u64.to_le_bytes());
-        describe.extend(1u32.to_le_bytes());
-        describe.extend(0u32.to_le_bytes());
-        blob(&mut describe, identity);
-        blob(&mut describe, &args);
-        blob(&mut describe, &[3, 0, 0, 0, 0, 6]);
-        describe.extend(1u64.to_le_bytes());
-        describe.extend(2u64.to_le_bytes());
-        blob(&mut describe, &[]);
-        let server = dir.path().join("server");
-        std::fs::write(&server, []).unwrap();
-        let attempt = |flags: &[&str]| {
-            let mut call = vec!["m/record".to_owned()];
-            call.extend(flags.iter().map(|f| (*f).to_owned()));
-            let options = Options {
-                server: server.clone(),
-                url: Some("ws://127.0.0.1:1/".into()),
-                n_place: 17,
-                place_timeout: Duration::from_secs(1),
-                timeout: Duration::from_secs(1),
-                call,
-            };
-            run_with(options, |_, _, _| Ok(describe.clone()))
-                .unwrap_err()
-                .to_string()
-        };
-        assert_eq!(
-            attempt(&["--n", "seven", "--label", "x"]),
-            "--n expects u64: `seven` is not a decimal integer"
-        );
-        assert_eq!(
-            attempt(&["--n", "18446744073709551616", "--label", "x"]),
-            "--n expects u64: 18446744073709551616 is outside 0..=18446744073709551615"
-        );
-        assert_eq!(attempt(&["--label", "x"]), "missing --n u64");
-    }
-}
+mod tests;

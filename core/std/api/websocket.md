@@ -7,12 +7,12 @@ chooses no deadline, and generates no entropy. The socket owner supplies
 random client nonces and a fresh four-byte mask for each encoded client frame.
 
 `server` parses a bounded upgrade and returns the response, consumed byte
-offset and selected protocol. An offer containing `hirsel.3` selects
+offset and selected protocol. An offer containing `hirsel.4` selects
 `Current`. Otherwise the first `hirsel.1` or `hirsel.2` selects
 `Retired(token)`. A missing header or an offer with no supported token gives
-HTTP 400. The Runner sends Close 1009 with reason `hirsel.3` on a retired
+HTTP 400. The Runner sends Close 1009 with reason `hirsel.4` on a retired
 upgrade before reading any frames. `client` checks the 101 challenge and
-requires the selected `hirsel.3` protocol. Preserve `input[end..]` as the
+requires the selected `hirsel.4` protocol. Preserve `input[end..]` as the
 initial frame input for the current protocol. `request` constructs the fixed
 `/hirsel` request and returns `Result[Bytes, u16]`. Refused 426 requires a
 `Sec-WebSocket-Version: 13` response header. Allocation refusal raises Capacity.

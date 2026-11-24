@@ -147,7 +147,7 @@ The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
 
 `frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
-and BadKind number tables, and `subprotocol = "hirsel.3"`. Frame is a protocol
+and BadKind number tables, and `subprotocol = "hirsel.4"`. Frame is a protocol
 type shared by every executable. The schema `std.codec.schema(of[runner.Frame]())`
 is generated from the Runner and std sources by `core/tools/frame_schema.py`
 and checked in as `core/programs/runner/frame-schema.bin`. The
@@ -156,7 +156,7 @@ Describe contains only per-program data. A Frame change requires a subprotocol
 change; the client checks the negotiated subprotocol. To a client that offers
 only retired tokens (`hirsel.1`, `hirsel.2`) the server answers 101 selecting the
 first token offered, so the browser completes the handshake, and then Close 1009
-with reason `hirsel.3` before any Welcome; the client reports that the page or client must be
+with reason `hirsel.4` before any Welcome; the client reports that the page or client must be
 reloaded, and never retries. A 1009 after Welcome is the stored-reply close and
 is reported as a reply error.
 Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
@@ -209,22 +209,32 @@ time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
-Locks. Node storage uses durable file
-replacement and `flock` leases. Generation validation and each work send share
-the installation lock. Missing allocated stream records fence the generation;
-pending requests are tied to the Caller saved for that stream.
+Locks. Node storage uses durable file replacement and `flock` leases.
+Recovery format 4 stores a random installation ID and random fencing generation.
+Generation validation and each work send share the installation lock. Missing
+stream records fence the generation. Pending requests keep their original Caller.
 
 The client keeps one call in flight per stream. Calls submitted while ready
-wait in memory in submission order, including behind a recovered call.
-Pending identity and admission uncertainty are durable before send. Returned
-and Failed outcomes commit together with the next position. A definitive V1
-refusal reuses the position only after a single, unambiguous attempt; otherwise
-the stream retires. HistoryUnavailable retires only a matching pending request,
-while RequestMismatch also fences the generation. Incompatible closes remain
-terminal until an explicit reconnect or bindings reload. Reconnection waits for
-all Placed frames, recovers pending calls, and restores subscriptions using new
-ids. The old images are invalidated at the disconnect, and each subscription is
-pending until its new `complete` (above).
+wait in memory in submission order, including behind a recovered call. The
+first call mints a stream ID from the keyed time in Welcome and a cryptographic
+64-bit nonce. The client persists the stream ID, position, argument bytes and
+in-flight flag before sending. Returned and Failed outcomes commit together
+with the next position. A lost attempt retries the original identity after
+backoff. A decisive refusal reuses the position only when every attempt received
+a no-commit answer.
+
+On WebSocket, HistoryUnavailable allows one remint when the installation
+minted the stream and every attempt received a no-commit answer. If prior
+delivery is uncertain, the client retires the stream and reports LocallyUnknown.
+On HTTP a matching 410 marker applies to its own delivery. An earlier request
+could have reached the place through a proxy retry, so the client reports
+LocallyUnknown and retires the stream. Every POST comes from an explicit
+recovery transition. RequestMismatch fences the generation.
+
+Incompatible closes remain terminal until an explicit reconnect or bindings
+reload. Reconnection waits for all Placed frames, recovers pending calls, and
+restores subscriptions using new IDs. Disconnect invalidates old images.
+Each subscription stays pending until its new `complete` (above).
 
 The application may supply credential bytes in Client options. The client
 sends them in Hello and stores the returned Caller with the stream. It replays
@@ -234,7 +244,7 @@ outcome as LocallyUnknown and starts at position zero for that Caller.
 
 ## Calling an entry from the terminal
 
-`hirsel call SERVER --url ws://HOST:PORT/PATH [-- ENTRY [--FLAG VALUE...]]`
+`hirsel call SERVER --url ws://HOST:PORT/PATH [--stream 32-HEX] [-- ENTRY [--FLAG VALUE...]]`
 lists a running place's entries, or calls one of them, for debugging. SERVER is
 the built executable the place runs. Without ENTRY, or with `-- --help`, the
 command prints every entry with its kind, flags and result type. `-- ENTRY
@@ -249,14 +259,18 @@ rules, including `DuplicateStubName`, apply as they do in `hirsel sdk ts`.
 
 **Transport.** The call is an ordinary client session on the server's ingress,
 as the TypeScript client's is. It sends Hello without an application credential.
-It sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
-the Done for that position arrives. There is no debug entry point or second call
-path: a place applies its credential binding to the CLI's empty credential as it
-would to any other client. The upgrade offers `hirsel.3` and checks
+It mints a fresh stream ID from the keyed time in Welcome and a random nonce,
+sends one Call at position zero, and reads Batch and Reset frames until the
+matching Done arrives. A place applies its credential binding to the CLI's
+empty credential as it would to any other client. The upgrade offers `hirsel.4` and checks
 `Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
 connection and is the Call's `deadline_ms`; default 10 seconds. A session that
-ends after the Call was sent reports that the outcome is unknown, and the call
-is never resent. `wss://` is refused as unsupported.
+ends after the Call was sent reports LocallyUnknown. The command sends once
+and prints the received outcome, including HistoryUnavailable or Overloaded.
+With `--stream`, it uses the supplied ID as-is. The 32 hexadecimal digits
+encode the 64-bit birth stamp followed by the 64-bit nonce in most-significant
+digit first order. Repeat the command with the same Caller, ID and arguments
+to recover a retained outcome. `wss://` is refused as unsupported.
 
 **Schemas.** Entry identities, fingerprints and argument and result schemas come
 from SERVER's describe launch mode, as in `hirsel sdk ts`. `--n-place` and

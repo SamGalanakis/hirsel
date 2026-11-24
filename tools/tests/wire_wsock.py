@@ -19,7 +19,7 @@ KEY = b'dGhlIHNhbXBsZSBub25jZQ=='
 GUID = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 REQUEST = (b'GET /hirsel HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
            b'Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n'
-           b'Sec-WebSocket-Key: ' + KEY + b'\r\nSec-WebSocket-Protocol: hirsel.3\r\n\r\n')
+           b'Sec-WebSocket-Key: ' + KEY + b'\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n')
 
 
 def exact(s, count):
@@ -338,9 +338,9 @@ def main():
                     request = head(peer)
                     key = next(line.split(b':',1)[1].strip() for line in request.split(b'\r\n') if line.lower().startswith(b'sec-websocket-key:'))
                     assert len(base64.b64decode(key, validate=True)) == 16
-                    assert b'Sec-WebSocket-Protocol: hirsel.3' in request
+                    assert b'Sec-WebSocket-Protocol: hirsel.4' in request
                     accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
-                    peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: hirsel.3\r\nSec-WebSocket-Accept: '+accept+b'\r\n\r\n'+frame(2,b'abc',False))
+                    peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: hirsel.4\r\nSec-WebSocket-Accept: '+accept+b'\r\n\r\n'+frame(2,b'abc',False))
                     for opcode, payload in [(2,b'abc'), (9,b'abc'), (10,b'abc')]:
                         assert read_frame(peer, True) == (opcode, payload)
                         if opcode == 9:

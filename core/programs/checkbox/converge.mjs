@@ -101,8 +101,9 @@ function transport(Frame, failure, {faultAt, resetProbe = false} = {}) {
           if (frame.tag === 'Call') {
             const [stream, p, , , arg] = frame.values;
             if (dropped && !retransmit) {
-              if (stream !== dropped.stream || p !== dropped.p || !Buffer.from(arg).equals(dropped.arg)) {
-                abort(`reconnect changed durable request (${dropped.stream}, ${dropped.p}) to (${stream}, ${p})`);
+              if (stream.t !== dropped.stream.t || stream.n !== dropped.stream.n ||
+                  p !== dropped.p || !Buffer.from(arg).equals(dropped.arg)) {
+                abort(`reconnect changed durable request (${dropped.stream.t}, ${dropped.stream.n}, ${dropped.p}) to (${stream.t}, ${stream.n}, ${p})`);
                 wire.close();
                 return;
               }
@@ -130,7 +131,7 @@ function transport(Frame, failure, {faultAt, resetProbe = false} = {}) {
         if (frame.tag === 'Batch' || frame.tag === 'Reset') {
           const version = frame.values[0];
           const outcomes = frame.values.at(-1);
-          if (outstanding && outcomes.some(row => row.stream === outstanding.stream &&
+          if (outstanding && outcomes.some(row => row.stream.t === outstanding.stream.t && row.stream.n === outstanding.stream.n &&
               row.p === outstanding.p && row.outcome.tag === 'Returned')) {
             if (!dropped && outstanding.p === faultAt) {
               dropped = outstanding;
@@ -194,7 +195,9 @@ export async function converge(origin, generated, {
     const outcome = await agent.toggle(bit);
     assert.equal(outcome.tag, 'Returned', outcome.value?.tag);
     assert.equal(outcome.value.tag, 'Ok');
-    const record = (await agent.storage.read()).streams[agent.sdk.stream];
+    const {directory, streams} = await agent.storage.read();
+    assert.equal(directory.length, 1);
+    const record = streams[directory[0]];
     assert.equal(record.terminal.p, p);
     assert.equal(record.next, p + 1n);
     assert(!agent.positions.has(p), `duplicate final API outcome for p=${p}`);

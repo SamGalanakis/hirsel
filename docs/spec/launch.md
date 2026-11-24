@@ -78,8 +78,8 @@ of one program are different executables, so their digests differ
 
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
-`Welcome` carries `(caller, q, budget, executable, target, n_place)` under
-tag 4 of `hirsel.3`. Target and allowance are independent of the executable digest.
+`Welcome` carries `(caller, q, budget, executable, target, n_place, now_ms, retention_ms)`
+under tag 4 of `hirsel.4`. Target and allowance are independent of the executable digest.
 When either identity is unavailable the diagnostic is "identity unknown", with
 no mismatch report. A differing available digest, target or `n_place` produces
 a developer diagnostic only. Compatibility is decided by entry identity and

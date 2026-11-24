@@ -13,7 +13,7 @@ const [name, origin, generated] = process.argv.slice(2);
 const url = new URL('/hirsel', origin);
 url.protocol = 'ws:';
 const imported = file => import(pathToFileURL(resolve(generated, file)).href);
-const {Frame} = await imported('frame.js');
+const {Frame, subprotocol} = await imported('frame.js');
 const {values, keys} = await imported('codec.js');
 const {want, identity, bind} = await imported('entries.js');
 const sockets = new Set();
@@ -22,7 +22,7 @@ const some = value => ({tag: 'Some', value});
 const none = {tag: 'None'};
 
 async function raw(credential = some(randomBytes(16)), entries = want) {
-  const socket = new WebSocket(url, 'hirsel.3');
+  const socket = new WebSocket(url, subprotocol);
   sockets.add(socket);
   socket.binaryType = 'arraybuffer';
   const queue = [];
@@ -59,11 +59,12 @@ async function welcome(credential, entries = want) {
     assert.equal(placed.value.tag, 'Ready');
     slots.push(placed.value.value);
   }
-  return {...client, slots};
+  const stream = {t: answer.values[6], n: randomBytes(8).readBigUInt64LE()};
+  return {...client, slots, stream};
 }
 
-function call(client, stream, p, bit) {
-  client.send({tag: 'Call', values: [stream, p, client.slots[0], 30000, values.u32.encode(bit)]});
+function call(client, p, bit) {
+  client.send({tag: 'Call', values: [client.stream, p, client.slots[0], 30000, values.u32.encode(bit)]});
 }
 
 async function image(client, sub) {
@@ -111,10 +112,10 @@ async function bit_pixels() {
   let p = 0n;
   for (const [index, offset, mask] of [[0, 0, 1], [7, 0, 128], [8, 1, 1],
     [511, 63, 128], [512, 64, 1], [999999, 124999, 128]]) {
-    call(client, 0, p, index);
+    call(client, p, index);
     const batch = await client.next();
     assert.equal(batch.tag, 'Batch');
-    assert.deepEqual(batch.values[3], [{stream: 0, p, outcome: {
+    assert.deepEqual(batch.values[3], [{stream: client.stream, p, outcome: {
       tag: 'Returned', value: Uint8Array.of(0, 0, 0, 0, 1),
     }}]);
     expected[offset] ^= mask;
@@ -140,10 +141,10 @@ async function toggle_no_rerun() {
     const start = performance.now();
     const p = BigInt(i);
     const checked = i % 2 === 0;
-    call(callPeer, 0, p, 3);
+    call(callPeer, p, 3);
     const response = await callPeer.next();
     assert.equal(response.tag, 'Batch');
-    assert.deepEqual(response.values[3], [{stream: 0, p, outcome: {
+    assert.deepEqual(response.values[3], [{stream: callPeer.stream, p, outcome: {
       tag: 'Returned', value: Uint8Array.of(0, 0, 0, 0, Number(checked)),
     }}]);
     await Promise.all(subscribers.map(async (peer) => {
@@ -169,7 +170,7 @@ function upgradeStatus() {
   return new Promise((finish, reject) => {
     const upgrade = request(new URL('/hirsel', origin), {headers: {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
-      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': 'hirsel.3',
+      'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Protocol': subprotocol,
     }}, response => {
       response.resume();
       finish(response.statusCode);

@@ -47,7 +47,8 @@ def cli_names(root):
     for names in re.findall(r'option!\(\s*\w+,\s*\[([^\]]+)\]', options):
         flags.update(FLAG.findall(names))
     # Top-level switches such as --version are handled directly by parse().
-    flags.update(re.findall(r'\bif name == "(--[\w-]+)"', source))
+    parser = (root / DRIVER).with_name('cli_parse.rs').read_text(encoding='utf-8')
+    flags.update(re.findall(r'\bif name == "(--[\w-]+)"', parser))
     if not commands or not flags:
         raise ValueError('empty command or option catalogue')
     return commands, flags

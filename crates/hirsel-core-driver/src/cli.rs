@@ -97,6 +97,7 @@ pub enum OptionId {
     NPlace,
     Url,
     CallTimeout,
+    CallStream,
     Control,
     HostState,
     CgroupRoot,
@@ -467,6 +468,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("SECONDS"),
         ["call"],
         "Connection and call deadline; default 10 seconds."
+    ),
+    option!(
+        CallStream,
+        ["--stream"],
+        Some("32-HEX"),
+        ["call"],
+        "Send once at position zero on this saved stream ID."
     ),
     option!(
         Recording,
@@ -1214,67 +1222,4 @@ pub use help_text::help;
 pub(crate) use help_text::named;
 #[path = "cli_parse.rs"]
 mod parsing;
-use help_text::is_help;
-
-pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
-    let mut arguments = arguments.into_iter().peekable();
-    let Some(mut name) = arguments.next() else {
-        return Ok(Action::Help(help(None)));
-    };
-    if is_help(&name) {
-        return Ok(Action::Help(help(None)));
-    }
-    if name == "--version" {
-        return if arguments.next().is_none() {
-            Ok(Action::Version)
-        } else {
-            Err("--version takes no arguments".into())
-        };
-    }
-    if matches!(name.as_str(), "prof" | "laws" | "lean") {
-        match arguments.next() {
-            None => return Ok(Action::Help(help(Some(named(&name)?)))),
-            Some(subcommand) if is_help(&subcommand) => {
-                return Ok(Action::Help(help(Some(named(&name)?))));
-            }
-            Some(subcommand) => name.push_str(&format!(" {subcommand}")),
-        }
-    }
-    let command = named(&name)?;
-    if name == "sdk" {
-        match arguments.next().as_deref() {
-            Some("ts") => {}
-            Some("--help" | "-h") | None => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err("sdk requires the ts generator".into()),
-        }
-    }
-    if name == "help" {
-        let target = arguments
-            .next()
-            .map(|mut name| {
-                if is_help(&name) {
-                    Ok(command)
-                } else {
-                    if matches!(name.as_str(), "prof" | "laws" | "lean")
-                        && let Some(subcommand) = arguments.next()
-                    {
-                        name.push_str(&format!(" {subcommand}"));
-                    }
-                    named(&name)
-                }
-            })
-            .transpose()?;
-        if arguments.next().is_some() {
-            return Err("help takes at most one command".into());
-        }
-        return Ok(Action::Help(help(target)));
-    }
-    if matches!(name.as_str(), "tape" | "manifest") {
-        match arguments.next().as_deref() {
-            Some("show") => {}
-            Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err(format!("expected: hirsel {}", command.usage)),
-        }
-    }
-    parsing::invocation(command, arguments)
-}
+pub use parsing::parse;

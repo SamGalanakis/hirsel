@@ -412,7 +412,7 @@ def host_law(args, root, work, engine, name):
             with peer.makefile('rb') as stream:
                 peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
                               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
-                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.3\r\n'
+                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.4\r\n'
                               'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
                 assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
                 for line in stream:
@@ -424,10 +424,11 @@ def host_law(args, root, work, engine, name):
                 masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
                 peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
                 opcode, length = stream.read(2)
-                assert opcode == 0x82 and 12 <= length < 126, f'unexpected Welcome frame header {opcode:#x} {length}'
+                length = int.from_bytes(stream.read(2), 'big') if length == 126 else length
+                assert opcode == 0x82 and length >= 28, f'unexpected Welcome frame header {opcode:#x} {length}'
                 frame = stream.read(length)
                 assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
-                return int.from_bytes(frame[-8:], 'little')
+                return int.from_bytes(frame[-24:-16], 'little')
 
     def listening():
         with socket.socket(socket.AF_UNIX) as peer:
@@ -1104,11 +1105,10 @@ def admission_laws(args, root, work, engines, row):
             value, report = evaluate(args.evaluator.resolve(), selected, 'runner@1/runner/law_' + name)
             row(engine='evaluator', law=name, passed=value == 1, result=report)
 
-
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
-             'cli_call_exact_value', 'cli_call_fingerprint_mismatch'}
+             'cli_call_exact_value', 'cli_call_fingerprint_mismatch', 'supplied_id_never_rotates'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),

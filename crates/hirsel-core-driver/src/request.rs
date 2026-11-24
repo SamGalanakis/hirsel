@@ -512,6 +512,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::MaxMemory
             | Opt::Stop
             | Opt::CallTimeout
+            | Opt::CallStream
             | Opt::ProfOut
             | Opt::ProfTasks
             | Opt::ProfMem
@@ -1434,7 +1435,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
             );
         }
-
         Some(options)
     } else {
         None

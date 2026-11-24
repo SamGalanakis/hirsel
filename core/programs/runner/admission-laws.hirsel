@@ -258,7 +258,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec))
     wire_know(mut owner, entries, w3c_retired())
     let head = Head(db: take db, r: take entries, replay_identity: list.new(),
-        h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
+        h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox)
 }
 
@@ -438,7 +438,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
     let pub_job = Publish(place: code.describe(subs_place), n_place: 1048576u64,
-        h: result.unwrap(subs_handles(mut db)), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+        h: arc.new(result.unwrap(subs_handles(mut db))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
@@ -754,7 +754,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     set(mut db, t, 1u64, 0u64)
     let h = result.unwrap(subs_handles(mut db))
     let board_reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take board_reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take board_reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
 
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)

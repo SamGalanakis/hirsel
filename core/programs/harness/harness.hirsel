@@ -444,6 +444,41 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
     ))
 }
 
+fn declare_table[K, V](mut d: store.Declare, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
+    let table = store.declare_table(mut d, name, key, value)?
+    store.finish(mut d, take table)
+}
+
+pub fn declare_tables(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let trigger_tables = runner.triggers.declare_tables(mut d)?
+    let mcp_catalog = mcp_tools.declare_catalog(mut d)?
+    let c_session: std.codec.Codec[Session] = std.codec.of()
+    let c_entry: std.codec.Codec[Entry] = std.codec.of()
+    let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
+    let c_frame: std.codec.Codec[Frame] = std.codec.of()
+    let c_run: std.codec.Codec[Run] = std.codec.of()
+    let c_effect: std.codec.Codec[Effect] = std.codec.of()
+    let c_wait: std.codec.Codec[Wait] = std.codec.of()
+    let c_shown: std.codec.Codec[View] = std.codec.of()
+    let c_reader: std.codec.Codec[bool] = std.codec.of()
+    Ok(Handles(
+        session: declare_table(mut d, session_name(), std.codec.key_u64(), c_session)?,
+        entries: declare_table(mut d, entries_name(), std.codec.key_u64(), c_entry)?,
+        inbox: declare_table(mut d, inbox_name(), inbox_key(), c_received)?,
+        ingress: declare_table(mut d, ingress_name(), std.codec.key_u64(), c_lodged)?,
+        frames: declare_table(mut d, "harness.frames", std.codec.key_u64(), c_frame)?,
+        runs: declare_table(mut d, runs_name(), std.codec.key_u64(), c_run)?,
+        effects: declare_table(mut d, effects_name(), effect_key(), c_effect)?,
+        waits: declare_table(mut d, waits_name(), wait_key(), c_wait)?,
+        views: declare_table(mut d, views_name(), std.codec.key_u64(), c_shown)?,
+        readers: declare_table(mut d, "harness.readers", std.codec.key_bytes(), c_reader)?,
+        fork_cuts: declare_table(mut d, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
+        mcp_catalog: take mcp_catalog,
+        triggers: take trigger_tables,
+    ))
+}
+
 // ---- the composition ----
 pub type Fault: codec + send = BadArgs(String) | Refused(String) | Unavailable | TooLarge
 

@@ -70,6 +70,16 @@ pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
     ))
 }
 
+pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
+    let c_text: std.codec.Codec[String] = std.codec.of()
+    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
+    let files = store.declare_table(mut d, files_name(), std.codec.key_string(), c_text)?
+    let files_table = store.finish(mut d, take files)?
+    let proposals = store.declare_table(mut d, proposals_name(), std.codec.key_bytes(), c_proposal)?
+    let proposals_table = store.finish(mut d, take proposals)?
+    Ok(Tables(files: take files_table, proposals: take proposals_table))
+}
+
 // The four Inside tools.
 pub fn add_tools[G: send](mut a: harness.Agent[G]) {
     list.push(mut a.tools, harness.inside("read_source", "Reads one source file of this harness.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", code.describe(read_source)))

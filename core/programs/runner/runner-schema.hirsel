@@ -1,0 +1,130 @@
+fn migration_declaration(db: store.Db, tasks: Tasks, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]]) -> Result[store.Declare, store.Error] waits {
+    match on_migrate {
+        Some(callback) => store.declare_migration(db, tasks, callback),
+        None => store.declare(db, Migrate),
+    }
+}
+
+fn open_place_schema[H: shareable + inert + send](mut db: store.Db, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[H, store.Error] waits {
+    let mut declaration = store.declare(db, Open)?
+    let h = (code.callable(schema))(mut declaration)?
+    let _ = store.seal(mut db, take declaration)?
+    Ok(take h)
+}
+
+fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+    if !store.is_disk(db) {
+        let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
+        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+        let installing = match selection {
+            Install => true,
+            InstallAt(_) => true,
+            _ => store.version(store.snapshot(db)) == 0u64,
+        }
+        let h = if installing {
+            let mut declaration = migration_declaration(db, tasks, on_migrate) ?=> Migrate
+            let made = (code.callable(schema))(mut declaration) ?=> Migrate
+            let _ = store.seal(mut db, take declaration) ?=> Migrate
+            take made
+        } else {
+            open_place_schema(mut db, schema) ?=> Store
+        }
+        let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
+        return Ok((take local_registry, take h, take release, take identity))
+    }
+    if persistent && launch_env().revision.size == 0u64 { return Error(IdentityUnknown) }
+    let current = activation_result(current_description(db))?
+    let selected: Option[u64] = match selection {
+        Install => None,
+        InstallAt(target) => {
+            let next = store.version(store.snapshot(db)) + 1u64
+            if next != (if target == 0u64 { 1u64 } else { target }) {
+                return Error(InstallVersion(next))
+            }
+            None
+        },
+        Reopen => match current {
+            None => None,
+            Some(_) => {
+                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                Some(activation_result(activation_version(db))?)
+            },
+        },
+        Current(expected) => match current {
+            None => {
+                if expected != 0u64 { return Error(NotCurrent(Empty)) }
+                None
+            },
+            Some(_) => {
+                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                let version = activation_result(activation_version(db))?
+                if version != expected { return Error(not_current_activation(db, version, option.unwrap(take current))) }
+                Some(version)
+            },
+        },
+    }
+    let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
+    let (description, record) = prepare_activation(reg, n_place) ?=> Place
+    if let Some(version) = selected {
+        let old = option.unwrap(take current)
+        let prior = activation_result(release_record(db, version))?
+        let matches = match prior { Some(row) => row.binding == record.binding, None => false }
+        if !matches { return Error(not_current_activation(db, version, take old)) }
+        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+        let h = open_place_schema(mut db, schema) ?=> Store
+        let ReleaseRecord(release: take release, ..) = take record
+        return Ok((take reg, take h, take release, take identity))
+    }
+    let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+    let mut declaration = migration_declaration(db, tasks, on_migrate) ?=> Migrate
+    let h = (code.callable(schema))(mut declaration) ?=> Migrate
+    let mut stage = store.finish_migration(db, take declaration) ?=> Migrate
+    let version = store.version(store.snapshot(db)) + 1u64
+    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
+    if let Error(take problem) = store.install_bound_activation(mut db, take stage, version, record.binding) {
+        if let Tiered(Install) = problem { return Error(Store(take problem)) }
+        if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
+        return Error(Store(take problem))
+    }
+    let ReleaseRecord(release: take release, ..) = take record
+    Ok((take reg, take h, take release, take identity))
+}
+
+fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenError] {
+    match take answer {
+        Ok(take value) => Ok(take value),
+        Error(take problem) => Error(Store(take problem)),
+    }
+}
+
+fn activation_identity(place_id: Bytes, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema_id: Bytes) -> Result[Bytes, OpenError] {
+    let migrate_id: Bytes = match on_migrate {
+        Some(callback) => clone(code.identity(callback)),
+        None => list.new(),
+    }
+    match replay_identity_of(place_id, migrate_id, schema_id) {
+        Ok(take digest) => Ok(take digest),
+        Error(problem) => Error(Store(Full(Allocation(problem)))),
+    }
+}
+
+fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> Result[Bytes, Capacity] {
+    let launch = launch_digest()?
+    if list.len(launch) == 0 { return Ok(list.new()) }
+    let mut raw = take launch
+    be_word(mut raw, list.len(place_id), 4)?
+    list.append(mut raw, place_id)
+    be_word(mut raw, list.len(migrate_id), 4)?
+    list.append(mut raw, migrate_id)
+    be_word(mut raw, list.len(schema_id), 4)?
+    list.append(mut raw, schema_id)
+    let mut hash = std.sha256.start()
+    std.sha256.add(mut hash, raw, 0, list.len(raw))
+    let digest = std.sha256.finish(hash)
+    let mut identity: Bytes = list.with_capacity(32)
+    for byte in digest { list.push(mut identity, byte) }
+    Ok(take identity)
+}

@@ -67,7 +67,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let a = store.version(base)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let reader = result.unwrap(store.reader(db, 0u64))
-    let mut b = Board(r: take reg, h: store.copy_env(h), read_handle: take reader, reads: publisher_reads(),
+    let mut b = Board(r: take reg, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(),
         base: take base, newest: None, subs: subscriptions())
 
     let Mailbox(rounds: take reserved, ..) = result.unwrap(mailbox(8u64))

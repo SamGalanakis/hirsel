@@ -355,7 +355,7 @@ fn publisher_reads() -> PublisherReads {
     PublisherReads(changes: store.changes_page, span: take step_span)
 }
 
-type Board[G: send, H: shareable + inert + send] { r: Registry[G, H], h: H, read_handle: store.Reader, reads: PublisherReads, base: store.Snapshot, newest: Option[store.Snapshot], subs: Subscriptions }
+type Board[G: send, H: shareable + inert + send] { r: Registry[G, H], h: Arc[H], read_handle: store.Reader, reads: PublisherReads, base: store.Snapshot, newest: Option[store.Snapshot], subs: Subscriptions }
 
 fn sub_generation(generations: List[(u32, u64)], sub: u32) -> Option[u64] {
     for (id, generation) in generations { if id == sub { return Some(generation) } }

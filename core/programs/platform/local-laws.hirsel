@@ -10,21 +10,21 @@ fn local_wire() -> runner.WireConfig {
     wire
 }
 
-fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
+fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], schema_fn: StaticFn[fn(mut store.Declare) -> Result[Hd, store.Error]], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install, place: place_fn, n_place: N_PLACE,
-        migrate: migrate_fn, handles: code.describe(handles), session: local_wire(), max_sessions: 1u64,
+        on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
 fn quick_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    Ok(local_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
+    Ok(local_config(supplied, code.describe(place), code.describe(schema), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
 }
 
 // A place whose drain keeps admission open for 400 ms, so an open can arrive during it.
 fn lagged_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    Ok(local_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
+    Ok(local_config(supplied, code.describe(place), code.describe(schema), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
 type LocalRun { local: local.Local, door: local.Door, dir_name: String, changes: Receiver[local.Change] }
@@ -274,7 +274,7 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 }
 
 fn keeping_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    let mut config = local_config(supplied, code.describe(kept_place), code.describe(ping_migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
+    let mut config = local_config(supplied, code.describe(kept_place), code.describe(ping_schema), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
     config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: (), grant: unit_grant, grant_bytes: 65536u64))
@@ -352,6 +352,13 @@ fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
     Ok(Hd(t: t))
 }
 
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
+    Ok(Hd(t: t))
+}
+
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(kept), 65536u64, runner.DEFAULT_STEPS)
 }
@@ -418,9 +425,9 @@ fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u6
     }
 }
 
-fn ping_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    runner.triggers.migrate(mut phase)?
-    migrate(mut phase)
+fn ping_schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let _ = runner.triggers.declare_tables(mut d)?
+    schema(mut d)
 }
 
 fn unit_grant(seed: (), take context: runner.TriggerContext) -> Result[(), Capacity] {

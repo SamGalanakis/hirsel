@@ -3648,7 +3648,7 @@ pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migratio
         }),
         Error(Cancelled(_)) => return Error(MigrationFault),
     }
-    Ok(StagedMigration(base: declaration_base(db), plan: result.unwrap(channel.receive(from))?))
+    Ok(StagedMigration(base: declaration_base(db), plan: result.unwrap(channel.receive(from))?, declared: false))
 }
 
 pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
@@ -3667,14 +3667,6 @@ pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrat
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     healthy(db)?
     catalog_handle(db.store, db.heads[0].roots.catalog, named(name)?, take key, take value)
-}
-
-pub fn with_staged_schema[H](mut staged: StagedMigration, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
-    let (take handles, take bindings) = bind_schema(staged.plan.store, staged.plan.roots.catalog, make)?
-    for take binding in take bindings {
-        list.push(mut staged.plan.bindings, take binding)
-    }
-    Ok(take handles)
 }
 
 // AB1: the table and every index `s` declares, in one schema commit. The
@@ -5835,7 +5827,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned.next_table = staged.meta.next_table
     planned.live = install_account(db, planned.roots)?
     deploy_result(over_ceiling(planned.live, disk_limit))?
-    let mut installation = StagedMigration(base: declaration_base(db), plan: take planned)
+    let mut installation = StagedMigration(base: declaration_base(db), plan: take planned, declared: false)
     let release_at = base.head + 1u64
     let prior = deploy_result(copied(old_describe))?
     let release = release_from(target, request.digest)?

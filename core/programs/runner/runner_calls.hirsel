@@ -55,21 +55,20 @@ fn test_release_digest() -> Result[(), ()] {
     if law_release_digest() { Ok(()) } else { Error(()) }
 }
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
 }
 
+
+fn open_data(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let mut declaration = store.declare(db, Open)?
+    let handles = schema(mut declaration)?
+    let _ = store.seal(mut db, take declaration)?
+    Ok(take handles)
+}
 
 // The body writes k and returns its commit's version.
 fn write(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
@@ -437,7 +436,7 @@ fn served_on_with_place(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r:
     } else { (take head, None) }
     let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
     let driving = task.spawn(tasks, bytes driving_bytes, take d, f)
-    let opened = runner.place_head(take db, register, N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, register, N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
     match opened {
@@ -1440,7 +1439,7 @@ fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
     let fresh_request = drain_send(to, "new", 0u64, 42u64)
     let _ = take to
     let mail = result.unwrap(runner.mailbox(4u64))
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take from, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take from, take mail, tasks, 1048576u64))
     let admitted = drain_answer(first, "held", 0u64)
     let joined = drain_answer(join, "held", 0u64)
     match (admitted, joined, drain_answer(fifo, "held", 1u64), drain_answer(fresh_request, "new", 0u64)) {
@@ -1466,7 +1465,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     let mut options = disk_options()
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
-    let table = result.unwrap(store.with_schema(mut db, code.describe(handles)))
+    let table = result.unwrap(open_data(mut db))
     let snap = store.snapshot(db)
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
@@ -1497,7 +1496,7 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
-        migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+        on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: listen,
         net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
@@ -1548,7 +1547,7 @@ fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take w
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
     runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
-        migrate: code.describe(migrate), handles: code.describe(handles), session: session, max_sessions: 2u64,
+        on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)
 }
@@ -1681,7 +1680,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let installed = serve_until_ready(tasks, take first)
     // One application commit between the starts: genesis is version 1, this row is version 2.
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
+    let h = result.unwrap(open_data(mut db))
     let seeded = result.unwrap(store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env.t, 7u64, 70u64)
     }))
@@ -1699,7 +1698,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
         _ => false,
     }
     let mut check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let read = result.unwrap(store.with_schema(mut check, code.describe(handles)))
+    let read = result.unwrap(open_data(mut check))
     let snap = store.snapshot(check)
     let survived = result.unwrap(store.get(result.unwrap(store.reader(check, 0u64)), snap, read.t, 7u64)) == Some(70u64)
     let unwritten = store.version(snap) == 2u64
@@ -1715,7 +1714,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     after.place = code.describe(fixture_place)
     let resumed = serve_until_ready(tasks, take after)
     let mut last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let rows = result.unwrap(store.with_schema(mut last, code.describe(handles)))
+    let rows = result.unwrap(open_data(mut last))
     let carried = result.unwrap(store.get(result.unwrap(store.reader(last, 0u64)), store.snapshot(last), rows.t, 7u64)) == Some(70u64)
     result.unwrap(store.close(take last))
     result.unwrap(std.dir.remove_all(parent, name))
@@ -1828,9 +1827,9 @@ fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u6
     }
 }
 
-fn ping_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    triggers.migrate(mut phase)?
-    migrate(mut phase)
+fn ping_schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let _ = triggers.declare_tables(mut d)?
+    schema(mut d)
 }
 
 fn ping_place(mut r: Calls) -> Result[(), runner.RegisterError] {
@@ -1865,7 +1864,7 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut settings = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
     settings.place = code.describe(ping_place)
-    settings.migrate = code.describe(ping_migrate)
+    settings.schema = code.describe(ping_schema)
     let (entries, _) = ping_entries()
     settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: (), grant: unit_grant, grant_bytes: 65536u64))
@@ -2303,7 +2302,7 @@ pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let (_, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1)
     let mail = result.unwrap(runner.mailbox(1))
     let opened = runner.place_head(take db, code.describe(place), N_PLACE,
-        code.describe(migration_second_refuses), code.describe(handles), take inbox, take mail, tasks, 1048576)
+        Some(code.describe(migration_second_refuses)), code.describe(schema), take inbox, take mail, tasks, 1048576)
     if let Error(Migrate(Full(_))) = opened {} else { return false }
     let mut reopened = result.unwrap(store.open(tasks, d, c, r, options))
     let unchanged = store.version(store.snapshot(reopened)) == 0 &&
@@ -2327,15 +2326,12 @@ fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 type NoteHandles: shareable + send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
 type NoteRegistry = runner.Registry[(), NoteHandles]
 
-fn note_handles(schema: store.Schema) -> Result[NoteHandles, store.Error] {
-    let notes = store.schema_table(schema, "notes", std.codec.key_u64(), std.codec.of_u64())?
-    let members = store.schema_table(schema, "members", std.codec.key_u64(), std.codec.of_u64())?
-    Ok(NoteHandles(notes: take notes, members: take members))
-}
-
-fn note_migrate(mut plan: store.Migration) -> Result[(), store.Error] {
-    store.migration_create_table(mut plan, store.spec("notes", std.codec.key_u64(), std.codec.of_u64()))?
-    store.migration_create_table(mut plan, store.spec("members", std.codec.key_u64(), std.codec.of_u64()))
+fn note_schema(mut d: store.Declare) -> Result[NoteHandles, store.Error] {
+    let notes = store.declare_table(mut d, "notes", std.codec.key_u64(), std.codec.of_u64())?
+    let note_table = store.finish(mut d, take notes)?
+    let members = store.declare_table(mut d, "members", std.codec.key_u64(), std.codec.of_u64())?
+    let member_table = store.finish(mut d, take members)?
+    Ok(NoteHandles(notes: take note_table, members: take member_table))
 }
 
 fn note_write(mut tx: store.Tx, hd: NoteHandles, caller: runner.Caller, take unused: u64) -> Result[u64, u32] {
@@ -2388,8 +2384,9 @@ fn drive_notes(take d: NoteDriver) -> () waits {
 
 pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(note_migrate)))
-    let hd = result.unwrap(store.with_schema(mut db, code.describe(note_handles)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let hd = result.unwrap(note_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     let seeded = result.unwrap(store.run(mut db, None, hd, fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env.members, 1u64, 1u64)?
         store.put(mut tx, call_env.members, 2u64, 1u64)
@@ -2398,12 +2395,11 @@ pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits 
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(4u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let driving = task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes)
-    let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, code.describe(already_migrated), code.describe(note_handles), take inbox, take mail, tasks, 1048576u64)
+    let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, None, code.describe(note_schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     match (take ended, take drove) { (Ok(()), Ok(())) => true, _ => false }
 }
 
-fn already_migrated(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
 
 @test
 fn test_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {

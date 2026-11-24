@@ -37,6 +37,12 @@ pub fn catalog(schema: store.Schema) -> Result[store.Table[String, Remote], stor
     store.schema_table(schema, table_name(), std.codec.key_string(), row_codec)
 }
 
+pub fn declare_catalog(mut d: store.Declare) -> Result[store.Table[String, Remote], store.Error] {
+    let row_codec: std.codec.Codec[Remote] = std.codec.of()
+    let table = store.declare_table(mut d, table_name(), std.codec.key_string(), row_codec)?
+    store.finish(mut d, take table)
+}
+
 pub fn reserved(name: String) -> bool {
     string.starts_with(name, "mcp__")
 }

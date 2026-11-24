@@ -65,7 +65,7 @@ pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir) | Temp(Dir)
 pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: send {
     backing: Backing, sizes: store.Overrides, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     wire: Option[Wire[G, B]], triggers: Option[TriggerConfig[G, S]], idle: Option[u64],
@@ -230,7 +230,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     }
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
-    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_publisher: n_publisher,
+    let PlaceConfig(backing: take backing, selection: selection, place: place, on_migrate: on_migrate, schema: schema, n_publisher: n_publisher,
         session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle, ..) = take p
     let idle = match launch.idle { Some(ms) => Some(ms), None => configured_idle }
@@ -265,7 +265,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     let allowance = add_place_bytes(head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
-    let head_job = ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let head_job = ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
         head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
@@ -542,14 +542,14 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
 fn operate_install[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
-    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles, ..) = take p
+    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
     let persistent = match backing { Disk(_) => true, _ => false }
     if let InstallAt(_) = selection {
         if !persistent { return Error(Missing("disk store")) }
     }
     let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random)?
     let mut opened = take db
-    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, migrate, handles, n_place, tasks) {
+    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, on_migrate, schema, n_place, tasks) {
         Ok(_) => if persistent {
             match activation_version(opened) { Ok(version) => Ok(version), Error(take problem) => Error(Open(InstallUncertain(take problem))) }
         } else { Ok(0u64) },
@@ -602,14 +602,14 @@ fn operate_prepare[G: send, H: shareable + inert + send, S: send, B: send](take 
 }
 
 fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
-    let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, clock: clock, tasks: tasks, triggers: take config, ..) = take p
+    let PlaceConfig(backing: take backing, place: place, on_migrate: on_migrate, schema: schema, clock: clock, tasks: tasks, triggers: take config, ..) = take p
     let Disk(scratch) = backing else { return Error(Missing("scratch")) }
     let entries = match take config {
         Some(TriggerConfig(entries: take listed, ..)) => take listed,
         None => triggers.empty_entries(),
     }
     let setup = PrepareConfig(scratch: scratch, options: take options, attempt: take attempt, image_digest: take image,
-        clock: clock, tasks: tasks, n_place: n_place, place: place, migrate: migrate, handles: handles, triggers: take entries)
+        clock: clock, tasks: tasks, n_place: n_place, place: place, on_migrate: on_migrate, schema: schema, triggers: take entries)
     match prepare_deploy(setup) {
         Ok(()) => Ok(Unstarted),
         Error(Open(take problem)) => Error(Open(take problem)),
@@ -1622,7 +1622,7 @@ type Head[G: send, H: shareable + inert + send] {
     db: store.Db,
     r: Registry[G, H],
     replay_identity: Bytes,
-    h: H,
+    h: Arc[H],
     out: Sender[PubIn],
     busy: Map[Bytes, Worker],
     waiting: List[Waiting],
@@ -1644,7 +1644,7 @@ type Head[G: send, H: shareable + inert + send] {
 type Publish[G: send, H: shareable + inert + send]: send {
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     n_place: u64,
-    h: H,
+    h: Arc[H],
     read_handle: store.Reader,
     base: store.Snapshot,
     from: Receiver[PubIn],
@@ -1669,27 +1669,28 @@ fn publish[G: send, H: shareable + inert + send](take p: Publish[G, H]) -> () wa
 }
 
 // The head selects the release under the store's LOCK before opening handles.
-pub fn place_head[G: send, H: shareable + inert + send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
-    place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, take inbox, take mail, tasks, n_publisher)
+pub fn place_head[G: send, H: shareable + inert + send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+    place_head_selected(take db, Current(0u64), place, n_place, on_migrate, schema, take inbox, take mail, tasks, n_publisher)
 }
 
-pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
     let persistent = store.is_disk(owned)
-    let prepared = head_prepare(mut owned, selection, persistent, place, migrate, handles, n_place, tasks)
-    let (r, h, h2, _, replay_identity) = match take prepared {
+    let prepared = head_prepare(mut owned, selection, persistent, place, on_migrate, schema, n_place, tasks)
+    let (r, h, _, replay_identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
     }
-    let _ = run_head(take owned, take r, take replay_identity, take h, take h2, place, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
+    let _ = run_head(take owned, take r, take replay_identity, take h, place, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
     Ok(())
 }
 
-fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, take h2: H,
+fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: Receiver[HeadInput],
     take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
     let mut owned = take db
-    let publishing = start_publisher(owned, place, n_place, take h2, take mail, tasks, n_publisher)
+    let shared = arc.new(take h)
+    let publishing = start_publisher(owned, place, n_place, arc.share(shared), take mail, tasks, n_publisher)
     let (out, publisher_task) = match take publishing {
         Ok(take started) => take started,
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
@@ -1703,7 +1704,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
+    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = serve_head(mut hd, take woken, take drain, mut tables)
@@ -1802,17 +1803,10 @@ fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
     match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
 }
 
-fn open_handles[H: shareable + inert + send](mut db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
-    match store.with_schema(mut db, handles) {
-        Ok(take h) => Ok(take h),
-        Error(take problem) => Error(Store(take problem)),
-    }
-}
-
-fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take h2: H, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
+fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let (ready, readied): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: place, n_place: n_place, h: take h2, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
+    let p = Publish(place: place, n_place: n_place, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
     let publishing = task.spawn(tasks, bytes n_publisher, take p, publish)
     match channel.receive(readied) {
         Ok(None) => (),
@@ -2071,7 +2065,7 @@ type HeadDrain {
 type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
     backing: Backing, options: store.Options, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
     head_to: Sender[HeadInput], cut: CutActivity,
@@ -2107,7 +2101,7 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
 }
 
 fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
         head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
     let persistent = match backing { Disk(_) => true, _ => false }
@@ -2121,8 +2115,8 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         }
     }
     if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
-    let prepared = head_prepare(mut db, selection, persistent, place, migrate, handles, n_place, tasks)
-    let (reg, local, publisher_handles, release, replay_identity) = match take prepared {
+    let prepared = head_prepare(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks)
+    let (reg, local, release, replay_identity) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
     }
@@ -2146,7 +2140,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut, idle: idle)
-    let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
+    let ended = run_head(take db, take reg, take replay_identity, take local, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
     let _ = take temporary
     match take ended {
         Ok(due) => Ok(due),
@@ -2160,113 +2154,6 @@ fn head_closed(take db: store.Db) -> Result[Option[u64], StartError] waits {
     Ok(None)
 }
 
-fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H, Bytes, Bytes), OpenError] waits {
-    if !store.is_disk(db) {
-        let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
-        let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
-        if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
-        let h = open_handles(mut db, handles)?
-        let h2 = open_handles(mut db, handles)?
-        let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
-        return Ok((take local_registry, take h, take h2, take release, take identity))
-    }
-    if persistent && launch_env().revision.size == 0u64 { return Error(IdentityUnknown) }
-    let current = activation_result(current_description(db))?
-    let selected: Option[u64] = match selection {
-        Install => None,
-        InstallAt(target) => {
-            let next = store.version(store.snapshot(db)) + 1u64
-            if next != (if target == 0u64 { 1u64 } else { target }) {
-                return Error(InstallVersion(next))
-            }
-            None
-        },
-        Reopen => match current {
-            None => None,
-            Some(_) => {
-                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
-                Some(activation_result(activation_version(db))?)
-            },
-        },
-        Current(expected) => match current {
-            None => {
-                if expected != 0u64 { return Error(NotCurrent(Empty)) }
-                None
-            },
-            Some(_) => {
-                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
-                let version = activation_result(activation_version(db))?
-                if version != expected { return Error(not_current_activation(db, version, option.unwrap(take current))) }
-                Some(version)
-            },
-        },
-    }
-    let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
-    let (description, record) = prepare_activation(reg, n_place) ?=> Place
-    if let Some(version) = selected {
-        let old = option.unwrap(take current)
-        let prior = activation_result(release_record(db, version))?
-        let matches = match prior { Some(row) => row.binding == record.binding, None => false }
-        if !matches { return Error(not_current_activation(db, version, take old)) }
-        let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
-        let h = open_handles(mut db, handles)?
-        let h2 = open_handles(mut db, handles)?
-        let ReleaseRecord(release: take release, ..) = take record
-        return Ok((take reg, take h, take h2, take release, take identity))
-    }
-    let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
-    let mut stage = match store.stage_migration(db, tasks, migrate) {
-        Ok(take staged) => take staged,
-        Error(take problem) => return Error(Migrate(take problem)),
-    }
-    let version = store.version(store.snapshot(db)) + 1u64
-    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
-    activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
-    let h = activation_result(store.with_staged_schema(mut stage, handles))?
-    let h2 = activation_result(store.with_staged_schema(mut stage, handles))?
-    if let Error(take problem) = store.install_bound_activation(mut db, take stage, version, record.binding) {
-        if let Tiered(Install) = problem { return Error(Store(take problem)) }
-        if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
-        return Error(Store(take problem))
-    }
-    let ReleaseRecord(release: take release, ..) = take record
-    Ok((take reg, take h, take h2, take release, take identity))
-}
-
-fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenError] {
-    match take answer {
-        Ok(take value) => Ok(take value),
-        Error(take problem) => Error(Store(take problem)),
-    }
-}
-
-fn activation_identity(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> Result[Bytes, OpenError] {
-    match replay_identity_of(place_id, migrate_id, handles_id) {
-        Ok(take digest) => Ok(take digest),
-        Error(problem) => Error(Store(Full(Allocation(problem)))),
-    }
-}
-
-fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> Result[Bytes, Capacity] {
-    let launch = launch_digest()?
-    if list.len(launch) == 0 { return Ok(list.new()) }
-    let mut raw = take launch
-    be_word(mut raw, list.len(place_id), 4)?
-    list.append(mut raw, place_id)
-    be_word(mut raw, list.len(migrate_id), 4)?
-    list.append(mut raw, migrate_id)
-    be_word(mut raw, list.len(handles_id), 4)?
-    list.append(mut raw, handles_id)
-    let mut hash = std.sha256.start()
-    std.sha256.add(mut hash, raw, 0, list.len(raw))
-    let digest = std.sha256.finish(hash)
-    let mut identity: Bytes = list.with_capacity(32)
-    for byte in digest { list.push(mut identity, byte) }
-    Ok(take identity)
-}
-
 pub type PrepareError: send = Open(OpenError) | Deploy(store.DeployError) | Identity
 
 pub type PrepareConfig[G: send, H: shareable + inert + send] {
@@ -2278,8 +2165,8 @@ pub type PrepareConfig[G: send, H: shareable + inert + send] {
     tasks: Tasks,
     n_place: u64,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
-    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
+    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
     triggers: triggers.Entries
 }
 
@@ -2362,15 +2249,12 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),
     }
-    if let Error(take problem) = activation_identity(code.identity(p.place), code.identity(p.migrate), code.identity(p.handles)) {
+    if let Error(take problem) = activation_identity(code.identity(p.place), p.on_migrate, code.identity(p.schema)) {
         return Error(Open(take problem))
     }
-    let mut staged = match store.stage_export_migration(source, p.tasks, p.migrate) {
-        Ok(take staged) => take staged,
-        Error(take error) => return Error(Open(Migrate(take error))),
-    }
-    let _ = prepare_open_result(store.with_staged_schema(mut staged, p.handles))?
-    let _ = prepare_open_result(store.with_staged_schema(mut staged, p.handles))?
+    let mut declaration = store.declare_export(source, p.tasks, p.on_migrate) ?=> |problem| Open(Migrate(problem))
+    let _ = (code.callable(p.schema))(mut declaration) ?=> |problem| Open(Migrate(problem))
+    let staged = store.finish_export_declaration(source, take declaration) ?=> |problem| Open(Migrate(problem))
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
     let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
@@ -3669,7 +3553,7 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
 pub fn journal_attempt_gate(take db: store.Db, take registered: Registry[(), ()], t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes)
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
-    let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: (), out: take to,
+    let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: arc.new(()), out: take to,
         busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
@@ -3717,7 +3601,7 @@ fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {
     }
 }
 
-fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: H, take read_handle: store.Reader, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister) -> () waits {
+fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: Arc[H], take read_handle: store.Reader, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister) -> () waits {
     let mut at = store.version(base)
     let mut b = Board(r: take r, h: take h, read_handle: take read_handle, reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()

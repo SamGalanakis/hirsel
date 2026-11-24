@@ -1,0 +1,51 @@
+type DeclarationLawHandle = store.Table[u64, u64]
+
+fn declaration_law_place(mut entries: Registry[(), DeclarationLawHandle]) -> Result[(), RegisterError] {
+    Ok(())
+}
+
+fn declaration_law_schema(mut d: store.Declare) -> Result[DeclarationLawHandle, store.Error] {
+    let t = store.declare_table(mut d, "data", std.codec.key_u64(), std.codec.of_u64())?
+    store.finish(mut d, take t)
+}
+
+fn declaration_law_missing(mut d: store.Declare) -> Result[DeclarationLawHandle, store.Error] {
+    let t = store.declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    store.finish(mut d, take t)
+}
+
+fn declaration_law_migrate(mut m: store.Migration) -> Result[(), store.Error] {
+    Error(MigrationFault)
+}
+
+@test
+fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
+    let mut scratch = string.with_capacity(32u64)
+    let directory = result.unwrap(host.mkdtemp(parent, mut scratch))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let place = code.describe(declaration_law_place)
+    let schema = code.describe(declaration_law_schema)
+    let install = head_prepare(mut db, Install, false, place, None, schema, 1048576u64, tasks)
+    if let Error(take problem) = take install { return Error(start_text(Open(take problem))) }
+    let version = store.version(store.snapshot(db))
+    if version != 1u64 { return Error("genesis did not publish one activation commit") }
+    let reopen = head_prepare(mut db, Current(version), false, place, Some(code.describe(declaration_law_migrate)), schema, 1048576u64, tasks)
+    if let Error(take problem) = take reopen { return Error(start_text(Open(take problem))) }
+    let failed_open = head_prepare(mut db, Current(version), false, place, None, code.describe(declaration_law_missing), 1048576u64, tasks)
+    if let Error(Store(Missing(name))) = failed_open {
+        if name != "other" { return Error("ordinary open reported the wrong missing table") }
+    } else {
+        return Error("ordinary open changed the catalog or accepted a missing declaration")
+    }
+    let failed_install = head_prepare(mut db, Install, false, place, None, code.describe(declaration_law_missing), 1048576u64, tasks)
+    if let Error(Migrate(Undeclared(name))) = failed_install {
+        if name != "data" { return Error("install reported the wrong undeclared table") }
+    } else {
+        return Error("install accepted an undeclared table")
+    }
+    if store.version(store.snapshot(db)) != version { return Error("a reopen or refusal published a commit") }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, scratch))
+    Ok(())
+}

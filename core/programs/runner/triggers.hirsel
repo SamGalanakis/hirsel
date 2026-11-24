@@ -92,6 +92,17 @@ fn id_key() -> std.codec.Key[Id] {
 
 fn row_due(row: Row) -> Result[u64, Capacity] { Ok(row.due) }
 
+pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
+    let value: std.codec.Codec[Row] = std.codec.of()
+    let terminal: std.codec.Codec[Terminal] = std.codec.of()
+    let pending = store.declare_table(mut d, rows_name(), id_key(), value)?
+    let due = store.declare_single_index(mut d, pending, "due", code.describe(row_due), std.codec.key_u64())?
+    let rows = store.finish(mut d, take pending)?
+    let completed = store.declare_table(mut d, outcomes_name(), id_key(), terminal)?
+    let outcomes = store.finish(mut d, take completed)?
+    Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
+}
+
 fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
     match take r {
         Error(Exists(_)) => Ok(()),

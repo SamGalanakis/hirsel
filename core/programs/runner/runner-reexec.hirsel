@@ -20,17 +20,17 @@ fn recorded_stream_caller(key: Bytes) -> Option[Caller] {
 // Re-execute a recorded transact against its original base without publishing writes.
 pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
-    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
+    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
     let loaded = store.prepare_reexecute(db, branch, version) ?=> Store
-    let (take source, take schema) = match take loaded {
+    let source = match take loaded {
         Ok(take prepared) => take prepared,
         Error(reason) => return Ok(Unknown(reason)),
     }
     let recorded_entry = store.replay_record(source)
     let recorded_code = view recorded_entry.record.code
     if let RecordedCode = mode {
-        let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
+        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
         if list.len(identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(identity) ||
             !list.starts_with_at(recorded_code, 16u64, identity) {
             return Ok(Unknown(RevisionUnknown))
@@ -50,9 +50,10 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
         return Ok(Unknown(ArgsUnresolved))
     }
     if let Some(Malformed(_)) = check(recorded_entry.record.args) { return Ok(Unknown(ArgsUnresolved)) }
-    let h = (code.callable(handles))(schema) ?=> Store
+    let mut declaration = store.declare_replay(db, source) ?=> Store
+    let h = (code.callable(schema))(mut declaration) ?=> Store
     let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-    Ok((go.replay)(db, source, take schema, plan, h, caller, recorded_entry.record.args) ?=> Store)
+    Ok((go.replay)(db, source, take declaration, plan, h, caller, recorded_entry.record.args) ?=> Store)
 }
 
 fn replay_fault(stop: store.Stop) -> Bytes {

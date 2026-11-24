@@ -41,6 +41,13 @@ fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
     Ok(Hd(t: t))
 }
 
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
+    Ok(Hd(t: t))
+}
+
 fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
     match store.fetch(tx, h.t, 0u64) {
         Ok(Some(n)) => Ok(n),
@@ -122,7 +129,7 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
         }
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
             backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms)), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
-            migrate: migration, handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            on_migrate: Some(migration), schema: code.describe(schema), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -142,7 +149,7 @@ pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: N
         disk.lock_wait_ms = 10000u64
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
             backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms)), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place,
-            migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -285,7 +292,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), token: take token)
     let driving = task.spawn(tasks, bytes 33554432u64, take seed, secret_client)
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
     let mut o = options()
     o.create = false
@@ -505,7 +512,7 @@ fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, t
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
     let mut driving = task.spawn(tasks, bytes 33554432u64, take seed, accept)
-    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     take opened
@@ -670,7 +677,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms)), selection: chosen, place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -697,7 +704,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
 }
 
-fn unreachable_handles(_catalog: store.Schema) -> Result[Hd, store.Error] {
+fn unreachable_schema(mut _catalog: store.Declare) -> Result[Hd, store.Error] {
     fail("a refused opener called handles")
 }
 
@@ -705,8 +712,8 @@ fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Sele
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
     let (_sender, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
     let mail = result.unwrap(runner.mailbox(1u64))
-    let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, code.describe(migrate),
-        code.describe(unreachable_handles), take from, take mail, tasks, 1048576u64)
+    let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, None,
+        code.describe(unreachable_schema), take from, take mail, tasks, 1048576u64)
     match take tried {
         Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
         Error(NotCurrent(Active(found, _, _))) => want(!legacy && found == v, "activation: wrong active version"),
@@ -727,8 +734,8 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     if phase == "write" {
         let chosen: runner.Selection = if grow { Install } else { Current(0u64) }
         let (_sender, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
-        let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, code.describe(migrate),
-            code.describe(unreachable_handles), take inbox, result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
+        let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, None,
+            code.describe(unreachable_schema), take inbox, result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
         match take attempted {
             Error(IdentityUnknown) => result.unwrap(stdout.write(out, "DONE")),
             _ => fail("disk install accepted an unavailable identity"),
@@ -745,7 +752,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -818,7 +825,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
             let mut wire = runner.wire_defaults(131072u64)
             wire.n_pool = 4194304u64
             let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
-                migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+                on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64,
                 proxies: list.new(), n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
                 stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)

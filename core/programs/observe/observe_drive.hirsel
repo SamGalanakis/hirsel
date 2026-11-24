@@ -213,7 +213,7 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let input = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
     let body = task.spawn(tasks, bytes 33554432u64, take input, drive)
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(observe_fixture.schema), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }
@@ -316,7 +316,7 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let input = JoinDrive(drive: take d, scenario: scenario)
     let body = task.spawn(tasks, bytes 33554432u64, take input, drive_join)
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.migrate), code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(observe_fixture.schema), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }

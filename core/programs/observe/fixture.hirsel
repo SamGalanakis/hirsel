@@ -1,6 +1,6 @@
 // T2 fixture. Its argument identifies the client request without a product tap.
 pub type Request: codec + send { stream: Bytes, p: u64, arg: Bytes }
-pub type Handles: send { ran: store.Table[Bytes, Request] }
+pub type Handles: shareable + send { ran: store.Table[Bytes, Request] }
 pub type Recorded: codec + send { request: Request, version: u64 }
 
 pub fn entry() -> Bytes {
@@ -64,6 +64,13 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
 pub fn handles(catalog: store.Schema) -> Result[Handles, store.Error] {
     let ca: std.codec.Codec[Request] = std.codec.of()
     let t = store.schema_table(catalog, "ran", std.codec.key_bytes(), ca)?
+    Ok(Handles(ran: t))
+}
+
+pub fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let ca: std.codec.Codec[Request] = std.codec.of()
+    let table = store.declare_table(mut d, "ran", std.codec.key_bytes(), ca)?
+    let t = store.finish(mut d, take table)?
     Ok(Handles(ran: t))
 }
 

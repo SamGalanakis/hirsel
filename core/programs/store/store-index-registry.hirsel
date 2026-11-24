@@ -24,6 +24,14 @@ fn empty_index_registry() -> IndexRegistry {
     IndexRegistry(entries: map.new())
 }
 
+fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegistry {
+    let mut registry = empty_index_registry()
+    for take binding in take bindings {
+        register_index(mut registry, take binding)
+    }
+    take registry
+}
+
 type RegisteredDecoder[J, V]: send {
     table: u32,
     id: u32,

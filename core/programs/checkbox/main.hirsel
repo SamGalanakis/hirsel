@@ -16,24 +16,16 @@ fn bit(take i: u32) -> Result[Bit, ()] {
     }
 }
 
-type Handles: send {
+type Handles: shareable + send {
     chunks: store.Table[u32, Bytes]
 }
 
 type Registry = runner.Registry[(), Handles]
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("chunks", std.codec.key_u32(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Handles, store.Error] {
-    let codec: std.codec.Codec[Bytes] = std.codec.of()
-    let chunks = store.schema_table(catalog, "chunks", std.codec.key_u32(), codec)?
+    let table = store.declare_table(mut d, "chunks", std.codec.key_u32(), codec)?
+    let chunks = store.finish(mut d, take table)?
     Ok(Handles(chunks: chunks))
 }
 
@@ -147,7 +139,7 @@ fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tas
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
     runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(),
-        selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+        selection: selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema),
         session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
         listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
 }

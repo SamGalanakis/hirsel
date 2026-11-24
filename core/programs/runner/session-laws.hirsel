@@ -173,7 +173,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     result.unwrap(transact(mut entries, add, 65536u64, DEFAULT_STEPS))
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let mut head = Head(db: take db, r: take entries, replay_identity: list.new(),
-        h: table, out: take release_to, busy: map.new(), waiting: list.new(),
+        h: arc.new(take table), out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
 
     // The retained writer block costs 32 bytes. An Ended frame with a 30-byte

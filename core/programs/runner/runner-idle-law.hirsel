@@ -49,7 +49,9 @@ fn idle_net(take seed: (Sender[()], Served[NetOp])) waits {
 
 fn idle_triggers(dir: Dir, time: Clock, random: Random, tasks: Tasks, due: u64, future: u64) -> triggers.Id waits {
     let mut db = result.unwrap(store.open(tasks, dir, time, random, disk_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(ping_migrate)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(ping_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     let tables = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
     let (entries, target) = idle_entries()
     let schedule = store.run(mut db, None, (store.copy_env(due), store.copy_env(future), store.copy_env(tables), store.copy_env(entries), store.copy_env(target)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
@@ -87,7 +89,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     wire.n_pool = 4194304u64
     let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(
         backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE,
-        migrate: code.describe(ping_migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+        on_migrate: None, schema: code.describe(ping_schema), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time,
         random: random, stop: stop, wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)

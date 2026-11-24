@@ -351,34 +351,35 @@ pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Sto
 }
 
 // Prepare handles on the same historical catalog the attempt will read.
-pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[(ReplaySource, Schema), UnknownReason], Error] waits {
-    let loaded = replay_source(db, b, v)?
-    match take loaded {
-        Ok(take source) => {
-            let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog), bindings: Some(log.new()))
-            Ok(Ok((take source, take schema)))
-        },
-        Error(reason) => Ok(Error(reason)),
-    }
+pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
+    replay_source(db, b, v)
+}
+
+fn replay_declaration_base(source: ReplaySource) -> DeclarationBase {
+    DeclarationBase(store: source.store, opened: source.open, version: source.call.base,
+        stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
+}
+
+pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
+    if !same(source.store, db.store) || source.open != open_number(db) { return Error(Foreign) }
+    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node,
+        next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new())
+    Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
 }
 
 pub fn replay_record(source: ReplaySource) -> Recorded {
     clone(source.call)
 }
 
-pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Schema, plan: Plan, failed: fn(Stop) -> Bytes, env: Env,
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Bytes, env: Env,
     body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
-    if !same(source.store, db.store) || source.open != open_number(db) || !same(selected.store, db.store) ||
-        std.page.stamp(std.page.image_of(selected.catalog.root)) != std.page.stamp(std.page.image_of(source.base.catalog.root)) {
+    let Open = selected.mode else { return Error(Foreign) }
+    if !same(source.store, db.store) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {
         return Error(Foreign)
     }
-    let Schema(bindings: take bindings, ..) = take selected
-    let Some(take registration) = take bindings else { return Error(Foreign) }
-    let declared = log.finish(take registration)
-    let mut registry = empty_index_registry()
-    for take binding in take declared {
-        register_index(mut registry, take binding)
-    }
+    complete_declaration(selected)?
+    let Declare(plan: SchemaPlan(bindings: take bindings, ..), ..) = take selected
+    let registry = declared_index_registry(take bindings)
     replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) })
 }
 

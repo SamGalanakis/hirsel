@@ -6,7 +6,7 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 0u64, 1u64)
     let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
@@ -87,7 +87,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
             return false
         }
     }
-    publisher(take reg, take h, result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds)
+    publisher(take reg, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds)
     match channel.try_receive(told_from) {
         Ok(a) => if a.who != 1u64 { return false },
         _ => return false,
@@ -181,7 +181,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let v2 = store.version(c2)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -274,7 +274,7 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let k1 = query_key(code.describe(q1))
     let _ = at_base(mut b, 1u64, 1u32, clone(k1), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, clone(k1), no_arg())
@@ -534,7 +534,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 2u64, 0u64)
     let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q_late)), no_arg())
@@ -633,7 +633,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 524288u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -687,7 +687,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let vb = store.version(bs)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
     match channel.receive(ready_from) {
         Ok(None) => (),
@@ -884,7 +884,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let ca: std.codec.Codec[u32] = std.codec.of()
     let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
     if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
@@ -933,7 +933,7 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let ca: std.codec.Codec[u32] = std.codec.of()
     let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64
         && list.len(o.ended) == 1u64 && o.ended[0].0 == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64))

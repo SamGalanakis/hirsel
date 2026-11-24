@@ -72,6 +72,13 @@ fn trigger_law_handles(catalog: store.Schema) -> Result[TriggerLawTables, store.
     Ok(TriggerLawTables(effects: take effects))
 }
 
+fn trigger_law_schema(mut d: store.Declare) -> Result[TriggerLawTables, store.Error] {
+    let _ = triggers.declare_tables(mut d)?
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    let declared = store.declare_table(mut d, "trigger-law-effects", std.codec.key_u64(), codec)?
+    Ok(TriggerLawTables(effects: store.finish(mut d, take declared)?))
+}
+
 fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take digit: u64) -> Result[u64, u64] {
     let old = match result.unwrap(store.fetch(tx, h.effects, 0u64)) { Some(value) => value, None => 0u64 }
     let next = old * 10u64 + digit
@@ -104,7 +111,7 @@ fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sende
     let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
     let h = result.unwrap(store.with_schema(mut db, code.describe(trigger_law_handles)))
     let (out, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
-    let head = Head(db: take db, r: take reg, replay_identity: list.new(), h: take h, out: take out,
+    let head = Head(db: take db, r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take out,
         busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false,
         trigger_drive: Some(take drive))
     (take head, take from)
@@ -484,7 +491,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest),
         clock: c, tasks: tasks, n_place: new_n_place, place: new_place,
-        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: clone(new_entries))
+        on_migrate: None, schema: code.describe(trigger_law_schema), triggers: clone(new_entries))
     result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
@@ -595,7 +602,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest),
         clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty),
-        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: triggers.empty_entries())
+        on_migrate: None, schema: code.describe(trigger_law_schema), triggers: triggers.empty_entries())
     result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
@@ -614,8 +621,8 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let drain = latest.new(arc.new(initial_window))
     let triggering = if explicit_empty { Some(trigger_law_config(triggers.empty_entries())) } else { None }
     let job = ManagedHead(backing: Disk(dir), options: clone(options), selection: selection, tasks: tasks, clock: c, random: r,
-        place: code.describe(trigger_scan_law_empty), migrate: code.describe(trigger_scan_law_keep_schema),
-        handles: code.describe(trigger_law_handles), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
+        place: code.describe(trigger_scan_law_empty), on_migrate: None,
+        schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),
         cut: result.unwrap(cut_activity()), triggering: take triggering, idle: None, expected_store: None)
     let allowance = disk_store_bytes(options) + job.n_place + job.n_publisher
@@ -855,7 +862,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let mut cl = Client(caches: list.new(), last: list.new())
     let k1 = query_key(code.describe(q1))
     let kf = query_key(code.describe(qf))
@@ -942,7 +949,7 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 7, 70)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
     let h = result.unwrap(subs_handles(mut db))
-    let mut b = Board(r: take reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
     let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
     set(mut db, t, 8, 80)

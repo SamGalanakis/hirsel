@@ -6,18 +6,10 @@ type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
 }
 
@@ -106,7 +98,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) ->
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood, net: net, random: random)
     let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

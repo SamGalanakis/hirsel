@@ -27,6 +27,15 @@ type Tables {
 fn caps_name() -> String { "store.steps.caps" }
 fn rows_name() -> String { "store.steps.rows" }
 
+pub fn declare_tables(mut d: store.Declare) -> Result[(), store.Error] {
+    let caps = store.declare_table(mut d, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
+    let _ = store.finish(mut d, take caps)?
+    let row: std.codec.Codec[Row] = std.codec.of()
+    let rows = store.declare_table(mut d, rows_name(), std.codec.key_bytes(), row)?
+    let _ = store.finish(mut d, take rows)?
+    Ok(())
+}
+
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     ensure_table(store.migration_create_table(mut phase, store.spec(caps_name(), std.codec.key_bytes(), std.codec.of_u64())))?
     let row: std.codec.Codec[Row] = std.codec.of()

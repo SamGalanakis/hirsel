@@ -1,12 +1,11 @@
 fn empty_place(mut reg: Registry[(), ()]) -> Result[(), RegisterError] { Ok(()) }
-fn empty_migrate(mut m: store.Migration) -> Result[(), store.Error] { Ok(()) }
-fn empty_handles(s: store.Schema) -> Result[(), store.Error] { Ok(()) }
+fn empty_schema(mut d: store.Declare) -> Result[(), store.Error] { Ok(()) }
 
 fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
     let mut session_sizes = wire_defaults(65536u64)
     session_sizes.n_pool = 4194304u64
     PlaceConfig(backing: take disk, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(empty_place), n_place: 262144u64,
-        migrate: code.describe(empty_migrate), handles: code.describe(empty_handles), session: session_sizes, max_sessions: 1u64,
+        on_migrate: None, schema: code.describe(empty_schema), session: session_sizes, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
 }

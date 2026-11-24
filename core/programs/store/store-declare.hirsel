@@ -62,8 +62,27 @@ pub fn declare_follower(f: Follower) -> Declare {
 pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[Declare, Error] waits {
     require_memory_collections(store_has_tiered(db), Migrate)?
     let staged = stage_migration(db, tasks, configure)?
-    let StagedMigration(base, plan: take plan) = take staged
+    let StagedMigration(base, plan: take plan, ..) = take staged
     Ok(new_declaration(Migrate, base, take plan, is_disk(db)))
+}
+
+pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Error] {
+    let Migrate = d.mode else { return Error(Foreign) }
+    if !same_declaration_base(d.base, declaration_base(db)) { return Error(Foreign) }
+    complete_declaration(d)?
+    let Declare(base, plan: take plan, ..) = take d
+    Ok(StagedMigration(base, plan: take plan, declared: true))
+}
+
+pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]]) -> Result[Declare, Error] waits {
+    match configure {
+        Some(callback) => declare_migration(source.db, tasks, callback),
+        None => declare(source.db, Migrate),
+    }
+}
+
+pub fn finish_export_declaration(source: Preparation, take d: Declare) -> Result[StagedMigration, Error] {
+    finish_migration(source.db, take d)
 }
 
 fn declaration_name(name: String) -> Result[(), Error] {
@@ -156,6 +175,28 @@ fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Err
         return copied(hash)
     }
     Ok(list.new())
+}
+
+pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: String,
+    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
+    active_table(d, t)?
+    d.failed = true
+    declaration_name(name)?
+    let lookup_key = catalog_index_key(t.handle.id, name)?
+    if let Migrate = d.mode {
+        let missing = match get_page_row(d.plan.roots.catalog, lookup_key) { None => true, Some(_) => false }
+        if missing { stage_create_index(mut d.plan, t.handle, name, by, key)? }
+    }
+    let (take address, take record) = read_catalog_index(d.plan.store, d.plan.roots.catalog, t.handle, name, by, key)?
+    if map.contains(d.indexes, record.id) { return Error(Exists(named(name)?)) }
+    let handle: Index[J, K, V, ()] = catalog_index_handle(d.plan.roots.catalog, t.handle, record, take address, key, None)?
+    match d.mode {
+        Follower => (),
+        _ => list.push(mut d.plan.bindings, bind_index(t.handle, record, by, key)),
+    }
+    map.insert(mut d.indexes, record.id, ())
+    d.failed = false
+    Ok(take handle)
 }
 
 pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
@@ -345,11 +386,7 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     complete_declaration(d)?
     let Declare(plan: take candidate, ..) = take d
     let mut proposal = take candidate
-    let bindings = replace(mut proposal.bindings, list.new())
-    let mut registry = empty_index_registry()
-    for take binding in take bindings {
-        register_index(mut registry, take binding)
-    }
+    let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
     if proposal.changed {
         let committed = publish_schema_plan(mut db, take proposal)?
         db.indexes = take registry

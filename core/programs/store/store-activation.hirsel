@@ -1,6 +1,7 @@
 pub opaque type StagedMigration {
     base: DeclarationBase,
-    plan: SchemaPlan
+    plan: SchemaPlan,
+    declared: bool
 }
 
 fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -70,13 +71,22 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     if !same_declaration_base(staged.base, declaration_base(db)) {
         return Error(Foreign)
     }
-    let StagedMigration(plan: take plan, ..) = take staged
+    let StagedMigration(plan: take staged_plan, declared: declared, ..) = take staged
+    let mut plan = take staged_plan
+    let registration = if declared {
+        Some(declared_index_registry(replace(mut plan.bindings, list.new())))
+    } else {
+        None
+    }
     let old_fence = db.fence
     if is_disk(db) {
         db.fence = 1
     }
     match publish_schema_plan_binding(mut db, take plan, activation) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if let Some(take registry) = take registration { db.indexes = take registry }
+            Ok(())
+        },
         Error(take problem) => {
             db.fence = old_fence;
             Error(take problem)

@@ -2342,7 +2342,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 && fd.path.0.name == source_name
         })?;
         let fd = &self.p.fns[f];
-        crate::identity::code_identity(&self.p.decls, &self.t, fd)
+        crate::identity::code_identity(&self.p.decls, &self.t, fd, &[])
     }
 
     /// A `Bytes` view `{bytes, length, 0}` of static identity bytes.

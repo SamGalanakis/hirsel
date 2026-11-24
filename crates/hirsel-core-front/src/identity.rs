@@ -1,8 +1,9 @@
 //! PROG-9 identity bytes: the one encoder of `code.identity`.
 //!
-//! Version 1 is the byte `0x01` followed by the UTF-8 text `D S`. `D` is the definition
+//! Version 1 is the byte `0x01` followed by the UTF-8 text `D A S`. `D` is the definition
 //! identity, with every byte of a component other than an ASCII letter, digit or `_`
-//! written `%XX`. `S` is the header's meaning: no parameter names; the default mode is
+//! written `%XX`. `A` is the type arguments and their declared dictionaries, in the order
+//! their parameters first occur in `S`. `S` is the header's meaning: no parameter names; the default mode is
 //! not written; no generics list; roots `^i` (a region generic, numbered by first
 //! naming in the parameters then the result, any named in neither next in declared
 //! order) and `#i` (a parameter by its position); type paths are definition identities, aliases expanded; a missing result is
@@ -10,37 +11,34 @@
 //! between two adjacent words (keywords, identifiers, numbers, definition identities,
 //! and the root names `^i` and `#i`).
 use crate::decls::Role;
-use crate::decls::{FnDecl, TypeDecl};
+use crate::decls::{FnDecl, TypeDecl, declared_bound_names};
 use crate::types::*;
 use hirsel_core_ids::DefPath;
 use std::fmt::Write;
 
-/// The identity bytes of a top-level function with no type parameters, or `None` for a
-/// header PROG-9 does not describe (one that `code.describe` refuses). Region generics
-/// are numbered as the writer first meets them, so the declared order is not part of the
-/// bytes.
+/// The identity of a top-level function or an instance. Arguments use the declaration's
+/// generic slots, including region slots, which have no entry in `A`. Pass an empty
+/// slice for a function without type parameters.
 pub(crate) fn code_identity(
     decls: &crate::Rows<TypeDecl>,
     t: &impl TyRead,
     fd: &FnDecl,
+    args: &[TyId],
 ) -> Option<Vec<u8>> {
     let TyKind::Fn(params, result, waits, Callable::Plain) = t.kind(fd.callable).clone() else {
         return None;
     };
-    if fd.generics.iter().any(|g| !g.region) {
+    let type_count = fd.generics.iter().filter(|g| !g.region).count();
+    if type_count > 0 && args.len() != fd.generics.len() {
         return None;
     }
-    let mut w = Words {
-        decls,
-        s: String::new(),
-        word: false,
-        named: Vec::with_capacity(fd.generics.len()),
-    };
-    w.definition(&fd.path);
+    let mut w = Words::new(decls, true);
     w.callable(t, &params, result, waits)?;
     // Region generics named in neither the parameters nor the result, in declared order.
-    for i in 0..fd.generics.len() as u32 {
-        w.number(i);
+    for (i, g) in fd.generics.iter().enumerate() {
+        if g.region {
+            number(&mut w.regions, i as u32);
+        }
     }
     let mut pairs = Vec::with_capacity(fd.outlives.len());
     for &(a, b) in &fd.outlives {
@@ -61,10 +59,51 @@ pub(crate) fn code_identity(
         w.punct(":");
         w.written_root(*b);
     }
-    let mut bytes = Vec::with_capacity(w.s.len() + 1);
+    if w.parameters.len() != type_count {
+        return None;
+    }
+    let mut prefix = Words::new(decls, false);
+    prefix.definition(&fd.path);
+    if type_count > 0 {
+        prefix.punct("[");
+        for (i, &slot) in w.parameters.iter().enumerate() {
+            if i > 0 {
+                prefix.punct(",");
+            }
+            prefix.ty(t, args[slot as usize])?;
+        }
+        prefix.punct("]");
+        let mut separator = "{";
+        for &slot in &w.parameters {
+            for bound in declared_bound_names(fd.generics[slot as usize].bounds) {
+                prefix.punct(separator);
+                prefix.word(bound);
+                prefix.punct("[");
+                prefix.ty(t, args[slot as usize])?;
+                prefix.punct("]");
+                separator = ",";
+            }
+        }
+        if separator == "," {
+            prefix.punct("}");
+        }
+    }
+    let mut bytes = Vec::with_capacity(1 + prefix.s.len() + w.s.len());
     bytes.push(1);
+    bytes.extend_from_slice(prefix.s.as_bytes());
     bytes.extend_from_slice(w.s.as_bytes());
     Some(bytes)
+}
+
+/// Number a declared slot by its first occurrence.
+fn number(slots: &mut Vec<u32>, slot: u32) -> u32 {
+    match slots.iter().position(|&n| n == slot) {
+        Some(i) => i as u32,
+        None => {
+            slots.push(slot);
+            slots.len() as u32 - 1
+        }
+    }
 }
 
 /// A root a header can name: a region generic (`^i`, sorted first, `i` its declared
@@ -84,10 +123,24 @@ struct Words<'a> {
     /// The last thing written was a word, so the next word is preceded by one space.
     word: bool,
     /// Declared region generic positions in the order first named: `^k` is `named[k]`.
-    named: Vec<u32>,
+    regions: Vec<u32>,
+    /// Declared type generic positions in the order first named.
+    parameters: Vec<u32>,
+    header: bool,
 }
 
-impl Words<'_> {
+impl<'a> Words<'a> {
+    fn new(decls: &'a crate::Rows<TypeDecl>, header: bool) -> Self {
+        Self {
+            decls,
+            s: String::new(),
+            word: false,
+            regions: vec![],
+            parameters: vec![],
+            header,
+        }
+    }
+
     fn word(&mut self, w: &str) {
         if self.word {
             self.s.push(' ');
@@ -101,22 +154,10 @@ impl Words<'_> {
         self.word = false;
     }
 
-    /// The written number of the declared region generic `i`, the next one when it is
-    /// named here first.
-    fn number(&mut self, i: u32) -> u32 {
-        match self.named.iter().position(|&n| n == i) {
-            Some(k) => k as u32,
-            None => {
-                self.named.push(i);
-                self.named.len() as u32 - 1
-            }
-        }
-    }
-
     /// A root key with a region generic renumbered to its written number.
     fn key(&mut self, (kind, i): (u8, u32)) -> (u8, u32) {
         if kind == 0 {
-            (0, self.number(i))
+            (0, number(&mut self.regions, i))
         } else {
             (1, i)
         }
@@ -220,7 +261,7 @@ impl Words<'_> {
                 self.punct("]");
             }
             // A root, as an anchor (`T in r`) or a region type argument (`in r`).
-            TyKind::Region(_) => {
+            TyKind::Region(_) if self.header => {
                 self.word("in");
                 self.root(root_key(t, ty)?);
             }
@@ -249,7 +290,11 @@ impl Words<'_> {
                 self.word("fn");
                 self.callable(t, &ps, r, w)?;
             }
-            TyKind::Error | TyKind::Hole | TyKind::Param(_) => return None,
+            TyKind::Param(slot) if self.header => {
+                let index = number(&mut self.parameters, slot);
+                self.word(&format!("${index}"));
+            }
+            TyKind::Error | TyKind::Hole | TyKind::Param(_) | TyKind::Region(_) => return None,
         }
         Some(())
     }

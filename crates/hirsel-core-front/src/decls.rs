@@ -8,7 +8,6 @@ use hirsel_core_layout::{Recipe, Scalar, Width};
 use hirsel_core_resolve::{DefinitionId, Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind, Symbol};
 use std::hash::BuildHasher;
-
 /// Bound bits (OWN-4).
 pub const PLAIN: u16 = 1;
 pub const SHAREABLE: u16 = 2;
@@ -70,6 +69,10 @@ pub(crate) fn counted(k: usize, unit: &str) -> String {
 }
 
 pub fn bound_names(b: u16) -> String {
+    declared_bound_names(b).collect::<Vec<_>>().join(" + ")
+}
+
+pub(crate) fn declared_bound_names(b: u16) -> impl Iterator<Item = &'static str> {
     let names = [
         (PLAIN, "plain"),
         (SHAREABLE, "shareable"),
@@ -86,12 +89,9 @@ pub fn bound_names(b: u16) -> String {
     ];
     names
         .into_iter()
-        .filter(|(bit, _)| b & bit != 0)
+        .filter(move |(bit, _)| b & bit != 0)
         .map(|(_, name)| name)
-        .collect::<Vec<_>>()
-        .join(" + ")
 }
-
 /// Holds bits (OWN-2).
 pub const H_RESOURCE: u8 = 1;
 pub const H_CAPABILITY: u8 = 2;

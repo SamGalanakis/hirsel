@@ -1,0 +1,129 @@
+// launch.md H1-b fixtures for tools/tests/ingress_front.py: the stream listener
+// behind the TLS front, and the HAProxy front written by platform's generator.
+fn push_addr(mut line: String, a: Addr) {
+    match a.ip {
+        V4(v) => {
+            for shift in[24u32, 16u32, 8u32, 0u32] {
+                string.push_u64(mut line, int.widen((v >> shift) & 255u32))
+                if shift != 0u32 {
+                    string.push(mut line, ".")
+                }
+            }
+        },
+        V6(_, _) => string.push(mut line, "v6")
+    }
+    string.push(mut line, ":")
+    string.push_u64(mut line, int.widen(a.port))
+}
+
+fn refusal_name(r: std.proxy.Refusal) -> String {
+    match r {
+        Untrusted => "Untrusted",
+        Missing => "Missing",
+        Malformed => "Malformed",
+        Local => "Local",
+        Family => "Family",
+        TooLong => "TooLong",
+        Silent => "Silent",
+        Ended => "Ended",
+        Failed(_) => "Failed"
+    }
+}
+
+fn log(out: Stdout, take line: String) -> Result[(), ()] waits {
+    let mut l = take line
+    string.push(mut l, "\n")
+    match stdout.write(out, l) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(())
+    }
+}
+
+// Echoes the stream after the header until the front ends it.
+fn echo(take s: Socket) -> String waits {
+    let (take r, take w) = net.split(take s)
+    let mut reader = take r
+    let mut writer = take w
+    let mut received = 0u64
+    loop {
+        let mut buf: Bytes = list.with_capacity(4096)
+        match host.recv_bounded(mut reader, mut buf, 4096, Never) {
+            Ok(0) => break,
+            Ok(n) => {
+                received += n
+                let mut at = 0u64
+                while at < n {
+                    match host.send_pair(mut writer, list.slice(buf, at, n), b"", Never) {
+                        Ok(sent) => {
+                            at += sent
+                        },
+                        Error(_) => break
+                    }
+                }
+            },
+            Error(_) => break
+        }
+    }
+    let mut line = string.from("end ")
+    string.push_u64(mut line, received)
+    take line
+}
+
+// One connection at a time on 127.0.0.1:18202. Only the front at 127.0.0.1 is trusted.
+// Every accept is logged, so a test can prove a name never reached this listener.
+pub fn listener(n: Net, clock: Clock, out: Stdout) -> Result[(), ()] waits {
+    let mut trusted: List[std.wsock.Prefix] = list.new()
+    list.push(mut trusted, option.unwrap(std.wsock.parse_prefix("127.0.0.1/32")))
+    let config = std.proxy.config(trusted, std.proxy.DEFAULT_HEADER_MAX, std.proxy.DEFAULT_HEADER_MS)?
+    let (take l, _) = match host.listen(n, Addr(ip: V4(0x7f000001), port: 18202), 16) {
+        Ok(take pair) => take pair,
+        Error(_) => return Error(())
+    }
+    let mut accepting = take l
+    log(out, "listening")?
+    loop {
+        let (take socket, peer) = match host.accept(mut accepting, Never) {
+            Ok(take pair) => take pair,
+            Error(_) => return Error(())
+        }
+        let accepted_ns = host.mono_ns(clock)
+        let mut line = string.from("accept ")
+        push_addr(mut line, peer)
+        log(out, take line)?
+        match std.proxy.accept(take socket, peer, config, clock, accepted_ns) {
+            Ok((take s, header)) => {
+                let mut h = string.from("header ")
+                push_addr(mut h, header.source)
+                string.push(mut h, " ")
+                push_addr(mut h, header.destination)
+                log(out, take h)?
+                let ended = echo(take s)
+                log(out, take ended)?
+            },
+            Error(r) => {
+                let mut refused = string.from("refused ")
+                string.push(mut refused, refusal_name(r))
+                log(out, take refused)?
+            }
+        }
+    }
+}
+
+// The HAProxy front for one HTTPS name and one stream name, from H1-c's generator.
+pub fn haproxy(out: Stdout) -> Result[(), ()] waits {
+    let mut web_names: List[String] = list.new()
+    list.push(mut web_names, "web.test")
+    let mut stream_names: List[String] = list.new()
+    list.push(mut stream_names, "stream.test")
+    let mut routes: List[platform.Route] = list.new()
+    list.push(mut routes, platform.Route(group: "web", listen: "127.0.0.1:18201", front: Some(platform.operator.Front(names: take web_names, forward: Http))))
+    list.push(mut routes, platform.Route(group: "stream", listen: "127.0.0.1:18202", front: Some(platform.operator.Front(names: take stream_names, forward: Stream))))
+    let config = match platform.haproxy(routes, "/usr/local/etc/haproxy/certs", 300000u32) {
+        Ok(take c) => take c,
+        Error(_) => return Error(())
+    }
+    match stdout.write(out, config) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(())
+    }
+}

@@ -18,6 +18,7 @@ std = { major = 1 }
 "store-tiered-cache.hirsel" = "store"
 "store-tiered-pager.hirsel" = "store"
 "store-tiered-attempt.hirsel" = "store"
+"store-tiered-pins.hirsel" = "store"
 "store-tiered-overlay.hirsel" = "store"
 "store-manifest.hirsel" = "store"
 "store-manifest-wire.hirsel" = "store"

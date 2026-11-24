@@ -628,3 +628,27 @@ fn test_l62_attempt_touch_order() -> Result[(), Error] {
     map.insert(mut visible, (7, 4168), l70_cache_frame(2))
     l62_refusal(visible)
 }
+
+@test
+fn test_l62_root_scoped_pins() -> Result[(), Error] {
+    let old_root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: 90)
+    let new_root = TieredPinRoot(domain: 1, branch: 0, generation: 2, root_stamp: 90)
+    let mut touched: Map[u64, ()] = map.new()
+    map.insert(mut touched, 1, ())
+    let mut pins = empty_tiered_pins(old_root, 2098)
+    if !tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(1))? || !tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(2))? || !tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(3))? {
+        fail("L62: failed to admit the target after removing a hint")
+    }
+    if list.len(pins.ordered) != 2 || pins.ordered[0u64] != (7u64, 2120u64) || pins.ordered[1u64] != (7u64, 6216u64) || pins.retained != 2098 {
+        fail("L62: newest untouched pin must go first")
+    }
+    map.insert(mut touched, 3, ())
+    if tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(4))? || pins.retained != 2098 {
+        fail("L62: the full partition evicted touched pins")
+    }
+    tiered_reset_pins(mut pins, new_root)
+    if list.len(pins.ordered) != 0 || map.len(pins.frames) != 0 || pins.retained != 0 || tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(4))? {
+        fail("L62: a stale delivery installed a pin into the next root")
+    }
+    Ok(())
+}

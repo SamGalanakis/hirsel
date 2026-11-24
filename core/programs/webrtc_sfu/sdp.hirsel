@@ -1,0 +1,420 @@
+pub type Media: key = Audio | Video | Application
+
+pub type Direction: key = SendRecv | SendOnly | RecvOnly | Inactive
+
+pub type Setup: key = Active | Passive | ActPass
+
+pub type Codec: key = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec
+
+pub type Ext: key = Mid | RidExtension | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor
+
+pub type Vad: key = VadOn | VadOff
+
+pub type ExtForm: key = OneOnly | TwoOnly | Mixed
+
+pub type RidDir: key = RidSend | RidRecv
+
+pub type Port: key = Rejected | BundleOnly | Port(u16)
+
+pub type Format {
+    pt: u8,
+    codec: Codec,
+    clock: u32,
+    channels: u8,
+    fmtp: Bytes,
+    apt: Option[u8],
+    nack: bool,
+    pli: bool,
+    fir: bool,
+    twcc: bool
+}
+
+pub type Extmap {
+    id: u8,
+    ext: Ext,
+    dir: Option[Direction],
+    vad: Option[Vad]
+}
+
+pub type Id: key {
+    name: Inline[u8, 16],
+    len: u8
+}
+
+pub type Rid {
+    id: Inline[u8, 16],
+    len: u8,
+    dir: RidDir,
+    pts: List[u8],
+    depend: List[u8],
+    unresolved: List[Id],
+    restrictions: Bytes
+}
+
+pub type Stream {
+    alternatives: List[u8],
+    paused: List[bool]
+}
+
+pub type Simulcast {
+    send: List[Stream],
+    recv: List[Stream]
+}
+
+pub type Section {
+    media: Media,
+    protocol: Bytes,
+    fallback: Bytes,
+    connection: Bytes,
+    port: Port,
+    mid: Inline[u8, 16],
+    mid_len: u8,
+    dir: Direction,
+    formats: List[Format],
+    extmaps: List[Extmap],
+    mixed_extmaps: bool,
+    rids: List[Rid],
+    simulcast: Simulcast,
+    ssrcs: List[u32],
+    rtx_pairs: List[(u32, u32)],
+    msid: Bytes,
+    rtcp_mux: bool,
+    rtcp_rsize: bool
+}
+
+pub type Description {
+    origin_session: u64,
+    origin_version: u64,
+    bundle: List[u8],
+    ice_ufrag: Bytes,
+    ice_pwd: Bytes,
+    ice_lite: bool,
+    ice_options: Bytes,
+    mixed_extmaps: bool,
+    fingerprint: Inline[u8, 32],
+    setup: Setup,
+    tls_id: Bytes,
+    sections: List[Section],
+    candidates: List[Bytes],
+    end_of_candidates: bool
+}
+
+pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | AnswerMismatch(u8) | AssociationChanged | Capacity(Capacity)
+
+const TEXT_LIMIT: u64 = 32000
+
+const SECTION_LIMIT: u64 = 64
+
+const FORMAT_LIMIT: u64 = 32
+
+const RID_LIMIT: u64 = 4
+
+pub fn description() -> Description {
+    Description(origin_session: 0, origin_version: 0, bundle: list.new(), ice_ufrag: b"", ice_pwd: b"", ice_lite: false, ice_options: b"", mixed_extmaps: false, fingerprint:[0; 32], setup: ActPass, tls_id: b"", sections: list.new(), candidates: list.new(), end_of_candidates: false)
+}
+
+fn empty_section(media: Media, port: Port, take protocol: Bytes) -> Section {
+    Section(media: media, protocol: take protocol, fallback: b"", connection: b"IN IP4 0.0.0.0", port: port, mid:[0; 16], mid_len: 0, dir: SendRecv, formats: list.new(), extmaps: list.new(), mixed_extmaps: false, rids: list.new(), simulcast: empty_simulcast(), ssrcs: list.new(), rtx_pairs: list.new(), msid: b"", rtcp_mux: false, rtcp_rsize: false)
+}
+
+fn empty_simulcast() -> Simulcast {
+    Simulcast(send: list.new(), recv: list.new())
+}
+
+fn same(a: Bytes, b: Bytes) -> bool {
+    list.compare_bytes(a, b) == Equal
+}
+
+fn ascii_lower(b: u8) -> u8 {
+    if b >= b'A' && b <= b'Z' {
+        b + 32
+    } else {
+        b
+    }
+}
+
+fn ascii_same(a: Bytes, b: Bytes) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0 .. list.len(a) {
+        if ascii_lower(a[i]) != ascii_lower(b[i]) {
+            return false
+        }
+    }
+    true
+}
+
+fn decimal(b: Bytes, max: u64) -> Option[u64] {
+    if list.len(b) == 0 {
+        return None
+    }
+    let mut n: u64 = 0
+    for c in b {
+        if c < b'0' || c > b'9' {
+            return None
+        }
+        let digit: u64 = int.widen(c - b'0')
+        let Some(next) = int.checked_mul(n, 10) else {
+            return None
+        }
+        let Some(value) = int.checked_add(next, digit) else {
+            return None
+        }
+        if value > max {
+            return None
+        }
+        n = value
+    }
+    Some(n)
+}
+
+fn delimiter(b: Bytes, start: u64, sep: u8) -> u64 {
+    let mut at = start
+    while at < list.len(b) && b[at] != sep {
+        at += 1
+    }
+    at
+}
+
+fn space(c: u8) -> bool {
+    c == b' ' || c == b'\t'
+}
+
+fn whitespace(b: Bytes, start: u64) -> u64 {
+    let mut at = start
+    while at < list.len(b) && !space(b[at]) {
+        at += 1
+    }
+    at
+}
+
+fn skip_space(b: Bytes, start: u64) -> u64 {
+    let mut at = start
+    while at < list.len(b) && space(b[at]) {
+        at += 1
+    }
+    at
+}
+
+fn words(b: Bytes) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    let mut at = skip_space(b, 0)
+    while at < list.len(b) {
+        let end = whitespace(b, at)
+        list.push(mut out, clone(list.slice(b, at, end)))
+        at = skip_space(b, end)
+    }
+    out
+}
+
+fn pieces(b: Bytes, sep: u8) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    let mut at: u64 = 0
+    loop {
+        let end = delimiter(b, at, sep)
+        list.push(mut out, clone(list.slice(b, at, end)))
+        if end == list.len(b) {
+            break
+        }
+        at = end + 1
+    }
+    out
+}
+
+fn parameter(b: Bytes, key: Bytes) -> Option[Bytes] {
+    for part in pieces(b, b';') {
+        let start = skip_space(part, 0)
+        let at = delimiter(part, start, b'=')
+        if at < list.len(part) && same(trim(list.slice(part, start, at)), key) {
+            return Some(clone(trim(list.slice(part, at + 1, list.len(part)))))
+        }
+    }
+    None
+}
+
+fn trim(b: Bytes) -> View[Bytes] in b {
+    let start = skip_space(b, 0)
+    let mut end = list.len(b)
+    while end > start && space(b[end - 1]) {
+        end -= 1
+    }
+    list.slice(b, start, end)
+}
+
+fn same_parameters(a: Bytes, b: Bytes) -> bool {
+    if same(a, b) {
+        return true
+    }
+    let aa = pieces(a, b';')
+    let bb = pieces(b, b';')
+    if list.len(aa) != list.len(bb) {
+        return false
+    }
+    let mut used: List[bool] = list.new()
+    list.fill(mut used, list.len(bb), false)
+    for x in aa {
+        let x_at = delimiter(x, 0, b'=')
+        if x_at == list.len(x) {
+            return false
+        }
+        let key = trim(list.slice(x, 0, x_at))
+        let value = trim(list.slice(x, x_at + 1, list.len(x)))
+        let mut found = false
+        for j in 0 .. list.len(bb) {
+            if used[j] {
+                continue
+            }
+            let y = bb[j]
+            let y_at = delimiter(y, 0, b'=')
+            if y_at < list.len(y) && same(key, trim(list.slice(y, 0, y_at))) && same(value, trim(list.slice(y, y_at + 1, list.len(y)))) {
+                used[j] = true
+                found = true
+                break
+            }
+        }
+        if !found {
+            return false
+        }
+    }
+    true
+}
+
+fn connection(b: Bytes) -> bool {
+    let fields = words(b)
+    list.len(fields) == 3 && same(fields[0], b"IN") && (same(fields[1], b"IP4") || same(fields[1], b"IP6")) && token(fields[2])
+}
+
+fn token(b: Bytes) -> bool {
+    if list.len(b) == 0 {
+        return false
+    }
+    for c in b {
+        if c <= 32 || c >= 127 {
+            return false
+        }
+    }
+    true
+}
+
+fn identifier(b: Bytes, rid: bool) -> Option[Id] {
+    if list.len(b) > 16 || !token(b) {
+        return None
+    }
+    let mut id = Id(name:[0; 16], len: int.narrow(list.len(b)))
+    for i in 0 .. list.len(b) {
+        let c = b[i]
+        let l = ascii_lower(c)
+        if rid && !(l >= b'a' && l <= b'z') && !(c >= b'0' && c <= b'9') && c != b'-' && c != b'_' {
+            return None
+        }
+        id.name[i] = c
+    }
+    Some(id)
+}
+
+fn section_id(s: Section) -> Id {
+    Id(name: s.mid, len: s.mid_len)
+}
+
+fn rid_id(r: Rid) -> Id {
+    Id(name: r.id, len: r.len)
+}
+
+fn direction(b: Bytes) -> Option[Direction] {
+    if same(b, b"sendrecv") {
+        Some(SendRecv)
+    } else if same(b, b"sendonly") {
+        Some(SendOnly)
+    } else if same(b, b"recvonly") {
+        Some(RecvOnly)
+    } else if same(b, b"inactive") {
+        Some(Inactive)
+    } else {
+        None
+    }
+}
+
+fn has_send(dir: Direction) -> bool {
+    dir == SendRecv || dir == SendOnly
+}
+
+fn has_recv(dir: Direction) -> bool {
+    dir == SendRecv || dir == RecvOnly
+}
+
+fn directions(send: bool, recv: bool) -> Direction {
+    if send && recv {
+        SendRecv
+    } else if send {
+        SendOnly
+    } else if recv {
+        RecvOnly
+    } else {
+        Inactive
+    }
+}
+
+fn format_config(a: Format, b: Format) -> bool {
+    a.pt == b.pt && a.codec == b.codec && a.clock == b.clock && a.channels == b.channels && same_parameters(a.fmtp, b.fmtp)
+}
+
+fn ext_uri(ext: Ext) -> Bytes {
+    match ext {
+        Mid => b"urn:ietf:params:rtp-hdrext:sdes:mid",
+        RidExtension => b"urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
+        RepairedRid => b"urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id",
+        AudioLevel => b"urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+        AbsSendTime => b"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+        TransportCc => b"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+        DependencyDescriptor => b"https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension",
+    }
+}
+
+fn codec_name(codec: Codec) -> Bytes {
+    match codec {
+        Opus => b"opus",
+        Vp8 => b"VP8",
+        Vp9 => b"VP9",
+        H264 => b"H264",
+        Av1 => b"AV1",
+        Rtx => b"rtx",
+        Red => b"red",
+        Ulpfec => b"ulpfec",
+    }
+}
+
+fn has_mid(s: Section) -> bool {
+    for x in s.extmaps {
+        if x.ext == Mid {
+            return true
+        }
+    }
+    false
+}
+
+fn has_pt(formats: List[Format], pt: u8) -> bool {
+    for f in formats {
+        if f.pt == pt {
+            return true
+        }
+    }
+    false
+}
+
+fn list_has[T: key](xs: List[T], item: T) -> bool {
+    for x in xs {
+        if x == item {
+            return true
+        }
+    }
+    false
+}
+
+fn add[T](mut xs: List[T], take x: T) -> Result[(), SdpError] {
+    if let Error(e) = list.try_reserve(mut xs, 1) {
+        return Error(Capacity(e))
+    }
+    list.push(mut xs, take x)
+    Ok(())
+}

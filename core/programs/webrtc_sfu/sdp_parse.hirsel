@@ -1,0 +1,844 @@
+type Transport {
+    ufrag: Option[Bytes],
+    pwd: Option[Bytes],
+    fingerprint: Option[Inline[u8, 32]],
+    setup: Option[Setup],
+    tls_id: Option[Bytes],
+    ice_options: Option[Bytes],
+    candidates: List[Bytes],
+    ended: bool
+}
+
+type Payload {
+    format: Format,
+    known: bool
+}
+
+type Draft {
+    section: Section,
+    transport: Transport,
+    payloads: List[Payload],
+    dependencies: List[List[Id]],
+    simulcast: Option[Bytes]
+}
+
+type SessionLines {
+    version: bool,
+    origin: bool,
+    name: bool,
+    time: bool,
+    bundle: Option[List[Bytes]],
+    dir: Direction,
+    connection: Bytes,
+    transport: Transport
+}
+
+fn transport() -> Transport {
+    Transport(ufrag: None, pwd: None, fingerprint: None, setup: None, tls_id: None, ice_options: None, candidates: list.new(), ended: false)
+}
+
+fn blank_format(pt: u8) -> Format {
+    Format(pt: pt, codec: Opus, clock: 0, channels: 1, fmtp: b"", apt: None, nack: false, pli: false, fir: false, twcc: false)
+}
+
+fn mline(b: Bytes, index: u8, dir: Direction, at: u64) -> Result[Draft, SdpError] {
+    let fields = words(b)
+    if list.len(fields) < 4 || !token(fields[2]) {
+        return Error(Malformed(at))
+    }
+    let media = if same(fields[0], b"audio") {
+        Audio
+    } else if same(fields[0], b"video") {
+        Video
+    } else if same(fields[0], b"application") {
+        Application
+    } else {
+        return Error(Malformed(at))
+    }
+    let Some(n) = decimal(fields[1], 65535) else {
+        return Error(Malformed(at))
+    }
+    let port = if n == 0 {
+        Rejected
+    } else {
+        Port(int.narrow(n))
+    }
+    let mut s = empty_section(media, port, clone(fields[2]))
+    s.dir = dir
+    let mut ps: List[Payload] = list.new()
+    if media == Application {
+        let mut start: u64 = 0
+        for _ in 0u64 .. 3 {
+            start = skip_space(b, whitespace(b, start))
+        }
+        s.fallback = clone(list.slice(b, start, list.len(b)))
+    } else {
+        if list.len(fields) - 3 > FORMAT_LIMIT {
+            return Error(TooManyFormats(index))
+        }
+        for i in 3 .. list.len(fields) {
+            let Some(pt) = decimal(fields[i], 127) else {
+                return Error(Malformed(at))
+            }
+            let pt8: u8 = int.narrow(pt)
+            if pt8 >= 64 && pt8 <= 95 && port != Rejected {
+                return Error(PayloadConflict(pt8))
+            }
+            if let Some(_) = payload_index(ps, pt8) {
+                return Error(PayloadConflict(pt8))
+            }
+            add(mut ps, Payload(format: blank_format(pt8), known: false))?
+        }
+        s.fallback = clone(fields[3])
+    }
+    Ok(Draft(section: take s, transport: transport(), payloads: take ps, dependencies: list.new(), simulcast: None))
+}
+
+fn payload_index(ps: List[Payload], pt: u8) -> Option[u64] {
+    for i in 0 .. list.len(ps) {
+        if ps[i].format.pt == pt {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn parse_hex(b: u8) -> Option[u8] {
+    let c = ascii_lower(b)
+    if c >= b'0' && c <= b'9' {
+        Some(c - b'0')
+    } else if c >= b'a' && c <= b'f' {
+        Some(c - b'a' + 10)
+    } else {
+        None
+    }
+}
+
+fn fingerprint(b: Bytes) -> Option[Inline[u8, 32]] {
+    if list.len(b) != 95 {
+        return None
+    }
+    let mut fp: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        let at = i * 3
+        let hi = parse_hex(b[at])?
+        let lo = parse_hex(b[at + 1])?
+        if i < 31 && b[at + 2] != b':' {
+            return None
+        }
+        fp[i] = (hi << 4) | lo
+    }
+    Some(fp)
+}
+
+fn transport_attr(key: Bytes, value: Bytes, at: u64, mut t: Transport) -> Result[bool, SdpError] {
+    if same(key, b"ice-ufrag") || same(key, b"ice-pwd") || same(key, b"tls-id") {
+        if !token(value) {
+            return Error(Malformed(at))
+        }
+        if same(key, b"ice-ufrag") {
+            t.ufrag = Some(clone(value))
+        } else if same(key, b"ice-pwd") {
+            t.pwd = Some(clone(value))
+        } else {
+            t.tls_id = Some(clone(value))
+        }
+    } else if same(key, b"fingerprint") {
+        let fields = words(value)
+        if list.len(fields) == 0 {
+            return Error(Malformed(at))
+        }
+        if ascii_same(fields[0], b"sha-256") {
+            if list.len(fields) != 2 {
+                return Error(WrongFingerprint)
+            }
+            let Some(fp) = fingerprint(fields[1]) else {
+                return Error(WrongFingerprint)
+            }
+            t.fingerprint = Some(fp)
+        }
+    } else if same(key, b"setup") {
+        if same(value, b"active") {
+            t.setup = Some(Active)
+        } else if same(value, b"passive") {
+            t.setup = Some(Passive)
+        } else if same(value, b"actpass") {
+            t.setup = Some(ActPass)
+        } else {
+            return Error(Malformed(at))
+        }
+    } else if same(key, b"ice-options") {
+        if list.len(words(value)) == 0 {
+            return Error(Malformed(at))
+        }
+        t.ice_options = Some(clone(value))
+    } else if same(key, b"candidate") {
+        if list.len(value) == 0 {
+            return Error(Malformed(at))
+        }
+        add(mut t.candidates, clone(value))?
+    } else if same(key, b"end-of-candidates") {
+        t.ended = true
+    } else {
+        return Ok(false)
+    }
+    Ok(true)
+}
+
+fn supported_codec(value: Bytes) -> Option[(Codec, u32, u8)] {
+    let fields = pieces(value, b'/')
+    if list.len(fields) < 2 || list.len(fields) > 3 {
+        return None
+    }
+    let clock = decimal(fields[1], 0xffffffff)?
+    let channels = if list.len(fields) == 3 {
+        decimal(fields[2], 255)?
+    } else {
+        1
+    }
+    for codec in[Opus, Vp8, Vp9, H264, Av1, Rtx, Red, Ulpfec] {
+        let expected_clock: u64 = if codec == Opus || codec == Red {
+            48000
+        } else {
+            90000
+        }
+        let expected_channels: u64 = if codec == Opus || codec == Red {
+            2
+        } else {
+            1
+        }
+        if ascii_same(fields[0], codec_name(codec)) && clock == expected_clock && channels == expected_channels {
+            return Some((codec, int.narrow(clock), int.narrow(channels)))
+        }
+    }
+    None
+}
+
+fn feedback(mut f: Format, value: Bytes) {
+    if same(value, b"nack") {
+        f.nack = true
+    } else if same(value, b"nack pli") {
+        f.pli = true
+    } else if same(value, b"ccm fir") {
+        f.fir = true
+    } else if same(value, b"transport-cc") {
+        f.twcc = true
+    }
+}
+
+fn format_attr(key: Bytes, b: Bytes, at: u64, mut ps: List[Payload]) -> Result[(), SdpError] {
+    let end = whitespace(b, 0)
+    let value = list.slice(b, skip_space(b, end), list.len(b))
+    if end == list.len(b) || list.len(value) == 0 {
+        return Error(Malformed(at))
+    }
+    let raw_pt = list.slice(b, 0, end)
+    if same(key, b"rtcp-fb") && same(raw_pt, b"*") {
+        for i in 0 .. list.len(ps) {
+            feedback(mut ps[i].format, value)
+        }
+        return Ok(())
+    }
+    let Some(pt) = decimal(raw_pt, 127) else {
+        return Error(Malformed(at))
+    }
+    let Some(i) = payload_index(ps, int.narrow(pt)) else {
+        return Ok(())
+    }
+    if same(key, b"rtpmap") {
+        if let Some((codec, clock, channels)) = supported_codec(value) {
+            if ps[i].known && ps[i].format.codec != codec {
+                return Error(PayloadConflict(int.narrow(pt)))
+            }
+            ps[i].known = true
+            ps[i].format.codec = codec
+            ps[i].format.clock = clock
+            ps[i].format.channels = channels
+        }
+    } else if same(key, b"fmtp") {
+        ps[i].format.fmtp = clone(value)
+    } else {
+        feedback(mut ps[i].format, value)
+    }
+    Ok(())
+}
+
+fn parse_extmap(b: Bytes, at: u64, mut out: List[Extmap]) -> Result[(), SdpError] {
+    let fields = words(b)
+    if list.len(fields) < 2 {
+        return Error(Malformed(at))
+    }
+    let spec = pieces(fields[0], b'/')
+    let Some(n) = decimal(spec[0], 255) else {
+        return Error(Malformed(at))
+    }
+    if n == 0 || list.len(spec) > 2 {
+        return Error(Malformed(at))
+    }
+    let mut dir: Option[Direction] = None
+    if list.len(spec) == 2 {
+        let Some(d) = direction(spec[1]) else {
+            return Error(Malformed(at))
+        }
+        dir = Some(d)
+    }
+    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor] {
+        if same(fields[1], ext_uri(ext)) {
+            let mut vad: Option[Vad] = None
+            if ext == AudioLevel {
+                for i in 2 .. list.len(fields) {
+                    if same(fields[i], b"vad=on") {
+                        vad = Some(VadOn)
+                    } else if same(fields[i], b"vad=off") {
+                        vad = Some(VadOff)
+                    }
+                }
+            }
+            let id: u8 = int.narrow(n)
+            for e in out {
+                if e.id == id || e.ext == ext {
+                    return Error(ExtmapConflict(id))
+                }
+            }
+            return add(mut out, Extmap(id: id, ext: ext, dir: dir, vad: vad))
+        }
+    }
+    Ok(())
+}
+
+fn parse_rid(b: Bytes, index: u8, mut d: Draft) -> Result[(), SdpError] {
+    if list.len(d.section.rids) == RID_LIMIT {
+        return Error(TooManyRids(index))
+    }
+    let id_end = whitespace(b, 0)
+    let dir_start = skip_space(b, id_end)
+    let dir_end = whitespace(b, dir_start)
+    let Some(id) = identifier(list.slice(b, 0, id_end), true) else {
+        return Error(BadRid(index))
+    }
+    let dword = list.slice(b, dir_start, dir_end)
+    let dir = if same(dword, b"send") {
+        RidSend
+    } else if same(dword, b"recv") {
+        RidRecv
+    } else {
+        return Error(BadRid(index))
+    }
+    if let Some(_) = rid_index(d.section.rids, id, dir) {
+        return Error(BadRid(index))
+    }
+    let mut r = Rid(id: id.name, len: id.len, dir: dir, pts: list.new(), depend: list.new(), unresolved: list.new(), restrictions: b"")
+    let mut dependencies: List[Id] = list.new()
+    let start = skip_space(b, dir_end)
+    if start < list.len(b) {
+        for part in pieces(list.slice(b, start, list.len(b)), b';') {
+            let key = delimiter(part, 0, b'=')
+            let name = trim(list.slice(part, 0, key))
+            if key < list.len(part) && same(name, b"pt") {
+                if list.len(r.pts) != 0 {
+                    return Error(BadRid(index))
+                }
+                for pt in pieces(list.slice(part, key + 1, list.len(part)), b',') {
+                    let Some(n) = decimal(trim(pt), 127) else {
+                        return Error(BadRid(index))
+                    }
+                    add(mut r.pts, int.narrow(n))?
+                }
+            } else if key < list.len(part) && same(name, b"depend") {
+                if list.len(dependencies) != 0 {
+                    return Error(BadRid(index))
+                }
+                for dep in pieces(list.slice(part, key + 1, list.len(part)), b',') {
+                    let Some(dep_id) = identifier(trim(dep), true) else {
+                        return Error(BadRid(index))
+                    }
+                    add(mut dependencies, dep_id)?
+                }
+            } else {
+                if list.len(part) == 0 {
+                    return Error(BadRid(index))
+                }
+                if list.len(r.restrictions) != 0 {
+                    add(mut r.restrictions, b';')?
+                }
+                list.append(mut r.restrictions, part)
+            }
+        }
+    }
+    add(mut d.dependencies, take dependencies)?
+    add(mut d.section.rids, take r)
+}
+
+fn rid_index(rs: List[Rid], id: Id, dir: RidDir) -> Option[u8] {
+    for i in 0 .. list.len(rs) {
+        if rs[i].dir == dir && rid_id(rs[i]) == id {
+            return Some(int.narrow(i))
+        }
+    }
+    None
+}
+
+fn parse_streams(b: Bytes, rs: List[Rid], dir: RidDir, index: u8) -> Result[List[Stream], SdpError] {
+    let mut out: List[Stream] = list.new()
+    let mut seen: List[u8] = list.new()
+    for item in pieces(b, b';') {
+        let mut stream = Stream(alternatives: list.new(), paused: list.new())
+        for alt in pieces(item, b',') {
+            let paused = list.len(alt) != 0 && alt[0] == b'~'
+            let start: u64 = if paused {
+                1
+            } else {
+                0
+            }
+            let Some(id) = identifier(list.slice(alt, start, list.len(alt)), true) else {
+                return Error(BadRid(index))
+            }
+            let Some(i) = rid_index(rs, id, dir) else {
+                return Error(BadRid(index))
+            }
+            if list_has(seen, i) {
+                return Error(BadRid(index))
+            }
+            add(mut seen, i)?
+            add(mut stream.alternatives, i)?
+            add(mut stream.paused, paused)?
+        }
+        add(mut out, take stream)?
+    }
+    Ok(take out)
+}
+
+fn finish_section(mut draft: Draft, index: u8) -> Result[(), SdpError] {
+    for payload in draft.payloads {
+        if !payload.known {
+            continue
+        }
+        let mut format: Format = clone(payload.format)
+        if format.codec == Rtx {
+            let Some(apt) = parameter(format.fmtp, b"apt") else {
+                return Error(Malformed(0))
+            }
+            let Some(pt) = decimal(apt, 127) else {
+                return Error(Malformed(0))
+            }
+            format.apt = Some(int.narrow(pt))
+        }
+        add(mut draft.section.formats, take format)?
+    }
+    if list.len(draft.section.formats) != 0 {
+        draft.section.fallback = b""
+    }
+    if let Some(data) = draft.simulcast {
+        let fields = words(data)
+        if list.len(fields) != 2 && list.len(fields) != 4 {
+            return Error(BadRid(index))
+        }
+        let mut i: u64 = 0
+        while i < list.len(fields) {
+            if same(fields[i], b"send") && list.len(draft.section.simulcast.send) == 0 {
+                draft.section.simulcast.send = parse_streams(fields[i + 1], draft.section.rids, RidSend, index)?
+            } else if same(fields[i], b"recv") && list.len(draft.section.simulcast.recv) == 0 {
+                draft.section.simulcast.recv = parse_streams(fields[i + 1], draft.section.rids, RidRecv, index)?
+            } else {
+                return Error(BadRid(index))
+            }
+            i += 2
+        }
+    } else if list.len(draft.section.rids) != 0 {
+        return Error(BadRid(index))
+    }
+    for i in 0 .. list.len(draft.dependencies) {
+        for dep in draft.dependencies[i] {
+            let dir = draft.section.rids[i].dir
+            if let Some(ref_index) = rid_index(draft.section.rids, dep, dir) {
+                add(mut draft.section.rids[i].depend, ref_index)?
+            } else {
+                add(mut draft.section.rids[i].unresolved, dep)?
+            }
+        }
+    }
+    if draft.section.port != Rejected {
+        for p in draft.payloads {
+            if p.format.pt >= 64 && p.format.pt <= 95 {
+                return Error(PayloadConflict(p.format.pt))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ssrc_attr(k: Bytes, b: Bytes, at: u64, mut s: Section) -> Result[(), SdpError] {
+    let fields = words(b)
+    if same(k, b"ssrc-group") {
+        if list.len(fields) == 0 || !same(fields[0], b"FID") {
+            return Ok(())
+        }
+        if list.len(fields) != 3 {
+            return Error(Malformed(at))
+        }
+        let Some(a) = decimal(fields[1], 0xffffffff) else {
+            return Error(Malformed(at))
+        }
+        let Some(repair) = decimal(fields[2], 0xffffffff) else {
+            return Error(Malformed(at))
+        }
+        return add(mut s.rtx_pairs, (int.narrow(a), int.narrow(repair)))
+    }
+    if list.len(fields) < 2 {
+        return Error(Malformed(at))
+    }
+    let end = delimiter(fields[1], 0, b':')
+    let attr = list.slice(fields[1], 0, end)
+    if same(attr, b"cname") || same(attr, b"msid") {
+        let Some(n) = decimal(fields[0], 0xffffffff) else {
+            return Error(Malformed(at))
+        }
+        let ssrc: u32 = int.narrow(n)
+        if !list_has(s.ssrcs, ssrc) {
+            add(mut s.ssrcs, ssrc)?
+        }
+    }
+    Ok(())
+}
+
+fn section_attr(k: Bytes, b: Bytes, index: u8, at: u64, mut d: Draft) -> Result[(), SdpError] {
+    if transport_attr(k, b, at, mut d.transport)? {
+        return Ok(())
+    }
+    if let Some(dir) = direction(k) {
+        d.section.dir = dir
+    } else if same(k, b"mid") {
+        let Some(id) = identifier(b, false) else {
+            return Error(NoMid(index))
+        }
+        if d.section.mid_len != 0 {
+            return Error(NoMid(index))
+        }
+        d.section.mid = id.name
+        d.section.mid_len = id.len
+    } else if same(k, b"rtcp-mux") {
+        d.section.rtcp_mux = true
+    } else if same(k, b"rtcp-rsize") {
+        d.section.rtcp_rsize = true
+    } else if same(k, b"bundle-only") {
+        if d.section.port != Rejected {
+            return Error(Malformed(at))
+        }
+        d.section.port = BundleOnly
+    } else if same(k, b"extmap-allow-mixed") {
+        d.section.mixed_extmaps = true
+    } else if same(k, b"extmap") {
+        parse_extmap(b, at, mut d.section.extmaps)?
+    } else if same(k, b"rtpmap") || same(k, b"fmtp") || same(k, b"rtcp-fb") {
+        format_attr(k, b, at, mut d.payloads)?
+    } else if same(k, b"msid") {
+        d.section.msid = clone(b)
+    } else if same(k, b"ssrc") || same(k, b"ssrc-group") {
+        ssrc_attr(k, b, at, mut d.section)?
+    } else if same(k, b"rid") {
+        parse_rid(b, index, mut d)?
+    } else if same(k, b"simulcast") {
+        if let Some(_) = d.simulcast {
+            return Error(BadRid(index))
+        }
+        d.simulcast = Some(clone(b))
+    }
+    Ok(())
+}
+
+fn origin(b: Bytes, at: u64, mut d: Description) -> Result[(), SdpError] {
+    let ws = words(b)
+    if list.len(ws) != 6 || !same(ws[3], b"IN") || !(same(ws[4], b"IP4") || same(ws[4], b"IP6")) {
+        return Error(Malformed(at))
+    }
+    let Some(session) = decimal(ws[1], 0xffffffffffffffff) else {
+        return Error(Malformed(at))
+    }
+    let Some(version) = decimal(ws[2], 0xffffffffffffffff) else {
+        return Error(Malformed(at))
+    }
+    d.origin_session = session
+    d.origin_version = version
+    Ok(())
+}
+
+fn session_line(kind: u8, b: Bytes, at: u64, mut lines: SessionLines, mut out: Description) -> Result[(), SdpError] {
+    if kind == b'v' {
+        if lines.version || !same(b, b"0") {
+            return Error(Malformed(at))
+        }
+        lines.version = true
+    } else if kind == b'o' {
+        if lines.origin {
+            return Error(Malformed(at))
+        }
+        origin(b, at, mut out)?
+        lines.origin = true
+    } else if kind == b's' {
+        if lines.name || list.len(b) == 0 {
+            return Error(Malformed(at))
+        }
+        lines.name = true
+    } else if kind == b't' {
+        let ws = words(b)
+        if list.len(ws) != 2 {
+            return Error(Malformed(at))
+        }
+        let Some(_) = decimal(ws[0], 0xffffffffffffffff) else {
+            return Error(Malformed(at))
+        }
+        let Some(_) = decimal(ws[1], 0xffffffffffffffff) else {
+            return Error(Malformed(at))
+        }
+        lines.time = true
+    } else if kind == b'c' {
+        if !connection(b) {
+            return Error(Malformed(at))
+        }
+        lines.connection = clone(b)
+    } else if kind == b'a' {
+        let end = delimiter(b, 0, b':')
+        let k = list.slice(b, 0, end)
+        let start = if end < list.len(b) {
+            end + 1
+        } else {
+            end
+        }
+        let value = list.slice(b, start, list.len(b))
+        if same(k, b"group") {
+            let mut ws = words(value)
+            if list.len(ws) != 0 && same(ws[0], b"BUNDLE") {
+                if let Some(_) = lines.bundle {
+                    return Error(Malformed(at))
+                }
+                let _ = list.remove(mut ws, 0)
+                lines.bundle = Some(take ws)
+            }
+        } else if same(k, b"ice-lite") {
+            out.ice_lite = true
+        } else if same(k, b"extmap-allow-mixed") {
+            out.mixed_extmaps = true
+        } else if let Some(dir) = direction(k) {
+            lines.dir = dir
+        } else {
+            let _ = transport_attr(k, value, at, mut lines.transport)?
+        }
+    }
+    Ok(())
+}
+
+fn check_bundle(ds: List[Section], bundle: List[u8]) -> Result[(), SdpError] {
+    for i in 0 .. list.len(ds) {
+        let s = ds[i]
+        if s.port == Rejected {
+            continue
+        }
+        let index: u8 = int.narrow(i)
+        if s.mid_len == 0 || (s.media != Application && !has_mid(s)) {
+            return Error(NoMid(index))
+        }
+        if !list_has(bundle, index) {
+            return Error(NotBundled(index))
+        }
+        for prev in 0 .. i {
+            let p = ds[prev]
+            if p.port == Rejected {
+                continue
+            }
+            for x in s.extmaps {
+                for y in p.extmaps {
+                    if (x.id == y.id) != (x.ext == y.ext) {
+                        return Error(ExtmapConflict(x.id))
+                    }
+                }
+            }
+            for x in s.formats {
+                for y in p.formats {
+                    if x.pt == y.pt && !format_config(x, y) {
+                        return Error(PayloadConflict(x.pt))
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bundle_order(names: List[Bytes], mut d: Description) -> Result[(), SdpError] {
+    list.clear(mut d.bundle)
+    for i in 0 .. list.len(d.sections) {
+        let s = d.sections[i]
+        if s.mid_len == 0 {
+            if s.port != Rejected {
+                return Error(NoMid(int.narrow(i)))
+            }
+            continue
+        }
+        for j in 0 .. i {
+            if section_id(s) == section_id(d.sections[j]) {
+                return Error(NoMid(int.narrow(i)))
+            }
+        }
+    }
+    for b in names {
+        let Some(id) = identifier(b, false) else {
+            return Error(Malformed(0))
+        }
+        let mut found = false
+        for i in 0 .. list.len(d.sections) {
+            if section_id(d.sections[i]) == id && d.sections[i].port != Rejected {
+                let index: u8 = int.narrow(i)
+                if list_has(d.bundle, index) {
+                    return Error(NotBundled(index))
+                }
+                add(mut d.bundle, index)?
+                found = true
+                break
+            }
+        }
+        if !found {
+            return Error(NoBundle)
+        }
+    }
+    Ok(())
+}
+
+fn inherit_bytes(own_level: Option[Bytes], enclosing: Option[Bytes]) -> Option[Bytes] {
+    match own_level {
+        Some(x) => Some(clone(x)),
+        None => clone(enclosing),
+    }
+}
+
+fn finish_transport(tag: Transport, session: Transport, mut d: Description) -> Result[(), SdpError] {
+    let Some(ufrag) = inherit_bytes(tag.ufrag, session.ufrag) else {
+        return Error(NoIceCredentials)
+    }
+    let Some(pwd) = inherit_bytes(tag.pwd, session.pwd) else {
+        return Error(NoIceCredentials)
+    }
+    let Some(fp) = (match tag.fingerprint {
+        Some(fp) => Some(fp),
+        None => session.fingerprint
+    }) else {
+        return Error(NoFingerprint)
+    }
+    let Some(setup) = (match tag.setup {
+        Some(role) => Some(role),
+        None => session.setup
+    }) else {
+        return Error(Malformed(0))
+    }
+    d.ice_ufrag = take ufrag
+    d.ice_pwd = take pwd
+    d.fingerprint = fp
+    d.setup = setup
+    d.ice_options = match inherit_bytes(tag.ice_options, session.ice_options) {
+        Some(value) => take value,
+        None => b""
+    }
+    d.tls_id = match inherit_bytes(tag.tls_id, session.tls_id) {
+        Some(id) => take id,
+        None => b""
+    }
+    list.clear(mut d.candidates)
+    for candidate in tag.candidates {
+        add(mut d.candidates, clone(candidate))?
+    }
+    d.end_of_candidates = tag.ended
+    Ok(())
+}
+
+fn emit_section(mut draft: Draft, mut out: Description, mut ts: List[Transport]) -> Result[(), SdpError] {
+    finish_section(mut draft, int.narrow(list.len(out.sections)))?
+    add(mut ts, clone(draft.transport))?
+    add(mut out.sections, clone(draft.section))
+}
+
+pub fn parse(text: Bytes, mut out: Description) -> Result[(), SdpError] {
+    if list.len(text) > TEXT_LIMIT {
+        return Error(TooLarge)
+    }
+    list.clear(mut out.sections)
+    out.ice_lite = false
+    out.mixed_extmaps = false
+    let mut session = SessionLines(version: false, origin: false, name: false, time: false, bundle: None, dir: SendRecv, connection: b"IN IP4 0.0.0.0", transport: transport())
+    let mut ts: List[Transport] = list.new()
+    let mut active: Option[Draft] = None
+    let mut start: u64 = 0
+    while start < list.len(text) {
+        let stop = delimiter(text, start, b'\n')
+        let mut end = stop
+        if end > start && text[end - 1] == b'\r' {
+            end -= 1
+        }
+        let at = start
+        start = stop + 1
+        if end == at {
+            continue
+        }
+        if end - at < 2 || text[at + 1] != b'=' {
+            return Error(Malformed(at))
+        }
+        let b = list.slice(text, at + 2, end)
+        for c in b {
+            if (c < 32 && c != b'\t') || c == 127 {
+                return Error(Malformed(at))
+            }
+        }
+        let kind = text[at]
+        if kind == b'm' {
+            if let Some(mut draft) = active {
+                emit_section(mut draft, mut out, mut ts)?
+            }
+            if list.len(out.sections) == SECTION_LIMIT {
+                return Error(TooManySections)
+            }
+            let mut next = mline(b, int.narrow(list.len(out.sections)), session.dir, at)?
+            next.section.connection = clone(session.connection)
+            active = Some(take next)
+        } else if let Some(mut draft) = active {
+            if kind == b'c' {
+                if !connection(b) {
+                    return Error(Malformed(at))
+                }
+                draft.section.connection = clone(b)
+            } else if kind == b'a' {
+                let split = delimiter(b, 0, b':')
+                let lo = if split < list.len(b) {
+                    split + 1
+                } else {
+                    split
+                }
+                section_attr(list.slice(b, 0, split), list.slice(b, lo, list.len(b)), int.narrow(list.len(out.sections)), at, mut draft)?
+            }
+        } else {
+            session_line(kind, b, at, mut session, mut out)?
+        }
+    }
+    if let Some(mut draft) = active {
+        emit_section(mut draft, mut out, mut ts)?
+    }
+    if !session.version || !session.origin || !session.name || !session.time {
+        return Error(Malformed(0))
+    }
+    let Some(names) = view session.bundle else {
+        return Error(NoBundle)
+    }
+    bundle_order(names, mut out)?
+    if list.len(out.bundle) == 0 {
+        check_bundle(out.sections, out.bundle)?
+        let empty = transport()
+        return finish_transport(empty, session.transport, mut out)
+    }
+    let tag = out.bundle[0]
+    let index: u64 = int.widen(tag)
+    if let Port(_) = out.sections[index].port {} else {
+        return Error(NotBundled(tag))
+    }
+    if out.sections[index].media != Application && !out.sections[index].rtcp_mux {
+        return Error(NoRtcpMux(tag))
+    }
+    check_bundle(out.sections, out.bundle)?
+    finish_transport(ts[index], session.transport, mut out)
+}

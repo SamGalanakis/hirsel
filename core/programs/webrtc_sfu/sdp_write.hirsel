@@ -1,0 +1,559 @@
+fn media_name(media: Media) -> Bytes {
+    match media {
+        Audio => b"audio",
+        Video => b"video",
+        Application => b"application"
+    }
+}
+
+fn direction_name(dir: Direction) -> Bytes {
+    match dir {
+        SendRecv => b"sendrecv",
+        SendOnly => b"sendonly",
+        RecvOnly => b"recvonly",
+        Inactive => b"inactive"
+    }
+}
+
+fn rid_direction(dir: RidDir) -> Bytes {
+    match dir {
+        RidSend => b"send",
+        RidRecv => b"recv"
+    }
+}
+
+fn setup_name(setup: Setup) -> Bytes {
+    match setup {
+        Active => b"active",
+        Passive => b"passive",
+        ActPass => b"actpass"
+    }
+}
+
+fn append(mut out: Bytes, input: Bytes) {
+    list.append(mut out, input)
+}
+
+fn number(mut out: Bytes, value: u64) {
+    let mut buf: Inline[u8, 64] =[0; 64]
+    let first = int.radix_digits(value, 10, mut buf)
+    for i in first .. 64 {
+        list.push(mut out, buf[i])
+    }
+}
+
+fn put_id(mut out: Bytes, id: Id) {
+    for i in 0u64 .. int.widen(id.len) {
+        list.push(mut out, id.name[i])
+    }
+}
+
+fn line(mut out: Bytes, prefix: Bytes, value: Bytes) {
+    append(mut out, prefix)
+    append(mut out, value)
+    append(mut out, b"\r\n")
+}
+
+fn hex(c: u8) -> u8 {
+    if c < 10 {
+        b'0' + c
+    } else {
+        b'A' + c - 10
+    }
+}
+
+fn put_transport(mut out: Bytes, d: Description) {
+    line(mut out, b"a=ice-ufrag:", d.ice_ufrag)
+    line(mut out, b"a=ice-pwd:", d.ice_pwd)
+    if list.len(d.ice_options) != 0 {
+        line(mut out, b"a=ice-options:", d.ice_options)
+    }
+    append(mut out, b"a=fingerprint:sha-256 ")
+    for i in 0u64 .. 32 {
+        if i != 0 {
+            list.push(mut out, b':')
+        }
+        list.push(mut out, hex(d.fingerprint[i] >> 4))
+        list.push(mut out, hex(d.fingerprint[i] & 15))
+    }
+    append(mut out, b"\r\n")
+    line(mut out, b"a=setup:", setup_name(d.setup))
+    if list.len(d.tls_id) != 0 {
+        line(mut out, b"a=tls-id:", d.tls_id)
+    }
+}
+
+fn put_extmap(mut out: Bytes, e: Extmap) {
+    append(mut out, b"a=extmap:")
+    number(mut out, int.widen(e.id))
+    if let Some(dir) = e.dir {
+        list.push(mut out, b'/')
+        append(mut out, direction_name(dir))
+    }
+    list.push(mut out, b' ')
+    append(mut out, ext_uri(e.ext))
+    if let Some(vad) = e.vad {
+        append(mut out, if vad == VadOn {
+            b" vad=on"
+        } else {
+            b" vad=off"
+        })
+    }
+    append(mut out, b"\r\n")
+}
+
+fn pt_line(mut out: Bytes, prefix: Bytes, pt: u8) {
+    append(mut out, prefix)
+    number(mut out, int.widen(pt))
+    list.push(mut out, b' ')
+}
+
+fn put_format(mut out: Bytes, f: Format) {
+    pt_line(mut out, b"a=rtpmap:", f.pt)
+    append(mut out, codec_name(f.codec))
+    list.push(mut out, b'/')
+    number(mut out, int.widen(f.clock))
+    if f.channels != 1 {
+        list.push(mut out, b'/')
+        number(mut out, int.widen(f.channels))
+    }
+    append(mut out, b"\r\n")
+    if list.len(f.fmtp) != 0 {
+        pt_line(mut out, b"a=fmtp:", f.pt)
+        append(mut out, f.fmtp)
+        append(mut out, b"\r\n")
+    }
+    if f.nack {
+        pt_line(mut out, b"a=rtcp-fb:", f.pt)
+        append(mut out, b"nack\r\n")
+    }
+    if f.pli {
+        pt_line(mut out, b"a=rtcp-fb:", f.pt)
+        append(mut out, b"nack pli\r\n")
+    }
+    if f.fir {
+        pt_line(mut out, b"a=rtcp-fb:", f.pt)
+        append(mut out, b"ccm fir\r\n")
+    }
+    if f.twcc {
+        pt_line(mut out, b"a=rtcp-fb:", f.pt)
+        append(mut out, b"transport-cc\r\n")
+    }
+}
+
+fn put_rid(mut out: Bytes, r: Rid, rs: List[Rid]) {
+    append(mut out, b"a=rid:")
+    put_id(mut out, rid_id(r))
+    list.push(mut out, b' ')
+    append(mut out, rid_direction(r.dir))
+    let mut sep = b' '
+    if list.len(r.pts) != 0 {
+        list.push(mut out, sep)
+        append(mut out, b"pt=")
+        for i in 0 .. list.len(r.pts) {
+            if i != 0 {
+                list.push(mut out, b',')
+            }
+            number(mut out, int.widen(r.pts[i]))
+        }
+        sep = b';'
+    }
+    if list.len(r.depend) + list.len(r.unresolved) != 0 {
+        list.push(mut out, sep)
+        append(mut out, b"depend=")
+        let mut first = true
+        for dep in r.depend {
+            if !first {
+                list.push(mut out, b',')
+            }
+            put_id(mut out, rid_id(rs[int.widen(dep)]))
+            first = false
+        }
+        for id in r.unresolved {
+            if !first {
+                list.push(mut out, b',')
+            }
+            put_id(mut out, id)
+            first = false
+        }
+        sep = b';'
+    }
+    if list.len(r.restrictions) != 0 {
+        list.push(mut out, sep)
+        append(mut out, r.restrictions)
+    }
+    append(mut out, b"\r\n")
+}
+
+fn put_streams(mut out: Bytes, streams: List[Stream], rs: List[Rid]) {
+    for i in 0 .. list.len(streams) {
+        if i != 0 {
+            list.push(mut out, b';')
+        }
+        let s = streams[i]
+        for j in 0 .. list.len(s.alternatives) {
+            if j != 0 {
+                list.push(mut out, b',')
+            }
+            if s.paused[j] {
+                list.push(mut out, b'~')
+            }
+            put_id(mut out, rid_id(rs[int.widen(s.alternatives[j])]))
+        }
+    }
+}
+
+fn put_candidates(mut b: Bytes, d: Description) {
+    for candidate in d.candidates {
+        line(mut b, b"a=candidate:", candidate)
+    }
+    if d.end_of_candidates {
+        append(mut b, b"a=end-of-candidates\r\n")
+    }
+}
+
+fn put_section(mut b: Bytes, s: Section, d: Description, tagged: bool) {
+    append(mut b, b"m=")
+    append(mut b, media_name(s.media))
+    list.push(mut b, b' ')
+    let port: u16 = match s.port {
+        Port(n) => n,
+        _ => 0
+    }
+    number(mut b, int.widen(port))
+    list.push(mut b, b' ')
+    append(mut b, s.protocol)
+    if list.len(s.formats) == 0 {
+        list.push(mut b, b' ')
+        append(mut b, s.fallback)
+    } else {
+        for f in s.formats {
+            list.push(mut b, b' ')
+            number(mut b, int.widen(f.pt))
+        }
+    }
+    append(mut b, b"\r\n")
+    line(mut b, b"c=", s.connection)
+    if s.mid_len != 0 {
+        append(mut b, b"a=mid:")
+        put_id(mut b, section_id(s))
+        append(mut b, b"\r\n")
+    }
+    if s.port == BundleOnly {
+        append(mut b, b"a=bundle-only\r\n")
+    }
+    if s.media != Application || s.dir != SendRecv {
+        line(mut b, b"a=", direction_name(s.dir))
+    }
+    for f in s.formats {
+        put_format(mut b, f)
+    }
+    if s.mixed_extmaps {
+        append(mut b, b"a=extmap-allow-mixed\r\n")
+    }
+    for e in s.extmaps {
+        put_extmap(mut b, e)
+    }
+    if list.len(s.msid) != 0 {
+        line(mut b, b"a=msid:", s.msid)
+    }
+    for pair in s.rtx_pairs {
+        let (main, rtx) = pair
+        append(mut b, b"a=ssrc-group:FID ")
+        number(mut b, int.widen(main))
+        list.push(mut b, b' ')
+        number(mut b, int.widen(rtx))
+        append(mut b, b"\r\n")
+    }
+    for ssrc in s.ssrcs {
+        append(mut b, b"a=ssrc:")
+        number(mut b, int.widen(ssrc))
+        append(mut b, b" cname:webrtc\r\n")
+    }
+    for r in s.rids {
+        put_rid(mut b, r, s.rids)
+    }
+    let send = list.len(s.simulcast.send) != 0
+    let recv = list.len(s.simulcast.recv) != 0
+    if send || recv {
+        append(mut b, b"a=simulcast:")
+        if send {
+            append(mut b, b"send ")
+            put_streams(mut b, s.simulcast.send, s.rids)
+        }
+        if recv {
+            if send {
+                list.push(mut b, b' ')
+            }
+            append(mut b, b"recv ")
+            put_streams(mut b, s.simulcast.recv, s.rids)
+        }
+        append(mut b, b"\r\n")
+    }
+    if s.port != Rejected && s.port != BundleOnly {
+        put_transport(mut b, d)
+    }
+    if s.rtcp_mux {
+        append(mut b, b"a=rtcp-mux\r\n")
+    }
+    if s.rtcp_rsize {
+        append(mut b, b"a=rtcp-rsize\r\n")
+    }
+    if tagged {
+        put_candidates(mut b, d)
+    }
+}
+
+fn valid_text(b: Bytes) -> bool {
+    for c in b {
+        if (c < 32 && c != b'\t') || c == 127 {
+            return false
+        }
+    }
+    true
+}
+
+fn valid_id(id: Id, is_rid: bool) -> bool {
+    if id.len == 0 || id.len > 16 {
+        return false
+    }
+    let mut b: Bytes = list.new()
+    put_id(mut b, id)
+    if let Some(canonical) = identifier(b, is_rid) {
+        return canonical == id
+    }
+    false
+}
+
+fn validate_streams(streams: List[Stream], rs: List[Rid], dir: RidDir, index: u8) -> Result[(), SdpError] {
+    let mut seen: List[u8] = list.new()
+    for s in streams {
+        if list.len(s.alternatives) == 0 || list.len(s.alternatives) != list.len(s.paused) {
+            return Error(BadRid(index))
+        }
+        for n in s.alternatives {
+            let i: u64 = int.widen(n)
+            if i >= list.len(rs) || rs[i].dir != dir || list_has(seen, n) {
+                return Error(BadRid(index))
+            }
+            add(mut seen, n)?
+        }
+    }
+    Ok(())
+}
+
+fn validate_section(s: Section, index: u8) -> Result[(), SdpError] {
+    if !token(s.protocol) || !valid_text(s.msid) || !valid_text(s.connection) || !connection(s.connection) {
+        return Error(Malformed(0))
+    }
+    if let Port(0) = s.port {
+        return Error(Malformed(0))
+    }
+    if s.mid_len != 0 && !valid_id(section_id(s), false) {
+        return Error(NoMid(index))
+    }
+    if s.mid_len == 0 && s.mid !=[0; 16] {
+        return Error(NoMid(index))
+    }
+    if list.len(s.formats) > FORMAT_LIMIT {
+        return Error(TooManyFormats(index))
+    }
+    if list.len(s.formats) == 0 {
+        if list.len(s.fallback) == 0 || !valid_text(s.fallback) {
+            return Error(Malformed(0))
+        }
+        if s.media == Application {
+            if space(s.fallback[0]) {
+                return Error(Malformed(0))
+            }
+        } else {
+            let Some(pt) = decimal(s.fallback, 127) else {
+                return Error(Malformed(0))
+            }
+            if s.port != Rejected && pt >= 64 && pt <= 95 {
+                return Error(PayloadConflict(int.narrow(pt)))
+            }
+        }
+    } else if s.media == Application || list.len(s.fallback) != 0 {
+        return Error(Malformed(0))
+    }
+    let mut pts: List[u8] = list.new()
+    for f in s.formats {
+        if f.pt > 127 || list_has(pts, f.pt) || (s.port != Rejected && f.pt >= 64 && f.pt <= 95) {
+            return Error(PayloadConflict(f.pt))
+        }
+        add(mut pts, f.pt)?
+        let clock: u32 = if f.codec == Opus || f.codec == Red {
+            48000
+        } else {
+            90000
+        }
+        let channels: u8 = if f.codec == Opus || f.codec == Red {
+            2
+        } else {
+            1
+        }
+        if f.clock != clock || f.channels != channels || !valid_text(f.fmtp) || (list.len(f.fmtp) != 0 && space(f.fmtp[0])) {
+            return Error(Malformed(0))
+        }
+        if f.codec == Rtx {
+            let Some(b) = parameter(f.fmtp, b"apt") else {
+                return Error(Malformed(0))
+            }
+            let Some(pt) = decimal(b, 127) else {
+                return Error(Malformed(0))
+            }
+            if f.apt != Some(int.narrow(pt)) {
+                return Error(Malformed(0))
+            }
+        } else if f.apt != None {
+            return Error(Malformed(0))
+        }
+    }
+    let mut ids: List[u8] = list.new()
+    let mut exts: List[Ext] = list.new()
+    for e in s.extmaps {
+        if e.id == 0 || list_has(ids, e.id) || list_has(exts, e.ext) || (e.ext != AudioLevel && e.vad != None) {
+            return Error(ExtmapConflict(e.id))
+        }
+        add(mut ids, e.id)?
+        add(mut exts, e.ext)?
+    }
+    if list.len(s.rids) > RID_LIMIT {
+        return Error(TooManyRids(index))
+    }
+    if list.len(s.rids) != 0 && list.len(s.simulcast.send) + list.len(s.simulcast.recv) == 0 {
+        return Error(BadRid(index))
+    }
+    for i in 0 .. list.len(s.rids) {
+        let r = s.rids[i]
+        if !valid_id(rid_id(r), true) || !valid_text(r.restrictions) {
+            return Error(BadRid(index))
+        }
+        if rid_index(s.rids, rid_id(r), r.dir) != Some(int.narrow(i)) {
+            return Error(BadRid(index))
+        }
+        for n in r.pts {
+            if n > 127 {
+                return Error(BadRid(index))
+            }
+        }
+        for dep in r.depend {
+            let slot: u64 = int.widen(dep)
+            if slot >= list.len(s.rids) || s.rids[slot].dir != r.dir {
+                return Error(BadRid(index))
+            }
+        }
+        for id in r.unresolved {
+            if !valid_id(id, true) || rid_index(s.rids, id, r.dir) != None {
+                return Error(BadRid(index))
+            }
+        }
+        if list.len(r.restrictions) != 0 {
+            for part in pieces(r.restrictions, b';') {
+                if list.len(part) == 0 {
+                    return Error(BadRid(index))
+                }
+                if let Some(_) = parameter(part, b"pt") {
+                    return Error(BadRid(index))
+                }
+                if let Some(_) = parameter(part, b"depend") {
+                    return Error(BadRid(index))
+                }
+            }
+        }
+    }
+    validate_streams(s.simulcast.send, s.rids, RidSend, index)?
+    validate_streams(s.simulcast.recv, s.rids, RidRecv, index)?
+    Ok(())
+}
+
+fn validate_description(d: Description) -> Result[(), SdpError] {
+    if list.len(d.sections) > SECTION_LIMIT {
+        return Error(TooManySections)
+    }
+    if !token(d.ice_ufrag) || !token(d.ice_pwd) {
+        return Error(NoIceCredentials)
+    }
+    if list.len(d.tls_id) != 0 && !token(d.tls_id) {
+        return Error(Malformed(0))
+    }
+    if list.len(d.ice_options) != 0 && (!valid_text(d.ice_options) || list.len(words(d.ice_options)) == 0) {
+        return Error(Malformed(0))
+    }
+    let mut seen: List[u8] = list.new()
+    for index in d.bundle {
+        let i: u64 = int.widen(index)
+        if i >= list.len(d.sections) || d.sections[i].port == Rejected || list_has(seen, index) {
+            return Error(NotBundled(index))
+        }
+        add(mut seen, index)?
+    }
+    if list.len(d.bundle) != 0 {
+        let tag = d.bundle[0]
+        let s = d.sections[int.widen(tag)]
+        if s.port == BundleOnly {
+            return Error(NotBundled(tag))
+        }
+        if s.media != Application && !s.rtcp_mux {
+            return Error(NoRtcpMux(tag))
+        }
+    } else if list.len(d.candidates) != 0 || d.end_of_candidates {
+        return Error(NoBundle)
+    }
+    for i in 0 .. list.len(d.sections) {
+        let s = d.sections[i]
+        validate_section(s, int.narrow(i))?
+        for j in 0 .. i {
+            if s.mid_len != 0 && section_id(s) == section_id(d.sections[j]) {
+                return Error(NoMid(int.narrow(i)))
+            }
+        }
+    }
+    for b in d.candidates {
+        if list.len(b) == 0 || !valid_text(b) {
+            return Error(Malformed(0))
+        }
+    }
+    check_bundle(d.sections, d.bundle)
+}
+
+pub fn write(d: Description, mut out: Bytes) -> Result[u64, SdpError] {
+    validate_description(d)?
+    let mut b: Bytes = list.new()
+    append(mut b, b"v=0\r\no=- ")
+    number(mut b, d.origin_session)
+    list.push(mut b, b' ')
+    number(mut b, d.origin_version)
+    append(mut b, b" IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE")
+    for n in d.bundle {
+        list.push(mut b, b' ')
+        put_id(mut b, section_id(d.sections[int.widen(n)]))
+    }
+    append(mut b, b"\r\n")
+    if d.ice_lite {
+        append(mut b, b"a=ice-lite\r\n")
+    }
+    if d.mixed_extmaps {
+        append(mut b, b"a=extmap-allow-mixed\r\n")
+    }
+    if list.len(d.bundle) == 0 {
+        put_transport(mut b, d)
+    }
+    for i in 0 .. list.len(d.sections) {
+        let tagged = list.len(d.bundle) != 0 && d.bundle[0] == int.narrow(i)
+        put_section(mut b, d.sections[i], d, tagged)
+        if list.len(b) > TEXT_LIMIT {
+            return Error(TooLarge)
+        }
+    }
+    let length = list.len(b)
+    if length > TEXT_LIMIT {
+        return Error(TooLarge)
+    }
+    if let Error(e) = list.try_reserve(mut out, length) {
+        return Error(Capacity(e))
+    }
+    append(mut out, b)
+    Ok(length)
+}

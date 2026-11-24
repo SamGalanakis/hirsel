@@ -1,0 +1,709 @@
+pub type Policy {
+    audio: List[Codec],
+    video: List[Codec],
+    exts: List[Ext],
+    max_sections: u8,
+    simulcast: bool
+}
+
+pub type LocalEnd {
+    origin_session: u64,
+    origin_version: u64,
+    port: u16,
+    ice_ufrag: Bytes,
+    ice_pwd: Bytes,
+    fingerprint: Inline[u8, 32],
+    tls_id: Bytes,
+    candidate: Bytes
+}
+
+pub type SendSection = Add(TrackSource) | Remove(Id)
+
+pub type TrackSource {
+    media: Media,
+    formats: List[Format],
+    ssrc: u32,
+    rtx_ssrc: u32,
+    msid: Bytes
+}
+
+pub type RidDrops {
+    direction: u8,
+    payload: u8,
+    dependency: u8,
+    paused: u8,
+    unlisted: u8,
+    disabled: u8,
+    wire: u8
+}
+
+pub type Agreed {
+    index: u8,
+    mid: Inline[u8, 16],
+    mid_len: u8,
+    media: Media,
+    recv: bool,
+    send: bool,
+    formats: List[Format],
+    extmaps: List[Extmap],
+    ext_form: ExtForm,
+    rids: List[Rid],
+    streams: List[Stream],
+    rid_drops: RidDrops,
+    local: Section,
+    down_track: bool
+}
+
+pub type Negotiated {
+    remote_ufrag: Bytes,
+    remote_pwd: Bytes,
+    remote_fingerprint: Inline[u8, 32],
+    remote_setup: Setup,
+    tls_id: Bytes,
+    local: LocalEnd,
+    mixed_extmaps: bool,
+    sections: List[Agreed]
+}
+
+pub type Signaling: key = Stable | HaveLocalOffer(u64) | HaveRemoteOffer(u64)
+
+pub type RemoteOffer = Proceed | Glare(u64) | Busy
+
+pub fn default_policy() -> Policy {
+    let mut audio: List[Codec] = list.new()
+    let mut video: List[Codec] = list.new()
+    let mut exts: List[Ext] = list.new()
+    list.push(mut audio, Opus)
+    for codec in[Vp8, Vp9, H264, Av1] {
+        list.push(mut video, codec)
+    }
+    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor] {
+        list.push(mut exts, ext)
+    }
+    Policy(audio: take audio, video: take video, exts: take exts, max_sections: 64, simulcast: true)
+}
+
+pub fn negotiated(local: LocalEnd) -> Negotiated {
+    Negotiated(remote_ufrag: b"", remote_pwd: b"", remote_fingerprint:[0; 32], remote_setup: Active, tls_id: b"", local: clone(local), mixed_extmaps: false, sections: list.new())
+}
+
+pub fn begin_local(mut state: Signaling, version: u64) -> Result[(), SdpError] {
+    if state != Stable {
+        return Error(AnswerMismatch(0))
+    }
+    state = HaveLocalOffer(version)
+    Ok(())
+}
+
+pub fn begin_remote(mut state: Signaling, version: u64) -> RemoteOffer {
+    match state {
+        HaveLocalOffer(v) => Glare(v),
+        HaveRemoteOffer(_) => Busy,
+        Stable => {
+            state = HaveRemoteOffer(version)
+            Proceed
+        },
+    }
+}
+
+pub fn finish_remote(mut state: Signaling, version: u64) -> Result[(), SdpError] {
+    if state != HaveRemoteOffer(version) {
+        return Error(AnswerMismatch(0))
+    }
+    state = Stable
+    Ok(())
+}
+
+pub fn check_answer_version(state: Signaling, version: u64) -> Result[(), SdpError] {
+    if state != HaveLocalOffer(version) {
+        Error(AnswerMismatch(0))
+    } else {
+        Ok(())
+    }
+}
+
+fn same_remote(current: Negotiated, d: Description) -> bool {
+    same(current.remote_ufrag, d.ice_ufrag) && same(current.remote_pwd, d.ice_pwd) && current.remote_fingerprint == d.fingerprint && same(current.tls_id, d.tls_id)
+}
+
+fn same_local(current: LocalEnd, local: LocalEnd) -> bool {
+    same(current.ice_ufrag, local.ice_ufrag) && same(current.ice_pwd, local.ice_pwd) && current.fingerprint == local.fingerprint && same(current.tls_id, local.tls_id) && current.port == local.port && same(current.candidate, local.candidate) && current.origin_session == local.origin_session
+}
+
+fn matched(old: Section, s: Section) -> bool {
+    old.media == s.media && section_id(old) == section_id(s) && same(old.protocol, s.protocol)
+}
+
+fn local_connection(local: LocalEnd) -> Result[Bytes, SdpError] {
+    let fields = words(local.candidate)
+    if list.len(fields) < 8 || !same(fields[1], b"1") || !ascii_same(fields[2], b"udp") || decimal(fields[5], 65535) != Some(int.widen(local.port)) || !same(fields[6], b"typ") || !same(fields[7], b"host") {
+        return Error(Malformed(0))
+    }
+    let ip = std.net.parse_ip(fields[4])
+    let mut b: Bytes = match ip {
+        Ok(V4(_)) => b"IN IP4 ",
+        Ok(V6(_, _)) => b"IN IP6 ",
+        Error(_) => {
+            return Error(Malformed(0))
+        },
+    }
+    list.append(mut b, fields[4])
+    Ok(take b)
+}
+
+fn local_description(local: LocalEnd, setup: Setup) -> Result[Description, SdpError] {
+    if local.port == 0 || !token(local.ice_ufrag) || !token(local.ice_pwd) || !token(local.tls_id) || list.len(local.candidate) == 0 || !valid_text(local.candidate) {
+        return Error(NoIceCredentials)
+    }
+    let mut d = description()
+    d.origin_session = local.origin_session
+    d.origin_version = local.origin_version
+    d.ice_ufrag = clone(local.ice_ufrag)
+    d.ice_pwd = clone(local.ice_pwd)
+    d.fingerprint = local.fingerprint
+    d.tls_id = clone(local.tls_id)
+    d.ice_lite = true
+    d.setup = setup
+    Ok(take d)
+}
+
+fn local_bundle(local: LocalEnd, mut d: Description) -> Result[(), SdpError] {
+    let address = local_connection(local)?
+    for i in 0 .. list.len(d.sections) {
+        if d.sections[i].port != Rejected {
+            d.sections[i].connection = clone(address)
+            add(mut d.bundle, int.narrow(i))?
+        }
+    }
+    if list.len(d.bundle) != 0 {
+        add(mut d.candidates, clone(local.candidate))?
+        d.end_of_candidates = true
+    }
+    validate_description(d)
+}
+
+fn supports(policy: Policy, media: Media, f: Format) -> bool {
+    if media == Application || f.codec == Rtx {
+        return false
+    }
+    let supported = if media == Audio {
+        list_has(policy.audio, f.codec)
+    } else {
+        list_has(policy.video, f.codec)
+    }
+    if !supported {
+        return false
+    }
+    if f.codec == H264 {
+        if let Some(mode) = parameter(f.fmtp, b"packetization-mode") {
+            return same(mode, b"1")
+        }
+        return false
+    }
+    true
+}
+
+fn put_formats(policy: Policy, offered: Section, mut out: List[Format]) -> Result[(), SdpError] {
+    for f in offered.formats {
+        let mut keep = supports(policy, offered.media, f)
+        if f.codec == Rtx {
+            if let Some(pt) = f.apt {
+                for base in offered.formats {
+                    if base.pt == pt && supports(policy, offered.media, base) {
+                        keep = true
+                    }
+                }
+            }
+        }
+        if keep {
+            add(mut out, clone(f))?
+        }
+    }
+    Ok(())
+}
+
+fn complement(d: Direction) -> Direction {
+    directions(has_recv(d), has_send(d))
+}
+
+fn put_extmaps(policy: Policy, offered: Section, dir: Direction, mut out: List[Extmap]) -> Result[(), SdpError] {
+    for orig in offered.extmaps {
+        if !list_has(policy.exts, orig.ext) && orig.ext != Mid {
+            continue
+        }
+        let mut e: Extmap = clone(orig)
+        if let Some(d) = orig.dir {
+            let reverse = complement(d)
+            if !(has_send(reverse) && has_send(dir)) && !(has_recv(reverse) && has_recv(dir)) {
+                continue
+            }
+            e.dir = Some(reverse)
+        }
+        add(mut out, take e)?
+    }
+    Ok(())
+}
+
+fn drop_rids() -> RidDrops {
+    RidDrops(direction: 0, payload: 0, dependency: 0, paused: 0, unlisted: 0, disabled: 0, wire: 0)
+}
+
+fn wire_rid(r: Rid) -> bool {
+    for i in 0u64 .. int.widen(r.len) {
+        if r.id[i] == b'-' || r.id[i] == b'_' {
+            return false
+        }
+    }
+    true
+}
+
+fn ext_form(s: Section, mixed: bool) -> ExtForm {
+    if mixed || s.mixed_extmaps {
+        return Mixed
+    }
+    for e in s.extmaps {
+        if e.id > 14 {
+            return TwoOnly
+        }
+    }
+    OneOnly
+}
+
+fn choose_rids(enabled: bool, sent: Section, mut s: Section) -> Result[RidDrops, SdpError] {
+    let mut drops = drop_rids()
+    let mut remap: Inline[u8, 4] =[255; 4]
+    let mut kept: Inline[bool, 4] =[false; 4]
+    let mut seen: Inline[bool, 4] =[false; 4]
+    let mut unpaused: Inline[bool, 4] =[false; 4]
+    let mut pts: List[List[u8]] = list.new()
+    for stream in sent.simulcast.send {
+        for i in 0 .. list.len(stream.alternatives) {
+            let slot: u64 = int.widen(stream.alternatives[i])
+            seen[slot] = true
+            unpaused[slot] = !stream.paused[i]
+        }
+    }
+    for i in 0 .. list.len(sent.rids) {
+        let r = sent.rids[i]
+        let mut filtered: List[u8] = list.new()
+        for pt in r.pts {
+            if has_pt(s.formats, pt) {
+                add(mut filtered, pt)?
+            }
+        }
+        if r.dir == RidRecv || !has_recv(s.dir) {
+            drops.direction += 1
+        } else if !enabled {
+            drops.disabled += 1
+        } else if !wire_rid(r) {
+            drops.wire += 1
+        } else if !seen[i] {
+            drops.unlisted += 1
+        } else if !unpaused[i] {
+            drops.paused += 1
+        } else if list.len(r.pts) != 0 && list.len(filtered) == 0 {
+            drops.payload += 1
+        } else if list.len(r.unresolved) != 0 {
+            drops.dependency += 1
+        } else {
+            kept[i] = true
+        }
+        add(mut pts, take filtered)?
+    }
+    // A removed dependency can in turn remove another RID.
+    loop {
+        let mut changed = false
+        for i in 0 .. list.len(sent.rids) {
+            if !kept[i] {
+                continue
+            }
+            for dep in sent.rids[i].depend {
+                if !kept[int.widen(dep)] {
+                    kept[i] = false
+                    drops.dependency += 1
+                    changed = true
+                    break
+                }
+            }
+        }
+        if !changed {
+            break
+        }
+    }
+    let mut next: u8 = 0
+    for i in 0 .. list.len(sent.rids) {
+        if kept[i] {
+            remap[i] = next
+            next += 1
+        }
+    }
+    for i in 0 .. list.len(sent.rids) {
+        if !kept[i] {
+            continue
+        }
+        let mut r: Rid = clone(sent.rids[i])
+        r.dir = RidRecv
+        r.pts = clone(pts[i])
+        for j in 0 .. list.len(r.depend) {
+            let dep: u64 = int.widen(r.depend[j])
+            r.depend[j] = remap[dep]
+        }
+        add(mut s.rids, take r)?
+    }
+    for stream in sent.simulcast.send {
+        let mut selected = Stream(alternatives: list.new(), paused: list.new())
+        for old in stream.alternatives {
+            let slot: u64 = int.widen(old)
+            if kept[slot] {
+                add(mut selected.alternatives, remap[slot])?
+                add(mut selected.paused, false)?
+            }
+        }
+        if list.len(selected.alternatives) != 0 {
+            add(mut s.simulcast.recv, take selected)?
+        }
+    }
+    Ok(drops)
+}
+
+fn agreed_section(index: u8, s: Section, drops: RidDrops, down_track: bool, mixed: bool) -> Agreed {
+    Agreed(index: index, mid: s.mid, mid_len: s.mid_len, media: s.media, recv: s.port != Rejected && has_recv(s.dir), send: s.port != Rejected && has_send(s.dir), formats: clone(s.formats), extmaps: clone(s.extmaps), ext_form: ext_form(s, mixed), rids: clone(s.rids), streams: clone(s.simulcast.recv), rid_drops: drops, local: clone(s), down_track: down_track)
+}
+
+fn set_remote(d: Description, mut n: Negotiated) {
+    n.remote_ufrag = clone(d.ice_ufrag)
+    n.remote_pwd = clone(d.ice_pwd)
+    n.remote_fingerprint = d.fingerprint
+    n.remote_setup = Active
+    n.tls_id = clone(d.tls_id)
+}
+
+fn reject_section(orig: Section, mut s: Section) {
+    s.port = Rejected
+    s.dir = Inactive
+    s.fallback = if list.len(orig.formats) == 0 {
+        clone(orig.fallback)
+    } else {
+        let mut b: Bytes = list.new()
+        number(mut b, int.widen(orig.formats[0].pt))
+        take b
+    }
+}
+
+pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, local: LocalEnd, mut out: Description, mut agreed: Negotiated) -> Result[(), SdpError] {
+    validate_description(remote)?
+    if remote.setup == Passive {
+        return Error(AssociationChanged)
+    }
+    if list.len(remote.sections) > int.widen(policy.max_sections) {
+        return Error(TooManySections)
+    }
+    if let Some(old) = current {
+        if !same_remote(old, remote) || !same_local(old.local, local) {
+            return Error(AssociationChanged)
+        }
+        for i in 0 .. list.len(old.sections) {
+            if i >= list.len(remote.sections) || !matched(old.sections[i].local, remote.sections[i]) {
+                return Error(AnswerMismatch(int.narrow(i)))
+            }
+        }
+    }
+    let mut d = local_description(local, Passive)?
+    d.mixed_extmaps = remote.mixed_extmaps
+    let mut n = negotiated(local)
+    n.mixed_extmaps = d.mixed_extmaps
+    set_remote(remote, mut n)
+    for i in 0 .. list.len(remote.sections) {
+        let orig = remote.sections[i]
+        let mut s = empty_section(orig.media, Port(local.port), clone(orig.protocol))
+        s.mid = orig.mid
+        s.mid_len = orig.mid_len
+        let mut down = false
+        let mut was_sending = false
+        if let Some(old) = current {
+            if i < list.len(old.sections) {
+                down = old.sections[i].down_track
+                was_sending = old.sections[i].send
+            }
+        }
+        let mut drops = drop_rids()
+        if orig.port != Rejected && orig.media != Application && same(orig.protocol, b"UDP/TLS/RTP/SAVPF") {
+            s.dir = directions(orig.dir == RecvOnly || (was_sending && has_recv(orig.dir)), has_send(orig.dir))
+            put_formats(policy, orig, mut s.formats)?
+        }
+        if list.len(s.formats) == 0 {
+            reject_section(orig, mut s)
+            drops.direction = int.narrow(list.len(orig.rids))
+        } else {
+            s.rtcp_mux = true
+            s.mixed_extmaps = orig.mixed_extmaps
+            put_extmaps(policy, orig, s.dir, mut s.extmaps)?
+            if !has_mid(s) {
+                return Error(NoMid(int.narrow(i)))
+            }
+            if let Some(old) = current {
+                if i < list.len(old.sections) && was_sending && has_send(s.dir) {
+                    s.ssrcs = clone(old.sections[i].local.ssrcs)
+                    s.rtx_pairs = clone(old.sections[i].local.rtx_pairs)
+                    s.msid = clone(old.sections[i].local.msid)
+                }
+            }
+            drops = choose_rids(policy.simulcast, orig, mut s)?
+        }
+        add(mut n.sections, agreed_section(int.narrow(i), s, drops, down, d.mixed_extmaps))?
+        add(mut d.sections, take s)?
+    }
+    local_bundle(local, mut d)?
+    out = take d
+    agreed = take n
+    Ok(())
+}
+
+fn find_mid(sections: List[Section], id: Id) -> Option[u64] {
+    for i in 0 .. list.len(sections) {
+        if section_id(sections[i]) == id {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn next_mid(sections: List[Section]) -> Id {
+    let mut next: u64 = 0
+    loop {
+        let mut name: Bytes = b"s"
+        number(mut name, next)
+        let id = option.unwrap(identifier(name, false))
+        if find_mid(sections, id) == None {
+            return id
+        }
+        next += 1
+    }
+}
+
+fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, port: u16) -> Result[Section, SdpError] {
+    let mut out = empty_section(source.media, Port(port), clone(s.protocol))
+    out.mid = s.mid
+    out.mid_len = s.mid_len
+    out.dir = SendOnly
+    out.rtcp_mux = true
+    out.extmaps = clone(s.extmaps)
+    out.mixed_extmaps = s.mixed_extmaps
+    out.msid = clone(source.msid)
+    let mut pt: Option[u8] = None
+    for f in source.formats {
+        if supports(policy, source.media, f) {
+            add(mut out.formats, clone(f))?
+            pt = Some(f.pt)
+            break
+        }
+    }
+    let Some(base) = pt else {
+        return Error(AnswerMismatch(index))
+    }
+    for f in source.formats {
+        if f.codec == Rtx && f.apt == Some(base) {
+            add(mut out.formats, clone(f))?
+            add(mut out.rtx_pairs, (source.ssrc, source.rtx_ssrc))?
+            break
+        }
+    }
+    add(mut out.ssrcs, source.ssrc)?
+    if list.len(out.rtx_pairs) != 0 {
+        add(mut out.ssrcs, source.rtx_ssrc)?
+    }
+    Ok(take out)
+}
+
+fn append_track(policy: Policy, current: Negotiated, source: TrackSource, local: LocalEnd, mut d: Description) -> Result[(), SdpError] {
+    for i in 0 .. list.len(current.sections) {
+        if current.sections[i].down_track && d.sections[i].media == source.media && d.sections[i].port != Rejected && d.sections[i].dir == Inactive {
+            let replacement = track_section(policy, source, d.sections[i], int.narrow(i), local.port)?
+            let _ = list.set(mut d.sections, i, take replacement)
+            return Ok(())
+        }
+    }
+    if list.len(d.sections) >= SECTION_LIMIT || list.len(d.sections) >= int.widen(policy.max_sections) {
+        return Error(TooManySections)
+    }
+    let index: u8 = int.narrow(list.len(d.sections))
+    let id = next_mid(d.sections)
+    let mut s = empty_section(source.media, Port(local.port), b"UDP/TLS/RTP/SAVPF")
+    s.mid = id.name
+    s.mid_len = id.len
+    // Use only extension IDs already associated with this BUNDLE transport.
+    for old in d.sections {
+        if old.port == Rejected || old.media != source.media {
+            continue
+        }
+        s.mixed_extmaps = s.mixed_extmaps || old.mixed_extmaps
+        for e in old.extmaps {
+            if e.ext == RidExtension || e.ext == RepairedRid {
+                continue
+            }
+            let mut seen = false
+            for x in s.extmaps {
+                if x.ext == e.ext {
+                    seen = true
+                }
+            }
+            if !seen {
+                let mut map: Extmap = clone(e)
+                map.dir = None
+                add(mut s.extmaps, take map)?
+            }
+        }
+    }
+    if !has_mid(s) {
+        for old in d.sections {
+            for e in old.extmaps {
+                if old.port != Rejected && e.ext == Mid && !has_mid(s) {
+                    add(mut s.extmaps, Extmap(id: e.id, ext: Mid, dir: None, vad: None))?
+                }
+            }
+        }
+    }
+    if !has_mid(s) {
+        add(mut s.extmaps, Extmap(id: 1, ext: Mid, dir: None, vad: None))?
+    }
+    let section = track_section(policy, source, s, index, local.port)?
+    add(mut d.sections, take section)
+}
+
+pub fn offer(policy: Policy, current: Negotiated, local: LocalEnd, adds: List[SendSection], mut out: Description) -> Result[(), SdpError] {
+    if !same_local(current.local, local) {
+        return Error(AssociationChanged)
+    }
+    let mut d = local_description(local, ActPass)?
+    d.mixed_extmaps = current.mixed_extmaps
+    for s in current.sections {
+        add(mut d.sections, clone(s.local))?
+    }
+    for change in adds {
+        match change {
+            Add(source) => {
+                append_track(policy, current, source, local, mut d)?
+            },
+            Remove(id) => {
+                let Some(i) = find_mid(d.sections, id) else {
+                    return Error(AnswerMismatch(0))
+                }
+                if i < list.len(current.sections) && !current.sections[i].down_track {
+                    return Error(AnswerMismatch(int.narrow(i)))
+                }
+                if d.sections[i].port == Rejected {
+                    return Error(AnswerMismatch(int.narrow(i)))
+                }
+                d.sections[i].dir = Inactive
+                list.clear(mut d.sections[i].ssrcs)
+                list.clear(mut d.sections[i].rtx_pairs)
+                d.sections[i].msid = b""
+            },
+        }
+    }
+    local_bundle(local, mut d)?
+    out = take d
+    Ok(())
+}
+
+fn valid_answer_direction(sent: Direction, remote: Direction) -> bool {
+    (!has_send(remote) || has_recv(sent)) && (!has_recv(remote) || has_send(sent))
+}
+
+fn matches_format(sent: List[Format], a: Format) -> bool {
+    for f in sent {
+        if format_config(f, a) && (!a.nack || f.nack) && (!a.pli || f.pli) && (!a.fir || f.fir) && (!a.twcc || f.twcc) {
+            return true
+        }
+    }
+    false
+}
+
+fn narrow_local(sent: Section, remote: Section, index: u8) -> Result[Section, SdpError] {
+    if !matched(sent, remote) || remote.port == BundleOnly {
+        return Error(AnswerMismatch(index))
+    }
+    let mut s: Section = clone(sent)
+    if remote.port == Rejected {
+        s.port = Rejected
+        s.dir = Inactive
+        return Ok(take s)
+    }
+    if sent.port == Rejected || !valid_answer_direction(sent.dir, remote.dir) || list.len(remote.formats) == 0 {
+        return Error(AnswerMismatch(index))
+    }
+    for f in remote.formats {
+        if !matches_format(sent.formats, f) {
+            return Error(AnswerMismatch(index))
+        }
+    }
+    s.dir = complement(remote.dir)
+    s.formats = clone(remote.formats)
+    list.clear(mut s.extmaps)
+    for e in remote.extmaps {
+        let mut found = false
+        for orig in sent.extmaps {
+            if e.ext == orig.ext && e.id == orig.id {
+                let out_dir = if let Some(d) = e.dir {
+                    Some(complement(d))
+                } else {
+                    None
+                }
+                add(mut s.extmaps, Extmap(id: e.id, ext: e.ext, dir: out_dir, vad: e.vad))?
+                found = true
+                break
+            }
+        }
+        if !found {
+            return Error(AnswerMismatch(index))
+        }
+    }
+    list.clear(mut s.rids)
+    s.simulcast = empty_simulcast()
+    let _ = choose_rids(true, remote, mut s)?
+    Ok(take s)
+}
+
+pub fn accept_answer(current: Negotiated, sent: Description, remote: Description, mut agreed: Negotiated) -> Result[(), SdpError] {
+    validate_description(sent)?
+    validate_description(remote)?
+    if !same_remote(current, remote) || remote.setup != Active {
+        return Error(AssociationChanged)
+    }
+    let count = list.len(sent.sections)
+    let actual = list.len(remote.sections)
+    if actual != count {
+        return Error(AnswerMismatch(int.narrow(if actual < count {
+            actual
+        } else {
+            count
+        })))
+    }
+    let mut n = negotiated(current.local)
+    n.local.origin_version = sent.origin_version
+    n.mixed_extmaps = sent.mixed_extmaps && remote.mixed_extmaps
+    set_remote(remote, mut n)
+    for i in 0 .. count {
+        let index: u8 = int.narrow(i)
+        let mut narrowed = narrow_local(sent.sections[i], remote.sections[i], index)?
+        let mixed = remote.mixed_extmaps || remote.sections[i].mixed_extmaps
+        if narrowed.port != Rejected && mixed && !(sent.mixed_extmaps || sent.sections[i].mixed_extmaps) {
+            return Error(AnswerMismatch(index))
+        }
+        narrowed.mixed_extmaps = narrowed.port != Rejected && mixed && !n.mixed_extmaps
+        let down = i >= list.len(current.sections) || current.sections[i].down_track
+        add(mut n.sections, agreed_section(index, narrowed, drop_rids(), down, n.mixed_extmaps))?
+    }
+    agreed = take n
+    Ok(())
+}
+
+pub fn receive_answer(version: u64, current: Negotiated, sent: Description, remote: Description, mut state: Signaling, mut agreed: Negotiated) -> Result[(), SdpError] {
+    check_answer_version(state, version)?
+    if version != sent.origin_version {
+        return Error(AnswerMismatch(0))
+    }
+    accept_answer(current, sent, remote, mut agreed)?
+    state = Stable
+    Ok(())
+}

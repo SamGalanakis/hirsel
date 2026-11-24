@@ -202,6 +202,7 @@ unsafe fn connect(
                 backlog: 0,
                 connecting: None,
                 denial: None,
+                public: false,
                 direction: 0,
                 os: &crate::os_net::TLS_OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,

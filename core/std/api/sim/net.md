@@ -15,5 +15,8 @@ and closing a write half lets its peer drain the pipe before EOF.
 counts successful opaque secret sends without reading their bytes. Virtual
 TLS supplies no trust authority for entry-granted secrets.
 
+`local_as` names addresses as the simulated host's own: the server answers
+a public-only `Connect` to one of them `Denied` (NET-18).
+
 `answer_name` answers one served Resolve or Handshake using the same
 scripts as `serve`. It replies Denied to other operations.

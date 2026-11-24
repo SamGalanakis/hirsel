@@ -1019,6 +1019,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         backlog: 0,
                         connecting: Some(key),
                         denial: None,
+                        public: false,
                         direction: 0,
                         os: &crate::os_net::OPERATIONS,
                         tls: ptr::null_mut(),

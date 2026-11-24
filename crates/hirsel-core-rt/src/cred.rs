@@ -858,6 +858,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
                 backlog: 0,
                 connecting: None,
                 denial: None,
+                public: false,
                 direction: 0,
                 os: &OPERATIONS,
                 tls: ptr::null_mut(),

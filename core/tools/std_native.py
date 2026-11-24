@@ -105,7 +105,7 @@ LIVE_UDP_CASES = ('net:udp_gro_first_truncates', 'net:udp_group_recycles_a_full_
 
 def unit_socket_case(case):
     return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket',
-                         *LIVE_UDP_CASES)
+                         'net:public_connect_preflight_host', *LIVE_UDP_CASES)
 
 
 def simulated_network_case(case, evaluating=False):
@@ -115,6 +115,9 @@ def simulated_network_case(case, evaluating=False):
 
 def loopback_grants(case):
     rules = LOOPBACK_RULES
+    if case.name == 'net:public_connect_preflight_host':
+        # NET-18's public_connect_preflight grant.
+        rules = ('Connect 0.0.0.0/0 1-65535 public', 'Connect 10.0.0.5/32 5432-5432')
     if case.name in LIVE_UDP_CASES:
         rules += ('UdpBind 127.0.0.0/8 1-65535', 'UdpSend 127.0.0.0/8 1-65535')
     return ['--grant', 'Net=' + ';'.join(rules), '--grant', 'Clock', '--grant', 'Tasks']

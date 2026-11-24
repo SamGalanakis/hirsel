@@ -494,3 +494,124 @@ fn one_rule(take r: Rule) -> List[Rule] {
     list.push(mut rules, take r)
     take rules
 }
+
+fn issued(take attempt: Result[Socket, NetError]) -> bool {
+    match take attempt {
+        Ok(socket) => {
+            let _ = take socket
+            true
+        },
+        Error(Denied) => false,
+        Error(_) => true,
+    }
+}
+
+fn denied(take attempt: Result[Socket, NetError]) -> bool {
+    match take attempt {
+        Ok(socket) => {
+            let _ = take socket
+            false
+        },
+        Error(Denied) => true,
+        Error(_) => false,
+    }
+}
+
+fn public_rule() -> Rule {
+    Rule(dir: Connect, prefix: V4(0), bits: 0, ports: (1u16, 65535u16), reach: Public)
+}
+
+fn preflight_refused(n: Net) -> bool waits {
+    // NET-18 part 1: 127.0.0.1:80, 169.254.169.254:80 and 10.0.0.1:5432.
+    for addr in [Addr(ip: V4(2130706433), port: 80), Addr(ip: V4(2852039166), port: 80), Addr(ip: V4(167772161), port: 5432)] {
+        if !denied(host.connect(n, addr, Never)) {
+            return false
+        }
+    }
+    true
+}
+
+// NET-18 `public_connect_preflight` on the host, granted
+// `Connect 0.0.0.0/0 1-65535 public;Connect 10.0.0.5/32 5432-5432`.
+// expect: run public_connect_preflight_host(network) = true
+fn public_connect_preflight_host(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let refused = preflight_refused(n)
+    let until = At(clock, host.mono_ns(clock) + 200000000u64)
+    let fourth = issued(host.connect(n, Addr(ip: V4(167772165), port: 5432), until))
+    let counts = net.denials(n)
+    refused && fourth && counts.not_public == 3 && counts.own_address == 0
+}
+
+// NET-18 `public_connect_preflight` on a std.sim.net Net narrowed by the same
+// two rules. The sim server answers an issued connect with no listener
+// `Refused`, never `Denied`.
+// expect: run public_connect_preflight(network) = true
+fn public_connect_preflight(root: Net, _clock: Clock, _tasks: Tasks) -> bool waits {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, public_rule())
+    list.push(mut rules, Rule(dir: Connect, prefix: V4(167772165), bits: 32, ports: (5432u16, 5432u16), reach: Any))
+    let n = result.unwrap(net.narrow(root, rules))
+    let refused = preflight_refused(n)
+    let fourth = match host.connect(n, Addr(ip: V4(167772165), port: 5432), Never) {
+        Error(Refused) => true,
+        Error(_) => false,
+        Ok(socket) => {
+            let _ = take socket
+            false
+        },
+    }
+    let counts = net.denials(n)
+    refused && fourth && counts.not_public == 3 && counts.own_address == 0
+}
+
+type OwnNetwork: send {
+    port: Served[NetOp],
+    clock: Clock
+}
+
+fn own_address_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+// 192.31.196.1 (public class) is the simulated host's own address.
+fn own_address_network(take input: OwnNetwork) waits {
+    let OwnNetwork(port: take port, clock) = take input
+    let mut network = sim.net.new(sim.net.defaults())
+    let mut own: List[Ip] = list.with_capacity(1)
+    list.push(mut own, V4(3223307265))
+    sim.net.local_as(mut network, take own)
+    let mut plan = sim.world.plan(1)
+    let _ = sim.net.serve(network, mut plan, clock, take port)
+}
+
+fn own_address_phases(n: Net) -> bool waits {
+    let own = Addr(ip: V4(3223307265), port: 7000)
+    let other = Addr(ip: V4(3223307266), port: 7000)
+    let (first, _) = result.unwrap(host.listen(n, own, 4))
+    let (second, _) = result.unwrap(host.listen(n, other, 4))
+    let public = result.unwrap(net.narrow(n, one_rule(public_rule())))
+    let refused = denied(host.connect(public, own, Never))
+    let counted = net.denials(n)
+    let covered = issued(host.connect(n, own, Never))
+    let not_held = issued(host.connect(public, other, Never))
+    let _ = take first
+    let _ = take second
+    let after = net.denials(n)
+    refused && counted.own_address == 1 && counted.not_public == 0 && covered && not_held && after.own_address == 1
+}
+
+// NET-18 `own_address_denied` in std.sim.net: a public-only connect to an
+// address given by `local_as` is Denied and counted; an Any rule covering it
+// is issued; a public-only connect to an address not given is issued.
+// expect: run own_address_denied(tasks) = true
+fn own_address_denied(tasks: Tasks) -> bool waits {
+    let (world, c) = sim.world.new(1, 0, 0)
+    let (n, port) = provide.net(bytes 65536)
+    let driver = task.spawn(tasks, bytes 65536, take world, own_address_clock)
+    let server = task.spawn(tasks, bytes 4194304, OwnNetwork(port: take port, clock: c), own_address_network)
+    let passed = own_address_phases(n)
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    passed
+}

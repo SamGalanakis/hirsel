@@ -1,6 +1,26 @@
 use super::*;
 
 impl Machine<'_> {
+    /// NET-18 part 2: a served Net connect only `Public` rules cover, which
+    /// its server is told.
+    pub(super) fn public_only(&self, a: &[u64]) -> bool {
+        self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+            let rules = rules.iter().filter_map(|rule| match rule {
+                hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
+                _ => None,
+            });
+            hirsel_core_net::public_only(rules, a[1] as u8, a[2], a[3], a[4] as u16)
+        })
+    }
+
+    /// A public-only connect its server answered `Denied` counts as `own_address`.
+    pub(super) fn own_address(&mut self, public: bool, port: usize, row: Vec<u64>) -> Vec<u64> {
+        if public && row[1] == 1 {
+            *self.world.own_address.entry(Some(port)).or_default() += 1;
+        }
+        row
+    }
+
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
     pub(super) fn host(&mut self, t: &mut Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         if op == HostOp::SecretSeal {
@@ -252,7 +272,7 @@ impl Machine<'_> {
                 let provider = self.world.net_ports.get(&a[0]).copied();
                 ok(
                     self.world.not_public.get(&provider).copied().unwrap_or(0),
-                    0,
+                    self.world.own_address.get(&provider).copied().unwrap_or(0),
                 )
             }
             HostOp::NetNarrow => {

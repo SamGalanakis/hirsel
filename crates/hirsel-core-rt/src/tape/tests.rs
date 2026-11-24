@@ -756,6 +756,7 @@ fn socket_deadline_final_receive_records_its_success() {
                 backlog: 0,
                 connecting: None,
                 denial: None,
+                public: false,
                 direction: 1,
                 os: &crate::os_net::OPERATIONS,
                 tls: ptr::null_mut(),

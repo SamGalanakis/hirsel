@@ -43,8 +43,8 @@ impl Cx<'_, '_, '_> {
         Some(value)
     }
 
-    /// `net.denials(n)` (NET-18): the provider's refusal counts. Part 2 (the
-    /// provider's own address) comes with S2, so `own_address` is 0.
+    /// `net.denials(n)` (NET-18): the provider's refusal counts, `not_public`
+    /// in the outcome's value and `own_address` in its written count.
     pub(super) fn runtime_net_denials(
         &mut self,
         vals: &[Option<ValueId>],
@@ -52,13 +52,12 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
-        let [not_public, ..] =
+        let [not_public, _, _, own_address] =
             self.runtime_row(RtOp::Host(HostOp::NetDenials), &[Arg::Value(vals[0]?)], n)?;
         let id = self.runtime_type(result, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.runtime_store(to, &[Step::Field(0)], u, not_public, n);
-        let zero = self.konst(u, 0, n)?;
-        self.runtime_store(to, &[Step::Field(1)], u, zero, n);
+        self.runtime_store(to, &[Step::Field(1)], u, own_address, n);
         let value = self.pointer(to, n);
         self.temp(result, Some(value));
         Some(value)

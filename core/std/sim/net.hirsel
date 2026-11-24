@@ -18,7 +18,8 @@ pub opaque type Network: send {
     source_ip: Option[Ip],
     // Each name's answers in order (NET-18): a resolve_as name has one.
     dns: Map[String, List[List[Ip]]],
-    tls_outcomes: Map[String, Result[Handshake, TlsFailure]]
+    tls_outcomes: Map[String, Result[Handshake, TlsFailure]],
+    local: List[Ip]
 }
 
 type Link {
@@ -61,7 +62,7 @@ pub fn new(config: Config) -> Network {
     if config.queue_bytes == 0 || config.fragment_bytes == 0 {
         fail("sim.net needs positive pipe and fragment sizes")
     }
-    Network(config: config, partitions: list.new(), source_ip: None, dns: map.new(), tls_outcomes: map.new())
+    Network(config: config, partitions: list.new(), source_ip: None, dns: map.new(), tls_outcomes: map.new(), local: list.new())
 }
 
 /// Stalls both directions between these addresses.
@@ -105,6 +106,12 @@ pub fn resolve_sequence(mut n: Network, take hostname: String, take answers: Lis
     let mut key = take hostname
     string.make_ascii_lower(mut key)
     map.insert(mut n.dns, take key, take answers)
+}
+
+/// Names addresses as the host's own (NET-18 part 2): a public-only `Connect` to
+/// one of them is answered `Denied`.
+pub fn local_as(mut n: Network, take addrs: List[Ip]) {
+    list.append(mut n.local, addrs)
 }
 
 /// Scripts the result of handshakes for one canonical verification name.
@@ -206,7 +213,14 @@ fn pipe(peer: u64, addr: Addr, room: u64) -> Pipe {
     Pipe(info: Endpoint(peer: peer, addr: addr, read_closed: false, write_closed: false, reset: false), outgoing: list.with_capacity(room))
 }
 
-fn connect(n: Network, mut state: State, addr: Addr, now: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
+fn connect(n: Network, mut state: State, addr: Addr, public: bool, now: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
+    if public {
+        for own in n.local {
+            if same(own, addr.ip) {
+                return reject(mut s, take c, Denied)
+            }
+        }
+    }
     let ip = match n.source_ip {
         Some(ip) => ip,
         None => addr.ip
@@ -555,7 +569,7 @@ fn send_secret(n: Network, mut state: State, id: u64, now: u64, mut s: Served[Ne
 
 fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock, mut port: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] waits {
     match provide.net_op(c) {
-        Connect(addr: addr) => connect(n, mut state, addr, host.mono_ns(clock), mut port, take c),
+        Connect(addr: addr, public: public) => connect(n, mut state, addr, public, host.mono_ns(clock), mut port, take c),
         Listen(addr: addr, backlog: backlog) => {
             listen(mut state, addr, backlog, mut port, take c)
             None

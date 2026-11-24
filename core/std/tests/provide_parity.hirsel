@@ -270,7 +270,7 @@ fn loopback(take s: Served[NetOp]) -> u64 waits {
                         id = id + 4
                         Some(Listener(id, here))
                     },
-                    Connect(addr) => {
+                    Connect(addr, _) => {
                         id = id + 4
                         Some(Socket(id, here))
                     },

@@ -1027,7 +1027,8 @@ through the launch arguments to find and verify the pin.
   ([SEM-5](spec/semantics.md#sem-5-maps), [CAP-8](spec/capabilities.md#cap-8-the-replay-point)),
   so a replay supplies nothing for it and compares nothing with it.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
-  and with duplicates; each address rule occupies 23 bytes.
+  and with duplicates; each address rule occupies 23 bytes, preceded by the byte 8 when
+  its reach is `Public` ([NET-18](spec/net.md#net-18-public-only-connects)).
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of
   roots digest when the trust is `Roots`; the port interval; and a `u16` count of patterns,
   each a length byte followed by its bytes.

@@ -179,9 +179,9 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2799,
-    "raise_revision": 3,
-    "reason": "run-decode-raii-2112"
+    "lines": 2769,
+    "raise_revision": 4,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -195,9 +195,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 2187,
-    "raise_revision": 1,
-    "reason": "run-decode-raii-2112"
+    "lines": 1919,
+    "raise_revision": 2,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 3938,
@@ -320,9 +320,9 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 7168,
-    "raise_revision": 7,
-    "reason": "net18-s2-2481"
+    "lines": 7144,
+    "raise_revision": 8,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
@@ -399,14 +399,14 @@
     "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-rt/src/net.rs": {
-    "lines": 1384,
-    "raise_revision": 2,
-    "reason": "net18-s2-2481"
+    "lines": 1390,
+    "raise_revision": 3,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-rt/src/net_tests.rs": {
-    "lines": 1528,
-    "raise_revision": 1,
-    "reason": "net18-s1-2446"
+    "lines": 1529,
+    "raise_revision": 2,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-rt/src/os.rs": {
     "lines": 1253
@@ -438,9 +438,9 @@
     "lines": 2258
   },
   "crates/hirsel-core-rt/src/tape/tests.rs": {
-    "lines": 2553,
-    "raise_revision": 1,
-    "reason": "std2-host-2117"
+    "lines": 2504,
+    "raise_revision": 2,
+    "reason": "net18-s3-2482"
   },
   "crates/hirsel-core-rt/src/task_heap.rs": {
     "lines": 2650

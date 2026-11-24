@@ -16,7 +16,7 @@ pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[ public][;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
 
 /// Address rule tags in grant rows and tape headers. Tags 2 through 5
 /// identify other kinds of Net rules and are separate from Core variants.
@@ -164,7 +164,14 @@ impl Rule {
     }
     pub fn parse(text: &str) -> Result<Self, String> {
         let error = || format!("expected --grant {RULE_SYNTAX}: {text}");
-        let parts: Vec<_> = text.split_whitespace().collect();
+        let mut parts: Vec<_> = text.split_whitespace().collect();
+        // NET-18: `public` is an optional last word, valid only on `Connect`.
+        let reach = if parts.len() == 4 && parts[3] == "public" {
+            parts.pop();
+            PUBLIC
+        } else {
+            ANY
+        };
         if parts.len() != 3 {
             return Err(error());
         }
@@ -188,7 +195,7 @@ impl Rule {
             hi,
             lo,
             bits: bits.parse().map_err(|_| error())?,
-            reach: ANY,
+            reach,
             first: first.parse().map_err(|_| error())?,
             last: last.parse().map_err(|_| error())?,
         };
@@ -216,6 +223,24 @@ pub fn not_public(
             .into_iter()
             .any(|rule| rule.covers_address(dir, family, hi, lo) && rule.ports_permit(dir, port))
 }
+
+/// NET-18 part 2's marking: a connect the preflight permitted is public-only
+/// when no `Any` rule covers its address and port, so only `Public` rules do.
+pub fn public_only(
+    mut rules: impl Iterator<Item = Rule>,
+    family: u8,
+    hi: u64,
+    lo: u64,
+    port: u16,
+) -> bool {
+    let dir = AddressDirection::Connect as u8;
+    !rules.any(|rule| rule.reach == ANY && rule.permits(dir, family, hi, lo, port))
+}
+
+/// The `IoError` code that marks a connect refused by NET-18's part 2 (an
+/// address the host holds) with `Denied` (tag 1). The program sees `Denied`;
+/// the caller counts the code as `own_address`, so a replay counts it again.
+pub const OWN_ADDRESS: u32 = 1;
 
 /// Refusal specific to an ephemeral listen whose matching rules leave a port uncovered.
 pub const EPHEMERAL_OUTSIDE_NET_GRANT: u8 = 11;

@@ -40,6 +40,9 @@ pub struct HeaderTooLarge;
 const NET_KIND: u8 = 1;
 const ENV_KIND: u8 = 7;
 const NET_RULE_LEN: usize = 23;
+/// NET-18: an address rule with the `Public` reach is its 23-byte row after
+/// this tag. An untagged row is an `Any` rule.
+const PUBLIC_RULE: u8 = 8;
 
 fn read_net_rule(bytes: &[u8]) -> Rule {
     Rule {
@@ -48,7 +51,6 @@ fn read_net_rule(bytes: &[u8]) -> Rule {
         hi: u64::from_le_bytes(bytes[2..10].try_into().unwrap()),
         lo: u64::from_le_bytes(bytes[10..18].try_into().unwrap()),
         bits: bytes[18],
-        // Launch grants carry no `public` word before NET-18's S3.
         reach: hirsel_core_net::ANY,
         first: u16::from_le_bytes(bytes[19..21].try_into().unwrap()),
         last: u16::from_le_bytes(bytes[21..23].try_into().unwrap()),
@@ -110,8 +112,15 @@ fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
                     UnixRule::new(direction, root, path).ok_or(Corrupt)?,
                 ));
             }
-            _ => {
-                let rule = read_net_rule(c.take(NET_RULE_LEN)?);
+            tag => {
+                let public = tag == Some(&PUBLIC_RULE);
+                if public {
+                    c.u8()?;
+                }
+                let mut rule = read_net_rule(c.take(NET_RULE_LEN)?);
+                if public {
+                    rule.reach = hirsel_core_net::PUBLIC;
+                }
                 if !rule.valid() {
                     return Err(Corrupt);
                 }
@@ -134,6 +143,9 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
     for rule in rules {
         match rule {
             GrantRule::Address(rule) => {
+                if rule.reach == hirsel_core_net::PUBLIC {
+                    out.push(PUBLIC_RULE);
+                }
                 out.extend_from_slice(&[rule.dir, rule.family]);
                 out.extend_from_slice(&rule.hi.to_le_bytes());
                 out.extend_from_slice(&rule.lo.to_le_bytes());

@@ -194,6 +194,8 @@ pub(crate) struct NetworkRequest {
     pub backlog: u16,
     pub connecting: Option<u64>,
     pub denial: Option<u8>,
+    /// NET-18: a CONNECT only `Public` rules permit; part 2 refuses an own address.
+    pub public: bool,
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
     pub tls: *mut crate::host_file::TlsSessions,
@@ -400,6 +402,7 @@ unsafe fn address_op(
             backlog,
             connecting: None,
             denial: None,
+            public: false,
             direction: 0,
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls_sessions,
@@ -426,6 +429,7 @@ unsafe fn address_op(
         {
             outcome = tape.carrier(outcome);
         }
+        addr::count_own_address(&*files, &*provider, &network, &outcome, served);
         let ok = outcome.status == 0 && outcome.error == IoError::OK;
         if ok && (op == CONNECT || served) {
             // A served Net's listeners route to it too.
@@ -508,6 +512,7 @@ impl OwnedNet {
                 backlog: 0,
                 connecting: None,
                 denial: None,
+                public: false,
                 direction: (key & 3) as u8,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,
@@ -1057,6 +1062,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 backlog: 0,
                 connecting: None,
                 denial: None,
+                public: false,
                 direction: 2,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,

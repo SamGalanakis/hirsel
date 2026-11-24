@@ -157,6 +157,8 @@ pub(crate) struct RunGrants {
     pub(crate) cells: crate::provide::Cells,
     /// NET-18's `not_public` refusals per provider (its `state` address).
     pub(crate) not_public: Mutex<BTreeMap<usize, u64>>,
+    /// NET-18's `own_address` refusals per provider, counted from deliveries.
+    pub(crate) own_address: Mutex<BTreeMap<usize, u64>>,
 }
 
 impl RunGrants {

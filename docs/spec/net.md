@@ -163,8 +163,10 @@ A run grants Net with an explicit rule list:
 hirsel run app --grant 'Net=Connect 127.0.0.0/8 1-65535;Listen 127.0.0.1/32 8000-9000'
 ```
 
-The syntax is `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[;<rule>]'`, where
-`dir` is `Connect` or `Listen` and the prefix is an IPv4 or IPv6 literal. A `Tls` rule is
+The syntax is `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[ public][;<rule>]'`, where
+`dir` is `Connect` or `Listen` and the prefix is an IPv4 or IPv6 literal. The trailing
+word `public` gives a `Connect` rule the `Public` reach (NET-18); on any other rule it is
+`Invalid`. A `Tls` rule is
 written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`, and a `Resolve` rule
 `Resolve <pattern>[,<pattern>]`. Its trust is `System` or
 `Roots=sha256:<hex>`. An example:
@@ -366,7 +368,7 @@ The check has two parts, kept apart because they depend on different things.
    registered in the provider's kqueue, for `RTM_NEWADDR` and `RTM_DELADDR`. A lost message
    (`ENOBUFS`) takes a new snapshot, as a netlink dump does. A `std.sim.net` server answers
    `Denied` to a public-only `Connect` to an address given by
-   `sim.net.local_as(mut n, addrs)`<!-- doc-ref: planned -->.
+   `sim.net.local_as(mut n, addrs)`.
 
 **What the program sees.** A connect refused by either part returns `NetError.Denied`,
 the same value as an address no rule covers. The recovery is the same (the address is
@@ -448,11 +450,37 @@ Decided in S1 (2026-11-24, net18-s1-2446), where the text above is silent:
   `Invalid`, and an intersection that is left with no public address is dropped.
 - A refusal counts as `not_public` when some rule covers the address and port and
   every such rule is public-only. NET-6's own refusals (mapped, unscoped link-local,
-  unspecified) are covered by no rule and do not count. Until S2 builds part 2,
-  `own_address` is 0.
-- The tape header records only launch grants, and the S1 grant has no `public`
-  word, so its 23-byte address row is unchanged and reads back as `Any`. Narrowed
-  rules are recomputed on replay. S3 encodes the reach when it parses `public`.
+  unspecified) are covered by no rule and do not count.
+- Narrowed rules are recomputed on replay. A replay makes part 1's check, and so
+  counts `not_public`, from the recorded launch rules.
+
+Decided in S3 (2026-11-25, net18-s3-2482), where the text above is silent:
+
+- **TAPE.** A launch grant's `Public` address rule is written as the byte 8
+  followed by its unchanged 23-byte address row; an `Any` rule is the bare row. A
+  bare row reads back as `Any`, so a tape recorded before S3 replays as before. A
+  row after the byte 8 reads back as `Public` and must still be a valid `Public`
+  rule, or the header is `Corrupt`. No format number changes: an older build
+  reading a tagged row refuses the header, since 8 is no direction byte.
+- **Counting `own_address`.** The caller counts it from the delivery, so a replay
+  counts the recorded answer again. For a served `Net`, a `Denied` delivered after
+  issue to a public-only connect counts. For the host provider, the provider's
+  part-2 `Denied` carries the error code 1 (`OWN_ADDRESS`; a host `EACCES` carries
+  0), and only that one counts, so a firewall's `EACCES` on a public-only connect
+  does not. A connect part 1 refused is never marked public-only.
+- **The table.** It is kept for the process, keyed by family, address, interface
+  index and prefix length, so an address assigned twice stays until every
+  assignment is removed. `IFA_LOCAL` is the address when present (on a
+  point-to-point link `IFA_ADDRESS` is the peer), else `IFA_ADDRESS`. A message that
+  does not parse is treated as lost and dumps the table again; a drain after a dump
+  that loses messages dumps again. When the table cannot be read (the socket,
+  bind, dump or receive fails), the public-only connect is `Denied` and counted
+  under `own_address`: ambiguity denies.
+- **`sim.net.local_as`** appends to the addresses the server holds for the
+  `Network`'s whole serve; the sim answers by exact address only and does not
+  read the embedded forms. The sim half of `own_address_denied` replaces the
+  address deletion with a public-only connect to a second public address the
+  sim does not hold.
 
 Decided in S2 (2026-11-24, net18-s2-2481), where the text above is silent; each is
 reversible before 1.0:
@@ -763,7 +791,7 @@ calls and answers them with these replies, in addition to the existing ones
 ([core](core.md#provide)):
 
 ```hirsel core
-pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64)
+pub type NetOp = Connect(addr: Addr, public: bool) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64)
 pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
 ```
 

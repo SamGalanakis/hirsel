@@ -35,6 +35,8 @@ impl Port {
             CONNECT => {
                 w[0] = NET_CONNECT;
                 w[1..5].copy_from_slice(&address);
+                // NET-18: `public`, so the server refuses its own addresses.
+                w[5] = u64::from(n.public);
             }
             RESOLVE => {
                 // The name as the caller wrote it, which its rules covered,

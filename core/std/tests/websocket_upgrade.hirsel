@@ -251,7 +251,7 @@ fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
         return false
     }
     let dialed = match provide.net_op(connect) {
-        Connect(addr) => addr.port == 80,
+        Connect(addr, _) => addr.port == 80,
         _ => false
     }
     if !dialed || !answered(mut s, take connect, Socket(8, Addr(ip: V4(2130706433), port: 80))) {

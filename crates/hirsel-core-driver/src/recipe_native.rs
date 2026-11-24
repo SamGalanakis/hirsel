@@ -849,8 +849,13 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
                     (u128::from(rule.hi) << 64) | u128::from(rule.lo),
                 ))
             };
+            let reach = if rule.reach == hirsel_core_net::PUBLIC {
+                " public"
+            } else {
+                ""
+            };
             format!(
-                "{direction} {ip}/{} {}-{}",
+                "{direction} {ip}/{} {}-{}{reach}",
                 rule.bits, rule.first, rule.last
             )
         }

@@ -194,6 +194,8 @@ struct World {
     /// `net.narrow`'s list in progress, by builder: the parent Net, the rules
     /// read so far, and whether one was invalid (NET-6).
     narrowing: BTreeMap<u64, (u64, Vec<hirsel_core_net::GrantRule>, bool)>,
+    /// NET-18's `own_address` refusals per served Net's port.
+    own_address: BTreeMap<Option<usize>, u64>,
     exec_grants: Vec<(usize, hirsel_core_net::exec::ExecRules)>,
     exec_handles: BTreeMap<u64, Limit>,
     /// A served Net caller's socket and listener keys (direction bits clear):
@@ -3607,8 +3609,9 @@ impl Machine<'_> {
                 ..
             }
         );
+        let public = op == HostOp::Connect && self.public_only(a);
         let (words, fields, out): (Vec<u64>, Vec<Vec<u8>>, Option<u64>) = match op {
-            HostOp::Connect => (vec![0, a[1], a[2], a[3], a[4]], vec![], None),
+            HostOp::Connect => (vec![0, a[1], a[2], a[3], a[4], public.into()], vec![], None),
             HostOp::Listen => (vec![2, a[1], a[2], a[3], a[4], a[5]], vec![], None),
             HostOp::Accept => (vec![3, id], vec![], None),
             HostOp::LocalAddr => (vec![NET_LOCAL_ADDR, id], vec![], None),
@@ -3659,7 +3662,8 @@ impl Machine<'_> {
             HostOp::Resolve | HostOp::RecvBounded | HostOp::SendPair => self.until(a, 3),
             _ => None,
         };
-        self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)
+        let row = self.port_call_with(t, c, w, fields, out, live, &mut None, deadline);
+        row.map(|row| self.own_address(public, c, row))
     }
 
     /// `net.join` on a served Net socket's live halves (native

@@ -1261,7 +1261,7 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
         let op = provide.net_op(call)
         match op {
             ConnectUnix(root, path) => control(mut schedule, mut port, take call, root, path),
-            Connect(addr: addr) => {
+            Connect(addr: addr, ..) => {
                 list.push(mut connects, (addr, host.mono_ns(clock)))
                 let spare = match n.cut {
                     Some(cut) => addr == cut.spare,

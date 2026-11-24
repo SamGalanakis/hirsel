@@ -117,6 +117,22 @@ fn v6_class(ip: u128) -> AddressClass {
     }
 }
 
+/// The IPv4 addresses embedded in `ip` by the table's embedding rows (NET-18
+/// part 2 also refuses a public-only connect to one the host holds): none, one,
+/// or for Teredo the server and the client.
+pub fn embedded_v4(ip: u128) -> impl Iterator<Item = u32> {
+    let (first, second) = if within(ip, MAPPED) || within(ip, NAT64) {
+        (Some(ip as u32), None)
+    } else if within(ip, SIX_TO_FOUR) {
+        (Some((ip >> 80) as u32), None)
+    } else if within(ip, TEREDO) {
+        (Some((ip >> 64) as u32), Some(!(ip as u32)))
+    } else {
+        (None, None)
+    };
+    first.into_iter().chain(second)
+}
+
 /// `net.class`: the class of `ip` under NET-18's table.
 pub fn class(ip: IpAddr) -> AddressClass {
     match ip {

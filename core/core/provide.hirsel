@@ -150,7 +150,7 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
     let d = word(c, 3)
     let e = word(c, 4)
     if t == 0 {
-        Connect(addr: addr(a, b, d, e))
+        Connect(addr: addr(a, b, d, e), public: word(c, 5) == 1)
     } else if t == 1 {
         Resolve(name: a, room: b)
     } else if t == 2 {

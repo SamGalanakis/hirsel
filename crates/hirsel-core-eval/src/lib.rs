@@ -65,6 +65,9 @@ use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_ids::host_op::{DIRECT_ALIGNMENT, MODE_DIRECT, MODE_DURABLE};
 use hirsel_core_ir::*;
+use provide::zero_at_error;
+mod fs;
+use fs::{FileLock, ModelFile, OpenFile};
 use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
     cleanup_class, compute, field_size, map_entry,
@@ -267,6 +270,7 @@ struct PortHandle {
     write: Option<PortState>,
     read_only_file: bool,
     client_socket: bool,
+    file_mode: u8,
     termination: Option<u64>,
 }
 impl PortHandle {
@@ -277,6 +281,7 @@ impl PortHandle {
             write: None,
             read_only_file: false,
             client_socket: false,
+            file_mode: 0,
             termination: None,
         }
     }
@@ -513,55 +518,6 @@ type DirKey = (u64, Vec<u8>);
 enum Node {
     File(Arc<Mutex<ModelFile>>),
     Dir(u64),
-}
-struct OpenFile {
-    file: Arc<Mutex<ModelFile>>,
-    at: u64,
-    locked: bool,
-    mode: u8,
-    read_only_dir: bool,
-}
-const FILE_PAGE: u64 = 4096;
-
-#[derive(Default)]
-struct ModelFile {
-    len: u64,
-    modified_ns: u64,
-    pages: BTreeMap<u64, Box<[u8; FILE_PAGE as usize]>>,
-}
-
-impl ModelFile {
-    fn read(&self, at: u64, count: usize) -> Vec<u8> {
-        let mut bytes = vec![0; count];
-        Self::visit(at, count, |page, from, to, pos| {
-            if let Some(page) = self.pages.get(&page) {
-                bytes[pos..pos + to - from].copy_from_slice(&page[from..to]);
-            }
-        });
-        bytes
-    }
-
-    fn write(&mut self, at: u64, bytes: &[u8]) {
-        Self::visit(at, bytes.len(), |page, from, to, pos| {
-            let page = self
-                .pages
-                .entry(page)
-                .or_insert_with(|| Box::new([0; FILE_PAGE as usize]));
-            page[from..to].copy_from_slice(&bytes[pos..pos + to - from]);
-        });
-        self.len = self.len.max(at + bytes.len() as u64);
-    }
-
-    fn visit(at: u64, count: usize, mut f: impl FnMut(u64, usize, usize, usize)) {
-        let mut pos = 0;
-        while pos < count {
-            let offset = at + pos as u64;
-            let from = (offset % FILE_PAGE) as usize;
-            let n = (count - pos).min(FILE_PAGE as usize - from);
-            f(offset / FILE_PAGE, from, from + n, pos);
-            pos += n;
-        }
-    }
 }
 /// The model host's largest block: an admitted allocation above it stops the run.
 const HOST_BYTES: u64 = 1 << 32;
@@ -3314,9 +3270,11 @@ impl Machine<'_> {
             | HostOp::ReadAt
             | HostOp::Write
             | HostOp::WriteAt
+            | HostOp::ZeroAt
             | HostOp::StatFile
             | HostOp::Sync
             | HostOp::TryLock
+            | HostOp::TryLockShared
             | HostOp::Unlock
             | HostOp::Close
             | HostOp::NextEntries => {
@@ -4278,6 +4236,13 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             "a counted operation names another kind than its alloc"
         );
     }
+    fn direct_buffer_aligned(&self, data: u64) -> bool {
+        let (block, offset) = split(data);
+        data == 0
+            || (self.mem[block].align.is_multiple_of(DIRECT_ALIGNMENT)
+                && (offset as u64).is_multiple_of(DIRECT_ALIGNMENT))
+    }
+
     fn block(&mut self, size: u64, limit: Option<Limit>, charge: u64, res: Option<Res>) -> u64 {
         // An admitted block the host cannot provide is a run stop, as for
         // `hirsel_core_alloc_admitted`, never `Capacity`: a refusal is the limit's

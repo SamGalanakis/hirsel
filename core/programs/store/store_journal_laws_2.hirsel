@@ -775,8 +775,12 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     }
     let sh = view t
     let head = db.heads[0].head
-    let final_item = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
+    let final_item = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" {
         2u64
+    } else if scenario == "journal-place-split" || scenario == "journal-place-short" {
+        // B was issued: its direct write's first sector also carries A's tail,
+        // so a sector image may keep all of B (commit law: recovered ⊆ issued).
+        3u64
     } else if scenario == "journal" {
         8u64
     } else if scenario == "journal-sync-count" {
@@ -847,10 +851,14 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
     if scenario == "journal-keyed" {
         let text = option.unwrap(args.get(argv, 3))
         let mut floor = 0u64
-        for digit in string.as_bytes(text) { floor = floor * 10 + int.widen(digit - b'0') }
+        for digit in string.as_bytes(text) {
+            floor = floor * 10 + int.widen(digit - b'0')
+        }
         return match claim_crash_phase(d, c, r, tasks, out, phase, floor) {
             Ok(()) => {
-                if phase == "write" { let _ = stdout.write(out, "DONE") }
+                if phase == "write" {
+                    let _ = stdout.write(out, "DONE")
+                }
                 Ok(())
             },
             Error(Io(_)) if phase == "write" => Ok(()),

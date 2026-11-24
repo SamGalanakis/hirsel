@@ -15,7 +15,13 @@ SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'b
 WINDOW_FAILURES = ('window-chunk-failure', 'window-sync-failure')
 JOURNAL_SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split',
                      'journal-place-idle', 'journal-fork')
-SMOKE_KINDS = ('append', 'overwrite', 'create', 'rename', 'unlink')
+# STORE-SPEC §3.3b: a Direct extension (creation block or window step) and a
+# Direct overwrite of the zeroed window keep any subset of their sectors; a
+# Durable END rewrite's one sector straddles EOF and keeps old or new bytes.
+SMOKE_KINDS = ('extend', 'window', 'straddle', 'create', 'rename', 'unlink')
+SECTOR_KINDS = {'extend': 'Partial', 'window': 'Partial', 'straddle': 'Old'}
+# Seeds 0-4 select each Direct sector mask: none, all, first, last, alternate.
+SECTOR_SEEDS = range(5)
 NIGHTLY_SEEDS = 4
 
 
@@ -115,13 +121,17 @@ def bridge_env(bridge, environment=None):
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=()):
+                count_only=(), sectors=()):
     executable = build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter)
     env = bridge_env(bridge, environment)
     rows = run_cuts(executable, engine, env, scenarios)
     for scenario in count_only:
         checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
+    if sectors:
+        if sector_images(executable, sectors, engine, env):
+            raise RuntimeError(f'{engine}: sector images broke the commit law or were vacuous')
+        rows.append(dict(scenario='sector-images', passed=True))
     return rows
 
 
@@ -141,6 +151,32 @@ def run_damage(executable, scenario, cuts, seeds, env):
                 failed += 1
     total = len(cuts) * len(seeds)
     print(f'{scenario}: {total - failed}/{total} damaged cuts passed, seeds {seeds[0]}–{seeds[-1]}', flush=True)
+    return failed
+
+
+def sector_images(executable, scenarios, engine, env):
+    """Damage every Direct and Durable sector cut of the scenarios under the
+    commit law. Across them, each kind must leave an image that is neither its
+    clean cut nor its completed write (for the one-sector END, the old bytes)."""
+    failed = 0
+    seen = {kind: set() for kind in SECTOR_KINDS}
+    for scenario in scenarios:
+        _, trace = count_cuts(executable, scenario, engine, dict(env, HIRSEL_W2_TRACE_CUTS='1'))
+        cuts = [(int(cut), kind) for cut, kind in re.findall(r'^w2-cut ([0-9]+) ([a-z-]+)$', trace, re.M)
+                if kind in SECTOR_KINDS]
+        for seed in SECTOR_SEEDS:
+            for cut, kind in cuts:
+                command = [str(executable), scenario, str(cut), '0', str(seed)]
+                ran = subprocess.run(command, env=env, capture_output=True, text=True, timeout=300)
+                if ran.returncode:
+                    print(f'{shlex.join(command)} exited {ran.returncode}\n{ran.stdout}{ran.stderr}', flush=True)
+                    failed += 1
+                seen[kind].update(re.findall(r'^w2-image ([A-Za-z]+)$', ran.stderr, re.M))
+        print(f'{engine} {scenario}: {len(cuts) * len(SECTOR_SEEDS)} sector cuts', flush=True)
+    for kind, wanted in SECTOR_KINDS.items():
+        if wanted not in seen[kind]:
+            print(f'{engine} {kind}: no {wanted} image in {sorted(seen[kind])}', flush=True)
+            failed += 1
     return failed
 
 

@@ -71,9 +71,12 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
         HostOp::EnvName => &["u64", "u64"],
         HostOp::Open => &["u64", "ptr", "u8"],
-        HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
-            &["u64"]
-        }
+        HostOp::Close
+        | HostOp::TryLock
+        | HostOp::TryLockShared
+        | HostOp::Unlock
+        | HostOp::WallMs
+        | HostOp::MonoNs => &["u64"],
         HostOp::Rename
         | HostOp::SecretHmac
         | HostOp::SecretHmacSha1
@@ -86,6 +89,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::ReadAt | HostOp::WriteAt | HostOp::SecretWrap | HostOp::SecretKeyShare => {
             &["u64", "u64", "ptr"]
         }
+        HostOp::ZeroAt => &["u64", "u64", "u64"],
         HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => &["u64", "ptr", "ptr", "u64"],
         HostOp::SecretUnwrap => &["u64", "ptr", "ptr"],
         HostOp::SecretSign => &["u64", "u64", "u64", "ptr", "ptr"],

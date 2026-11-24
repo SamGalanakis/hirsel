@@ -61,4 +61,18 @@ impl Function<'_, '_, '_> {
             n
         }
     }
+
+    /// `host.zero_at(f, at, len)`: the file key, offset and length (§3.3b).
+    pub(super) fn host_zero_at(
+        &mut self,
+        args: &[Value],
+        site: Value,
+    ) -> Result<calls::NativeValues> {
+        self.c_call(
+            "hirsel_core_host_zero_at",
+            &[P, U, U, U, U],
+            &[U, K, Ty::Scalar(Scalar::U32), U, K],
+            &[self.context, args[0], args[1], args[2], site],
+        )
+    }
 }

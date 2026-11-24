@@ -62,12 +62,12 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
     Ok(())
 }
 
-pub fn inspect_hand_install(root: Dir, argv: Args, input: Stdin) -> Result[(), Exit] waits {
+pub fn inspect_hand_install(root: Dir, c: Clock, argv: Args, input: Stdin) -> Result[(), Exit] waits {
     let expected = result.unwrap(std.io.read_all(input))
     let path = option.unwrap(args.get(argv, 0u64))
     let dir = result.unwrap(host.open_dir(root, path))
     let opts = result.unwrap(store.sized(Directory, 134217728u64))
-    let source = result.unwrap(store.open_read_only(dir, opts))
+    let source = result.unwrap(store.open_read_only(dir, c, opts))
     let at = store.read_only_snapshot(source)
     expect(store.version(at) == 12, "T1: the native install did not take version 12")
     let mut schema = store.declare_read_only(source)

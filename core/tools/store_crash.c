@@ -29,6 +29,7 @@ extern void store_crash_expect_read_only(void *);
 extern void store_crash_journal_fork(void *, uint8_t);
 extern void store_crash_armed_io(void *, uint64_t *);
 extern void store_crash_window(void *);
+extern uint8_t store_crash_syncs(void *, uint8_t, uint64_t);
 
 static struct {
     uint64_t phase, issued;
@@ -59,9 +60,10 @@ static void cancel_wait(HirselCoreContext *ctx) {
  * itself. Each issue while the write phase's journal worker lives is one cut;
  * that cut cancels the worker alone, so a sync it issued is in flight and the
  * store's head survives to see the worker end. Resume answers the outcome
- * computed at issue. The worker is the spawn of group_bytes + 65536 bytes,
- * with journal_crash_options' group_bytes of 1 MiB. */
-enum { JOURNAL_WORKER_BYTES=1048576+65536 };
+ * computed at issue. The worker is the spawn of journal_group_room(group_bytes)
+ * + JOURNAL_WORKER_SLACK: the aligned group plus one tail block, with
+ * journal_crash_options' group_bytes of 1 MiB. */
+enum { JOURNAL_WORKER_BYTES=1048576+4096+32768 };
 static struct {
     int enabled, fired;
     uint64_t phase, target, issued, token[64];
@@ -129,7 +131,6 @@ static void schedule_event(void *state,HirselCoreEvent event) {
  * turns, not time: an expired Until re-runs wait at the next turn. */
 static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
-    (void)state;
     /* SleepUntil and SleepUntilWall (the runner's deadline and trigger timers) wait on
      * host time and never reach the W2 filesystem; their deadlines are far, so a timer
      * ends only by being dropped. */
@@ -138,7 +139,8 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
     const int child=hold.child_probe && (request->operation==2 || request->operation==38) && request->buffer.len>=20 &&
         !memcmp(request->buffer.data,"\x11\0",2) && !memcmp(request->buffer.data+16,"\x01\0\0\0",4);
-    if((hold.enabled && request->operation==16) || probe || child) {
+    /* A Durable or Direct write is also its sync (§3.3b). */
+    if((hold.enabled && store_crash_syncs(state,request->operation,request->handle)) || probe || child) {
         /* Tokens are unique per operation; concurrent syncs keep separate counts. */
         uint64_t *calls=&hold.calls[token%64];
         if(hold.token[token%64]!=token) {hold.token[token%64]=token; *calls=0;}
@@ -182,13 +184,18 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
         if(r->operation==1 || r->operation==37) r->buffer.len+=(size_t)out.value;
         if(r->operation==18) r->buffer.len+=(size_t)out.written;
     }
-    if(parked.enabled && (r->operation==16 || r->operation==17)) {
-        if(parked.token[token%64]) abort();
-        parked.token[token%64]=token; parked.out[token%64]=out;
+    if(parked.enabled && (r->operation==17 || store_crash_syncs(state,r->operation,r->handle))) {
         if(parked.phase==1 && parked.worker && parked.issued++==parked.target && !parked.fired) {
             parked.fired=1;
             hirsel_core_cancel(0,parked.worker);
         }
+        /* A Durable or Direct write is its sync, but the host completes it
+         * on the issuing stack (§3.3b ring writes park the unit, not the
+         * task): the cancel lands during the write, which delivers its own
+         * result. Only syncs park. */
+        if(r->operation!=16 && r->operation!=17) return (HirselCoreStep){.outcome=out};
+        if(parked.token[token%64]) abort();
+        parked.token[token%64]=token; parked.out[token%64]=out;
         hirsel_core_ready(token);
         return (HirselCoreStep){.kind=1};
     }

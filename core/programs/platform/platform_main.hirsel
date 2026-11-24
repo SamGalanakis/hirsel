@@ -193,7 +193,7 @@ pub fn read_pin(d: Dir, c: Clock, out: Stdout, argv: Args) -> Result[(), Exit] w
     if list.len(id) != 16u64 {
         return Error(Exit(status: 64u8))
     }
-    let line = match platform.resolve_offline(d, id, host.wall_ms(c) / 1000u64) {
+    let line = match platform.resolve_offline(d, c, id, host.wall_ms(c) / 1000u64) {
         Ok(Found(assembly)) => {
             let mut found = string.from("found ")
             string.push(mut found, std.hex.encode(assembly))

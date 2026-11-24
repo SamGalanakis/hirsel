@@ -12,6 +12,7 @@ mod conn;
 #[cfg(test)]
 mod declarations;
 mod flow;
+mod host;
 mod media;
 mod net_class;
 mod net_error;
@@ -1883,6 +1884,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::StatFile
                 | HostOp::Close
                 | HostOp::TryLock
+                | HostOp::TryLockShared
+                | HostOp::ZeroAt
                 | HostOp::Unlock
                 | HostOp::Sync
         ) {
@@ -1892,7 +1895,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mut args = [Arg::Value(handle); 3];
         let len = match op {
-            HostOp::Rename | HostOp::ReadAt | HostOp::WriteAt => {
+            HostOp::Rename | HostOp::ReadAt | HostOp::WriteAt | HostOp::ZeroAt => {
                 args[1] = Arg::Value(vals[1]?);
                 args[2] = Arg::Value(vals[2]?);
                 3
@@ -1976,7 +1979,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_stat(ty, at, kind.unwrap(), value, written, n);
                     }
                 }
-                HostOp::TryLock | HostOp::ZeroExtension => {
+                HostOp::TryLock | HostOp::TryLockShared | HostOp::ZeroExtension => {
                     if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
                         cx.runtime_case_payload(to, 0, ty, Some(boolean), n);
                     }
@@ -1998,51 +2001,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-
-    fn runtime_stat(
-        &mut self,
-        ty: TyId,
-        at: AddressId,
-        kind: ValueId,
-        size: ValueId,
-        modified_ns: ValueId,
-        n: NodeId,
-    ) {
-        let Some((_, tag)) = self.net_field(ty, at, 0, n) else {
-            return;
-        };
-        self.runtime_store(at, &[Step::Field(1)], Ty::Scalar(Scalar::U64), size, n);
-        self.runtime_store(
-            at,
-            &[Step::Field(2)],
-            Ty::Scalar(Scalar::I64),
-            modified_ns,
-            n,
-        );
-        let join = self.new_block(&[]);
-        for case in 0..3 {
-            let Some(matches) = self.runtime_compare(Ty::Scalar(Scalar::U8), kind, case as u64, n)
-            else {
-                return;
-            };
-            let yes = self.new_block(&[]);
-            let next = self.new_block(&[]);
-            self.runtime_branch(matches, yes, next, n);
-            self.start(yes);
-            self.inst(Inst::SetCase { address: tag, case }, n);
-            self.jump(join, &[], n);
-            self.start(next);
-        }
-        self.inst(
-            Inst::SetCase {
-                address: tag,
-                case: 3,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
     }
 
     /// A HostFile's entire carrier is the opaque u64 key into the run's

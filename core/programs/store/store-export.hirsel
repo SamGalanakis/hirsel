@@ -139,7 +139,7 @@ fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stam
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     for seq in lease.first .. stamp.terminal {
         let path = scratch_result(capacity(disk_path("j-", seq, "")))?
-        let following = match journal_header(from, id, seq + 1, false) {
+        let following = match journal_header(from, id, seq + 1, None) {
             Ok(header) => header,
             Error(Corrupt(_)) => None,
             Error(take problem) => return Error(Scratch(take problem)),
@@ -190,13 +190,18 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     if let Target(target) = into {
         require_empty(target, "backup target")?
     }
-    if object_writer_open(db) { return begin_object_export_copy(mut db, take into, take attempt, activation) }
+    if object_writer_open(db) {
+        return begin_object_export_copy(mut db, take into, take attempt, activation)
+    }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
     let lease_attempt = deploy_result(copied(attempt))?
-    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: match activation { Some(given) => given, None => 0u64 }, terminal: db.file_seq, end: db.file_end)
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: match activation {
+        Some(given) => given,
+        None => 0u64
+    }, terminal: db.file_seq, end: db.file_end)
     let first_live = disk_state(db).record_cut
     let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
         Ok(live_pack_sequences(disk_state(db).pages.locations))

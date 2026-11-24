@@ -531,11 +531,11 @@ pub unsafe extern "C" fn hirsel_core_host_file(
         } else {
             (*registry).registry.file(file)
         };
-        if owned.read_only_dir && matches!((*request).operation, WRITE | WRITE_AT) {
+        if owned.read_only_dir && matches!((*request).operation, WRITE | WRITE_AT | ZERO_AT) {
             return crate::host_ops::denied(context, (*request).site);
         }
         (*request).handle = owned.handle;
-        if matches!((*request).operation, READ_AT | WRITE_AT) {
+        if matches!((*request).operation, READ_AT | WRITE_AT | ZERO_AT) {
             (*request).mode = owned.mode;
         }
         if (*request).operation != CLOSE {

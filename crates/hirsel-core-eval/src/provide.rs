@@ -52,7 +52,7 @@ impl Machine<'_> {
                 self.port_release(a[0]);
             }
         })?;
-        if matches!(op, HostOp::Write | HostOp::WriteAt)
+        if matches!(op, HostOp::Write | HostOp::WriteAt | HostOp::ZeroAt)
             && let VirtualCell::Port { handles, .. } = &self.host.world.cells[c]
             && handles
                 .get(&h)
@@ -78,6 +78,27 @@ impl Machine<'_> {
                 return Err(Stop::Cause("Bounds"));
             }
             _ => {}
+        }
+        if matches!(op, HostOp::WriteAt | HostOp::ZeroAt)
+            && let VirtualCell::Port { handles, .. } = &self.host.world.cells[c]
+            && let Some(handle) = handles.get(&h)
+        {
+            if op == HostOp::ZeroAt {
+                if !matches!(handle.file_mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT) {
+                    return Ok(vec![0, DENIED, 0, 0]);
+                }
+                if let Some((tag, code)) = zero_at_error(handle.file_mode, a[1], a[2]) {
+                    return Ok(vec![0, tag, code, 0]);
+                }
+            } else if handle.file_mode == MODE_DIRECT {
+                let (_, data, len, _) = self.carrier(a[2]);
+                if !a[1].is_multiple_of(DIRECT_ALIGNMENT)
+                    || !len.is_multiple_of(DIRECT_ALIGNMENT)
+                    || !self.direct_buffer_aligned(data)
+                {
+                    return Ok(vec![0, OTHER, 22, 0]);
+                }
+            }
         }
         let path = |m: &Self, i: usize| m.carrier_bytes(a[i]).to_vec();
         let (kind, words, fields, out): (u8, Vec<u64>, Vec<Vec<u8>>, Option<u64>) = match op {
@@ -148,6 +169,8 @@ impl Machine<'_> {
             HostOp::StatFile => (1, vec![14, h], vec![], None),
             HostOp::Sync => (1, vec![15, h], vec![], None),
             HostOp::TryLock => (1, vec![16, h], vec![], None),
+            HostOp::TryLockShared => (1, vec![23, h], vec![], None),
+            HostOp::ZeroAt => (1, vec![24, h, a[1], a[2]], vec![], None),
             HostOp::Unlock => (1, vec![17, h], vec![], None),
             HostOp::Close => (1, vec![DIR_CLOSE, h], vec![], None),
             HostOp::NextEntries => (2, vec![19, h, spare(self, a[1])], vec![], Some(a[1])),
@@ -162,13 +185,16 @@ impl Machine<'_> {
         let mut w = [0; 9];
         w[..words.len()].copy_from_slice(&words);
         let mut answer = self.port_call(t, c, w, fields, out, live)?;
-        if a[0] & DIR_READ_ONLY != 0 && answer[1] == 0 {
-            if matches!(op, HostOp::OpenDir | HostOp::Mkdtemp) {
-                answer[0] |= DIR_READ_ONLY;
-            } else if op == HostOp::Open {
+        if answer[1] == 0 {
+            let narrow = a[0] & DIR_READ_ONLY != 0;
+            if op == HostOp::Open {
                 let (_, file) = self.port_handle(answer[0]).expect("a registered file");
                 let (_, handles, ..) = self.host.world.cells[c].port();
-                handles.get_mut(&file).unwrap().read_only_file = true;
+                let handle = handles.get_mut(&file).unwrap();
+                handle.read_only_file = narrow;
+                handle.file_mode = a[2] as u8;
+            } else if narrow && matches!(op, HostOp::OpenDir | HostOp::Mkdtemp) {
+                answer[0] |= DIR_READ_ONLY;
             }
         }
         Ok(answer)
@@ -207,5 +233,17 @@ impl Machine<'_> {
         }
         self.store(carrier + 8, 8, len + spare as u64);
         Ok(vec![])
+    }
+}
+
+pub(super) fn zero_at_error(mode: u8, at: u64, len: u64) -> Option<(u64, u64)> {
+    if mode == MODE_DIRECT
+        && (!at.is_multiple_of(DIRECT_ALIGNMENT) || !len.is_multiple_of(DIRECT_ALIGNMENT))
+    {
+        Some((OTHER, 22))
+    } else if at.checked_add(len).is_none_or(|end| end > i64::MAX as u64) {
+        Some((OTHER, 27))
+    } else {
+        None
     }
 }

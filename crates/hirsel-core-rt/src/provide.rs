@@ -15,7 +15,7 @@ mod payload;
 pub(crate) mod random;
 mod replies;
 mod udp;
-use replies::answer;
+use replies::{answer, unix_reply};
 pub(crate) use udp::release_udp;
 
 use crate::exec_runtime::{Call, ProcCall, SpawnCall};
@@ -191,16 +191,6 @@ const R_UNIX_LISTENING: u64 = 13;
 const R_DATAGRAM: u64 = 14;
 const R_PACKET: u64 = 15;
 const R_ADDRESS: u64 = 16;
-
-fn unix_reply(reply: UnixReply) -> (u64, Option<Kind>) {
-    match reply {
-        UnixReply::Created(UnixHandle::Stream) => (R_UNIX_SOCKET, Some(Kind::Socket)),
-        UnixReply::Created(UnixHandle::Listener) => (R_UNIX_LISTENING, Some(Kind::UnixListener)),
-        UnixReply::Created(UnixHandle::Datagram) => (R_DATAGRAM, Some(Kind::Datagram)),
-        UnixReply::Done => (R_DONE, None),
-        UnixReply::Packet => (R_PACKET, None),
-    }
-}
 
 /// A port caller's socket and listener keys: the registry's generation-0
 /// band with bit 33 set, so they never meet a registry key (generation 1 and
@@ -467,6 +457,8 @@ impl Port {
             STAT_FILE => (Kind::File, &[14, h]),
             SYNC => (Kind::File, &[15, h]),
             TRY_LOCK => (Kind::File, &[16, h]),
+            TRY_LOCK_SHARED => (Kind::File, &[23, h]),
+            ZERO_AT => (Kind::File, &[24, h, request.offset(), request.zero_len()]),
             UNLOCK => (Kind::File, &[17, h]),
             CLOSE => (Kind::File, &[DIR_CLOSE, h]),
             NEXT_ENTRIES => (Kind::Entries, &[19, h, spare]),

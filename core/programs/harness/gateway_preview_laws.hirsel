@@ -124,8 +124,8 @@ fn answer_rows() -> List[(u64, Bytes)] {
     expected
 }
 
-fn committed_version(dir: Dir) -> u64 waits {
-    let reader = result.unwrap(store.open_read_only(dir, runner.triggers.law_options()))
+fn committed_version(dir: Dir, clock: Clock) -> u64 waits {
+    let reader = result.unwrap(store.open_read_only(dir, clock, runner.triggers.law_options()))
     store.version(store.read_only_snapshot(reader))
 }
 
@@ -164,7 +164,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         return Error(11u64)
     }
     let dir = result.unwrap(std.dir.narrow(root, "s0"))
-    let before = committed_version(dir)
+    let before = committed_version(dir, clock)
     let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", posting(me, s, 0u64), json(harness.Submit(client_key: "p1", text: "preview it")))
     if posted != 202u16 {
         return Error(12u64)
@@ -246,7 +246,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let Some(_) = down_within(door, 0u64, clock) else {
         return Error(18u64)
     }
-    let committed = committed_version(dir) - before
+    let committed = committed_version(dir, clock) - before
     if committed != 8u64 {
         return Error(100u64 + committed)
     }

@@ -422,7 +422,7 @@ impl Machine<'_> {
                 w.files.push(Some(OpenFile {
                     file,
                     at: 0,
-                    locked: false,
+                    lock: None,
                     mode,
                     read_only_dir: a[0] & DIR_READ_ONLY != 0,
                 }));
@@ -540,12 +540,10 @@ impl Machine<'_> {
                         .as_ref()
                         .is_some_and(|f| f.mode == MODE_DIRECT)
                 {
-                    let (block, offset) = split(data);
                     let aligned = |value: u64| value.is_multiple_of(DIRECT_ALIGNMENT);
                     if !aligned(a[1])
                         || !aligned(bytes.len() as u64)
-                        || (data != 0
-                            && (!aligned(self.mem[block].align) || !aligned(offset as u64)))
+                        || !self.direct_buffer_aligned(data)
                     {
                         return Ok(vec![0, 5, 22, 0]); // Other(EINVAL)
                     }
@@ -587,25 +585,60 @@ impl Machine<'_> {
                 }
                 ok(0, bytes.len() as u64)
             }
+            HostOp::ZeroAt => {
+                let index = file(a[0]);
+                let Some(handle) = self.host.world.files[index].as_ref() else {
+                    return Ok(error(CLOSED));
+                };
+                if handle.read_only_dir
+                    || !matches!(handle.mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT)
+                {
+                    return Ok(error(DENIED));
+                }
+                let (at, len) = (a[1], a[2]);
+                if let Some(problem) = zero_at_error(handle.mode, at, len) {
+                    return Ok(resolve(problem));
+                }
+                if len != 0 {
+                    let mut target = handle.file.lock().unwrap();
+                    target.zero_at(at, len);
+                    target.modified_ns = self.host.world.clock.min(i64::MAX as u64);
+                }
+                ok(0, 0)
+            }
             HostOp::Close => {
                 let i = file(a[0]);
                 self.host.world.files[i] = None;
                 ok(0, 0)
             }
-            HostOp::TryLock | HostOp::Unlock => {
-                let i = file(a[0]);
-                let open = self.host.world.files[i].as_ref().expect("an open file");
-                let held = self.host.world.files.iter().enumerate().any(|(j, f)| {
-                    j != i
-                        && f.as_ref()
-                            .is_some_and(|f| f.locked && Arc::ptr_eq(&f.file, &open.file))
+            HostOp::TryLock | HostOp::TryLockShared | HostOp::Unlock => {
+                let index = file(a[0]);
+                let requested = match op {
+                    HostOp::TryLock => Some(FileLock::Exclusive),
+                    HostOp::TryLockShared => Some(FileLock::Shared),
+                    _ => None,
+                };
+                let open = self.host.world.files[index].as_ref().expect("an open file");
+                let grant = requested.filter(|&wanted| {
+                    !self
+                        .host
+                        .world
+                        .files
+                        .iter()
+                        .enumerate()
+                        .any(|(other, handle)| {
+                            other != index
+                                && handle.as_ref().is_some_and(|handle| {
+                                    Arc::ptr_eq(&handle.file, &open.file)
+                                        && handle.lock.is_some_and(|held| {
+                                            wanted == FileLock::Exclusive
+                                                || held == FileLock::Exclusive
+                                        })
+                                })
+                        })
                 });
-                let take = op == HostOp::TryLock;
-                if take && held {
-                    return Ok(ok(0, 0));
-                }
-                self.host.world.files[i].as_mut().unwrap().locked = take;
-                ok(u64::from(take), 0)
+                self.host.world.files[index].as_mut().unwrap().lock = grant;
+                ok(u64::from(requested.is_none() || grant.is_some()), 0)
             }
             HostOp::Mkdir => {
                 let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
@@ -695,7 +728,7 @@ impl Machine<'_> {
                         self.host.world.files.push(Some(OpenFile {
                             file,
                             at: 0,
-                            locked: false,
+                            lock: None,
                             mode: 3,
                             read_only_dir: false,
                         }));

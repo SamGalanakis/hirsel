@@ -209,7 +209,7 @@ def native_install_variants(work, engine, compiler, platform_inputs, launch_stor
     command = [compiler, 'build', '--inputs', str(platform_inputs), '--source-core',
                '--source-std', '--backend', engine, '--store', str(work / 'publish-cache'),
                '--entry', 'platform@1/platform/inspect_hand_install',
-               '--limit', str(134217728), '--dir', str(work), '--grant', 'Stdin',
+               '--limit', str(134217728), '--dir', str(work), '--grant', 'Stdin', '--grant', 'Clock',
                '-o', str(check_install)]
     checked(command, engine=engine, case='T1:wrong-allowance-build')
     for label, flags in (

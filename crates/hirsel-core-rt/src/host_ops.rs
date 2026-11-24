@@ -128,9 +128,8 @@ pub unsafe extern "C" fn hirsel_core_host_op(
         let mode = if op == MKSTEMP { 3 } else { mode }; // CreateNew
         let mut request = request(op, mode, site, buffer);
         let outcome = match op {
-            READ | WRITE | CLOSE | TRY_LOCK | UNLOCK | SYNC | NEXT_ENTRIES | STAT_FILE => {
-                hirsel_core_host_file(context, handle, &mut request)
-            }
+            READ | WRITE | CLOSE | TRY_LOCK | TRY_LOCK_SHARED | UNLOCK | SYNC | NEXT_ENTRIES
+            | STAT_FILE => hirsel_core_host_file(context, handle, &mut request),
             OPEN | RENAME | MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | SYNC_DIR
             | ZERO_EXTENSION | OPEN_DIR | ENTRIES | STAT => {
                 let rights = handle & DIR_READ_ONLY;
@@ -240,6 +239,38 @@ pub unsafe extern "C" fn hirsel_core_host_at(
         }
         outcome
     }
+}
+
+/// Write a zero range through the owning file provider.
+///
+/// # Safety
+/// Context is live and the file is the checked, exclusively borrowed HostFile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_zero_at(
+    context: *mut Context,
+    file: u64,
+    at: u64,
+    len: u64,
+    site: u64,
+) -> Outcome {
+    let mut position = [0; 16];
+    position[..8].copy_from_slice(&at.to_le_bytes());
+    position[8..].copy_from_slice(&len.to_le_bytes());
+    let mut request = request(
+        ZERO_AT,
+        0,
+        site,
+        Buffer {
+            data: std::ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+        },
+    );
+    request.path = position.as_ptr();
+    request.path_len = position.len();
+    // SAFETY: the provider exclusively borrows the file and stack carrier
+    // through delivery.
+    unsafe { hirsel_core_host_file(context, file, &mut request) }
 }
 
 /// Host rename uses two path carriers; the combined request is only an issue-time view.

@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import crash_inputs
-from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, run_crashes
+from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, run_crashes, sector_images
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
@@ -45,6 +45,11 @@ def provider_checks(executable, engine, env):
         checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
     print(f'{engine}: {len(FAILURES)} named I/O failure laws passed', flush=True)
+    # BL2: an interrupted Direct or Durable write recovers under the commit law
+    # from each sector image it can leave.
+    if sector_images(executable, ('journal', 'journal-rotate'), engine, env):
+        raise RuntimeError(f'{engine}: sector images broke the commit law or were vacuous')
+    rows.append(dict(scenario='sector-images', passed=True))
     # Drift guard 4: syncs and END opens per §3.2, checked by store_crash.c.
     checked([str(executable), 'journal-sync-count', 'count'], env, engine=engine)
     rows.append(dict(scenario='journal-sync-count', passed=True))

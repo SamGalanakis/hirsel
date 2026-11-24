@@ -1,5 +1,38 @@
 //! File and stream writes report the committed prefix on a failed syscall.
 use crate::provider::{DIRECT_ALIGNMENT, IoError, MODE_DIRECT, Outcome, Request, WRITE_AT};
+use std::io;
+
+const ZERO_BYTES: usize = 64 << 10;
+#[repr(align(4096))]
+struct ZeroRegion([u8; ZERO_BYTES]);
+static ZEROES: ZeroRegion = ZeroRegion([0; ZERO_BYTES]);
+
+pub(super) fn zero_at(fd: i32, offset: u64, len: u64, direct: bool) -> Outcome {
+    let ring = crate::units::uses_file_ring();
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    complete(len, Some(offset), ring, direct, |done, at| {
+        let count = (len - done).min(16 * ZERO_BYTES);
+        let mut iov = [libc::iovec {
+            iov_base: ZEROES.0.as_ptr().cast_mut().cast(),
+            iov_len: ZERO_BYTES,
+        }; 16];
+        let used = count.div_ceil(ZERO_BYTES);
+        iov[used - 1].iov_len = count - (used - 1) * ZERO_BYTES;
+        let at = at.expect("zero_at is positioned");
+        if ring {
+            let entry =
+                io_uring::opcode::Writev::new(io_uring::types::Fd(fd), iov.as_ptr(), used as u32)
+                    .offset(at as u64)
+                    .build();
+            // SAFETY: the provider holds fd and this frame pins the iovecs and zero region.
+            unsafe { crate::units::file_request(entry) }.map(|n| n as usize)
+        } else {
+            // SAFETY: fd and the initialized vector are live throughout pwritev.
+            super::syscall(unsafe { libc::pwritev(fd, iov.as_ptr(), used as i32, at) })
+                .map(|n| n as usize)
+        }
+    })
+}
 
 pub(super) fn write_request(fd: i32, request: &Request) -> Outcome {
     let bytes = if request.buffer.len == 0 {
@@ -9,24 +42,43 @@ pub(super) fn write_request(fd: i32, request: &Request) -> Outcome {
         unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
     };
     let offset = (request.operation == WRITE_AT).then(|| request.offset());
-    write_all_from(
-        fd,
-        bytes,
-        offset,
-        crate::units::uses_file_ring(),
-        request.mode == MODE_DIRECT,
-    )
+    let ring = crate::units::uses_file_ring();
+    let part = |bytes: &[u8], at| write_part(fd, bytes, at, ring);
+    write_all_from(bytes, offset, ring, request.mode == MODE_DIRECT, part)
 }
 
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
-    write_all_from(fd, bytes, None, false, false)
+    write_all_from(bytes, None, false, false, |bytes, at| {
+        write_part(fd, bytes, at, false)
+    })
 }
 
-fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>, ring: bool, direct: bool) -> Outcome {
+/// Drives one write to completion over `part`, the source of each piece's
+/// completion: the ring or the syscall in production, a script in tests.
+pub(crate) fn write_all_from(
+    bytes: &[u8],
+    offset: Option<u64>,
+    ring: bool,
+    direct: bool,
+    mut part: impl FnMut(&[u8], Option<i64>) -> io::Result<usize>,
+) -> Outcome {
+    complete(bytes.len(), offset, ring, direct, |done, at| {
+        part(&bytes[done..], at)
+    })
+}
+
+/// The one completion loop for `len` bytes: `part(done, at)` issues the
+/// remainder after `done` bytes and returns how many it wrote.
+fn complete(
+    len: usize,
+    offset: Option<u64>,
+    ring: bool,
+    direct: bool,
+    mut part: impl FnMut(usize, Option<i64>) -> io::Result<usize>,
+) -> Outcome {
     let mut written = 0;
     let error = loop {
-        let remaining = &bytes[written..];
-        if remaining.is_empty() {
+        if written == len {
             break IoError::OK;
         }
         let at = if let Some(at) = offset {
@@ -40,14 +92,11 @@ fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>, ring: bool, direct
         } else {
             None
         };
-        match write_part(fd, remaining, at, ring) {
+        match part(written, at) {
             Ok(0) => break IoError::from_errno(libc::EIO),
             Ok(count) => {
                 written += count;
-                if direct
-                    && written < bytes.len()
-                    && !(written as u64).is_multiple_of(DIRECT_ALIGNMENT)
-                {
+                if direct && written < len && !(written as u64).is_multiple_of(DIRECT_ALIGNMENT) {
                     break IoError::from_errno(libc::EIO);
                 }
             }

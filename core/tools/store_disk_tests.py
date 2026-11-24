@@ -86,7 +86,8 @@ def main():
                         count_only = WINDOW_FAILURES
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine, scenarios=cases,
-                                       count_only=count_only)
+                                       count_only=count_only,
+                                       sectors=('window',) if args.crash_scenario in (None, 'window') else ())
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

@@ -394,6 +394,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ExecWait
                     | HostOp::ExecSignal
                     | HostOp::NetSplit => self.host_adapter(op, &args, site)?,
+                    HostOp::ZeroAt => self.host_zero_at(&args, site)?,
                     HostOp::ReadAt | HostOp::WriteAt => self.c_call(
                         "hirsel_core_host_at",
                         &[P, K, U, U, P, U],
@@ -406,14 +407,12 @@ impl Function<'_, '_, '_> {
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, args[0], args[1], args[2], site],
                     )?,
-                    HostOp::SleepUntil => self.c_call(
-                        "hirsel_core_host_sleep_until",
-                        &[P, U, U, U],
-                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
-                        &[self.context, args[0], args[1], site],
-                    )?,
-                    HostOp::SleepUntilWall => self.c_call(
-                        "hirsel_core_host_sleep_until_wall",
+                    HostOp::SleepUntil | HostOp::SleepUntilWall => self.c_call(
+                        if op == HostOp::SleepUntil {
+                            "hirsel_core_host_sleep_until"
+                        } else {
+                            "hirsel_core_host_sleep_until_wall"
+                        },
                         &[P, U, U, U],
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, args[0], args[1], site],
@@ -429,6 +428,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Write
                     | HostOp::Close
                     | HostOp::TryLock
+                    | HostOp::TryLockShared
                     | HostOp::Unlock
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp

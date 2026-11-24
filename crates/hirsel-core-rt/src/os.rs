@@ -29,6 +29,8 @@ use tables::Tables;
 #[cfg(test)]
 pub(crate) use temp::TEMP_ATTEMPTS;
 pub(crate) use write::write_all;
+#[cfg(test)]
+pub(crate) use write::write_all_from;
 use write::write_request;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
@@ -288,21 +290,30 @@ impl OsProvider {
             WRITE | WRITE_AT => {
                 return Ok(write_request(self.file(request.handle), request));
             }
+            ZERO_AT => {
+                let fd = self.file(request.handle);
+                return Ok(write::zero_at(
+                    fd,
+                    request.offset(),
+                    request.zero_len(),
+                    request.mode == MODE_DIRECT,
+                ));
+            }
             CLOSE => {
                 let fd = self.tables().files.remove(&request.handle).unwrap();
                 close_file(fd)?;
             }
-            TRY_LOCK | UNLOCK => {
+            TRY_LOCK | TRY_LOCK_SHARED | UNLOCK => {
                 let fd = self.file(request.handle);
-                let flags = if request.operation == TRY_LOCK {
-                    libc::LOCK_EX | libc::LOCK_NB
-                } else {
-                    libc::LOCK_UN
+                let flags = match request.operation {
+                    TRY_LOCK => libc::LOCK_EX | libc::LOCK_NB,
+                    TRY_LOCK_SHARED => libc::LOCK_SH | libc::LOCK_NB,
+                    _ => libc::LOCK_UN,
                 };
                 // SAFETY: fd is live, flags designate an advisory operation.
                 let rc = unsafe { libc::flock(fd, flags) };
                 if rc < 0
-                    && request.operation == TRY_LOCK
+                    && request.operation != UNLOCK
                     && io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
                 {
                     out.value = 0;
@@ -693,44 +704,8 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         deadline_ns: 0,
     }
 }
-/// Test-only: when a test switches it on, the OS provider's `wait`, `issue` and
-/// `deliver` note each call, so a test can compare how they were called.
 #[cfg(test)]
-pub(crate) mod probe {
-    use super::{Outcome, Request};
-    use std::cell::RefCell;
-    pub(crate) const WAIT: u8 = 0;
-    pub(crate) const ISSUE: u8 = 1;
-    pub(crate) const DELIVER: u8 = 2;
-    /// One callback: which, the request's operation and site, whether a task
-    /// was current, and its answer (a wait's kind; an outcome's status, error
-    /// and count written).
-    pub(crate) type Call = (u8, u8, u64, bool, u64);
-    thread_local! { pub(crate) static CALLS: RefCell<Option<Vec<Call>>> = const { RefCell::new(None) }; }
-    pub(crate) fn answer(outcome: &Outcome) -> u64 {
-        u64::from(outcome.status)
-            | u64::from(outcome.error.tag) << 8
-            | u64::from(outcome.error.code) << 16
-            | outcome.written << 48
-    }
-    pub(crate) fn note(callback: u8, request: *const Request, answer: u64) {
-        record(callback, request, answer, crate::tasks::in_task());
-    }
-    /// A note for a `wait` a direct call form runs in place of the callback,
-    /// which the scheduler always calls with no task current.
-    pub(crate) fn note_outside(callback: u8, request: *const Request, answer: u64) {
-        record(callback, request, answer, false);
-    }
-    fn record(callback: u8, request: *const Request, answer: u64, in_task: bool) {
-        CALLS.with_borrow_mut(|calls| {
-            if let Some(calls) = calls {
-                // SAFETY: the callback's pinned request.
-                let (operation, site) = unsafe { ((*request).operation, (*request).site) };
-                calls.push((callback, operation, site, in_task, answer));
-            }
-        });
-    }
-}
+pub(crate) mod probe;
 
 /// The Net adapters pin the private extension of each socket request.
 #[inline]
@@ -820,7 +795,11 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
         RANDOM => return random::issue(unsafe { &mut *request }),
-        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | WRITE | WRITE_AT
+        TRY_LOCK | TRY_LOCK_SHARED | UNLOCK => {
+            // SAFETY: nonblocking flock completes in place.
+            return unsafe { issue_now(state, request) };
+        }
+        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | WRITE | WRITE_AT | ZERO_AT
             if crate::units::uses_file_ring() =>
         {
             // SAFETY: the request is pinned until the CQE completes.

@@ -271,6 +271,17 @@ impl FunctionEmitter<'_> {
                 operands.push(word(at));
                 self.native_call(symbol, &results, &operands)
             }
+            HostOp::ZeroAt => self.native_call(
+                "hirsel_core_host_zero_at",
+                &results,
+                &[
+                    ptr(CONTEXT),
+                    word(args[0].clone()),
+                    word(args[1].clone()),
+                    word(args[2].clone()),
+                    word(at),
+                ],
+            ),
             HostOp::ReadAt | HostOp::WriteAt => self.native_call(
                 "hirsel_core_host_at",
                 &results,
@@ -319,6 +330,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Write
             | HostOp::Close
             | HostOp::TryLock
+            | HostOp::TryLockShared
             | HostOp::Unlock
             | HostOp::Mkdir
             | HostOp::Mkdtemp

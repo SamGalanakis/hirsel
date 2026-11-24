@@ -109,7 +109,7 @@ unsafe fn operands(r: &Request) -> Args {
                 a.extend_from_slice(path);
                 a
             }
-            READ_AT => path.to_vec(),
+            READ_AT | ZERO_AT => path.to_vec(),
             WRITE_AT => return Args::of_parts(&[path, bytes]),
             WRITE | STDOUT | STDERR | MKDTEMP | MKSTEMP => bytes.to_vec(),
             MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | ENTRIES | STAT => path.to_vec(),

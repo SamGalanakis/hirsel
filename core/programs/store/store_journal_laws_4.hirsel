@@ -288,14 +288,20 @@ fn journal_frame_oversize() -> Result[(), ()] {
 }
 
 fn steps_point(reads: List[Read]) -> bool {
-    if list.len(reads) != 1 { return false }
+    if list.len(reads) != 1 {
+        return false
+    }
     // First collection id (u32 BE) followed by u64 key 7 (BE).
-    let expected: Inline[u8, 12] = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7]
+    let expected: Inline[u8, 12] =[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7]
     match reads[0u64] {
         Point(key) => {
-            if list.len(key) != 12 { return false }
+            if list.len(key) != 12 {
+                return false
+            }
             for at in 0u64 .. 12 {
-                if key[at] != expected[at] { return false }
+                if key[at] != expected[at] {
+                    return false
+                }
             }
             true
         },
@@ -482,7 +488,11 @@ fn test_reserve_latches(c: Clock) -> Result[(), ()] waits {
 fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
     let admitted = version(snapshot(db)) + 1
     // Creating the durable table advances its branch version by a cut.
-    let admit_sequence = if oversized { db.frame_seq + 1 } else { 1u64 }
+    let admit_sequence = if oversized {
+        db.frame_seq + 1
+    } else {
+        1u64
+    }
     let stream = law_stream_bytes(b"s", keyed_time(db))
     let digest = digest_for("request")
     match result.unwrap(admit_law_stream(mut db, stream, 0, digest)) {
@@ -599,7 +609,7 @@ fn window_law_commit(ctx: DiskContext, offset: u64, head: u64, width: u64) -> By
     result.unwrap(encode_commit(ci, mut data, ctx.seq, offset))
 }
 
-fn window_law_image(d: Dir, id: StoreId, raw: Bytes, start: u64, frames: Inline[Bytes, 3]) -> Result[(), Error] waits {
+fn window_law_image(d: Dir, c: Clock, id: StoreId, raw: Bytes, start: u64, frames: Inline[Bytes, 3]) -> Result[(), Error] waits {
     let mut expected_end = start
     let mut expected_head = 1u64
     for frame in frames {
@@ -613,64 +623,15 @@ fn window_law_image(d: Dir, id: StoreId, raw: Bytes, start: u64, frames: Inline[
     disk_write_synced(d, "j-7", raw)?
     let mut initial = journal_initial()
     define_store_collection(mut initial.state.tips[0].roots.collections, 1, 1, mut initial.next_node)?
-    let recovered = journal_recover(d, id, 7, Locked, take initial)?
+    let recovered = journal_recover(d, id, 7, c, take initial)?
     if recovered.end != expected_end || recovered.uncovered != expected_end - 72 || recovered.replay.state.tips[0].head != expected_head {
         return Error(Missing("window commit prefix"))
     }
     Ok(())
 }
 
-fn window_law_witness(d: Dir, id: StoreId, acked_image: Bytes, frame: Bytes) -> Result[(), Error] waits {
-    let acked_end = list.len(acked_image)
-    disk_write_synced(d, "j-7.end", journal_end_bytes(id, 7, acked_end))?
-    let mut image = copied(acked_image)?
-    list.fill(mut image, 16, 0u8)
-    disk_write_synced(d, "j-7", image)?
-    let zeros = log_journal_witness(d, id, 7)?
-    list.fill(mut image, 65536, 0u8)
-    disk_write_synced(d, "j-7", image)?
-    if zeros != log_journal_witness(d, id, 7)? { return Error(Missing("witness of added zeros")) }
-
-    let mut reserved = copied(acked_image)?
-    list.fill(mut reserved, 16, 0u8)
-    list.set_word_le(mut reserved, acked_end, 0x0020u16)
-    list.set_word_le(mut reserved, acked_end + 4, 1u32)
-    disk_write_synced(d, "j-7", reserved)?
-    if zeros == log_journal_witness(d, id, 7)? { return Error(Missing("witness of reserved head")) }
-    match journal_recover(d, id, 7, Locked, journal_initial()) {
-        Error(Unsupported(32)) => (),
-        _ => return Error(Missing("window reserved head")),
-    }
-
-    let mut in_place = copied(acked_image)?
-    list.append(mut in_place, frame)
-    let padding = list.len(image) - list.len(in_place)
-    list.fill(mut in_place, padding, 0u8)
-    disk_write_synced(d, "j-7", in_place)?
-    if zeros == log_journal_witness(d, id, 7)? { return Error(Missing("witness of in-place frame")) }
-
-    let mut gap = copied(acked_image)?
-    list.fill(mut gap, 16, 0u8)
-    list.append(mut gap, frame)
-    disk_write_synced(d, "j-7", gap)?
-    // Past d, even fitting-looking bytes after the zero head are unreachable.
-    if zeros != log_journal_witness(d, id, 7)? { return Error(Missing("witness stops at zero")) }
-    disk_write_synced(d, "j-7.end", journal_end_bytes(id, 7, list.len(gap)))?
-    match journal_recover(d, id, 7, Locked, journal_initial()) {
-        Error(Corrupt(Fault(offset: at, why: Kind(0), ..))) if at == acked_end => (),
-        _ => return Error(Missing("zero below durable end")),
-    }
-
-    disk_io(host.remove(d, "j-7.end"))?
-    disk_write_synced(d, "j-7", list.slice(acked_image, 0, 71))?
-    let short = log_journal_witness(d, id, 7)?
-    disk_write_synced(d, "j-7", list.slice(acked_image, 0, 70))?
-    if short == log_journal_witness(d, id, 7)? { return Error(Missing("witness of short header")) }
-    Ok(())
-}
-
 @test
-fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
+fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
     let dir = disk_test_directory(d)
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 2, seq: 7)
@@ -680,12 +641,14 @@ fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
     let empty = journal_empty_commit(ctx, acked_end, 2)
     let big = window_law_commit(ctx, acked_end + 42, 3, 65300)
     let small = window_law_commit(ctx, acked_end + 42 + list.len(big), 4, 512)
-    let frames: Inline[Bytes, 3] = [take empty, take big, take small]
+    let frames: Inline[Bytes, 3] =[take empty, take big, take small]
     let mut group: Bytes = list.new()
     let mut cuts: List[u64] = list.new()
     for frame in frames {
         let at = list.len(group)
-        if at > 0 { list.push(mut cuts, at - 1) }
+        if at > 0 {
+            list.push(mut cuts, at - 1)
+        }
         list.push(mut cuts, at)
         list.push(mut cuts, at + 1)
         list.append(mut group, frame)
@@ -693,22 +656,26 @@ fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
     let length = list.len(group)
     list.push(mut cuts, length - 1)
     list.push(mut cuts, length)
-    for cut in [38u64, 40u64, 41u64] { list.push(mut cuts, cut) }
+    for cut in[38u64, 40u64, 41u64] {
+        list.push(mut cuts, cut)
+    }
     let mut page = 4096 - acked_end % 4096
     while page < length {
         list.push(mut cuts, page)
         page += 4096
     }
-    for with_end in [false, true] {
+    for with_end in[false, true] {
         if with_end {
             disk_write_synced(dir, "j-7.end", journal_end_bytes(id, 7, acked_end))?
         }
         for cut in cuts {
-            for room in [0u64, 1u64, length - 1, 4096u64, 8192u64, 4194304u64] {
+            for room in[0u64, 1u64, length - 1, 4096u64, 8192u64, 4194304u64] {
                 let mut image = copied(acked_image)?
                 list.append(mut image, list.slice(group, 0, cut))
-                if room > cut { list.fill(mut image, room - cut, 0u8) }
-                window_law_image(dir, id, image, acked_end, frames)?
+                if room > cut {
+                    list.fill(mut image, room - cut, 0u8)
+                }
+                window_law_image(dir, c, id, image, acked_end, frames)?
             }
         }
         let mut subset = copied(acked_image)?
@@ -716,9 +683,9 @@ fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
         list.fill(mut subset, later_page, 0u8)
         list.append(mut subset, list.slice(group, later_page, later_page + 4096))
         list.fill(mut subset, length - later_page - 4096, 0u8)
-        window_law_image(dir, id, subset, acked_end, frames)?
+        window_law_image(dir, c, id, subset, acked_end, frames)?
     }
-    window_law_witness(dir, id, acked_image, frames[0])
+    Ok(())
 }
 
 fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
@@ -726,7 +693,13 @@ fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> Journa
 }
 
 fn disk_window_width(commit_number: u64) -> u64 {
-    if commit_number < 3 { 3000u64 } else if commit_number == 3 { 96u64 } else { 12288u64 }
+    if commit_number < 3 {
+        3000u64
+    } else if commit_number == 3 {
+        96u64
+    } else {
+        12288u64
+    }
 }
 
 fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
@@ -739,8 +712,12 @@ fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout)
             list.fill(mut value, input.2 - 73, int.truncate(input.1 + 1))
             put(mut tx, input.0, input.1, value)
         })?
-        let Committed(done) = edit else { return Error(Missing("window commit")) }
-        if db.file_end - start_end != width { return Error(Missing("window commit size")) }
+        let Committed(done) = edit else {
+            return Error(Missing("window commit"))
+        }
+        if db.file_end - start_end != width {
+            return Error(Missing("window commit size"))
+        }
         durable(mut db, done.ticket)?
         journal_note(out, db.heads[0].head)
         // The journal gets its idle turn before the next commit is queued.
@@ -766,16 +743,22 @@ fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, ackn
     for commit_number in 0u64 .. 5 {
         let row = get(read_rows, captured, t, commit_number)?
         if commit_number < recovered {
-            let Some(value) = row else { return Error(Missing("window recovered row")) }
-            if list.len(value) != disk_window_width(commit_number) - 73 { return Error(Missing("window recovered width")) }
+            let Some(value) = row else {
+                return Error(Missing("window recovered row"))
+            }
+            if list.len(value) != disk_window_width(commit_number) - 73 {
+                return Error(Missing("window recovered width"))
+            }
             for octet in value {
-                if octet != int.truncate(commit_number + 1) { return Error(Missing("window recovered bytes")) }
+                if octet != int.truncate(commit_number + 1) {
+                    return Error(Missing("window recovered bytes"))
+                }
             }
         } else if let Some(_) = row {
             return Error(Missing("window unissued row"))
         }
     }
-    let header = option.unwrap(journal_header(d, db.store, db.file_seq, false)?)
+    let header = option.unwrap(journal_header(d, db.store, db.file_seq, None)?)
     let segment = journal_path(db.file_seq - 1, "")?
     let mut previous = disk_io(host.open(d, segment, Read))?
     let size = disk_io(host.stat_file(mut previous))?.size
@@ -783,10 +766,13 @@ fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, ackn
     let end = header.prev_end
     let target = order.min(4194304u64, (end - 72) / 4096 * 4096)
     // A pending group can extend the file as far as its issued frame end.
+    // Direct writes pad to A, so the file end is at most ⌈e + T⌉ₐ (§3.3b Disk).
     // The bridge checks the independent bound on every window chunk.
     let mut issued_end = end
-    for commit_number in recovered .. issued { issued_end += disk_window_width(commit_number) }
-    if size < end || size > order.max(end + target, issued_end) {
+    for commit_number in recovered .. issued {
+        issued_end += disk_window_width(commit_number)
+    }
+    if size < end || size > (order.max(end + target, issued_end) + 4095) / 4096 * 4096 {
         return Error(disk_fault(segment, size, Malformed))
     }
     close(take db)
@@ -811,12 +797,20 @@ fn disk_window_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out:
         let worked = disk_window_work(mut db, t, tasks, out)
         let closed = close(take db)
         if poisoned {
-            if !journal_is_poisoned(take worked) || !journal_is_poisoned(take closed) { return Error(Exit(status: 73)) }
+            if !journal_is_poisoned(take worked) || !journal_is_poisoned(take closed) {
+                return Error(Exit(status: 73))
+            }
         } else {
-            if let Error(Io(_)) = worked { return Ok(()) }
-            if let Error(Poisoned(_)) = worked { return Ok(()) }
+            if let Error(Io(_)) = worked {
+                return Ok(())
+            }
+            if let Error(Poisoned(_)) = worked {
+                return Ok(())
+            }
             worked ?=> |_| Exit(status: 72)
-            if let Error(Poisoned(_)) = closed { return Ok(()) }
+            if let Error(Poisoned(_)) = closed {
+                return Ok(())
+            }
             closed ?=> |_| Exit(status: 72)
         }
         result.unwrap(stdout.write(out, "DONE"))
@@ -828,160 +822,4 @@ fn disk_window_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out:
     let floor: u64 = result.unwrap(int.parse(acked_arg))
     disk_window_read(d, c, r, tasks, issued, int.saturating_sub(floor, 1), poisoned) ?=> |_| Exit(status: 74)
     Ok(())
-}
-
-@test
-fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), u64] waits {
-    let dir = disk_test_directory(d)
-    let mut options = journal_crash_options()
-    options.stream_retention_ms = 3600000u64
-    let mut before = result.unwrap(open(tasks, dir, c, r, options))
-    let time = keyed_time(before)
-    let name = StreamKey(caller: Caller(issuer: 2u8, subject: clone(b"age")), id: StreamId(t: time, n: 1u64))
-    let raw = result.unwrap(stream_key_bytes(name))
-    let digest = digest_for("age")
-    if let Admitted(_) = result.unwrap(admit(mut before, name, 0u64, digest)) {} else { return Error(1u64) }
-    let replied = result.unwrap(run(mut before, None, raw, fn(mut tx, tok) -> Result[(), Error] {
-        reply(mut tx, tok, 0u64, clone(b"reply"))
-    }))
-    let Committed(saved) = replied else { return Error(2u64) }
-    result.unwrap(durable(mut before, saved.ticket))
-    let no_reply: Option[fn(Error) -> bool] = None
-    let advanced = result.unwrap(store_body_at(mut before, 0u64, time + 3600000u64, None, no_reply, fn(mut _tx: Tx) -> Result[(), Error] { Ok(()) }))
-    if let Committed(_) = advanced {} else { return Error(3u64) }
-    if let HistoryUnavailable = result.unwrap(admit(mut before, name, 0u64, digest)) {} else { return Error(4u64) }
-    if !stream_reply_is(before, raw, b"reply") { return Error(5u64) }
-    result.unwrap(close(take before))
-
-    options.stream_retention_ms = 10800000u64
-    let mut after = result.unwrap(open(tasks, dir, c, r, options))
-    if !stream_reply_is(after, raw, b"reply") { return Error(6u64) }
-    if let HistoryUnavailable = result.unwrap(admit(mut after, name, 0u64, digest)) {} else { return Error(7u64) }
-    result.unwrap(close(take after))
-    Ok(())
-}
-
-fn count_stream_effect(mut db: Db, key: Bytes, effect: u64) -> Ticket waits {
-    let saved = result.unwrap(run(mut db, None, (copy_env(key), effect), fn(mut tx, args) -> Result[(), Error] {
-        let row = logical_key(1u32, key_word(args.1))?
-        let prior = match get_page_row(tx.roots.collections, row) {
-            Some(value) => decode_word(value),
-            None => 0u64,
-        }
-        put_bytes(mut tx, 1u32, key_word(args.1), key_word(prior + 1u64))?
-        reply(mut tx, args.0, 0u64, key_word(args.1))
-    }))
-    let Committed(done) = saved else { fail("stream effect did not commit") }
-    done.ticket
-}
-
-@test
-fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), u64] waits {
-    let dir = disk_test_directory(d)
-    let mut options = journal_crash_options()
-    options.streams_per_caller_max = 1u64
-    options.streams_max = 1u64
-    let mut before = result.unwrap(open(tasks, dir, c, r, options))
-    result.unwrap(law_table(mut before, "effects", std.codec.key_u64(), std.codec.of_u64()))
-    let birth = keyed_time(before)
-    let caller = Caller(issuer: 2u8, subject: clone(b"shared"))
-    let first = StreamKey(caller: clone(caller), id: StreamId(t: birth, n: 1u64))
-    let second = StreamKey(caller: take caller, id: StreamId(t: birth, n: 2u64))
-    let first_digest = digest_for("logical X")
-    let second_digest = digest_for("logical Y")
-    let first_raw = result.unwrap(stream_key_bytes(first))
-    let second_raw = result.unwrap(stream_key_bytes(second))
-    if let Admitted(_) = result.unwrap(admit(mut before, first, 0u64, first_digest)) {} else { return Error(1u64) }
-    let x = count_stream_effect(mut before, first_raw, 10u64)
-    result.unwrap(durable(mut before, x))
-    result.unwrap(close(take before))
-
-    // X did not receive its committed response. Reopening still has its reply.
-    let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
-    match result.unwrap(admit(mut reopened, first, 0u64, first_digest)) {
-        Duplicate(saved) if saved.reply == key_word(10u64) => (),
-        _ => return Error(2u64),
-    }
-    if let Admitted(_) = result.unwrap(admit(mut reopened, second, 0u64, second_digest)) {} else { return Error(3u64) }
-    let y = count_stream_effect(mut reopened, second_raw, 20u64)
-    result.unwrap(durable(mut reopened, y))
-    result.unwrap(close(take reopened))
-
-    // After the eviction the old key cannot run again, even across another open.
-    let mut after = result.unwrap(open(tasks, dir, c, r, options))
-    if let HistoryUnavailable = result.unwrap(admit(mut after, first, 0u64, first_digest)) {} else { return Error(4u64) }
-    match result.unwrap(admit(mut after, second, 0u64, second_digest)) {
-        Duplicate(saved) if saved.reply == key_word(20u64) => (),
-        _ => return Error(5u64),
-    }
-    for effect in [10u64, 20u64] {
-        let row = result.unwrap(logical_key(1u32, key_word(effect)))
-        match get_page_row(after.heads[0].roots.collections, row) {
-            Some(value) if decode_word(value) == 1u64 => (),
-            _ => return Error(effect),
-        }
-    }
-    result.unwrap(close(take after))
-    Ok(())
-}
-
-@test
-fn anonymous_startup_scan_keeps_current_open_caller(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), u64] waits {
-    let dir = disk_test_directory(d)
-    let options = journal_crash_options()
-    let mut initial = result.unwrap(open(tasks, dir, c, r, options))
-    let birth = keyed_time(initial)
-    let old = Caller(issuer: 1u8, subject: clone(b"cohort-a-subject"))
-    let later = Caller(issuer: 1u8, subject: clone(b"cohort-z-subject"))
-    let active = Caller(issuer: 1u8, subject: clone(b"cohort-n-subject"))
-    let digest = digest_for("anonymous cohort")
-    for n in 0u64 .. 20u64 {
-        let key = StreamKey(caller: clone(old), id: StreamId(t: birth, n: n))
-        if let Admitted(_) = result.unwrap(admit(mut initial, key, 0u64, digest)) {} else { return Error(1u64) }
-    }
-    let last_old = StreamKey(caller: clone(later), id: StreamId(t: birth, n: 0u64))
-    if let Admitted(_) = result.unwrap(admit(mut initial, last_old, 0u64, digest)) {} else { return Error(2u64) }
-    result.unwrap(close(take initial))
-
-    let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
-    let mut cursor = result.unwrap(reclaim_startup_streams(mut reopened, anonymous_cursor(), fn(_name: Caller) -> bool { false }))
-    if result.unwrap(stream_control(reopened)).count != 1u64 { return Error(3u64) }
-    let current = StreamKey(caller: clone(active), id: StreamId(t: birth, n: 1u64))
-    if let Admitted(_) = result.unwrap(admit(mut reopened, current, 0u64, digest)) {} else { return Error(4u64) }
-    while let Some(take at) = replace(mut cursor, None) {
-        cursor = result.unwrap(reclaim_startup_streams(mut reopened, at, fn(name: Caller) -> bool { name == active }))
-    }
-    if result.unwrap(stream_control(reopened)).count != 1u64 { return Error(5u64) }
-    let key = result.unwrap(stream_key_bytes(current))
-    if stream_now(reopened, key) != (0u64, 1u64) { return Error(6u64) }
-    result.unwrap(close(take reopened))
-    Ok(())
-}
-
-// §3.3b BL3: all three misalignments refuse before any write, even on tmpfs.
-@test
-fn journal_test_direct_alignment(d: Dir) -> Result[(), ()] waits {
-    let mut file = result.unwrap(host.open(d, "direct", Direct))
-    let mut raw: Bytes = list.with_capacity_aligned(8192, 4096)
-    list.fill(mut raw, 8192, 53u8)
-    let bad_offset = host.write_at(mut file, 1, list.slice(raw, 0, 4096))
-    let bad_length = host.write_at(mut file, 0, list.slice(raw, 0, 4095))
-    let bad_address = host.write_at(mut file, 0, list.slice(raw, 1, 4097))
-    for outcome in [bad_offset, bad_length, bad_address] {
-        match outcome {
-            Error(WriteError(written: 0, error: Other(22))) => (),
-            _ => return Error(()),
-        }
-    }
-    if result.unwrap(host.stat_file(mut file)).size != 0 {
-        return Error(())
-    }
-    result.unwrap(host.write_at(mut file, 0, list.slice(raw, 0, 4096)))
-    result.unwrap(host.close(take file))
-    let found = result.unwrap(read_journal_prefix(d, "direct", 4096))
-    if list.len(found) == 4096 && found == list.slice(raw, 0, 4096) {
-        Ok(())
-    } else {
-        Error(())
-    }
 }

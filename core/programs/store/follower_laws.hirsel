@@ -494,10 +494,10 @@ fn follower_provision_charge(plan: FollowerPlan) -> u64 {
     charge
 }
 
-fn follower_request_charge(d: Dir) -> u64 {
+fn follower_request_charge(d: Dir, c: Clock) -> u64 {
     let room = follower_law_room()
     let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
-    let command = FollowerCommand(request: box.new(Bind(DirectoryFollow(d), None, 0)), reply: take outlet)
+    let command = FollowerCommand(request: box.new(Bind(DirectoryFollow(d, c), None, 0)), reply: take outlet)
     let charge = room - follower_law_room()
     let _ = take command
     let _ = take inbox
@@ -567,7 +567,7 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     // K = round8(8 + 242 + 24 + 8) + (64 + 8 + 304) = 664.
     // The widest response has 16 + 236 + 36 bytes of fields and two tags.
-    let request = follower_request_charge(directory)
+    let request = follower_request_charge(directory, c)
     if follower_request_bytes() != request {
         fail("L85: the request price differs from the box and reply charge")
     }
@@ -777,11 +777,10 @@ fn follower_cancelled_slot(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
         result.unwrap(channel.receive(announced))
         let pending = if after_acceptance {
             result.unwrap(channel.send(start, ()))
+            // Capture reads before its fence and syncs (§3.3b); hold the bind
+            // in its first provider call. The disk read-only cut checks the syncs.
             let Some(take call) = provide.next(mut provider) else {
                 fail("L85: bind never reached the provider")
-            }
-            if let SyncDir(..) = provide.dir_op(call) {} else {
-                fail("L85: bind did not sync before recovery")
             }
             Some(take call)
         } else {
@@ -791,7 +790,7 @@ fn follower_cancelled_slot(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
             fail("L85: the caller escaped cancellation")
         }
         if let Some(take call) = take pending {
-            // A provider sync may finish after the caller has gone. Let the
+            // A provider call may finish after the caller has gone. Let the
             // worker clean its undeliverable result before checking its refund.
             let _ = provide.reply(mut provider, take call, provide.dir_reply(Failed(Denied)))
         }
@@ -820,7 +819,7 @@ fn follower_cancel_apply(take job: FollowerCancelApply) waits {
 
 fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[FollowCapture], Error] {
     let state = capacity(main_state(empty_roots(), at_version, 0))?
-    follow_capture(id, take state, 0, None, None, at_version)
+    follow_capture(id, take state, 0, None, 0, at_version)
 }
 
 @test
@@ -928,8 +927,7 @@ fn follower_heal_start(mut marker: std.object.Client, time: Clock) -> u64 waits 
 }
 
 fn follower_heal_end(mut marker: std.object.Client, time: Clock, healed_ns: u64, wanted: Position, law: String, at: Position) waits {
-    if host.mono_ns(time) - healed_ns > FOLLOWER_HEAL_NS ||
-        !same(at.store, wanted.store) || at.branch != wanted.branch || at.version < wanted.version {
+    if host.mono_ns(time) - healed_ns > FOLLOWER_HEAL_NS || !same(at.store, wanted.store) || at.branch != wanted.branch || at.version < wanted.version {
         follower_heal_failed(time, healed_ns, wanted, law, Ok(at))
     }
     follower_heal_mark(mut marker, "vp2-reached")

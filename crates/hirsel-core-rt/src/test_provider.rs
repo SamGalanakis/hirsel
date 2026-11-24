@@ -58,6 +58,14 @@ pub mod crash {
 
     struct Damage(u64);
 
+    /// What a damaged restart kept of one file's pending bytes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Image {
+        Old,
+        New,
+        Partial,
+    }
+
     impl Damage {
         fn next(&mut self) -> u64 {
             // SplitMix64, with wrapping arithmetic for reproducible cuts.
@@ -68,9 +76,45 @@ pub mod crash {
             z ^ (z >> 31)
         }
 
-        fn file(&mut self, durable: &mut Vec<u8>, live: &[u8]) {
+        fn file(&mut self, durable: &mut Vec<u8>, live: &[u8], direct: Option<u64>) {
             const SECTOR: usize = 512;
             if durable == live {
+                return;
+            }
+            if let Some(mask) = direct {
+                // An O_DIRECT write lands as any subset of its sectors, below
+                // or past durable EOF; a hole before a landed sector reads as
+                // zeros. Every sector that differs or lies past EOF is a
+                // candidate; the mask picks none, all, the first, the last or
+                // alternate candidates.
+                let old_len = durable.len();
+                let candidates: Vec<usize> = (0..live.len())
+                    .step_by(SECTOR)
+                    .filter(|&at| {
+                        let stop = (at + SECTOR).min(live.len());
+                        stop > old_len || durable[at..stop] != live[at..stop]
+                    })
+                    .collect();
+                let last = candidates.len().saturating_sub(1);
+                let mut image = durable.clone();
+                let mut end = old_len;
+                for (index, &at) in candidates.iter().enumerate() {
+                    let lands = match mask {
+                        0 => false,
+                        1 => true,
+                        2 => index == 0,
+                        3 => index == last,
+                        _ => index % 2 == 0,
+                    };
+                    if lands {
+                        let stop = (at + SECTOR).min(live.len());
+                        image.resize(image.len().max(stop), 0);
+                        image[at..stop].copy_from_slice(&live[at..stop]);
+                        end = end.max(stop);
+                    }
+                }
+                image.truncate(end);
+                *durable = image;
                 return;
             }
             let pending = &live[durable.len()..];
@@ -112,6 +156,7 @@ pub mod crash {
         durable_data: BTreeMap<u64, Vec<u8>>,
         pending_names: Vec<NameChange>,
         pending_truncations: BTreeSet<u64>,
+        direct: BTreeSet<u64>,
     }
 
     impl FileSystem {
@@ -136,14 +181,7 @@ pub mod crash {
                 }
                 Op::Write(name, bytes) => {
                     let inode = self.live_names[*name];
-                    if self
-                        .durable_data
-                        .get(&inode)
-                        .is_some_and(|old| bytes.len() < old.len())
-                    {
-                        self.pending_truncations.insert(inode);
-                    }
-                    self.live_data.insert(inode, bytes.to_vec());
+                    self.write_inode(inode, bytes.to_vec());
                 }
                 Op::Append(name, bytes) => {
                     let inode = self.live_names[*name];
@@ -154,9 +192,7 @@ pub mod crash {
                 }
                 Op::Sync(name) => {
                     let inode = self.live_names[*name];
-                    self.durable_data
-                        .insert(inode, self.live_data[&inode].clone());
-                    self.pending_truncations.remove(&inode);
+                    self.sync_inode(inode);
                 }
                 Op::Rename(from, to) => {
                     if from == to {
@@ -204,8 +240,22 @@ pub mod crash {
             self.pending_truncations.clear();
         }
 
-        pub fn restart_damaged(&mut self, cut: u64, seed: u64) {
+        /// Marks an inode as opened O_DIRECT, so a damaged restart keeps a
+        /// sector subset of its pending bytes instead of a prefix.
+        pub fn mark_direct(&mut self, inode: u64) {
+            self.direct.insert(inode);
+        }
+
+        pub fn is_direct(&self, name: &str) -> bool {
+            self.inode(name)
+                .is_some_and(|inode| self.direct.contains(&inode))
+        }
+
+        /// Returns, for each inode whose pending bytes were damaged, whether
+        /// its image kept the old bytes, took the new ones, or a mix.
+        pub fn restart_damaged(&mut self, cut: u64, seed: u64) -> Vec<Image> {
             let mut damage = Damage(seed ^ cut.wrapping_mul(0xd1342543de82ef95));
+            let mut images = Vec::new();
             for change in std::mem::take(&mut self.pending_names) {
                 if damage.next() & 1 == 0 {
                     change.persist(&mut self.durable_names);
@@ -217,15 +267,54 @@ pub mod crash {
                 // Later appends to the truncated file are a different extent.
                 if !self.pending_truncations.contains(&inode)
                     && let Some(live) = self.live_data.get(&inode)
+                    && durable != live
                 {
-                    damage.file(durable, live);
+                    let old = durable.clone();
+                    let mask = self.direct.contains(&inode).then_some(seed % 5);
+                    damage.file(durable, live, mask);
+                    images.push(if *durable == old {
+                        Image::Old
+                    } else if durable == live {
+                        Image::New
+                    } else {
+                        Image::Partial
+                    });
                 }
             }
             self.restart();
+            images
         }
 
         pub fn read(&self, name: &str) -> Option<&[u8]> {
-            self.live_data.get(&self.inode(name)?).map(Vec::as_slice)
+            self.read_inode(self.inode(name)?)
+        }
+
+        pub fn read_inode(&self, inode: u64) -> Option<&[u8]> {
+            self.live_data.get(&inode).map(Vec::as_slice)
+        }
+
+        pub fn durable_inode(&self, inode: u64) -> &[u8] {
+            self.durable_data.get(&inode).map_or(&[], Vec::as_slice)
+        }
+
+        pub fn write_inode(&mut self, inode: u64, bytes: Vec<u8>) {
+            if self
+                .durable_data
+                .get(&inode)
+                .is_some_and(|old| bytes.len() < old.len())
+            {
+                self.pending_truncations.insert(inode);
+            }
+            self.live_data.insert(inode, bytes);
+        }
+
+        pub fn sync_inode(&mut self, inode: u64) {
+            self.sync_image(inode, self.live_data[&inode].clone());
+        }
+
+        pub fn sync_image(&mut self, inode: u64, bytes: Vec<u8>) {
+            self.durable_data.insert(inode, bytes);
+            self.pending_truncations.remove(&inode);
         }
 
         pub fn inode(&self, name: &str) -> Option<u64> {

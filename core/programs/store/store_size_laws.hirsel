@@ -33,13 +33,12 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
         }
     }
     let open_charge = before - writer_law_room()
-    // The worker, timer and five live channels take 67,174,752 + 4,384
-    // + (27,264 - 88). The ready channel's 88 B have been refunded.
+    // The ready channel is refunded. The creator keeps one aligned block.
     let group: u64 = int.widen(input.options.group_bytes)
     let commits: u64 = int.widen(input.options.group_commits)
-    let worker = option.unwrap(charge.task(bytes[Result[(), Error]], group + JOURNAL_WORKER_SLACK))
-    let timer = option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT))
-    let fixed = open_charge - worker - timer - (journal_channel_bytes(commits) - journal_ready_bytes())
+    let worker = option.unwrap(charge.task(bytes[Result[(), Error]], journal_group_room(group) + JOURNAL_WORKER_SLACK))
+    let creation = option.unwrap(charge.seq(bytes[u8], 4096))
+    let fixed = open_charge - worker - creation - (journal_channel_bytes(commits) - journal_ready_bytes())
     if fixed != GENESIS_WRITER_STATE || fixed != writer_state_bytes() {
         fail("§1.1: fixed writer state at genesis")
     }

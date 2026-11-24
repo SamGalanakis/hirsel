@@ -87,7 +87,9 @@ fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCap
     if latest.head.authority_kind != source.authority_kind {
         return Error(Unsupported(int.widen(latest.head.authority_kind)))
     }
-    if source.authority_kind == 1 { history_check_endpoint(mut source.client, source.deadline)? }
+    if source.authority_kind == 1 {
+        history_check_endpoint(mut source.client, source.deadline)?
+    }
     history_check_namespace(latest, source.client)?
     Ok(Some((take latest, tag)))
 }
@@ -122,9 +124,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         }
         if history_ref_matches(latest.entry, old.current.entry) {
             return disk_allocation(scoped fn() -> Result[Option[Arc[FollowCapture]], Error] {
-                Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.share(old_capture.state),
-                    resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)),
-                    log_input: None, watermark: old_capture.watermark))))
+                Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)), log_id: 0, watermark: old_capture.watermark))))
             })
         }
         old_capture.resident
@@ -150,17 +150,18 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let resident = journal_account(replay)?
     let JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: latest, tag, next_node)
-    Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), None, stamp_after(next_node)?)?))
+    Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, stamp_after(next_node)?)?))
 }
 
-fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: HistoryMark, raw: Bytes,
-    at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: HistoryMark, raw: Bytes, at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
     let manifest = history_read_manifest(mut source.client, captured.store, mark, captured.checkpoint.seq, source.deadline)?
-    if manifest.branches[0u64].version > at_most { return Ok(None) }
+    if manifest.branches[0u64].version > at_most {
+        return Ok(None)
+    }
     let (take recovered, _) = history_open_checkpoint(mut source, captured, mark, raw, take manifest, ceiling)?
     let resident = journal_account(recovered)?
     let JournalReplay(state: take state, next_node: stamp, ..) = take recovered
-    Ok(Some(follow_capture(captured.store, take state, resident, None, None, stamp_after(stamp)?)?))
+    Ok(Some(follow_capture(captured.store, take state, resident, None, 0, stamp_after(stamp)?)?))
 }
 
 fn check_floor_missing[T](mut source: ObjectPackRead, captured: HistoryHead, take loaded: Result[T, Error], mut scratch: Bytes) -> Result[T, Error] waits {
@@ -182,13 +183,17 @@ fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ce
         Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
     })?
     let fetched = object_follow_head(mut source, None, mut scratch)?
-    let Some((take current, _)) = take fetched else { return Error(NotFound) }
+    let Some((take current, _)) = take fetched else {
+        return Error(NotFound)
+    }
     let head = current.head
     check_expected_store(expected, head.store)?
     let latest_mark = history_checkpoint(mut source.client, head, source.deadline)
     let (take mark, take raw) = check_floor_missing(mut source, head, take latest_mark, mut scratch)?
     let latest = object_floor_loaded(mut source, head, mark, raw, at_most, ceiling)
-    if let Some(take chosen) = check_floor_missing(mut source, head, take latest, mut scratch)? { return Ok(Some(take chosen)) }
+    if let Some(take chosen) = check_floor_missing(mut source, head, take latest, mut scratch)? {
+        return Ok(Some(take chosen))
+    }
     let mut remaining = list.len(mark.retained)
     while remaining > 0 {
         remaining -= 1
@@ -200,7 +205,9 @@ fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ce
         let earlier_raw = check_floor_missing(mut source, older, take older_mark, mut scratch)?
         let earlier = history_read_mark(name, head.store, reference, earlier_raw)?
         let selected = object_floor_loaded(mut source, older, earlier, earlier_raw, at_most, ceiling)
-        if let Some(take chosen) = check_floor_missing(mut source, older, take selected, mut scratch)? { return Ok(Some(take chosen)) }
+        if let Some(take chosen) = check_floor_missing(mut source, older, take selected, mut scratch)? {
+            return Ok(Some(take chosen))
+        }
     }
     Ok(None)
 }

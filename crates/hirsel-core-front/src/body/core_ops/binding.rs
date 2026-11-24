@@ -118,6 +118,8 @@ operations! {
     ("host", "write_at", Lane::Runtime(Kernel::Host(HostOp::WriteAt)), "B", "fs-ops-1502", false),
     ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
     ("host", "try_lock", Lane::Runtime(Kernel::Host(HostOp::TryLock)), "B", "core-ops-914", false),
+    ("host", "try_lock_shared", Lane::Runtime(Kernel::Host(HostOp::TryLockShared)), "B", "store-ring-build-2285", false),
+    ("host", "zero_at", Lane::Runtime(Kernel::Host(HostOp::ZeroAt)), "B", "store-ring-build-2285", false),
     ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
     ("host", "mkdir", Lane::Runtime(Kernel::Host(HostOp::Mkdir)), "B", "core-ops-914", false),
     ("host", "mkdtemp", Lane::Runtime(Kernel::Host(HostOp::Mkdtemp)), "B", "core-ops-914", false),

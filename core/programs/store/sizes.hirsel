@@ -47,11 +47,18 @@ pub type Overrides: send {
     readers: Option[u64],
 }
 
-pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
+pub type Shortage: send {
+    need: u64,
+    have: u64,
+    parts: List[(String, u64)]
+}
 
 const MIB: u64 = 1048576
+
 const CUT_FIXED_BYTES: u64 = 65536
+
 const KEY_LIMIT: u64 = 4096
+
 const CUT_STEP_BYTES: u64 = KEY_LIMIT + VALUE_LIMIT
 
 pub opaque type WriterPlan: send {
@@ -65,11 +72,7 @@ type WriterParts: send {
 }
 
 fn writer_parts() -> WriterParts {
-    WriterParts(terms: [
-        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0),
-        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0),
-        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0)
-    ], count: 0)
+    WriterParts(terms:[("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0), ("", 0)], count: 0)
 }
 
 fn writer_add(mut parts: WriterParts, take name: String, n: u64) {
@@ -95,9 +98,7 @@ fn writer_shortage(have: u64, parts: WriterParts) -> Shortage {
 }
 
 pub fn derived_sizes() -> Overrides {
-    Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None,
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
 }
 
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
@@ -105,7 +106,10 @@ pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
 }
 
 fn size_or(overridden: Option[u64], derived: u64) -> u64 {
-    match overridden { Some(n) => n, None => derived }
+    match overridden {
+        Some(n) => n,
+        None => derived
+    }
 }
 
 fn add_size(mut parts: List[(String, u64)], name: String, n: u64) -> () {
@@ -126,7 +130,11 @@ fn shortage(have: u64, take parts: List[(String, u64)]) -> Shortage {
 
 fn cut_work(resident: u64) -> u64 {
     // Dividing first keeps ceil(resident / 11) and the doubled result in range.
-    let blocks = resident / 11 + if resident % 11 == 0 { 0u64 } else { 1u64 }
+    let blocks = resident / 11 + if resident % 11 == 0 {
+        0u64
+    } else {
+        1u64
+    }
     2 * blocks + CUT_FIXED_BYTES
 }
 
@@ -168,15 +176,18 @@ fn tiered_open_funded(o: Options) -> bool {
     if o.writer_pin_bytes < MIN_WRITER_PINS || o.cache_bytes < o.writer_pin_bytes {
         return false
     }
-    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES),
-        int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
+    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
     needed <= o.resident_limit
 }
 
 fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
     let zero = TieredSizes(cache: 0, writer: 0, dirty: 0, pager: 0)
-    if let Memory = kind { return zero }
-    let Some(initial) = tiered_sizes_at(MIN_WRITER_PINS, resident_limit, o) else { return zero }
+    if let Memory = kind {
+        return zero
+    }
+    let Some(initial) = tiered_sizes_at(MIN_WRITER_PINS, resident_limit, o) else {
+        return zero
+    }
     let mut best = initial
     let mut low = MIN_WRITER_PINS
     let mut high = 64 * MIB
@@ -187,7 +198,9 @@ fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
                 low = middle
                 best = next_shape
             },
-            None => { high = middle - 1 },
+            None => {
+                high = middle - 1
+            },
         }
     }
     let (candidate, remainder) = best
@@ -249,7 +262,9 @@ pub fn planned_sim_bytes(p: PlacePlan, weak_room: u64) -> Result[u64, Capacity] 
             Some(total) => Ok(total),
             None => Error(Capacity(requested: extra, available: 18446744073709551615u64 - writer)),
         }
-    } else { Ok(planned_bytes(p)) }
+    } else {
+        Ok(planned_bytes(p))
+    }
 }
 
 pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
@@ -257,11 +272,7 @@ pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
 }
 
 pub fn writer_plan(kind: Kind, o: Options) -> Result[WriterPlan, Shortage] {
-    let fixed = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit),
-        checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes),
-        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
-        cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
-        dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: None)
+    let fixed = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: None)
     let (_, take writer) = writer_reservation(kind, 18446744073709551615u64, fixed)?
     Ok(take writer)
 }
@@ -293,34 +304,27 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
     let tiered = tiered_sizes(kind, resident, o)
-    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2,
-        stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64)
 }
 
 // The Directory journal worker's grant beyond its group buffer, holding its
-// END scratch and write state (§3.4), and the idle timer's grant.
-const JOURNAL_WORKER_SLACK: u64 = 65536
-const JOURNAL_WINDOW_STEP: u64 = 1048576
-const JOURNAL_ZERO_CHUNK: u64 = 32768
-const JOURNAL_BULK_GROUP: u64 = 65536
+// END scratch and write state (§3.4).
+const JOURNAL_WORKER_SLACK: u64 = 32768
 
-const JOURNAL_TIMER_GRANT: u64 = 4096
+const JOURNAL_WINDOW_STEP: u64 = 1048576
+
+const JOURNAL_BULK_GROUP: u64 = 65536
 
 // Recovery reads the journal through one input chunk of this many bytes.
 const JOURNAL_CHUNK_BYTES: u64 = 65536
 
-// The ready channel covers startup. The other five stay live after open.
+// The ready channel covers startup. Four channels stay live after open.
 fn journal_ready_bytes() -> u64 {
     option.unwrap(charge.channel(bytes[Result[(), Capacity]], 1))
 }
 
 fn journal_channel_bytes(group_count: u64) -> u64 {
-    option.unwrap(charge.channel(bytes[JournalMsg], 2 * group_count)) +
-        option.unwrap(charge.channel(bytes[Ack], 3 * group_count + 3)) +
-        journal_ready_bytes() +
-        option.unwrap(charge.channel(bytes[WriteNotice], 2)) +
-        option.unwrap(charge.channel(bytes[()], 1)) +
-        option.unwrap(charge.channel(bytes[()], 1))
+    option.unwrap(charge.channel(bytes[JournalMsg], 2 * group_count)) + option.unwrap(charge.channel(bytes[Ack], 3 * group_count + 3)) + journal_ready_bytes() + option.unwrap(charge.channel(bytes[WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1))
 }
 
 fn writer_state_bytes() -> u64 {
@@ -396,6 +400,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         writer_add(mut parts, "history_workspace", option.unwrap(history_workspace_bytes(packet, packet)))
         writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), Error]], object_writer_journal_room(group_room))))
         writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], OBJECT_TIMER_GRANT)))
+        writer_add(mut parts, "journal_timer_channel", option.unwrap(charge.channel(bytes[()], 1)))
         // Recovery reads one object at a time. Replay can hold the fetched
         // entry beside its decoded frame. The checkpoint can hold its entry
         // beside a pack read. The growing suffix and location tables remain
@@ -405,9 +410,10 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         recovery = order.max(fetched_entry + FRAME_LIMIT, size_or(checkpoint_read, unbounded))
         cut_parts = bucket_cut_parts(pack)
     } else {
-        let worker = charge.task(bytes[Result[(), Error]], size_or(int.checked_add(group, JOURNAL_WORKER_SLACK), unbounded))
+        let aligned_room = journal_group_room(order.min(group, 4294967295u64))
+        let worker = charge.task(bytes[Result[(), Error]], aligned_room + JOURNAL_WORKER_SLACK)
         writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
-        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT)))
+        writer_add(mut parts, "journal_creation", option.unwrap(charge.seq(bytes[u8], 4096)))
         writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack))
     }
     writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
@@ -464,13 +470,13 @@ pub opaque type FollowerPlan: send {
 }
 
 pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
-    let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit),
-        checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes),
-        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
-        cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
-        dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
+    let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit), checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes), group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms), cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes), dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
     let (take sized_options, writer) = writer_reservation(kind, 18446744073709551615u64, effective)?
-    let transport = if let Bucket(lanes) = kind { option.unwrap(std.object.lane_reservation(lanes)) } else { 0u64 }
+    let transport = if let Bucket(lanes) = kind {
+        option.unwrap(std.object.lane_reservation(lanes))
+    } else {
+        0u64
+    }
     let mut effective_options = take sized_options
     effective_options.claim_ms = o.claim_ms
     effective_options.head_poll_ms = o.head_poll_ms
@@ -504,10 +510,8 @@ pub fn service_bytes(plans: List[FollowerPlan]) -> Option[u64] {
     Some(room)
 }
 
-
 pub fn follower_starter_bytes() -> u64 {
-    follower_task_bytes(0) + order.max(follower_startup_reply_bytes(),
-        order.max(follower_provision_bytes(), follower_request_bytes()))
+    follower_task_bytes(0) + order.max(follower_startup_reply_bytes(), order.max(follower_provision_bytes(), follower_request_bytes()))
 }
 
 // Price the fixed roots and the per-level allocations in weak_publisher.
@@ -522,13 +526,17 @@ fn sim_level_bytes(names: List[String]) -> u64 {
     let receivers = option.unwrap(charge.seq(bytes[Receiver[WeakNotice]], n))
     let names_storage = option.unwrap(charge.seq(bytes[String], n))
     let mut room = roots + progress + frontiers + lifetime + n * notice + 2 * senders + receivers + names_storage
-    for name in names { room += option.unwrap(charge.seq(bytes[u8], string.byte_len(name))) }
+    for name in names {
+        room += option.unwrap(charge.seq(bytes[u8], string.byte_len(name)))
+    }
     room
 }
 
 /// Fixed opening room for sim@1's weak barriers.
 pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
-    if list.len(declaration.weak) == 0 { return 0 }
+    if list.len(declaration.weak) == 0 {
+        return 0
+    }
     sim_level_bytes(declaration.weak)
 }
 

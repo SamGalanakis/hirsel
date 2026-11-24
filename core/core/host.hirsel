@@ -26,6 +26,10 @@ pub fn close(take f: HostFile) -> Result[(), IoError] waits
 
 pub fn try_lock(mut f: HostFile) -> Result[bool, IoError] waits
 
+pub fn try_lock_shared(mut f: HostFile) -> Result[bool, IoError] waits
+
+pub fn zero_at(mut f: HostFile, at: u64, len: u64) -> Result[(), IoError] waits
+
 pub fn unlock(mut f: HostFile) -> Result[(), IoError] waits
 
 pub fn mkdir(d: Dir, p: String) -> Result[(), IoError] waits

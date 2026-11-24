@@ -154,6 +154,8 @@ host_ops! {
     CONN_SEND = 165,
     CONN_TRY_SEND = 166,
     UNIT_CANCEL = 167,
+    TRY_LOCK_SHARED = 172,
+    ZERO_AT = 173,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

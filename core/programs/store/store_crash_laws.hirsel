@@ -467,7 +467,7 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             }
         }
         let published = option.unwrap(args.get(argv, 2)) == "new"
-        disk_crash_read_only(d, published) ?=> |_| Exit(status: 33)
+        disk_crash_read_only(d, c, published) ?=> |_| Exit(status: 33)
         return Ok(())
     }
     if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" {
@@ -579,8 +579,8 @@ fn disk_crash_torn_manifest(d: Dir) -> Result[(), Error] waits {
     disk_io(host.sync_dir(d))
 }
 
-fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
-    let opened = open_read_only(d, disk_crash_options("checkpoint"))
+fn disk_crash_read_only(d: Dir, c: Clock, torn: bool) -> Result[(), Error] waits {
+    let opened = open_read_only(d, c, disk_crash_options("checkpoint"))
     if torn {
         match opened {
             Error(Corrupt(f)) => if f.file == "MANIFEST" {
@@ -613,7 +613,7 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
 @test
 fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
-    if let Error(NotFound) = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64))) {} else {
+    if let Error(NotFound) = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64))) {} else {
         fail("read-only open of an empty directory must refuse")
     }
     let mut db = open(tasks, child, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
@@ -624,7 +624,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, final_item)?
-    let saved = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64)))?
+    let saved = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
         fail("read-only open missed a durable journal row")
@@ -634,7 +634,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     checkpoint(mut db)?
     close(take db)?
-    let newer = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64)))?
+    let newer = open_read_only(child, c, result.unwrap(sized(Directory, 2147483648u64)))?
     if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(newer.snapshot) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
         fail("read-only reads changed after the writer replaced the row")
     }
@@ -650,8 +650,16 @@ fn lix_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
     let a = value % 7
     let b = (value / 2) % 7
     let mut keys: List[u64] = list.new()
-    list.push(mut keys, if a <= b { a } else { b })
-    list.push(mut keys, if a <= b { b } else { a })
+    list.push(mut keys, if a <= b {
+        a
+    } else {
+        b
+    })
+    list.push(mut keys, if a <= b {
+        b
+    } else {
+        a
+    })
     Ok(take keys)
 }
 
@@ -663,7 +671,9 @@ fn lix_expected(id: u32, model: List[Option[u64]]) -> Result[List[Bytes], Error]
     let mut out: List[Bytes] = list.new()
     for j in 0u64 .. 7 {
         for k in 0u64 .. list.len(model) {
-            let Some(v) = model[k] else { continue }
+            let Some(v) = model[k] else {
+                continue
+            }
             let keys = capacity(lix_keys(k, v))?
             if keys[0] == j || keys[1] == j {
                 let mut logical = prefix(id)?
@@ -730,8 +740,14 @@ fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     let _ = seal(mut db, take declaration)?
     let mut model: List[Option[u64]] = list.new()
     for k in 0u64 .. 40 {
-        let v = if k < initial { Some(k * 3) } else { None }
-        if let Some(_) = v { lix_write(mut db, t, k, v)? }
+        let v = if k < initial {
+            Some(k * 3)
+        } else {
+            None
+        }
+        if let Some(_) = v {
+            lix_write(mut db, t, k, v)?
+        }
         list.push(mut model, v)
     }
     rebuild_index(mut db, ix)?
@@ -739,7 +755,9 @@ fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     let mut rounds = 0u64
     while !lix_serves(db, ix)? {
         rounds += 1
-        if rounds > 2000 { fail("L-IX: the build made no progress") }
+        if rounds > 2000 {
+            fail("L-IX: the build made no progress")
+        }
         state = lix_next(state)
         let pick = state % 8
         state = lix_next(state)
@@ -747,11 +765,17 @@ fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
         state = lix_next(state)
         if pick < 3 {
             match index_build_step(mut db, 2 * pick + 1)? {
-                Some(name) => if name != "by_v" { fail("L-IX: the step built another index") },
+                Some(name) => if name != "by_v" {
+                    fail("L-IX: the step built another index")
+                },
                 None => fail("L-IX: the step found nothing building"),
             }
         } else {
-            let v = if pick < 6 { Some(state % 1000) } else { None }
+            let v = if pick < 6 {
+                Some(state % 1000)
+            } else {
+                None
+            }
             lix_write(mut db, t, k, v)?
             model[k] = v
         }
@@ -759,7 +783,9 @@ fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     if lix_entries(db, ix.id)? != lix_expected(ix.id, model)? {
         fail("L-IX: the Public index differs from a fresh extraction of the rows")
     }
-    if let Some(_) = index_build_step(mut db, 1)? { fail("L-IX: a Public index still builds") }
+    if let Some(_) = index_build_step(mut db, 1)? {
+        fail("L-IX: a Public index still builds")
+    }
     Ok(())
 }
 
@@ -780,9 +806,13 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         }
         Ok(())
     })?
-    if let Committed(_) = filled {} else { return Error(MigrationFault) }
+    if let Committed(_) = filled {} else {
+        return Error(MigrationFault)
+    }
     rebuild_index(mut db, ix)?
-    if let Some(d) = duplicate { lix_write(mut db, t, 0, Some(d))? }
+    if let Some(d) = duplicate {
+        lix_write(mut db, t, 0, Some(d))?
+    }
     while let Some(_) = index_build_step(mut db, INDEX_CHUNK)? {}
     let record = catalog_entry_in(db.heads[0].roots.catalog, ix.catalog_key)?
     let failed = match record.state {
@@ -797,14 +827,22 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         Some(d) => Some((0u64, d)),
         None => None,
     }
-    if failed != expected_failure { fail("L-IX: a duplicate fails the build at the row that repeats it") }
-    if lix_serves(db, ix)? == (duplicate != None) { fail("L-IX: a failed index refuses reads") }
+    if failed != expected_failure {
+        fail("L-IX: a duplicate fails the build at the row that repeats it")
+    }
+    if lix_serves(db, ix)? == (duplicate != None) {
+        fail("L-IX: a failed index refuses reads")
+    }
     if let None = duplicate {
         let found = lix_entries(db, ix.id)?
-        if list.len(found) != rows { fail("L-IX: the unique index holds one entry per row") }
+        if list.len(found) != rows {
+            fail("L-IX: the unique index holds one entry per row")
+        }
         for i in 0u64 .. rows {
             let j: u64 = list.word_be(found[i], 4)
-            if j != i { fail("L-IX: the unique index holds one entry per row") }
+            if j != i {
+                fail("L-IX: the unique index holds one entry per row")
+            }
         }
     }
     Ok(())
@@ -812,14 +850,14 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
 
 @test
 fn test_index_build_law(c: Clock) -> Result[(), Error] waits {
-    let initials: Inline[u64, 4] = [0, 1, 17, 40]
+    let initials: Inline[u64, 4] =[0, 1, 17, 40]
     for initial in initials {
         for seed in 0u64 .. 8 {
             lix_case(c, seed * 7919 + initial, initial)?
         }
     }
-    let sizes: Inline[u64, 6] = [0, 1, 4095, 4096, 4097, 12289]
-    let duplicates: Inline[u64, 10] = [1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
+    let sizes: Inline[u64, 6] =[0, 1, 4095, 4096, 4097, 12289]
+    let duplicates: Inline[u64, 10] =[1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
     for rows in sizes {
         lix_duplicate_case(c, rows, None)?
         for duplicate in duplicates {

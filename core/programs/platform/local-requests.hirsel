@@ -273,7 +273,7 @@ fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[()
     let Ok(dir) = std.dir.narrow(a.root, name) else {
         return Error(Unknown)
     }
-    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+    let Ok(take reader) = store.open_read_only(dir, a.clock, a.options) else {
         return Error(Failed("read cold store"))
     }
     match code.callable(check.check)(reader, check.caller) {
@@ -287,7 +287,7 @@ fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Re
     let Ok(dir) = std.dir.narrow(a.root, name) else {
         return Error(Unknown)
     }
-    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+    let Ok(take reader) = store.open_read_only(dir, a.clock, a.options) else {
         return Error(Failed(string.from("read cold store")))
     }
     match code.callable(r.read)(reader, r.arg) {

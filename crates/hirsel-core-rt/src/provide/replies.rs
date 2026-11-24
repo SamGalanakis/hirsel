@@ -169,3 +169,14 @@ pub(super) fn answer(
     }
     Some(out)
 }
+
+/// A Unix socket reply's word and the handle kind it creates.
+pub(super) fn unix_reply(reply: UnixReply) -> (u64, Option<Kind>) {
+    match reply {
+        UnixReply::Created(UnixHandle::Stream) => (R_UNIX_SOCKET, Some(Kind::Socket)),
+        UnixReply::Created(UnixHandle::Listener) => (R_UNIX_LISTENING, Some(Kind::UnixListener)),
+        UnixReply::Created(UnixHandle::Datagram) => (R_DATAGRAM, Some(Kind::Datagram)),
+        UnixReply::Done => (R_DONE, None),
+        UnixReply::Packet => (R_PACKET, None),
+    }
+}

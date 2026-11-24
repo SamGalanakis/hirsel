@@ -152,6 +152,8 @@ pub enum HostOp {
     NetDenials = 169,
     NetNarrowBegin = 170,
     NetNarrowEnd = 171,
+    TryLockShared = hirsel_core_ids::host_op::TRY_LOCK_SHARED as isize,
+    ZeroAt = hirsel_core_ids::host_op::ZERO_AT as isize,
 }
 
 mod symbol;
@@ -229,6 +231,8 @@ impl HostOp {
         HostOp::Sync,
         HostOp::SyncDir,
         HostOp::ZeroExtension,
+        HostOp::TryLockShared,
+        HostOp::ZeroAt,
         HostOp::Random,
         HostOp::Connect,
         HostOp::Listen,
@@ -660,10 +664,12 @@ impl HostOp {
             }
             HostOp::Close
             | HostOp::TryLock
+            | HostOp::TryLockShared
             | HostOp::Unlock
             | HostOp::Sync
             | HostOp::SyncDir
             | HostOp::ZeroExtension => (vec![V(u64_)], outcome),
+            HostOp::ZeroAt => (vec![V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::Random => (vec![V(u64_), V(p)], vec![]),
             HostOp::Stopped => (vec![V(u64_)], vec![]),
             HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
@@ -706,6 +712,8 @@ impl HostOp {
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
             HostOp::ZeroExtension => "host_zero_extension",
+            HostOp::TryLockShared => "host_try_lock_shared",
+            HostOp::ZeroAt => "host_zero_at",
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
             HostOp::Resolve => "host_resolve",

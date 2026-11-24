@@ -22,4 +22,4 @@ webrtc_sfu@1/laws/service_answers_over_the_room src=a39a141f209b569b sig=55a0dd8
 webrtc_sfu@1/laws/signaling_loss_fails_closed src=3622a9d99d222cbb sig=c3d6a9c116b7305e run=c7b2a52baff70a63 bug=1d8c89257f64b087 oracle=1bc13dab3fdd6e00 rows=pending
 webrtc_sfu@1/laws/ssrc_survives_switches src=d9d31cafe326b87a sig=be8c5a2195f41f29 run=c2c0c6612d4cbb79 bug=f2295f10bf707b65 oracle=0c7ec1f582b2fa33 rows=pending
 webrtc_sfu@1/laws/unauthenticated_changes_nothing src=51f82136d2dbdbd3 sig=cb98e1fa8e32e66b run=c2c0c6612d4cbb79 bug=6c3f1522e1c86436 oracle=5047e9c0d66829af rows=pending
-webrtc_sfu@1/laws/units_on_loopback src=1a4c9513d6218dc3 sig=a5d367ced2497b20 run=862f819be0a1a67f bug=9a6be0cc5514abca oracle=0610fd3a587d9e38 rows=pending
+webrtc_sfu@1/laws/units_on_loopback src=1a4c9513d6218dc3 sig=415b42b62ae07d60 run=862f819be0a1a67f bug=9a6be0cc5514abca oracle=0610fd3a587d9e38 rows=pending

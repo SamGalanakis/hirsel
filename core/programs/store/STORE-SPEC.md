@@ -4755,21 +4755,13 @@ A later version may add these, and a periodic tour with an I/O budget, without a
 
 Replaced by §12's objects@1. There is no reader for a v2.43 bucket store.
 
-### 11.19 Read-only open (v2.44, deleted by v2.46)
+### 11.19 Read-only open
 
-Replaced by §12.5's `Follower`: `open_read_only`, `open_bucket_read_only`, `ReadOnly`, `read_only_table`, `read_only_get` and `read_only_version` are deleted. A follower over log@1 is the old offline reader, under writer exclusion, reading the last segment past END as §3.4 does (§12.5). Its S2 `read-only` crash law is kept, restated over a follower (§12.10).
-
-**Callers that move with it (v2.47, Fable L6).** The deleted API has five callers outside the store's implementation. Each moves to a log@1 `follower` under writer exclusion, or to the writer's own Db, in the slice that deletes the API:
-
-| Caller | Uses | Moves to |
-|---|---|---|
-| `core/programs/platform/local.hirsel` | 2 | a follower over the place's directory |
-| `core/programs/platform/platform.hirsel` | 3 | a follower over the place's directory |
-| `core/programs/harness/gateway_laws.hirsel` | 1 | a follower in the law |
-| `core/programs/harness/waits.hirsel` | 2 | a follower, `catch_up` with a deadline |
-| `core/std/api/store.md` | 2 | the follower API's text |
-
-The implementation's own uses (`store.hirsel`, `store-bucket.hirsel`, `bucket_laws.hirsel`) are deleted with the API.
+`open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Error] waits`
+captures an existing log@1 Directory store using §3.3b's reader protocol. The caller
+supplies the clock for the segment fence poll. If the terminal fence is refused and
+`LOCK` is free, the reader polls the fence every 1 ms with no deadline. Table reads
+after the open use the captured roots. §12.5 covers followers.
 
 ## 12. Authorities, the claim fence, levels and followers (Store M2, v2.49, not yet built)
 

@@ -526,3 +526,95 @@ fn units_on_every_slot_share_one_provider_handle_table() {
     assert_eq!(descriptors_on(&file), 0, "a CLOSE missed its descriptor");
     drop(os);
 }
+
+#[test]
+fn slot_ring_reads_preserve_prefix_cursor_and_errors() {
+    if !slot_file_child("host_file_tests::slot_ring_reads_preserve_prefix_cursor_and_errors") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"abcdef").unwrap();
+    let directory = File::open(root.path()).unwrap();
+    slot_file_fixture(directory, |f| {
+        let file = f.open(b"file", 0);
+        let mut at = *b"prefix????";
+        let (positioned, len) = f.call(READ_AT, file, &4u64.to_le_bytes(), 0, &mut at, 6);
+        assert_eq!(
+            (positioned.error, positioned.value, len),
+            (IoError::OK, 2, 8)
+        );
+        assert_eq!(&at[..len], b"prefixef");
+
+        let mut cursor = [0; 3];
+        let (read, len) = f.call(READ, file, b"", 0, &mut cursor, 0);
+        assert_eq!((read.error, read.value, len), (IoError::OK, 3, 3));
+        assert_eq!(&cursor, b"abc");
+        assert_eq!(f.simple(CLOSE, file, b"", 0).error, IoError::OK);
+
+        let write_only = f.open(b"file", 1);
+        let (failed, len) = f.call(READ, write_only, b"", 0, &mut cursor, 1);
+        assert_eq!((failed.error, len), (IoError::from_errno(libc::EBADF), 1));
+        assert_eq!(&cursor, b"abc");
+        assert_eq!(f.simple(CLOSE, write_only, b"", 0).error, IoError::OK);
+    });
+    check_file_backend();
+}
+
+/// Runs the ring write loop over scripted completions. Returns the outcome
+/// and each piece the loop issued, as (offset, length).
+fn scripted_write(
+    len: usize,
+    direct: bool,
+    script: Vec<std::io::Result<usize>>,
+) -> (Outcome, Vec<(i64, usize)>) {
+    let bytes = vec![7u8; len];
+    let mut script = script.into_iter();
+    let mut issued = Vec::new();
+    let outcome = crate::os::write_all_from(&bytes, Some(4096), true, direct, |piece, at| {
+        issued.push((at.unwrap(), piece.len()));
+        script.next().expect("loop issued past its script")
+    });
+    assert!(
+        script.next().is_none(),
+        "loop stopped before its script ended"
+    );
+    (outcome, issued)
+}
+
+#[test]
+fn ring_write_loop_continues_and_retries_the_remainder() {
+    let eintr = || Err(std::io::Error::from_raw_os_error(libc::EINTR));
+    let eagain = || Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+    // An aligned short Direct write continues at its end; EINTR and EAGAIN
+    // reissue the same remainder.
+    let (out, issued) = scripted_write(
+        12288,
+        true,
+        vec![Ok(4096), eintr(), eagain(), Ok(4096), Ok(4096)],
+    );
+    assert_eq!((out.error, out.written), (IoError::OK, 12288));
+    assert_eq!(
+        issued,
+        [
+            (4096, 12288),
+            (8192, 8192),
+            (8192, 8192),
+            (8192, 8192),
+            (12288, 4096)
+        ]
+    );
+}
+
+#[test]
+fn ring_write_loop_refuses_zero_and_unaligned_direct_results() {
+    let eio = IoError::from_errno(libc::EIO);
+    // A zero result on a nonempty write would loop forever if retried.
+    let (out, issued) = scripted_write(4096, false, vec![Ok(0)]);
+    assert_eq!((out.error, out.written, issued.len()), (eio, 0, 1));
+    let (out, _) = scripted_write(8192, true, vec![Ok(4096), Ok(0)]);
+    assert_eq!((out.error, out.written), (eio, 4096));
+    // A valid aligned Direct request whose completion is unaligned stops:
+    // the next piece would break the alignment contract.
+    let (out, issued) = scripted_write(8192, true, vec![Ok(512)]);
+    assert_eq!((out.error, out.written, issued.len()), (eio, 512, 1));
+}

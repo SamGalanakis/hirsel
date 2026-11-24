@@ -3519,8 +3519,8 @@ fn pin_answer(p: Option[Pin], now: u64) -> operator.Resolved {
 // caller holding the launcher's lifetime lock and the catalog's LOCK, it recovers the
 // catalog in `d` read-only (STORE §11.19: no genesis, repair, cleanup or write) and gives
 // the live host's lookup at `now`, in Unix seconds. A store error is an error, never Gone.
-pub fn resolve_offline(d: Dir, id: Bytes, now: u64) -> Result[operator.Resolved, store.Error] waits {
-    let reader = store.open_read_only(d, result.unwrap(store.sized(Directory, 2147483648u64)))?
+pub fn resolve_offline(d: Dir, c: Clock, id: Bytes, now: u64) -> Result[operator.Resolved, store.Error] waits {
+    let reader = store.open_read_only(d, c, result.unwrap(store.sized(Directory, 2147483648u64)))?
     let pins: store.Table[Bytes, Pin] = store.read_only_table(reader, "platform.pins", std.codec.key_bytes(), std.codec.of())?
     Ok(pin_answer(store.read_only_get(reader, pins, id)?, now))
 }

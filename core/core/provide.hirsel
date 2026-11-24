@@ -118,6 +118,10 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
         Mkstemp(dir: a, prefix: b, room: d)
     } else if t == 22 {
         ZeroExtension(dir: a)
+    } else if t == 23 {
+        TryLockShared(file: a)
+    } else if t == 24 {
+        ZeroAt(file: a, at: b, len: d)
     } else {
         Released(id: a)
     }

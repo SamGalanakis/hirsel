@@ -193,8 +193,14 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
             }
         }
         let held = if let ReplacePin(at, replacement) = delta {
-            if at == slot { replacement } else { view db.pins[slot] }
-        } else { view db.pins[slot] }
+            if at == slot {
+                replacement
+            } else {
+                view db.pins[slot]
+            }
+        } else {
+            view db.pins[slot]
+        }
         list.push(mut kept, share_pin(held)?)
     }
     if let AddPin(added) = delta {
@@ -562,7 +568,6 @@ pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
     Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark)
 }
 
-
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
 pub fn splitmix64(x: u64) -> u64 {
     let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
@@ -600,8 +605,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(),
-        stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -863,7 +867,9 @@ pub fn next_call_info(db: Db) -> CallInfo {
     call_info(db.store, 0, db.heads[0].head + 1, host.wall_ms(db.clock), db.heads[0].at)
 }
 
-pub fn stream_retention_ms(db: Db) -> u64 { db.stream_retention_ms }
+pub fn stream_retention_ms(db: Db) -> u64 {
+    db.stream_retention_ms
+}
 
 pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempted: CallInfo) -> Pending {
     Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
@@ -917,7 +923,9 @@ fn cause_number(causes: Causes) -> u32 {
 
 fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement], credit: Option[KeyedCredit]) -> Result[(), Error] {
     if let Some(keyed) = complete.keyed {
-        let Some(remaining) = credit else { fail("store: keyed completion must apply its terminal credit") }
+        let Some(remaining) = credit else {
+            fail("store: keyed completion must apply its terminal credit")
+        }
         let call = KeyedCallSection(record: clone(keyed.record), settlement: settlement)
         return stage_claim_reply(mut tx, complete.stream, complete.request, keyed.policy.retention_ms, output, remaining, Some(take call))
     }
@@ -1012,7 +1020,10 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
 }
 
 pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reserve: Reserve) -> Result[Served, ServeError] waits {
-    let has_credit = match pending_run.completion.keyed { Some(_) => true, None => false }
+    let has_credit = match pending_run.completion.keyed {
+        Some(_) => true,
+        None => false
+    }
     match reserve {
         Claim if !has_credit => return Error(Before(Missing("claim"), None)),
         Resident if has_credit => return Error(Before(Missing("terminal credit"), None)),
@@ -1066,13 +1077,17 @@ pub fn run[E: inert, R, A](mut db: Db, steps: Option[u64], env: E, body: fn(mut 
 }
 
 pub fn run_on[E: inert, R, A](mut db: Db, b: Branch, steps: Option[u64], env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    run_on_with_reply(mut db, b, steps, None, scoped fn(mut tx: Tx) -> Result[R, A] { body(mut tx, env) })
+    run_on_with_reply(mut db, b, steps, None, scoped fn(mut tx: Tx) -> Result[R, A] {
+        body(mut tx, env)
+    })
 }
 
 // A runner abort may keep its reply. A runner refusal rolls back the whole Tx.
 pub fn run_with_reply[E: inert, R, A](mut db: Db, steps: Option[u64], keep_reply: fn(A) -> bool, env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
-    run_on_with_reply(mut db, b, steps, Some(keep_reply), scoped fn(mut tx: Tx) -> Result[R, A] { body(mut tx, env) })
+    run_on_with_reply(mut db, b, steps, Some(keep_reply), scoped fn(mut tx: Tx) -> Result[R, A] {
+        body(mut tx, env)
+    })
 }
 
 fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -1281,7 +1296,10 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 Some(decide) => decide(a),
                 None => true
             }
-            let keyed_reply = match tx.keyed { Some(_) => true, None => false }
+            let keyed_reply = match tx.keyed {
+                Some(_) => true,
+                None => false
+            }
             if !keep || (tx.stream_ops.rows.count == 0 && !keyed_reply) {
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
@@ -1336,7 +1354,10 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         },
         None => None,
     }
-    let keyed_writes = match keyed { Some(_) => true, None => false }
+    let keyed_writes = match keyed {
+        Some(_) => true,
+        None => false
+    }
     let mut admits_rows = stream_edits.count != 0 || keyed_writes
     if !admits_rows {
         for slot in 0u64 .. operations.count {
@@ -1385,7 +1406,9 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
     if !same(db.store, t.store) || t.open != open_number(db) {
         return Error(Foreign)
     }
-    if object_writer_open(db) && covered(db, t.mark) { return Ok(true) }
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(true)
+    }
     if let Some(e) = journal_poison(db) {
         return Error(Poisoned(e))
     }
@@ -1396,7 +1419,9 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
         }
     }
     let drained = journal_poll_groups(mut db)
-    if object_writer_open(db) && covered(db, t.mark) { return Ok(true) }
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(true)
+    }
     let _ = drained?
     if covered(db, t.mark) {
         return Ok(true)
@@ -1418,7 +1443,9 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     if !same(db.store, t.store) || t.open != open_number(db) {
         return Error(Foreign)
     }
-    if object_writer_open(db) && covered(db, t.mark) { return Ok(0) }
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(0)
+    }
     if let Some(e) = journal_poison(db) {
         return Error(Poisoned(e))
     }
@@ -1430,7 +1457,10 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     }
     let drained = journal_poll_groups(mut db)
     if object_writer_open(db) && covered(db, t.mark) {
-        return Ok(match drained { Ok(groups) => groups, Error(_) => 0u64 })
+        return Ok(match drained {
+            Ok(groups) => groups,
+            Error(_) => 0u64
+        })
     }
     let mut groups = drained?
     if is_disk(db) {
@@ -1683,7 +1713,11 @@ fn data_op_size(operation: DataOp, stream: bool) -> u64 {
     if let Some(_) = operation.trim {
         return 21
     }
-    let size = (if stream { 5u64 } else { 9u64 }) + list.len(operation.key)
+    let size = (if stream {
+        5u64
+    } else {
+        9u64
+    }) + list.len(operation.key)
     match operation.value {
         None => size,
         Some(raw) => size + 4 + list.len(staged_bytes(raw)),
@@ -1789,7 +1823,10 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], tiered: Opt
 }
 
 fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {
-    let tag: u64 = match value { Some(_) => 1, None => 2 }
+    let tag: u64 = match value {
+        Some(_) => 1,
+        None => 2
+    }
     le(mut payload, tag, 1)?
     blob(mut payload, key)?
     if let Some(width) = prior {
@@ -1822,7 +1859,9 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
 
 fn stream_control_slot(ops: DataRows) -> Option[u64] {
     for slot in 0u64 .. ops.count {
-        if list.len(data_row(ops, slot).key) == 0u64 { return Some(slot) }
+        if list.len(data_row(ops, slot).key) == 0u64 {
+            return Some(slot)
+        }
     }
     None
 }
@@ -1833,7 +1872,9 @@ fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call:
     let order = data_order(ops)?
     for slot_order in 0u64 .. ops.count {
         let operation = ordered_row(ops, order, slot_order)
-        if list.len(operation.key) != 0u64 { encode_stream_op(mut payload, operation, call, settlement)? }
+        if list.len(operation.key) != 0u64 {
+            encode_stream_op(mut payload, operation, call, settlement)?
+        }
     }
     Ok(())
 }
@@ -2302,14 +2343,12 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String,
     Error(Schema(int.widen(c.next)))
 }
 
-fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J],
-    take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
+fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J], take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
     let public = match get_page_row(catalog, k) {
         Some(raw) => record_public(raw),
         None => false,
     }
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?,
-        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec, public: public))
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec, public: public))
 }
 
 fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {
@@ -2562,7 +2601,9 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     check_write_attempt(tx)?
-    if let Some(stop) = tx.index_conflict { return Error(index_stop_error(stop)?) }
+    if let Some(stop) = tx.index_conflict {
+        return Error(index_stop_error(stop)?)
+    }
     let indexes = writable(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
@@ -2572,7 +2613,9 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     check_write_attempt(tx)?
-    if let Some(stop) = tx.index_conflict { return Error(index_stop_error(stop)?) }
+    if let Some(stop) = tx.index_conflict {
+        return Error(index_stop_error(stop)?)
+    }
     let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?
     delete_impl(mut tx, t, indexes, key)
@@ -2671,7 +2714,6 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     }
 }
 
-
 fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
     let old_charge = if retained {
         0u64
@@ -2717,7 +2759,9 @@ fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capa
 }
 
 fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
-    let mut schema_binding: Bytes = (bound bytes round8(BINDING_BYTES) { list.with_capacity(BINDING_BYTES) })?
+    let mut schema_binding: Bytes = (bound bytes round8(BINDING_BYTES) {
+        list.with_capacity(BINDING_BYTES)
+    })?
     put_binding(mut schema_binding, ctx, offset)?
     let mut state = std.check.start()
     std.check.add(mut state, schema_binding, 0, BINDING_BYTES)
@@ -3017,35 +3061,6 @@ fn disk_remove_optional(d: Dir, path: String) -> Result[bool, Error] waits {
     }
 }
 
-fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(HostFile, HostFile), Error] waits {
-    let (take path, take end_path, take journal, take end_bytes) = disk_allocation(scoped fn() -> Result[(String, String, Bytes, Bytes), Error] {
-        let path = capacity(disk_path("j-", seq, ""))?
-        let end_path = capacity(disk_path("j-", seq, ".end"))?
-        let header = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end, 0))?
-        let ctx = DiskContext(store: id, role: 4, seq: seq)
-        let mut end_bytes = capacity(disk_header_bytes(ctx, 0, 0))?
-        let mut payload: Bytes = list.with_capacity(8)
-        capacity(le(mut payload, 72, 8))?
-        let frame = capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?
-        list.append(mut end_bytes, frame)
-        Ok((take path, take end_path, take header, take end_bytes))
-    })?
-    let mut file = disk_io(host.open(d, path, Write))?
-    match host.write(mut file, journal) {
-        Ok(()) => (),
-        Error(e) => return Error(Io(e.error)),
-    }
-    disk_io(host.sync(mut file))?
-    let mut end_file = disk_io(host.open(d, end_path, Write))?
-    match host.write(mut end_file, end_bytes) {
-        Ok(()) => (),
-        Error(e) => return Error(Io(e.error)),
-    }
-    disk_io(host.sync(mut end_file))?
-    disk_io(host.sync_dir(d))?
-    Ok((take file, take end_file))
-}
-
 // Checkpoint graph: new nodes contribute their child edges once; root edges
 // change at the cut. Removing a last edge cascades without walking live subtrees.
 type DiskLoaded: send {
@@ -3078,7 +3093,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, tak
         let boundary = if seq == terminal {
             limit
         } else {
-            let following = journal_header(d, id, seq + 1u64, false)?
+            let following = journal_header(d, id, seq + 1u64, None)?
             match following {
                 Some(head) => head.prev_end,
                 None => return Error(disk_fault(path, 0u64, Header))
@@ -3323,7 +3338,11 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
 }
 
 fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
-    let prefix_tag = if c.kind == 2 { 2u8 } else { 1u8 }
+    let prefix_tag = if c.kind == 2 {
+        2u8
+    } else {
+        1u8
+    }
     if list.len(key) == 0 || key[0u64] != prefix_tag {
         return false
     }
@@ -3866,6 +3885,8 @@ type DiskStartup: send {
     seq: u64,
     segment: HostFile,
     end_file: HostFile,
+    header: Bytes,
+    creation: Bytes,
     pages: PageDisk
 }
 
@@ -3881,7 +3902,9 @@ fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, root
     }
     for slot in 0u64 .. list.len(roots.keyed) {
         let stamp = roots.keyed[slot].stamp
-        if stamp != 0 { map.insert(mut owners, HolderSource(kind, owner, int.narrow(3 + slot)), stamp) }
+        if stamp != 0 {
+            map.insert(mut owners, HolderSource(kind, owner, int.narrow(3 + slot)), stamp)
+        }
     }
 }
 
@@ -3922,7 +3945,7 @@ fn check_expected_store(expected: Option[StoreId], found: StoreId) -> Result[(),
     Ok(())
 }
 
-fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error] waits {
+fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStartup, Error] waits {
     let selected = read_page_manifest_file(d)
     let mut loaded = match take selected {
         Ok((id, take manifest)) => {
@@ -3945,11 +3968,12 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
             }
             let id = capacity(disk_identity(r))?
             let manifest = page_manifest_empty()
-            let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
+            let mut creation = disk_creation_block()?
+            let (take segment, take end_file, take header) = disk_new_segment(d, c, id, 1, 0, mut creation)?
             disk_publish_manifest(d, id, manifest)?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
             let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-            return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, pages: take pages))
+            return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages))
         },
         Error(take problem) => return Error(take problem),
     }
@@ -3962,7 +3986,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     })?
     let recorded_after = manifested.tips[0u64].head
     let initial = journal_replay_manifest(take manifested, loaded.manifest)?
-    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, Locked, take initial)?
+    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, c, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live_bytes = journal_account(replay)?
     let JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
@@ -3978,10 +4002,11 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     let orphan_end = capacity(disk_path("j-", seq, ".end"))?
     let _ = disk_remove_optional(d, orphan_end)?
     disk_io(host.sync_dir(d))?
-    let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
+    let mut creation = disk_creation_block()?
+    let (take segment, take end_file, take header) = disk_new_segment(d, c, loaded.store, seq, last_end, mut creation)?
     let DiskLoaded(store: id, manifest: take manifest, lists: take lists, locations: take locations, ..) = take loaded
     let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, compaction: no_tiered_compaction())
-    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages))
+    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages))
 }
 
 type DiskSession {
@@ -4025,7 +4050,7 @@ fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[Dis
     if disk_exists(d, "EXPORT")? {
         return Error(ExportDirectory)
     }
-    let startup = disk_start(d, r, options)?
+    let startup = disk_start(d, clock, r, options)?
     Ok(DiskSession(lock: take lock, startup: take startup))
 }
 
@@ -4059,10 +4084,14 @@ type DiskState {
     journal: Sender[JournalMsg],
     pending: Option[Bytes],
     journal_task: Task[Result[(), Error]],
-    journal_idle_task: Task[()],
+    journal_idle_task: Option[Task[()]],
+    creation: Bytes,
     // The pager of a store with a Tiered collection (§13.8), started from `tasks`; `restamp` and
     // `unload` name the collection a `set_residency` cut moves to Tiered or to Memory on main.
-    pager_task: Option[Task[()]], tasks: Tasks, restamp: Option[u32], unload: Option[u32]
+    pager_task: Option[Task[()]],
+    tasks: Tasks,
+    restamp: Option[u32],
+    unload: Option[u32]
 }
 
 fn open_number(db: Db) -> u64 {
@@ -4140,9 +4169,7 @@ type JournalChannels {
     written_send: Sender[WriteNotice],
     written_receive: Receiver[WriteNotice],
     synced_send: Sender[()],
-    synced_receive: Receiver[()],
-    idle_send: Sender[()],
-    idle_receive: Receiver[()]
+    synced_receive: Receiver[()]
 }
 
 fn journal_channels(group_count: u64) -> JournalChannels {
@@ -4153,8 +4180,7 @@ fn journal_channels(group_count: u64) -> JournalChannels {
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
     let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
-    let (idle_send, idle_receive): (Sender[()], Receiver[()]) = channel.new(1)
-    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive)
+    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
 }
 
 // S3 makes the disk opener public with its journal and final durability path.
@@ -4168,19 +4194,35 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     open_started(tasks, d, c, options, take session)
 }
 
-/// Recovers an existing Directory store in memory. The caller must exclude writers
-/// during recovery to observe the offline durable state. Reads after open use only
-/// the captured roots.
-pub fn open_read_only(d: Dir, options: Options) -> Result[ReadOnly, Error] waits {
+/// Captures an existing Directory store. The clock drives the terminal
+/// segment fence wait if a dead writer still has a write in flight.
+pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Error] waits {
     if let Bucket(_) = options.authority {
         return Error(Unsupported(1))
     }
     open_checks(options)?
-    let (take raw, id, take manifest) = read_only_manifest(d)?
-    check_expected_store(options.expect, id)?
-    let read_source = read_only_recover(d, id, take manifest, options.resident_limit)?
-    check_read_only_manifest(d, raw)?
-    Ok(take read_source)
+    let mut restarted = false
+    loop {
+        let (take raw, id, take manifest) = read_only_manifest(d)?
+        check_expected_store(options.expect, id)?
+        let candidate = capture_walk(d, id, manifest.first_live, restarted)?
+        let Some(take selected) = take candidate else {
+            restarted = true
+            continue
+        }
+        let mut walk = take selected
+        capture_fence(d, c, 18446744073709551615u64, mut walk)?
+        disk_io(host.sync_dir(d))?
+        if read_page_manifest_bytes(d)? != raw {
+            restarted = false
+            continue
+        }
+        let initial = read_only_checkpoint(d, id, take manifest)?
+        let replay = capture_scan(id, take walk, take initial)?
+        over_ceiling(journal_account(replay)?, options.resident_limit)?
+        let main = view replay.state.tips[0u64]
+        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?)))
+    }
 }
 
 fn read_only_manifest(d: Dir) -> Result[(Bytes, StoreId, PageManifest), Error] waits {
@@ -4205,20 +4247,6 @@ fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, read: JournalRead) -> Result[JournalReplay, Error] waits {
-    let first_live = manifest.first_live
-    let replay = read_only_checkpoint(d, id, take manifest)?
-    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, first_live, read, take replay)?
-    Ok(take recovered)
-}
-
-fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: u64) -> Result[ReadOnly, Error] waits {
-    let replay = read_only_state(d, id, take manifest, Live)?
-    over_ceiling(journal_account(replay)?, ceiling)?
-    let main = view replay.state.tips[0u64]
-    Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?)))
-}
-
 fn open_checks(options: Options) -> Result[(), Error] {
     if options.group_commits == 0 {
         return Error(Missing("group_commits"))
@@ -4235,7 +4263,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = disk_io(host.zero_extension(d))?
-    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages) = take startup
+    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages) = take startup
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
         Ok(empty_db(c, id, options))
     })?
@@ -4261,20 +4289,15 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
-    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive) = take channels
-    let reserve: u64 = int.widen(options.group_bytes)
-    let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: 100000000)
-    let timer = match task.try_spawn(tasks, bytes JOURNAL_TIMER_GRANT, take timer_input, journal_idle_timer) {
-        Ok(take running) => take running,
-        Error((problem, _)) => return Error(Full(Allocation(problem))),
-    }
-    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send, idle: Some(take idle_send))
+    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
+    let reserve = journal_group_room(int.widen(options.group_bytes))
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, header: take header, group_commits: options.group_commits, group_bytes: options.group_bytes, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send)
     let writer = match task.try_spawn(tasks, bytes reserve + JOURNAL_WORKER_SLACK, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, tasks, restamp: None, unload: None))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: None, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
     Ok(take db)
 }
 
@@ -4288,8 +4311,13 @@ fn disk_wait_cut(db: Db, generation: u64) -> Result[(), Error] {
 
 fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
     let d = log_directory(db)?
-    let (take segment, take end_file) = disk_new_segment(d, id, seq, previous)?
-    let closed = match channel.send(disk_state(db).journal, Rotate(take segment, take end_file)) {
+    let c = db.clock
+    let (take segment, take end_file, take header) = if let Some(mut storage) = db.disk {
+        disk_new_segment(d, c, id, seq, previous, mut storage.creation)?
+    } else {
+        return Error(Foreign)
+    }
+    let closed = match channel.send(disk_state(db).journal, Rotate(take segment, take end_file, take header)) {
         Ok(()) => false,
         Error(_) => true,
     }
@@ -4529,7 +4557,9 @@ fn call_checked(c: CallRecord) -> Result[(), Error] {
 
 fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Result[(), Error] {
     if let Some(c) = rec {
-        if let Some(_) = complete.keyed { return Error(Foreign) }
+        if let Some(_) = complete.keyed {
+            return Error(Foreign)
+        }
         if !stream_record_matches(complete.stream, c.stream) {
             return Error(Foreign)
         }
@@ -4579,7 +4609,11 @@ fn journal_event_kind(kind: u16) -> bool {
 }
 
 fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Option[CallSection]) -> Result[List[JournalOp], Error] {
-    let operation_count = disk_count(file, raw, mut at, if stream { 5u64 } else { 9u64 })?
+    let operation_count = disk_count(file, raw, mut at, if stream {
+        5u64
+    } else {
+        9u64
+    })?
     let mut ops: List[JournalOp] = list.new()
     let value_limit = if stream {
         1048576u64
@@ -4604,7 +4638,11 @@ fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Op
             return Error(disk_fault(file, op_at, Malformed))
         }
         let key = disk_blob(file, raw, mut at, 4096)?
-        let prior = if stream { 0u64 } else { disk_number(file, raw, mut at, 4)? }
+        let prior = if stream {
+            0u64
+        } else {
+            disk_number(file, raw, mut at, 4)?
+        }
         if prior > FORMAT_VALUE_MAX + 1 {
             return Error(disk_fault(file, op_at, Malformed))
         }
@@ -4678,16 +4716,24 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
     let mut previous_tag: Option[u64] = None
     for _ in 0u64 .. sections {
         let tag = disk_number(file, raw, mut at, 1)?
-        if tag > 3u64 || (if let Some(prior_tag) = previous_tag { tag <= prior_tag } else { false }) {
+        if tag > 3u64 || (if let Some(prior_tag) = previous_tag {
+            tag <= prior_tag
+        } else {
+            false
+        }) {
             return Error(disk_fault(file, at - 1, Malformed))
         }
         previous_tag = Some(tag)
         match tag {
-            0 => { data = journal_ops(file, raw, false, mut at, mut call)? },
+            0 => {
+                data = journal_ops(file, raw, false, mut at, mut call)?
+            },
             1 => {
                 streams = journal_ops(file, raw, true, mut at, mut call)?
                 for operation in streams {
-                    if list.len(operation.key) == 0u64 { return Error(disk_fault(file, at, Malformed)) }
+                    if list.len(operation.key) == 0u64 {
+                        return Error(disk_fault(file, at, Malformed))
+                    }
                 }
             },
             2 => {
@@ -4696,16 +4742,22 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
                 if list.len(control_rows) != 1u64 || list.len(control_rows[0u64].key) != 0u64 {
                     return Error(disk_fault(file, at, Malformed))
                 }
-                if let Some(_) = no_call { return Error(disk_fault(file, at, Malformed)) }
+                if let Some(_) = no_call {
+                    return Error(disk_fault(file, at, Malformed))
+                }
                 let row = option.unwrap(list.pop(mut control_rows))
                 {
-                    let Some(control) = view row.value else { return Error(disk_fault(file, at, Malformed)) }
+                    let Some(control) = view row.value else {
+                        return Error(disk_fault(file, at, Malformed))
+                    }
                     let _ = decode_stream_control(control) ?=> |_| disk_fault(file, at, Malformed)
                 }
                 list.insert(mut streams, 0u64, take row)
             },
             _ => {
-                if br != 0 { return Error(disk_fault(file, at, Malformed)) }
+                if br != 0 {
+                    return Error(disk_fault(file, at, Malformed))
+                }
                 keyed = decode_keyed_edits(file, raw, mut at)?
             },
         }
@@ -4971,7 +5023,9 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 continue
             }
             if kind == 4 {
-                let Some(value) = view op.value else { return Error(disk_fault(file, 0, Malformed)) }
+                let Some(value) = view op.value else {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
                 if list.len(op.key) != 12 || op.prior != 0 || list.len(value) < 2 {
                     return Error(disk_fault(file, 0, Malformed))
                 }
@@ -4991,9 +5045,14 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 if list.len(op.key) != 4 {
                     return Error(disk_fault(file, 0, Malformed))
                 }
-                let raw = match op.value { Some(stored) => Some(view stored), None => None }
+                let raw = match op.value {
+                    Some(stored) => Some(view stored),
+                    None => None
+                }
                 if let Some(stored) = raw {
-                    if list.len(stored) < 2 { return Error(disk_fault(file, 0, Malformed)) }
+                    if list.len(stored) < 2 {
+                        return Error(disk_fault(file, 0, Malformed))
+                    }
                 }
                 apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
                 continue
@@ -5034,7 +5093,9 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
         canonical_roots(mut replay.state.tips[i].roots)?
         replay.next_node = draw - 1
         replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
-        if replay.record_bytes > META_LIMIT { return Error(disk_fault(file, 0, Malformed)) }
+        if replay.record_bytes > META_LIMIT {
+            return Error(disk_fault(file, 0, Malformed))
+        }
     }
     replay.state.tips[i].head = commit.version
     replay.state.tips[i].at = commit.at
@@ -5056,7 +5117,7 @@ fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     })
 }
 
-fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {
+fn journal_following(d: Dir, id: StoreId, seq: u64, flush: Option[Clock]) -> Result[Option[DiskHeader], Error] waits {
     let Some(next_seq) = int.checked_add(seq, 1) else {
         return Ok(None)
     }
@@ -5232,14 +5293,18 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let request = request_digest(label, label)
     let stream = StreamKey(caller: Caller(issuer: 2u8, subject: take label), id: StreamId(t: keyed_time(db), n: 0u64))
     let admission = result.unwrap(admit(mut db, stream, 0, request))
-    let Admitted(take complete) = take admission else { return false }
+    let Admitted(take complete) = take admission else {
+        return false
+    }
     db.ceiling = db.resident
     let unsettled = db.changes
     if db.settled == unsettled {
         return false
     }
     let cut = db.checkpointed
-    let Some(grant) = call_reserves(plan) else { return false }
+    let Some(grant) = call_reserves(plan) else {
+        return false
+    }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()

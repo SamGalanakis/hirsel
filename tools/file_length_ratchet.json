@@ -39,9 +39,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7178,
-    "raise_revision": 17,
-    "reason": "m3-s3-slots-2010"
+    "lines": 5328,
+    "raise_revision": 18,
+    "reason": "store-ring-build-2293: formatter-gate growth (314ec03b)"
   },
   "core/std/char.hirsel": {
     "lines": 4741

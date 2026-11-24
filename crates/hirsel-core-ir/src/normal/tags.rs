@@ -563,6 +563,8 @@ tags!(HostOp {
     173 => NetDenials,
     174 => NetNarrowBegin,
     175 => NetNarrowEnd,
+    176 => TryLockShared,
+    177 => ZeroAt,
 });
 
 tags!(RaiseCause {

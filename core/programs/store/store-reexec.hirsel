@@ -55,7 +55,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             Error(e) => return Error(Io(e))
         }
         let mut source = journal_input(take file, false)?
-        let following = journal_following(d, db.store, seq, false)?
+        let following = journal_following(d, db.store, seq, None)?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
             None => disk_end(d, db.store, seq)?
@@ -119,7 +119,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
             Error(e) => return Error(Io(e))
         }
         let mut source = journal_input(take file, false)?
-        let following = journal_following(d, id, seq, false)?
+        let following = journal_following(d, id, seq, None)?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
@@ -201,8 +201,7 @@ type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded,
-    attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
+fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
@@ -315,7 +314,9 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
             return Ok(false)
         }
         if let Some(trim) = op.trim {
-            let Some(expected) = other.trim else { return Ok(false) }
+            let Some(expected) = other.trim else {
+                return Ok(false)
+            }
             if trim.floor != expected.floor {
                 return Ok(false)
             }
@@ -402,9 +403,11 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
 pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Stop) -> Bytes, env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let selected = replay_source(db, b, v)?
     match take selected {
-        Ok(take source) => replay_run(db, db.indexes, source, plan,
-            scoped fn(stop: Stop) -> Result[Bytes, Error] { Ok(failed(stop)) },
-            scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) }),
+        Ok(take source) => replay_run(db, db.indexes, source, plan, scoped fn(stop: Stop) -> Result[Bytes, Error] {
+            Ok(failed(stop))
+        }, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+            body(call, mut tx, env)
+        }),
         Error(reason) => Ok(Unknown(reason)),
     }
 }
@@ -415,14 +418,14 @@ pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySourc
 }
 
 fn replay_declaration_base(source: ReplaySource) -> DeclarationBase {
-    DeclarationBase(store: source.store, opened: source.open, version: source.call.base,
-        stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
+    DeclarationBase(store: source.store, opened: source.open, version: source.call.base, stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
 }
 
 pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
-    if !same(source.store, db.store) || source.open != open_number(db) { return Error(Foreign) }
-    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node,
-        next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), preview: None)
+    if !same(source.store, db.store) || source.open != open_number(db) {
+        return Error(Foreign)
+    }
+    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node, next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), preview: None)
     Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
 }
 
@@ -430,19 +433,20 @@ pub fn replay_record(source: ReplaySource) -> Recorded {
     clone(source.call)
 }
 
-pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan,
-    failed: fn(Stop) -> Result[Bytes, Error], env: Env,
-    body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
-    let Open = selected.mode else { return Error(Foreign) }
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Result[Bytes, Error], env: Env, body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    let Open = selected.mode else {
+        return Error(Foreign)
+    }
     if !same(source.store, db.store) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {
         return Error(Foreign)
     }
     complete_declaration(selected)?
     let Declare(plan: SchemaPlan(bindings: take bindings, ..), ..) = take selected
     let registry = declared_index_registry(take bindings)
-    replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) })
+    replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        body(call, mut tx, env)
+    })
 }
-
 
 // Run a read-only projection at the recorded base with the same entry bounds.
 pub type ReplayProjection[R] = Projected(R) | ProjectionUnavailable(UnknownReason) | ProjectionStopped
@@ -476,16 +480,16 @@ pub type RecordedClaim {
 }
 
 pub fn recorded_claim(db: Db, wanted: u64) -> Result[Option[RecordedClaim], Error] waits {
-    let Some(take commit) = recorded_commit(db, main_branch(db), wanted)? else { return Ok(None) }
+    let Some(take commit) = recorded_commit(db, main_branch(db), wanted)? else {
+        return Ok(None)
+    }
     for edit in commit.keyed {
         if let Some(section) = edit.call {
             let context = match section.settlement {
                 Some(current) => current,
-                None => Settlement(way: 0, base: commit.version - 1, at: commit.at,
-                    seed: call_info(db.store, 0, commit.version, commit.at, commit.at).seed, stop: None),
+                None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(db.store, 0, commit.version, commit.at, commit.at).seed, stop: None),
             }
-            return Ok(Some(RecordedClaim(claim: copied(edit.key)?, call: clone(section.record), settle: context.way,
-                base: context.base, at: context.at, seed: context.seed, stop: context.stop)))
+            return Ok(Some(RecordedClaim(claim: copied(edit.key)?, call: clone(section.record), settle: context.way, base: context.base, at: context.at, seed: context.seed, stop: context.stop)))
         }
     }
     Ok(None)

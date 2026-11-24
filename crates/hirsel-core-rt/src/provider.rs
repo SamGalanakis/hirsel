@@ -51,6 +51,11 @@ impl Request {
         // SAFETY: positioned requests pin eight little-endian offset bytes.
         u64::from_le_bytes(unsafe { self.path.cast::<[u8; 8]>().read() })
     }
+
+    pub(crate) fn zero_len(&self) -> u64 {
+        // SAFETY: ZERO_AT pins two little-endian words.
+        u64::from_le_bytes(unsafe { self.path.add(8).cast::<[u8; 8]>().read() })
+    }
 }
 
 #[repr(C)]
@@ -295,6 +300,28 @@ unsafe fn admit<const RETURNABLE: bool>(
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
                 return Some(CANCELLED);
+            }
+        }
+        if operation == ZERO_AT {
+            let request = &*request;
+            let at = request.offset();
+            let len = request.zero_len();
+            let error = if !matches!(request.mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT) {
+                libc::EACCES
+            } else if request.mode == MODE_DIRECT
+                && (!at.is_multiple_of(DIRECT_ALIGNMENT) || !len.is_multiple_of(DIRECT_ALIGNMENT))
+            {
+                libc::EINVAL
+            } else if at.checked_add(len).is_none_or(|end| end > i64::MAX as u64) {
+                libc::EFBIG
+            } else {
+                0
+            };
+            if error != 0 {
+                return Some(Outcome {
+                    error: IoError::from_errno(error),
+                    ..Outcome::default()
+                });
             }
         }
         if operation == WRITE_AT && (*request).mode == MODE_DIRECT {

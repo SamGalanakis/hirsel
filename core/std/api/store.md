@@ -392,7 +392,7 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
   prior holder. A `follower` over the same authority reads the committed history without claiming.
   `import_authority` publishes an image from `open_export` as the first checkpoint of a new
   object store and returns its new identity.
-- **Offline read-only open.** `open_read_only` opens a Directory store without writing, exposing
+- **Offline read-only open.** `open_read_only(d, c, options)` uses the supplied Clock to poll the segment fence and opens a Directory store without writing, exposing
   `read_only_table`, `read_only_get`, and `read_only_snapshot` (the captured `Snapshot`).
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
   `Options` includes `journal_limit: u64` and `authority: StorageKind` (`Directory() | Bucket(std.object.Bucket)`).

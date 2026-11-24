@@ -147,6 +147,7 @@ dirs = ["."]
 "store_journal_laws_4.hirsel" = "store"
 "store_journal_laws_5.hirsel" = "store"
 "store_backup_laws.hirsel" = "store"
+"store_journal_laws_6.hirsel" = "store"
 "store_pages_paged_laws.hirsel" = "store"
 "tiered_laws.hirsel" = "store"
 "tiered_read_laws.hirsel" = "store"

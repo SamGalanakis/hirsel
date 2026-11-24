@@ -170,8 +170,8 @@ fn recovery_servers(take job: RecoveryServers) waits {
     result.unwrap(channel.send(head, HeadFinish))
 }
 
-fn recovery_inspect(directory: Dir, out: Stdout, options: store.Options) waits {
-    let disk = result.unwrap(store.open_read_only(directory, options))
+fn recovery_inspect(directory: Dir, clock: Clock, out: Stdout, options: store.Options) waits {
+    let disk = result.unwrap(store.open_read_only(directory, clock, options))
     let values: std.codec.Codec[u32] = std.codec.of()
     let table = result.unwrap(store.read_only_table(disk, "effects", std.codec.key_u32(), values))
     let mut counts = string.with_capacity(24u64)
@@ -201,7 +201,7 @@ pub fn recovery_main(root: Dir, net: Net, clock: Clock, random: Random, tasks: T
             options.streams_max = 1u64
         }
         if mode == "inspect" {
-            recovery_inspect(directory, out, options)
+            recovery_inspect(directory, clock, out, options)
             return Ok(())
         }
         let db = result.unwrap(store.open(tasks, directory, clock, random, options))

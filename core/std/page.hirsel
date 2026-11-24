@@ -2788,14 +2788,14 @@ pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, char
     })
 }
 
-/// Give a Tiered descriptor the location its cut sealed. An empty collection
-/// keeps a shared stamp-zero leaf. Earlier captures keep their root slot.
+/// Replace a Tiered collection's root without changing its logical descriptor.
+/// A fold can install a Hot image and publication can replace it with a location.
 pub fn install_tiered_root(mut root: Arc[Page], key: Bytes, replacement: Slot, mut next: u64) -> Result[(), Error] {
     edit_tiered_descriptor(mut root, key, mut next, scoped fn(mut page: Page, slot: u64, descriptor: u64) -> Result[(), Error] {
-        let rows: u64 = list.word_le(page.image.raw, descriptor + 36)
+        let (rows, charge): (u64, u64) = (list.word_le(page.image.raw, descriptor + 36), list.word_le(page.image.raw, descriptor + 44))
         let place = match replacement {
             ColdPage(ptr) if rows > 0 && ptr.stamp != 0 && ptr.pack != 0 && ptr.offset >= 72 && ptr.len != 0 => ptr,
-            HotPage(empty_root) if rows == 0 && empty_root.image.domain == Collection && level(empty_root.image) == 0 && stamp(empty_root.image) == 0 => unlocated(0),
+            HotPage(ready) if ready.image.domain == Collection && totals(ready) == (rows, charge) && ((stamp(ready.image) == 0) == (rows == 0)) => unlocated(stamp(ready.image)),
             _ => return Error(MalformedPage),
         }
         put_ptr(mut page.image.raw, descriptor, place)

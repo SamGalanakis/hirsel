@@ -73,6 +73,73 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     Ok(())
 }
 
+fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Bytes, mut next_stamp: u64) -> Result[Roots, Error] waits {
+    let key = prefix(9)?
+    let mut descriptor = collection_header(base.stamp, 3, 258, 1, 1)?
+    list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: take key, cell: InlineValue(take descriptor)))
+    let image = page_result(std.page.encode(rows, 0, next_stamp, CollectionMap))?
+    next_stamp += 1
+    let mut kids: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut kids, ColdPage(base))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take kids, list.new()))?
+    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let change = JournalOp(key: log_key(9, 1)?, value: Some(clone(body)), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, ReplayOrigin(ordinal: 1, branch: 0), ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
+    fold_page_tree(source, mut roots.collections, mut next_stamp)?
+    Ok(take roots)
+}
+
+fn l79_cut_emits_folded_tree(source: TieredPageSource, base: std.page.PagePtr, owner: StoreId) -> Result[(), Error] waits {
+    let mut body: Bytes = list.with_capacity(1025)
+    list.fill(mut body, 1025, 77u8)
+    let mut stamp = 51u64
+    let folded = l79_cut_candidate(source, base, body, mut stamp)?
+    let mut holders: List[Roots] = list.with_capacity(2)
+    list.push(mut holders, share_roots(folded))
+    list.push(mut holders, share_roots(folded))
+    let TieredCutFrames(blobs: take cut_blobs, pages: take cut_pages, ..) = tiered_cut_frames(holders)?
+    if list.len(cut_blobs) != 1 || list.len(cut_pages) != 1 || cut_pages[0u64].key != log_key(9, 0)? || cut_blobs[0u64].key != log_key(9, 1)? {
+        fail("L79: the two holders must share one first-key PAGE and one owning-key BLOB")
+    }
+    let blob_run = layout_tiered_packs(take cut_blobs, 4, 11, 4096)?
+    let page_run = layout_tiered_packs(take cut_pages, 3, blob_run.next_pack, 4096)?
+    let mut emitted: Map[u64, std.page.PagePtr] = map.new()
+    let (take blob_wire, blob_pack) = encode_tiered_cut_pack(owner, blob_run, blob_run.packs[0u64], mut emitted)?
+    let (take page_wire, page_pack) = encode_tiered_cut_pack(owner, page_run, page_run.packs[0u64], mut emitted)?
+    let sealed = seal_holder_tiered(folded.collections, emitted, mut stamp)?
+    let key = prefix(9)?
+    let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(sealed.root, key) else {
+        fail("L79: the prepared holder must name the emitted Tiered root")
+    }
+    let rows: u64 = list.word_le(descriptor, 36)
+    let row_bytes: u64 = list.word_le(descriptor, 44)
+    if ptr.pack != 12 || page_pack.class != 3 || blob_pack.class != 4 || blob_pack.live != 1033 || rows != 3 || row_bytes != 1282 {
+        fail("L79: the prepared holder must keep the folded descriptor and class order")
+    }
+    let page = read_tiered_frame("p-12", owner, TieredPage(ptr), page_wire, 0, stamp)?
+    let leaf = fold_page(page)
+    let Some(ColdBlob(reference)) = std.page.blob_slot(leaf, 0) else {
+        fail("L79: the emitted leaf must point to the new Cold BLOB")
+    }
+    if reference.pack != 11 || reference.len != 1025 {
+        fail("L79: the class-3 leaf must name its earlier class-4 body")
+    }
+    let stored = read_tiered_frame("p-11", owner, TieredBlob(reference), blob_wire, 0, stamp)?
+    let TieredValue(payload) = view stored.payload else {
+        fail("L79: the emitted body must decode as a BLOB")
+    }
+    if list.compare_bytes(payload, body) != Equal {
+        fail("L79: fold emission changed the overlay value")
+    }
+    if let Some(_) = sealed.replay {
+        fail("L79: the prepared holder must have consumed its overlay")
+    }
+    Ok(())
+}
+
 fn l64_fold_with_writer_pin(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr) -> Result[(), Error] waits {
     // The fixture's leaf frame occupies all writer room:
     // 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
@@ -110,10 +177,15 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
     let source = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 43, deadline: 0)
-    let checked = l64_fold_with_writer_pin(source, base, parent, right)
+    let checked = l79_fold_and_emit(source, base, parent, right, owner)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
     checked
+}
+
+fn l79_fold_and_emit(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr, owner: StoreId) -> Result[(), Error] waits {
+    l64_fold_with_writer_pin(source, base, parent, right)?
+    l79_cut_emits_folded_tree(source, base, owner)
 }
 
 @test

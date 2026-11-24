@@ -1,9 +1,9 @@
 
-fn l62_write_count_page(d: Dir, owner: StoreId, seq: u64, collection: u32, low_key: u64, page: Arc[std.page.Page], mut packs: std.omap.OMap[u64, TieredPagerPack], mut ids: u64) -> Result[std.page.PagePtr, Error] waits {
+fn l62_write_count_page(d: Dir, owner: StoreId, seq: u64, collection: u32, page: Arc[std.page.Page], mut packs: std.omap.OMap[u64, TieredPagerPack], mut ids: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut draft = begin_tiered_pack(owner, seq, 3, 4096)?
     let image = std.page.image_of(page)
     let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
-    let Some(ptr) = add_tiered_pack_frame(mut draft, frame, collection, log_key(collection, low_key)?, scoped fn(stamp: u64) -> std.page.PagePtr {
+    let Some(ptr) = add_tiered_pack_frame(mut draft, frame, collection, tiered_page_index_key(collection, image)?, scoped fn(stamp: u64) -> std.page.PagePtr {
         fail("L62: count fixture's child locations are already Cold")
     })? else {
         fail("L62: a first data frame must fit")
@@ -18,14 +18,14 @@ fn l62_write_count_page(d: Dir, owner: StoreId, seq: u64, collection: u32, low_k
 fn l62_prepare_count_snapshot(mut db: Db, d: Dir, collection: u32) -> Result[(), Error] waits {
     let mut ids = 0u64
     let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
-    let left = l62_write_count_page(d, db.store, 8, collection, 1, l63_edit_leaf(1, 1, (6u64, 6u64), 40)?, mut packs, mut ids)?
-    let right = l62_write_count_page(d, db.store, 9, collection, 3, l63_edit_leaf(3, 1, (6u64, 6u64), 41)?, mut packs, mut ids)?
+    let left = l62_write_count_page(d, db.store, 8, collection, l63_edit_leaf(1, 1, (6u64, 6u64), 40)?, mut packs, mut ids)?
+    let right = l62_write_count_page(d, db.store, 9, collection, l63_edit_leaf(3, 1, (6u64, 6u64), 41)?, mut packs, mut ids)?
     let mut branches: List[std.page.Entry] = list.with_capacity(2)
     list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 1, charge: 86))))
     list.push(mut branches, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: right, rows: 1, charge: 86))))
     let image = page_result(std.page.encode(branches, 1, 42, Collection))?
     let branch_page = page_result(std.page.attach_cold(take image))?
-    let ptr = l62_write_count_page(d, db.store, 10, collection, 1, branch_page, mut packs, mut ids)?
+    let ptr = l62_write_count_page(d, db.store, 10, collection, branch_page, mut packs, mut ids)?
     let mut row = collection_header(42, 2, 172, 1, 1)?
     list.copy_from_slice(mut row, 0, std.page.encode_ptr(ptr))
     let id = prefix(collection)?

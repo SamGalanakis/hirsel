@@ -1,0 +1,163 @@
+type TieredEmitFrame: send {
+    collection: u32,
+    key: Bytes,
+    frame: PackFrame
+}
+
+type TieredCutFrames: send {
+    pages: List[TieredEmitFrame],
+    blobs: List[TieredEmitFrame],
+    seen: Map[u64, ()]
+}
+
+fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.page.Slot) -> Result[(), Error] {
+    let HotPage(page) = view root else {
+        return Ok(())
+    }
+    let image = std.page.image_of(page)
+    let stamp = std.page.stamp(image)
+    if stamp == 0 || map.contains(pending.seen, stamp) {
+        return Ok(())
+    }
+    capacity(map.try_reserve(mut pending.seen, 1))?
+    map.insert(mut pending.seen, stamp, ())
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(edge) = std.page.child_slot(page, slot) {
+            tiered_emit_tree(mut pending, collection, edge)?
+        } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+            if let Some(HotBlob(body)) = std.page.blob_slot(page, reference.body) {
+                if !map.contains(pending.seen, reference.stamp) {
+                    let suffix = option.unwrap(std.page.key_at(image, slot))
+                    let key = logical_key(collection, suffix)?
+                    let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
+                    capacity(map.try_reserve(mut pending.seen, 1))?
+                    capacity(list.try_reserve(mut pending.blobs, 1))?
+                    map.insert(mut pending.seen, reference.stamp, ())
+                    list.push(mut pending.blobs, TieredEmitFrame(collection: collection, key: take key, frame: take frame))
+                }
+            }
+        }
+    }
+    let key = tiered_page_index_key(collection, image)?
+    let frame = PackFrame(stamp: stamp, size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
+    capacity(list.try_reserve(mut pending.pages, 1))?
+    list.push(mut pending.pages, TieredEmitFrame(collection: collection, key: take key, frame: take frame))
+    Ok(())
+}
+
+fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    let leaf = std.page.level(image) == 0
+    for slot in 0u64 .. std.page.count(image) {
+        if !leaf {
+            let Some(HotPage(child)) = std.page.child_slot(root, slot) else {
+                fail("store: a collection map has Hot children")
+            }
+            tiered_emit_map(mut pending, child)?
+        } else if let Some(_) = std.page.tiered_root_at(image, slot) {
+            let key = option.unwrap(std.page.key_at(image, slot))
+            let collection: u32 = list.word_be(key, 0)
+            let edge = option.unwrap(std.page.child_slot(root, slot))
+            tiered_emit_tree(mut pending, collection, edge)?
+        }
+    }
+    Ok(())
+}
+
+fn tiered_cut_frames(roots: List[Roots]) -> Result[TieredCutFrames, Error] {
+    let mut pending = TieredCutFrames(pages: list.new(), blobs: list.new(), seen: map.new())
+    for held in roots {
+        tiered_emit_map(mut pending, held.collections.root)?
+    }
+    Ok(take pending)
+}
+
+type TieredPackRun: send {
+    class: u8,
+    frames: List[TieredEmitFrame],
+    packs: List[PlannedPack],
+    next_pack: u64
+}
+
+fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack: u64, cap: u64) -> Result[TieredPackRun, Error] {
+    let mut packs: List[PlannedPack] = list.new()
+    let mut seq = first_pack
+    let mut first = 0u64
+    let mut extent = 72u64
+    let mut index_room = 0u64
+    let mut payload = 0u64
+    for slot in 0u64 .. list.len(frames) {
+        let item = view frames[slot]
+        let width = item.frame.size
+        let key_width = list.len(item.key)
+        let (following, room) = tiered_frame_extent(extent, index_room, width, key_width)?
+        if slot != first && (following > cap || slot - first == 4294967295) {
+            capacity(list.try_reserve(mut packs, 1))?
+            list.push(mut packs, PlannedPack(seq: seq, first: first, end: slot, size: extent, payload_bytes: payload))
+            seq = stamp_after(seq)?
+            first = slot
+            let (fresh_extent, fresh_room) = tiered_frame_extent(72, 0, width, key_width)?
+            extent = fresh_extent
+            index_room = fresh_room
+            payload = width
+        } else {
+            extent = following
+            index_room = room
+            payload += width
+        }
+    }
+    let end = list.len(frames)
+    if end != first {
+        capacity(list.try_reserve(mut packs, 1))?
+        list.push(mut packs, PlannedPack(seq: seq, first: first, end: end, size: extent, payload_bytes: payload))
+        seq = stamp_after(seq)?
+    }
+    Ok(TieredPackRun(class: class, frames: take frames, packs: take packs, next_pack: seq))
+}
+
+fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, PagePack), Error] {
+    let mut draft = begin_tiered_pack(id, pack.seq, layout.class, pack.size)?
+    let room = pack.size - list.len(draft.raw)
+    capacity(list.try_reserve(mut draft.raw, room))?
+    capacity(map.try_reserve(mut emitted, pack.end - pack.first))?
+    for slot in pack.first .. pack.end {
+        let item = view layout.frames[slot]
+        let Some(place) = add_tiered_pack_frame(mut draft, item.frame, item.collection, item.key, scoped fn(stamp: u64) -> std.page.PagePtr {
+            let Some(place) = map.get(emitted, stamp) else {
+                fail("store: missing emitted Tiered child")
+            }
+            place
+        })? else {
+            fail("store: Tiered pack layout omitted a frame")
+        }
+        map.insert(mut emitted, place.stamp, place)
+    }
+    finish_tiered_pack(take draft)
+}
+
+fn seal_holder_tiered(tree: PageTree, emitted: Map[u64, std.page.PagePtr], mut next_stamp: u64) -> Result[PageTree, Error] {
+    let first = next_stamp
+    let (take sealed, following_stamp) = disk_allocation(scoped fn() -> Result[(PageTree, u64), Error] {
+        let mut ready = share_page_tree(tree)
+        let mut draw = first
+        let mut walk = std.page.walk_begin(tree.root)
+        while let Some(take key) = account_collection_key(mut walk) {
+            let (edge, descriptor) = option.unwrap(std.page.collection_slot(tree.root, key))
+            if descriptor[53u64] == 1 {
+                if let HotPage(page) = view edge {
+                    let stamp = std.page.stamp(std.page.image_of(page))
+                    if stamp != 0 {
+                        let Some(place) = map.get(emitted, stamp) else {
+                            fail("store: the cut omitted a Hot Tiered root")
+                        }
+                        page_result(std.page.install_tiered_root(mut ready.root, key, ColdPage(place), mut draw))?
+                    }
+                }
+            }
+            std.page.walk_next(mut walk)
+        }
+        Ok((take ready, draw))
+    })?
+    next_stamp = following_stamp
+    Ok(take sealed)
+}

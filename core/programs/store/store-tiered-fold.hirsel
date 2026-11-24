@@ -113,15 +113,14 @@ fn fold_prefix_charge(cut: TieredPageSource, base: std.page.PagePtr, sequence_li
 
 // Borrow the evidence directly from the immutable overlay. No cursor
 // allocation or key copy is needed between pager calls.
-fn visit_fold_records[K: ordered + shareable + send, V: shareable + send](node: Arc[std.omap.Node[K, V]],
-    visit: scoped[view] fn(K, V) -> Result[(), Error] waits) -> Result[(), Error] waits {
+fn visit_fold_records[K: ordered + shareable + send, V: shareable + send, S](node: Arc[std.omap.Node[K, V]], mut state: S, visit: scoped[view] fn(mut S, K, V) -> Result[(), Error] waits) -> Result[(), Error] waits {
     for slot in 0u64 .. std.omap.node_count(node) {
         if let Some(child) = std.omap.node_child(node, slot) {
-            visit_fold_records(child, visit)?
+            visit_fold_records(child, mut state, visit)?
         } else {
             let key = option.unwrap(std.omap.node_key(node, slot))
             let row = option.unwrap(std.omap.node_value(node, slot))
-            visit(key, row)?
+            visit(mut state, key, row)?
         }
     }
     Ok(())
@@ -129,8 +128,9 @@ fn visit_fold_records[K: ordered + shareable + send, V: shareable + send](node: 
 
 fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
     let pack_file = paged_pack_path(base.pack)?
+    let mut checked = ()
     if let Some(root) = std.omap.root(overlay.trims) {
-        visit_fold_records(root, scoped fn(ordinal: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), ordinal: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
             if evidence.lo < evidence.hi {
                 let low = fold_prefix_charge(cut, base, evidence.lo)?
                 let high = fold_prefix_charge(cut, base, evidence.hi)?
@@ -142,7 +142,7 @@ fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Ar
         })?
     }
     if let Some(root) = std.omap.root(overlay.entries) {
-        visit_fold_records(root, scoped fn(key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
             if fold_base_prior(cut, base, key)? != row.base {
                 return Error(disk_fault(pack_file, base.offset, Malformed))
             }
@@ -212,4 +212,90 @@ fn fold_materialize_trim(cut: TieredPageSource, current: std.page.Slot, empty_ro
     })?
     next_stamp = following_stamp
     Ok(take ready)
+}
+
+type FoldCollection {
+    current: std.page.Slot,
+    next_stamp: u64
+}
+
+fn fold_collection(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[ReplayOverlay], inline: u64, mut next_stamp: u64) -> Result[std.page.Slot, Error] waits {
+    let location = match base {
+        ColdPage(ptr) => ptr,
+        HotPage(_) => std.page.unlocated(0),
+    }
+    verify_tiered_fold(cut, location, overlay)?
+    let mut current: std.page.Slot = clone(base)
+    if let Some(floor) = overlay.floor {
+        let cold_next = option.unwrap(overlay.cold_next)
+        if floor >= cold_next {
+            current = HotPage(arc.share(empty_root))
+        } else {
+            let (_, first) = option.unwrap(std.omap.first(overlay.trims))
+            let before = fold_prefix_charge(cut, location, cold_next)?
+            current = fold_materialize_trim(cut, current, empty_root, LogBounds(first: first.lo, next: cold_next), before, floor, mut next_stamp)?
+        }
+    }
+    let private_from = next_stamp
+    let log_rows = overlay.cold_next != None
+    let mut folded = FoldCollection(current: take current, next_stamp: next_stamp)
+    let materialized = if let Some(rows) = std.omap.root(overlay.entries) {
+        visit_fold_records(rows, mut folded, scoped fn(mut working: FoldCollection, key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+            working.current = fold_materialize_row(cut, working.current, empty_root, key, row, inline, log_rows, private_from, mut working.next_stamp)?
+            Ok(())
+        })
+    } else {
+        Ok(())
+    }
+    let FoldCollection(current: take ready, next_stamp: following_stamp) = take folded
+    next_stamp = following_stamp
+    materialized?
+    Ok(take ready)
+}
+
+type FoldMap {
+    root: Arc[std.page.Page],
+    next_stamp: u64
+}
+
+fn fold_page_tree(cut: TieredPageSource, mut tree: PageTree, mut next_stamp: u64) -> Result[(), Error] waits {
+    let replayed: Option[Arc[ReplayBranch]] = clone(tree.replay)
+    let Some(take overlay) = take replayed else {
+        return Ok(())
+    }
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let inline = tree.inline
+    let mut folded = FoldMap(root: arc.share(tree.root), next_stamp: next_stamp)
+    let materialized = if let Some(collections) = std.omap.root(overlay.collections) {
+        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+            working.root = fold_collection_in_map(cut, working.root, empty_root, id, edits, inline, mut working.next_stamp)?
+            Ok(())
+        })
+    } else {
+        Ok(())
+    }
+    let FoldMap(root: take ready, next_stamp: following_stamp) = take folded
+    next_stamp = following_stamp
+    materialized?
+    tree.root = take ready
+    tree.replay = None
+    Ok(())
+}
+
+fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[ReplayOverlay], inline: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
+    let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        prefix(id)
+    })?
+    let (base, _) = option.unwrap(std.page.collection_slot(root, key))
+    let folded = fold_collection(cut, base, empty_root, edits, inline, mut next_stamp)?
+    let (take mapped, following_stamp) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+        let mut candidate = arc.share(root)
+        let mut draw = next_stamp
+        page_result(std.page.install_tiered_root(mut candidate, key, folded, mut draw))?
+        Ok((take candidate, draw))
+    })?
+    next_stamp = following_stamp
+    Ok(take mapped)
 }

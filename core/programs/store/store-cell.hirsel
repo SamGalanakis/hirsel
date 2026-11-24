@@ -254,7 +254,7 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
         None => None,
         Some(current) => {
             let after = current - old_width + effective_width
-            let data_head = if tx.streams != 0 && tx.rows + cell_rows == 0 { 5u64 } else { 0u64 }
+            let data_head = if tx.streams != 0 && tx.rows + cell_rows + tx.trim_rows == 0 { 5u64 } else { 0u64 }
             if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > 16777280 {
                 return Error(Limit(Transaction))
             }
@@ -300,8 +300,8 @@ fn seal_cell_edits(mut rows: DataRows, cells: Map[u32, CellEdit]) {
     for (id, edit) in cells {
         let key = result.unwrap(prefix(id))
         match edit {
-            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)))),
-            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None)),
+            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)), trim: None)),
+            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None, trim: None)),
             CellRevert => (),
         }
     }

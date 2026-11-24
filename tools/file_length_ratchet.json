@@ -46,8 +46,8 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7720,
-    "raise_revision": 11,
+    "lines": 7745,
+    "raise_revision": 12,
     "reason": "cell-log-build-2018"
   },
   "core/std/char.hirsel": {
@@ -79,8 +79,8 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3327,
-    "raise_revision": 7,
+    "lines": 3439,
+    "raise_revision": 8,
     "reason": "cell-log-build-2018"
   },
   "core/std/prop.hirsel": {

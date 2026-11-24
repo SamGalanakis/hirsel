@@ -395,7 +395,8 @@ pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
 type DataOp: shareable + send {
     key: Bytes,
-    value: Option[StagedValue]
+    value: Option[StagedValue],
+    trim: Option[JournalTrim]
 }
 
 // Inline pages copy the bytes into the page image. Overflow pages share the
@@ -427,8 +428,8 @@ type DataRows: shareable + send {
 
 fn new_data_rows() -> DataRows {
     let first: Inline[DataOp, 2] =[
-        DataOp(key: list.new(), value: None),
-        DataOp(key: list.new(), value: None),
+        DataOp(key: list.new(), value: None, trim: None),
+        DataOp(key: list.new(), value: None, trim: None),
     ]
     DataRows(count: 0, first: take first, rest: list.new())
 }
@@ -523,6 +524,7 @@ pub opaque scoped type Tx {
     own: u64,
     rows: u64,
     cell_rows: u64,
+    trim_rows: u64,
     streams: u64
 }
 
@@ -1380,7 +1382,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1412,9 +1414,14 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
             Error(take a)
         }
     }
-    let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, frame_tail: frame_tail, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, ..) = take tx
-    let DataOps(rows: take ordinary, cells: take cells, ..) = take ops
-    let mut rows = take ordinary
+    let mut first_stamp = tx.private_from
+    let mut rows = match seal_log_trims(mut tx, mut first_stamp) {
+        Ok(take operations) => take operations,
+        Error(Full(problem)) => return RolledBack(Refused(problem)),
+        Error(_) => fail("store: invalid staged Log trim"),
+    }
+    let Tx(roots: take roots, resident: live, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, call: take call, ..) = take tx
+    let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
     let DataOps(rows: take stream_rows, ..) = take stream_ops
     Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
@@ -2218,7 +2225,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
         } else {
             0u64
         }
-        let data_head = if tx.rows + tx.cell_rows == 0 {
+        let data_head = if tx.rows + tx.cell_rows + tx.trim_rows == 0 {
             5u64
         } else {
             0u64
@@ -2479,7 +2486,7 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
     if slot_order >= SCANNED_OPS {
         map.insert(mut ops.slots, clone(key), slot_order)
     }
-    push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
+    push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None))
     if beneath {
         OPEN_FRAME_TAIL
     } else {
@@ -2549,6 +2556,9 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut dr
     let order = capacity(data_order(operations))?
     for slot_order in 0u64 .. operations.count {
         let op = ordered_row(operations, order, slot_order)
+        if let Some(_) = op.trim {
+            continue
+        }
         if tree_domain(tree) == CollectionMap {
             let kind = collection_kind(tree, list.slice(op.key, 0, 4))
             if kind == Some(3u8) {
@@ -2612,6 +2622,9 @@ fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: 
 }
 
 fn data_op_size(operation: DataOp, stream: bool) -> u64 {
+    if let Some(_) = operation.trim {
+        return 21
+    }
     let size = (if stream { 5u64 } else { 9u64 }) + list.len(operation.key)
     match operation.value {
         None => size,
@@ -2689,6 +2702,10 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], ops: DataRo
     le(mut payload, ops.count, 4)?
     for slot_order in 0u64 .. ops.count {
         let op = ordered_row(ops, order, slot_order)
+        if let Some(trim) = op.trim {
+            encode_log_trim(mut payload, op.key, trim.floor, trim.dropped)
+            continue
+        }
         let prior = match base {
             Some(head) => {
                 if collection_kind(head, list.slice(op.key, 0, 4)) == Some(4u8) {
@@ -4344,7 +4361,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, streams: 0)
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
             body(tx, env)
         }
         match steps {
@@ -7319,8 +7336,16 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
     }
     let mut next_stamp = stamp_after(ids)?
     for op in ops {
-        if let Some(_) = op.trim {
-            return Error(disk_fault(file, 0, Malformed))
+        if let Some(trim) = op.trim {
+            if tree_domain(tree) != CollectionMap {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+            match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
+                Ok(_) => (),
+                Error(Corrupt(_)) => return Error(disk_fault(file, 0, Malformed)),
+                Error(take problem) => return Error(take problem),
+            }
+            continue
         }
         if tree_domain(tree) == CollectionMap {
             if list.len(op.key) < 4 {

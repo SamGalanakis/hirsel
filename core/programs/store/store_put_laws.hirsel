@@ -421,7 +421,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let mut ops = new_data_rows()
     list.reserve(mut ops.rest, n - 2)
     for slot_order in 0u64 .. n {
-        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None))
+        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None, trim: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.

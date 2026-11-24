@@ -257,7 +257,13 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
         if op.key != other.key {
             return Ok(false)
         }
-        if let Some(_) = other.trim {
+        if let Some(trim) = op.trim {
+            let Some(expected) = other.trim else { return Ok(false) }
+            if trim.floor != expected.floor {
+                return Ok(false)
+            }
+            continue
+        } else if let Some(_) = other.trim {
             return Ok(false)
         }
         let equal = match (view op.value, view other.value) {

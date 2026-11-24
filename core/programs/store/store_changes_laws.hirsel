@@ -915,7 +915,7 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value))))
+    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, mut ops, segments[i], offsets[i]))

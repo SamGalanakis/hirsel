@@ -6,10 +6,10 @@
 // expect: run wasm_swizzle() = true
 // expect: run halves() = true
 // expect: run inferred(0) = true
-// expect: run inferred(1) = fail Bounds@63:22
-// expect: run inferred(18446744073709551615) = fail Bounds@63:22
+// expect: run inferred(1) = fail Bounds@96:22
+// expect: run inferred(18446744073709551615) = fail Bounds@96:22
 // expect: run exact_tail(24) = true
-// expect: run exact_tail(33) = fail Bounds@72:9
+// expect: run exact_tail(33) = fail Bounds@138:9
 // expect: run capacity_refused() = true used 32
 // expect: run closure_local() = true
 // Wasm spec d0b2e8d: simd_bit_shift.wast, i8x16.shr_s; simd_i8x16_sat_arith.wast,

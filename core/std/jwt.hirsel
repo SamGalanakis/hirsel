@@ -82,6 +82,7 @@ pub opaque type KeySet: send {
 pub opaque type Signer: send {
     alg: Alg,
     key: Secret,
+    random: Random,
     kid: Option[String]
 }
 
@@ -241,8 +242,8 @@ pub fn key_id(k: Key) -> Option[View[String]] in k {
 /// A signer for alg. The Secret holds an HMAC key with the `mac` use for
 /// HS256, HS384 or HS512, or a PKCS#8 private key with `sign(ed25519)`, `sign(p256)` or
 /// `sign(rs256)` (TLS-5).
-pub fn signer(alg: Alg, take key: Secret) -> Signer {
-    Signer(alg: alg, key: take key, kid: None)
+pub fn signer(alg: Alg, random: Random, take key: Secret) -> Signer {
+    Signer(alg: alg, key: take key, random: random, kid: None)
 }
 
 /// The same signer, writing kid into the headers sign_jwt makes.
@@ -633,7 +634,7 @@ fn sign_bytes(s: Signer, input: Bytes) -> Result[Bytes, Error] {
         _ => return Error(WrongKey),
     }
     let mut out: Bytes = list.with_capacity(1024)
-    match secret.sign(s.key, alg, input, mut out) {
+    match secret.sign(s.key, alg, s.random, input, mut out) {
         Ok(_) => Ok(take out),
         Error(Denied) => Error(Denied),
         Error(e) => Error(Sign(e)),

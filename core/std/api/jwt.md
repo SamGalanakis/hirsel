@@ -94,7 +94,7 @@ header has been fully admitted, and claims are read only after the signature ver
   family is `BadKey`. RSA moduli are odd, have 2048 to 8192 significant bits and
   use minimal unsigned encodings. RSA exponents are odd and at least 3. Ed25519
   keys with small order give `BadKey`.
-- Signing keys are `Secret`s: `signer(alg, key)` takes a sealed HMAC key or PKCS#8 private
+- Signing keys are `Secret`s: `signer(alg, random, key)` takes a sealed HMAC key or PKCS#8 private
   key. A use missing from the secret's policy gives `Denied`.
 
 ## Signing

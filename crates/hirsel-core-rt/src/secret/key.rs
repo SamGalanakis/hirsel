@@ -1,6 +1,7 @@
 //! Synchronous Secret key operations.
 
 use super::*;
+use hirsel_core_net::key_wrap::{SignAlg, SigningRandom};
 use hirsel_core_net::secret_aead::{self, AeadAlg, AeadInput, AeadMode, AeadRefusal};
 
 /// Tape modes of SECRET_MAC for the key operations (recording.md).
@@ -29,7 +30,9 @@ pub(crate) enum KeyOp<'a> {
         plain: std::cell::Cell<Option<Zeroizing<Vec<u8>>>>,
     },
     Sign {
-        alg: hirsel_core_net::key_wrap::SignAlg,
+        alg: SignAlg,
+        random: u64,
+        source: SigningRandom,
         msg: &'a [u8],
     },
     Aead {
@@ -83,7 +86,9 @@ pub(super) unsafe fn key_issue(request: &mut Request) -> Outcome {
                 secret.bytes.as_deref().unwrap(),
                 key_wrap::salt(),
             ),
-            KeyOp::Sign { alg, msg } => key_wrap::sign(*alg, key, msg),
+            KeyOp::Sign {
+                alg, source, msg, ..
+            } => key_wrap::sign(*alg, key, msg, *source),
             KeyOp::Aead { input, len } => {
                 let buffer = &mut request.buffer;
                 let spare = if *len == 0 {
@@ -150,7 +155,15 @@ unsafe fn key_op(
     // SAFETY: the entry points pin the Secrets and all carriers.
     unsafe {
         #[cfg(feature = "record")]
-        let tape = (*(*context).host_files).secret_mac_tape;
+        let tape = (*(*context).host_files)
+            .secret_mac_tape
+            .filter(|_| match args.op {
+                KeyOp::Sign { alg, source, .. } => {
+                    !matches!(args.key.origin, Origin::Sealed(_))
+                        || (alg == SignAlg::P256 && source == SigningRandom::Host)
+                }
+                _ => true,
+            });
         #[cfg(feature = "record")]
         let (p, h) = tape.map_or((MAC_PROVIDER, 0), |tape| (tape.provider, tape.handle));
         #[cfg(not(feature = "record"))]
@@ -293,6 +306,7 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
     context: *mut Context,
     key: u64,
     alg: u64,
+    random: u64,
     msg: *const Buffer,
     out: *mut Buffer,
     site: u64,
@@ -300,16 +314,27 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
     unsafe {
         crate::process::deny_describe_capability(context);
         let key = resolve(context, key);
-        let Some(alg) = hirsel_core_net::key_wrap::SignAlg::from_case(alg) else {
+        let Some(alg) = SignAlg::from_case(alg) else {
             crate::process::stop(b"SignAlg")
         };
         if !key.policy.uses.permits(alg.needed()) {
+            return key_error(KEY_DENIED);
+        }
+        let provider = crate::entry::hirsel_core_capability_provider(context, random);
+        let source = if crate::provide::owns(&*provider) {
+            SigningRandom::Virtual
+        } else {
+            SigningRandom::Host
+        };
+        if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.origin.opaque() {
             return key_error(KEY_DENIED);
         }
         let args = KeyRequest {
             key: &key,
             op: KeyOp::Sign {
                 alg,
+                random,
+                source,
                 msg: crate::tls::bytes(&*msg),
             },
         };

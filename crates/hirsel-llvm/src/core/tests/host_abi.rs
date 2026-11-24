@@ -78,7 +78,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::ReadAt | HostOp::WriteAt | HostOp::SecretWrap => &["u64", "u64", "ptr"],
         HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => &["u64", "ptr", "ptr", "u64"],
         HostOp::SecretUnwrap => &["u64", "ptr", "ptr"],
-        HostOp::SecretSign => &["u64", "u64", "ptr", "ptr"],
+        HostOp::SecretSign => &["u64", "u64", "u64", "ptr", "ptr"],
         HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
             &["u64", "u64", "ptr", "ptr", "ptr", "ptr"]
         }

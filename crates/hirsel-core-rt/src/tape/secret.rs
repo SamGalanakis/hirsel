@@ -25,8 +25,11 @@ pub(super) unsafe fn key_args(r: &Request) -> Args {
             texts.push(uses.text().into_bytes());
             blob
         }
-        KeyOp::Sign { alg, msg } => {
+        KeyOp::Sign {
+            alg, random, msg, ..
+        } => {
             head.push(alg.case());
+            put_varint(&mut head, *random);
             msg
         }
         KeyOp::Aead { input, .. } => {

@@ -141,7 +141,7 @@ const HS512_JWT: String = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDB9
 const HS512_SHORT_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-"
 
 fn hs2_roundtrip(alg: jwt.Alg, key: String, short_key: String, expected: String) -> bool {
-    let signer = jwt.signer(alg, seal(b64(key), "mac"))
+    let signer = jwt.signer(alg, provide.random(0), seal(b64(key), "mac"))
     if !signed(jwt.sign_jwt(signer, "{\"exp\":2000}"), expected) {
         return false
     }
@@ -153,7 +153,7 @@ fn hs2_roundtrip(alg: jwt.Alg, key: String, short_key: String, expected: String)
     if value.header.alg != alg || value.claims.exp != Some(2000u64) {
         return false
     }
-    let Error(BadKey) = jwt.sign_jwt(jwt.signer(alg, seal(b64(short_key), "mac")), "{\"exp\":2000}") else {
+    let Error(BadKey) = jwt.sign_jwt(jwt.signer(alg, provide.random(0), seal(b64(short_key), "mac")), "{\"exp\":2000}") else {
         return false
     }
     let Error(BadKey) = jwt.verify_jws(expected, jwt.allow(alg), jwt.hmac_key(seal(b64(short_key), "verify"))) else {
@@ -190,7 +190,7 @@ fn jwt_law() -> u64 {
     }
     // 3. Signing A.1's header text and payload reproduces A.1 byte for byte.
     let header = "{\"typ\":\"JWT\",\r\n \"alg\":\"HS256\"}"
-    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
     if !signed(jwt.sign_jws(hs, header, b64(A1_PAYLOAD)), A1) {
         return 3
     }
@@ -198,7 +198,7 @@ fn jwt_law() -> u64 {
     let Ok(_) = jwt.verify_jws(A2, jwt.allow(Rs256), a2_key()) else {
         return 4
     }
-    let rs = jwt.signer(Rs256, seal(unhex(A2_PKCS8), "sign(rs256)"))
+    let rs = jwt.signer(Rs256, provide.random(0), seal(unhex(A2_PKCS8), "sign(rs256)"))
     if !signed(jwt.sign_jws(rs, "{\"alg\":\"RS256\"}", b64(A1_PAYLOAD)), A2) {
         return 5
     }
@@ -221,7 +221,7 @@ fn jwt_law() -> u64 {
     if ed.payload != string.as_bytes("Example of Ed25519 signing") {
         return 7
     }
-    let eds = jwt.signer(EdDsa, seal(unhex(ED_PKCS8), "sign(ed25519)"))
+    let eds = jwt.signer(EdDsa, provide.random(0), seal(unhex(ED_PKCS8), "sign(ed25519)"))
     if !signed(jwt.sign_jws(eds, "{\"alg\":\"EdDSA\"}", string.as_bytes("Example of Ed25519 signing")), ED) {
         return 8
     }
@@ -394,7 +394,7 @@ fn jwt_ed25519_key_law() -> u64 {
 
 // expect: run jwt_audience_presence_law() = 0
 fn jwt_audience_presence_law() -> u64 {
-    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
     let Ok(token) = jwt.sign_jwt(hs, "{\"aud\":[],\"exp\":1300819380}") else {
         return 1
     }
@@ -490,7 +490,7 @@ fn nested_set(depth: u64) -> String {
 
 // expect: run jwt_json_depth_law() = 0
 fn jwt_json_depth_law() -> u64 {
-    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
     let Ok(_) = jwt.sign_jws(hs, nested_header(127), b"") else {
         return 1
     }
@@ -514,7 +514,7 @@ fn jwt_sign_size_law() -> u64 {
         string.push(mut text, "x")
     }
     string.push(mut text, "\"}")
-    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
     match (bound bytes 4096 {
         jwt.sign_jws(hs, "{\"alg\":\"HS256\"}", string.as_bytes(text))
     }) {
@@ -531,7 +531,7 @@ fn jwt_sign_size_law() -> u64 {
 
 // expect: run jwt_b64_header_law() = 0
 fn jwt_b64_header_law() -> u64 {
-    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
     match jwt.sign_jws(hs, "{\"alg\":\"HS256\",\"b64\":false}", b"sample") {
         Error(UnsupportedCrit) => {},
         _ => return 1,
@@ -553,7 +553,7 @@ fn jwt_set_allowlist_law() -> u64 {
 
 fn hmac_minimum(alg: jwt.Alg, minimum: u64) -> u64 {
     let raw = b64(A1_K)
-    let hs = jwt.signer(alg, seal(clone(list.slice(raw, 0, minimum)), "mac"))
+    let hs = jwt.signer(alg, provide.random(0), seal(clone(list.slice(raw, 0, minimum)), "mac"))
     let Ok(token) = jwt.sign_jwt(hs, "{}") else {
         return 1
     }
@@ -563,7 +563,7 @@ fn hmac_minimum(alg: jwt.Alg, minimum: u64) -> u64 {
         return 2
     }
     for n in[0u64, minimum - 1] {
-        let short_signer = jwt.signer(alg, seal(clone(list.slice(raw, 0, n)), "mac"))
+        let short_signer = jwt.signer(alg, provide.random(0), seal(clone(list.slice(raw, 0, n)), "mac"))
         match jwt.sign_jwt(short_signer, "{}") {
             Error(BadKey) => {},
             _ => return 3,

@@ -72,6 +72,8 @@ fn host_p256_key_load_rng_failure_ends_run() {
             key: &secret,
             op: KeyOp::Sign {
                 alg: SignAlg::P256,
+                random: 0,
+                source: SigningRandom::Host,
                 msg: b"sample",
             },
         };

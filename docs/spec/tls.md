@@ -281,7 +281,7 @@ pub fn send_secret(mut w: WriteHalf, wire: Bytes, secrets: List[Secret], marks: 
 pub type SecretError = Invalid | Capacity(Capacity)
 pub fn wrap(kek: Secret, s: Secret, mut out: Bytes) -> Result[u64, KeyError]
 pub fn unwrap(kek: Secret, blob: Bytes, uses: String) -> Result[Secret, KeyError]
-pub fn sign(key: Secret, alg: SignAlg, msg: Bytes, mut out: Bytes) -> Result[u64, KeyError]
+pub fn sign(key: Secret, alg: SignAlg, r: Random, msg: Bytes, mut out: Bytes) -> Result[u64, KeyError]
 pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
 pub type SignAlg = Ed25519 | P256 | Rs256
 ```
@@ -1149,8 +1149,7 @@ pub fn open_into(c: Opener, domain: u64, seq: u64, src: Bytes, aad_at: u64, at: 
 pub fn mask(m: HeaderMask, sample: Bytes, at: u64) -> Inline[u8, 5]
 ```
 
-This `sign` replaces TLS-5's when slice T13 lands. It adds the `Random` from which ECDSA's
-nonce is drawn (randomness, below).
+The `sign` operation takes the `Random` used by ECDSA (randomness, below).
 
 | type | kind | bounds | logical size | cleanup |
 |---|---|---|---|---|
@@ -1797,10 +1796,25 @@ instruction sequences. Tag and Finished comparison is constant time. X25519 and 
 constant-time scalar multiplication in both backends. Every CPU path gives the same bytes.
 
 **Cost.** On x86-64 with VAES and VPCLMULQDQ, sealing or opening a 1,200-byte QUIC packet
-under `Aes128GcmSha256`, in place or into a buffer, takes at most 120 ns and allocates
-nothing, in a release build without recording. The sealer runs the `os_tls/gcm.rs` routines
-over its held key schedule and GHASH table. Other algorithms and CPUs have no target. The
-one-shot `aead_seal` and `aead_open` keep their contract. Packet-rate callers use a sealer.
+under `Aes128GcmSha256`, in place or into a buffer, adds at most 15 ns per packet above
+ring's corresponding fused AES-CTR and GHASH call and makes zero allocations. Measure both
+in the same locked run on one pinned CPU, with expanded keys, the same payload length and
+a release build without recording. The fused baseline starts with the AAD accumulator
+ready. The packet operation includes its own AAD, tag and nonce work. The sealer runs
+`os_tls/gcm.rs` with its held key schedule and GHASH table. Other algorithms and CPUs
+have no target.
+
+The disjoint-buffer native kernel, before language packet handling, measured as follows.
+Each median uses 60 interleaved pairs on one CPU. The fused baseline omits tag generation
+and checking. The overhead is the median of the paired differences.
+
+| AES-128-GCM, 1,200 bytes | Fused ring (ns) | Native kernel (ns) | Added time (ns) | Allocations per packet |
+| --- | ---: | ---: | ---: | ---: |
+| Seal | 131.66 | 166.62 | 34.86 | 0 |
+| Open | 115.23 | 150.13 | 34.61 | 0 |
+
+Both kernel measurements exceed the 15 ns bound. The one-shot `aead_seal` and
+`aead_open` keep their contract. Packet-rate callers use a sealer.
 
 **Checksums.** SCTP's CRC-32C is `crc32c.update` ([crc32c](../../core/std/api/crc32c.md)). No
 second spelling is added.

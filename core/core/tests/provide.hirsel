@@ -2252,7 +2252,7 @@ fn unhex(s: String) -> Bytes {
 
 fn sign_denied(key: Secret, alg: SignAlg) -> bool {
     let mut sig: Bytes = list.with_capacity(512)
-    match secret.sign(key, alg, string.as_bytes("m"), mut sig) {
+    match secret.sign(key, alg, provide.random(0), string.as_bytes("m"), mut sig) {
         Error(Denied) => list.len(sig) == 0,
         _ => false
     }
@@ -2268,14 +2268,14 @@ fn sign_ed25519_rfc8032() -> bool {
     let key = result.unwrap(secret.seal(unhex(pkcs8), "sign(ed25519)"))
     let mut sig: Bytes = list.with_capacity(64)
     let empty: Bytes = list.new()
-    let n = result.unwrap(secret.sign(key, Ed25519, empty, mut sig))
+    let n = result.unwrap(secret.sign(key, Ed25519, provide.random(0), empty, mut sig))
     let expected = unhex(string.from("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"))
     let exact = n == 64 && sig == expected
     let wrong_alg = sign_denied(key, P256) && sign_denied(key, Rs256)
     let no_use = sign_denied(sealed_pencil(string.from("mac")), Ed25519)
     let as_p256 = result.unwrap(secret.seal(unhex(pkcs8), "sign(p256)"))
     let mut out: Bytes = list.with_capacity(64)
-    let invalid = match secret.sign(as_p256, P256, empty, mut out) {
+    let invalid = match secret.sign(as_p256, P256, provide.random(0), empty, mut out) {
         Error(Invalid) => list.len(out) == 0,
         _ => false
     }
@@ -2291,12 +2291,12 @@ fn sign_rs256_rfc7515() -> bool {
     let message = string.as_bytes("eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ")
     let expected = unhex("702e218943e88fd11eb5d82dbf7845f34106ae1b81fff7731116add1717d83656d420afd3c96eedd73a2663e5166687b000b87226e0187ed1073f945e582adfcef16d85a798ee8c66ddb3db8975b17d09402beedd5d9d97007108db28160d5f8040ca7445762b81fbe7ff9d92e0ae76f24f25b33bbe6f44ae61eb1040acb20044d3ef9128ed40130795bd4bd3b41eecad066ab651981fde48df77f372dc38b9fafdd3befb18b5da3cc3c2eb02f9e3a41d612caad15911273a05f23b9e838faaf849d698429ef5a1e88798236c3d40e604522a544c8f27a7a2db80663d16cf7caea56de405cb2215a45b2c25566b55ac1a748a070dfc8a32a469543d019eefb47")
     let mut sig: Bytes = list.with_capacity(256)
-    let n = result.unwrap(secret.sign(key, Rs256, message, mut sig))
+    let n = result.unwrap(secret.sign(key, Rs256, provide.random(0), message, mut sig))
     n == 256 && sig == expected
 }
 
 // RFC 6979 Appendix A.2.5. The published P-256 key is encoded as PKCS#8.
-// The ring verifier checks the randomized signature against the published public point.
+// The ring verifier checks the signature against the published public point.
 // expect: run sign_p256_rfc6979() = true
 fn sign_p256_rfc6979() -> bool {
     let pkcs8 = unhex("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721a1440342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299")
@@ -2304,7 +2304,7 @@ fn sign_p256_rfc6979() -> bool {
     let point = unhex("0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299")
     let message = string.as_bytes("sample")
     let mut sig: Bytes = list.with_capacity(64)
-    let n = result.unwrap(secret.sign(key, P256, message, mut sig))
+    let n = result.unwrap(secret.sign(key, P256, provide.random(7), message, mut sig))
     // 'r' differs from 's' in its low bit.
     n == 64 && p256.verify(point, message, sig) && !p256.verify(point, string.as_bytes("rample"), sig)
 }

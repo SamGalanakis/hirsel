@@ -29,9 +29,9 @@ impl Cx<'_, '_, '_> {
                     },
                     n,
                 );
-                operands.extend([alg, vals[2]?, vals[3]?]);
+                operands.extend([alg, vals[2]?, vals[3]?, vals[4]?]);
                 if op != HostOp::SecretSign {
-                    operands.extend([vals[4]?, vals[5]?]);
+                    operands.push(vals[5]?);
                 }
             }
             _ => unreachable!(),

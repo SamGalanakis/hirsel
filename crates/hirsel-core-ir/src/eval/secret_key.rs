@@ -5,7 +5,7 @@ impl Machine<'_> {
     /// operations): error tag 1 Denied, 2 Invalid, 3 Tampered, 4 Capacity.
     /// Every evaluator Secret is sealed, so no KEK or secret is opaque.
     pub(super) fn secret_key(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
-        use hirsel_core_net::key_wrap::{self, KeyFailure, SignAlg};
+        use hirsel_core_net::key_wrap::{self, KeyFailure, SignAlg, SigningRandom};
         let fail = |f: KeyFailure| {
             let tag = match f {
                 KeyFailure::Denied => 1,
@@ -38,9 +38,14 @@ impl Machine<'_> {
             }
             HostOp::SecretSign => {
                 let alg = SignAlg::from_case(a[1]).unwrap();
+                let source = if self.cell(a[2]).is_some() {
+                    SigningRandom::Virtual
+                } else {
+                    SigningRandom::Host
+                };
                 (
-                    key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[2])),
-                    a[3],
+                    key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[3]), source),
+                    a[4],
                 )
             }
             _ => {

@@ -1391,7 +1391,7 @@ impl RtOp {
                         (vec![V(u64_), V(p), V(p), V(u64_)], outcome)
                     }
                     HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
+                    HostOp::SecretSign => (vec![V(u64_), V(u64_), V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
                         (vec![V(u64_), V(u64_), V(p), V(p), V(p), V(p)], outcome)
                     }

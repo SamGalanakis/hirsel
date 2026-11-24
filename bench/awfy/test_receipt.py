@@ -355,15 +355,16 @@ class ProfileSelfCosts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stdout differs"):
             check_output(marker, stdout + b"extra result\n", "Rust")
 
-        data = ("   2370 cycles:u: \n"
-                "        10420 app (/opt/app+0x420)\n"
-                "   6731 instructions:u: \n"
-                "        10512 app (/opt/app+0x512)\n")
-        samples = parse_samples(data.splitlines())
+        data = ["   2370 cycles:u: ", "        10420 app (/opt/app+0x420)", "   6731 instructions:u: "]
+        leaves = ["U   2370 cycles:u:     10420 app (/opt/app+0x420)",
+                  "U   6731 instructions:u:     10512 app (/opt/app+0x512)"]
+        samples = parse_samples(data, leaves)
         self.assertEqual([(s["event"], s["period"], s["stack"][0]["offset"]) for s in samples],
                          [("cycles:u", 2370, 0x420), ("instructions:u", 6731, 0x512)])
         with self.assertRaisesRegex(ValueError, "unexpected sample event"):
-            parse_samples(data.replace("instructions:u:", "instructions:k:").splitlines())
+            parse_samples([*data[:-1], "   6731 instructions:k: "], leaves)
+        with self.assertRaisesRegex(ValueError, "sampled IP does not match"):
+            parse_samples(data, [*leaves[:-1], leaves[-1].replace("instructions:u:", "instructions:k:")])
 
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)

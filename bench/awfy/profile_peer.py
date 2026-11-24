@@ -16,10 +16,11 @@ from timing_shield import hold, measurement_affinity
 
 EVENTS = ("cycles:u", "instructions:u")
 FRAME = re.compile(r"\s*[\da-fA-F]+\s+(.*?) \((.*?)(?:\+0x([\da-fA-F]+))?\)\s*")
+SAMPLE = re.compile(r"\s*(\d+)\s+(\S+):\s*(.*)")
 
 
 def notes(path):
-    return subprocess.check_output(["readelf", "-n", path], text=True)
+    return subprocess.check_output(["readelf", "-n", path], text=True, stderr=subprocess.PIPE)
 
 
 def build_id(note):
@@ -47,7 +48,7 @@ def detached_debug(image, out):
         matches = match is not None and match[1].replace(" ", "") == digest
     if not matches:
         raise ValueError(f"{debug}: detached debug image identity differs from {image}")
-    sections = subprocess.check_output(["readelf", "-SW", debug], text=True)
+    sections = subprocess.check_output(["readelf", "-SW", debug], text=True, stderr=subprocess.PIPE)
     for section in (".debug_info", ".debug_line"):
         match = re.search(rf"\s{re.escape(section)}\s+\S+\s+\S+\s+\S+\s+([0-9a-f]+)", sections)
         if not match or not int(match[1], 16):
@@ -77,25 +78,39 @@ def check_output(marker, stdout, side):
         raise ValueError(f"{side}: stdout differs from the checked workload")
 
 
-def parse_samples(lines):
+def sample_frame(match):
+    symbol, obj, offset = match.groups()
+    return {"symbol": symbol, "object": obj, "offset": int(offset, 16) if offset else None}
+
+
+def parse_samples(lines, leaves):
     samples = []
     for line in lines:
         if not line.strip():
             continue
-        if match := re.fullmatch(r"\s*(\d+)\s+(\S+):\s*", line):
+        if (match := SAMPLE.fullmatch(line)) and not match[3]:
             period, event = int(match[1]), match[2]
             if period <= 0 or event not in EVENTS:
                 raise ValueError(f"unexpected sample event or weight: {line}")
             samples.append({"event": event, "period": period, "stack": []})
         elif samples and (match := FRAME.fullmatch(line)):
-            symbol, obj, offset = match.groups()
-            samples[-1]["stack"].append({
-                "symbol": symbol, "object": obj, "offset": int(offset, 16) if offset else None,
-            })
+            samples[-1]["stack"].append(sample_frame(match))
         else:
             raise ValueError(f"unexpected perf record (or lost samples): {line}")
-    if {sample["event"] for sample in samples} != set(EVENTS) or any(not s["stack"] for s in samples):
-        raise ValueError("expected weighted stacks for both user PMU events")
+    if {sample["event"] for sample in samples} != set(EVENTS):
+        raise ValueError("expected both user PMU events")
+    # perf may have a sampled IP even when stack unwinding yields no frames.
+    for sample, line in zip(samples, filter(str.strip, leaves), strict=True):
+        mode, _, record = line.partition(" ")
+        match = SAMPLE.fullmatch(record)
+        if (mode not in ("U", "K") or match is None
+                or (match[2], int(match[1])) != (sample["event"], sample["period"])
+                or (leaf := FRAME.fullmatch(match[3])) is None):
+            raise ValueError(f"sampled IP does not match its stack record: {line}")
+        frame, stack = sample_frame(leaf), sample["stack"]
+        if not stack or stack[0] != frame:
+            stack.insert(0, frame)
+        sample["mode"] = mode
     return samples
 
 
@@ -111,12 +126,11 @@ def executable_segments(image):
 
 
 def mapped_samples(out, image, debug):
-    result = subprocess.check_output(
-        ["perf", "script", "--no-inline", "--show-lost-events", "-i", out / "perf.data",
-         "-F", "event,period,ip,sym,dso,dsoff"],
-        text=True,
-    )
-    samples = parse_samples(result.splitlines())
+    command = ["perf", "script", "--no-inline", "--show-lost-events", "-i", out / "perf.data"]
+    fields = "event,period,ip,sym,dso,dsoff"
+    stacks = subprocess.check_output([*command, "-F", fields], text=True)
+    leaves = subprocess.check_output([*command, "-G", "-F", f"misc,{fields}"], text=True)
+    samples = parse_samples(stacks.splitlines(), leaves.splitlines())
     segments = executable_segments(image)
     app_frames = []
     for sample in samples:
@@ -140,6 +154,7 @@ def summarize(side, samples, top):
     for event in EVENTS:
         leaves = Counter()
         source_weight = 0
+        kernel_ip_weight = 0
         count = 0
         for sample in samples:
             if sample["event"] != event:
@@ -147,6 +162,8 @@ def summarize(side, samples, top):
             count += 1
             leaf = sample["stack"][0]
             weight = sample["period"]
+            if sample["mode"] == "K":
+                kernel_ip_weight += weight
             frames = leaf.get("source", [])
             if frames:
                 source_weight += weight
@@ -155,7 +172,8 @@ def summarize(side, samples, top):
             leaves[symbol, Path(leaf["object"]).name, source] += weight
         total = leaves.total()
         print(f"{side} {event} sampled self cost ({count:,} samples, "
-              f"{source_weight / total:.1%} weight with source lines)")
+              f"{source_weight / total:.1%} weight with source lines, "
+              f"{kernel_ip_weight / total:.1%} kernel IPs)")
         print("  Weight %       Period  Function [image] and inline source")
         for (symbol, image, source), weight in leaves.most_common(top):
             print(f"  {weight / total:8.2%} {weight:12,}  {symbol} [{image}] {source}")
@@ -229,12 +247,12 @@ def run(args, key, left, rust_command, cycle_samples, write):
     print(f"  {'Metric':<15} {'Hirsel':>18} {right_label:>18} {'Median pair ratio':>18}")
     for event, (a, b, ratio) in summary.items():
         print(f"  {event:<15} {a:>18,} {b:>18,} {ratio:>17.6f}x")
+    write(out / "pairs.json", {"row": key, "comparison": comparison, "cpu": args.cpu,
+                               "ratio": f"Hirsel/{right_label}", "summary": summary, "pairs": pairs})
     for label, _, image, directory, debug in arms:
         samples = mapped_samples(directory, image, debug)
         summarize(label, samples, args.top)
         write(directory / "samples.json", samples)
-    write(out / "pairs.json", {"row": key, "comparison": comparison, "cpu": args.cpu,
-                               "ratio": f"Hirsel/{right_label}", "summary": summary, "pairs": pairs})
     print(f"Profiles and uninstrumented pairs: {out}")
     return 0
 

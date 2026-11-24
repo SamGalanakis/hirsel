@@ -12,17 +12,21 @@ core `ed25519`, `p256` and `rsa` verifiers.
 
 ```
 pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256 | Hs384 | Hs512
-pub type Allow { first: Alg, rest: List[Alg] }
+pub type Allow: shareable + send { first: Alg, rest: List[Alg] }
+pub opaque type PublicKeys: shareable + send
 pub type Error = Malformed(Fault) | UnsupportedAlg | UnsupportedCrit | WrongKey
     | BadSignature | Expired | NotYetValid | Mismatch(Claim) | NoKey | AmbiguousKey
     | BadKey | UnsupportedKey | PrivateKey | Denied | Sign(KeyError)
 pub fn verify_jws(token: String, accept: Allow, k: Key) -> Result[Jws, Error]
 pub fn verify_jwt(token: String, r: Rules, k: Key) -> Result[Jwt, Error]
 pub fn verify_jws_in / verify_jwt_in(..., keys: KeySet)
+pub fn verify_jwt_public(token: String, r: Rules, keys: PublicKeys) -> Result[Jwt, Error]
 pub fn sign_jws(s: Signer, header: String, payload: Bytes) -> Result[String, Error]
 pub fn sign_jwt(s: Signer, claims: String) -> Result[String, Error]
 pub fn jwk(text: String) -> Result[Key, Error]
 pub fn jwks(text: String) -> Result[KeySet, Error]
+pub fn jwks_public(text: String) -> Result[PublicKeys, Error]
+pub fn public_len(keys: PublicKeys) -> u64
 ```
 
 ## Algorithms
@@ -66,9 +70,10 @@ Each invariant is a property of the types, not a caller's discipline.
      says a recipient that does not identify itself with a value in `aud` must reject it.
    Leeway is added to the trusted clock with saturation, so no claim value can overflow it.
    NumericDate values must be non-negative integers; fractions and negatives are `Malformed(Json)`.
-5. **One key per `kid`.** `find` and `verify_*_in` return exactly one key. Two keys with
+5. **One key per `kid`.** `find`, `verify_*_in` and `verify_jwt_public` select exactly one key. Two keys with
    the token's `kid` give `AmbiguousKey`; no match gives `NoKey`. A token without `kid`
    selects the set's only key, and is `AmbiguousKey` when the set holds more than one.
+   An empty set gives `NoKey`.
 6. **Strict parsing.** A token is at most `MAX_TOKEN` (64 KiB) and has exactly three
    segments. Each segment is canonical unpadded base64url: padding, other alphabets and
    nonzero trailing bits are `Malformed(Encoding)`. The header must be a UTF-8 JSON object
@@ -83,10 +88,17 @@ header has been fully admitted, and claims are read only after the signature ver
 
 ## Keys
 
-- `jwk` reads one public key; `jwks` reads `{"keys": [...]}`. A JWK whose `use` is not
+- `jwk` reads one key; `jwks` reads `{"keys": [...]}`. A JWK whose `use` is not
   `sig`, whose `key_ops` lacks `verify`, or whose `kty`, `crv` or `alg` this module does
   not use is skipped by `jwks` (RFC 7517 §5) and is `UnsupportedKey` from `jwk`.
   Duplicate `key_ops` entries or operations inconsistent with `use` give `BadKey`.
+- `jwks_public` applies the same parsing rules and retains RSA, EC P-256 and
+  Ed25519 verification keys. An `oct` member gives `UnsupportedKey` for the
+  whole set, even when its algorithm or use would otherwise exclude it.
+  `public_len` counts usable keys, including zero for an empty or fully skipped set.
+- `verify_jwt_public` applies the same allowlist, key family, signature and
+  claim checks as `verify_jwt_in`. The returned `Jwt` includes the protected
+  header's `typ` for callers that apply their own token-type policy.
 - A JWK with private members (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`) is `PrivateKey`, and
   a set holding one is refused as a whole: a published key set that leaks a private key is
   a configuration error, not a key to skip.

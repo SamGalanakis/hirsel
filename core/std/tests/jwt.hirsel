@@ -57,6 +57,11 @@ const ED: String = "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc.hgy
 
 const ED_JWK: String = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\n\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}"
 
+// RFC 8037 A.1 key, signed with Python cryptography over the hand-written
+// header {"alg":"EdDSA","kid":"rfc8037","typ":"at+jwt"} and claims
+// {"iss":"fixture","aud":"place","sub":"user-42","exp":200}.
+const ED_JWT: String = "eyJhbGciOiJFZERTQSIsImtpZCI6InJmYzgwMzciLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJmaXh0dXJlIiwiYXVkIjoicGxhY2UiLCJzdWIiOiJ1c2VyLTQyIiwiZXhwIjoyMDB9.3b1jweL07MhTRmDO6sm9UnqZKc6VkLTmjd5HWX_I-_6CaifNM1w5aMnlzlLqTaEmQzKuEdywLLDBBJnzjtoQCA"
+
 const ED_PRIVATE_JWK: String = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\n\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\n\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}"
 
 // RFC 8410 section 7's PKCS#8 v1 prefix, then RFC 8037 A.1's d.
@@ -446,6 +451,121 @@ fn jwk_with_metadata(fields: String) -> String {
     let mut text = string.from(fields)
     string.push(mut text, string.slice(ED_JWK, 1, string.byte_len(ED_JWK)))
     text
+}
+
+fn jwks_document(members: String) -> String {
+    let mut text = string.from("{\"keys\":[")
+    string.push(mut text, members)
+    string.push(mut text, "]}")
+    text
+}
+
+fn jwk_pair(first: String, second: String) -> String {
+    let mut text = string.from(first)
+    string.push(mut text, ",")
+    string.push(mut text, second)
+    text
+}
+
+type PublicKeysSeed: shareable + send {
+    keys: jwt.PublicKeys,
+    allow: jwt.Allow
+}
+
+// expect: run jwt_public_keys_law() = 0
+fn jwt_public_keys_law() -> u64 {
+    let ed = jwk_with_metadata("{\"kid\":\"rfc8037\",\"alg\":\"EdDSA\",")
+    let rsa = rsa_jwk("AQAB")
+    let ec = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}"
+    let mut r = rules(100, 0, Some(string.from("fixture")), Some(string.from("place")))
+    let mixed = result.unwrap(jwt.jwks_public(jwks_document(jwk_pair(ed, jwk_pair(rsa, ec)))))
+    let shared = arc.new(PublicKeysSeed(keys: take mixed, allow: jwt.allow(EdDsa)))
+    let Ok(take seed) = arc.try_unwrap(take shared) else {
+        return 1
+    }
+    if jwt.public_len(seed.keys) != 3 {
+        return 1
+    }
+    r.allow = clone(seed.allow)
+    let Ok(ed_jwt) = jwt.verify_jwt_public(ED_JWT, r, seed.keys) else {
+        return 1
+    }
+    if ed_jwt.header.typ != Some(string.from("at+jwt")) || ed_jwt.claims.sub != Some(string.from("user-42")) || ed_jwt.claims.exp != Some(200u64) {
+        return 1
+    }
+    let one = result.unwrap(jwt.jwks_public(jwks_document(ed)))
+    r.now_secs = 200
+    match jwt_error(jwt.verify_jwt_public(ED_JWT, r, one)) {
+        Some(Expired) => {},
+        _ => return 2,
+    }
+    let mut bad = string.from(string.slice(ED_JWT, 0, string.byte_len(ED_JWT) - 1))
+    string.push(mut bad, "Q")
+    match jwt_error(jwt.verify_jwt_public(bad, r, one)) {
+        Some(BadSignature) => {},
+        _ => return 3,
+    }
+    r.now_secs = 100
+    let pair = result.unwrap(jwt.jwks_public(jwks_document(jwk_pair(ed, ed))))
+    match jwt_error(jwt.verify_jwt_public(ED_JWT, r, pair)) {
+        Some(AmbiguousKey) => {},
+        _ => return 4,
+    }
+    let two = result.unwrap(jwt.jwks_public(jwks_document(jwk_pair(rsa, ec))))
+    match jwt_error(jwt.verify_jwt_public(ED_JWT, r, two)) {
+        Some(NoKey) => {},
+        _ => return 5,
+    }
+    r.iss = Some(string.from("joe"))
+    r.aud = None
+    r.allow = jwt.allow(Rs256)
+    match jwt_error(jwt.verify_jwt_public(A2, r, two)) {
+        Some(AmbiguousKey) => {},
+        _ => return 6,
+    }
+    let rsa_set = result.unwrap(jwt.jwks_public(jwks_document(rsa)))
+    let Ok(rsa_jwt) = jwt.verify_jwt_public(A2, r, rsa_set) else {
+        return 7
+    }
+    if rsa_jwt.claims.exp != Some(1300819380u64) {
+        return 7
+    }
+    match jwt_error(jwt.verify_jwt_public(A1, r, rsa_set)) {
+        Some(UnsupportedAlg) => {},
+        _ => return 8,
+    }
+    r.allow = jwt.allow(Hs256)
+    match jwt_error(jwt.verify_jwt_public(A1, r, rsa_set)) {
+        Some(WrongKey) => {},
+        _ => return 9,
+    }
+    r.allow = jwt.allow(Es256)
+    let ec_set = result.unwrap(jwt.jwks_public(jwks_document(ec)))
+    let Ok(ec_jwt) = jwt.verify_jwt_public(A3, r, ec_set) else {
+        return 10
+    }
+    if ec_jwt.claims.exp != Some(1300819380u64) {
+        return 10
+    }
+    let unusable = result.unwrap(jwt.jwks_public(jwks_document("{\"kty\":\"EC\",\"crv\":\"P-384\"}")))
+    if jwt.public_len(unusable) != 0 {
+        return 11
+    }
+    match jwt_error(jwt.verify_jwt_public(A3, r, unusable)) {
+        Some(NoKey) => {},
+        _ => return 11,
+    }
+    match jwt.jwks_public(SET_PRIVATE_RSA) {
+        Error(PrivateKey) => {},
+        _ => return 12,
+    }
+    for oct in["{\"kty\":\"oct\",\"alg\":\"A128KW\",\"use\":\"enc\",\"key_ops\":[\"wrapKey\"],\"k\":\"GawgguFyGrWKav7AX4VKUg\"}", "{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow\"}"] {
+        match jwt.jwks_public(jwks_document(jwk_pair(ec, oct))) {
+            Error(UnsupportedKey) => {},
+            _ => return 13,
+        }
+    }
+    0
 }
 
 // expect: run jwt_jwk_key_ops_law() = 0

@@ -293,6 +293,7 @@ store@1/store/test_set_residency_moves_a_table_back_to_memory src=76c3767d9685a1
 store@1/store/test_set_residency_moves_a_table_to_tiered src=d011a1ed4d00f4d3 sig=33471f25f7ff3c53 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_set_residency_refused_admission_changes_nothing src=2d63505f02d4dda5 sig=bc31677814ff29c4 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_set_residency_refused_load_changes_nothing src=0dad99202eac17ed sig=1fd7cdf6fdf0e228 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_set_residency_restamps_hot_pages_back_to_memory src=896c20da4ab41c2e sig=ed229d6cb018699b run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_settled_callinfo src=b0e8357c44980e3c sig=959764aaf6f0e5a0 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_shared_changes src=0ece571b0a9c92c2 sig=e7835fb52ed0b222 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_shared_payload_copy src=7de7cdb81532f191 sig=2ac3bf6b8831ddfb run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -301,7 +302,7 @@ store@1/store/test_staged_index_reads src=4001962c6cd10085 sig=f55c31bd3152e918 
 store@1/store/test_step_bounds src=bc8bb1bd2de4d3a7 sig=ff7293a09e7c4412 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_stored_size src=4d978cf0648bf9b4 sig=b05ccb027f322f20 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_streams src=aa17ce17ef4107ee sig=90308ce199315e24 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_tiered_log_range_reads_cold_leaves_and_staged_tail src=8085e298c1a21d46 sig=14c04345db96fd6c run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_tiered_log_range_reads_cold_leaves_and_staged_tail src=77f48facafd239e2 sig=a21ecb9c4a0d71ed run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows src=68d8f76743ffb53e sig=62d9883c1bfa4048 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_typed_foreign src=ad09a39160866d68 sig=decb54c437f21a54 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_indexes src=e65a1533fe64c4fa sig=b785b2d45d961a92 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

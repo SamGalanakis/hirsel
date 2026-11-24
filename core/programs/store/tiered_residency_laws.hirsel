@@ -212,6 +212,67 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     close(take reopened)
 }
 
+// L88 (g), Hot half (§13.8 "Tiered -> Memory", §13.6a T2): a row written
+// after the last cut leaves Hot pages in the Tiered tree. A Snapshot taken
+// then keeps that Hot tree, and a pin of it after the change has T2 seal its
+// Hot pages in class 3, while main's loaded tree goes to class 0. The load
+// re-stamps the Hot pages too, so no stamp the pin seals is one main's
+// Memory tree places (seeded bug: a Hot page is shared into the Memory tree
+// with its stamp).
+@test
+fn test_set_residency_restamps_hot_pages_back_to_memory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 200u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = residency_rows(mut db, row_count)?
+    set_residency(mut db, rows.id, Tiered)?
+    let _ = checkpoint(mut db)?
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(100000000), copy_env(fixture), fn(mut tx: Tx, t: Table[u64, Bytes]) -> Result[(), Error] {
+        put(mut tx, t, 7, residency_value(7))
+    })? else {
+        fail("residency: the unsealed write commits")
+    }
+    let before = snapshot(db)
+    {
+        let Some((HotPage(_), _)) = std.page.collection_slot(before.roots.collections.root, prefix(rows.id)?) else {
+            fail("residency: the Snapshot holds a Hot Tiered root")
+        }
+    }
+    set_residency(mut db, rows.id, Memory)?
+    let mut loaded: List[u64] = list.new()
+    {
+        let Some((page, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+            fail("residency: main has the table")
+        }
+        residency_memory_stamps(arc.share(page), mut loaded)
+    }
+    let _ = pin(mut db, "hot", before)?
+    let _ = checkpoint(mut db)?
+    let Some(held) = pinned(db, "hot") else {
+        fail("residency: the pin publishes")
+    }
+    let Some((ColdPage(sealed), _)) = std.page.collection_slot(held.roots.collections.root, prefix(rows.id)?) else {
+        fail("residency: the pin's cut seals the Snapshot's Hot Tiered tree")
+    }
+    let walk = compact_walk_from(d, db, sealed)?
+    for stamp in loaded {
+        if map.contains(walk.places, stamp) {
+            fail("L88 (g): a stamp lives in class 0 and in class 3")
+        }
+    }
+    residency_check_rows(db, held, rows, row_count)?
+    residency_check_rows(db, snapshot(db), rows, row_count)?
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let Some(again) = pinned(reopened, "hot") else {
+        fail("residency: the pin survives a reopen")
+    }
+    residency_check_rows(reopened, again, rows, row_count)?
+    residency_check_rows(reopened, snapshot(reopened), rows, row_count)?
+    close(take reopened)
+}
+
 // §13.8: Tiered -> Memory is admitted against `resident_limit` from the
 // collection's Tiered charge. Five 16 MB rows do not fit the 64 MiB a store
 // at the Tiered floor leaves Memory rows, so the change is
@@ -345,6 +406,14 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
     let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
     let _ = seal(mut db, take declaring)?
     log_append_entries(mut db, events, 0, 300)?
+    {
+        let Some((root, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+            fail("Tiered Log: main has the Log")
+        }
+        if std.page.level(std.page.image_of(root)) == 0 {
+            fail("Tiered Log: the fixture Log spans more than one leaf")
+        }
+    }
     set_residency(mut db, events.binding.id, Tiered)?
     if residency_mode(db, events.binding.id)? != (4u8, 1u8) {
         fail("Tiered Log: main's descriptor names the Log Tiered")

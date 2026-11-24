@@ -64,3 +64,54 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     }
     Ok(())
 }
+
+fn l62_deliver_branch(requests: Sender[TieredPagerMessage], target: std.page.PagePtr, leaf: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let mut ids = 0u64
+    for ptr in[target, leaf] {
+        let width: u64 = int.widen(ptr.len)
+        let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: inventory, object: None))
+        packs = take next_packs
+    }
+    let demand = TieredPointDemand(target: TieredPage(target), key: key_word(42), packs: take packs, next_stamp: 51, deadline: 0)
+    let path = tiered_point_delivery(requests, take demand)?
+    if list.len(path) != 2 || path[0u64].identity.stamp != 50 || path[1u64].identity.stamp != 49 {
+        fail("L62: point batch must deliver the parent and selected leaf in order")
+    }
+    let TieredImage(selected) = view path[1u64].payload else {
+        fail("L62: point batch returned a BLOB for its leaf")
+    }
+    let Some(raw) = std.page.lookup(selected, key_word(42)) else {
+        fail("L62: point batch delivered a leaf for the wrong key")
+    }
+    if list.len(raw) != 1 || raw[0u64] != 106 {
+        fail("L62: point batch did not carry the selected leaf's value")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    let mut value: Bytes = list.with_capacity(1)
+    list.push(mut value, 106u8)
+    list.push(mut rows, std.page.Entry(key: key_word(42), cell: InlineValue(take value)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 49, Collection))?
+    let leaf = l68_write_page_pack(fixtures, owner, 8, 49, std.page.payload(leaf_image))?
+    // The left child is deliberately not in the inventory. The key path
+    // only reaches the right child, so it must never request the left.
+    let left = std.page.PagePtr(pack: 7, offset: 72, len: 40, checksum: 11, stamp: 48)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 1, charge: 86))))
+    list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: leaf, rows: 1, charge: 86))))
+    let branch_image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let root = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(branch_image))?
+    let (requests, take worker) = start_tiered_pager(tasks, owner, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let delivered = l62_deliver_branch(requests, root, leaf)
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
+    delivered
+}

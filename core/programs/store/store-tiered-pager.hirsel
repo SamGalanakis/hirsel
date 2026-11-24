@@ -11,7 +11,20 @@ type TieredPagerTarget: send {
     deadline: u64
 }
 
-type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerReserve(u64, Sender[Result[(), Error]]) | PagerRelease(u64)
+type TieredPagerPack: shareable + send {
+    inventory: PagePack,
+    object: Option[HistoryRef]
+}
+
+type TieredPointDemand: send {
+    target: TieredTarget,
+    key: Bytes,
+    packs: std.omap.OMap[u64, TieredPagerPack],
+    next_stamp: u64,
+    deadline: u64
+}
+
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[List[Arc[TieredFrame]], Error]]) | PagerReserve(u64, Sender[Result[(), Error]]) | PagerRelease(u64)
 
 type TieredPagerStart: send {
     store: StoreId,
@@ -40,12 +53,66 @@ fn run_tiered_pager(take launch: TieredPagerStart) waits {
                 let delivered = tiered_pager_frame(mut input, mut private_cache, owner, demand)
                 let _ = channel.send(answer, take delivered)
             },
+            PagerPoint(demand, answer) => {
+                let delivered = tiered_pager_point(mut input, mut private_cache, owner, demand)
+                let _ = channel.send(answer, take delivered)
+            },
             PagerReserve(amount, answer) => {
                 let reserved = tiered_cache_reserve_reader(mut private_cache, amount)
                 let _ = channel.send(answer, take reserved)
             },
             PagerRelease(amount) => tiered_cache_release_reader(mut private_cache, amount),
         }
+    }
+}
+
+fn tiered_point_delivery(requests: Sender[TieredPagerMessage], take demand: TieredPointDemand) -> Result[List[Arc[TieredFrame]], Error] waits {
+    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[List[Arc[TieredFrame]], Error]], Receiver[Result[List[Arc[TieredFrame]], Error]]), Error] {
+        Ok(channel.new(1))
+    })?
+    channel.send(requests, PagerPoint(take demand, take answer)) ?=> |_| Io(Closed)
+    channel.receive(delivered) ?=> |_| Io(Closed)
+}
+
+fn tiered_point_continuation(frame: TieredFrame, key: Bytes, expected_level: Option[u8]) -> Result[Option[(TieredTarget, u8)], Error] {
+    let TieredImage(page) = view frame.payload else {
+        return Ok(None)
+    }
+    let image = std.page.image_of(page)
+    let height = std.page.level(image)
+    if let Some(expected) = expected_level {
+        if height != expected {
+            return Error(disk_fault(paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed))
+        }
+    }
+    let Some(slot) = std.page.descend(image, key) else {
+        return Ok(None)
+    }
+    let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
+        fail("store: verified PAGE path has no Cold child")
+    }
+    Ok(Some((TieredPage(child), height - 1)))
+}
+
+fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand) -> Result[List[Arc[TieredFrame]], Error] waits {
+    let mut frames: List[Arc[TieredFrame]] = list.new()
+    let mut edge: TieredTarget = clone(demand.target)
+    let mut expected_level: Option[u8] = None
+    loop {
+        let facts = tiered_frame_id(edge)
+        let Some(pack) = std.omap.get(demand.packs, facts.pack) else {
+            return Error(disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
+        }
+        let target = TieredPagerTarget(edge: clone(edge), direction: TieredPoint, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline)
+        let frame = tiered_pager_frame(mut input, mut private_cache, owner, target)?
+        let following = tiered_point_continuation(frame, demand.key, expected_level)?
+        capacity(list.try_reserve(mut frames, 1))?
+        list.push(mut frames, take frame)
+        let Some((take child, height)) = take following else {
+            return Ok(take frames)
+        }
+        edge = take child
+        expected_level = Some(height)
     }
 }
 

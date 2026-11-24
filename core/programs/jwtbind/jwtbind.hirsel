@@ -1,0 +1,395 @@
+// Module jwtbind (RUNNER-SPEC §15): a place's session binding over std.jwt. It verifies
+// asymmetric JWTs from one issuer against a public key set that is static or fetched by one
+// refresher task, and maps a verified token to Caller(issuer byte, sub). It names no product,
+// provider or claim beyond RFC 7519's registered claims.
+pub type Source: send = Static(String) | Remote(RemoteSource)
+
+pub type RemoteSource: send {
+    url: String,
+    every_ms: u64,
+    stale_ms: u64,
+    fetch_ms: u64
+}
+
+pub type Issuer: shareable + send {
+    iss: String,
+    aud: String,
+    typ: Option[String],
+    issuer: u8,
+    allow: std.jwt.Allow,
+    leeway_s: u64,
+    max_token: u64,
+    max_life_s: u64
+}
+
+pub type Seed: shareable + send {
+    issuer: Issuer,
+    clock: Clock,
+    keys: Option[std.jwt.PublicKeys],
+    good_until_mono_ns: u64,
+    confirmed_until_mono_ns: u64
+}
+
+// Why verifier refused its configuration (§15.2). A misconfigured place does not start.
+pub type ConfigError: send = EmptyIss | EmptyAud | IssuerNumber | Hmac | Leeway | MaxToken | MaxLife | Document(std.jwt.Error) | NoUsableKey | NotHttps | Every | Stale | FetchMs | Full(Capacity)
+
+// The published seed and, for a Remote source, the refresher. Dropping a Verifier cancels its
+// refresher (CONC-8), so a place keeps it for as long as it serves.
+pub opaque type Verifier {
+    root: Latest[Seed],
+    refresher: Option[Task[()]]
+}
+
+pub const BIND_BYTES: u64 = 262144 // GUESS: 3 × MAX_TOKEN of decoding plus claims and the largest RSA verify
+
+pub const BIND_STEPS: u64 = 4194304 // GUESS: one RSA-8192 verify and the claims; J4 measures it
+
+pub const MAX_LEEWAY_S: u64 = 300
+
+const MS_NS: u64 = 1000000u64
+
+const SECOND_MS: u64 = 1000u64
+
+const EVERY_MIN_MS: u64 = 60000u64
+
+const DAY_MS: u64 = 86400000u64
+
+const WEEK_MS: u64 = 604800000u64
+
+const FETCH_MAX_MS: u64 = 30000u64
+
+const RETRY_FIRST_MS: u64 = 5000u64
+
+const NEVER: u64 = 0xffffffffffffffffu64
+
+// GUESS: the refresher's pool (one connection), a MAX_JWKS body and its parsed set.
+const REFRESH_BYTES: u64 = 16777216u64
+
+// §15.2's defaults: no typ, leeway 60 s, max_token 8192, max_life 3600 s.
+pub fn issuer_defaults(take iss: String, take aud: String, number: u8, take allow: std.jwt.Allow) -> Issuer {
+    Issuer(iss: take iss, aud: take aud, typ: None, issuer: number, allow: take allow, leeway_s: 60u64, max_token: 8192u64, max_life_s: 3600u64)
+}
+
+// §15.2's defaults: every 300 s; stale after 2 h (SpacetimeDB's 7,200 s entry expiry); a
+// fetch's deadline 10 s. All GUESS.
+pub fn remote_defaults(take url: String) -> RemoteSource {
+    RemoteSource(url: take url, every_ms: 300000u64, stale_ms: 7200000u64, fetch_ms: 10000u64)
+}
+
+fn is_hmac(a: std.jwt.Alg) -> bool {
+    match a {
+        Hs256 => true,
+        Hs384 => true,
+        Hs512 => true,
+        _ => false,
+    }
+}
+
+fn check_issuer(i: Issuer) -> Result[(), ConfigError] {
+    if string.byte_len(i.iss) == 0u64 {
+        return Error(EmptyIss)
+    }
+    if string.byte_len(i.aud) == 0u64 {
+        return Error(EmptyAud)
+    }
+    if i.issuer < 2u8 {
+        return Error(IssuerNumber)
+    }
+    if is_hmac(i.allow.first) {
+        return Error(Hmac)
+    }
+    for a in i.allow.rest {
+        if is_hmac(a) {
+            return Error(Hmac)
+        }
+    }
+    if i.leeway_s > MAX_LEEWAY_S {
+        return Error(Leeway)
+    }
+    if i.max_token > std.jwt.MAX_TOKEN {
+        return Error(MaxToken)
+    }
+    if i.max_life_s == 0u64 || i.max_life_s > 86400u64 {
+        return Error(MaxLife)
+    }
+    Ok(())
+}
+
+fn check_remote(r: RemoteSource) -> Result[(), ConfigError] {
+    let scheme = string.as_bytes(r.url)
+    if list.len(scheme) < 8u64 || !string.eq_ignore_case(string.slice(r.url, 0u64, 8u64), "https://") {
+        return Error(NotHttps)
+    }
+    if r.every_ms < EVERY_MIN_MS || r.every_ms > DAY_MS {
+        return Error(Every)
+    }
+    if r.stale_ms < int.saturating_mul(2u64, r.every_ms) || r.stale_ms > WEEK_MS {
+        return Error(Stale)
+    }
+    if r.fetch_ms < SECOND_MS || r.fetch_ms > FETCH_MAX_MS {
+        return Error(FetchMs)
+    }
+    Ok(())
+}
+
+// A JWK Set document as a usable public set: jwks_public's refusal, or no usable key, fails it.
+fn usable(text: String) -> Result[std.jwt.PublicKeys, ConfigError] {
+    let keys = match std.jwt.jwks_public(text) {
+        Ok(take k) => take k,
+        Error(e) => return Error(Document(e)),
+    }
+    if std.jwt.public_len(keys) == 0u64 {
+        return Error(NoUsableKey)
+    }
+    Ok(take keys)
+}
+
+// Checks the configuration, then publishes a Static set once, or starts the refresher and
+// waits for its first fetch (bounded by fetch_ms) for a Remote one.
+pub fn verifier(take issuer: Issuer, take source: Source, net: Net, take trust: Trust, clock: Clock, random: Random, tasks: Tasks) -> Result[Verifier, ConfigError] waits {
+    check_issuer(issuer)?
+    match take source {
+        Static(take text) => {
+            let keys = usable(text)?
+            let root = latest.new(arc.new(Seed(issuer: take issuer, clock: clock, keys: Some(take keys), good_until_mono_ns: NEVER, confirmed_until_mono_ns: NEVER)))
+            Ok(Verifier(root: take root, refresher: None))
+        },
+        Remote(take r) => {
+            check_remote(r)?
+            let (v, _) = start_remote(take issuer, take r, net, take trust, clock, random, tasks, false)?
+            Ok(take v)
+        },
+    }
+}
+
+// The handle runner.wire_bind takes.
+pub fn seed(v: Verifier) -> Latest[Seed] {
+    latest.handle(v.root)
+}
+
+type Refresher: send {
+    issuer: Issuer,
+    source: RemoteSource,
+    net: Net,
+    trust: Trust,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    root: Latest[Seed],
+    report: Option[Sender[bool]],
+    every_attempt: bool
+}
+
+// Starts the refresher without the https check, so laws can serve a JWKS over loopback http.
+// With watch, the returned receiver gets every later fetch's outcome too.
+fn start_remote(take issuer: Issuer, take source: RemoteSource, net: Net, take trust: Trust, clock: Clock, random: Random, tasks: Tasks, watch: bool) -> Result[(Verifier, Option[Receiver[bool]]), ConfigError] waits {
+    let root = latest.new(arc.new(Seed(issuer: take issuer, clock: clock, keys: None, good_until_mono_ns: 0u64, confirmed_until_mono_ns: 0u64)))
+    let (to, from): (Sender[bool], Receiver[bool]) = channel.new(1u64)
+    let job = Refresher(issuer: clone(latest.read(root).issuer), source: take source, net: net, trust: take trust, clock: clock, random: random, tasks: tasks, root: latest.handle(root), report: Some(take to), every_attempt: watch)
+    let run: fn(take Refresher) -> () waits = refresh_loop
+    let refresher = match task.try_spawn(tasks, bytes REFRESH_BYTES, take job, run) {
+        Ok(take t) => take t,
+        Error((cap, _)) => return Error(Full(cap)),
+    }
+    // The first fetch ends within fetch_ms (its deadline); either way the place starts.
+    let _ = channel.receive(from)
+    let watched = if watch {
+        Some(take from)
+    } else {
+        None
+    }
+    Ok((Verifier(root: take root, refresher: Some(take refresher)), take watched))
+}
+
+fn ms_ns(ms: u64) -> u64 {
+    int.saturating_mul(ms, MS_NS)
+}
+
+fn jitter_ms(random: Random, every_ms: u64) -> u64 {
+    let span = every_ms / 10u64
+    if span == 0u64 {
+        return 0u64
+    }
+    let mut raw: Bytes = list.with_capacity(8u64)
+    host.random(random, mut raw)
+    let mut n: u64 = 0u64
+    for b in raw {
+        n = (n << 8u64) | int.widen(b)
+    }
+    n % span
+}
+
+// min(every_ms, 5 s × 2^n) after the n-th consecutive failure, n from 0.
+fn retry_ms(every_ms: u64, failures: u64) -> u64 {
+    let shift = if failures > 40u64 {
+        40u64
+    } else {
+        failures
+    }
+    let wait = int.saturating_mul(RETRY_FIRST_MS, 1u64 << shift)
+    if wait < every_ms {
+        wait
+    } else {
+        every_ms
+    }
+}
+
+// One GET of the source: a 200 whose body jwks_public accepts with a usable key publishes a
+// new seed whole, stamped from this success's mono reading; anything else publishes nothing.
+fn refresh_once(cl: std.http_client.Client, issuer: Issuer, source: RemoteSource, clock: Clock, root: Latest[Seed]) -> bool waits {
+    let deadline = int.saturating_add(host.mono_ns(clock), ms_ns(source.fetch_ms))
+    let mut body: Bytes = list.with_capacity(65536u64)
+    match std.http_client.get(cl, source.url, mut body, deadline) {
+        Ok(200u16) => (),
+        _ => return false,
+    }
+    let Ok(text) = string.from_utf8(take body) else {
+        return false
+    }
+    let Ok(keys) = usable(text) else {
+        return false
+    }
+    let at = host.mono_ns(clock)
+    let confirmed = int.saturating_add(int.saturating_add(source.every_ms, source.every_ms / 10u64), source.fetch_ms)
+    latest.publish(root, arc.new(Seed(issuer: clone(issuer), clock: clock, keys: Some(take keys), good_until_mono_ns: int.saturating_add(at, ms_ns(source.stale_ms)), confirmed_until_mono_ns: int.saturating_add(at, ms_ns(confirmed)))))
+    true
+}
+
+fn refresh_loop(take job: Refresher) -> () waits {
+    let Refresher(issuer: take issuer, source: take source, net, trust: take trust, clock, random, tasks, root: take root, report: take report, every_attempt) = take job
+    let mut limits = std.http_client.limits(std.jwt.MAX_JWKS)
+    limits.redirects = Return
+    limits.conns_max = 1u16
+    limits.waiters_max = 1u16
+    let pool = match std.http_client.pool(net, clock, tasks, take trust, limits) {
+        Ok(take p) => take p,
+        Error(_) => return (),
+    }
+    let cl = std.http_client.handle(pool)
+    let mut reporting = take report
+    let mut failures: u64 = 0u64
+    loop {
+        let ok = refresh_once(cl, issuer, source, clock, root)
+        if let Some(to) = view reporting {
+            let _ = channel.send(to, ok)
+        }
+        if !every_attempt {
+            reporting = None
+        }
+        let wait = if ok {
+            failures = 0u64
+            int.saturating_add(source.every_ms, jitter_ms(random, source.every_ms))
+        } else {
+            let w = retry_ms(source.every_ms, failures)
+            failures = int.saturating_add(failures, 1u64)
+            w
+        }
+        host.sleep_until(clock, int.saturating_add(host.mono_ns(clock), ms_ns(wait)))
+    }
+}
+
+// RFC 6750 §2.1: "Bearer" (ASCII case-insensitive) and one space, or the bare token.
+fn strip_scheme(credential: Bytes) -> View[Bytes] in credential {
+    let n = list.len(credential)
+    if n >= 7u64 && credential[6u64] == 0x20u8 {
+        let scheme = b"bearer"
+        let mut matched = true
+        for i in 0u64 .. 6u64 {
+            let c = credential[i]
+            let lower = if c >= 0x41u8 && c <= 0x5au8 {
+                c + 0x20u8
+            } else {
+                c
+            }
+            if lower != scheme[i] {
+                matched = false
+            }
+        }
+        if matched {
+            return list.slice(credential, 7u64, n)
+        }
+    }
+    list.slice(credential, 0u64, n)
+}
+
+// RFC 7515 §4.1.9: a typ with no "/" means "application/" followed by it; compared ASCII
+// case-insensitively.
+fn media_type(t: String) -> String {
+    if let Some(_) = string.find(t, 0u64, "/") {
+        return string.to_lower(t)
+    }
+    let mut full = string.from("application/")
+    string.push(mut full, t)
+    string.to_lower(full)
+}
+
+fn typ_matches(want: Option[String], got: Option[String]) -> bool {
+    match view want {
+        None => true,
+        Some(w) => match view got {
+            Some(g) => media_type(w) == media_type(g),
+            None => false,
+        },
+    }
+}
+
+// §15.3. The first refusal is the answer; only a missing or stale set and a kid miss on an
+// unconfirmed set are Unavailable.
+pub fn bind(s: Seed, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    let wall_ms = host.wall_ms(s.clock)
+    let mono_ns = host.mono_ns(s.clock)
+    let Some(keys) = view s.keys else {
+        return Error(Unavailable)
+    }
+    if mono_ns >= s.good_until_mono_ns {
+        return Error(Unavailable)
+    }
+    let raw = strip_scheme(credential)
+    if list.len(raw) > s.issuer.max_token {
+        return Error(Rejected)
+    }
+    for b in raw {
+        if b >= 0x80u8 {
+            return Error(Rejected)
+        }
+    }
+    let Ok(token) = string.from_utf8(clone(raw)) else {
+        return Error(Rejected)
+    }
+    let now_secs = wall_ms / 1000u64
+    let rules = std.jwt.Rules(allow: clone(s.issuer.allow), now_secs: now_secs, leeway_secs: s.issuer.leeway_s, iss: Some(clone(s.issuer.iss)), aud: Some(clone(s.issuer.aud)), require_exp: true)
+    let jwt = match std.jwt.verify_jwt_public(token, rules, keys) {
+        Ok(take j) => take j,
+        Error(NoKey) => return if mono_ns < s.confirmed_until_mono_ns {
+            Error(Rejected)
+        } else {
+            Error(Unavailable)
+        },
+        Error(_) => return Error(Rejected),
+    }
+    if !typ_matches(s.issuer.typ, jwt.header.typ) {
+        return Error(Rejected)
+    }
+    let exp = match jwt.claims.exp {
+        Some(e) => e,
+        None => return Error(Rejected),
+    }
+    if exp > int.saturating_add(int.saturating_add(now_secs, s.issuer.leeway_s), s.issuer.max_life_s) {
+        return Error(Rejected)
+    }
+    let Some(sub) = view jwt.claims.sub else {
+        return Error(Rejected)
+    }
+    let size = string.byte_len(sub)
+    if size == 0u64 || size > runner.SUBJECT_MAX {
+        return Error(Rejected)
+    }
+    let Some(end_s) = int.checked_add(exp, s.issuer.leeway_s) else {
+        return Error(Rejected)
+    }
+    let Some(expires_at_ms) = int.checked_mul(end_s, 1000u64) else {
+        return Error(Rejected)
+    }
+    let subject: Bytes = clone(string.as_bytes(sub))
+    Ok(runner.BoundCaller(caller: store.Caller(issuer: s.issuer.issuer, subject: take subject), expires_at_ms: Some(expires_at_ms)))
+}

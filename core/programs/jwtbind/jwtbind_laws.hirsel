@@ -1,0 +1,428 @@
+// jwtbind's laws (RUNNER-SPEC §15.10). Every token below was signed by openssl (ES256, P-256
+// keys k1 and k2) and joined by Python, once; the expected answers come from the claims written
+// beside them and §15.3's arithmetic, never from std.jwt's output. Claims, all tokens:
+//   iss "https://issuer.example", aud "place-a", sub "user-42", exp E = 1767225600, kid k1,
+// except: T_LATER exp E + 3600; T_NO_SUB no sub; T_EMPTY_SUB sub ""; T_LONG_SUB sub "a" × 65;
+// T_MAX_SUB sub "a" × 64; T_OTHER_ISS iss "https://other.example"; T_OTHER_AUD aud "place-b";
+// T_TYP_JWT header typ "JWT"; T_TYP_AT header typ "at+jwt"; T_K2 kid k2, signed by k2;
+// T_HUGE_EXP exp 18446744073709551; T_BAD_SIG is T_BASE's header and payload with T_LATER's
+// signature.
+const T_BASE: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.5VNma27IApbMZow7GmJGQ8-mVFVviM9D3pLmWs6gXeMvot1bGbSfMyjsMDV3gezBvbWeWVg0xinafCCWgyMd5A"
+
+const T_LATER: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjkyMDB9.vIt1Z55aS5yLaf_DRojOWjak-DxDN-nokW7IAChbXmSpR8Ec3UrB4HluvvotifkZEOPfiFTh4qRHOZmWWkc_Sw"
+
+const T_NO_SUB: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsImV4cCI6MTc2NzIyNTYwMH0.gpeoHdIb2OjoKCd6QBZsOQojMDjhoSbc_XAzsJ2_7daU0wLyDbBarawOa4vSOJ5Le1Ixx1aZFHhAHyXDLt4kpg"
+
+const T_EMPTY_SUB: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6IiIsImV4cCI6MTc2NzIyNTYwMH0.obnnUyIDpw0NdbaXB-vdKMBSWKx3LjGzHrjSfLOIVp-O8yG6L3cF4FI0x3lbOnn2BITt4nVdrhFV9VZr4Qp_fg"
+
+const T_LONG_SUB: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiZXhwIjoxNzY3MjI1NjAwfQ.Asxqd1nt_7A-1ObEAZqd_qw01_XNzZNJ8iQdH73-Daf1Rn1xzcQpiD8i80tEkK8AXJWHPSvBc3TbxCI9OBGIXw"
+
+const T_MAX_SUB: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJleHAiOjE3NjcyMjU2MDB9.OGNqH3FF79WPUHrPC9E2AFE82Uh6ymkdrhZRbbue9-M7ePYiG4sZ-RaEg92vCe0YhkPrSGdrW_mhunaK23YOlw"
+
+const T_OTHER_ISS: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL290aGVyLmV4YW1wbGUiLCJhdWQiOiJwbGFjZS1hIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTYwMH0.kNY8PJIxdml3jFq2K-9pJMTazIKdqtFS4Wr8U4GIygUU8bfpNVphrekuh5I9-vFwV_v5mnVlqpLmCBdT7cIabw"
+
+const T_OTHER_AUD: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYiIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.IQXACkPmatsyFuF-RR92zuy5Hz1y6DWmRsLvzhpj784LL2ZSSD5_cLHfqqbHXDsn9YkIcv7ckrZk2D4Fe9z_2w"
+
+const T_TYP_JWT: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.AmTYWvPlja7sRPuzpxuyQJ0IuFyxi1txlSMjA6mvKxwTUY3M16qyuXI0spatYM67j-UwDPhyoMFje_bRUC7qmQ"
+
+const T_TYP_AT: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIiwidHlwIjoiYXQrand0In0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.96aD3iGQVhkyIlw_-3-YeeI1CWtsXLEanK9RjTfR24lybF51M1BYxrWKfz82ctu4Y68YWE-Ux1gMIcLenxTiSA"
+
+const T_K2: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsyIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.39VecP6OxvrEhbc1P2MhiII0rKuSaoLMo4ZQgSQX-E_79S_Yhx9BkohtmA11W48M_oOeLlKzOTSd_xQ19HXpIw"
+
+const T_HUGE_EXP: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE4NDQ2NzQ0MDczNzA5NTUxfQ.0VgZe2d0k2kvE2maFX-LPRs7qrrBJXNeXvzoAvgPp6lYq-Fe0wRvUPkw34SFpxbiFYYUnS50-oeeOXg6Qv39cg"
+
+const T_BAD_SIG: String = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoicGxhY2UtYSIsInN1YiI6InVzZXItNDIiLCJleHAiOjE3NjcyMjU2MDB9.vIt1Z55aS5yLaf_DRojOWjak-DxDN-nokW7IAChbXmSpR8Ec3UrB4HluvvotifkZEOPfiFTh4qRHOZmWWkc_Sw"
+
+const JWKS_K1: String = "{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"kid\":\"k1\",\"use\":\"sig\",\"alg\":\"ES256\",\"x\":\"zOO9e7dexw44uY9AfMbce9FITUyLYdQ22UHqBFsMjyM\",\"y\":\"XgsoOVujuIb-HePG1im_eMScgw_iAHvqgMrK8-ijvLQ\"}]}"
+
+const JWKS_K1_K2: String = "{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"kid\":\"k1\",\"use\":\"sig\",\"alg\":\"ES256\",\"x\":\"zOO9e7dexw44uY9AfMbce9FITUyLYdQ22UHqBFsMjyM\",\"y\":\"XgsoOVujuIb-HePG1im_eMScgw_iAHvqgMrK8-ijvLQ\"},{\"kty\":\"EC\",\"crv\":\"P-256\",\"kid\":\"k2\",\"use\":\"sig\",\"alg\":\"ES256\",\"x\":\"WHy-N1WmI_iUPuMNagWdnZe9t0oaE_8OVZ3xHWqBbk4\",\"y\":\"6i-_EnFhTRbwXlQ6d3NrJJZjwoxlxtauqDoGUy3nwcQ\"}]}"
+
+const JWKS_K2: String = "{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"kid\":\"k2\",\"use\":\"sig\",\"alg\":\"ES256\",\"x\":\"WHy-N1WmI_iUPuMNagWdnZe9t0oaE_8OVZ3xHWqBbk4\",\"y\":\"6i-_EnFhTRbwXlQ6d3NrJJZjwoxlxtauqDoGUy3nwcQ\"}]}"
+
+const X_K1: String = "zOO9e7dexw44uY9AfMbce9FITUyLYdQ22UHqBFsMjyM"
+
+const Y_K1: String = "XgsoOVujuIb-HePG1im_eMScgw_iAHvqgMrK8-ijvLQ"
+
+const X_K2: String = "WHy-N1WmI_iUPuMNagWdnZe9t0oaE_8OVZ3xHWqBbk4"
+
+const ISS: String = "https://issuer.example"
+
+const AUD: String = "place-a"
+
+// (E + 60) × 1000 and (E + 3660) × 1000: the expiries of T_BASE and T_LATER at leeway 60.
+const BASE_END_MS: u64 = 1767225660000u64
+
+const LATER_END_MS: u64 = 1767229260000u64
+
+// A second before E: every token above is unexpired and within max_life.
+const BEFORE_MS: u64 = 1767225599000u64
+
+const MS: u64 = 1000000u64
+
+fn place_issuer() -> Issuer {
+    issuer_defaults(string.from(ISS), string.from(AUD), 9u8, std.jwt.allow(Es256))
+}
+
+fn public_set(doc: String) -> std.jwt.PublicKeys {
+    result.unwrap(std.jwt.jwks_public(doc))
+}
+
+fn seed_of(take i: Issuer, c: Clock, doc: String, good: u64, confirmed: u64) -> Seed {
+    Seed(issuer: take i, clock: c, keys: Some(public_set(doc)), good_until_mono_ns: good, confirmed_until_mono_ns: confirmed)
+}
+
+fn with_prefix(prefix: String, token: String) -> Bytes {
+    let mut b: Bytes = clone(string.as_bytes(prefix))
+    list.append(mut b, string.as_bytes(token))
+    take b
+}
+
+fn try_bind(s: Seed, token: String) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    bind(s, with_prefix("", token))
+}
+
+fn binds_as(take r: Result[runner.BoundCaller, runner.BindRefusal], subject: Bytes, expires: u64) -> bool {
+    match take r {
+        Ok(b) => b.caller.issuer == 9u8 && b.caller.subject == subject && b.expires_at_ms == Some(expires),
+        _ => false,
+    }
+}
+
+fn rejected(take r: Result[runner.BoundCaller, runner.BindRefusal]) -> bool {
+    match take r {
+        Error(Rejected) => true,
+        _ => false,
+    }
+}
+
+fn unavailable(take r: Result[runner.BoundCaller, runner.BindRefusal]) -> bool {
+    match take r {
+        Error(Unavailable) => true,
+        _ => false,
+    }
+}
+
+fn check(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+fn a_times(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0x61u8)
+    take b
+}
+
+// L64 jwt_expiry_instant: with E = 1767225600 and L = 60, a bind at (E + L) × 1000 − 1 binds
+// until (E + L) × 1000 and a bind at (E + L) × 1000 is refused; max_life M = 3600 admits exp =
+// now_secs + L + M and refuses one second more; an expiry whose × 1000 overflows is refused.
+@test
+fn jwt_expiry_instant(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take h) = provide.clock(0u64, BASE_END_MS - 1u64)
+    let mut hand = take h
+    let s = seed_of(place_issuer(), c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(binds_as(try_bind(s, T_BASE), b"user-42", BASE_END_MS), "L64: a bind a millisecond before (E + L) × 1000 binds until it")
+    clock.set_wall(mut hand, BASE_END_MS)
+    check(rejected(try_bind(s, T_BASE)), "L64: a bind at (E + L) × 1000 is refused")
+    // now_secs = E − 3660, so exp = now_secs + L + M exactly.
+    clock.set_wall(mut hand, 1767221940000u64)
+    check(binds_as(try_bind(s, T_BASE), b"user-42", BASE_END_MS), "L64: exp = now + L + M binds")
+    clock.set_wall(mut hand, 1767221939000u64)
+    check(rejected(try_bind(s, T_BASE)), "L64: exp = now + L + M + 1 is refused")
+    // exp X = 18446744073709551 at now_secs X − 1: (X + 60) × 1000 overflows u64, X × 1000 does not.
+    clock.set_wall(mut hand, 18446744073709550000u64)
+    check(rejected(try_bind(s, T_HUGE_EXP)), "L64: an overflowing expiry is refused")
+    let mut no_leeway = place_issuer()
+    no_leeway.leeway_s = 0u64
+    let exact = seed_of(take no_leeway, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(binds_as(try_bind(exact, T_HUGE_EXP), b"user-42", 18446744073709551000u64), "L64: the same token at leeway 0 binds until X × 1000")
+    let _ = take hand
+    Ok(())
+}
+
+// L65 jwt_caller_map: the configured issuer byte and the verbatim sub, bare or after
+// "Bearer " in any case; sub absent, empty or over 64 bytes, another iss or aud, and a typ
+// other than the configured one are refused.
+@test
+fn jwt_caller_map(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take hand) = provide.clock(0u64, BEFORE_MS)
+    let s = seed_of(place_issuer(), c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(binds_as(try_bind(s, T_BASE), b"user-42", BASE_END_MS), "L65: the bare token binds Caller(9, user-42)")
+    check(binds_as(bind(s, with_prefix("Bearer ", T_BASE)), b"user-42", BASE_END_MS), "L65: Bearer binds the same Caller")
+    check(binds_as(bind(s, with_prefix("bearer ", T_BASE)), b"user-42", BASE_END_MS), "L65: bearer binds the same Caller")
+    check(binds_as(bind(s, with_prefix("BeArEr ", T_BASE)), b"user-42", BASE_END_MS), "L65: the scheme is case-insensitive")
+    check(rejected(bind(s, with_prefix("Bearer  ", T_BASE))), "L65: a second space is part of the token")
+    check(binds_as(try_bind(s, T_LATER), b"user-42", LATER_END_MS), "L65: a later token with the same sub binds the same Caller")
+    check(rejected(try_bind(s, T_NO_SUB)), "L65: no sub is refused")
+    check(rejected(try_bind(s, T_EMPTY_SUB)), "L65: an empty sub is refused")
+    check(rejected(try_bind(s, T_LONG_SUB)), "L65: a 65-byte sub is refused")
+    check(binds_as(try_bind(s, T_MAX_SUB), a_times(64u64), BASE_END_MS), "L65: a 64-byte sub binds verbatim")
+    check(rejected(try_bind(s, T_OTHER_ISS)), "L65: another iss is refused")
+    check(rejected(try_bind(s, T_OTHER_AUD)), "L65: another aud is refused")
+    let mut typed = place_issuer()
+    typed.typ = Some(string.from("at+jwt"))
+    let t = seed_of(take typed, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(rejected(try_bind(t, T_TYP_JWT)), "L65: typ JWT under at+jwt is refused")
+    check(rejected(try_bind(t, T_BASE)), "L65: no typ under at+jwt is refused")
+    check(binds_as(try_bind(t, T_TYP_AT), b"user-42", BASE_END_MS), "L65: typ at+jwt binds")
+    let mut full = place_issuer()
+    full.typ = Some(string.from("Application/AT+JWT"))
+    let f = seed_of(take full, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(binds_as(try_bind(f, T_TYP_AT), b"user-42", BASE_END_MS), "L65: typ compares as RFC 7515 media types, case-insensitively")
+    let mut small = place_issuer()
+    small.max_token = string.byte_len(T_BASE) - 1u64
+    let m = seed_of(take small, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
+    check(rejected(try_bind(m, T_BASE)), "L65: a token over max_token is refused")
+    // bind is the StaticFn wire_bind takes, over the verifier's own seed handle.
+    let v = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Ok(take v) => take v,
+        Error(_) => return Error(()),
+    }
+    let _wired: runner.Wire[(), Seed] = runner.wire_bind(seed(v), code.describe(bind), BIND_BYTES, BIND_STEPS)
+    let _ = take hand
+    Ok(())
+}
+
+// L67 jwt_unavailable, on the seed: no set, a stale set and a kid miss on an unconfirmed
+// set are Unavailable; a bad signature stays Rejected.
+@test
+fn jwt_unavailable_seed(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take h) = provide.clock(0u64, BEFORE_MS)
+    let mut hand = take h
+    let none = Seed(issuer: place_issuer(), clock: c, keys: None, good_until_mono_ns: 0xffffffffffffffffu64, confirmed_until_mono_ns: 0xffffffffffffffffu64)
+    check(unavailable(try_bind(none, T_BASE)), "L67: no verified set is Unavailable")
+    // Confirmed until 67 s, good until 120 s.
+    let s = seed_of(place_issuer(), c, JWKS_K1, 120000u64 * MS, 67000u64 * MS)
+    check(rejected(try_bind(s, T_K2)), "L67: a kid miss on a confirmed set is Rejected")
+    clock.advance_to(mut hand, 67000u64 * MS)
+    check(unavailable(try_bind(s, T_K2)), "L67: a kid miss on an unconfirmed set is Unavailable")
+    check(rejected(try_bind(s, T_BAD_SIG)), "L67: a bad signature on an unconfirmed set is Rejected")
+    check(binds_as(try_bind(s, T_BASE), b"user-42", BASE_END_MS), "L67: a known key still verifies until stale")
+    clock.advance_to(mut hand, 120000u64 * MS - 1u64)
+    check(binds_as(try_bind(s, T_BASE), b"user-42", BASE_END_MS), "L67: the set verifies until good_until")
+    clock.advance_to(mut hand, 120000u64 * MS)
+    check(unavailable(try_bind(s, T_BASE)), "L67: a stale set is Unavailable")
+    clock.set_wall(mut hand, BEFORE_MS - 120000u64)
+    check(unavailable(try_bind(s, T_BASE)), "L67: setting the wall back does not freshen a stale set")
+    Ok(())
+}
+
+// L69 jwt_config_refused (§15.2's list).
+@test
+fn jwt_config_refused(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take hand) = provide.clock(0u64, BEFORE_MS)
+    let mut anon = place_issuer()
+    anon.issuer = 1u8
+    check(match verifier(take anon, Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Error(IssuerNumber) => true,
+        _ => false
+    }, "L69: issuer 1 is refused")
+    let mut zero = place_issuer()
+    zero.issuer = 0u8
+    check(match verifier(take zero, Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Error(IssuerNumber) => true,
+        _ => false
+    }, "L69: issuer 0 is refused")
+    let mut rest: List[std.jwt.Alg] = list.new()
+    list.push(mut rest, Hs256)
+    let mut mac = place_issuer()
+    mac.allow = std.jwt.Allow(first: Es256, rest: take rest)
+    check(match verifier(take mac, Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Error(Hmac) => true,
+        _ => false
+    }, "L69: HS256 in allow is refused")
+    let mut wide = place_issuer()
+    wide.leeway_s = 301u64
+    check(match verifier(take wide, Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Error(Leeway) => true,
+        _ => false
+    }, "L69: leeway 301 is refused")
+    let plain = remote_defaults(string.from("http://issuer.example/jwks"))
+    check(match verifier(place_issuer(), Remote(take plain), n, System, c, r, tasks) {
+        Error(NotHttps) => true,
+        _ => false
+    }, "L69: an http: URL is refused")
+    // A 32-byte oct key (RFC 7518 §3.2's minimum).
+    let oct = "{\"keys\":[{\"kty\":\"oct\",\"k\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}"
+    check(match verifier(place_issuer(), Static(string.from(oct)), n, System, c, r, tasks) {
+        Error(Document(UnsupportedKey)) => true,
+        _ => false
+    }, "L69: a Static oct key is refused")
+    check(match verifier(place_issuer(), Static(string.from("{\"keys\":[]}")), n, System, c, r, tasks) {
+        Error(NoUsableKey) => true,
+        _ => false
+    }, "L69: a Static set with no key is refused")
+    let ok = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Ok(take v) => binds_as(try_bind(latest.read(seed(v)), T_BASE), b"user-42", BASE_END_MS),
+        Error(_) => false,
+    }
+    check(ok, "L69: a valid Static configuration binds")
+    let _ = take hand
+    Ok(())
+}
+
+// A JWKS fixture server: one response per accepted connection, in order, each a 200 with
+// the next document; it reports every request it reads on `seen` and ends after the last.
+type KeyServer: send {
+    listener: Listener,
+    documents: List[String],
+    seen: Sender[u64]
+}
+
+fn read_head(mut input: ReadHalf) -> bool waits {
+    let mut wire: Bytes = list.with_capacity(4096u64)
+    loop {
+        let n = list.len(wire)
+        if n >= 4u64 && list.slice(wire, n - 4u64, n) == b"\r\n\r\n" {
+            return true
+        }
+        if n == 4096u64 {
+            return false
+        }
+        match host.recv_bounded(mut input, mut wire, 1u64, Never) {
+            Ok(0u64) => return false,
+            Ok(_) => (),
+            Error(_) => return false,
+        }
+    }
+}
+
+fn serve_keys(take job: KeyServer) -> u64 waits {
+    let KeyServer(listener: take site, documents: take documents, seen: take seen) = take job
+    let mut accepting = take site
+    let mut served: u64 = 0u64
+    for doc in documents {
+        let Ok((sock, _)) = host.accept(mut accepting, Never) else {
+            return served
+        }
+        let (rx, tx) = net.split(take sock)
+        let mut input = take rx
+        let mut output = take tx
+        if !read_head(mut input) {
+            return served
+        }
+        served += 1u64
+        let mut head = string.from("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ")
+        string.push_u64(mut head, string.byte_len(doc))
+        string.push(mut head, "\r\n\r\n")
+        string.push(mut head, doc)
+        let reply = string.into_bytes(take head)
+        let mut at: u64 = 0u64
+        while at < list.len(reply) {
+            match host.send_pair(mut output, list.slice(reply, at, list.len(reply)), b"", Never) {
+                Ok(0u64) => return served,
+                Ok(k) => {
+                    at += k
+                },
+                Error(_) => return served,
+            }
+        }
+        let _ = channel.send(seen, served)
+    }
+    served
+}
+
+fn key_server(n: Net, tasks: Tasks, take documents: List[String]) -> (String, Task[u64], Receiver[u64]) waits {
+    let (site, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0u16), 4u16))
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(8u64)
+    let server = task.spawn(tasks, bytes 1048576u64, KeyServer(listener: take site, documents: take documents, seen: take to), serve_keys)
+    let mut url = string.from("http://127.0.0.1:")
+    string.push_u64(mut url, int.widen(address.port))
+    string.push(mut url, "/jwks")
+    (take url, take server, take from)
+}
+
+// every 60 s, so confirmed for 60 + 6 + 1 = 67 s and stale after 120 s.
+fn loopback_source(take url: String) -> RemoteSource {
+    RemoteSource(url: take url, every_ms: 60000u64, stale_ms: 120000u64, fetch_ms: 1000u64)
+}
+
+fn current(v: Verifier) -> Arc[Seed] {
+    latest.read(seed(v))
+}
+
+fn pending(seen: Receiver[u64]) -> bool {
+    match channel.try_receive(seen) {
+        Ok(_) => true,
+        _ => false,
+    }
+}
+
+// L66 jwt_rotation: set {k1}; a k2 token is Rejected inside the confirmed window and starts no
+// fetch; after the next fetch returns {k1, k2} it binds; after one returns {k2}, a k1 token is
+// Rejected.
+@test
+fn jwt_rotation(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take h) = provide.clock(0u64, BEFORE_MS)
+    let mut hand = take h
+    let mut documents: List[String] = list.new()
+    list.push(mut documents, string.from(JWKS_K1))
+    list.push(mut documents, string.from(JWKS_K1_K2))
+    list.push(mut documents, string.from(JWKS_K2))
+    let (url, take server, seen) = key_server(n, tasks, take documents)
+    let Ok((v, Some(watch))) = start_remote(place_issuer(), loopback_source(take url), n, System, c, r, tasks, true) else {
+        fail("L66: the refresher did not start")
+    }
+    check(result.unwrap(channel.receive(seen)) == 1u64, "L66: the first fetch is one request")
+    check(rejected(try_bind(current(v), T_K2)), "L66: a k2 token is Rejected while {k1} is confirmed")
+    check(binds_as(try_bind(current(v), T_BASE), b"user-42", BASE_END_MS), "L66: a k1 token binds on {k1}")
+    check(!pending(seen), "L66: a kid miss starts no fetch")
+    // The next fetch is due within every_ms + every_ms / 10.
+    clock.advance_to(mut hand, 66000u64 * MS)
+    check(result.unwrap(channel.receive(watch)), "L66: the second fetch succeeds")
+    check(binds_as(try_bind(current(v), T_K2), b"user-42", BASE_END_MS), "L66: a k2 token binds after {k1, k2} is published")
+    clock.advance_to(mut hand, 132000u64 * MS)
+    check(result.unwrap(channel.receive(watch)), "L66: the third fetch succeeds")
+    check(rejected(try_bind(current(v), T_BASE)), "L66: a k1 token is Rejected after {k2} replaces the set")
+    check(binds_as(try_bind(current(v), T_K2), b"user-42", BASE_END_MS), "L66: a k2 token binds on {k2}")
+    let _ = take v
+    check(match task.join(take server) {
+        Ok(k) => k == 3u64,
+        _ => false
+    }, "L66: the server saw exactly three fetches")
+    Ok(())
+}
+
+// L67 jwt_unavailable, through the refresher: with the key server down from the start the
+// place starts and binds answer Unavailable; after one good fetch and then the server gone,
+// a kid miss past the confirmed window is Unavailable, a bad signature Rejected, and from
+// stale_ms on every bind is Unavailable, though the wall is set back.
+@test
+fn jwt_unavailable_remote(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take h) = provide.clock(0u64, BEFORE_MS)
+    let mut hand = take h
+    let (closed, gone) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0u16), 1u16))
+    let mut down = string.from("http://127.0.0.1:")
+    string.push_u64(mut down, int.widen(gone.port))
+    string.push(mut down, "/jwks")
+    let _ = take closed
+    let Ok((cold, _)) = start_remote(place_issuer(), loopback_source(take down), n, System, c, r, tasks, false) else {
+        fail("L67: a key server down at start stopped the verifier")
+    }
+    check(unavailable(try_bind(current(cold), T_BASE)), "L67: with no set yet, a bind is Unavailable")
+    let _ = take cold
+    let mut documents: List[String] = list.new()
+    list.push(mut documents, string.from(JWKS_K1))
+    let (url, take server, seen) = key_server(n, tasks, take documents)
+    let Ok((v, Some(watch))) = start_remote(place_issuer(), loopback_source(take url), n, System, c, r, tasks, true) else {
+        fail("L67: the refresher did not start")
+    }
+    check(result.unwrap(channel.receive(seen)) == 1u64, "L67: the first fetch is one request")
+    check(match task.join(take server) {
+        Ok(k) => k == 1u64,
+        _ => false
+    }, "L67: the key server ends")
+    clock.advance_to(mut hand, 100000u64 * MS)
+    check(!result.unwrap(channel.receive(watch)), "L67: a fetch from the ended server fails")
+    check(unavailable(try_bind(current(v), T_K2)), "L67: a kid miss past the confirmed window is Unavailable")
+    check(rejected(try_bind(current(v), T_BAD_SIG)), "L67: a bad signature past the confirmed window is Rejected")
+    check(binds_as(try_bind(current(v), T_BASE), b"user-42", BASE_END_MS), "L67: the last good set verifies until stale")
+    clock.advance_to(mut hand, 120000u64 * MS)
+    check(unavailable(try_bind(current(v), T_BASE)), "L67: a stale set is Unavailable")
+    clock.set_wall(mut hand, BEFORE_MS - 120000u64)
+    check(unavailable(try_bind(current(v), T_BASE)), "L67: setting the wall back does not freshen a stale set")
+    let _ = take v
+    let _ = take watch
+    Ok(())
+}

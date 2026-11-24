@@ -1,0 +1,20 @@
+[package]
+name = "jwtbind"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
+
+[sources]
+"jwtbind.hirsel" = "jwtbind"
+
+[tests]
+limit = 67108864
+grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+dirs = ["."]
+
+[tests.sources]
+"jwtbind_laws.hirsel" = "jwtbind"

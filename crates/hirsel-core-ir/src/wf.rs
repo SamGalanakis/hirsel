@@ -10,6 +10,7 @@
 use crate::*;
 
 mod frame;
+mod own;
 mod places;
 
 type R = Result<(), String>;
@@ -559,6 +560,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     available(b)?;
     frame::obligations(m, b)?;
     written(m, b)?;
+    own::check(m, sig, b)?;
     ended(b)
 }
 
@@ -1795,7 +1797,7 @@ fn written(m: &Module, b: &Body) -> R {
                     }
                     _ => {
                         for p in &touches[bi][k].writes {
-                            if p.1.is_empty() && guards.get(p.0).is_some() && is_flag_slot(b, p.0) {
+                            if p.1.is_empty() && guards.get(p.0).is_some() && own::is_flag_slot(b, p.0) {
                                 meet(p.0, vec![0; words]);
                             }
                         }
@@ -1856,14 +1858,6 @@ fn written(m: &Module, b: &Body) -> R {
         }
     }
     Ok(())
-}
-
-/// Whether slot `s` is a `bool` value place (a drop flag's shape).
-fn is_flag_slot(b: &Body, s: usize) -> bool {
-    b.slots.get(s)
-        == Some(&PlaceTy::Value(Ty::Scalar(
-            hirsel_core_layout::Scalar::Bool,
-        )))
 }
 
 /// The blocks `bi`'s terminator continues to.

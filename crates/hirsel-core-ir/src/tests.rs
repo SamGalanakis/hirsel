@@ -2,10 +2,10 @@
 //! line in the sample file, not output of this crate.
 
 mod frame;
+mod own;
 
 use crate::text::{parse, print};
 use crate::*;
-
 use crate::eval;
 
 const SAMPLES: &[(&str, &str)] = &[

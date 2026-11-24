@@ -1,6 +1,7 @@
 /// One fault per connection, selected before any request octets arrive.
 /// Conflict interrupts an If-Match write. DeleteConflict interposes a delete on If-None-Match.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict
+/// CompleteExpired reports an embedded error and ends the upload without publishing it.
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CompleteExpired | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict
 
 /// Kills the writer's connections at a wire cut. Requests to `address` are
 /// numbered from 1. The first `after` are served. Request `after + 1` is
@@ -36,6 +37,7 @@ pub type Report: send {
     objects: Map[String, Object],
     // The keys of multipart uploads neither completed nor aborted.
     pending: List[String],
+    multipart_uploads: u64,
     writes: u64,
     attempts: u64,
     withdrawn: u64
@@ -735,7 +737,9 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
             put_part(mut current, n, take body)
         }
     } else if req.method == "POST" {
-        if let CompleteError = fault {
+        if let CompleteExpired = fault {
+            return error(200, "InternalError")
+        } else if let CompleteError = fault {
             error(200, "InternalError")
         } else if let MalformedComplete = fault {
             reply(200, "<Error/>")
@@ -1200,10 +1204,10 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
             }
         }
     }
-    let Bucket(objects: take objects, uploads: take uploads, writes, ..) = take bucket
+    let Bucket(objects: take objects, uploads: take uploads, next_upload, writes, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
     for id in sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(objects: take objects, pending: take pending, writes: writes, attempts: next - 1, withdrawn: withdrawn)
+    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: next - 1, withdrawn: withdrawn)
 }

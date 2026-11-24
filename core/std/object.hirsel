@@ -426,6 +426,7 @@ type Job: send {
     hi: u64,
     deadline: u64,
     retry_uncertain: bool,
+    resolve_complete: bool,
     entries: List[Entry]
 }
 
@@ -1985,7 +1986,9 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                             continue
                         },
                         Resolve => {
-                            if op == PutIf {
+                            if !job.resolve_complete {
+                                return Error(Uncertain(take last))
+                            } else if op == PutIf {
                                 if !job.retry_uncertain {
                                     return Error(Uncertain(take last))
                                 }
@@ -2259,7 +2262,7 @@ pub fn endpoint_secure(c: Client) -> bool {
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
-    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, retry_uncertain: false, entries: list.new())
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, retry_uncertain: false, resolve_complete: true, entries: list.new())
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
@@ -2718,6 +2721,18 @@ fn xml_encode(mut out: String, raw: Bytes) {
 }
 
 pub fn complete(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[Created, Error] waits {
+    let mut owned = take u
+    let path = replace(mut owned.path, string.new())
+    complete_upload(mut c, owned, take path, true, deadline_ns)
+}
+
+/// Complete an upload with caller-owned resolution of uncertain replies.
+/// The handle remains available to abort if the caller starts a new upload.
+pub fn complete_unresolved(mut c: Client, u: Upload, deadline_ns: u64) -> Result[Created, Error] waits {
+    complete_upload(mut c, u, clone(u.path), false, deadline_ns)
+}
+
+fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, deadline_ns: u64) -> Result[Created, Error] waits {
     if list.len(u.parts) == 0 {
         return Error(Precondition)
     }
@@ -2739,10 +2754,10 @@ pub fn complete(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[Creat
         Complete
     }
     let query = upload_query(u, 0)
-    let Upload(path: take path, put_id, ..) = take u
     let mut request = new_job(operation, take path, string.into_bytes(take xml), deadline_ns)
     request.query = take query
-    request.id = Some(put_id)
+    request.id = Some(u.put_id)
+    request.resolve_complete = resolve
     let Reply(result: take result, ..) = run(mut c, take request)
     match as_created(take result) {
         Ok(Created(take m)) => {

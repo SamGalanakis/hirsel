@@ -55,6 +55,7 @@ the operation uses a no-clobber precondition.
 | `upload(key, mode, deadline_ns)` | Begins a multipart upload and assigns the put-id. |
 | `parts(mut upload, take bodies, deadline_ns)` | Uploads a batch concurrently, numbers parts in input order across calls, and returns the buffers. If a batch fails, its part numbers can be reused by retrying it. |
 | `complete(take upload, deadline_ns)` | Publishes the multipart object. In `NoClobber` mode it sends `If-None-Match: *`. |
+| `complete_unresolved(upload, deadline_ns)` | Sends completion and returns any uncertain outcome to the caller. The caller retains the upload handle. |
 | `abort(take upload, deadline_ns)` | Stops a multipart upload. An absent upload is success. |
 | `pending_uploads(prefix, mut into, deadline_ns)` | Appends handles for up to 16 multipart uploads still pending under the prefix and returns true when more remain. Abort them and list again. |
 | `pending_uploads_page(prefix, after, mut into, deadline_ns)` | Lists pending upload handles with their relative object keys. Pass the returned cursor to continue. `None` marks the final page. |

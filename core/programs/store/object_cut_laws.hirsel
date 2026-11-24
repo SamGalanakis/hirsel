@@ -77,6 +77,39 @@ fn bucket_test_m2_checkpoint_advance(c: Clock, r: Random, tasks: Tasks) -> Resul
     outcome
 }
 
+fn upload_pack_with_expired_completion(tasks: Tasks, sim: BucketSim, name: String, raw: Bytes) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut scratch: Bytes = list.new()
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    history_upload_pack(mut client, name, raw, mut scratch, deadline)
+}
+
+// L54m. Connections serve one request each. The third is completion of the
+// first upload. Its HTTP 200 error spends the ID without publishing the key.
+@test
+fn bucket_test_m2_multipart_restart(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(2)
+    list.push(mut faults, Clean)
+    list.push(mut faults, CompleteExpired)
+    let mut draws: List[u64] = list.with_capacity(16)
+    list.fill(mut draws, 16, 0u64)
+    draws[4u64] = 0x8000000000000000u64
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take draws)
+    let plan = std.sim.world.plan_from(std.sim.world.Script(tail_seed: 54, streams: take streams), 0)
+    let sim = bucket_law_sim_plan(tasks, c, 54, None, take faults, take plan)
+    let name = "p-00000000000000000007-00000000000000000001-0123456789abcdef"
+    let raw = string.into_bytes(string.from("these are the complete pack bytes"))
+    let sent = upload_pack_with_expired_completion(tasks, sim, name, raw)
+    let observed = bucket_law_finish(take sim)
+    sent?
+    let Some(saved) = map.get(observed.objects, name) else { fail("completed pack is missing") }
+    if saved.data != raw || observed.writes != 1 || observed.multipart_uploads != 2 || list.len(observed.pending) != 0 {
+        fail("multipart restart did not publish only the original bytes under a fresh upload")
+    }
+    Ok(())
+}
+
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take client, 0)

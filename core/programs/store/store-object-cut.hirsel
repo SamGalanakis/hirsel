@@ -1,5 +1,9 @@
 const HISTORY_LOCATE_ROWS: u64 = 32768
 
+const HISTORY_PART_BYTES: u64 = 8388608
+
+const HISTORY_UPLOAD_ATTEMPTS: u64 = 5
+
 type HistoryLocateRoot {
     depth: u8,
     rows: List[HistoryRef]
@@ -130,25 +134,68 @@ fn history_copy_header(mut raw: Bytes, ctx: DiskContext, epoch: u64) -> Result[(
     Ok(())
 }
 
-fn history_upload_pack(mut client: std.object.Client, key: String, mut raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[(), Error] waits {
-    let (take created, take packet) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
-    raw = take packet
-    match take created {
-        Ok(Applied(_)) => return Ok(()),
-        Ok(Mismatch) => (),
-        Error(take e) => return Error(Remote(take e)),
-    }
-    let item = HistoryRef(seq: 0, epoch: 0, len: list.len(raw), digest: 0)
+fn history_pack_parts(mut client: std.object.Client, mut upload: std.object.Upload, raw: Bytes, mut bodies: List[Bytes], deadline: u64) -> Result[(), Error] waits {
     let mut at = 0u64
-    while at < item.len {
-        let end = at + order.min(item.len - at, 65536)
-        history_range(mut client, key, item, at, end, mut scratch, deadline)?
-        if scratch != list.slice(raw, at, end) {
-            return Error(disk_fault(key, at, Malformed))
-        }
+    while at < list.len(raw) {
+        let end = at + order.min(list.len(raw) - at, HISTORY_PART_BYTES)
+        list.clear(mut bodies[0u64])
+        list.append(mut bodies[0u64], list.slice(raw, at, end))
+        let (take sent, take returned) = std.object.parts(mut client, mut upload, replace(mut bodies, list.new()), deadline)
+        bodies = take returned
+        if let Error(take problem) = sent { return Error(Remote(take problem)) }
         at = end
     }
     Ok(())
+}
+
+fn history_confirm_pack(mut client: std.object.Client, key: String, raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[bool, Error] waits {
+    list.clear(mut scratch)
+    capacity(list.try_reserve(mut scratch, list.len(raw)))?
+    let (take fetched, take bytes_back) = std.object.fetch(mut client, key, replace(mut scratch, list.new()), deadline)
+    scratch = take bytes_back
+    match take fetched {
+        Ok(meta) if meta.size == list.len(raw) && scratch == raw => Ok(true),
+        Ok(_) => Error(disk_fault(key, 0, Malformed)),
+        Error(TooLarge) => Error(disk_fault(key, 0, Malformed)),
+        Error(NotFound) => Ok(false),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let mut bodies = disk_allocation(scoped fn() -> Result[List[Bytes], Error] {
+        let mut part_batch: List[Bytes] = list.with_capacity(1)
+        list.push(mut part_batch, list.with_capacity(order.min(list.len(raw), HISTORY_PART_BYTES)))
+        Ok(take part_batch)
+    })?
+    let mut last_upload_error: std.object.Error = Retriable(Deadline)
+    for _ in 0u64 .. HISTORY_UPLOAD_ATTEMPTS {
+        if std.object.deadline_after_ms(client, 0) >= deadline { break }
+        let mut upload = match std.object.upload(mut client, key, NoClobber, deadline) {
+            Ok(take active) => take active,
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+        if let Error(take problem) = history_pack_parts(mut client, mut upload, raw, mut bodies, deadline) {
+            let _ = std.object.abort(mut client, take upload, deadline)
+            return Error(take problem)
+        }
+        let (restart, completed): (bool, std.object.Error) = match std.object.complete_unresolved(mut client, upload, deadline) {
+            Ok(Created(_)) => return Ok(()),
+            Ok(Exists) => (false, NotFound),
+            Error(take problem) => (true, take problem),
+        }
+        let found = match completed {
+            Uncertain(_) => history_confirm_pack(mut client, key, raw, mut scratch, deadline),
+            NotFound => history_confirm_pack(mut client, key, raw, mut scratch, deadline),
+            Fatal(Status(409, code)) if code == string.as_bytes("ConditionalRequestConflict") => history_confirm_pack(mut client, key, raw, mut scratch, deadline),
+            _ => Error(Remote(clone(completed))),
+        }
+        let _ = std.object.abort(mut client, take upload, deadline)
+        if found? { return Ok(()) }
+        if !restart { return Error(Remote(take completed)) }
+        last_upload_error = take completed
+    }
+    Error(Remote(take last_upload_error))
 }
 
 fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, pack_layout: PackRun, mut known: PageLocations, mut pack_objects: Map[u64, HistoryRef], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
@@ -157,7 +204,7 @@ fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64
         history_copy_header(mut buffers.out, DiskContext(store: id, role: 3, seq: planned.seq), epoch)?
         let item = history_new_ref(planned.seq, epoch, buffers.out)
         history_fill_key(mut workspace.key, "p-", item)
-        history_upload_pack(mut client, workspace.key, mut buffers.out, mut workspace.compare, deadline)?
+        history_upload_pack(mut client, workspace.key, buffers.out, mut workspace.compare, deadline)?
         map.insert(mut pack_objects, planned.seq, item)
     }
     Ok(())

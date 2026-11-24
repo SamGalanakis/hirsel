@@ -1,6 +1,7 @@
 //! Resolve unit-local tables before copying bodies, as a native linker does.
 use hirsel_core_ir::*;
 use rustc_hash::FxHashMap as HashMap;
+use std::borrow::Cow;
 
 /// One reached instance's emission unit. Generated bodies belong to this unit too.
 #[derive(Clone, Copy)]
@@ -131,6 +132,20 @@ impl Remap {
 /// symbol; conflicting definitions of one symbol are a link error. Body-local
 /// values, blocks, slots, addresses and pool ranges retain their numbering.
 pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), String> {
+    join_units(
+        units
+            .iter()
+            .map(|unit| (unit.identity, Cow::Borrowed(unit.module), unit.function))
+            .collect(),
+        entry,
+    )
+}
+
+/// Join units whose owned bodies can be remapped in place.
+pub fn join_units(
+    units: Vec<(&Identity, Cow<'_, Module>, FuncId)>,
+    entry: &Identity,
+) -> Result<(Module, FuncId), String> {
     let mut out = Module::default();
     let mut types = HashMap::default();
     let mut signatures = HashMap::default();
@@ -141,8 +156,7 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
     let mut items = HashMap::default();
     let mut remaps = Vec::with_capacity(units.len());
     let mut root = None;
-    for unit in units {
-        let module = unit.module;
+    for (identity, module, root_function) in &units {
         let mut map = Remap::default();
         for (i, shape) in module.types.iter().enumerate() {
             let (row, fresh) = intern_shape(
@@ -184,8 +198,8 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
         for (i, function) in module.functions.iter().enumerate() {
             let f = FuncId(i as u32);
             let name = link_symbol(module, f, || {
-                if f == unit.function {
-                    unit.identity.symbol()
+                if f == *root_function {
+                    identity.symbol()
                 } else {
                     module.identity(function.instance).symbol()
                 }
@@ -242,17 +256,17 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
             });
             map.items.push(id);
         }
-        if unit.identity == entry {
-            root = Some(map.functions[unit.function.index()]);
+        if *identity == entry {
+            root = Some(map.functions[root_function.index()]);
         }
         remaps.push(map);
     }
-    for (unit, map) in units.iter().zip(remaps) {
+    for ((_, mut module, _), map) in units.into_iter().zip(remaps) {
         for &i in &map.fresh_types {
-            if !unit.module.types[i].numbered() {
+            if !module.types[i].numbered() {
                 continue;
             }
-            let mut shape = Shape::clone(&unit.module.types[i]);
+            let mut shape = Shape::clone(&module.types[i]);
             shape.map_refs(&mut |r| TypeRef(map.types[r.index()].0));
             for hook in [
                 &mut shape.finalizer,
@@ -264,16 +278,20 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
             }
             out.types[map.types[i].index()] = Row::new(shape);
         }
-        for (i, function) in unit.module.functions.iter().enumerate() {
-            let Some(body) = &function.body else { continue };
-            let mut body = body.clone();
+        for i in 0..module.functions.len() {
+            let body = match &mut module {
+                Cow::Borrowed(module) => module.functions[i].body.clone(),
+                Cow::Owned(module) => module.functions[i].body.take(),
+            };
+            let Some(mut body) = body else { continue };
+            let function = &module.functions[i];
             map.body(&mut body);
             let row = &mut out.functions[map.functions[i].index()];
             if let Some(prior) = &row.body {
                 if *prior != body || row.signature != map.signatures[function.signature.index()] {
                     return Err(format!(
                         "conflicting code identity for {}",
-                        unit.module.render_instance(function.instance)
+                        module.render_instance(function.instance)
                     ));
                 }
             } else {

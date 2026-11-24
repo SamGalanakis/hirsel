@@ -270,6 +270,19 @@ impl InstanceBody {
         }
     }
 
+    pub(crate) fn prepare_assembly(
+        &self,
+        sources: &hirsel_core_ir::source::SourcePositions<'_>,
+    ) -> io::Result<(hirsel_core_ir::normal::Annex, Module)> {
+        use hirsel_core_ir::normal;
+        match self.module.as_deref() {
+            Some(MaterializedModule::Recipe { sites, .. }) => {
+                Ok((sites.annex(sources), normal::assembly_module(&self.code)))
+            }
+            _ => Ok(normal::prepare_retained_assembly(self.ir()?, sources)),
+        }
+    }
+
     /// A published body's module is hashed in its record; a materialized
     /// one is hashed here, by the same rule, through the caller's `scratch`.
     pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {

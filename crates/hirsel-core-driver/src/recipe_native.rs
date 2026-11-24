@@ -129,6 +129,13 @@ pub(super) struct Memos {
 }
 
 impl Unit {
+    pub(super) fn into_module(self) -> Module {
+        let UnitModule::Decoded(module) = self.module else {
+            unreachable!("release assembly prepares its modules together");
+        };
+        *module
+    }
+
     pub(super) fn module(&self) -> &Module {
         let UnitModule::Decoded(module) = &self.module else {
             unreachable!("this assembly prepares its modules together");
@@ -259,6 +266,9 @@ impl CheckProduct {
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
         let index = Memos::open(options, &entry, store)?;
+        // Keep the canonical bytes through publication. Release std selection
+        // needs the decoded program, so assemble that view after publication.
+        let defer_modules = matches!(options.backend, Backend::Cranelift) || options.optimize;
         let Released {
             units,
             memos,
@@ -270,7 +280,7 @@ impl CheckProduct {
             store,
             Some(names),
             index.as_ref(),
-            matches!(options.backend, Backend::Cranelift),
+            defer_modules,
         )?;
         // The bodies in identity order before their sort, as one map of every
         // unit gives them.
@@ -369,7 +379,7 @@ impl CheckProduct {
                     UnitModule::Encoded(Arc::clone(&instance.code)),
                 )
             } else {
-                let (annex, module) = normal::prepare_retained_assembly(instance.ir()?, &sources);
+                let (annex, module) = instance.prepare_assembly(&sources)?;
                 (annex, UnitModule::Decoded(Box::new(module)))
             };
             if identity == entry {
@@ -381,7 +391,7 @@ impl CheckProduct {
                 .filter_map(|identity| builtin_semantics_number(&identity.definition))
                 .collect();
             let code = BodyRef {
-                body: store.put_addressed(ObjectKind::Body, instance.body, &instance.code)?,
+                body: store.put_shared(ObjectKind::Body, instance.body, &instance.code)?,
                 annex: store.put(ObjectKind::Annex, &annex.encode())?,
             };
             units.insert(
@@ -1530,7 +1540,7 @@ impl Publication {
     /// build's prebuilt objects, are read first from `library` (a library
     /// image's store), else from `product`'s image.
     pub(crate) fn assemble_with(
-        self,
+        mut self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
         product: Option<&CheckProduct>,
@@ -1549,13 +1559,18 @@ impl Publication {
     /// publication under `options` takes ([`std_side`]), prebuilt in
     /// `library` (a library image's store) or not; None for any other.
     pub(crate) fn std_side(
-        &self,
+        &mut self,
         options: &NativeOptions,
         library: Option<&Path>,
     ) -> Result<Option<StdSide>, NativeStop> {
         let (options, _) = self.launch(options)?;
         if !matches!(options.backend, Backend::Llvm) || !options.optimize {
             return Ok(None);
+        }
+        for unit in self.units.values_mut() {
+            if let UnitModule::Encoded(bytes) = &unit.module {
+                unit.module = UnitModule::Decoded(Box::new(normal::assembly_module(bytes)));
+            }
         }
         std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
     }
@@ -1671,7 +1686,8 @@ impl Publication {
         let mut release_debug_sites = Vec::new();
         let mut remarks = Vec::new();
         let (mut objects, closed_image, launch_digest_unused) = if let Some(std) = std {
-            let emitted = release_objects(
+            drop(bound);
+            let emitted = release::release_objects(
                 self.units,
                 entry,
                 std,
@@ -1838,56 +1854,6 @@ impl Publication {
             )),
         }
     }
-}
-
-/// The release objects of `units`, which hold `entry`'s closure apart from
-/// the exports of `std`, over `std`: the program's image parts and the std's
-/// objects. `closed_executable`: the hirsel launcher alone enters the image.
-pub(super) fn release_objects(
-    units: BTreeMap<Identity, Unit>,
-    entry: &Identity,
-    std: StdSide,
-    options: &NativeOptions,
-    runtime: ContentHash,
-    store: &Store,
-    closed_executable: bool,
-) -> Result<Emitted, NativeStop> {
-    let reached = units.keys().cloned().collect::<Vec<_>>();
-    let mut modules = units
-        .values()
-        .map(|unit| Cow::Borrowed(unit.module()))
-        .collect();
-    let body_keys = crate::callable_variants::prepare_inputs(
-        &mut modules,
-        &reached,
-        crate::callable_variants::Roots::Entry(&entry.definition),
-        options.instance_limit,
-        |identity| {
-            let owner = units[identity].owner()?;
-            Ok((
-                FuncId(0),
-                owner,
-                !identity.closures.is_empty() || !identity.dictionaries.is_empty(),
-            ))
-        },
-    )?;
-    let joined = release::join_modules(entry, &reached, &modules, |_| FuncId(0))?;
-    drop(modules);
-    drop(units);
-    let mut emitted = release::emit_release_image(
-        entry,
-        &reached,
-        &body_keys,
-        joined,
-        options,
-        runtime,
-        store,
-        closed_executable,
-        (&std.summaries, std.key, &std.lent),
-    )?;
-    let linked = std.objects(&emitted.objects, options)?;
-    emitted.objects.extend(linked);
-    Ok(emitted)
 }
 
 pub(crate) fn parse_root(text: &str) -> Result<ContentHash, &'static str> {

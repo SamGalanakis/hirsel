@@ -11,6 +11,7 @@
 //! held, and its object is cut per part. An unchanged definition is generated
 //! once, whichever program and build reached it.
 use super::*;
+use super::{recipe_build::Unit, std_release::StdSide};
 use hirsel_core_ir::{Callee, FuncId, RtOp};
 use serde::{Deserialize, Serialize};
 
@@ -210,7 +211,7 @@ pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
 pub(super) fn join_modules(
     entry: &Identity,
     reached: &[Identity],
-    modules: &[Cow<'_, Module>],
+    modules: Vec<Cow<'_, Module>>,
     root: impl Fn(&Identity) -> FuncId,
 ) -> Result<(Module, FuncId), NativeStop> {
     let roots = modules
@@ -230,17 +231,11 @@ pub(super) fn join_modules(
         })
         .collect::<Vec<_>>();
     let units = modules
-        .iter()
+        .into_iter()
         .zip(&roots)
-        .map(
-            |(module, (identity, function))| hirsel_core_materialize::Unit {
-                identity,
-                module,
-                function: *function,
-            },
-        )
+        .map(|(module, (identity, function))| (identity, module, *function))
         .collect::<Vec<_>>();
-    hirsel_core_materialize::join(&units, entry).map_err(|message| NativeStop::Emit {
+    hirsel_core_materialize::join_units(units, entry).map_err(|message| NativeStop::Emit {
         definition: entry.definition.clone(),
         message,
     })
@@ -528,6 +523,57 @@ pub(super) fn emit_release_image(
         release_debug_sites: debug_sites,
         remarks,
     })
+}
+
+/// The release objects of `units`, which hold `entry`'s closure apart from
+/// the exports of `std`, over `std`: the program's image parts and the std's
+/// objects. `closed_executable`: the hirsel launcher alone enters the image.
+pub(super) fn release_objects(
+    units: BTreeMap<Identity, Unit>,
+    entry: &Identity,
+    std: StdSide,
+    options: &NativeOptions,
+    runtime: ContentHash,
+    store: &Store,
+    closed_executable: bool,
+) -> Result<Emitted, NativeStop> {
+    let reached = units.keys().cloned().collect::<Vec<_>>();
+    let mut modules = Vec::with_capacity(units.len());
+    let mut owners = Vec::with_capacity(units.len());
+    for unit in units.into_values() {
+        owners.push(unit.owner()?);
+        modules.push(Cow::Owned(unit.into_module()));
+    }
+    let mut owners = owners.into_iter();
+    let body_keys = crate::callable_variants::prepare_inputs(
+        &mut modules,
+        &reached,
+        crate::callable_variants::Roots::Entry(&entry.definition),
+        options.instance_limit,
+        |identity| {
+            let owner = owners.next().expect("an owner for each reached module");
+            Ok((
+                FuncId(0),
+                owner,
+                !identity.closures.is_empty() || !identity.dictionaries.is_empty(),
+            ))
+        },
+    )?;
+    let joined = join_modules(entry, &reached, modules, |_| FuncId(0))?;
+    let mut emitted = emit_release_image(
+        entry,
+        &reached,
+        &body_keys,
+        joined,
+        options,
+        runtime,
+        store,
+        closed_executable,
+        (&std.summaries, std.key, &std.lent),
+    )?;
+    let linked = std.objects(&emitted.objects, options)?;
+    emitted.objects.extend(linked);
+    Ok(emitted)
 }
 
 #[cfg(test)]

@@ -27,7 +27,7 @@ fn anchor<'a>(
 ) -> Option<hirsel_core_ir::Anchor> {
     let site = site?;
     let index = *seen
-        .entry((site.file.as_str(), site.line, site.column))
+        .entry((site.file.as_ref(), site.line, site.column))
         .or_insert_with(|| {
             let index = ItemId(items.len() as u32);
             items.push(match unit {
@@ -152,12 +152,12 @@ fn source_map(
             .or_default()
             .extend(at.iter().copied());
     }
-    let mut add = |file: &String, at: (u32, u32)| match points.get_mut(file) {
+    let mut add = |file: &str, at: (u32, u32)| match points.get_mut(file) {
         Some(file) => {
             file.insert(at);
         }
         None => {
-            points.insert(file.clone(), BTreeSet::from([at]));
+            points.insert(file.to_owned(), BTreeSet::from([at]));
         }
     };
     for unit in units.values() {
@@ -261,16 +261,16 @@ impl Bound {
         let mut points = Vec::new();
         for site in annex_sites(annex) {
             index
-                .entry((site.file.as_str(), site.line, site.column))
+                .entry((site.file.as_ref(), site.line, site.column))
                 .or_insert_with(|| {
-                    points.push((site.file.clone(), site.line, site.column));
+                    points.push((site.file.to_string(), site.line, site.column));
                     points.len() as u32 - 1
                 });
         }
         let anchored = match added {
             Some(added) => added
                 .into_iter()
-                .map(|(item, site)| (item.0, index[&(site.file.as_str(), site.line, site.column)]))
+                .map(|(item, site)| (item.0, index[&(site.file.as_ref(), site.line, site.column)]))
                 .collect(),
             // A normal body has no source items. Binding adds one per distinct
             // site in annex order, the same order as `points`.

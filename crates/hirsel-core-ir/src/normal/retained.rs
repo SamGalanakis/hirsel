@@ -206,10 +206,6 @@ pub(super) fn resolve_site(
     anchor: Option<Anchor>,
 ) -> Option<Site> {
     let anchor = anchor?;
-    let (file, line, column) = sources.position(&items[anchor.item.index()], anchor.start)?;
-    Some(Site {
-        file: file.path.clone(),
-        line,
-        column,
-    })
+    let (file, line, column) = sources.annex_position(&items[anchor.item.index()], anchor.start)?;
+    Some(Site { file, line, column })
 }

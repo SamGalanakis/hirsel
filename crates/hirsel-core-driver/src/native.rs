@@ -594,10 +594,7 @@ impl CheckProduct {
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
         recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true, None)?;
         let store = Store::new(&options.store)?;
-        Ok(
-            recipe_build::release_objects(units, &root, std, options, runtime, &store, false)?
-                .objects,
-        )
+        Ok(release::release_objects(units, &root, std, options, runtime, &store, false)?.objects)
     }
     /// The reached instances' objects in link order, and for a Cranelift
     /// development build whose walk drafted a reach record, their table.

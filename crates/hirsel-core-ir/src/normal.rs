@@ -493,7 +493,7 @@ impl<'m> BodyOrder<'m> {
 /// A source position resolved against the current checked sources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Site {
-    pub file: String,
+    pub file: std::sync::Arc<str>,
     pub line: u32,
     pub column: u32,
 }

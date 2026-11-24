@@ -320,13 +320,33 @@ impl CodeStore {
         hash: ContentHash,
         bytes: &[u8],
     ) -> io::Result<ObjectRef> {
+        self.put_addressed_with(kind, hash, bytes, || Arc::from(bytes))
+    }
+
+    /// Keep the producer's existing immutable bytes in a pending cache pack.
+    pub(crate) fn put_shared(
+        &self,
+        kind: ObjectKind,
+        hash: ContentHash,
+        bytes: &Arc<[u8]>,
+    ) -> io::Result<ObjectRef> {
+        self.put_addressed_with(kind, hash, bytes, || Arc::clone(bytes))
+    }
+
+    fn put_addressed_with(
+        &self,
+        kind: ObjectKind,
+        hash: ContentHash,
+        bytes: &[u8],
+        shared: impl FnOnce() -> Arc<[u8]>,
+    ) -> io::Result<ObjectRef> {
         let object = ObjectRef {
             hash,
             len: bytes.len() as u64,
         };
         if self.cache.is_some() {
             if !self.contains(kind, object)? {
-                self.packs.lock().unwrap().put(kind, object.hash, bytes);
+                self.packs.lock().unwrap().put(kind, object.hash, shared);
             }
             return Ok(object);
         }

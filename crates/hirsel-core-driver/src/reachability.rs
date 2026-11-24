@@ -318,7 +318,9 @@ impl CheckProduct {
     ) -> io::Result<Reachable<'_>> {
         let limit = options.instance_limit;
         if !crate::resident::serving() {
-            return self.reachable(entry, limit);
+            return hirsel_core_ids::published::catch_io(|| {
+                self.reachable_inner(entry, limit, None, None, true)
+            });
         }
         let key = crate::native::key(
             "hirsel.recipe-reach.v1",

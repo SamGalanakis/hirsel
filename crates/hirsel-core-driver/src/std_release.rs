@@ -621,11 +621,10 @@ fn lower_module(
         .first()
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
-    let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
+    let (mut module, _) = release::join_modules(&first, &reached, modules, |_| FuncId(0))?;
     module.law_observation = options.recording;
     // The joined module holds every body LLVM lowers; the per-unit modules
     // are not read again, so they leave before the optimiser runs.
-    drop(modules);
     drop(units);
     // Each root's function: the row holding its own body.
     let mut functions: BTreeMap<Identity, FuncId> = BTreeMap::new();

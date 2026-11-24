@@ -543,7 +543,7 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(
 
 fn std_of(
     options: &NativeOptions,
-    publication: &crate::native::recipe_build::Publication,
+    publication: &mut crate::native::recipe_build::Publication,
     library: Option<&Path>,
 ) -> Option<crate::native::std_release::StdSide> {
     publication.std_side(options, library).unwrap()
@@ -579,20 +579,20 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
     };
     let options = if matches!(build, StdBuild::Dev) { &dev } else { options };
     let reached = product.reachable(&entry, options.instance_limit).unwrap();
-    let publication = product
+    let mut publication = product
         .publish_release(&entry, &reached, options, &code, 16 * 1024 * 1024)
         .unwrap();
     let std = match build {
         StdBuild::Dev => None,
-        StdBuild::Parts => std_of(options, &publication, None)
+        StdBuild::Parts => std_of(options, &mut publication, None)
             .map(|std| crate::native::std_release::StdSide {
                 lent: Default::default(),
                 ..std
             }),
-        StdBuild::Imported => std_of(options, &publication, None),
+        StdBuild::Imported => std_of(options, &mut publication, None),
         StdBuild::Prebuilt => {
             let library = product.image.as_ref().map(|image| image.store_root());
-            let std = std_of(options, &publication, library.as_deref());
+            let std = std_of(options, &mut publication, library.as_deref());
             // The prebuilt side holds every plain std root, not only those
             // the program reaches.
             let unreached = hirsel_core_ir::Identity::plain(
@@ -682,10 +682,10 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             reached.instances.as_ref().unwrap().contains(&first_lane),
             "the map probe reaches its plain helper"
         );
-        let publication = product
+        let mut publication = product
             .publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024)
             .unwrap();
-        let std = std_of(&options, &publication, None).expect("an optimised build's std");
+        let std = std_of(&options, &mut publication, None).expect("an optimised build's std");
         assert!(std.roots.contains(&split), "the entry's call uses the side");
         assert!(
             !std.roots.contains(&find),

@@ -36,6 +36,7 @@ use std::hash::Hasher;
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use twox_hash::XxHash3_64;
 
 const MAGIC: &[u8; 12] = b"HIRSEL-PACK\0";
@@ -255,7 +256,7 @@ fn sequence(name: &str) -> Option<u64> {
 /// Objects put since the last commit.
 #[derive(Default)]
 struct Pending {
-    rows: FxHashMap<Key, Vec<u8>>,
+    rows: FxHashMap<Key, Arc<[u8]>>,
 }
 
 /// The packs of one code store, as this process has read them, and the
@@ -346,7 +347,7 @@ impl Packs {
     ) -> io::Result<Option<Vec<u8>>> {
         let key = (kind.code(), hash.0);
         if let Some(bytes) = self.pending.rows.get(&key) {
-            return Ok(Some(bytes.clone()));
+            return Ok(Some(bytes.to_vec()));
         }
         let mut found = self.find(key)?;
         if found.is_none() {
@@ -360,11 +361,16 @@ impl Packs {
     }
 
     /// Hold `bytes` as the `kind` object `hash` until the next commit.
-    pub(super) fn put(&mut self, kind: ObjectKind, hash: ContentHash, bytes: &[u8]) {
+    pub(super) fn put(
+        &mut self,
+        kind: ObjectKind,
+        hash: ContentHash,
+        bytes: impl FnOnce() -> Arc<[u8]>,
+    ) {
         self.pending
             .rows
             .entry((kind.code(), hash.0))
-            .or_insert_with(|| bytes.to_vec());
+            .or_insert_with(bytes);
     }
 
     /// Write the pending objects as one pack through `store`'s temporaries,

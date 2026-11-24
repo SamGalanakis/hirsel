@@ -1,4 +1,4 @@
-use super::Outcome;
+use super::{Meter, Outcome, Output, PathBuf};
 
 /// The program a `run` or `replay` request built: its argument vector (the
 /// runner's, then the executable's, then the request's), the variables it runs
@@ -50,4 +50,117 @@ pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::
             std::process::exit(code)
         }
     }
+}
+
+/// Print `output`, run a `run` request's executable, and exit with the
+/// request's status.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish(
+    output: &Output<'_>,
+    command: &str,
+    json: bool,
+    sources: &crate::SourceFiles,
+    runner: &crate::Runner,
+    run_args: Vec<String>,
+    record_path: Option<&str>,
+    profile: Option<&crate::prof_command::Run>,
+    mut run_output: Option<crate::store::Scratch>,
+    meter: &mut Meter,
+    metrics: Option<PathBuf>,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string(output)?);
+    } else {
+        for d in &output.diagnostics {
+            eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
+            for cause in &d.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
+            }
+            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
+            {
+                eprintln!("  {suggestion}");
+            }
+        }
+        for g in &output.incomplete {
+            eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
+            for cause in &g.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
+            }
+        }
+        for r in &output.resources {
+            eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
+        }
+        // Behind a printed refusal an instance stop is its consequence.
+        if let Some(stop) = &output.stopped
+            && (output.diagnostics.is_empty() && output.incomplete.is_empty()
+                || !stop.starts_with("instances: "))
+        {
+            eprintln!("{stop}");
+        }
+        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
+        {
+            println!(
+                "{}: {} files, {} checked definitions",
+                if output.accepted {
+                    "accepted"
+                } else {
+                    "not accepted"
+                },
+                output.files,
+                output.checked_definitions
+            );
+        }
+    }
+    let mut launch = None;
+    let run_exit = if command == "run" || command == "replay" {
+        if let Some(native) = &output.native {
+            let path = std::fs::canonicalize(&native.executable)?;
+            if let Some(profile) = profile {
+                let status = profile.capture(&path, &run_args, record_path)?;
+                if !status.success() {
+                    eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
+                }
+                Some(status.code().unwrap_or(102))
+            } else {
+                let program = runner.command(&path);
+                let mut argv = vec![program.get_program().to_owned()];
+                argv.extend(program.get_args().map(ToOwned::to_owned));
+                argv.extend(run_args.into_iter().map(Into::into));
+                let env = (command == "run")
+                    .then_some(record_path)
+                    .flatten()
+                    .map(|record| ("HIRSEL_RECORD".into(), record.into()))
+                    .into_iter()
+                    .collect();
+                launch = Some(Launch {
+                    argv,
+                    env,
+                    keep: run_output.take(),
+                });
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let exit = if let Some(code) = run_exit {
+        code
+    } else if !output.incomplete.is_empty() || !output.resources.is_empty() {
+        2
+    } else if !output.diagnostics.is_empty() {
+        1
+    } else {
+        i32::from(output.stopped.is_some()) * 2
+    };
+    meter.finish("output/render");
+    if let Some(path) = metrics {
+        meter.write_metrics(path)?;
+    }
+    if let Some(profile) = profile {
+        profile.cleanup();
+    }
+    drop(run_output);
+    conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
 }

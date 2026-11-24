@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod lean;
+mod release;
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -1659,6 +1660,42 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         }
                         return conclude(Outcome::Exit(0));
                     }
+                    if command == "build"
+                        && matches!(options.backend, Backend::Llvm)
+                        && options.optimize
+                    {
+                        let mut report = release::Report::new(&product, reached, key, json);
+                        let counters = reached.finish();
+                        let library = product
+                            .image
+                            .as_ref()
+                            .map(|image| image.store_root().to_owned());
+                        drop(reach);
+                        drop(product);
+                        let output = report.assemble(
+                            publication,
+                            options,
+                            counters,
+                            library.as_deref(),
+                            release_manifest.as_deref(),
+                            place_timeout,
+                            &store_root,
+                            &mut meter,
+                        )?;
+                        return finish(
+                            &output,
+                            command,
+                            json,
+                            &sources,
+                            &runner,
+                            run_args,
+                            record_path.as_deref(),
+                            profile.as_ref(),
+                            temporary_output,
+                            &mut meter,
+                            metrics,
+                        );
+                    }
                     let recipe = (release_manifest.is_some() || grant_lines)
                         .then(|| publication.recipe.clone());
                     let built =
@@ -1874,119 +1911,6 @@ fn answer_hit(
         metrics,
     )
 }
-/// Print `output`, run a `run` request's executable, and exit with the
-/// request's status.
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    output: &Output<'_>,
-    command: &str,
-    json: bool,
-    sources: &crate::SourceFiles,
-    runner: &crate::Runner,
-    run_args: Vec<String>,
-    record_path: Option<&str>,
-    profile: Option<&crate::prof_command::Run>,
-    mut run_output: Option<crate::store::Scratch>,
-    meter: &mut Meter,
-    metrics: Option<PathBuf>,
-) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if json {
-        println!("{}", serde_json::to_string(output)?);
-    } else {
-        for d in &output.diagnostics {
-            eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
-            for cause in &d.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
-            {
-                eprintln!("  {suggestion}");
-            }
-        }
-        for g in &output.incomplete {
-            eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
-            for cause in &g.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-        }
-        for r in &output.resources {
-            eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
-        }
-        // Behind a printed refusal an instance stop is its consequence.
-        if let Some(stop) = &output.stopped
-            && (output.diagnostics.is_empty() && output.incomplete.is_empty()
-                || !stop.starts_with("instances: "))
-        {
-            eprintln!("{stop}");
-        }
-        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
-        {
-            println!(
-                "{}: {} files, {} checked definitions",
-                if output.accepted {
-                    "accepted"
-                } else {
-                    "not accepted"
-                },
-                output.files,
-                output.checked_definitions
-            );
-        }
-    }
-    let mut launch = None;
-    let run_exit = if command == "run" || command == "replay" {
-        if let Some(native) = &output.native {
-            let path = std::fs::canonicalize(&native.executable)?;
-            if let Some(profile) = profile {
-                let status = profile.capture(&path, &run_args, record_path)?;
-                if !status.success() {
-                    eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
-                }
-                Some(status.code().unwrap_or(102))
-            } else {
-                let program = runner.command(&path);
-                let mut argv = vec![program.get_program().to_owned()];
-                argv.extend(program.get_args().map(ToOwned::to_owned));
-                argv.extend(run_args.into_iter().map(Into::into));
-                let env = (command == "run")
-                    .then_some(record_path)
-                    .flatten()
-                    .map(|record| ("HIRSEL_RECORD".into(), record.into()))
-                    .into_iter()
-                    .collect();
-                launch = Some(Launch {
-                    argv,
-                    env,
-                    keep: run_output.take(),
-                });
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let exit = if let Some(code) = run_exit {
-        code
-    } else if !output.incomplete.is_empty() || !output.resources.is_empty() {
-        2
-    } else if !output.diagnostics.is_empty() {
-        1
-    } else {
-        i32::from(output.stopped.is_some()) * 2
-    };
-    meter.finish("output/render");
-    if let Some(path) = metrics {
-        meter.write_metrics(path)?;
-    }
-    if let Some(profile) = profile {
-        profile.cleanup();
-    }
-    drop(run_output);
-    conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
-}
-
 /// What a request leaves for its caller: an exit status, or the program it
 /// built for `run` or `replay`, which the caller runs and whose status is the
 /// request's. A resident compiler's client runs the program itself, so it has
@@ -1998,7 +1922,7 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
-use launch::conclude;
+use launch::{conclude, finish};
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the

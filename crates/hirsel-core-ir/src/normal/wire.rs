@@ -367,6 +367,22 @@ impl Wire for String {
     }
 }
 
+impl Wire for std::sync::Arc<str> {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        out.count(self.len());
+        out.raw(self.as_bytes());
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let n = input.count()?;
+        let bytes = input.take(n)?;
+        let value = std::str::from_utf8(bytes).map_err(|_| invalid("invalid UTF-8"))?;
+        input.budget.charge_bytes(n)?;
+        input.budget.allocation::<[usize; 2]>(1)?;
+        Ok(Self::from(value))
+    }
+}
+
 pub(super) fn write_slice<T: Wire>(values: &[T], out: &mut Write<'_, '_, '_>) {
     out.count(values.len());
     for value in values {

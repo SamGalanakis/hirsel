@@ -7,7 +7,7 @@ use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
 use serde::Serialize;
 use std::ffi::OsStr;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1276,8 +1276,9 @@ fn observe(path: &Path, previous: Option<&RecipeFile>) -> io::Result<RecipeFile>
     let mut file = std::fs::File::open(path)?;
     let stat = stat_of(&file.metadata()?);
     let after = clock();
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let content = ContentHash::of_stream("hirsel.text.v1", stat.len, |digest| {
+        io::copy(&mut file, digest).map(drop)
+    })?;
     #[cfg(test)]
     {
         READS.set(READS.get() + 1);
@@ -1285,7 +1286,6 @@ fn observe(path: &Path, previous: Option<&RecipeFile>) -> io::Result<RecipeFile>
             after_read();
         }
     }
-    let content = ContentHash::of_bytes(&bytes);
     let same = previous.filter(|record| record.stat == stat && record.content == content);
     let trust = match (same.map(|record| &record.trust), &before) {
         (Some(Trust::Settled), _) => Trust::Settled,

@@ -26,12 +26,28 @@ retain every tag, including Some(None) and Some(unit). Nominal `via` types
 expose their representation type.
 
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
-result supplies `call.<name>`, `subscribe.<name>` and `subscribeDecoded.<name>`
-entry stubs. Names are the
-percent-decoded final component of an entry's definition identity `D`, which in the
+result supplies `call`, `subscribe` and `subscribeDecoded` entry stubs, each
+namespaced by module: `api.call.<module>.<name>`, `api.subscribe.<module>.<name>`
+and `api.subscribeDecoded.<module>.<name>`. Every module is namespaced the same
+way, `main` included, and there is no flat name. Calls (compute, granted and
+transact entries) appear under `call`; queries appear under `subscribe` and
+`subscribeDecoded`.
+
+An entry's **stub path** comes from its definition identity `D`, which in the
 identity bytes ends at the first `[` or `(` ([PROG-9](programs.md#prog-9-code-descriptors)).
-So two instances of one generic function have one name. Duplicate
-names cause `DuplicateStubName(a, b)` before any output is written.
+The package component is dropped, and every remaining component, each module path
+component and then the function's name, is percent-decoded. A nested module path
+gives nested objects: an entry `fn` in module `a.b`, with `D` =
+`app@1/a/b/fn`, is `api.call.a.b.fn`. Two instances of one generic function have
+one stub path.
+
+Stub paths must be distinct, and no stub path may be a proper prefix of another,
+so a module `a` with an entry `b` and a module `a.b` cannot both be exported (the
+object `api.call.a.b` would be both a function and a namespace). The rule covers
+every entry kind together. A clash, such as two instances of one generic function
+in one module, causes `DuplicateStubName(a, b)` before any output is written,
+where `a` and `b` are the two entries written `module.path::name`, for example
+`DuplicateStubName(main::pick, main::pick)`.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
 `Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onChange, onEnd?)`, returning a
@@ -65,12 +81,12 @@ generated stub forwards the optional `onEnd` callback. The runtime removes the
 matching subscription before delivering the decoded `Ended` reason once. Reset
 and reconnect resubscribe without calling `onEnd`.
 
-Use `api.subscribeDecoded.<name>(args, onChange, onEnd?)` for typed values and
+Use `api.subscribeDecoded.<module>.<name>(args, onChange, onEnd?)` for typed values and
 rows: `value()` is the decoded R, and each row of `rows(slot)` has the decoded
 `key` and `value` as an `Option` of the slot table's decoded row type, with
 `slot` the slot's name. `codec.js` exports `Value<i>` and, per slot `s`,
 `Key<i>_<s>` and `RowValue<i>_<s>` for the query at index `i` in `want`. Use
-`api.subscribe.<name>` for wire groups.
+`api.subscribe.<module>.<name>` for wire groups.
 
 For a query, `Described.result` is R's value schema followed by the slot list,
 each slot's name, ordered key schema and value schema, each schema encoded as
@@ -184,6 +200,13 @@ lists a running place's entries, or calls one of them, for debugging. SERVER is
 the built executable the place runs. Without ENTRY, or with `-- --help`, the
 command prints every entry with its kind, flags and result type. `-- ENTRY
 --help` also prints the entry's named types.
+
+ENTRY is `MODULE/NAME`: the entry's module path, its components joined by `.`,
+then `/` and the function's name, the stub path of the TypeScript bindings
+(section 4) written for the terminal. So `fn` in module `main` is `main/fn`, and
+`fn` in module `a.b` is `a.b/fn`. There is no bare-name form, for `main` or any
+other module. The listing prints each entry in this form, and the stub path
+rules, including `DuplicateStubName`, apply as they do in `hirsel sdk ts`.
 
 **Transport.** The call is an ordinary client session on the server's ingress,
 as the TypeScript client's is. It sends Hello without an application credential.

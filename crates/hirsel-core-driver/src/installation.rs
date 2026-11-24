@@ -371,6 +371,16 @@ pub fn environment(
             .and_then(|installed| installed.observed_runtime(target, true)),
     })
 }
+
+pub(crate) fn read_runtime_archive(path: &Path) -> io::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|error| {
+        io::Error::other(format!(
+            "failed to read runtime archive {}: {error}",
+            path.display()
+        ))
+    })
+}
+
 /// Keep user-supplied archives in the runtime slot they implement.
 pub(crate) fn check_runtime(path: &Path, bytes: &[u8], recording: bool) -> io::Result<()> {
     let defines_recording = archive_defines_symbol(bytes, b"hirsel_core_os_run_recording");

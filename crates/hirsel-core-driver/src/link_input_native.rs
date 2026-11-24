@@ -39,3 +39,38 @@ fn release_link_holds_no_descriptor_on_its_parts() {
         assert_eq!(descriptors, None, "descriptors open on {}", part.display());
     }
 }
+
+#[test]
+fn missing_explicit_runtime_names_archive() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main() -> Result[(), u8] { Ok(()) }\n",
+    )
+    .unwrap();
+    let missing = dir.path().join("absent-runtime.a");
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let args = vec![
+        "build".into(),
+        app.display().to_string(),
+        "--runtime".into(),
+        missing.display().to_string(),
+        "--cc".into(),
+        llvm.join("bin/clang").display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--store".into(),
+        dir.path().join("store").display().to_string(),
+    ];
+    let (code, stdout, stderr) = process::tape_request(&args, dir.path());
+    assert_eq!(code, Some(2), "{stdout}\n{stderr}");
+    assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
+}

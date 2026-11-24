@@ -907,7 +907,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         })?;
         if explicit_runtime {
-            let bytes = std::fs::read(archive)?;
+            let bytes = crate::installation::read_runtime_archive(archive)?;
             crate::installation::check_runtime(archive, &bytes, needs_recording)?;
             if observe
                 && !crate::installation::archive_defines_symbol(&bytes, b"hirsel_core_prof_runtime")

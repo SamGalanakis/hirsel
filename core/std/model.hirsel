@@ -1,0 +1,53 @@
+pub opaque type Bag[M: key + ordered]: key {
+    entries: List[(M, u64)]
+}
+
+pub fn bag_new[M: key + ordered]() -> Bag[M] {
+    Bag(entries: list.new())
+}
+
+fn bag_index[M: key + ordered](b: Bag[M], m: M) -> Result[u64, u64] {
+    list.binary_search_by(b.entries, scoped fn(entry: (M, u64)) -> Order {
+        order.compare(entry.0, m)
+    })
+}
+
+pub fn bag_add[M: key + ordered](mut b: Bag[M], take m: M) {
+    match bag_index(b, m) {
+        Ok(i) => {
+            b.entries[i].1 += 1
+        },
+        Error(i) => list.insert(mut b.entries, i, (take m, 1)),
+    }
+}
+
+pub fn bag_remove[M: key + ordered](mut b: Bag[M], m: M) -> bool {
+    let Ok(i) = bag_index(b, m) else {
+        return false
+    }
+    if b.entries[i].1 == 1 {
+        let _ = list.remove(mut b.entries, i)
+    } else {
+        b.entries[i].1 -= 1
+    }
+    true
+}
+
+pub fn bag_count[M: key + ordered](b: Bag[M], m: M) -> u64 {
+    match bag_index(b, m) {
+        Ok(i) => b.entries[i].1,
+        Error(_) => 0,
+    }
+}
+
+pub fn bag_size[M: key + ordered](b: Bag[M]) -> u64 {
+    let mut count: u64 = 0
+    for (_, copies) in b.entries {
+        count += copies
+    }
+    count
+}
+
+pub fn bag_entries[M: key + ordered](b: Bag[M]) -> View[List[(M, u64)]] in b {
+    view b.entries
+}

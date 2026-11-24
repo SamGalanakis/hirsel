@@ -1,7 +1,7 @@
 # Model
 
-[API overview](../API.md). Planned for Verification Phases 1.4 and 1.5; not built.
-There is no `model.hirsel` yet. The build list is
+[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag is implemented.
+The build list is
 `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
 
 Version note (2026-11-24, verify-phase-spec-2034): first text. This document specifies

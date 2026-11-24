@@ -1,0 +1,28 @@
+// expect: run bag_laws() = true
+fn bag_laws() -> bool {
+    let mut first: model.Bag[u64] = model.bag_new()
+    model.bag_add(mut first, 1u64)
+    model.bag_add(mut first, 1u64)
+    model.bag_add(mut first, 2u64)
+    if !model.bag_remove(mut first, 1u64) || model.bag_count(first, 1u64) != 1 || model.bag_size(first) != 2 {
+        return false
+    }
+    let mut second: model.Bag[u64] = model.bag_new()
+    model.bag_add(mut second, 2u64)
+    model.bag_add(mut second, 1u64)
+    if first != second || model.bag_remove(mut first, 3u64) || first != second {
+        return false
+    }
+    {
+        let rows = model.bag_entries(first)
+        if list.len(rows) != 2 || rows[0] != (1u64, 1u64) || rows[1] != (2u64, 1u64) {
+            return false
+        }
+    }
+    let mut keyed: Map[model.Bag[u64], u64] = map.new()
+    map.insert(mut keyed, take first, 42u64)
+    match map.get(keyed, second) {
+        Some(value) => value == 42,
+        None => false,
+    }
+}

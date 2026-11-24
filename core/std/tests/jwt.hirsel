@@ -293,3 +293,199 @@ fn jwt_law() -> u64 {
     }
     0
 }
+
+// RFC 8032 section 5.1.5 encodes y with the parity of x in the high bit.
+// These are the eight cofactor-torsion encodings, including Wycheproof tcId 152.
+fn small_order_key(x: Bytes) -> bool {
+    match jwt.ed25519_key(clone(x)) {
+        Error(BadKey) => {},
+        _ => return false,
+    }
+    let mut text = string.from("{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"")
+    string.push(mut text, base64.encode_url(x, false))
+    string.push(mut text, "\"}")
+    match jwt.jwk(text) {
+        Error(BadKey) => true,
+        _ => false,
+    }
+}
+
+// expect: run jwt_ed25519_key_law() = 0
+fn jwt_ed25519_key_law() -> u64 {
+    if !small_order_key(unhex("0100000000000000000000000000000000000000000000000000000000000000")) {
+        return 1
+    }
+    if !small_order_key(unhex("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")) {
+        return 2
+    }
+    for y in["0000000000000000000000000000000000000000000000000000000000000000", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"] {
+        let mut x = unhex(y)
+        if !small_order_key(x) {
+            return 3
+        }
+        x[31] = x[31] | 128u8
+        if !small_order_key(x) {
+            return 4
+        }
+    }
+    0
+}
+
+// expect: run jwt_audience_presence_law() = 0
+fn jwt_audience_presence_law() -> u64 {
+    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let Ok(token) = jwt.sign_jwt(hs, "{\"aud\":[],\"exp\":1300819380}") else {
+        return 1
+    }
+    match jwt_error(jwt.verify_jwt(token, rules(A1_EXP - 1, 0, None, None), hs_key())) {
+        Some(Mismatch(Aud)) => 0,
+        _ => 2,
+    }
+}
+
+// expect: run jwt_rsa_modulus_law() = 0
+fn jwt_rsa_modulus_law() -> u64 {
+    let mut n = b64(A2_N)
+    n[0] = 127u8
+    match jwt.rsa_key(take n, b64("AQAB")) {
+        Error(BadKey) => 0,
+        _ => 1,
+    }
+}
+
+// expect: run jwt_private_jwk_law() = 0
+fn jwt_private_jwk_law() -> u64 {
+    match jwt.jwks("{\"keys\":[{\"kty\":\"RSA\",\"use\":\"enc\",\"d\":\"AQ\"}]}") {
+        Error(PrivateKey) => 0,
+        _ => 1,
+    }
+}
+
+fn rsa_jwk(e: String) -> String {
+    let mut text = string.from("{\"kty\":\"RSA\",\"n\":\"")
+    string.push(mut text, A2_N)
+    string.push(mut text, "\",\"e\":\"")
+    string.push(mut text, e)
+    string.push(mut text, "\"}")
+    text
+}
+
+// expect: run jwt_rsa_exponent_law() = 0
+fn jwt_rsa_exponent_law() -> u64 {
+    for e in["AQ", "BA"] {
+        match jwt.jwk(rsa_jwk(e)) {
+            Error(BadKey) => {},
+            _ => return 1,
+        }
+    }
+    0
+}
+
+fn jwk_with_metadata(fields: String) -> String {
+    let mut text = string.from(fields)
+    string.push(mut text, string.slice(ED_JWK, 1, string.byte_len(ED_JWK)))
+    text
+}
+
+// expect: run jwt_jwk_key_ops_law() = 0
+fn jwt_jwk_key_ops_law() -> u64 {
+    for fields in["{\"key_ops\":[\"verify\",\"verify\"],", "{\"use\":\"sig\",\"key_ops\":[\"verify\",\"decrypt\"],", "{\"use\":\"enc\",\"key_ops\":[\"verify\"],"] {
+        match jwt.jwk(jwk_with_metadata(fields)) {
+            Error(BadKey) => {},
+            _ => return 1,
+        }
+    }
+    let Ok(_) = jwt.jwk(jwk_with_metadata("{\"use\":\"sig\",\"key_ops\":[\"verify\"],")) else {
+        return 2
+    }
+    0
+}
+
+fn nested_value(mut text: String, depth: u64) {
+    for _i in 0u64 .. depth {
+        string.push(mut text, "[")
+    }
+    string.push(mut text, "null")
+    for _i in 0u64 .. depth {
+        string.push(mut text, "]")
+    }
+}
+
+fn nested_header(depth: u64) -> String {
+    let mut text = string.from("{\"alg\":\"HS256\",\"extra\":")
+    nested_value(mut text, depth)
+    string.push(mut text, "}")
+    text
+}
+
+fn nested_set(depth: u64) -> String {
+    let mut set_text = string.from("{\"keys\":[{\"extra\":")
+    nested_value(mut set_text, depth)
+    string.push(mut set_text, ",")
+    string.push(mut set_text, string.slice(ED_JWK, 1, string.byte_len(ED_JWK)))
+    string.push(mut set_text, "]}")
+    set_text
+}
+
+// expect: run jwt_json_depth_law() = 0
+fn jwt_json_depth_law() -> u64 {
+    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    let Ok(_) = jwt.sign_jws(hs, nested_header(127), b"") else {
+        return 1
+    }
+    let Ok(_) = jwt.jwks(nested_set(125)) else {
+        return 2
+    }
+    match jwt.sign_jws(hs, nested_header(128), b"") {
+        Error(Malformed(Json)) => {},
+        _ => return 3,
+    }
+    match jwt.jwks(nested_set(126)) {
+        Error(Malformed(Json)) => 0,
+        _ => 4,
+    }
+}
+
+// expect: run jwt_sign_size_law() = 0
+fn jwt_sign_size_law() -> u64 {
+    let mut text = string.from("{\"extra\":\"")
+    for _i in 0u64 .. 50000 {
+        string.push(mut text, "x")
+    }
+    string.push(mut text, "\"}")
+    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    match (bound bytes 4096 {
+        jwt.sign_jws(hs, "{\"alg\":\"HS256\"}", string.as_bytes(text))
+    }) {
+        Ok(Error(Malformed(Size))) => {},
+        _ => return 1,
+    }
+    match (bound bytes 4096 {
+        jwt.sign_jwt(hs, text)
+    }) {
+        Ok(Error(Malformed(Size))) => 0,
+        _ => 2,
+    }
+}
+
+// expect: run jwt_b64_header_law() = 0
+fn jwt_b64_header_law() -> u64 {
+    let hs = jwt.signer(Hs256, seal(b64(A1_K), "mac"))
+    match jwt.sign_jws(hs, "{\"alg\":\"HS256\",\"b64\":false}", b"sample") {
+        Error(UnsupportedCrit) => {},
+        _ => return 1,
+    }
+    let Ok(_) = jwt.sign_jws(hs, "{\"alg\":\"HS256\",\"b64\":true}", b"sample") else {
+        return 2
+    }
+    0
+}
+
+// expect: run jwt_set_allowlist_law() = 0
+fn jwt_set_allowlist_law() -> u64 {
+    let empty = result.unwrap(jwt.jwks("{\"keys\":[]}"))
+    match jws_error(jwt.verify_jws_in(A1, jwt.allow(Rs256), empty)) {
+        Some(UnsupportedAlg) => 0,
+        _ => 1,
+    }
+}

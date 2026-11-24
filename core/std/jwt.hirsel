@@ -150,9 +150,23 @@ pub fn hmac_key(take key: Secret) -> Key {
     Key(material: MacKey(take key), alg: None, kid: None)
 }
 
-/// An Ed25519 public key: 32 bytes (RFC 8032 section 5.1.5).
+fn ed_y_is(point: Bytes, y: Bytes) -> bool {
+    (point[31] & 127u8) == y[31] && list.slice(point, 0, 31) == list.slice(y, 0, 31)
+}
+
+// The eight points killed by the cofactor have five distinct y coordinates.
+// RFC 8032 section 5.1.5 stores the parity of x in bit 255.
+fn invalid_ed_y(x: Bytes) -> bool {
+    // p - 1 is small-order, and y >= p is noncanonical.
+    if x[0] >= 236u8 && (x[31] & 127u8) == 127u8 && list.slice(x, 1, 31) == b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" {
+        return true
+    }
+    ed_y_is(x, b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") || ed_y_is(x, b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") || ed_y_is(x, b"\x26\xe8\x95\x8f\xc2\xb2\x27\xb0\x45\xc3\xf4\x89\xf2\xef\x98\xf0\xd5\xdf\xac\x05\xd3\xc6\x33\x39\xb1\x38\x02\x88\x6d\x53\xfc\x05") || ed_y_is(x, b"\xc7\x17\x6a\x70\x3d\x4d\xd8\x4f\xba\x3c\x0b\x76\x0d\x10\x67\x0f\x2a\x20\x53\xfa\x2c\x39\xcc\xc6\x4e\xc7\xfd\x77\x92\xac\x03\x7a")
+}
+
+/// An Ed25519 public key: 32 bytes (RFC 8032 section 5.1.5), excluding small-order points.
 pub fn ed25519_key(take x: Bytes) -> Result[Key, Error] {
-    if list.len(x) != 32 {
+    if list.len(x) != 32 || invalid_ed_y(x) {
         return Error(BadKey)
     }
     Ok(Key(material: EdPoint(take x), alg: None, kid: None))
@@ -175,7 +189,10 @@ pub fn p256_key(x: Bytes, y: Bytes) -> Result[Key, Error] {
 pub fn rsa_key(take n: Bytes, take e: Bytes) -> Result[Key, Error] {
     let n_len = list.len(n)
     let e_len = list.len(e)
-    if n_len < 256 || n_len > 1024 || n[0] == 0 || e_len == 0 || e_len > 4 || e[0] == 0 {
+    if n_len < 256 || n_len > 1024 || n[0] == 0 || (n_len == 256 && n[0] < 128u8) {
+        return Error(BadKey)
+    }
+    if (n[n_len - 1] & 1u8) == 0 || e_len == 0 || e_len > 4 || e[0] == 0 || (e[e_len - 1] & 1u8) == 0 || (e_len == 1 && e[0] < 3u8) {
         return Error(BadKey)
     }
     Ok(Key(material: RsaPublic(take n, take e), alg: None, kid: None))
@@ -217,6 +234,7 @@ type HeaderSeen {
     typ: Option[String],
     cty: Option[String],
     crit: bool,
+    unencoded: bool,
     dup: bool,
     names: set.Set[String]
 }
@@ -235,8 +253,16 @@ fn object_start(s: String) -> bool {
     i < n && b[i] == b'{'
 }
 
+fn decode_object[T](text: String, read: scoped fn(String, mut json.Cursor) -> Result[T, json.Error]) -> Result[T, Error] {
+    if !object_start(text) {
+        return Error(Malformed(NotObject))
+    }
+    let _ = json.size(text) ?=> json_fault
+    Ok(json.decode(text, read) ?=> json_fault)
+}
+
 fn read_header_seen(s: String, mut c: json.Cursor) -> Result[HeaderSeen, json.Error] {
-    let seed = HeaderSeen(alg: None, kid: None, typ: None, cty: None, crit: false, dup: false, names: set.new())
+    let seed = HeaderSeen(alg: None, kid: None, typ: None, cty: None, crit: false, unencoded: false, dup: false, names: set.new())
     json.record_of(s, mut c, take seed, fn(key: String, input: String, mut v: json.Cursor, mut h: HeaderSeen) -> Result[(), json.Error] {
         if !set.insert(mut h.names, clone(key)) {
             h.dup = true
@@ -252,6 +278,9 @@ fn read_header_seen(s: String, mut c: json.Cursor) -> Result[HeaderSeen, json.Er
         } else if key == "crit" {
             h.crit = true
             json.skip_value(input, mut v)?
+        } else if key == "b64" {
+            let b64 = json.read_bool(input, mut v)?
+            h.unencoded = !b64
         } else {
             json.skip_value(input, mut v)?
         }
@@ -262,15 +291,12 @@ fn read_header_seen(s: String, mut c: json.Cursor) -> Result[HeaderSeen, json.Er
 // RFC 7515 sections 4 and 5.2: an object, no duplicate names, an understood
 // alg, and no crit (this module understands no extension).
 fn parse_header(text: String) -> Result[Header, Error] {
-    if !object_start(text) {
-        return Error(Malformed(NotObject))
-    }
-    let seen = json.decode(text, read_header_seen) ?=> json_fault
-    let HeaderSeen(alg: name, kid: kid, typ: typ, cty: cty, crit: crit, dup: dup, names: _) = take seen
+    let seen = decode_object(text, read_header_seen)?
+    let HeaderSeen(alg: name, kid: kid, typ: typ, cty: cty, crit: crit, unencoded: unencoded, dup: dup, names: _) = take seen
     if dup {
         return Error(Malformed(Duplicate))
     }
-    if crit {
+    if crit || unencoded {
         return Error(UnsupportedCrit)
     }
     let Some(spelled) = view name else {
@@ -327,10 +353,7 @@ fn split_compact(token: String) -> Result[Compact, Error] {
 }
 
 // ---- verification ----
-fn admit(accept: Allow, alg: Alg, k: Key) -> Result[(), Error] {
-    if !allowed(accept, alg) {
-        return Error(UnsupportedAlg)
-    }
+fn admit_key(alg: Alg, k: Key) -> Result[(), Error] {
     if family(alg) != material_family(k.material) {
         return Error(WrongKey)
     }
@@ -357,8 +380,8 @@ fn check_signature(k: Key, input: Bytes, sig: Bytes) -> Result[(), Error] {
     }
 }
 
-fn verify_with(token: String, accept: Allow, take parts: Compact, k: Key) -> Result[Jws, Error] {
-    admit(accept, parts.header.alg, k)?
+fn verify_with(token: String, take parts: Compact, k: Key) -> Result[Jws, Error] {
+    admit_key(parts.header.alg, k)?
     check_signature(k, list.slice(string.as_bytes(token), 0, parts.signed), parts.signature)?
     let Compact(header: header, signed: _, payload: payload, signature: _) = take parts
     Ok(Jws(header: take header, payload: take payload))
@@ -368,15 +391,21 @@ fn verify_with(token: String, accept: Allow, take parts: Compact, k: Key) -> Res
 /// in the key's family (and equal its pinned alg). Alloc: the decoded parts.
 pub fn verify_jws(token: String, accept: Allow, k: Key) -> Result[Jws, Error] {
     let parts = split_compact(token)?
-    verify_with(token, accept, take parts, k)
+    if !allowed(accept, parts.header.alg) {
+        return Error(UnsupportedAlg)
+    }
+    verify_with(token, take parts, k)
 }
 
 /// Verifies a compact JWS with the one key of set that its header's kid picks
 /// (find's rule).
 pub fn verify_jws_in(token: String, accept: Allow, keys: KeySet) -> Result[Jws, Error] {
     let parts = split_compact(token)?
+    if !allowed(accept, parts.header.alg) {
+        return Error(UnsupportedAlg)
+    }
     let k = find(keys, parts.header.kid)?
-    verify_with(token, accept, take parts, k)
+    verify_with(token, take parts, k)
 }
 
 /// The one key whose kid equals kid. A missing kid picks the only key of a
@@ -466,16 +495,12 @@ fn read_claims_seen(s: String, mut c: json.Cursor) -> Result[ClaimsSeen, json.Er
 
 // RFC 7519 section 7.2 step 10: the payload is a JSON object, its names
 // unique. NumericDate is accepted as a non-negative integer only.
-fn parse_claims(take text: String) -> Result[Claims, Error] {
-    if !object_start(text) {
-        return Error(Malformed(NotObject))
-    }
-    let seen = json.decode(text, read_claims_seen) ?=> json_fault
-    let ClaimsSeen(iss: iss, sub: sub, aud: aud, exp: exp, nbf: nbf, iat: iat, jti: jti, dup: dup, names: _) = take seen
-    if dup {
+fn parse_claims(text: String) -> Result[ClaimsSeen, Error] {
+    let seen = decode_object(text, read_claims_seen)?
+    if seen.dup {
         return Error(Malformed(Duplicate))
     }
-    Ok(Claims(iss: take iss, sub: take sub, aud: take aud, exp: exp, nbf: nbf, iat: iat, jti: take jti, json: take text))
+    Ok(take seen)
 }
 
 fn later(now: u64, leeway: u64) -> u64 {
@@ -487,7 +512,7 @@ fn later(now: u64, leeway: u64) -> u64 {
 }
 
 // Leeway moves only the trusted clock, so no claim value can overflow.
-fn check_claims(c: Claims, r: Rules) -> Result[(), Error] {
+fn check_claims(c: ClaimsSeen, r: Rules) -> Result[(), Error] {
     match c.exp {
         Some(exp) => {
             if r.now_secs >= r.leeway_secs && exp <= r.now_secs - r.leeway_secs {
@@ -529,7 +554,7 @@ fn check_claims(c: Claims, r: Rules) -> Result[(), Error] {
             }
         },
         None => {
-            if list.len(c.aud) != 0 {
+            if set.contains(c.names, "aud") {
                 return Error(Mismatch(Aud))
             }
         },
@@ -539,8 +564,11 @@ fn check_claims(c: Claims, r: Rules) -> Result[(), Error] {
 
 fn finish_jwt(take jws: Jws, r: Rules) -> Result[Jwt, Error] {
     let Jws(header: header, payload: payload) = take jws
-    let claims = parse_claims(utf8(take payload)?)?
-    check_claims(claims, r)?
+    let text = utf8(take payload)?
+    let seen = parse_claims(text)?
+    check_claims(seen, r)?
+    let ClaimsSeen(iss: iss, sub: sub, aud: aud, exp: exp, nbf: nbf, iat: iat, jti: jti, dup: _, names: _) = take seen
+    let claims = Claims(iss: take iss, sub: take sub, aud: take aud, exp: exp, nbf: nbf, iat: iat, jti: take jti, json: take text)
     Ok(Jwt(header: take header, claims: take claims))
 }
 
@@ -583,9 +611,32 @@ fn sign_bytes(s: Signer, input: Bytes) -> Result[Bytes, Error] {
     }
 }
 
+fn encoded_len(n: u64) -> u64 {
+    n + (n + 2) / 3
+}
+
+fn minimum_signature_len(alg: Alg) -> u64 {
+    match family(alg) {
+        Mac => 32,
+        OkpKey => 64,
+        EcKey => 64,
+        RsaKey => 256,
+    }
+}
+
+fn check_token_size(header_len: u64, payload_len: u64, sig_len: u64) -> Result[(), Error] {
+    if header_len > MAX_TOKEN || payload_len > MAX_TOKEN || encoded_len(header_len) + encoded_len(payload_len) + encoded_len(sig_len) + 2 > MAX_TOKEN {
+        return Error(Malformed(Size))
+    }
+    Ok(())
+}
+
 /// Signs payload under the given protected header text, which must parse as
 /// verify reads it and name the signer's alg. Alloc: the token.
 pub fn sign_jws(s: Signer, header: String, payload: Bytes) -> Result[String, Error] {
+    let header_len = string.byte_len(header)
+    let payload_len = list.len(payload)
+    check_token_size(header_len, payload_len, minimum_signature_len(s.alg))?
     let parsed = parse_header(header)?
     if parsed.alg != s.alg {
         return Error(WrongKey)
@@ -593,24 +644,29 @@ pub fn sign_jws(s: Signer, header: String, payload: Bytes) -> Result[String, Err
     let mut token = base64.encode_url(string.as_bytes(header), false)
     string.push(mut token, ".")
     string.push(mut token, base64.encode_url(payload, false))
-    if string.byte_len(token) > MAX_TOKEN {
-        return Error(Malformed(Size))
-    }
     let sig = sign_bytes(s, string.as_bytes(token))?
+    check_token_size(header_len, payload_len, list.len(sig))?
     string.push(mut token, ".")
     string.push(mut token, base64.encode_url(sig, false))
-    if string.byte_len(token) > MAX_TOKEN {
-        return Error(Malformed(Size))
-    }
     Ok(take token)
 }
 
 /// Signs a claims object as a JWT with header {"alg":..,"typ":"JWT"} and
 /// the signer's kid. The claims must parse as verify_jwt reads them.
 pub fn sign_jwt(s: Signer, claims: String) -> Result[String, Error] {
-    let _ = parse_claims(clone(claims))?
+    let alg = alg_name(s.alg)
+    let mut header_len = string.byte_len("{\"alg\":\"\",\"typ\":\"JWT\"}") + string.byte_len(alg)
+    if let Some(kid) = view s.kid {
+        let kid_len = string.byte_len(kid)
+        if kid_len > MAX_TOKEN {
+            return Error(Malformed(Size))
+        }
+        header_len += string.byte_len(",\"kid\":\"\"") + kid_len
+    }
+    check_token_size(header_len, string.byte_len(claims), minimum_signature_len(s.alg))?
+    let _ = parse_claims(claims)?
     let mut header = string.from("{\"alg\":\"")
-    string.push(mut header, alg_name(s.alg))
+    string.push(mut header, alg)
     string.push(mut header, "\",\"typ\":\"JWT\"")
     match view s.kid {
         Some(kid) => {
@@ -698,6 +754,24 @@ fn is(m: Option[String], want: String) -> bool {
     }
 }
 
+fn check_key_ops(usage: Option[String], ops: List[String]) -> Result[(), Error] {
+    let sig = is(usage, "sig")
+    let enc = is(usage, "enc")
+    let mut names: set.Set[String] = set.new()
+    for op in ops {
+        if !set.insert(mut names, clone(op)) {
+            return Error(BadKey)
+        }
+        if sig && op != "sign" && op != "verify" {
+            return Error(BadKey)
+        }
+        if enc && op != "encrypt" && op != "decrypt" && op != "wrapKey" && op != "unwrapKey" && op != "deriveKey" && op != "deriveBits" {
+            return Error(BadKey)
+        }
+    }
+    Ok(())
+}
+
 // Ok(None): a well-formed key this module does not use for JWS
 // verification (another kty, curve or alg, or use other than "sig").
 fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
@@ -705,15 +779,20 @@ fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
     if dup {
         return Error(Malformed(Duplicate))
     }
+    if private {
+        return Error(PrivateKey)
+    }
     let Some(kind) = view kty else {
         return Error(BadKey)
     }
+    if let Some(list_ops) = view ops {
+        check_key_ops(usage, list_ops)?
+        if !list.contains(list_ops, "verify") {
+            return Ok(None)
+        }
+    }
     match view usage {
         Some(u) if u != "sig" => return Ok(None),
-        _ => {},
-    }
-    match view ops {
-        Some(list_ops) if !list.contains(list_ops, "verify") => return Ok(None),
         _ => {},
     }
     let pinned: Option[Alg] = match view alg {
@@ -724,9 +803,6 @@ fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
         None => None,
     }
     let key = if kind == "oct" {
-        if private {
-            return Error(BadKey)
-        }
         let raw = member(k)?
         // RFC 7518 section 3.2: an HS256 key has at least 256 bits.
         if list.len(raw) < 32 {
@@ -737,24 +813,15 @@ fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
             Error(_) => return Error(BadKey),
         }
     } else if kind == "RSA" {
-        if private {
-            return Error(PrivateKey)
-        }
         rsa_key(member(n)?, member(e)?)?
     } else if kind == "EC" {
         if !is(crv, "P-256") {
             return Ok(None)
         }
-        if private {
-            return Error(PrivateKey)
-        }
         p256_key(member(x)?, member(y)?)?
     } else if kind == "OKP" {
         if !is(crv, "Ed25519") {
             return Ok(None)
-        }
-        if private {
-            return Error(PrivateKey)
         }
         ed25519_key(member(x)?)?
     } else {
@@ -777,10 +844,7 @@ pub fn jwk(text: String) -> Result[Key, Error] {
     if string.byte_len(text) > MAX_JWKS {
         return Error(Malformed(Size))
     }
-    if !object_start(text) {
-        return Error(Malformed(NotObject))
-    }
-    let seen = json.decode(text, read_jwk_seen) ?=> json_fault
+    let seen = decode_object(text, read_jwk_seen)?
     let usable = jwk_key(take seen)?
     match take usable {
         Some(take k) => Ok(take k),
@@ -817,10 +881,7 @@ pub fn jwks(text: String) -> Result[KeySet, Error] {
     if string.byte_len(text) > MAX_JWKS {
         return Error(Malformed(Size))
     }
-    if !object_start(text) {
-        return Error(Malformed(NotObject))
-    }
-    let seen = json.decode(text, read_set_seen) ?=> json_fault
+    let seen = decode_object(text, read_set_seen)?
     let SetSeen(keys: raw, found: found, dup: dup, names: _) = take seen
     if dup {
         return Error(Malformed(Duplicate))

@@ -72,8 +72,9 @@ Each invariant is a property of the types, not a caller's discipline.
    segments. Each segment is canonical unpadded base64url: padding, other alphabets and
    nonzero trailing bits are `Malformed(Encoding)`. The header must be a UTF-8 JSON object
    with unique member names and an `alg`. Any `crit` gives `UnsupportedCrit`, because this
-   module understands no header extension (RFC 7515 §4.1.11). JSON depth is bounded by
-   `std.json`'s 128-level limit, and a JWK Set by `MAX_JWKS` (1 MiB).
+   module understands no header extension (RFC 7515 §4.1.11). A `b64` value of `false`
+   also gives `UnsupportedCrit` (RFC 7797). The `std.json` 128-level limit counts
+   containers from the document root. A JWK Set is at most `MAX_JWKS` (1 MiB).
 
 Errors distinguish malformed input, an unsupported algorithm, the wrong key, a bad
 signature, expiry, not-yet-valid and claim mismatch. Signature checks run only after the
@@ -84,11 +85,14 @@ header has been fully admitted, and claims are read only after the signature ver
 - `jwk` reads one public key; `jwks` reads `{"keys": [...]}`. A JWK whose `use` is not
   `sig`, whose `key_ops` lacks `verify`, or whose `kty`, `crv` or `alg` this module does
   not use is skipped by `jwks` (RFC 7517 §5) and is `UnsupportedKey` from `jwk`.
+  Duplicate `key_ops` entries or operations inconsistent with `use` give `BadKey`.
 - A JWK with private members (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`) is `PrivateKey`, and
   a set holding one is refused as a whole: a published key set that leaks a private key is
   a configuration error, not a key to skip.
 - An `oct` key must be at least 32 bytes (RFC 7518 §3.2). A pinned `alg` outside the key's
-  family is `BadKey`. RSA moduli are 2048 to 8192 bits with no leading zero byte.
+  family is `BadKey`. RSA moduli are odd, have 2048 to 8192 significant bits and
+  use minimal unsigned encodings. RSA exponents are odd and at least 3. Ed25519
+  keys with small order give `BadKey`.
 - Signing keys are `Secret`s: `signer(alg, key)` takes a sealed HMAC key or PKCS#8 private
   key. A use missing from the secret's policy gives `Denied`.
 

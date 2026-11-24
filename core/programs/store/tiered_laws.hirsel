@@ -755,20 +755,19 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
     Ok(())
 }
 
-fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
+fn l68_page_pack(owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[(Bytes, std.page.PagePtr), Error] {
     let context = DiskContext(store: owner, role: 3, seq: seq)
     let width: u32 = int.truncate(list.len(payload_bytes))
-    let mut frame: Bytes = list.with_capacity(16 + list.len(payload_bytes) + BINDING_BYTES)
-    list.put_word_le(mut frame, 0x0021u16)
-    list.put_word_le(mut frame, 1u16)
-    list.put_word_le(mut frame, width)
-    list.put_word_le(mut frame, 0u64)
-    list.append(mut frame, payload_bytes)
-    capacity(seal_frame(mut frame, context, 72))?
+    let frame = capacity(disk_seal(context, 72, 0x0021, 1, payload_bytes))?
     let mut pack_bytes = capacity(disk_header_bytes(context, 0, 0))?
     list.append(mut pack_bytes, frame)
+    Ok((take pack_bytes, std.page.PagePtr(pack: seq, offset: 72, len: width, checksum: std.check.xxh3(payload_bytes, 0, list.len(payload_bytes)), stamp: stamp)))
+}
+
+fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
+    let (take pack_bytes, pointer) = l68_page_pack(owner, seq, stamp, payload_bytes)?
     disk_write_synced(d, paged_pack_path(seq)?, pack_bytes)?
-    Ok(std.page.PagePtr(pack: seq, offset: 72, len: width, checksum: std.check.xxh3(payload_bytes, 0, list.len(payload_bytes)), stamp: stamp))
+    Ok(pointer)
 }
 
 fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
@@ -888,4 +887,58 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
     }
     l68_check_replay_root(q.state.tips[0u64].roots.collections, 3, 258, "stored")?
     l68_check_replay_root(q.state.tips[1u64].roots.collections, 3, 258, "second")
+}
+
+fn l68_object_pack(mut source: ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
+    let (take raw, ptr) = l68_page_pack(owner, seq, stamp, payload_bytes)?
+    let mut object_bytes = take raw
+    history_copy_header(mut object_bytes, DiskContext(store: owner, role: 3, seq: seq), 1)?
+    let item = history_new_ref(seq, 1, object_bytes)
+    let (take stored, _) = std.object.store(mut source.client, history_key("p-", item), take object_bytes, source.deadline)
+    let _ = stored ?=> |problem| Remote(problem)
+    map.insert(mut source.locator.rows, seq, item)
+    Ok(ptr)
+}
+
+fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client(model, tasks, "s3.test", 68)?
+    let until = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut source = history_reader(take client, until)
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut manifest = page_manifest_empty()
+    manifest.next_pack = 11
+    manifest.next_stamp = 102
+    manifest.next_table = 10
+    manifest.account_tiered = 78
+    manifest.branches[0u64].roots.collections = l68_object_pack(mut source, owner, 9, 100, l68_collection_map_wire())?
+    manifest.pack_root = l68_object_pack(mut source, owner, 10, 101, l68_inventory_wire(168)?)?
+    let cold = HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
+    // The locator names the Tiered pack, but the test never uploads it.
+    map.insert(mut source.locator.rows, 8u64, cold)
+    let verified = validate_bucket_graph(mut source, owner, "MANIFEST", clone(manifest), true)?
+    let loaded = rebuild_page_store(take verified)?
+    let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, prefix(9)?) else {
+        fail("L68: Bucket recovery did not preserve the Cold slot")
+    }
+    if ptr.pack != 8 || ptr.offset != 72 || ptr.stamp != 40 {
+        fail("L68: Bucket recovery changed the Cold locator")
+    }
+    let mut truncated = cold
+    truncated.len = 219
+    map.insert(mut source.locator.rows, 8u64, truncated)
+    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source, owner, "MANIFEST", take manifest, true) else {
+        fail("L68: a Tiered locator width differing from the pack row was accepted")
+    }
+    Ok(())
+}
+
+@test
+fn test_l68_lazy_bucket_inventory(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let model = bucket_law_sim(tasks, c, 6811, None, list.new())
+    let checked = l68_bucket_restore(tasks, model)
+    let report = bucket_law_finish(take model)
+    if report.writes != 2 {
+        fail("L68: expected exactly the two Memory packs in the fixture")
+    }
+    checked
 }

@@ -272,7 +272,7 @@ fn history_load_data_pack(mut source: ObjectPackRead, id: StoreId, seq: u64, pac
     Ok((take name, LoadedPack(class: pack.class, payloads: take payloads, raw: take raw)))
 }
 
-fn history_resolve_page(path: String, pack: LoadedPack, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], mut pending: Map[u64, List[LocatedNeed]], mut graph: PageGraph) -> Result[(), Error] {
+fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInventory, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], mut pending: Map[u64, List[LocatedNeed]], mut graph: PageGraph) -> Result[(), Error] {
     if pack.class != 0 {
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
@@ -298,7 +298,7 @@ fn history_resolve_page(path: String, pack: LoadedPack, ptr: std.page.PagePtr, d
         }
         return Ok(())
     }
-    let image = decode_located_page(path, ptr.offset, copied(payload)?, domain)?
+    let image = decode_manifest_page(path, ptr.offset, copied(payload)?, domain, inventory.allow_tiered)?
     let height = std.page.level(image)
     if let Some(wanted) = expected_level {
         if height != wanted {
@@ -312,6 +312,13 @@ fn history_resolve_page(path: String, pack: LoadedPack, ptr: std.page.PagePtr, d
             Some(PageEdge(child)) => {
                 if child.stamp != 0 {
                     page_edge_order(path, ptr, child)?
+                }
+                if let Some(_) = std.page.tiered_root_at(image, slot) {
+                    validate_cold_root(inventory, child)?
+                    list.push(mut kids, 0u64)
+                    continue
+                }
+                if child.stamp != 0 {
                     let need = if height == 0 {
                         NeedPage(child, Collection, None)
                     } else {
@@ -334,11 +341,11 @@ fn history_resolve_page(path: String, pack: LoadedPack, ptr: std.page.PagePtr, d
     graph_add(mut graph, ptr.stamp, ReadPage(take image, take kids, take blobs))
 }
 
-fn history_resolve_pack(path: String, pack: LoadedPack, seq: u64, mut pending: Map[u64, List[LocatedNeed]], mut graph: PageGraph) -> Result[(), Error] {
+fn history_resolve_pack(path: String, pack: LoadedPack, inventory: RecoveryInventory, seq: u64, mut pending: Map[u64, List[LocatedNeed]], mut graph: PageGraph) -> Result[(), Error] {
     while let Some(take needs) = map.remove(mut pending, seq) {
         for wanted in needs {
             match wanted {
-                NeedPage(ptr, domain, height) => history_resolve_page(path, pack, ptr, domain, height, mut pending, mut graph)?,
+                NeedPage(ptr, domain, height) => history_resolve_page(path, pack, inventory, ptr, domain, height, mut pending, mut graph)?,
                 NeedBlob(reference) => resolve_blob_frame(path, pack, reference, mut graph)?,
             }
         }
@@ -357,8 +364,12 @@ fn history_graph_order(mut graph: PageGraph) {
 
 fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: String, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
     require_memory_manifest(manifest)?
+    validate_bucket_graph(mut source, id, file, take manifest, false)
+}
+
+fn validate_bucket_graph(mut source: ObjectPackRead, id: StoreId, file: String, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(allow_tiered: false, packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
+    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
     let mut final_item: Option[u64] = None
     read_page_list(mut source, id, manifest, manifest.pack_root, None, false, mut final_item, mut lists, history_list_page)?
     for (seq, _) in lists.class_two {
@@ -370,11 +381,15 @@ fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: Stri
         return Error(disk_fault(file, 72, Malformed))
     }
     let mut seqs: List[u64] = list.with_capacity(map.len(lists.packs))
-    for (seq, _) in lists.packs {
-        if !map.contains(source.locator.rows, seq) {
+    for (seq, pack) in lists.packs {
+        let Some(located) = map.get(source.locator.rows, seq) else {
             return Error(disk_fault(file, 72, Malformed))
         }
-        list.push(mut seqs, seq)
+        if pack.class < 3 {
+            list.push(mut seqs, seq)
+        } else if located.len != pack.payload_bytes {
+            return Error(disk_fault(file, 72, Malformed))
+        }
     }
     for (seq, offsets) in lists.class_two {
         let pack = history_check_list_pack(mut source, id, seq, manifest.next_stamp, offsets)?
@@ -394,7 +409,8 @@ fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: Stri
     for seq in seqs {
         let pack = option.unwrap(map.get(lists.packs, seq))
         let (take name, take loaded) = history_load_data_pack(mut source, id, seq, pack, manifest.next_stamp)?
-        history_resolve_pack(name, loaded, seq, mut pending, mut lists.live_graph)?
+        let inventory = RecoveryInventory(packs: view lists.packs, next_stamp: manifest.next_stamp, allow_tiered: allow_tiered)
+        history_resolve_pack(name, loaded, inventory, seq, mut pending, mut lists.live_graph)?
     }
     for (seq, frames) in pending {
         let (offset, stamp) = match frames[0] {

@@ -133,7 +133,11 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
         if mode == "faulted_owner_releases_slot" { return fault_listener(n, c, tasks, false) }
         if mode == "wire_control_budget_too_small" { return fault_listener(n, c, tasks, true) }
     }
-    let mut db = store.memory(c, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut options = result.unwrap(store.sized(Memory, 1074790400u64))
+    if let Some(mode) = args.get(a, 0u64) {
+        if mode == "welcome_samples_store_stream_time" { options.stream_retention_ms = 721000u64 }
+    }
+    let mut db = store.memory(c, random, options)
     let mut declaration = result.unwrap(store.declare(db, Migrate))
     let _ = result.unwrap(schema(mut declaration))
     let _ = result.unwrap(store.seal(mut db, take declaration))

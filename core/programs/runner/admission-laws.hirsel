@@ -147,6 +147,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     wire_know(mut s, reg, take missing)
     wire_know(mut s, reg, clone(entry))
     if wire_can_read(s) { return false }
+    work.stream_time = Some(StreamTime(now_ms: host.wall_ms(clock), retention_ms: store.STREAM_RETENTION_MS))
     if let Ok(Some(Welcome(_, 4u32, 1048576u64, _, _, _, _, _))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }
     if wire_can_read(s) { return false }
     if let Ok(Some(Placed(Ready(0u32)))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }

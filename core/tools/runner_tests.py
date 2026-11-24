@@ -1108,7 +1108,7 @@ def admission_laws(args, root, work, engines, row):
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
-             'cli_call_exact_value', 'cli_call_fingerprint_mismatch', 'supplied_id_never_rotates'}
+             'cli_call_exact_value', 'cli_call_fingerprint_mismatch', 'supplied_id_never_rotates', 'welcome_samples_store_stream_time'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),

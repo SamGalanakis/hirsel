@@ -337,6 +337,15 @@ def welcome_with_small_budget():
         assert read_frame(s) == (8, b'\x03\xe8')
 
 
+def welcome_samples_store_stream_time():
+    with upgraded(frame(2, hello())) as s:
+        welcome = receive(s)
+        assert welcome[0] == 'welcome'
+        keyed, retention = welcome[-2:]
+        assert TEST_BIRTH <= keyed <= time.time_ns() // 1000000, welcome
+        assert retention == 721000, welcome
+
+
 def faulted_owner_releases_slot():
     def next_owner():
         for _ in range(100):
@@ -538,7 +547,7 @@ def cli_dev_restores_subscription():
 
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
-         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
+         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget, welcome_samples_store_stream_time,
          cli_call_exact_value, cli_call_fingerprint_mismatch, supplied_id_never_rotates)}
 
 

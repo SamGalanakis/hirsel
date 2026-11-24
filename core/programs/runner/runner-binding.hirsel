@@ -315,3 +315,24 @@ fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take 
     Req(e: Requested(Request(caller: take caller, stream: take stream, stream_id: stream_id, p: p, key: take key, arg: take arg, digest: digest,
         deadline: deadline, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
 }
+
+fn stream_time(head: Sender[HeadInput]) -> Option[StreamTime] waits {
+    host_head(head, scoped fn(take to: Sender[StreamTime]) -> Result[HeadInput, Capacity] { Ok(ReadStreamTime(take to)) })
+}
+
+type WireHello[G: send]: send {
+    binding: Option[(BindingJob[G], u64)], anonymous: Caller, tasks: Tasks, to: Sender[WireEvent], head: WireHead
+}
+
+fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
+    let WireHello(binding: take binding, anonymous: take anonymous, tasks: tasks, to: take to, head: take head) = take job
+    let identity = match take binding {
+        Some((take claim_job, allowance)) => bound_caller(tasks, take claim_job, allowance),
+        None => Some(take anonymous),
+    }
+    let sample = match identity {
+        Some(_) => match head { LifecycleHead(sender) => stream_time(sender) },
+        None => None,
+    }
+    let _ = channel.send(to, wire_event(HelloBound(take identity, sample)))
+}

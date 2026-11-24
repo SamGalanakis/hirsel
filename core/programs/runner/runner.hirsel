@@ -1522,7 +1522,9 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 pub type HeadInput: send = RunRequest(Req) | RetireCaller(Caller) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
-    | SyncWake | ParkWake | StoreUnhealthy | InboxEnded
+    | SyncWake | ParkWake | StoreUnhealthy | InboxEnded | ReadStreamTime(Sender[StreamTime])
+
+pub type StreamTime: send { now_ms: u64, retention_ms: u64 }
 
 pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[(u64, bool), store.DeployError]] }
 
@@ -2197,6 +2199,10 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             None => head_next(inbox, false),
         }
         match take next {
+            Some(ReadStreamTime(to)) => {
+                let _ = channel.try_send(to, StreamTime(now_ms: store.keyed_time(head.db), retention_ms: store.stream_retention_ms(head.db)))
+                continue
+            },
             Some(RunRequest(take req)) => {
                 head_arrival(mut head, take req, closed, !none(pause) || resuming)?
                 if none(pause) { continue }
@@ -3909,7 +3915,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 type WireParsed: send { reader: Box[std.wsock.Reader], packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -4329,7 +4335,8 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
                     },
                 }
             },
-            HelloBound(take identity_result) => {
+            HelloBound(take identity_result, sample) => {
+                st.work.stream_time = sample
                 let _ = replace(mut st.work.asking, None)
                 match wire_owner_hello(mut st, take service, pool, take identity_result) {
                     Some(take kept) => { service = take kept; None },
@@ -5098,9 +5105,9 @@ type WireOwed: send { generation: u64, reply: Bytes }
 // v2.19: `fence` is the session's fence root, made at join, and `round` the place's round
 // register, from the join's answer. `check` and `sending_done` are the unit handed out last:
 // its version, and a copy of its Outcome rows, which a Dropped Reset carries (§3).
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], plan_call: bool, timers: Map[u64, Task[()]], granted: Map[u64, Task[Outcome]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool, posts: List[Req], splice: bool, packing: List[OwedGroup] }
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], plan_call: bool, timers: Map[u64, Task[()]], granted: Map[u64, Task[Outcome]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool, posts: List[Req], stream_time: Option[StreamTime], splice: bool, packing: List[OwedGroup] }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), splice: false, packing: list.new()) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), stream_time: None, splice: false, packing: list.new()) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     wire_cut_at(work.drain, clock)
@@ -5125,19 +5132,6 @@ type WireMark: send = Unit(Bytes) | V1 | WriteUnit(Bytes)
 // check"); None for a unit that carries no content and passes unchecked.
 type WireOutput: send { frame: Frame, tapes: List[OwedGroup], marks: List[WireMark], generations: List[(u32, u64)], external: bool, check: Option[u64] }
 type WirePending: send { stream: StreamId, p: u64, wire_slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
-type WireHello[G: send]: send {
-    binding: Option[(BindingJob[G], u64)], anonymous: Caller, tasks: Tasks, to: Sender[WireEvent]
-}
-
-fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
-    let WireHello(binding: take binding, anonymous: take anonymous, tasks: tasks, to: take to) = take job
-    let identity = match take binding {
-        Some((take claim_job, allowance)) => bound_caller(tasks, take claim_job, allowance),
-        None => Some(take anonymous),
-    }
-    let _ = channel.send(to, wire_event(HelloBound(take identity)))
-}
-
 fn deadline_notice(take stream: Bytes, p: u64, generation: u64) -> WireEvent {
     wire_event(FromRunner(Notice(e: Expired(Tick(stream: take stream, p, generation)))))
 }
@@ -5496,7 +5490,7 @@ fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, 
         Some((_, bytes_reserved)) => int.saturating_add(4096u64, bytes_reserved),
         None => 4096u64,
     }
-    let job = WireHello(binding: take binding, anonymous: clone(s.anonymous), tasks: s.tasks, to: take to)
+    let job = WireHello(binding: take binding, anonymous: clone(s.anonymous), tasks: s.tasks, to: take to, head: copy_wire_head(s.head))
     let run: fn(take WireHello[B]) -> () waits = wire_bind_hello
     let h = task.spawn(s.tasks, bytes allowance, take job, run)
     work.asking = Some(take h)
@@ -6015,8 +6009,9 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
                         None => return Error(1008u16),
                     }
                     let q: u32 = int.narrow(s.config.q)
+                    let Some(sample) = work.stream_time else { return Error(1011u16) }
                     return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.n_place,
-                        host.wall_ms(s.clock), store.STREAM_RETENTION_MS)))
+                        sample.now_ms, sample.retention_ms)))
                 }
                 let index = s.placing - 1u64
                 let wire_slot: u32 = int.narrow(index)

@@ -60,9 +60,10 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     let limits = LogBounds(first: 0, next: 3)
     let empty = std.page.empty(0, 0, Collection)
     let mut stamp = 41u64
-    let kept = fold_materialize_trim(source, ColdPage(base), empty, limits, 258, 2, mut stamp)?
+    let mut ignored: Option[List[TieredFoldEffect]] = None
+    let kept = fold_materialize_trim(source, ColdPage(base), empty, limits, 258, 2, mut stamp, mut ignored)?
     let appended = option.unwrap(replay_overlay_at(overlay, next_key))
-    let HotPage(take ready) = fold_materialize_row(source, kept, empty, next_key, appended, 1024, true, 41, mut stamp)? else {
+    let HotPage(take ready) = fold_materialize_row(source, kept, empty, next_key, appended, 1024, true, 41, mut stamp, mut ignored)? else {
         fail("L79: the overlay append must make a fresh leaf")
     }
     if std.page.totals(ready) != (2u64, 172u64) || std.page.lookup(ready, key_word(0)) != None ||
@@ -73,9 +74,9 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
     Ok(())
 }
 
-fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Bytes, mut next_stamp: u64) -> Result[Roots, Error] waits {
+fn l79_cut_table(base: std.page.PagePtr, total_rows: u64, row_bytes: u64, mut next_stamp: u64) -> Result[Roots, Error] {
     let key = prefix(9)?
-    let mut descriptor = collection_header(base.stamp, 3, 258, 1, 1)?
+    let mut descriptor = collection_header(base.stamp, total_rows, row_bytes, 1, 1)?
     list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: take key, cell: InlineValue(take descriptor)))
@@ -85,10 +86,15 @@ fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Byt
     list.push(mut kids, ColdPage(base))
     let mut roots = empty_roots()
     roots.collections.root = page_result(std.page.attach(take image, take kids, list.new()))?
+    Ok(take roots)
+}
+
+fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Bytes, mut next_stamp: u64) -> Result[Roots, Error] waits {
+    let mut roots = l79_cut_table(base, 3, 258, mut next_stamp)?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let change = JournalOp(key: log_key(9, 1)?, value: Some(clone(body)), prior: 7, trim: None)
     replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
-    fold_page_tree(source, mut roots.collections, mut next_stamp)?
+    let _ = fold_page_tree(source, mut roots.collections, mut next_stamp)?
     Ok(take roots)
 }
 
@@ -149,8 +155,19 @@ fn l64_fold_with_writer_pin(source: TieredPageSource, base: std.page.PagePtr, pa
     l79_fold_checks(source, base)?
     let empty = std.page.empty(0, 0, Collection)
     let mut stamp = 43u64
-    let ColdPage(survivor) = fold_materialize_trim(source, ColdPage(parent), empty, LogBounds(first: 0, next: 5), 430, 3, mut stamp)? else {
+    let mut dropped: Option[List[TieredFoldEffect]] = Some(list.new())
+    let ColdPage(survivor) = fold_materialize_trim(source, ColdPage(parent), empty, LogBounds(first: 0, next: 5), 430, 3, mut stamp, mut dropped)? else {
         fail("L64: the fold must release the cut pin of an unchanged survivor")
+    }
+    let effects = option.unwrap(take dropped)
+    if list.len(effects) != 2 {
+        fail("L87(a): trim must replace the old parent and enqueue the detached leaf")
+    }
+    let FoldDropped(TieredPage(detached)) = effects[1u64] else {
+        fail("L87(a): do not read or file detached subtrees during the trim")
+    }
+    if detached != base {
+        fail("L87(a): the drop must retain the exact old Cold location")
     }
     if survivor != right || stamp != 43 { fail("L64: a collapsed root must keep its original Cold location") }
     if let Some(_) = held.failure { fail("L64: the writer's leaf must be readable") }
@@ -188,6 +205,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
 fn l79_fold_and_emit(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr, queued_blob: std.page.BlobRef, owner: StoreId) -> Result[(), Error] waits {
     l87_probe_queue_roots(source, parent, right, queued_blob)?
     l64_fold_with_writer_pin(source, base, parent, right)?
+    l87_fold_fork_shape(source, parent)?
     l79_cut_emits_folded_tree(source, base, owner)
 }
 
@@ -282,6 +300,54 @@ fn l87_probe_queue_roots(source: TieredPageSource, parent: std.page.PagePtr, lea
     }
     if found_root != parent || list.len(root_slots) != 0 {
         fail("L87(a): the queue value names the matching root directly")
+    }
+    Ok(())
+}
+
+fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut stamp = 51u64
+    let roots = l79_cut_table(base, 5, 430, mut stamp)?
+    let mut manifest = page_manifest_empty()
+    manifest.next_stamp = stamp
+    manifest.account_tiered = 430
+    let mut replay = journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)?
+    let mut deleted: List[JournalOp] = list.with_capacity(1)
+    list.push(mut deleted, JournalOp(key: log_key(9, 2)?, value: None, prior: 7, trim: None))
+    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), call: None)))?
+    journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
+    journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?
+
+    let mut parent_tree = share_page_tree(replay.state.tips[0u64].roots.collections)
+    let mut child_tree = share_page_tree(replay.state.tips[1u64].roots.collections)
+    stamp = stamp_after(replay.next_node)?
+    let parent_effects = fold_page_tree(source, mut parent_tree, mut stamp)?
+    let child_effects = fold_page_tree(source, mut child_tree, mut stamp)?
+    let mut observed: List[u64] = list.new()
+    for effect in parent_effects {
+        let FoldReplaced(frame) = effect else {
+            fail("L87(d): the merge replaced pages without detaching a subtree")
+        }
+        list.push(mut observed, frame.stamp)
+    }
+    list.sort(mut observed, order.compare)
+    if list.len(observed) != 3 || observed[0u64] != 40 || observed[1u64] != 41 || observed[2u64] != 42 || list.len(child_effects) != 0 {
+        fail("L87(d): only the parent records both Cold leaves and the Cold parent")
+    }
+    let map_key = prefix(9)?
+    let Some((HotPage(parent_rows), _)) = std.page.collection_slot(parent_tree.root, map_key) else {
+        fail("L87(d): the parent's fold must materialize the merged leaf")
+    }
+    let Some((HotPage(child_rows), _)) = std.page.collection_slot(child_tree.root, map_key) else {
+        fail("L87(d): the child must materialize its own inherited leaf")
+    }
+    let parent_image = std.page.image_of(parent_rows)
+    let child_image = std.page.image_of(child_rows)
+    // Deleting the last key in the left leaf merges the two underfull leaves.
+    // Restoring that key in the child stays in its copy of the merged leaf.
+    if std.page.level(parent_image) != 0 || std.page.level(child_image) != 0 ||
+        std.page.totals(parent_rows) != (4u64, 344u64) || std.page.totals(child_rows) != (5u64, 430u64) ||
+        std.page.stamp(parent_image) == std.page.stamp(child_image) {
+        fail("L87(d): the child must apply its own edit after materializing the fork-time merge")
     }
     Ok(())
 }

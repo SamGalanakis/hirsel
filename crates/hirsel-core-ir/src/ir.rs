@@ -1860,7 +1860,6 @@ pub struct Signature {
     /// The parameters (indices into `params`, ascending) a `dest` result is a view
     /// anchored on (OWN-20): the destination borrows their places, so it dangles
     /// once one of them is dropped. Empty for an owned result or no `dest`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchors: Vec<u32>,
     pub never: bool,
 }

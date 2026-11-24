@@ -10,6 +10,40 @@ import service_build
 
 
 class RuntimeBudgetTests(unittest.TestCase):
+    def test_reuse_requires_a_fresh_build_in_the_same_store(self):
+        for stages, expected_builds in [(['reuse'], 0), (['fresh', 'reuse', 'edit'], 3)]:
+            with self.subTest(stages=stages), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                artifacts = root / 'artifacts.json'
+                artifacts.write_text(json.dumps(dict(compiler='compiler', runtime='runtime', compiler_build_profile='release')))
+                out = root / 'out'
+                argv = ['service_build.py', '--artifacts', str(artifacts), '--out', str(out),
+                        '--group', 'json', '--backend', 'cranelift', '--release-twins', str(root),
+                        '--dev-twins', str(root), '--side', 'hirsel']
+                for stage in stages:
+                    argv += ['--stage', stage]
+                stores = []
+
+                def sample(command, directory):
+                    stores.append(command[command.index('--store') + 1])
+                    directory.mkdir()
+                    (directory / 'stdout').write_bytes(b'{"accepted":true,"native":{"linked":true}}')
+                    return dict(status='ok', instructions=100)
+
+                def execute(command):
+                    last = b'1\n' if command[0].name.startswith('edit-') else b'0\n'
+                    return unittest.mock.Mock(returncode=0, stdout=b'262144\n241502240\n' + last, stderr=b'')
+
+                with patch.object(sys, 'argv', argv), patch.object(
+                        service_build.measurement_artifacts, 'identity', return_value={}), patch.object(
+                        service_build, 'execute', side_effect=execute), patch.object(
+                        service_build, 'sample', side_effect=sample), patch('builtins.print'):
+                    status = service_build.main()
+                self.assertEqual(stores, [out / 'store/build'] * expected_builds)
+                self.assertEqual(status, int(expected_builds == 0))
+                rows = json.loads((out / 'results.json').read_text())
+                self.assertEqual([row['status'] for row in rows], ['ok'] * 3 if expected_builds else ['blocked'])
+
     def test_observed_regression_and_original_code(self):
         for instructions, passed in [(367_326_997, True), (605_042_819, False)]:
             with self.subTest(instructions=instructions):

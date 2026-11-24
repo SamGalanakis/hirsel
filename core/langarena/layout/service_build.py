@@ -133,7 +133,14 @@ def main():
     app = [Path(x['file']) for x in data['packages'][-1]['sources']]
     counts = dict(request_code_lines=sum(measure.source_lines(p) for p in sources), own_code_lines=sum(measure.source_lines(p) for p in app))
     rows = []
-    for stage in args.stage or ['check', 'fresh', 'reuse', 'edit']:
+    def save(row):
+        rows.append(row)
+        (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
+
+    primed = False
+    for stage in ['check', 'fresh', 'reuse', 'edit']:
+        if args.stage and stage not in args.stage:
+            continue
         if stage == 'edit':
             own.write_text(original.replace('+0', '+1'))
             for file, text in twins.values():
@@ -142,8 +149,13 @@ def main():
             if side == 'hirsel' and stage == 'check' and args.reuse_hirsel_check:
                 row = next(x for x in json.loads(args.reuse_hirsel_check.read_text()) if x['side'] == 'hirsel' and x['stage'] == 'check')
                 row = dict(row, backend=args.backend, reused_check_from=str(args.reuse_hirsel_check))
-                rows.append(row)
-                (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
+                save(row)
+                continue
+            row = dict(group=args.group, backend=args.backend, stage=stage, side=side, **identity, **counts)
+            if side == 'hirsel' and stage in ('reuse', 'edit') and not primed:
+                row.update(status='blocked', cause='no successful fresh build in this store')
+                save(row)
+                print(json.dumps(row, default=str), flush=True)
                 continue
             binary = args.out / f'{stage}-{side}-program'
             directory = args.out / f'{stage}-{side}'
@@ -171,7 +183,6 @@ def main():
                     command += ['--extern', f'serde_json={deps / "libserde_json.rlib"}', '-L', f'dependency={deps}']
                     if args.backend == 'llvm' and args.release_serde_core:
                         command += ['-L', f'dependency={args.release_serde_core.resolve().parent}']
-            row = dict(group=args.group, backend=args.backend, stage=stage, side=side, **identity, **counts)
             if side != 'hirsel':
                 row['own_code_lines'] = measure.source_lines(twins[side][0])
                 if args.group == 'graph':
@@ -208,8 +219,9 @@ def main():
                     observed = execute(command)
                     if observed.returncode or observed.stdout != want or observed.stderr:
                         row.update(status='wrong-output', output=observed.stdout.decode(errors='replace'), error=observed.stderr.decode(errors='replace'))
-            rows.append(row)
-            (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
+            if side == 'hirsel' and stage == 'fresh':
+                primed = row['status'] == 'ok'
+            save(row)
             print(json.dumps(row, default=str), flush=True)
             if stage != 'check' and binary.exists():
                 binary.unlink()

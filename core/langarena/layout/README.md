@@ -173,7 +173,8 @@ optimization attribute prevents either compiler from proving successful admissio
 
 `service_build.py` fills family build cells for graph, documents and JSON, separately
 for LLVM/opt3 and Cranelift/opt0. It uses the same canonical artifact JSON, CPU16 lock
-and2GiB cap. `--stage`/`--side` resume only missing configurations. Each group adds a
+and 2 GiB cap. Use `--stage` and `--side` to select cells. Hirsel reuse and edit require
+a successful fresh build in the same invocation. Each group adds a
 temporary same-module `build_family` entry, without changing the shipped benchmark:
 graph calls its four lifetime phases; documents builds/scans all three representations;
 JSON calls its two existing parse/print entries with their separate input lifetimes.

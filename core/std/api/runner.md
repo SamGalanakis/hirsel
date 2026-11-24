@@ -124,7 +124,8 @@ arg)` spawns a task under the entry's `bytes n` that holds the grant g and decod
 the granted entry, a body `fn(G, Caller, take A) -> Result[R, Capacity] waits`. A trigger
 moves its attempt's `G` into `start`. A wire call reaches a granted entry only when the
 place gives `PlaceConfig.wire` a `runner.wire(grant, ..)`, which requires `G: plain + send`
-(Dir, Net, Clock, Random, Secret and records of them); each wire call then runs with its
+(Dir, Net, Clock, Random and records of them; a Secret is a resource and is never in a
+wire grant); each wire call then runs with its
 own copy of the grant, so no call consumes it. Without it a wire call to a granted entry
 is `Refused(NotAllowed)`, as it is with a `runner.wire_bind` wire, which binds but carries no grant. A movable `G` stays trigger-only. A spawn the place cannot grant returns `Budget`. `finish` joins
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that

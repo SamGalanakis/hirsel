@@ -232,16 +232,13 @@ fn text(mut out: Bytes, data: String) -> Result[(), Error] {
     append(mut out, string.as_bytes(data))
 }
 
-fn hex(mut out: Bytes, digest: Inline[u8, 32]) -> Result[(), Error] {
-    let alphabet = string.as_bytes("0123456789abcdef")
-    let mut digits: Inline[u8, 64] =[0; 64]
-    for i in 0u64 .. 32u64 {
-        digits[i * 2] = alphabet[int.widen(digest[i] >> 4)]
-        digits[i * 2 + 1] = alphabet[int.widen(digest[i] & 15)]
-    }
-    if !bytebuf.append_inline(mut out, digits, 0, 64) {
+fn append_digest(mut out: Bytes, digest: Inline[u8, 32]) -> Result[(), Error] {
+    if list.capacity(out) - list.len(out) < 64 {
         return Error(NoSpace)
     }
+    hex.append_from(mut out, 32, scoped fn(i: u64) -> u8 {
+        digest[i]
+    })
     Ok(())
 }
 
@@ -355,7 +352,7 @@ fn canonical(mut out: Bytes, r: Request, date: Inline[u8, 16]) -> Result[(), Err
     signed_headers(mut out, r.headers)?
     text(mut out, "\n")?
     match r.payload {
-        Sha256(digest) => hex(mut out, digest),
+        Sha256(digest) => append_digest(mut out, digest),
         _ => text(mut out, "UNSIGNED-PAYLOAD"),
     }
 }
@@ -389,7 +386,7 @@ pub fn authorize(keys: SigningKeys, now_ms: u64, timestamp_ms: u64, access_key: 
     text(mut scratch, "\n")?
     append(mut scratch, day.scope)?
     text(mut scratch, "\n")?
-    hex(mut scratch, digest)?
+    append_digest(mut scratch, digest)?
     let signature = mac(day.key, scratch)?
     list.clear(mut out)
     text(mut out, "AWS4-HMAC-SHA256 Credential=")?
@@ -399,5 +396,5 @@ pub fn authorize(keys: SigningKeys, now_ms: u64, timestamp_ms: u64, access_key: 
     text(mut out, ", SignedHeaders=")?
     signed_headers(mut out, r.headers)?
     text(mut out, ", Signature=")?
-    hex(mut out, signature)
+    append_digest(mut out, signature)
 }

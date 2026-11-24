@@ -3042,10 +3042,10 @@ fn write_quoted(w: TypedWriter, mut length: u64, b: Bytes) -> Result[(), TypedWr
 
 fn write_string_byte(w: TypedWriter, mut length: u64, b: u8) -> Result[(), TypedWriteError] {
     if b < 32 {
-        let hex = string.as_bytes("0123456789ABCDEF")
+        let (hi, lo) = hex.encode_byte(b, true)
         output_literal(w, mut length, "\\u00")?
-        output_byte(w, mut length, hex[int.widen(b >> 4)])?
-        output_byte(w, mut length, hex[int.widen(b & 15)])
+        output_byte(w, mut length, hi)?
+        output_byte(w, mut length, lo)
     } else {
         if b == b'"' || b == b'\\' {
             output_byte(w, mut length, b'\\')?

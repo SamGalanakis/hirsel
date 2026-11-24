@@ -52,7 +52,7 @@ fn start_current(found: u64, selected: launcher.Selection) -> String {
     let mut out = string.from("NotCurrent: the store's release identity at activation ")
     string.push_uint(mut out, found, 10u32, 1u64, '0')
     string.push(mut out, " is not that of assembly ")
-    string.push(mut out, hex_of(selected.assembly))
+    string.push(mut out, std.hex.encode(selected.assembly))
     string.push(mut out, ", which this start ran")
     take out
 }
@@ -267,10 +267,10 @@ fn report_recovery(mut h: Host, name: String, gen: u64, version: u64, selected: 
 }
 
 fn push_candidate(mut out: String, assembly: Bytes, binding: Option[Binding]) {
-    string.push(mut out, hex_of(assembly))
+    string.push(mut out, std.hex.encode(assembly))
     if let Some(b) = binding {
         string.push(mut out, " with identity ")
-        string.push(mut out, hex_of(b.identity))
+        string.push(mut out, std.hex.encode(b.identity))
         string.push(mut out, " at n_place ")
         string.push_u64(mut out, b.n_place)
     }
@@ -287,7 +287,7 @@ fn failing_last(h: Host, name: String, outcome: String) -> String {
     string.push(mut message, ": its release identity ")
     if list.len(binding.identity) == 32u64 {
         string.push(mut message, "is ")
-        string.push(mut message, hex_of(binding.identity))
+        string.push(mut message, std.hex.encode(binding.identity))
         string.push(mut message, " at n_place ")
         string.push_u64(mut message, binding.n_place)
     } else {

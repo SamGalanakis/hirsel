@@ -193,15 +193,6 @@ fn quoted(mut out: String, s: String) {
     })
 }
 
-fn push_hex(mut out: String, n: u64) {
-    let mut digits: Inline[u8, 64] =[b'0'; 64]
-    let _ = int.radix_digits(n, 16, mut digits)
-    for i in 48u64 .. 64u64 {
-        let code: u32 = int.widen(digits[i])
-        let _ = string.push_char(mut out, option.unwrap(char.from_u32(code)))
-    }
-}
-
 fn push_value(mut out: String, v: Value) {
     match v {
         Str(s) => {
@@ -265,15 +256,15 @@ fn push_nanos(mut out: String, key: String, ns: u64) {
 
 fn push_trace_id(mut out: String, x: Context) {
     string.push(mut out, "\"traceId\":\"")
-    push_hex(mut out, x.trace_hi)
-    push_hex(mut out, x.trace_lo)
+    hex.push_u64(mut out, x.trace_hi)
+    hex.push_u64(mut out, x.trace_lo)
     string.push(mut out, "\"")
 }
 
 fn push_span_id(mut out: String, key: String, n: u64) {
     string.push(mut out, key)
     string.push(mut out, "\"")
-    push_hex(mut out, n)
+    hex.push_u64(mut out, n)
     string.push(mut out, "\"")
 }
 

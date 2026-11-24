@@ -1,0 +1,34 @@
+pub opaque type Edge[A, B]: shareable + send {
+    table: Table[(A, B), ()],
+    targets: Index[B, (A, B), (), ()],
+    source_key: std.codec.Key[A]
+}
+
+pub fn declare_edge[A, B: shareable](mut d: Declare, name: String, index_name: String, take pair_key: std.codec.Key[(A, B)], take source_key: std.codec.Key[A], take target_key: std.codec.Key[B]) -> Result[Edge[A, B], Error] {
+    let mut t = declare_table(mut d, name, take pair_key, std.codec.of_unit())?
+    let targets = index(mut d, mut t, index_name, Many, code.describe(edge_target), take target_key)?
+    Ok(Edge(table: finish(mut d, take t)?, targets: take targets, source_key: take source_key))
+}
+
+fn edge_target[A, B: shareable](k: (A, B), v: ()) -> Result[List[B], Capacity] {
+    let mut targets: List[B] = list.new()
+    list.try_reserve(mut targets, 1)?
+    list.push(mut targets, clone(k.1))
+    Ok(take targets)
+}
+
+pub fn edge_put[A, B](mut tx: Tx, edge: Edge[A, B], pair: (A, B)) -> Result[(), Error] {
+    put(mut tx, edge.table, pair, ())
+}
+
+pub fn edge_delete[A, B](mut tx: Tx, edge: Edge[A, B], pair: (A, B)) -> Result[bool, Error] {
+    delete(mut tx, edge.table, pair)
+}
+
+pub fn edge_out[A, B](tx: Tx, edge: Edge[A, B], source: A) -> Result[TxRows[(A, B), ()], Error] in tx {
+    range_prefix(tx, edge.table, source, edge.source_key)
+}
+
+pub fn edge_in[A, B: shareable](tx: Tx, edge: Edge[A, B], target: B) -> Result[IndexRows[(A, B), ()], Error] in tx {
+    lookup(tx, edge.targets, Included(clone(target)), Included(clone(target)))
+}

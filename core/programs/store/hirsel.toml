@@ -62,6 +62,7 @@ std = { major = 1 }
 "store-read.hirsel" = "store"
 "store-cell.hirsel" = "store"
 "store-log.hirsel" = "store"
+"store-edge.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]

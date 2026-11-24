@@ -74,7 +74,7 @@ pub type ReleaseRound: shareable + send {
     at: u64
 }
 
-type ReleaseGate: send {
+pub type ReleaseGate: send {
     fence: Latest[ReleaseFence],
     round: Latest[ReleaseRound],
     version: u64
@@ -1240,6 +1240,20 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(sent)
 }
 
+/// Writes an ordinary refusal from the stream writer before its head commits.
+pub fn write_stream_response(mut writer: WriteHalf, mut out: Bytes, reply: Response, version: u8, suppressed: bool, c: Clock, deadline: u64, signal: Option[DrainSignal]) -> Result[(), NetError] waits {
+    let mut cache = date_cache()
+    response_head(mut out, reply, version, true, host.wall_ms(c), mut cache) ?=> |_| Reset
+    if suppressed {
+        return write_wire_until(mut writer, out, b"", c, deadline, signal)
+    }
+    match reply.body {
+        OwnedBody(data) => write_wire_until(mut writer, out, bytebuf.as_bytes(data), c, deadline, signal),
+        SharedBody(data) => write_wire_until(mut writer, out, data, c, deadline, signal),
+        _ => Error(Reset),
+    }
+}
+
 fn route_response[S: send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {
     let methods = router.allow(routes, decoded, options_star)
     let status: u16 = if options_star {
@@ -1587,9 +1601,18 @@ type StreamRequest: send {
     reply: Sender[Option[stream.Transfer]]
 }
 
-type StreamJob: send {
+type StreamJob[Q: send]: send {
     work: stream.Work,
-    completion: Completion
+    completion: Completion,
+    state: Option[Q],
+    drive_managed: fn(take stream.Work, take Q) waits,
+}
+
+scoped type StreamHooks[Q: send] {
+    enabled: bool,
+    make: scoped[view] fn() -> Result[Q, Capacity],
+    drive: fn(take stream.Work, take Q) waits,
+    retired: scoped[view] fn(),
 }
 
 resource type Completion: send {
@@ -1612,11 +1635,14 @@ fn upgraded(take job: UpgradeJob) waits {
     run(upgrade.hand_over(take transfer, take notice))
 }
 
-fn streaming(take job: StreamJob) waits {
-    let StreamJob(work: take work, completion: take done) = take job
+fn streaming[Q: send](take job: StreamJob[Q]) waits {
+    let StreamJob(work: take work, completion: take done, state: take state, drive_managed) = take job
     let mut completion = take done
     completion.armed = true
-    stream.drive(take work)
+    match take state {
+        Some(take context) => drive_managed(take work, take context),
+        None => stream.drive(take work),
+    }
 }
 
 fn decline_handover(take reader: ReadHalf, take write_half: WriteHalf, c: Clock, ms: u64, linger: u64, signal: Option[DrainSignal]) waits {
@@ -1943,7 +1969,8 @@ type PromotedSlot {
     first: bool,
     ip: (u64, u64, u64),
     generation: u64,
-    stop: Option[stream.StopHandle]
+    stop: Option[stream.StopHandle],
+    managed: bool
 }
 
 resource type ServerTasks {
@@ -2060,7 +2087,7 @@ fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSi
     let job = UpgradeJob(transfer: take transfer, run, notice: take mark, completion: take completion)
     match task.try_spawn(tasks, bytes reserve, take job, upgraded) {
         Ok(take child) => {
-            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: source.first, ip: source.ip, generation, stop: None))
+            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: source.first, ip: source.ip, generation, stop: None, managed: false))
             source.first = false
             source.promoted = true
             generation = int.wrapping_add(generation, 1)
@@ -2074,7 +2101,7 @@ fn promote_upgrade(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSi
     group.connections[slot] = Some(take source)
 }
 
-fn promote_stream(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], from: u64, mut in_first_phase: u64, mut generation: u64, signal: Option[DrainSignal], take request: StreamRequest) {
+fn promote_stream[Q: send](mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSignal], done: Sender[ChildSlot], from: u64, mut in_first_phase: u64, mut generation: u64, signal: Option[DrainSignal], hooks: StreamHooks[Q], take request: StreamRequest) {
     let StreamRequest(source_slot: slot, transfer: take transfer, reply: take reply) = take request
     let end = list.len(group.promoted)
     let vacant = promotion_slot(group.promoted, from, end)
@@ -2097,16 +2124,35 @@ fn promote_stream(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSig
             return
         },
     }
+    let is_managed = stream.managed(transfer.offer)
+    let context: Option[Q] = if is_managed {
+        if !hooks.enabled {
+            group.connections[slot] = Some(take source)
+            let _ = channel.try_send(reply, Some(take transfer))
+            return
+        }
+        match (hooks.make)() {
+            Ok(take state) => Some(take state),
+            Error(_) => {
+                group.connections[slot] = Some(take source)
+                let _ = channel.try_send(reply, Some(take transfer))
+                return
+            },
+        }
+    } else {
+        None
+    }
     let reserve = stream.reservation(transfer.offer, transfer.out_cap)
     let control: Option[StreamControl] = if let Some(_) = signal {
         Some(StreamControl(inbox: channel.sender(tx), slot: vacant, generation, stop: share_signal(signal)))
     } else {
         None
     }
-    let job = StreamJob(work: stream.Work(transport: take transfer, tasks, control: take control), completion: take completion)
-    match task.try_spawn(tasks, bytes reserve, take job, streaming) {
+    let job = StreamJob(work: stream.Work(transport: take transfer, tasks, control: take control), completion: take completion, state: take context, drive_managed: hooks.drive)
+    let run: fn(take StreamJob[Q]) waits = streaming
+    match task.try_spawn(tasks, bytes reserve, take job, run) {
         Ok(take child) => {
-            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation, stop: None))
+            group.promoted[vacant] = Some(PromotedSlot(child: take child, first: false, ip: source.ip, generation, stop: None, managed: is_managed))
             generation = int.wrapping_add(generation, 1)
             if source.first {
                 in_first_phase -= 1
@@ -2116,7 +2162,7 @@ fn promote_stream(mut group: ServerTasks, tasks: Tasks, tx: Sender[ConnectionSig
             let _ = channel.try_send(reply, None)
         },
         Error((_, take refused)) => {
-            let StreamJob(work: take work, completion: _) = take refused
+            let StreamJob(work: take work, ..) = take refused
             let stream.Work(transport: take returned, tasks: _, control: _) = take work
             let _ = channel.try_send(reply, Some(take returned))
         },
@@ -2207,7 +2253,7 @@ fn serve_shared[S: shareable + send](take listeners: List[Listener], c: Clock, t
         Ok(arc.share(shared))
     }
     let run: fn(take ConnectionStart[S], Arc[S]) waits = shared_connection
-    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
+    serve_without_managed(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
 }
 
 /// Serves an immutable router with one owned state value per admitted connection.
@@ -2219,10 +2265,44 @@ pub fn serve_with_factory[S: send](take listeners: List[Listener], c: Clock, tas
         }
     }
     let run: fn(take ConnectionStart[S], S) waits = owned_connection
-    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
+    serve_without_managed(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
 }
 
-fn serve_internal[S: send, E: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+fn unused_managed(take job: stream.Work, take _context: ()) waits {
+    stream.drive(take job)
+}
+
+fn serve_without_managed[S: send, E: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let make_unused: scoped[view] fn() -> Result[(), Capacity] = fn() -> Result[(), Capacity] {
+        Ok(())
+    }
+    let no_retirement: scoped[view] fn() = fn() {}
+    let hooks = StreamHooks(enabled: false, make: make_unused, drive: unused_managed, retired: no_retirement)
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, take incoming)
+}
+
+/// Uses the same HTTP connection loop and starts application subscription
+/// owners only after the supervisor has reserved a stream slot.
+pub fn serve_with_stream_factory[S: send, Q: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> S, stream_bytes: u64, make_stream: scoped[view] fn() -> Q, drive: fn(take stream.Work, take Q) waits, retired: scoped[view] fn(), take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let make: scoped[view] fn() -> Result[S, Capacity] = fn() -> Result[S, Capacity] {
+        bound bytes state_bytes {
+            make_state()
+        }
+    }
+    let subscription: scoped[view] fn() -> Result[Q, Capacity] = fn() -> Result[Q, Capacity] {
+        bound bytes stream_bytes {
+            make_stream()
+        }
+    }
+    let cleanup: scoped[view] fn() = fn() {
+        retired()
+    }
+    let hooks = StreamHooks(enabled: true, make: subscription, drive: drive, retired: cleanup)
+    let run: fn(take ConnectionStart[S], S) waits = owned_connection
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, take incoming)
+}
+
+fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, hooks: StreamHooks[Q], take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }
@@ -2462,7 +2542,7 @@ fn serve_internal[S: send, E: send](take listeners: List[Listener], c: Clock, ta
                     let StreamRequest(source_slot: _, transfer: take transfer, reply: take reply) = take request
                     let _ = channel.try_send(reply, Some(take transfer))
                 } else {
-                    promote_stream(mut group, tasks, tx, done_tx, upgrade_slots, mut in_first_phase, mut generation, signal, take request)
+                    promote_stream(mut group, tasks, tx, done_tx, upgrade_slots, mut in_first_phase, mut generation, signal, hooks, take request)
                 }
             },
             Established(slot, ticket) => {
@@ -2499,8 +2579,11 @@ fn serve_internal[S: send, E: send](take listeners: List[Listener], c: Clock, ta
                 PromotedChild(i) => {
                     let ended = replace(mut group.promoted[i], None)
                     if let Some(take s) = take ended {
-                        let PromotedSlot(child: take child, first, ip: _, generation: _, stop: _) = take s
+                        let PromotedSlot(child: take child, first, managed: managed_stream, ..) = take s
                         let _ = task.join(take child)
+                        if managed_stream {
+                            (hooks.retired)()
+                        }
                         if first {
                             in_first_phase -= 1
                         }

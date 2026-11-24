@@ -21,7 +21,7 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let _ = channel.try_send(to, wire_event(FromRunner(update(6u64, None, list.new()))))
     list.push(mut joined, Joiner(who: 1u64, to: take to, closed: None, ended: list.new(),
         reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false,
-        progress: None, progressed: false, taken: None, handed: 0u64))
+        progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut active = subscriptions()
     let mut waiting: List[Replies] = list.new()
     settle(mut active, mut joined, mut waiting, terminal_age_owe(1u64, 7u64, 1u32), 7u64)

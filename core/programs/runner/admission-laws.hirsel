@@ -185,7 +185,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+    list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -451,7 +451,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     let (told, who): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
-    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: None, progress: None, taken: None, first: None)))))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: None, progress: None, taken: None, first: None, http_credit: None)))))
     owner.joined = Some(result.unwrap(channel.receive(who)).who)
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
@@ -782,7 +782,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     owner.taken = Some(take root)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64))
+    list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64, http_credit: None))
 
     // The first repair: due, and the owner drained.
     let _ = mark_due(mut b.subs, 7u64, 1u32)
@@ -858,7 +858,7 @@ pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut carried = take first
     let mut told: Option[Sender[Admit]] = None
     if let Ok(PubIn(e: Joined(take j))) = channel.try_receive(inbox) {
-        let Join(to: _, told: take answer, mark: _, closed: _, identity: _, fence: _, progress: _, taken: _, first: take sub) = take j
+        let Join(to: _, told: take answer, mark: _, closed: _, identity: _, fence: _, progress: _, taken: _, first: take sub, http_credit: _) = take j
         told = Some(take answer)
         carried = take sub
     }

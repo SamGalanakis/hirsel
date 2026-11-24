@@ -1209,7 +1209,7 @@ type ToPub: send = Released(Release) | RelayJoined(List[Option[RelayTell]]) | St
 // v2.22: `taken` is the session's taken register (§3 "Repair"): the count of `complete`s the
 // owner has taken and no longer holds unsent. `first` is the Subscribe that made the owner
 // join, registered as the publisher takes the Join, so a join needs one PubIn message.
-type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]], progress: Option[Receiver[()]], taken: Option[Latest[Taken]], first: Option[JoinSubscribe] }
+type Join: send { to: Sender[WireEvent], told: Sender[Admit], mark: Option[Receiver[()]], closed: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[Latest[Fence]], progress: Option[Receiver[()]], taken: Option[Latest[Taken]], first: Option[JoinSubscribe], http_credit: Option[HttpBatchCredit] }
 
 // v2.22: the owner's first Subscribe, with its instance, carried in its Join.
 type JoinSubscribe: send { sub: u32, generation: u64, input: SubscriptionInput }
@@ -3167,7 +3167,7 @@ pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, reg
 // wait until the inbox takes them, retried at the current base with any new content.
 // v2.22: `handed` counts the `complete`s the owner's inbox took, and `taken` is the owner's
 // count of those it no longer holds unsent; a due session is repaired only when they agree.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[TerminalUpdate], reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[TerminalUpdate], reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64, http_credit: Option[HttpBatchCredit] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -3332,7 +3332,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
         }
         let handing = list.len(next.complete)
         let content = if has_content { Some(take next) } else { None }
-        match offer(joined[i].to, update(at, take content, take rows)) {
+        match offer_content(joined[i], update(at, take content, take rows)) {
             Took => { joined[i].handed += handing },
             Shut => {
                 // A one-shot writer may still hold the mark while it writes
@@ -3786,7 +3786,7 @@ fn step[G: send, H: shareable + inert + send](mut b: Board[G, H], db: store.Db) 
 
 fn join_with(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]], take progress: Option[Receiver[()]]) -> u64 waits {
     let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None, progress: take progress, taken: None, first: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark, closed: None, identity: None, fence: None, progress: take progress, taken: None, first: None, http_credit: None)))) {
         return 0u64
     }
     match channel.receive(hear) {
@@ -3943,7 +3943,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 type WireParsed: send { reader: Box[std.wsock.Reader], packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -4411,7 +4411,7 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
                 }
             },
             JoinReady => None,
-            DrainWake => None,
+            DrainWake => None, HttpStream(_) => None,
             HelloExpired => {
                 if st.hello_seen { continue }
                 wire_owner_refuse(mut st, 1008u16)
@@ -5910,12 +5910,12 @@ fn wire_apply_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: Wi
     let first = Some(JoinSubscribe(sub: sub, generation: generation, input: take input))
     let join = if s.marked {
         s.mark = Some(take closing)
-        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first)
+        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first, http_credit: None)
     } else {
         list.reserve(mut s.leaving, 1u64)
         let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, mut work.output, sub, Refused(Overloaded)); return Ok(()) } }
         s.join_lease = Some(take lease)
-        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first)
+        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first, http_credit: None)
     }
     // v2.22: the owner's loop sends the Join with a waiting send (§3); it holds no sub yet.
     work.join = Some(PubIn(e: Joined(take join)))

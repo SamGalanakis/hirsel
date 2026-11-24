@@ -76,7 +76,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
     let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
     let mut queue: List[ToPub] = list.new()
-    list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))
+    list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None, http_credit: None)))
     list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
     list.push(mut queue, Subscribed(1u64, 1u32, law_caller(1u64), query_key(code.describe(q1)), no_arg()))
     list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))
@@ -285,8 +285,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[TerminalUpdate] = list.new()
     list.push(mut ended, TerminalUpdate(sub: 1u32, generation: 0u64, version: at, outcome: Refused(Overloaded)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
-    list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, read_failed: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+    list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, read_failed: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut outcomes: List[KeyedDone] = list.new()
     list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded)))
     let mut waiting: List[Replies] = list.new()
@@ -385,7 +385,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     // v2.22: the Subscribe that made the owner join rides in its Join.
     let (ses, held, subscribed) = match take first {
         Joined(take j) => {
-            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _, taken: _, first: take carried) = take j
+            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _, taken: _, first: take carried, http_credit: _) = take j
             let ses_to = take delivery
             let _ = channel.try_send(told, Admit(who: 7u64, round: latest.handle(rounds.round)))
             let _ = channel.send(ses_to, wire_event(JoinReady))
@@ -558,7 +558,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64))
+    list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut bounced = 0u64
     let mut i = 0u64
     while i < list.len(owes_c) {
@@ -626,7 +626,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None, http_credit: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {
@@ -677,7 +677,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let root = latest.new(take first)
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
     let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
-    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None, taken: None, first: None)))) {
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None, taken: None, first: None, http_credit: None)))) {
         return false
     }
     let Admit(who: s, round: take register) = match channel.receive(hear) {

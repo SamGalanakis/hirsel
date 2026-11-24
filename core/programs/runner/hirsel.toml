@@ -71,6 +71,7 @@ dirs = ["."]
 "runner-http-json-laws.hirsel" = "runner"
 "runner-http-status-law.hirsel" = "runner"
 "runner-http-op-law.hirsel" = "runner"
+"runner-http-sse-law.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
 "runner_trigger_laws.hirsel" = "runner"
 "runner_trigger_model.hirsel" = "triggers"

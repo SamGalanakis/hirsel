@@ -91,6 +91,9 @@ fn add_http_operation[G: send, H: shareable + inert + send, B: send](
     let operation = compile_http_operation(saved, entry, alias) ?=> |take check| BindError(op: string.from(saved.binding.op), check: take check)
     let mut route_desc: std.router.Route[HttpConnection[G, H, B]] = std.router.raw(http_generated_handler)
     route_desc.body_max = Some(saved.binding.body_max)
+    // The promoted owner's reservation is computed from the server's output
+    // capacity and the bounded seed actually handed over by this request.
+    if saved.binding.mode == Subscribe { route_desc.stream_bytes = Some(18446744073709551615u64) }
     let failure = scoped fn(take _cause: std.router.AddError) -> BindError { BindError(op: string.from(saved.binding.op), check: Route) }
     let tag = list.len(plan.operations) + 1u64
     if alias {
@@ -196,20 +199,17 @@ fn http_check_caller(req: std.http.Request, caller: Caller) -> HttpCallerCheck {
 
 fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: std.http.Request, _scratch: Region,
     mut resp: std.http.Responder, state: HttpConnection[G, H, B]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
-    let result = http_generated_response(req, mut resp, state)?
-    Ok(Reply(take result))
-}
-
-fn http_generated_response[G: send, H: shareable + inert + send, B: send](req: std.http.Request,
-    mut resp: std.http.Responder, state: HttpConnection[G, H, B]) -> Result[std.http.Response, std.http.HandlerError] waits {
     let operation = view state.routes.operations[std.http.route_tag(req) - 1u64]
     let binding = view operation.binding
+    if binding.mode == Subscribe && !http_accepts_events(req) {
+        return Ok(Reply(http_reply(406u16, "", false, false, false)?))
+    }
     let payload = match http_assemble(req, mut resp, operation.input, binding, operation.alias) {
         Ok(take arg) => take arg,
-        Error(take problem) => return http_assembly_error(take problem),
+        Error(take problem) => return Ok(Reply(http_assembly_error(take problem)?)),
     }
     let (stream_id, position) = if binding.mode == Stream {
-        let Some(identity) = http_request_identity(req) else { return http_reply(400u16, "", false, false, false) }
+        let Some(identity) = http_request_identity(req) else { return Ok(Reply(http_reply(400u16, "", false, false, false)?)) }
         identity
     } else { (0u32, 0u64) }
     let credential = match std.http.field(req, b"authorization") {
@@ -221,42 +221,51 @@ fn http_generated_response[G: send, H: shareable + inert + send, B: send](req: s
     let deadline = std.http.handler_deadline(req)
     let context = match bind_http(state.wire, take credential, take entries, state.random, state.clock, state.tasks, deadline, state.budget, binding.arg_max) {
         Ok(take admit) => take admit,
-        Error(RejectedCredential) => return http_reply(401u16, "", false, false, false),
-        Error(_) => return http_reply(503u16, "", false, true, false),
+        Error(RejectedCredential) => return Ok(Reply(http_reply(401u16, "", false, false, false)?)),
+        Error(_) => return Ok(Reply(http_reply(503u16, "", false, true, false)?)),
     }
     if binding.mode == Stream {
         match http_check_caller(req, context.caller) {
             MatchCaller => (),
-            BadCaller => return http_reply(400u16, "", false, false, false),
-            FencedCaller => return http_reply(403u16, "{\"refused\":\"fenced\"}", false, false, false),
+            BadCaller => return Ok(Reply(http_reply(400u16, "", false, false, false)?)),
+            FencedCaller => return Ok(Reply(http_reply(403u16, "{\"refused\":\"fenced\"}", false, false, false)?)),
         }
     }
     let sent = match prepare_call(state.registered, context, std.http.copy_bytes(binding.entry), stream_id, position, take payload, binding.deadline_ms) {
         Ok(take send) => take send,
-        Error(take why) => return http_refusal(take why),
+        Error(take why) => return Ok(Reply(http_refusal(take why)?)),
     }
     match operation.kind {
         Transact => {
             let delivered = match relay_call(state.relay, take sent, state.clock, state.tasks, deadline) {
                 Ok(take answer) => take answer,
-                Error(take why) => return http_refusal(take why),
+                Error(take why) => return Ok(Reply(http_refusal(take why)?)),
             }
-            http_render_stream(req, binding, operation.output, take delivered)
+            Ok(Reply(http_render_stream(req, binding, operation.output, take delivered)?))
         },
         Compute => match call(state.registered, sent.key, sent.arg) {
-            Returned(take data) => http_json_reply(binding.ok_status, take data, 0u64, operation.output, operation.output.root, false),
-            Failed(detail) => http_fault(detail, false),
-            Refused(take why) => http_refusal(take why),
+            Returned(take data) => Ok(Reply(http_json_reply(binding.ok_status, take data, 0u64, operation.output, operation.output.root, false)?)),
+            Failed(detail) => Ok(Reply(http_fault(detail, false)?)),
+            Refused(take why) => Ok(Reply(http_refusal(take why)?)),
             _ => fail("compute cannot be owed or be in doubt"),
         },
         Query => {
-            let Some(reads) = view state.reads else { return http_refusal(Overloaded) }
+            let Some(reads) = view state.reads else { return Ok(Reply(http_refusal(Overloaded)?)) }
             if binding.mode == Read {
-                http_one_shot(req, resp, reads, operation, take sent, state.budget, state.clock, state.tasks)
+                Ok(Reply(http_one_shot(req, resp, reads, operation, take sent, state.budget, state.clock, state.tasks)?))
             } else {
-                http_refusal(NoEntry)
+                Ok(Stream(http_stream_offer(req, take sent, state.budget)?))
             }
         },
-        Granted => http_refusal(NoEntry),
+        Granted => Ok(Reply(http_refusal(NoEntry)?)),
     }
+}
+
+fn http_accepts_events(req: std.http.Request) -> bool {
+    let mut index = 0u64
+    while let Some(field) = std.http.field_at(req, b"accept", index) {
+        if std.http1.contains(field, b"text/event-stream") { return true }
+        index += 1u64
+    }
+    false
 }

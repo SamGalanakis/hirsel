@@ -1,6 +1,12 @@
 // This form is private to the HTTP sink. The key still starts with the
 // collection id, followed by K's value codec bytes for B-4.
-fn http_group_keys(group: Bytes, bindings: List[BoundSlot], maximum: u64) -> Result[Arc[Bytes], Outcome] {
+fn http_group_keys(group: Arc[Bytes], bindings: List[BoundSlot], maximum: u64) -> Result[Arc[Bytes], Outcome] {
+    // A value-only group already has the same layout on both transports.
+    let mut row_count_at = 0u64
+    let _ = result.unwrap(http_counted_span(group, mut row_count_at))
+    if result.unwrap(std.codec.take_u32(group, mut row_count_at)) == 0u32 {
+        return Ok(arc.share(group))
+    }
     let encoded_keys: Result[Result[Arc[Bytes], Outcome], Capacity] = bound bytes maximum {
         let rebuilt = isolate(scoped fn() -> Result[Arc[Bytes], store.Error] {
             http_recode_group(group, bindings)
@@ -99,7 +105,7 @@ fn http_project_owes[G: send, H: shareable + inert + send](mut b: Board[G, H], m
     }
 }
 
-fn http_group_for[G: send, H: shareable + inert + send](b: Board[G, H], who: u64, sub: u32, packed: Bytes, available: u64) -> Option[Result[Arc[Bytes], Outcome]] {
+fn http_group_for[G: send, H: shareable + inert + send](b: Board[G, H], who: u64, sub: u32, packed: Arc[Bytes], available: u64) -> Option[Result[Arc[Bytes], Outcome]] {
     let Some(entry) = sub_at(b.subs, who, sub) else { return None }
     let Some(lease) = entry.input.room else { return None }
     if !lease.http { return None }

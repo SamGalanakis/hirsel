@@ -1,5 +1,5 @@
 hirsel.laws 1
-platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=e14d1d3c5965f484 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=ec0b3f79860249be run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_genesis_recovers src=e07f35d703561666 sig=0c74ae3bff8e5500 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=89f26225b5586810 sig=7d047b9feb5d1870 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_one_head src=264faecd5fcb6aba sig=373f2e7ccd501376 run=d58926ede9b57167 bug=- oracle=- rows=pending
@@ -8,7 +8,7 @@ platform@1/local_laws/test_local_route_during_unload src=87affbc58afa165c sig=c2
 platform@1/local_laws/test_platform_serve_budgets src=75b96fbd5600f3bd sig=7089249bcb00aaa8 run=ad4c20fab40b1abf bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=bae2230b65e828ad sig=f7cdbd0eb217df48 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=feeeb5c30f30c18b run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/bucket_hand_install_adopts_at_12 src=23270f33000f8bb1 sig=6a274ee3456ba599 run=dbf6722727633166 bug=- oracle=- rows=pending
+platform@1/platform/bucket_hand_install_adopts_at_12 src=23270f33000f8bb1 sig=fda72f919484a514 run=dbf6722727633166 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=ca9891f03f4c129f sig=7e1caf6c01b2b669 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=e93763420f77f0a1 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=3af4467f2f9d8665 sig=31df905cb57d47e5 run=b1818af2b24835d3 bug=- oracle=- rows=pending

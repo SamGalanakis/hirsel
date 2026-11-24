@@ -638,7 +638,7 @@ protected segment is sent from the caller's bytes and has no such bound.
 A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follows RUNNER-SPEC §3's session group: an owner that waits only on its inbox, and children that report to it.
 
 **Two phases.**
-- **Pre-head.** The group starts here. Its deadline is the spec's pre-head deadline, the handler's `Request.deadline` (HTTP-5). Nothing but a response head may be written. There is no heartbeat, and the lease has not started. A raw stream leaves pre-head at once: its first unit is the head. A subscription leaves it at its completing initial Batch (B-9).
+- **Pre-head.** The group starts here. Its deadline is the spec's pre-head deadline, the handler's `Request.deadline` (HTTP-5). Nothing but a response head may be written. There is no heartbeat, and the lease has not started. A raw stream leaves pre-head at once: its first unit is the head. A subscription leaves it at its completing initial Batch (B-9). The connection encodes the prepared query into the hand-over block. Runner's `http_serve` starts its owner in a stream slot through the same HTTP supervisor.
   - If the reader monitor reports `ReadEnd` first, the group ends without writing.
   - If the pre-head deadline passes first, the writer writes HTTP-5's handler-deadline `503`, as one output unit, and the group ends.
   - If an `Ended` comes first (B-9), the writer writes B-7's response for its Outcome, and the group ends.
@@ -686,6 +686,7 @@ A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follo
 `available credits + items being built + items queued at the owner + items held by the writer = k`
 
 - A credit returns to the producer only when a data item it paid for is `Sent`.
+- For a subscription, the publisher takes a Batch credit before offering a frame. The credit counts the Batch across the inbox, the owner queue and the write. A missing credit takes the publisher's normal repair path. Reset and Ended use the control slot.
 - Control items (a heartbeat comment, the terminating chunk, SSE control events) use the one control slot and never touch a credit.
 
 **Heartbeat and lease.**

@@ -36,7 +36,7 @@ fn failed_read_owner(mut joined: List[Joiner], mut rounds: RoundRegister, who: u
     let fences = result.unwrap(fence_reserve(mut rounds, latest.handle(root)))
     list.push(mut joined, Joiner(who: who, to: channel.sender(to), closed: None, ended: list.new(),
         reset: false, read_failed: false, mark: None, identity: Some(take identity),
-        fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+        fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     FailedReadOwner(from: take from, fence: take root, to: take to)
 }
 

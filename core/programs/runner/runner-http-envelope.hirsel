@@ -151,3 +151,49 @@ fn http_batch_reply(operation: HttpOperation, tables: Arc[Map[u32, String]], ver
     std.http.content_type(mut reply, ApplicationJson)?
     Ok(take reply)
 }
+
+fn http_sse_batch(operation: HttpOperation, tables: Arc[Map[u32, String]], version: u64, complete: bool,
+    take data: Arc[Bytes], initial: bool, take release: Option[std.http.ReleaseGate]) -> Result[std.stream.MeasuredEvent, std.json.TypedWriteError] {
+    let group = HttpGroup(version: version, complete: complete, payload: take data, output: arc.share(operation.output),
+        slots: arc.share(operation.projections), tables: arc.share(tables))
+    let prefix = if initial { "retry: 1000\n\nevent: batch\ndata: " } else { "event: batch\ndata: " }
+    let mut length = http_group_size(group)?
+    http_size_add(mut length, string.byte_len(prefix) + 2u64)?
+    let body: std.http.BodyWriter = fn(mut out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+        flush(string.as_bytes(prefix)) && http_group_write(group, mut out, flush) && flush(b"\n\n")
+    }
+    Ok(std.stream.MeasuredEvent(length: length, body: take body, gate: take release))
+}
+
+fn http_sse_reset(version: u64) -> std.stream.MeasuredEvent {
+    let mut event = string.from("event: reset\ndata: {\"version\":\"")
+    string.push_u64(mut event, version)
+    string.push(mut event, "\",\"outcomes\":[]}\n\n")
+    let length = string.byte_len(event)
+    let body: std.http.BodyWriter = fn(mut _out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+        flush(string.as_bytes(event))
+    }
+    std.stream.MeasuredEvent(length: length, body: take body, gate: None)
+}
+
+fn http_sse_control(owner: HttpOwner, format: Arc[std.json.JsonPlan], take frame: HttpFrame) -> Result[std.stream.MeasuredEvent, std.json.TypedWriteError] {
+    match take frame {
+        HttpReset(at) => Ok(http_sse_reset(at)),
+        HttpEnded(at, take outcome) => {
+            let coding: std.codec.Codec[Outcome] = std.codec.of()
+            let mut bytes_out: Bytes = list.new()
+            std.codec.encode(coding, outcome, mut bytes_out) ?=> |_| LengthOverflow
+            let payload = take bytes_out
+            let shape = arc.share(format)
+            let prefix = "event: ended\ndata: {\"sub\":0,\"outcome\":"
+            let mut length = std.json.wire_length(shape, shape.root, payload)?
+            http_size_add(mut length, string.byte_len(prefix) + 3u64)?
+            let body: std.http.BodyWriter = fn(mut out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+                let value = std.http1.Span(start: 0u64, end: list.len(payload))
+                flush(string.as_bytes(prefix)) && http_value_write(shape, payload, value, mut out, flush) && flush(b"}\n\n")
+            }
+            Ok(std.stream.MeasuredEvent(length: length, body: take body, gate: http_stream_gate(owner, at)))
+        },
+        HttpBatch(..) => fail("batch cannot terminate an SSE stream"),
+    }
+}

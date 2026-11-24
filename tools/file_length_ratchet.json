@@ -63,7 +63,9 @@
     "lines": 3331
   },
   "core/std/http.hirsel": {
-    "lines": 3260
+    "lines": 3142,
+    "raise_revision": 2,
+    "reason": "http-build-2077"
   },
   "core/std/json.hirsel": {
     "lines": 3786

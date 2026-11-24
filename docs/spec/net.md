@@ -636,9 +636,10 @@ deadline passes, then delivers a batch:
 
 Splitting and truncation happen at two separate stages. The host splits a record and applies
 the cut-record rule (Order and loss) when it takes the record from the kernel, before an
-intake steers it and before a datagram reaches a queue. Only whole datagrams leave that
-stage. Delivery into `buf` then applies steps 1 to 4 to those datagrams, whatever record
-they came from. Take a 2,400-byte record of stride 1,200, one spare entry and `r = 100`.
+intake steers it and before a datagram reaches a queue. Only whole datagrams leave a GRO
+record. Capture can truncate a datagram from an ordinary record to the slot's payload room.
+Delivery into `buf` then applies steps 1 to 4. Take a 2,400-byte record of stride 1,200,
+one spare entry and `r = 100`.
 The receive delivers the first datagram with `len` 1,200, 100 appended bytes and
 `truncated` true. The record's cursor moves past that datagram, so the second datagram is
 first at the next receive. With two spare entries and `r = 100`, the batch is the same
@@ -803,13 +804,13 @@ of all `members` members. A member whose window gets `EAGAIN` waits this way:
   readiness (NET-17), it issues `fence(SeqCst)` and then takes the whole writer list by
   swapping its head to empty. For each member on it, it clears the member's linked mark
   and swaps the member's writer word to empty. It posts one wake for each waiter it took,
-  to that waiter's poller (locally when the poller is its own). A member whose word was
-  already empty, because its writer was cancelled or timed out, is skipped.
+  to that waiter's poller (locally when the poller is its own). Empty words from cancelled
+  or timed-out calls still take one visit. The poller visits at most 64 writer nodes per
+  turn across all groups and keeps the unfinished list for the next turn.
 
 A readiness result reports the socket's whole mask, so a receive edge on a writable socket
-also carries `EPOLLOUT`. The list keeps that cheap. An edge with no published writer costs
-one swap of an empty head, and an edge with writers costs one step per published writer,
-never one per member.
+also carries `EPOLLOUT`. Taking an empty list costs one swap. Traversal costs one step for
+each linked node, including nodes whose waiter word is empty.
 
 The intake wakes every published writer, not one, so no writer's waiter replaces another's.
 Each woken writer retries, and one that gets `EAGAIN` again publishes again before it
@@ -1107,10 +1108,13 @@ pub type UdpStaged = UdpStaged(peer: Addr, len: u64, appended: u64, ecn: u8)
 pub fn fill_packets(mut s: Served[NetOp], mut c: Call[NetOp], take p: List[UdpStaged]) -> u64
 ```
 
-These variants join `NetOp` and `NetReply` when NET-16 is built. `UdpSend` is answered with
-the existing `Count(k)`, `UdpLocal` with `Address`, and any call with `Failed`. The build lane
-fixes their payload field numbers with `provide.payload`, as NET-14's are fixed. A `UdpBind`
-with `members` 1 is `udp_bind`. A served receive stages two things apart:
+These variants join `NetOp` and `NetReply`. `UdpSend` is answered with the existing
+`Count(k)`, `UdpLocal` with `Address`, and any call with `Failed`. For `UdpSend`,
+`provide.payload` field 1 is the caller's data and field 2 is the packet list in order.
+Each packet is 36 bytes: family (0 for IPv4, 1 for IPv6), address high and low words,
+port, offset, length and ECN. The family and ECN are one byte each, the port is two bytes,
+and the other words are eight bytes each. Multibyte fields are little-endian.
+A `UdpBind` with `members` 1 is `udp_bind`. A served receive stages two things apart:
 
 - **payload bytes** with `provide.fill`, at most `room`;
 - **packet records** with `provide.fill_packets`, at most `entries`.

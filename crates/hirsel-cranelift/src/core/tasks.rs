@@ -371,6 +371,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideNet
                     | HostOp::ProvideExec
                     | HostOp::PortFill
+                    | HostOp::UdpFillPackets
                     | HostOp::NetJoin
                     | HostOp::ExecSpawn
                     | HostOp::ExecWait

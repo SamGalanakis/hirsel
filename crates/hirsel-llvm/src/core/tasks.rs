@@ -204,6 +204,7 @@ impl FunctionEmitter<'_> {
             | HostOp::ProvideNet
             | HostOp::ProvideExec
             | HostOp::PortFill
+            | HostOp::UdpFillPackets
             | HostOp::ExecSpawn
             | HostOp::ExecWait
             | HostOp::ExecSignal

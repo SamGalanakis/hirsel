@@ -309,3 +309,159 @@ fn udp_pool_charge_outlives_its_helper(n: Net, _clock: Clock, tasks: Tasks) -> b
     }
     endpoint.ip == V4(0x7f000001) && endpoint.port != 0
 }
+
+type UdpSettlement = ReplyAndReuse | RoomDebited | RoomFull | InvalidReply | DropAndReuse | SealWhileStaged | WithdrawAndReuse
+
+fn udp_staging_server(take job: (Served[NetOp], UdpSettlement, ClockHand, Receiver[()])) -> bool waits {
+    let (take input, settlement, take clock_hand, take ack) = take job
+    let mut served = take input
+    let mut hand = take clock_hand
+    let sock_addr = Addr(ip: V4(0x7f000001), port: 4000)
+    let peer = Addr(ip: V4(0x7f000001), port: 5000)
+    let Some(take bind) = provide.next(mut served) else {
+        return false
+    }
+    let UdpBind(addr: addr, slots: 1, slot_bytes: 1536, members: 1, steer: Hash) = provide.net_op(bind) else {
+        return false
+    }
+    if addr != sock_addr {
+        return false
+    }
+    result.unwrap(provide.reply(mut served, take bind, provide.net_reply(UdpSockets(first: 17, count: 1, addr: sock_addr))))
+    for index in 0u64 .. 2u64 {
+        let Some(take incoming) = provide.next(mut served) else {
+            return false
+        }
+        let mut call = take incoming
+        let UdpRecv(socket: 17, room: 1, entries: 1) = provide.net_op(call) else {
+            return false
+        }
+        let mut records: List[UdpStaged] = list.with_capacity(1)
+        list.push(mut records, UdpStaged(peer: peer, len: 0, appended: 0, ecn: 3))
+        if let RoomFull = settlement {
+            provide.fill_packets(mut served, mut call, take records)
+            return false
+        }
+        let staged = result.unwrap(bound bytes 0 {
+            provide.fill_packets(mut served, mut call, take records)
+        })
+        if staged != 1 {
+            return false
+        }
+        match settlement {
+            RoomDebited => {
+                provide.fill(mut served, mut call, string.as_bytes("x"))
+                return false
+            },
+            InvalidReply => {
+                let _ = provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 2)))
+                return false
+            },
+            DropAndReuse if index == 0 => {
+                let _ = take call
+            },
+            WithdrawAndReuse if index == 0 => {
+                clock.advance_to(mut hand, 1)
+                result.unwrap(channel.receive(ack))
+                let Error(Withdrawn) = provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 1))) else {
+                    return false
+                }
+            },
+            SealWhileStaged => {
+                let _ = take served
+                let _ = take call
+                return true
+            },
+            _ => result.unwrap(provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 1)))),
+        }
+    }
+    let Some(take released) = provide.next(mut served) else {
+        return false
+    }
+    match provide.net_op(released) {
+        Released(id: 17, part: Whole) => true,
+        _ => false,
+    }
+}
+
+fn udp_staging_case(tasks: Tasks, settlement: UdpSettlement) -> bool waits {
+    let room: u64 = match settlement {
+        RoomFull => 32,
+        _ => 80
+    }
+    let (net, take served) = provide.net(bytes room)
+    let (clock, take hand) = provide.clock(0, 0)
+    let (ack, receive): (Sender[()], Receiver[()]) = channel.new(1)
+    let server = task.spawn(tasks, bytes 4096, (take served, settlement, take hand, take receive), udp_staging_server)
+    let endpoint = Addr(ip: V4(0x7f000001), port: 4000)
+    let (take socket, addr) = result.unwrap(host.udp_bind(net, endpoint, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let mut receiver = take socket
+    let mut same = addr == endpoint
+    let mut incoming: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    for index in 0u64 .. 2u64 {
+        let should_deliver = match settlement {
+            ReplyAndReuse => true,
+            DropAndReuse => index == 1,
+            WithdrawAndReuse => index == 1,
+            _ => false,
+        }
+        let withdraw = match settlement {
+            WithdrawAndReuse => index == 0,
+            _ => false
+        }
+        let until: Until = if withdraw {
+            At(clock, 1)
+        } else {
+            Never
+        }
+        let outcome = host.udp_recv(mut receiver, mut incoming, mut packets, until)
+        match outcome {
+            Ok(1) => {
+                let UdpPacket(peer, at, len, truncated, ecn) = packets[0]
+                same = same && should_deliver && list.len(incoming) == 0 && list.len(packets) == 1 && peer.port == 5000 && at == 0 && len == 0 && !truncated && ecn == 3
+                list.clear(mut packets)
+            },
+            Error(Reset) => {
+                same = same && !withdraw && !should_deliver && list.len(incoming) == 0 && list.len(packets) == 0
+            },
+            Error(TimedOut) => {
+                same = same && withdraw && list.len(incoming) == 0 && list.len(packets) == 0
+            },
+            _ => {
+                same = false
+            },
+        }
+        if withdraw {
+            result.unwrap(channel.send(ack, ()))
+        }
+    }
+    let _ = take receiver
+    let settled = match task.join(take server) {
+        Ok(ok) => ok && match settlement {
+            ReplyAndReuse => true,
+            DropAndReuse => true,
+            SealWhileStaged => true,
+            WithdrawAndReuse => true,
+            _ => false,
+        },
+        Error(Failed(causes)) => {
+            for cause in causes {
+                return same && match (settlement, cause.kind) {
+                    (RoomDebited, Capacity(c)) => c.requested == 1 && c.available == 0,
+                    (RoomFull, Capacity(c)) => c.requested == 48 && c.available == 0,
+                    (InvalidReply, Fail(_)) => true,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+    same && settled
+}
+
+// expect: run served_staging_has_one_payer(tasks) = true
+fn served_staging_has_one_payer(tasks: Tasks) -> bool waits {
+    udp_staging_case(tasks, ReplyAndReuse) && udp_staging_case(tasks, RoomDebited) && udp_staging_case(tasks, RoomFull) && udp_staging_case(tasks, InvalidReply) && udp_staging_case(tasks, DropAndReuse) && udp_staging_case(tasks, SealWhileStaged) && udp_staging_case(tasks, WithdrawAndReuse)
+}

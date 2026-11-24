@@ -528,6 +528,7 @@ tags!(HostOp {
     142 => UdpRecv,
     143 => UdpSend,
     144 => UdpLocalAddr,
+    145 => UdpFillPackets,
 });
 
 tags!(RaiseCause {

@@ -1,5 +1,5 @@
 hirsel.laws 1
 stun_ice@1/laws/binding_vectors src=e05f6fc9d2f391a1 sig=766472928f8e13b5 run=e8009a636892fb4a bug=540b45871b56e1b4 oracle=ea529810f9b4c4b4 rows=pending
-stun_ice@1/laws/full_connectivity src=cac6f3f5d66aa5c0 sig=3781d8bab1d32bcf run=e8009a636892fb4a bug=f6ecf8ddc0278a7d oracle=3ac8edc0207c93fe rows=pending
+stun_ice@1/laws/full_connectivity src=cac6f3f5d66aa5c0 sig=23496447792197c8 run=e8009a636892fb4a bug=f6ecf8ddc0278a7d oracle=3ac8edc0207c93fe rows=pending
 stun_ice@1/laws/lite_nat_rebinding src=534776ea82f9ef7b sig=5ca1aecbbe1e558e run=e8009a636892fb4a bug=0ead33159350fea1 oracle=840681dcfc946f7e rows=pending
 stun_ice@1/laws/lite_peer_signaling src=26cffcb9b463760b sig=9834a29434062e86 run=e8009a636892fb4a bug=2479a3ab4ac27c39 oracle=880d8e19f6335a90 rows=pending

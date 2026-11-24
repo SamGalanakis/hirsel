@@ -2,6 +2,9 @@ use super::*;
 
 impl Port {
     pub(super) fn net_words(&self, request: &Request) -> Option<[u64; 9]> {
+        if udp_operation(request.operation) {
+            return self.udp_words(request);
+        }
         if let Some(op) = UnixOperation::describe(request.operation) {
             // SAFETY: the Unix adapter pins this extension through delivery.
             let n = unsafe { &*request.path.cast::<UnixRequest>() };

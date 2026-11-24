@@ -1,7 +1,7 @@
 hirsel.laws 1
-postgres@1/sim_tests/comma_host_refused src=a919c78b4689b5eb sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/eof_in_error_response src=9034204ce5844c3a sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/fatal_error_during_sync src=b982ece95066bee3 sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/fragmented_startup_error src=c74f3315220bd9b1 sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/select_answer src=e6cad611a807f534 sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/startup_ready_deadline src=a5ce76966399d67d sig=15aed29a622ea2da run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/comma_host_refused src=a919c78b4689b5eb sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/eof_in_error_response src=9034204ce5844c3a sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/fatal_error_during_sync src=b982ece95066bee3 sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/fragmented_startup_error src=c74f3315220bd9b1 sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/select_answer src=e6cad611a807f534 sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/startup_ready_deadline src=a5ce76966399d67d sig=5c163f112f6d2378 run=4400fcc0f0345701 bug=- oracle=- rows=pending

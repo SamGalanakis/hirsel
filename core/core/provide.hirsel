@@ -42,6 +42,8 @@ pub fn secret(c: Call[NetOp], i: u64) -> Secret
 // call's `room` still offers; returns how many it took.
 pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
 
+pub fn fill_packets(mut s: Served[NetOp], mut c: Call[NetOp], take p: List[UdpStaged]) -> u64
+
 // Word `i` of the call's Op: 0 is its variant, then its fields.
 fn word[Op](c: Call[Op], i: u64) -> u64
 
@@ -183,8 +185,23 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         Ready(socket: a)
     } else if t == 19 {
         LocalAddr(id: a)
-    } else {
+    } else if t == 20 {
         PeerAddr(socket: a)
+    } else if t == 21 {
+        UdpOpen(v6: a == 1, slots: int.truncate(b), slot_bytes: int.truncate(d))
+    } else if t == 22 {
+        let steer: Steer = if word(c, 8) == 0 {
+            Hash
+        } else {
+            Quic
+        }
+        UdpBind(addr: addr(a, b, d, e), slots: int.truncate(word(c, 5)), slot_bytes: int.truncate(word(c, 6)), members: int.truncate(word(c, 7)), steer: steer)
+    } else if t == 23 {
+        UdpRecv(socket: a, room: b, entries: d)
+    } else if t == 24 {
+        UdpSend(socket: a, data: b, pkts: d)
+    } else {
+        UdpLocal(socket: a)
     }
 }
 
@@ -369,6 +386,11 @@ pub fn net_reply(r: NetReply) -> Reply[NetOp] {
         Socket(id, a) => addr_reply(9, id, a),
         Listener(id, a) => addr_reply(10, id, a),
         Address(a) => addr_reply(16, 0, a),
+        UdpSockets(first: first, count: count, addr: a) => {
+            let (family, hi, lo) = ip_words(a)
+            Reply(tag: 17, w0: first, w1: family, w2: hi, w3: lo, w4: int.widen(a.port), w5: int.widen(count))
+        },
+        UdpPackets(count) => words(18, count, 0, 0),
         Secured(h) => {
             let (some, protocol): (u64, u64) = match h.protocol {
                 Some(p) => (1, p),

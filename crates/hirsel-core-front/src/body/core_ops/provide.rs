@@ -32,6 +32,7 @@ impl Cx<'_, '_, '_> {
                 | HostOp::PortNext
                 | HostOp::PortReply
                 | HostOp::PortFill
+                | HostOp::UdpFillPackets
         );
         // A resource operand arrives as its key, or as a pointer to it when the
         // caller lends or hands over a place.
@@ -47,7 +48,11 @@ impl Cx<'_, '_, '_> {
                             | HostOp::CallPayload
                             | HostOp::CallPayloadPrefix
                     )))
-                || (i == 1 && matches!(op, HostOp::PortReply | HostOp::PortFill));
+                || (i == 1
+                    && matches!(
+                        op,
+                        HostOp::PortReply | HostOp::PortFill | HostOp::UdpFillPackets
+                    ));
             let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
             args.push(Arg::Value(if by_place {
                 self.runtime_key(v, n)
@@ -60,6 +65,10 @@ impl Cx<'_, '_, '_> {
             self.consume(vals[1], n);
         }
         let [value, error, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        if op == HostOp::UdpFillPackets {
+            self.consume(vals[2], n);
+            self.drop_field(vals[2], self.p.fns[f].params[2].ty, n);
+        }
         if matches!(
             op,
             HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
@@ -69,6 +78,10 @@ impl Cx<'_, '_, '_> {
             let requested = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
             let ok = self.runtime_nonzero(u, value, n)?;
             self.raise_unless(ok, requested, written, n);
+        }
+        if op == HostOp::UdpFillPackets {
+            self.consume(vals[2], n);
+            self.drop_field(vals[2], self.p.fns[f].params[2].ty, n);
         }
         if matches!(
             op,
@@ -155,7 +168,7 @@ impl Cx<'_, '_, '_> {
                 self.raise_unless(ok, value, written, n);
                 self.secret_carrier(result, value, n)
             }
-            HostOp::PortReply | HostOp::PortFill => {
+            HostOp::PortReply | HostOp::PortFill | HostOp::UdpFillPackets => {
                 // A room refusal answers error tag 1: the requested bytes in
                 // `value` and the available in `written` (MEM-21).
                 let u8_ = Ty::Scalar(Scalar::U8);

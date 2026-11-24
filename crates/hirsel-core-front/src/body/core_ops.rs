@@ -477,6 +477,7 @@ operations! {
     ("provide", "dir", Lane::Runtime(Kernel::Provide(HostOp::ProvideDir)), "B", "provide-r8a-1533", false),
     ("provide", "net", Lane::Runtime(Kernel::Provide(HostOp::ProvideNet)), "B", "provide-r8a-1533", false),
     ("provide", "exec", Lane::Runtime(Kernel::Provide(HostOp::ProvideExec)), "B", "exec-unix-impl-c-1627", false),
+    ("provide", "fill_packets", Lane::Runtime(Kernel::Provide(HostOp::UdpFillPackets)), "B", "media-w0-udp-build-2280", false),
     ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
@@ -3322,15 +3323,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        if matches!(
-            op,
-            HostOp::UdpOpen
-                | HostOp::UdpBind
-                | HostOp::UdpBindGroup
-                | HostOp::UdpRecv
-                | HostOp::UdpSend
-                | HostOp::UdpLocalAddr
-        ) {
+        if hirsel_core_ids::host_op::udp_operation(op.code()) {
             return self.runtime_udp(op, f, vals, result, n);
         }
         if matches!(

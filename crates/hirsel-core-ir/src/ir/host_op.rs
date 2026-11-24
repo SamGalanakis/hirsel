@@ -88,6 +88,7 @@ pub enum HostOp {
     ProvideNet = hirsel_core_ids::host_op::PROVIDE_NET as isize,
     ProvideExec = hirsel_core_ids::host_op::PROVIDE_EXEC as isize,
     PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
+    UdpFillPackets = hirsel_core_ids::host_op::UDP_FILL_PACKETS as isize,
     ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
     ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
     StreamTerminal = 96,
@@ -281,6 +282,7 @@ impl HostOp {
         HostOp::PortReply,
         HostOp::ProvideDir,
         HostOp::PortFill,
+        HostOp::UdpFillPackets,
         HostOp::StreamTerminal,
         HostOp::NetJoin,
         HostOp::ScramSha256,
@@ -410,6 +412,7 @@ impl HostOp {
             HostOp::ProvideNet => "provide_net",
             HostOp::ProvideExec => "provide_exec",
             HostOp::PortFill => "port_fill",
+            HostOp::UdpFillPackets => "udp_fill_packets",
             HostOp::StreamTerminal => "stream_is_terminal",
         }
     }
@@ -499,6 +502,7 @@ impl HostOp {
             Self::ProvideNet => "hirsel_core_provide_net",
             Self::ProvideExec => "hirsel_core_provide_exec",
             Self::PortFill => "hirsel_core_port_fill",
+            Self::UdpFillPackets => "hirsel_core_udp_fill_packets",
             Self::StreamTerminal => "hirsel_core_stream_is_terminal",
             _ => unreachable!(),
         }
@@ -579,6 +583,7 @@ impl HostOp {
                 | HostOp::ProvideNet
                 | HostOp::ProvideExec
                 | HostOp::PortFill
+                | HostOp::UdpFillPackets
                 | HostOp::StreamTerminal
         )
     }

@@ -14,7 +14,9 @@ mod net;
 mod payload;
 pub(crate) mod random;
 mod replies;
-use replies::answers;
+mod udp;
+use replies::answer;
+pub(crate) use udp::release_udp;
 
 use crate::exec_runtime::{Call, ProcCall, SpawnCall};
 use crate::unix_net::{
@@ -83,6 +85,7 @@ struct Port {
     /// A Net port's caller socket and listener keys (direction bits clear)
     /// and the server ids they name (NOTES 31).
     keys: BTreeMap<u64, u64>,
+    udp_retired: BTreeMap<u64, crate::udp_net::served::Retirement>,
     /// A Net port's root rules: every address, pinned with the port, so
     /// `net.narrow` intersects them as any Net grant's.
     rules: Option<crate::net::RulesStorage>,
@@ -107,6 +110,7 @@ enum Kind {
     Listener,
     UnixListener,
     Datagram,
+    Udp,
     Proc,
     PipeRead,
     PipeWrite,
@@ -222,6 +226,7 @@ struct PortCall {
     finished: bool,
     /// Reply bytes `fill` staged in the room.
     staged: Vec<u8>,
+    staged_packets: Vec<hirsel_core_net::udp::Packet>,
     /// A SendSecret's Secrets, narrowed to the stream's name at issue.
     secret: Option<Vec<crate::secret::Secret>>,
 }
@@ -272,8 +277,9 @@ impl Port {
     }
     fn free_staged(&mut self, id: u64) {
         if let Some(call) = self.calls.get_mut(&id) {
-            self.used -= call.staged.len() as u64;
+            self.used -= call.staged.len() as u64 + udp::packet_charge(call.staged_packets.len());
             call.staged = Vec::new();
+            call.staged_packets = Vec::new();
         }
     }
     /// A Close call ends: a server that took it knows the file is gone; one
@@ -520,6 +526,7 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
             (Vocab::Net, NET_RESOLVE, 0) => {
                 crate::tls::bytes(&(*r.path.cast::<crate::resolve::ResolveRequest>()).raw_name)
             }
+            (Vocab::Net, udp::SEND, _) => crate::udp_net::served::payload(r, field),
             (Vocab::Exec, exec::SPAWN, _) => {
                 let call = &(*r.path.cast::<Call<SpawnCall>>()).data;
                 match field {
@@ -555,7 +562,7 @@ fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
         (Vocab::Dir, 10 | 19) => words[2],
         (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => words[3],
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
-        (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV) => words[2],
+        (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV | udp::RECV) => words[2],
         _ => 0,
     }
 }
@@ -725,6 +732,7 @@ unsafe fn due(port: &Mutex<Port>, request: &Request, token: u64) -> crate::os_ne
         let until = match (vocab, request.operation) {
             (Vocab::Exec, EXEC_WAIT) => (*request.path.cast::<Call<ProcCall>>()).data.until,
             (Vocab::Net, op) if unix_operation(op) => (*request.path.cast::<UnixRequest>()).until,
+            (Vocab::Net, op) if udp_operation(op) => crate::udp_net::served::until(request),
             (Vocab::Net, _) | (Vocab::Exec, RECV_BOUNDED | SEND_PAIR) => {
                 (*request.path.cast::<crate::net::NetworkRequest>()).until
             }
@@ -775,6 +783,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     if queued.is_some() || quiesced {
         port.servers.retain(|&(t, _)| t != token);
         lock(&SERVERS).remove(&token);
+        let mut retired = None;
         let id = match queued {
             None => return done(Outcome::default()),
             Some(Queued::Call(id)) => {
@@ -801,6 +810,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                 if h.done() {
                     port.handles.remove(&handle);
                     port.used -= HANDLE_ROOM;
+                    retired = port.udp_retired.remove(&handle);
                 }
                 let id = port.next_id;
                 port.next_id += 1;
@@ -816,12 +826,15 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                         answer: None,
                         finished: true,
                         staged: Vec::new(),
+                        staged_packets: Vec::new(),
                         secret: None,
                     },
                 );
                 id
             }
         };
+        drop(port);
+        drop(retired);
         return done(Outcome {
             value: id,
             written: 1,
@@ -954,6 +967,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                         answer: None,
                         finished: false,
                         staged: Vec::new(),
+                        staged_packets: Vec::new(),
                         secret,
                     },
                 );
@@ -989,7 +1003,13 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             p.sealed = true;
             let ids: Vec<u64> = p.calls.keys().copied().collect();
             let tokens = ids.into_iter().filter_map(|id| p.close_call(id)).collect();
+            let retired = std::mem::take(&mut p.udp_retired);
+            for id in retired.keys() {
+                p.handles.remove(id);
+                p.used -= HANDLE_ROOM;
+            }
             drop(p);
+            drop(retired);
             ready_all(tokens);
         }
         _ => {}
@@ -1717,133 +1737,6 @@ fn alpn_count(mut wire: &[u8]) -> u64 {
     count
 }
 
-/// The caller's outcome for a reply that answers its call, or None when the
-/// reply breaks the port's rules (the server fails).
-fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -> Option<Outcome> {
-    let op = call.words[0];
-    if p.vocab == Vocab::Exec {
-        let [value, error, code, written] =
-            exec::answer(&call.words, call.staged.len() as u64, tag, &w, |id| {
-                p.handles.contains_key(&id)
-            })?;
-        return Some(Outcome {
-            value,
-            error: IoError {
-                tag: error as u8,
-                code: code as u32,
-            },
-            written,
-            ..Outcome::default()
-        });
-    }
-    if !unix.map_or_else(
-        || answers(p.vocab, op, tag),
-        |reply| tag == reply || tag == R_FAILED,
-    ) {
-        return None;
-    }
-    if (p.vocab, op, tag) == (Vocab::Dir, DIR_MKSTEMP, R_FILE)
-        && !hirsel_core_ids::host_op::valid_temp_suffix(&call.staged)
-    {
-        return None;
-    }
-    let io = |tag, code| net::reply_error(p.vocab, call, tag, code);
-    let mut out = Outcome::default();
-    match tag {
-        R_DONE => {
-            out.written = match (p.vocab, op) {
-                (Vocab::Stream, _) | (Vocab::Dir, 12) => {
-                    call.words[2 - (p.vocab == Vocab::Stream) as usize]
-                }
-                (Vocab::Dir, 13) => call.words[3],
-                _ => 0,
-            }
-        }
-        R_FAILED => out.error = io(w[0], w[1])?,
-        R_WRITE_FAILED => {
-            let len = if op == 13 {
-                call.words[3]
-            } else {
-                call.words[2 - (p.vocab == Vocab::Stream) as usize]
-            };
-            if w[0] > len {
-                return None;
-            }
-            out.error = io(w[1], w[2])?;
-            out.written = w[0];
-        }
-        R_COUNT if p.vocab == Vocab::Net && op == NET_SEND => {
-            // A send's count is at most the bytes it offered.
-            if w[0] > call.words[2] + call.words[3] {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_COUNT if p.vocab == Vocab::Net && op == NET_RESOLVE => {
-            // A resolve's count is its staged records, each well formed and
-            // distinct (NOTES 34).
-            let records = hirsel_core_net::ip_records(&call.staged)?;
-            if w[0] != records.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_COUNT => {
-            // A read's count is the bytes it staged; a listing's, its entries.
-            if op != 19 && w[0] != call.staged.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_ZERO_EXTENSION if p.vocab == Vocab::Dir => out.value = u64::from(w[0] != 0),
-        R_SOCKET | R_LISTENER | R_ADDRESS => {
-            let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
-            if !(v4 || w[1] == 1) || w[4] > 0xffff {
-                return None;
-            }
-            if tag != R_ADDRESS {
-                if w[0] == 0 || p.handles.contains_key(&w[0]) {
-                    return None;
-                }
-                out.value = w[0];
-            }
-        }
-        R_SECURED => {
-            // Some(i) names one of the offered protocols; None is (0, 0).
-            // SAFETY: the call is unsettled, so its caller's request is pinned.
-            let offered = alpn_count(unsafe { field_bytes(p.vocab, call, 2) });
-            if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
-                return None;
-            }
-            // SAFETY: as above.
-            out.value = unsafe { (*call.request).handle };
-        }
-        R_PACKET => {
-            let room = call.words[2];
-            if w[1] != u64::from(w[0] > room) || w[0].min(room) != call.staged.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-            out.written = call.staged.len() as u64;
-            out.kind = w[1] as u8;
-        }
-        R_LOCKED => out.value = (w[0] != 0) as u64,
-        R_STAT => {
-            out.kind = w[0].min(3) as u8;
-            out.value = w[1];
-            out.written = w[2];
-        }
-        _ => {
-            // A new object: never the root, never an id already in use.
-            if w[0] == 0 || p.handles.contains_key(&w[0]) {
-                return None;
-            }
-            out.value = w[0];
-        }
-    }
-    Some(out)
-}
-
 /// `provide.reply`'s commit: settle the call with the reply's tag and words
 /// and ready its caller. `value` 1 is Withdrawn: the call was settled first,
 /// or its caller has a cancellation pending that it observes (NOTES 16). A
@@ -1928,6 +1821,18 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         return CANCELLED;
     };
     let mut outcome = outcome;
+    if p.vocab == Vocab::Net && udp::operation(p.calls[&id].words[0]) {
+        if let Err((needed, available)) = udp::deliver(&mut p, id, tag, w) {
+            let token = p.close_call(id);
+            drop(p);
+            ready_all(token.into_iter().collect());
+            return refused(needed, available);
+        }
+        let token = p.settle(id, outcome);
+        drop(p);
+        ready_all(token.into_iter().collect());
+        return Outcome::default();
+    }
     let kind = match (p.vocab, tag) {
         (Vocab::Dir, R_FILE) => Some(Kind::File),
         (Vocab::Dir, R_DIR) => Some(Kind::Dir),

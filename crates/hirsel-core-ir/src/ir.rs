@@ -1425,7 +1425,7 @@ impl RtOp {
                     HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }
-                    HostOp::CallPayload | HostOp::PortFill => {
+                    HostOp::CallPayload | HostOp::PortFill | HostOp::UdpFillPackets => {
                         (vec![V(u64_), V(u64_), V(p)], outcome)
                     }
                     HostOp::CallPayloadPrefix => (vec![V(u64_), V(u64_), V(u64_), V(p)], outcome),

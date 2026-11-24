@@ -312,3 +312,59 @@ fn bucket_test_m2_reclaim_uploads(c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
     Ok(())
 }
+
+fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 811, true, 1)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.retain = 2
+    let mut writer = open_authority(tasks, object_authority(take connected, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options)?
+    let rows = bucket_law_rows_table(mut writer)?
+    let watching = bucket_law_client_lanes(sim, tasks, "s3.test", 812, true, 1)?
+    let mut ids = followers()
+    let mut follower_view = follower(mut ids, tasks, object_authority(take watching, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let main_line = main_branch(writer)
+    let saved = snapshot_follower(follower_view, main_line)?
+    let mut inspector = bucket_law_client_lanes(sim, tasks, "s3.test", 813, true, 1)?
+    let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
+    let mut scratch = history_buffers(1024)?
+    let _ = history_fetch(mut inspector, "head", mut scratch.witness, due)?
+    let captured = history_decode_head(scratch.witness)?
+    let (take mark, _) = history_checkpoint(mut inspector, captured.head, due)?
+    let missing = history_key("m-", mark.manifest)
+    if version(saved) != 1 || captured.head.checkpoint.seq != 3 {
+        fail("L59: the initial follower did not load the schema checkpoint")
+    }
+
+    bucket_law_round(mut writer, 7)?
+    match std.object.erase(mut inspector, missing, due) {
+        Ok(()) => (),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    match history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due) {
+        Error(Corrupt(Fault(file: name, why: Absent, ..))) if name == missing => (),
+        _ => fail("L59: a missing retained MANIFEST did not report corruption"),
+    }
+
+    bucket_law_round(mut writer, 8)?
+    let HistoryEvicted(newer) = history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due)? else {
+        fail("L59: a missing MANIFEST was still counted as live after eviction")
+    }
+    if newer.head.floor != 5 || newer.head.checkpoint.seq != 7 {
+        fail("L59: the witness reported the wrong retained floor")
+    }
+    let current = fresh(mut follower_view, due)?
+    let reading = follower_reader(follower_view, 0u64)?
+    if version(current) != 3 || get(reading, current, rows, 7)? != Some(bucket_law_value(7)) || get(reading, current, rows, 8)? != Some(bucket_law_value(8)) || get(reading, saved, rows, 7)? != None {
+        fail("L59: the follower lost a retained row or changed the earlier snapshot")
+    }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_retention_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 598), None, list.new())
+    let observed = object_retention_witness_law(r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    observed
+}

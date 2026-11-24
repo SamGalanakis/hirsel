@@ -6421,8 +6421,7 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
     Ok(key_word(7))
 }
 
-// L33. AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 body
-// steps + 6 fixed calls + 4096/8 for AM5's K_id term.
+// L33: AM5 and MEM-24 give 4096 + 32 bytes; MEM-30 gives 8192 + 6 + 4096/8 steps.
 pub fn law_call_reserve(c: Clock) -> bool waits {
     let byte_total = 4128u64
     let step_total = 8710u64
@@ -6437,6 +6436,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
     let key = key_word(23)
     let request = request_digest(key, key)
     let no_record: Option[CallRecord] = None
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     for fault in[false, true] {
         let p = if fault {
             1u64
@@ -6450,7 +6450,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         let ci = next_call_info(db)
         // One step is the call of metered_draft outside its own reserve.
         let rejected = bound steps step_total {
-            metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
                 reserve_tx(mut tx, fault)
             })
         }
@@ -6461,7 +6461,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
         let admitted = bound steps step_total + 1u64 {
-            metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
                 reserve_tx(mut tx, fault)
             })
         }

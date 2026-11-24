@@ -2888,14 +2888,6 @@ fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes
     }
 }
 
-fn failed_stop(stop: store.Stop) -> Outcome {
-    match stop {
-        Raised(reason) => Failed(Raised(reason)),
-        OutOfSteps(steps) => Failed(OutOfTime(steps)),
-        OutOfBytes(problem) => Failed(OutOfBytes(room(problem))),
-    }
-}
-
 type Effect = Served(Result[store.Served, store.ServeError]) | Unregistered(store.Pending)
 
 fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: Bytes, locations: Registry[G, H],
@@ -2925,7 +2917,7 @@ fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Req
     match take ran {
         Ok(Committed(take receipt)) => answered(mut hd, take q, take receipt),
         Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
-        Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)),
+        Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)?),
         Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
         Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
         Error(Before(take problem, _)) => Error(take problem),
@@ -3304,7 +3296,8 @@ fn invoke_trigger_transaction[G: send, H: shareable + inert + send](mut db: stor
             Ok(Aborted(store.Undone(value: Terminal(take terminal), ..))) => take terminal,
             Ok(Aborted(store.Undone(value: NotDue, ..))) => return Ok(TriggerNotDue),
             Ok(Aborted(store.Undone(value: Store(take problem), ..))) => return Error(trigger_store_error(take problem)),
-            Ok(Failed(causes)) => Raised(raised(causes)),
+            Ok(Failed(Raised(causes))) => Raised(raised(causes)),
+            Ok(Failed(Conflict(take name))) => return Error(Conflict(take name)),
             Ok(Stopped(limit)) => OutOfTime(limit.steps),
             Ok(Refused(cause)) => {
                 let cap = store_capacity(cause)
@@ -3541,7 +3534,8 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
         },
         Ok(Aborted(store.Undone(value: BodyOutcome(take outcome), ..))) => Ok(Ok(take outcome)),
         Ok(Aborted(store.Undone(value: Refusal(take problem), ..))) => Ok(Error(take problem)),
-        Ok(Failed(causes)) => Ok(Ok(Failed(Raised(raised(causes))))),
+        Ok(Failed(Raised(causes))) => Ok(Ok(Failed(Raised(raised(causes))))),
+        Ok(Failed(Conflict(take name))) => Error(Conflict(take name)),
         Ok(Stopped(limit)) => Ok(Ok(Failed(OutOfTime(limit.steps)))),
         Ok(Refused(cap)) => Ok(Error(Capacity(store_capacity(cap)))),
         Error(take problem) => Error(take problem),

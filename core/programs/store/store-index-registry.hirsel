@@ -6,6 +6,7 @@ type IndexValue {
 type RegisteredIndex: send {
     id: u32,
     schema: u16,
+    ordinal: u64,
     by: Bytes,
     key: Bytes,
     extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error]
@@ -17,11 +18,12 @@ type IndexRegistration: send {
 }
 
 type IndexRegistry: send {
-    entries: Map[(u32, u32, u16), RegisteredIndex]
+    entries: Map[(u32, u32, u16), RegisteredIndex],
+    next_ordinal: u64
 }
 
 fn empty_index_registry() -> IndexRegistry {
-    IndexRegistry(entries: map.new())
+    IndexRegistry(entries: map.new(), next_ordinal: 0)
 }
 
 fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegistry {
@@ -132,12 +134,15 @@ fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, by: StaticFn[fn(
 }
 
 fn index_registration[K, V](t: Table[K, V], record: Catalog, take extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error]) -> IndexRegistration {
-    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, by: clone(record.by), key: clone(record.key), extract: take extract))
+    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract))
 }
 
 fn register_index(mut registry: IndexRegistry, take binding: IndexRegistration) {
-    let IndexRegistration(table: table_id, index: take bound_index) = take binding
+    let IndexRegistration(table: table_id, index: take incoming) = take binding
+    let mut bound_index = take incoming
     let key = (table_id, bound_index.id, bound_index.schema)
+    bound_index.ordinal = registry.next_ordinal
+    registry.next_ordinal += 1
     map.insert(mut registry.entries, key, take bound_index)
 }
 
@@ -246,7 +251,7 @@ fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: 
     Ok(take out)
 }
 
-fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
+fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog,
     old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
     let IndexValue(keys: take keys, payload: take payload) = take incoming
     let mut old = 0u64
@@ -260,11 +265,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         if unchanged {
             old += 1
         } else if let Unique = record.index_kind {
-            if let Some(prior) = stored {
-                if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
-                    return Error(Conflict(find_index_name(tx.roots.catalog, record.owner, record.id)?))
-                }
-            }
+            list.push(mut edits.probes, (record.id, copied(key)?))
         }
         if let Some(prior) = stored {
             if prior == payload { continue }
@@ -276,6 +277,43 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         append_index_remove(tx, mut edits, copied(old_keys[old])?, mut frame)?
         old += 1
     }
+    Ok(())
+}
+
+fn probe_index_keys(tx: Tx, table_id: u32, primary: Bytes, probes: List[(u32, Bytes)]) -> Result[(), Error] {
+    for (index_id, key) in probes {
+        if let Some(prior) = transaction_row(tx, key) {
+            if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+                return Error(Conflict(find_index_name(tx.roots.catalog, table_id, index_id)?))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn edit_stamp_cost(tx: Tx, edit: DataEdit) -> Result[u64, Error] {
+    match edit {
+        StoreRow(key, _) => write_stamp_cost(tx, key),
+        RemoveRow(key, _) => Ok(6 * collection_write_height(tx.roots.collections, key) + 2),
+    }
+}
+
+fn write_stamp_cost(tx: Tx, key: Bytes) -> Result[u64, Error] {
+    if let None = std.page.collection_child(tx.roots.collections.root, list.slice(key, 0, 4)) {
+        return Error(Stale(list.word_be(key, 0)))
+    }
+    Ok(6 * collection_write_height(tx.roots.collections, key) + 2)
+}
+
+fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[(), Error] {
+    let mut stamps = write_stamp_cost(tx, primary)?
+    if let Some(edit) = edits.first {
+        stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
+    }
+    for edit in edits.rest {
+        stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
+    }
+    if let None = int.checked_add(tx.ids, stamps) { return Error(Limit(Ids)) }
     Ok(())
 }
 
@@ -426,4 +464,134 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
         return Error(Limit(Value))
     }
     Ok(take raw)
+}
+
+type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
+
+type IndexEdits {
+    probes: List[(u32, Bytes)],
+    first: Option[DataEdit],
+    rest: List[DataEdit]
+}
+
+fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
+    if let None = edits.first {
+        edits.first = Some(take edit)
+    } else {
+        list.push(mut edits.rest, take edit)
+    }
+}
+
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
+    if let Some(refund) = delete_refund(tx, key) {
+        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
+        push_index_edit(mut edits, RemoveRow(take key, refund))
+    }
+    Ok(())
+}
+
+fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
+    match take edit {
+        StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw, false),
+        RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund),
+    }
+}
+
+fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
+    let IndexEdits(probes: take probes, first: take first, rest: take rest) = take edits
+    if let Some(take edit) = take first {
+        apply_edit(mut tx, take edit)?
+    }
+    for take edit in take rest {
+        apply_edit(mut tx, take edit)?
+    }
+    for take (_, take key) in take probes {
+        log.append(tx.reads, Point(take key))
+    }
+    Ok(())
+}
+
+// Index IDs are distinct from the table ID and each other. Within one index,
+// a delete and put are emitted only for distinct keys. Each planned edit can
+// therefore check the original op table while carrying the cumulative frame size.
+// A returned Error leaves all roots, accounting and issued IDs untouched.
+fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
+    // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
+    let mut raw: Bytes = list.new()
+    let least = 2 + std.codec.least(t.readers.codec)
+    let hint = if least <= 32 {
+        least * 2
+    } else {
+        least
+    }
+    capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
+    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+    let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
+    if list.len(indexes) == 0 {
+        apply_put(mut tx, take p, take raw, tail)?
+    } else {
+        let edits = {
+            let previous = transaction_row(tx, p)
+            let mut pending = IndexEdits(probes: list.new(), first: None, rest: list.new())
+            let primary = list.slice(p, 4, list.len(p))
+            for (_, ix) in indexes {
+                let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+                let incoming = (bound_index.extract)(raw, primary)?
+                let old_keys = match previous {
+                    Some(value) => {
+                        let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
+                        take keys
+                    },
+                    None => list.new(),
+                }
+                plan_index_put(tx, mut pending, mut frame, ix, old_keys, take incoming)?
+            }
+            take pending
+        }
+        preflight_index_edits(tx, edits, p)?
+        let probed = {
+            let primary = list.slice(p, 4, list.len(p))
+            probe_index_keys(tx, t.id, primary, edits.probes)
+        }
+        match take probed {
+            Error(Conflict(take name)) => {
+                tx.index_conflict = Some(clone(name))
+                return Error(Conflict(take name))
+            },
+            Error(take problem) => return Error(take problem),
+            Ok(()) => (),
+        }
+        apply_put(mut tx, take p, take raw, tail)?
+        apply_edits(mut tx, take edits)?
+    }
+    tx.frame_bytes = frame
+    Ok(())
+}
+
+fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
+    let p = logical_key(t.id, key)?
+    let mut frame = tx.frame_bytes
+    let (take edits, refund) = {
+        let Some(old) = transaction_row(tx, p) else {
+            return Ok(false)
+        }
+        let previous = entry(p, old)
+        let refund = if tx.retain_old { 0u64 } else { previous }
+        let mut pending = IndexEdits(probes: list.new(), first: None, rest: list.new())
+        for (_, ix) in indexes {
+            let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+            let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
+            for take row in take keys {
+                append_index_remove(tx, mut pending, take row, mut frame)?
+            }
+        }
+        (take pending, refund)
+    }
+    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
+    if list.len(indexes) > 0 { preflight_index_edits(tx, edits, p)? }
+    apply_edits(mut tx, take edits)?
+    apply_delete(mut tx, take p, refund)?
+    tx.frame_bytes = frame
+    Ok(true)
 }

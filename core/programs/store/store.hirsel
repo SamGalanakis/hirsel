@@ -354,7 +354,9 @@ pub type Ticket {
 
 pub type Read = Point(Bytes) | Span(Bytes, Bytes)
 
-pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(OutOfTime)
+pub type StoreFailure = Raised(Causes) | Conflict(String)
+
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(StoreFailure) | Refused(StoreCapacity) | Stopped(OutOfTime)
 
 pub type Undone[A] {
     value: A,
@@ -506,6 +508,7 @@ pub opaque scoped type Tx {
     reads: View[core.Log[Read]],
     issued: View[core.Log[u64]],
     refusal: Option[Capacity],
+    index_conflict: Option[String],
     frame_bytes: Option[u64],
     wrote: bool,
     ops: DataOps,
@@ -957,7 +960,7 @@ pub type Receipt {
     reply: Bytes
 }
 
-pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity)
+pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity) | Conflict(String)
 
 fn append_be(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
     for i in 0u64 .. width {
@@ -1086,7 +1089,12 @@ fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_
         return Error(BodyStop(OutOfBytes(problem)))
     }
     let (success, take output) = match take returned {
-        Ok(take payload) => (true, take payload),
+        Ok(take payload) => {
+            if let Some(name) = tx.index_conflict {
+                return Error(BodyStop(Conflict(clone(name))))
+            }
+            (true, take payload)
+        },
         Error(take payload) => (false, take payload),
     }
     if list.len(output) > reply_max {
@@ -1118,7 +1126,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     })
     let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
         Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
-        Error(DraftStopped(stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), stop)),
+        Error(DraftStopped(take stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), take stop)),
         Ok(take draft) => take draft,
     }
     db.next_node = next_id
@@ -1126,18 +1134,19 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
         Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
-        Over(Failed(causes)) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
+        Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
+        Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
         Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
-        Over(Aborted(Undone(value: BodyStop(stop), ..))) => Ok(stopped_pending(take pending_run, stop)),
+        Over(Aborted(Undone(value: BodyStop(take stop), ..))) => Ok(stopped_pending(take pending_run, take stop)),
         Over(Aborted(Undone(value: StoreFailure(take problem), ..))) => Error(Before(take problem, None)),
         _ => fail("store: missing staged reply"),
     }
 }
 
-fn stopped_pending(take pending_run: Pending, stop: Stop) -> Served {
+fn stopped_pending(take pending_run: Pending, take stop: Stop) -> Served {
     let mut pending = take pending_run
     pending.stop = Some(stop_kind(stop))
-    Failed(take pending, stop)
+    Failed(take pending, take stop)
 }
 
 fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, ServeReply], retry: bool) -> Result[Served, ServeError] waits {
@@ -1358,7 +1367,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         Error(c) => Over(Refused(Allocation(c))),
         Ok(Error(take cs)) => match raised_capacity(cs) {
             Some(c) => Over(Refused(Allocation(c))),
-            None => Over(Failed(take cs)),
+            None => Over(Failed(Raised(take cs))),
         },
         Ok(Ok(Error(e))) => Over(Stopped(e)),
         Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
@@ -1382,7 +1391,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1391,7 +1400,12 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         return RolledBack(Refused(Allocation(c)))
     }
     let value: Result[R, A] = match take outcome {
-        Ok(take v) => Ok(take v),
+        Ok(take v) => {
+            if let Some(take name) = replace(mut tx.index_conflict, None) {
+                return RolledBack(Failed(Conflict(take name)))
+            }
+            Ok(take v)
+        },
         Error(take a) => {
             let keep = match keep_reply {
                 Some(decide) => decide(a),
@@ -1542,7 +1556,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         Error(problem) => Over(Refused(Allocation(problem))),
         Ok(Error(take causes)) => match raised_capacity(causes) {
             Some(problem) => Over(Refused(Allocation(problem))),
-            None => Over(Failed(take causes)),
+            None => Over(Failed(Raised(take causes))),
         },
         Ok(Ok(Error(limit))) => Over(Stopped(limit)),
         Ok(Ok(Ok(Error(problem)))) => Over(Refused(Allocation(problem))),
@@ -3021,15 +3035,20 @@ fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], 
     }
 }
 
-fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[Catalog], Error] {
+fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
-    let indexes = index_catalog_in(tx.roots.catalog, t.id)?
-    for record in indexes {
-        let _ = registered_index(tx, t.id, t.readers.current, record)?
+    let records = index_catalog_in(tx.roots.catalog, t.id)?
+    let mut indexes: List[(u64, Catalog)] = list.new()
+    for take record in take records {
+        let bound_index = registered_index(tx, t.id, t.readers.current, record)?
+        list.push(mut indexes, (bound_index.ordinal, take record))
     }
+    list.sort(mut indexes, fn(a: (u64, Catalog), b: (u64, Catalog)) -> Order {
+        order.compare(a.0, b.0)
+    })
     Ok(take indexes)
 }
 
@@ -3050,118 +3069,6 @@ pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
-}
-
-type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
-
-type IndexEdits {
-    first: Option[DataEdit],
-    rest: List[DataEdit]
-}
-
-fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
-    if let None = edits.first {
-        edits.first = Some(take edit)
-    } else {
-        list.push(mut edits.rest, take edit)
-    }
-}
-
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
-    if let Some(refund) = delete_refund(tx, key) {
-        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
-        push_index_edit(mut edits, RemoveRow(take key, refund))
-    }
-    Ok(())
-}
-
-fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
-    match take edit {
-        StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw, false),
-        RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund),
-    }
-}
-
-fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
-    let IndexEdits(first: take first, rest: take rest) = take edits
-    if let Some(take edit) = take first {
-        apply_edit(mut tx, take edit)?
-    }
-    for take edit in take rest {
-        apply_edit(mut tx, take edit)?
-    }
-    Ok(())
-}
-
-// Index IDs are distinct from the table ID and each other. Within one index,
-// a delete and put are emitted only for distinct keys. Each planned edit can
-// therefore check the original op table while carrying the cumulative frame size.
-// A returned Error leaves all roots, accounting and issued IDs untouched.
-fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
-    // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
-    let mut raw: Bytes = list.new()
-    let least = 2 + std.codec.least(t.readers.codec)
-    let hint = if least <= 32 {
-        least * 2
-    } else {
-        least
-    }
-    capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
-    capacity(le(mut raw, int.widen(t.readers.current), 2))?
-    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
-    if list.len(indexes) == 0 {
-        apply_put(mut tx, take p, take raw, tail)?
-    } else {
-        let edits = {
-            let previous = transaction_row(tx, p)
-            let mut pending = IndexEdits(first: None, rest: list.new())
-            let primary = list.slice(p, 4, list.len(p))
-            for ix in indexes {
-                let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-                let incoming = (bound_index.extract)(raw, primary)?
-                let old_keys = match previous {
-                    Some(value) => {
-                        let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
-                        take keys
-                    },
-                    None => list.new(),
-                }
-                plan_index_put(tx, mut pending, mut frame, ix, primary, old_keys, take incoming)?
-            }
-            take pending
-        }
-        apply_put(mut tx, take p, take raw, tail)?
-        apply_edits(mut tx, take edits)?
-    }
-    tx.frame_bytes = frame
-    Ok(())
-}
-
-fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], key: Bytes) -> Result[bool, Error] {
-    let p = logical_key(t.id, key)?
-    let mut frame = tx.frame_bytes
-    let (take edits, refund) = {
-        let Some(old) = transaction_row(tx, p) else {
-            return Ok(false)
-        }
-        let previous = entry(p, old)
-        let refund = if tx.retain_old { 0u64 } else { previous }
-        let mut pending = IndexEdits(first: None, rest: list.new())
-        for ix in indexes {
-            let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-            let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
-            for take row in take keys {
-                append_index_remove(tx, mut pending, take row, mut frame)?
-            }
-        }
-        (take pending, refund)
-    }
-    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
-    apply_edits(mut tx, take edits)?
-    apply_delete(mut tx, take p, refund)?
-    tx.frame_bytes = frame
-    Ok(true)
 }
 
 pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
@@ -4223,6 +4130,7 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 }
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
     let indexes = writable(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
@@ -4231,6 +4139,7 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
+    if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
     let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?
     delete_impl(mut tx, t, indexes, key)
@@ -4264,7 +4173,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, index_conflict: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
             body(tx, env)
         }
         match steps {

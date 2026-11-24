@@ -173,6 +173,7 @@ fn stop_kind(stop: Stop) -> StopKind {
         Raised(_) => Raised,
         OutOfSteps(steps) => OutOfSteps(steps),
         OutOfBytes(_) => OutOfBytes,
+        Conflict(_) => Conflict,
     }
 }
 
@@ -216,7 +217,8 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
         RolledBack(Aborted(Undone(value: take answer, ..))) => (take answer, new_data_rows()),
         RolledBack(Refused(Allocation(problem))) => return Halted(OutOfBytes(problem)),
         RolledBack(Refused(_)) => return RoomRefused,
-        RolledBack(Failed(causes)) => return Halted(Raised(cause_number(causes))),
+        RolledBack(Failed(Raised(causes))) => return Halted(Raised(cause_number(causes))),
+        RolledBack(Failed(Conflict(take name))) => return Halted(Conflict(take name)),
         RolledBack(Stopped(limit)) => return Halted(OutOfSteps(limit.steps)),
         RolledBack(Committed(_)) => fail("store: re-run committed"),
         Prepared(take ready) => {
@@ -307,7 +309,7 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
 // original CallInfo, and compare the committed reply and writes.
-fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Result[Bytes, Error], body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
     let reran = rerun(db, registry, source.base, ci, plan, call, body)
@@ -329,7 +331,7 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
     }
     let (take output, take writes) = match take metered {
         RanTo(take output, take writes) => (take output, take writes),
-        Halted(stop) => (failed(stop), new_data_rows()),
+        Halted(stop) => (failed(stop)?, new_data_rows()),
         RoomRefused => return Ok(Unknown(StateGone)),
     }
     let stored = option.unwrap(recorded_reply(source.commit, call.record.stream))
@@ -345,7 +347,9 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
 pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Stop) -> Bytes, env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let selected = replay_source(db, b, v)?
     match take selected {
-        Ok(take source) => replay_run(db, db.indexes, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) }),
+        Ok(take source) => replay_run(db, db.indexes, source, plan,
+            scoped fn(stop: Stop) -> Result[Bytes, Error] { Ok(failed(stop)) },
+            scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) }),
         Error(reason) => Ok(Unknown(reason)),
     }
 }
@@ -371,7 +375,8 @@ pub fn replay_record(source: ReplaySource) -> Recorded {
     clone(source.call)
 }
 
-pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Bytes, env: Env,
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan,
+    failed: fn(Stop) -> Result[Bytes, Error], env: Env,
     body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
     let Open = selected.mode else { return Error(Foreign) }
     if !same(source.store, db.store) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {

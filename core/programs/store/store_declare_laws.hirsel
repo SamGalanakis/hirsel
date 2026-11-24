@@ -235,3 +235,115 @@ fn test_index_declaration_laws(c: Clock) -> Result[(), Error] waits {
     covering_revision_case(c, false)?
     covering_revision_case(c, true)
 }
+
+fn conflict_first(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, value.0)
+}
+
+fn conflict_second(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, value.1)
+}
+
+fn conflict_many(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, (value.0 + value.1) % 4)
+}
+
+fn conflict_setup(mut db: Db) -> Result[Table[u64, (u64, u64)], Error] waits {
+    let mut schema = declare(db, Migrate)?
+    let codec: std.codec.Codec[(u64, u64)] = std.codec.of()
+    let key = std.codec.key_u64()
+    let mut item_decl = declare_table(mut schema, "items", key, codec)?
+    let _ = index(mut schema, mut item_decl, "z_first", Unique, code.describe(conflict_first), key)?
+    let _ = index(mut schema, mut item_decl, "a_second", Unique, code.describe(conflict_second), key)?
+    let _ = index(mut schema, mut item_decl, "many", Many, code.describe(conflict_many), key)?
+    let items = finish(mut schema, take item_decl)?
+    let _ = seal(mut db, take schema)?
+    Ok(take items)
+}
+
+fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[(), Error] {
+    put(mut tx, items, 1, (1, 2))?
+    put(mut tx, items, 2, (3, 4))?
+    let _ = delete(mut tx, items, 2)?
+    put(mut tx, items, 4, (3, 4))?
+    put(mut tx, items, 1, (1, 2))?
+    let before = (tx.resident, tx.frame_bytes, tx.ids, tx.rows)
+    match put(mut tx, items, 3, (1, 4)) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    match delete(mut tx, items, 1) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    match put(mut tx, items, 5, (5, 6)) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    Ok(())
+}
+
+@test
+fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let items = conflict_setup(mut db)?
+    let before = version(snapshot(db))
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Log[u64] = log.new()
+    let keep: Option[fn(Error) -> bool] = None
+    let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        tx.frame_bytes = Some(42)
+        put_conflict_sequence(mut tx, items)
+    })
+    match take staged {
+        RolledBack(Failed(Conflict(name))) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    let observed = log.finish(take reads)
+    if list.len(observed) != 6 { return Error(MigrationFault) }
+    for probe in observed {
+        if let Point(key) = probe {
+            if list.len(key) != 12 { return Error(MigrationFault) }
+        } else { return Error(MigrationFault) }
+    }
+    let attempted = run(mut db, None, items, fn(mut tx, handle) -> Result[(), Error] {
+        put_conflict_sequence(mut tx, handle)
+    })?
+    match take attempted {
+        Failed(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    let unchanged = snapshot(db)
+    if version(unchanged) != before || get(result.unwrap(reader(db, 0)), unchanged, items, 1)? != None {
+        return Error(MigrationFault)
+    }
+    let stream = key_word(23)
+    let request = request_digest(stream, stream)
+    let admitted = admit(mut db, stream, 0, request)?
+    let Admitted(take complete) = take admitted else { return Error(MigrationFault) }
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let served = serve(mut db, take complete, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
+        result.unwrap(put_conflict_sequence(mut tx, handle))
+        Error(key_word(7))
+    })
+    match take served {
+        Ok(Kept(receipt)) if receipt.reply == key_word(7) => (),
+        _ => return Error(MigrationFault),
+    }
+    if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None { return Error(MigrationFault) }
+    let next_admission = admit(mut db, stream, 1, request)?
+    let Admitted(take next_completion) = take next_admission else { return Error(MigrationFault) }
+    let staged_base = version(snapshot(db))
+    let next_result = serve(mut db, take next_completion, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
+        result.unwrap(put_conflict_sequence(mut tx, handle))
+        Ok(key_word(8))
+    })
+    match take next_result {
+        Ok(Failed(_, Conflict(name))) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if version(snapshot(db)) != staged_base { return Error(MigrationFault) }
+    Ok(())
+}

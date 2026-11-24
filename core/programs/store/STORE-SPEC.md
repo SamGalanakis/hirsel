@@ -1,4 +1,4 @@
-# STORE-SPEC v2.64: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.65: the M4 store library (lane store-spec-1001)
 
 v2.64 (lane replay-delta-fix-2023, astra replay-delta-attack-2020's ten findings on v2.63): text only, **not yet built**. It fixes all ten and keeps v2.63's ruling: the journal carries what replay needs, open decodes no class-3 or class-4 frame, and every store of the format uses one COMMIT op encoding. **M3's format word is 5** (§13.1, AP1): format 4 was written by main with format-3 data ops, and its bytes can also parse under the prior grammar, so format-3 and format-4 stores are `Unsupported` at the first HEADER read, before claim, cleanup or rotation, on log@1 and objects@1, and old format-4 stores, the checkbox deployment included, are re-created from genesis. A prior is 1 + the full encoded length of the replaced value for every kind, so a Many entry's covering payload counts, and its ceiling is the format's, FORMAT_VALUE_MAX + 1 = 16,711,681, not the API write limit. Replay charges priors to `account_tiered` only; `account_memory` is recomputed exactly at open, because a commit that settles under AP15's proposed-root admission can lower it, which no prior can say. The fold applies without charging, then settles both classes like any cut. A Tiered trim keeps per-trim evidence through the fold; a Memory trim is compared at apply; the removed count is min(b, n) − f, bytes are subtracted once, and a regressing floor is `Corrupt`. A pin or cut-path fork of an overlaid Snapshot materializes its overlay before publishing. The fold rebuilds per-branch ownership from the ordered suffix. A corrupt fold takes the store error path, never `NoRoom`. See CHANGES-v2.64. Reversible: the spec only.
 
@@ -151,6 +151,10 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.65 (W3a B4)
+
+An abort-only transaction whose body returns `Ok` yields `Outcome.Failed(StoreFailure.Conflict(name))`. The Store-owned failure also wraps runtime `Causes` via `Raised`. `serve` reports `Stop.Conflict(name)`.
 
 ## CHANGES-v2.64 (replay-delta-fix-2023: astra replay-delta-attack-2020 findings on v2.63; not yet built)
 
@@ -1147,10 +1151,10 @@ A `mut` lend lasts for one call (OWN-7, OWN-8), so `declare` captures a private 
 - the primary edit;
 - the COMMIT op bytes and the resident charge (§1.1 limits, §1.11).
 
-Then, for each `Unique` index in declaration order and each J in the new set but not the old (encoded order), it probes the staged view of `ix ‖ J`. An entry whose K differs from k is `Conflict(index name)`. The probe records `Point(ix ‖ J)`. A transaction limit, `Limit(Key)` or `Limit(Value)` is found in the same preflight. Only a complete edit is staged. On any error nothing of it is staged, and on `Conflict` the Tx becomes **abort-only**:
+Then, for each `Unique` index in declaration order and each J in the new set but not the old (encoded order), it probes the staged view of `ix ‖ J`. An entry whose K differs from k is `Conflict(index name)`. A successful put records `Point(ix ‖ J)` for each probe. A transaction limit, `Limit(Key)` or `Limit(Value)` is found in the same preflight. Only a complete edit is staged. On any error nothing of it is staged, and on `Conflict` the Tx becomes **abort-only**:
 - Every later `put` or `delete` in it returns the first `Conflict` with nothing staged, and reads continue.
 - If the body returns `Error(a)`, F2 applies (the data is undone and a reply is kept).
-- If the body returns `Ok(r)`, `run` and `run_on` answer `Failed(Causes)` with the cause `Conflict(name)` and commit nothing, and `serve` answers `Failed(p, Conflict(name))`, which the runner concludes as `Failed(Conflict(name))` (RUNNER-SPEC v2.45 §1.1).
+- If the body returns `Ok(r)`, `run` and `run_on` answer `Failed(StoreFailure.Conflict(name))` and commit nothing, and `serve` answers `Failed(p, Conflict(name))`, which the runner concludes as `Failed(Conflict(name))` (RUNNER-SPEC v2.45 §1.1).
 - A conflict that a helper swallows therefore cannot commit the writes before it.
 - Delete and re-insert in one Tx is not a conflict, because the probe reads the staged view. To swap two rows' unique keys, delete one row, put the other, then put the first.
 - `Stop` gains `Conflict(String)`. Re-execution compares it like any `Failed` reply.
@@ -1185,7 +1189,8 @@ Then, for each `Unique` index in declaration order and each J in the new set but
 
 ```hirsel
 pub opaque scoped type Tx                // VERIFY-5 B2: opaque (PROG-2). Base roots (views), working roots, op list, read Log view, scope, CallInfo
-pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(Capacity) | Stopped(core.OutOfTime)   // AC1
+pub type StoreFailure = Raised(Causes) | Conflict(String)
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(StoreFailure) | Refused(Capacity) | Stopped(core.OutOfTime)   // AC1
 pub type Undone[A] { value: A, ticket: Option[Ticket] }   // F2: the ticket of the kept reply commit, if any
 pub type Done[R] { value: R, ticket: Ticket, info: CallInfo, reads: List[Read] }
 pub type Read = Point(Bytes) | Span(Bytes, Bytes)   // data-tree keys (§2.4), the bytes of Change.tree_key; span [lo, hi) (I1)
@@ -1238,7 +1243,8 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
 |---|---|---|
 | `Committed` | the body returned `Ok` | the commit is visible to the next transaction and to `snapshot` |
 | `Aborted(u)` | the body returned `Error(a)`; `u.value` is `a` | the data writes are discarded. The reply writes (§1.8) are kept and committed as one frame with only a streams section, and `u.ticket` is that commit's ticket. With no reply nothing is committed and `u.ticket` is None. (v2.28 AL1: under `serve` a reply is always written, and this outcome is `Served.Kept`.) If that commit would pass `resident_limit`, the outcome is `Refused(c)` instead and nothing is kept (F2). |
-| `Failed(causes)` | the body faulted (never `Cancelled`, which `isolate` does not catch, FAIL-16) | none |
+| `Failed(Raised(causes))` | the body faulted (never `Cancelled`, which `isolate` does not catch, FAIL-16) | none |
+| `Failed(Conflict(name))` | the body returned `Ok` after a uniqueness conflict | none |
 | `Refused(c)` | isolate or, in a store with a journal, the commit encode ran out of capacity, or the commit would pass `resident_limit` (§1.11; `c.requested` is the account after it, `c.available` the limit) | none |
 
 - Every read and write takes the one `Table` (v2.57 DX Q1): a read needs only the key codec and the Readers, and a Table is `shareable + send`, so one query body runs under `run` and under `look` on any task. `put` and `delete` find the table's extractors in the registry the write Tx borrows (§1.2), so a Table carries none. `lookup`, `lookup_prefix` and `entries` take the `Index`.
@@ -3481,10 +3487,10 @@ pub type Limit = Key | Value | Transaction | Name | Ids | Manifest
 pub type StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)   // v2.40 ruling (b): the resource that refused
 // changed result types (v2.40, rulings (a) and (b)); core Capacity { requested, available } is unchanged
 pub type Error = … | Full(StoreCapacity) | …                     // every other case as §1.1 and the Limit gains above
-pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(StoreFailure) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
 pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity)   // NoRoom: Resident, Allocation or (v2.56 §13.3) Cache, never Journal
 pub type ServeError = Before(Error, Option[Pending]) | After(Error)   // Some(p) only from conclude refused before publication
-pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
+pub type Looked[R] = Seen(Seen[R]) | Failed(StoreFailure) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
 pub type DeployError = … | FullNew(StoreCapacity)                  // §3.5a; its other cases unchanged
 pub opaque type Scrub                                              // v2.42, §11.17: one tour; dropping it ends its lease
 pub type ScrubReport { generation: u64, checked: u64, next: Option[u64], faults: List[Fault] }

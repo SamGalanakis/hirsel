@@ -56,6 +56,15 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
     Ok((go.replay)(db, source, take declaration, plan, h, caller, recorded_entry.record.args) ?=> Store)
 }
 
-fn replay_fault(stop: store.Stop) -> Bytes {
-    result.unwrap(encode_runner_reply(failed_stop(stop)))
+fn failed_stop(stop: store.Stop) -> Result[Outcome, store.Error] {
+    match stop {
+        Raised(reason) => Ok(Failed(Raised(reason))),
+        OutOfSteps(steps) => Ok(Failed(OutOfTime(steps))),
+        OutOfBytes(problem) => Ok(Failed(OutOfBytes(room(problem)))),
+        Conflict(name) => Error(Conflict(clone(name))),
+    }
+}
+
+fn replay_fault(stop: store.Stop) -> Result[Bytes, store.Error] {
+    encode_runner_reply(failed_stop(stop)?)
 }

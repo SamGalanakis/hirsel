@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "native.h"
-#include "sqlite3.h"
+#include "hirsel_sqlite_os.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -16,240 +16,18 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 HIRSEL_ABI_TEXT
 
-struct sqlite3_mutex {
-    pthread_mutex_t lock;
-};
-
-static sqlite3_mutex static_mutexes[SQLITE_MUTEX_STATIC_VFS3 - SQLITE_MUTEX_STATIC_MAIN + 1];
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static int init_code = SQLITE_ERROR;
 
-static int mutex_init(void) {
-    size_t i = 0;
-    for (; i < sizeof static_mutexes / sizeof static_mutexes[0]; ++i) {
-        if (pthread_mutex_init(&static_mutexes[i].lock, NULL) != 0) {
-            while (i > 0) pthread_mutex_destroy(&static_mutexes[--i].lock);
-            return SQLITE_ERROR;
-        }
-    }
-    return SQLITE_OK;
-}
-
-static int mutex_end(void) {
-    for (size_t i = 0; i < sizeof static_mutexes / sizeof static_mutexes[0]; ++i)
-        pthread_mutex_destroy(&static_mutexes[i].lock);
-    return SQLITE_OK;
-}
-
-static sqlite3_mutex *mutex_alloc(int kind) {
-    if (kind >= SQLITE_MUTEX_STATIC_MAIN && kind <= SQLITE_MUTEX_STATIC_VFS3)
-        return &static_mutexes[kind - SQLITE_MUTEX_STATIC_MAIN];
-    if (kind != SQLITE_MUTEX_FAST && kind != SQLITE_MUTEX_RECURSIVE) return NULL;
-    sqlite3_mutex *mutex = malloc(sizeof *mutex);
-    if (!mutex) return NULL;
-    pthread_mutexattr_t attr;
-    if (pthread_mutexattr_init(&attr) != 0) {
-        free(mutex);
-        return NULL;
-    }
-    int error = 0;
-    if (kind == SQLITE_MUTEX_RECURSIVE)
-        error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    if (!error) error = pthread_mutex_init(&mutex->lock, &attr);
-    pthread_mutexattr_destroy(&attr);
-    if (!error) return mutex;
-    free(mutex);
-    return NULL;
-}
-
-static void mutex_free(sqlite3_mutex *mutex) {
-    pthread_mutex_destroy(&mutex->lock);
-    free(mutex);
-}
-
-static void mutex_enter(sqlite3_mutex *mutex) { pthread_mutex_lock(&mutex->lock); }
-static void mutex_leave(sqlite3_mutex *mutex) { pthread_mutex_unlock(&mutex->lock); }
-static int mutex_try(sqlite3_mutex *mutex) {
-    return pthread_mutex_trylock(&mutex->lock) == 0 ? SQLITE_OK : SQLITE_BUSY;
-}
-
-typedef struct {
-    sqlite3_file base;
-    uint8_t *data;
-    size_t size;
-} TempFile;
-
-static int temp_close(sqlite3_file *base) {
-    free(((TempFile *)base)->data);
-    return SQLITE_OK;
-}
-
-static int temp_truncate(sqlite3_file *base, sqlite3_int64 length) {
-    TempFile *file = (TempFile *)base;
-    if (length < 0 || (uint64_t)length > SIZE_MAX) return SQLITE_IOERR_TRUNCATE;
-    size_t n = (size_t)length;
-    if (!n) {
-        free(file->data);
-        file->data = NULL;
-    } else {
-        uint8_t *data = realloc(file->data, n);
-        if (!data) return SQLITE_NOMEM;
-        file->data = data;
-        if (n > file->size) memset(data + file->size, 0, n - file->size);
-    }
-    file->size = n;
-    return SQLITE_OK;
-}
-
-static int temp_read(sqlite3_file *base, void *out, int length, sqlite3_int64 offset) {
-    TempFile *file = (TempFile *)base;
-    if (offset < 0 || length < 0) return SQLITE_IOERR_READ;
-    size_t n = (size_t)length;
-    size_t available = (uint64_t)offset >= file->size ? 0 : file->size - (size_t)offset;
-    size_t copied = available < n ? available : n;
-    if (copied) memcpy(out, file->data + (size_t)offset, copied);
-    if (copied == n) return SQLITE_OK;
-    memset((uint8_t *)out + copied, 0, n - copied);
-    return SQLITE_IOERR_SHORT_READ;
-}
-
-static int temp_write(sqlite3_file *base, const void *src, int length, sqlite3_int64 offset) {
-    TempFile *file = (TempFile *)base;
-    if (offset < 0 || length < 0 || offset > INT64_MAX - length) return SQLITE_IOERR_WRITE;
-    sqlite3_int64 end = offset + length;
-    if ((uint64_t)end > file->size) {
-        int rc = temp_truncate(base, end);
-        if (rc != SQLITE_OK) return rc;
-    }
-    if (length) memcpy(file->data + (size_t)offset, src, (size_t)length);
-    return SQLITE_OK;
-}
-
-static int temp_size(sqlite3_file *base, sqlite3_int64 *size) {
-    *size = (sqlite3_int64)((TempFile *)base)->size;
-    return SQLITE_OK;
-}
-
-static int temp_noop(sqlite3_file *base, int flags) {
-    (void)base; (void)flags;
-    return SQLITE_OK;
-}
-
-static int temp_reserved(sqlite3_file *base, int *held) {
-    (void)base;
-    *held = 0;
-    return SQLITE_OK;
-}
-
-static int temp_control(sqlite3_file *base, int op, void *arg) {
-    (void)base; (void)op; (void)arg;
-    return SQLITE_NOTFOUND;
-}
-
-static int temp_sector(sqlite3_file *base) { (void)base; return 512; }
-static int temp_characteristics(sqlite3_file *base) { (void)base; return 0; }
-
-static const sqlite3_io_methods temp_methods = {
-    .iVersion = 1,
-    .xClose = temp_close,
-    .xRead = temp_read,
-    .xWrite = temp_write,
-    .xTruncate = temp_truncate,
-    .xSync = temp_noop,
-    .xFileSize = temp_size,
-    .xLock = temp_noop,
-    .xUnlock = temp_noop,
-    .xCheckReservedLock = temp_reserved,
-    .xFileControl = temp_control,
-    .xSectorSize = temp_sector,
-    .xDeviceCharacteristics = temp_characteristics,
-};
-
-static int no_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int flags, int *out) {
-    (void)vfs;
-    file->pMethods = NULL;
-    if (name || (flags & SQLITE_OPEN_SUPER_JOURNAL)) return SQLITE_CANTOPEN;
-    TempFile *temp = (TempFile *)file;
-    *temp = (TempFile){.base.pMethods = &temp_methods};
-    if (out) *out = flags;
-    return SQLITE_OK;
-}
-
-static int no_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
-    (void)vfs; (void)name; (void)sync_dir;
-    return SQLITE_IOERR_DELETE;
-}
-
-static int no_access(sqlite3_vfs *vfs, const char *name, int flags, int *out) {
-    (void)vfs; (void)name; (void)flags;
-    *out = 0;
-    return SQLITE_OK;
-}
-
-static int no_path(sqlite3_vfs *vfs, const char *name, int n, char *out) {
-    (void)vfs; (void)name; (void)n; (void)out;
-    return SQLITE_CANTOPEN;
-}
-
-static int zero_randomness(sqlite3_vfs *vfs, int n, char *out) {
-    (void)vfs;
-    memset(out, 0, (size_t)n);
-    return n;
-}
-
-static int no_sleep(sqlite3_vfs *vfs, int microseconds) {
-    (void)vfs; (void)microseconds;
-    return 0;
-}
-
-static int no_clock(sqlite3_vfs *vfs, double *out) {
-    (void)vfs; (void)out;
-    return SQLITE_ERROR;
-}
-
-static int no_clock64(sqlite3_vfs *vfs, sqlite3_int64 *out) {
-    (void)vfs; (void)out;
-    return SQLITE_ERROR;
-}
-
-static sqlite3_vfs no_files = {
-    .iVersion = 2,
-    .szOsFile = sizeof(TempFile),
-    .mxPathname = 1,
-    .zName = "hirsel-none",
-    .xOpen = no_open,
-    .xDelete = no_delete,
-    .xAccess = no_access,
-    .xFullPathname = no_path,
-    .xRandomness = zero_randomness,
-    .xSleep = no_sleep,
-    .xCurrentTime = no_clock,
-    .xCurrentTimeInt64 = no_clock64,
-};
-
-int sqlite3_os_init(void) { return sqlite3_vfs_register(&no_files, 1); }
-int sqlite3_os_end(void) { return SQLITE_OK; }
-
-static void initialize(void) {
-    sqlite3_mutex_methods methods = {
-        .xMutexInit = mutex_init,
-        .xMutexEnd = mutex_end,
-        .xMutexAlloc = mutex_alloc,
-        .xMutexFree = mutex_free,
-        .xMutexEnter = mutex_enter,
-        .xMutexTry = mutex_try,
-        .xMutexLeave = mutex_leave,
-    };
-    init_code = sqlite3_config(SQLITE_CONFIG_MUTEX, &methods);
-    if (init_code == SQLITE_OK) init_code = sqlite3_initialize();
-}
+static void initialize(void) { init_code = os_initialize(); }
 
 static int authorize(void *ctx, int op, const char *a, const char *b, const char *schema, const char *trigger) {
-    (void)ctx; (void)b; (void)schema; (void)trigger;
+    (void)ctx; (void)schema; (void)trigger;
     if (op == SQLITE_ATTACH || op == SQLITE_DETACH) return SQLITE_DENY;
     if (op == SQLITE_PRAGMA && a != NULL) {
         const char *blocked[] = {
@@ -257,6 +35,8 @@ static int authorize(void *ctx, int op, const char *a, const char *b, const char
         };
         for (size_t i = 0; i < sizeof blocked / sizeof blocked[0]; ++i)
             if (strcasecmp(a, blocked[i]) == 0) return SQLITE_DENY;
+        /* Setting it installs a busy handler that sleeps; reading it is harmless. */
+        if (b != NULL && strcasecmp(a, "busy_timeout") == 0) return SQLITE_DENY;
     }
     return SQLITE_OK;
 }
@@ -268,6 +48,7 @@ static int authorize(void *ctx, int op, const char *a, const char *b, const char
 #define DB_SHARED_LEN 510
 #define SHM_LOCK_BASE ((22 + SQLITE_SHM_NLOCK) * 4)
 #define SHM_DEADMAN 128
+#define SHM_PAGE ((off_t)4096)
 
 typedef struct {
     sqlite3_vfs vfs;
@@ -449,14 +230,21 @@ static int open_shm(DirFile *file) {
     if (fd < 0) return SQLITE_IOERR_SHMOPEN;
     struct stat stat;
     int rc = SQLITE_OK;
+    /* SQLite's unixLockSharedMemory: a shared holder admits this opener, an
+       exclusive holder may have died before its truncation finished and gives
+       BUSY, and a free byte makes this opener the one that truncates. */
+    struct flock held = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = SHM_DEADMAN, .l_len = 1};
     if (fstat(fd, &stat) != 0 || !S_ISREG(stat.st_mode)) {
         rc = SQLITE_IOERR_SHMOPEN;
-    } else {
+    } else if (fcntl(fd, F_OFD_GETLK, &held) != 0) {
+        rc = SQLITE_IOERR_SHMLOCK;
+    } else if (held.l_type == F_WRLCK) {
+        rc = SQLITE_BUSY;
+    } else if (held.l_type == F_UNLCK) {
         rc = set_lock(fd, F_WRLCK, SHM_DEADMAN, 1, SQLITE_IOERR_SHMLOCK);
         if (rc == SQLITE_OK && ftruncate(fd, 0) != 0) rc = SQLITE_IOERR_SHMSIZE;
-        if (rc == SQLITE_OK || rc == SQLITE_BUSY)
-            rc = set_lock(fd, F_RDLCK, SHM_DEADMAN, 1, SQLITE_IOERR_SHMLOCK);
     }
+    if (rc == SQLITE_OK) rc = set_lock(fd, F_RDLCK, SHM_DEADMAN, 1, SQLITE_IOERR_SHMLOCK);
     if (rc != SQLITE_OK) close(fd);
     else file->shm = fd;
     return rc;
@@ -483,7 +271,14 @@ static int disk_shm_map(sqlite3_file *base, int page, int length, int extend, vo
     if (fstat(file->shm, &stat) != 0) return SQLITE_IOERR_SHMSIZE;
     if (stat.st_size < end) {
         if (!extend) return SQLITE_OK;
-        if (ftruncate(file->shm, end) != 0) return SQLITE_IOERR_SHMSIZE;
+        /* Grow by writing the last byte of each new page, as SQLite's Unix VFS
+           does, so every page under the size is allocated and a full disk is
+           SQLITE_IOERR_SHMSIZE here, never SIGBUS on a later store. */
+        for (off_t at = stat.st_size / SHM_PAGE * SHM_PAGE; at < end; at += SHM_PAGE) {
+            ssize_t n;
+            do { n = pwrite(file->shm, "", 1, at + SHM_PAGE - 1); } while (n < 0 && errno == EINTR);
+            if (n != 1) return SQLITE_IOERR_SHMSIZE;
+        }
     }
     if (index >= file->mapped) {
         size_t count = index + 1;
@@ -673,6 +468,16 @@ static int dir_path(sqlite3_vfs *vfs, const char *name, int length, char *out) {
     return n < 0 || n >= length ? SQLITE_CANTOPEN : SQLITE_OK;
 }
 
+/* SQLite's only sleeper here is its finite WAL read retry: no busy handler is
+   installed and the authorizer refuses setting busy_timeout. */
+static int dir_sleep(sqlite3_vfs *vfs, int microseconds) {
+    (void)vfs;
+    if (microseconds <= 0) return 0;
+    struct timespec left = {microseconds / 1000000, (long)(microseconds % 1000000) * 1000};
+    while (nanosleep(&left, &left) != 0 && errno == EINTR) {}
+    return microseconds;
+}
+
 static void release_dir(DirVfs *dir) {
     if (!dir) return;
     sqlite3_vfs_unregister(&dir->vfs);
@@ -731,6 +536,11 @@ static Connection *open_connection(const char *name, int flags, DirVfs *dir,
     int code = sqlite3_open_v2(name, &db, flags | SQLITE_OPEN_EXRESCODE,
                               dir ? dir->name : "hirsel-none");
     if (code == SQLITE_OK) code = sqlite3_set_authorizer(db, authorize, NULL);
+    if (code == SQLITE_OK) {
+        int trusted = -1;
+        code = sqlite3_db_config(db, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, &trusted);
+        if (code == SQLITE_OK && trusted != 0) code = SQLITE_ERROR;
+    }
     if (code != SQLITE_OK) {
         database_error(db, e, e_len, code);
         if (db) sqlite3_close(db);
@@ -804,7 +614,7 @@ void *hsq_open(int d_fd, uint32_t d_flags, const uint8_t *name, uint64_t n,
     uint64_t serial = atomic_fetch_add_explicit(&vfs_serial, 1, memory_order_relaxed);
     snprintf(dir->name, sizeof dir->name, "hirsel-dir-%llu", (unsigned long long)serial);
     dir->vfs = no_files;
-    dir->vfs.szOsFile = sizeof(DirFile) > sizeof(TempFile) ? sizeof(DirFile) : sizeof(TempFile);
+    dir->vfs.szOsFile = sizeof(DirFile) > (size_t)no_files.szOsFile ? (int)sizeof(DirFile) : no_files.szOsFile;
     dir->vfs.mxPathname = 210;
     dir->vfs.zName = dir->name;
     dir->vfs.pAppData = dir;
@@ -812,6 +622,7 @@ void *hsq_open(int d_fd, uint32_t d_flags, const uint8_t *name, uint64_t n,
     dir->vfs.xDelete = dir_delete;
     dir->vfs.xAccess = dir_access;
     dir->vfs.xFullPathname = dir_path;
+    dir->vfs.xSleep = dir_sleep;
     int code = sqlite3_vfs_register(&dir->vfs, 0);
     if (code != SQLITE_OK) {
         release_dir(dir);
@@ -829,9 +640,10 @@ static int sql_input(const uint8_t *sql, uint64_t n, uint8_t *e, uint64_t e_len)
     return SQLITE_OK;
 }
 
-static int next_statement(sqlite3 *db, const char **p, int *len, sqlite3_stmt **stmt) {
+static int next_statement(sqlite3 *db, const char **p, int *len, unsigned flags,
+                          sqlite3_stmt **stmt) {
     const char *tail = *p;
-    int rc = sqlite3_prepare_v3(db, *p, *len, 0, stmt, &tail);
+    int rc = sqlite3_prepare_v3(db, *p, *len, flags, stmt, &tail);
     if (rc != SQLITE_OK) return rc;
     if (tail <= *p || tail - *p > *len) return SQLITE_MISUSE;
     *len -= (int)(tail - *p);
@@ -848,7 +660,7 @@ int32_t hsq_exec(void *handle, const uint8_t *sql, uint64_t n, uint8_t *e, uint6
     const char *p = (const char *)sql;
     for (int len = (int)n; len > 0 && rc == SQLITE_OK;) {
         sqlite3_stmt *stmt = NULL;
-        rc = next_statement(db, &p, &len, &stmt);
+        rc = next_statement(db, &p, &len, 0, &stmt);
         if (stmt && rc == SQLITE_OK) {
             do { rc = sqlite3_step(stmt); } while (rc == SQLITE_ROW);
             if (rc == SQLITE_DONE) rc = SQLITE_OK;
@@ -874,7 +686,7 @@ void *hsq_prepare(void *handle, const uint8_t *sql, uint64_t n, uint8_t *e, uint
     int len = (int)n;
     while (len > 0) {
         sqlite3_stmt *stmt = NULL;
-        int rc = next_statement(db, &p, &len, &stmt);
+        int rc = next_statement(db, &p, &len, SQLITE_PREPARE_PERSISTENT, &stmt);
         if (rc != SQLITE_OK) {
             database_error(db, e, e_len, rc);
             sqlite3_finalize(stmt);

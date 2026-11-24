@@ -40,9 +40,6 @@
   "core/programs/search/unicode.hirsel": {
     "lines": 1936
   },
-  "core/programs/sqlite/hirsel_sqlite.c": {
-    "lines": 1056
-  },
   "core/programs/store/store-manifest.hirsel": {
     "lines": 2982
   },

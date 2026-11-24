@@ -275,17 +275,34 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.deepEqual(store.byValue,new Map([[21,1]]));
   };
   tests.copied_storage_never_remints=async()=>{
-    // Row 6a needs this installation as minter. A copy restored into another
-    // installation holds a touched record with no minter, so its
-    // HistoryUnavailable retires the stream instead of reminting (B2).
+    // Rows 0 and 6a need this installation as minter. A request committed
+    // durably but never sent (crash after commit), reopened by its own
+    // installation past half the retention, rotates to a fresh id. The same
+    // bytes restored into another installation (export/restart) are touched
+    // with no minter: they send the original id, and HistoryUnavailable
+    // retires the stream instead of reminting (B2).
+    const late=birth+retention*3n/4n;
+    const lateWelcome=onCall=>server=>{
+      const emit=server.emit.bind(server);
+      server.emit=(s,f)=>{if(f.tag==='Welcome')f.values[6]=late;return emit(s,f);};
+      server.onCall=onCall(server);
+    };
     const h=await setup(new Memory(),{prepare:server=>{server.onCall=()=>{};}});await ready(h);
+    h.storage.afterWrite=state=>{if(savedStream(state).pending?.inflight===false)throw new Error('crash after durable commit');};
     const x=h.client.call(want,bytes(21),x=>x);void x.catch(()=>{});await settle();
+    assert.equal(h.server.calls.length,0);
+    const original=savedStream(h.storage.raw).id;
     const copy=new Memory();copy.raw=structuredClone(h.storage.raw);copy.raw.installation=3n;
-    await h.client.close();await settle();
-    const restored=await setup(copy,{prepare:server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],refused('HistoryUnavailable'));}});
+    h.storage.afterWrite=undefined;await h.client.close();await settle();
+    const own=await setup(h.storage,{prepare:lateWelcome(server=>(f,s)=>server.answer(s,f.values[0],f.values[1],returned(21)))});
+    await ready(own);await settle();
+    assert.notDeepEqual(own.server.calls[0].frame.values[0],original);
+    assert.equal(own.server.calls[0].frame.values[0].t,late);
+    await own.client.close();await settle();
+    const restored=await setup(copy,{prepare:lateWelcome(server=>(f,s)=>server.answer(s,f.values[0],f.values[1],refused('HistoryUnavailable')))});
     await ready(restored);await settle();await restored.time.advance(1000);
     assert.equal(restored.server.calls.length,1);
-    assert.deepEqual(restored.server.calls[0].frame.values[0],h.server.calls[0].frame.values[0]);
+    assert.deepEqual(restored.server.calls[0].frame.values[0],original);
     assert.equal(restored.client.state,'Retired');
   };
   async function subscribed(decode) {

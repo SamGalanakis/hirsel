@@ -85,6 +85,8 @@ pub opaque type Bwe {
     lost: u64,
     lowered: Option[u64],
     raised: Option[u64],
+    first: Option[u64],
+    lossy: bool,
     // Probing.
     next_id: u32,
     probing: Option[Probing],
@@ -131,7 +133,7 @@ pub fn bwe(c: Config) -> Bwe {
     let min: f64 = float.from_int(c.min_bps)
     let max: f64 = float.from_int(c.max_bps)
     let start: f64 = float.from_int(c.start_bps)
-    Bwe(min: min, max: max, origin: None, current: None, previous: None, seen: 0, accumulated: 0.0, smoothed: 0.0, zero: None, points: list.with_capacity(WINDOW + 1), gamma: 12.5, trend: 0.0, over: None, stamped: None, usage: Normal, window: list.new(), state: Increase, a: clamp(start, min, max), changed: None, rtt: None, avg: None, var: 0.4, l: clamp(start, min, max), reported: 0, lost: 0, lowered: None, raised: None, next_id: 0, probing: None, members: list.new())
+    Bwe(min: min, max: max, origin: None, current: None, previous: None, seen: 0, accumulated: 0.0, smoothed: 0.0, zero: None, points: list.with_capacity(WINDOW + 1), gamma: 12.5, trend: 0.0, over: None, stamped: None, usage: Normal, window: list.new(), state: Increase, a: clamp(start, min, max), changed: None, rtt: None, avg: None, var: 0.4, l: clamp(start, min, max), reported: 0, lost: 0, lowered: None, raised: None, first: None, lossy: false, next_id: 0, probing: None, members: list.new())
 }
 
 pub fn target(b: Bwe) -> u64 {
@@ -149,6 +151,7 @@ pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: 
         match p.arrived_us {
             None => {
                 b.lost += 1
+                b.lossy = true
             }
             Some(at) => {
                 arrive(mut b, at, p.size)
@@ -165,7 +168,25 @@ pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: 
         control(mut b, usage, r, now_ns)
     }
     measure(mut b, now_ns)
+    start_phase(mut b, now_ns)
 }
+
+// The start phase (RTP-9): until 2 s after the first `on_acked`, while no
+// packet has been reported lost, the loss estimate trusts the delay estimate.
+fn start_phase(mut b: Bwe, now_ns: u64) {
+    let first = match b.first {
+        Some(t) => t,
+        None => {
+            b.first = Some(now_ns)
+            now_ns
+        }
+    }
+    if !b.lossy && now_ns >= first && now_ns - first < START_NS {
+        b.l = fmax(b.l, b.a)
+    }
+}
+
+const START_NS: u64 = 2000000000
 
 // Arrival groups (RTP-9): a packet's send time is rounded to the nearest
 // ms from the first send time seen.

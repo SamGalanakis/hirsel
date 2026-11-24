@@ -907,7 +907,14 @@ at least 20 reported (counts carry across `on_acked` calls until they reach 20, 
 restart): `p > 0.10` gives `L = L · (1 − 0.5·p)`, at most once per 300 ms plus
 the round-trip time; `p < 0.02` gives `L = 1.05 · L`, at most once per second; otherwise `L`
 holds. The round-trip time is the last given, 0 before any, the waits run on `now_ns`, and
-`L` stays within `[min_bps, max_bps]`. `target()` is `min(A, L)`, truncated to an integer.
+`L` stays within `[min_bps, max_bps]`. A start phase lets the target leave `start_bps`
+before loss has spoken: until 2 s after the first `on_acked`, while no packet has yet been
+reported lost, the end of each `on_acked` sets `L = max(L, A)` (after the probe measurement
+above, so a probe's raise carries into `L`). Without it, `L` rises 5% a second and a
+300 kbit/s start needs 25 s to reach 1 Mbit/s whatever the delay estimate sees; libwebrtc's
+send-side estimator trusts the delay-based estimate the same way during its first 2 s
+(`IsInStartPhase`), there while the last loss fraction is zero. `target()` is `min(A, L)`,
+truncated to an integer.
 
 **Probing.** A sender that sends less than it could cannot see more capacity: the increase
 is capped at 1.5 times the acked rate. A forwarder that wants a higher layer must raise the

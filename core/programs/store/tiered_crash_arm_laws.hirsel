@@ -1,0 +1,222 @@
+// §13.6 crash table, the arms 172c0d2e left uncrashed. Each arm reruns that
+// harness: a cut whose MANIFEST seal is refused after its packs are written
+// (`compact_refused_retiring_cut`), then the sealed bytes land as
+// MANIFEST.tmp (the process died before the rename) or as MANIFEST (it died
+// after the rename, before RAM install and Remove). The oracle is the frame
+// walker of 5860634f over every branch's published root, plus reopen
+// read-back of every row on every branch.
+//
+// - Class 4: the retiring pack is a BLOB pack.
+// - Second branch: a live-head fork shares the probed tree, so the cut
+//   rewrites two roots.
+// - Snapshot lease: an unpinned Snapshot reaches the retiring pack, so the
+//   cut carries the retirement instead of removing the file; the crash ends
+//   the lease.
+// - Mid-probe: the probe spans many cuts and the crash lands between its
+//   cursor's steps.
+type CrashArm = Pages | Blobs | SecondBranch | SnapshotLease | MidProbe
+
+fn crash_arm_options(arm: CrashArm, floor: u64) -> Result[Options, Error] {
+    let mut options = compact_crash_options(floor)?
+    match arm {
+        // One cut walks every PACK_INDEX row of both packs.
+        Blobs => {
+            options.probe_budget = 65536
+        },
+        // Two rows per cut: the probe of the 160-row pack spans many cuts.
+        MidProbe => {
+            options.probe_budget = 2
+        },
+        _ => (),
+    }
+    Ok(options)
+}
+
+fn crash_arm_width(arm: CrashArm) -> u64 {
+    match arm {
+        Blobs => 1100,
+        _ => 48,
+    }
+}
+
+// Every branch reads every row, and reaches no frame outside a listed pack
+// on disk, and none in `retired` once it is unlisted. A Tiered pack's live
+// bytes never fall below the frames main reaches in it, and equal them once
+// no probe runs (`compact_check_published`). The exception is a crash
+// during a probe: it loses the cursor (§13.6 "Progress"), so until the
+// restarted probe retires the pack it still counts the old copies of the
+// frames moved before the crash.
+fn crash_arm_check(d: Dir, db: Db, rows: Table[u64, Bytes], row_count: u64, width: u64, retired: u64, exact: bool) -> Result[(), Error] waits {
+    let unlisted = !compact_listed(db, retired)
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for slot in 0u64 .. list.len(db.heads) {
+        let walk = compact_walk_from(d, db, compact_branch_root(db, slot, rows.id)?)?
+        for (seq, _) in walk.live {
+            if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+                fail("§13.6 crash: every branch reaches its frames in listed packs on disk")
+            }
+        }
+        if unlisted && map.contains(walk.live, retired) {
+            fail("§13.6 crash: no branch reaches the retired pack")
+        }
+        let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+        for key in 0u64 .. row_count {
+            if get(read_handle, s, rows, key)? != Some(compact_value_of(key, 0, width)) {
+                fail("§13.6 crash: every branch reads every row")
+            }
+        }
+        drop(take s)
+    }
+    drop(take read_handle)
+    if exact {
+        return compact_check_published(d, db, rows.id)
+    }
+    let walk = compact_walk_from(d, db, compact_branch_root(db, 0, rows.id)?)?
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class >= 3 && listed.live < map.get_or(walk.live, seq, 0) {
+            fail("§13.6 crash: a Tiered pack's live bytes cover its reachable frames")
+        }
+    }
+    Ok(())
+}
+
+fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: bool) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 160u64
+    let width = crash_arm_width(arm)
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, row_count, width)?
+    let mut db = open(tasks, d, c, r, crash_arm_options(arm, floor)?)?
+    let probed = match arm {
+        Blobs => compact_blob_pack(db)?,
+        _ => compact_branch_root(db, 0, rows.id)?.pack,
+    }
+    match arm {
+        SecondBranch => {
+            let at_fork = snapshot(db)
+            let _ = fork(mut db, "beta", at_fork)?
+        },
+        MidProbe => {
+            let _ = checkpoint(mut db)?
+            if !compact_listed(db, probed) || map.len(disk_state(db).pages.compaction.probes) == 0 {
+                fail("§13.6 crash: the probe is still running after its first cut")
+            }
+        },
+        _ => (),
+    }
+    let held: Option[Snapshot] = match arm {
+        SnapshotLease => Some(snapshot(db)),
+        _ => None,
+    }
+    let first_output = disk_state(db).pages.next_pack
+    let sealed = compact_refused_retiring_cut(mut db)?
+    if !disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: the cut wrote its packs before the rename")
+    }
+    if let Some(take reading) = take held {
+        drop(take reading)
+    }
+    close(take db)?
+    disk_write_synced(d, if renamed {
+        "MANIFEST"
+    } else {
+        "MANIFEST.tmp"
+    }, sealed)?
+    let mut reopened = open(tasks, d, c, r, crash_arm_options(arm, floor)?)?
+    if disk_exists(d, "MANIFEST.tmp")? {
+        fail("§13.6 crash: open removes an unpublished MANIFEST.tmp")
+    }
+    if !renamed {
+        if disk_exists(d, paged_pack_path(first_output)?)? {
+            fail("§13.6 crash: open removes an unpublished cut's packs")
+        }
+        if !compact_listed(reopened, probed) || !disk_exists(d, paged_pack_path(probed)?)? {
+            fail("§13.6 crash: the previous generation recovers with the probed pack listed and on disk")
+        }
+    } else {
+        if let MidProbe = arm {
+            if !compact_listed(reopened, probed) {
+                fail("§13.6 crash: a mid-probe cut does not retire the pack")
+            }
+        } else {
+            if compact_listed(reopened, probed) || disk_exists(d, paged_pack_path(probed)?)? {
+                fail("§13.6 crash: the new generation retired the pack, and Remove resumes at open")
+            }
+        }
+    }
+    // A crash mid-probe loses every running cursor, and with `compact_permille`
+    // above 1000 every pack had a probe running.
+    let lost_cursors = match arm {
+        MidProbe => true,
+        _ => false,
+    }
+    crash_arm_check(d, reopened, rows, row_count, width, probed, !lost_cursors)?
+    // The store carries on: later cuts finish the probe and remove the file.
+    let mut cuts = 0u64
+    // Above 1000 every fresh pack is selected again, so only P is waited on.
+    while compact_listed(reopened, probed) {
+        if cuts == 256 {
+            fail("§13.6 crash: the probe ends after reopen")
+        }
+        let _ = checkpoint(mut reopened)?
+        cuts += 1
+    }
+    let _ = checkpoint(mut reopened)?
+    let _ = checkpoint(mut reopened)?
+    if disk_exists(d, paged_pack_path(probed)?)? {
+        fail("§13.6 crash: the retired pack's file is removed")
+    }
+    crash_arm_check(d, reopened, rows, row_count, width, probed, !lost_cursors)?
+    close(take reopened)?
+    // Under the same ratio with a full budget each restarted probe finishes in
+    // one cut, so two cuts leave every listed pack's live bytes exact. (A
+    // pack selected only by the forced ratio is not reselected under a lower
+    // one, because a move deducts nothing from its `live` until it retires.)
+    let mut settled = crash_arm_options(arm, floor)?
+    settled.probe_budget = 65536
+    let mut again = open(tasks, d, c, r, settled)?
+    let _ = checkpoint(mut again)?
+    let _ = checkpoint(mut again)?
+    crash_arm_check(d, again, rows, row_count, width, probed, true)?
+    close(take again)
+}
+
+@test
+fn test_crash_arm_class4_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, Blobs, false)
+}
+
+@test
+fn test_crash_arm_class4_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, Blobs, true)
+}
+
+@test
+fn test_crash_arm_second_branch_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, SecondBranch, false)
+}
+
+@test
+fn test_crash_arm_second_branch_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, SecondBranch, true)
+}
+
+@test
+fn test_crash_arm_snapshot_lease_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, SnapshotLease, false)
+}
+
+@test
+fn test_crash_arm_snapshot_lease_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, SnapshotLease, true)
+}
+
+@test
+fn test_crash_arm_mid_probe_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, MidProbe, false)
+}
+
+@test
+fn test_crash_arm_mid_probe_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    crash_arm(d, c, r, tasks, MidProbe, true)
+}

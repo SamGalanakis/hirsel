@@ -157,6 +157,14 @@ store@1/store/test_changes src=38d4c10019deddd7 sig=fabcef8907c0abeb run=aff7b6b
 store@1/store/test_changes_identity src=f4690c195381816c sig=dc461411bf68c9fa run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_changes_rewritten_equal src=545d7edb0014c11e sig=3871be8f8407c872 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_close_follow src=90d393768b7c5fff sig=f9e22a51af2463b2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_class4_after_rename src=674cfdacf54eafd6 sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_class4_before_rename src=b4e2e2d790b51832 sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_mid_probe_after_rename src=8c54cb1c7b337ac0 sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_mid_probe_before_rename src=a154f9bdcc456f8b sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_second_branch_after_rename src=11aaac2cfa018596 sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_second_branch_before_rename src=4b2fb8b4cfcaa6e1 sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_snapshot_lease_after_rename src=9d8b895524af88bc sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_crash_arm_snapshot_lease_before_rename src=7ae22ce9c6539e9e sig=72955036378ad211 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_declaration_seal src=097da98e60f6edc0 sig=33e7b66d271f4003 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_drop_recreate src=a5f50ce8bddd0a51 sig=ff8ca38ef661a39d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_f3_corrupt_fold_refuses_the_call src=6df7f5a8d51cc166 sig=cbc408b76bb31985 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending

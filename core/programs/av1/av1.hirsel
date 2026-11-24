@@ -1,0 +1,192 @@
+pub opaque type DecoderCodec {}
+
+pub opaque type EncoderCodec {}
+
+pub opaque type DecoderHandle {}
+
+pub opaque type EncoderHandle {}
+
+pub type Av1Error = Invalid | Limit | Buffer | Drain | Native
+
+pub type PixelLayout = Monochrome | Yuv420 | Yuv422 | Yuv444
+
+pub type Picture {
+    width: u32,
+    height: u32,
+    bit_depth: u32,
+    layout: PixelLayout
+}
+
+pub type EncodeConfig {
+    width: u32,
+    height: u32,
+    bit_depth: u32,
+    enc_mode: u32,
+    fast_decode: u32,
+    level_of_parallelism: u32,
+    avif: bool,
+    qp: u32,
+    fps_num: u32,
+    fps_den: u32
+}
+
+// A stack foreign call must finish within 50 µs. A 26×22 frame decoded in at
+// most 24.3 µs, a 160×90 frame in 545 µs, and an encoder call in at least
+// 39 µs, so only frames up to 640 pixels carried in packets up to 4 KiB decode
+// on the stack. Every other decoder call and every encoder call uses a helper.
+const STACK_PIXELS: u64 = 640
+
+const STACK_BYTES: u64 = 4096
+
+pub opaque resource type Decoder: send {
+    f: Foreign[DecoderCodec],
+    p: foreign.Ptr[DecoderHandle]
+} drop(d) {
+    dav.destroy(d.f, d.p)
+}
+
+pub opaque resource type Encoder: send {
+    f: Foreign[EncoderCodec],
+    p: foreign.Ptr[EncoderHandle]
+} drop(e) {
+    svt.destroy(e.f, e.p)
+}
+
+fn error(code: i64) -> Av1Error {
+    match code {
+        -1 => Invalid,
+        -2 => Limit,
+        -3 => Buffer,
+        -4 => Drain,
+        _ => Native,
+    }
+}
+
+fn status(code: i32) -> Result[(), Av1Error] {
+    if code < 0 {
+        Error(error(int.widen(code)))
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_pixels(max_pixels: u32) -> bool {
+    max_pixels > 0 && max_pixels <= 8847360
+}
+
+/// Checks low-overhead AV1 OBUs, including each declared sequence size.
+/// Does not open a decoder or allocate a packet. The packet cap is 16 MiB.
+pub fn probe(f: Foreign[DecoderCodec], max_pixels: u32, data: Bytes) -> Result[(), Av1Error] waits {
+    if !valid_pixels(max_pixels) {
+        return Error(Limit)
+    }
+    if list.len(data) <= STACK_BYTES {
+        status(dav.probe(f, max_pixels, data))
+    } else {
+        status(dav.probe_waiting(f, max_pixels, data))
+    }
+}
+
+/// One caller thread, with a single-frame delay. The limit is in pixels.
+pub fn decoder(f: Foreign[DecoderCodec], max_pixels: u32) -> Result[Decoder, Av1Error] waits {
+    if !valid_pixels(max_pixels) {
+        return Error(Limit)
+    }
+    match dav.create(f, max_pixels) {
+        None => Error(Native),
+        Some(p) => match Decoder(f: f, p: p) {
+            Ok(take d) => Ok(take d),
+            Error((_, (grant, handle))) => {
+                dav.destroy(grant, handle)
+                Error(Native)
+            },
+        },
+    }
+}
+
+/// Submits low-overhead OBUs without container framing. Drain before retrying Drain.
+pub fn decode_send(mut d: Decoder, data: Bytes) -> Result[(), Av1Error] waits {
+    if dav.send_pixels(d.f, d.p, data) <= STACK_PIXELS {
+        status(dav.send(d.f, d.p, data))
+    } else {
+        status(dav.send_waiting(d.f, d.p, data))
+    }
+}
+
+/// Writes packed Y, U, V planes to the initialized buffer. Larger samples use
+/// little-endian u16 words. Buffer leaves the picture queued for a larger buffer.
+pub fn decode_receive(mut d: Decoder, mut pixels: Bytes) -> Result[Option[Picture], Av1Error] waits {
+    let rc = if dav.sequence_pixels(d.f, d.p) <= STACK_PIXELS {
+        dav.receive(d.f, d.p, mut pixels)
+    } else {
+        dav.receive_waiting(d.f, d.p, mut pixels)
+    }
+    if rc < 0 {
+        return Error(error(rc))
+    }
+    if rc == 0 {
+        return Ok(None)
+    }
+    let value: u64 = int.narrow(rc)
+    let layout = match value >> 40 {
+        0 => Monochrome,
+        1 => Yuv420,
+        2 => Yuv422,
+        _ => Yuv444,
+    }
+    Ok(Some(Picture(width: int.narrow(value & 65535), height: int.narrow((value >> 16) & 65535), bit_depth: int.narrow((value >> 32) & 255), layout: layout)))
+}
+
+/// Drops buffered decode data and references before seeking to a new sequence.
+pub fn decode_reset(mut d: Decoder) waits {
+    dav.reset(d.f, d.p)
+}
+
+/// Creates an 8- or 10-bit YUV420 encoder. Parallelism must be 1. AVIF mode
+/// accepts one still frame and emits AV1 OBUs for an AVIF container writer.
+pub fn encoder(f: Foreign[EncoderCodec], config: EncodeConfig) -> Result[Encoder, Av1Error] waits {
+    if config.width < 64 || config.height < 64 || config.width > 4096 || config.height > 2304 || config.width % 2 != 0 || config.height % 2 != 0 {
+        return Error(Limit)
+    }
+    if (config.bit_depth != 8 && config.bit_depth != 10) || config.enc_mode > 13 || config.fast_decode > 3 || (config.fast_decode == 3 && !config.avif) || config.level_of_parallelism != 1 || config.qp > 63 || config.fps_num == 0 || config.fps_num > 60000 || config.fps_den == 0 || config.fps_den > 60000 {
+        return Error(Invalid)
+    }
+    let still = if config.avif {
+        1u32
+    } else {
+        0u32
+    }
+    match svt.create(f, config.width, config.height, config.bit_depth, config.enc_mode, config.fast_decode, config.level_of_parallelism, still, config.qp, config.fps_num, config.fps_den) {
+        None => Error(Native),
+        Some(p) => match Encoder(f: f, p: p) {
+            Ok(take e) => Ok(take e),
+            Error((_, (grant, handle))) => {
+                svt.destroy(grant, handle)
+                Error(Native)
+            },
+        },
+    }
+}
+
+/// Submits one densely packed YUV420 frame. Drain output before submitting
+/// another frame. Ten-bit planes require a two-byte-aligned input.
+pub fn encode_send(mut e: Encoder, pixels: Bytes) -> Result[(), Av1Error] waits {
+    status(svt.send(e.f, e.p, pixels))
+}
+
+/// Signals end of input. Drain until encode_receive returns None.
+pub fn encode_finish(mut e: Encoder) -> Result[(), Av1Error] waits {
+    status(svt.finish(e.f, e.p))
+}
+
+/// Copies one AV1 output packet. Buffer leaves it queued for a larger buffer.
+pub fn encode_receive(mut e: Encoder, mut packet: Bytes) -> Result[Option[u32], Av1Error] waits {
+    let rc = svt.receive(e.f, e.p, mut packet)
+    if rc < 0 {
+        Error(error(rc))
+    } else if rc == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(int.narrow(rc)))
+    }
+}

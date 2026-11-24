@@ -1,0 +1,227 @@
+fn load(d: Dir, stem: String, suffix: String) -> Bytes waits {
+    let mut name: String = string.with_capacity(string.byte_len(stem) + string.byte_len(suffix))
+    string.push(mut name, stem)
+    string.push(mut name, suffix)
+    result.unwrap(std.file.read(d, name))
+}
+
+fn buffer(size: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(size)
+    list.fill(mut b, size, 0)
+    b
+}
+
+fn word(b: Bytes, at: u64) -> u32 {
+    list.word_le(b, at)
+}
+
+fn layout_code(layout: av1.PixelLayout) -> u32 {
+    match layout {
+        Monochrome => 0,
+        Yuv420 => 1,
+        Yuv422 => 2,
+        Yuv444 => 3,
+    }
+}
+
+// Packed Y, U, V bytes of one picture, as reference.c writes them.
+fn picture_size(width: u64, height: u64, depth: u64, layout: u32) -> u64 {
+    let cw = if layout == 1 || layout == 2 {
+        (width + 1) / 2
+    } else {
+        width
+    }
+    let ch = if layout == 1 {
+        (height + 1) / 2
+    } else {
+        height
+    }
+    let chroma = if layout == 0 {
+        0u64
+    } else {
+        2 * cw * ch
+    }
+    let size_bytes = if depth > 8 {
+        2u64
+    } else {
+        1u64
+    }
+    (width * height + chroma) * size_bytes
+}
+
+// Fixture packets are each preceded by their u32 little-endian length.
+// Expected pictures are a 16-byte header (width, height, depth, layout) and planes.
+fn check_decode(f: Foreign[av1.DecoderCodec], packets: Bytes, expected: Bytes) waits {
+    let mut d = result.unwrap(av1.decoder(f, 8847360))
+    let mut at = 0u64
+    let mut seen = 0u64
+    while at < list.len(packets) {
+        let size: u64 = int.widen(word(packets, at))
+        let packet = list.slice(packets, at + 4, at + 4 + size)
+        result.unwrap(av1.probe(f, 8847360, packet))
+        result.unwrap(av1.decode_send(mut d, packet))
+        at += 4 + size
+        loop {
+            if seen + 16 > list.len(expected) {
+                let mut spare = buffer(1)
+                let Ok(None) = av1.decode_receive(mut d, mut spare) else {
+                    fail("decoder produced more pictures than dav1d")
+                }
+                break
+            }
+            let width: u64 = int.widen(word(expected, seen))
+            let height: u64 = int.widen(word(expected, seen + 4))
+            let depth: u64 = int.widen(word(expected, seen + 8))
+            let layout = word(expected, seen + 12)
+            let size_bytes = picture_size(width, height, depth, layout)
+            let mut pixels = buffer(size_bytes)
+            let Some(p) = result.unwrap(av1.decode_receive(mut d, mut pixels)) else {
+                break
+            }
+            let got_width: u64 = int.widen(p.width)
+            let got_height: u64 = int.widen(p.height)
+            let got_depth: u64 = int.widen(p.bit_depth)
+            if got_width != width || got_height != height || got_depth != depth || layout_code(p.layout) != layout {
+                fail("picture format differs from dav1d")
+            }
+            if pixels != list.slice(expected, seen + 16, seen + 16 + size_bytes) {
+                fail("picture differs from dav1d")
+            }
+            seen += 16 + size_bytes
+        }
+    }
+    if seen == 0 || seen != list.len(expected) {
+        fail("wrong decoded picture count")
+    }
+}
+
+fn mean_error_ok(input: Bytes, decoded: Bytes, depth: u32) -> bool {
+    let wide = depth > 8
+    let step = if wide {
+        2u64
+    } else {
+        1u64
+    }
+    let mut total = 0u64
+    let mut at = 0u64
+    while at < list.len(input) {
+        let (a, b): (u64, u64) = if wide {
+            let x: u16 = list.word_le(input, at)
+            let y: u16 = list.word_le(decoded, at)
+            let wx: u64 = int.widen(x)
+            let wy: u64 = int.widen(y)
+            (wx, wy)
+        } else {
+            let x: u64 = int.widen(input[at])
+            let y: u64 = int.widen(decoded[at])
+            (x, y)
+        }
+        total += if a > b {
+            a - b
+        } else {
+            b - a
+        }
+        at += step
+    }
+    // Mean error under 4 levels of 8-bit range at QP 30.
+    let tolerance = if wide {
+        16u64
+    } else {
+        4u64
+    }
+    total < tolerance * (list.len(input) / step)
+}
+
+// Moves every queued packet into the expected stream check and the decoder.
+// A still input is one frame, which every decoded picture is compared to.
+fn drain(mut e: av1.Encoder, mut d: av1.Decoder, input: Bytes, frame: u64, expected: Bytes, start_at: u64, start_shown: u64, depth: u32) -> (u64, u64) waits {
+    let mut at = start_at
+    let mut shown = start_shown
+    let mut packet = buffer(1048576)
+    loop {
+        let Some(n) = result.unwrap(av1.encode_receive(mut e, mut packet)) else {
+            break
+        }
+        let size: u64 = int.widen(n)
+        if at + size > list.len(expected) || list.slice(packet, 0, size) != list.slice(expected, at, at + size) {
+            fail("encoded packet differs from SVT-AV1")
+        }
+        at += size
+        result.unwrap(av1.decode_send(mut d, list.slice(packet, 0, size)))
+        loop {
+            let mut pixels = buffer(frame)
+            let Some(_) = result.unwrap(av1.decode_receive(mut d, mut pixels)) else {
+                break
+            }
+            let start = shown * frame % list.len(input)
+            if !mean_error_ok(list.slice(input, start, start + frame), pixels, depth) {
+                fail("decoded frame is far from the encoder input")
+            }
+            shown += 1
+        }
+    }
+    (at, shown)
+}
+
+fn check_encode(e_grant: Foreign[av1.EncoderCodec], d_grant: Foreign[av1.DecoderCodec], input: Bytes, expected: Bytes, avif: bool, speed: u32, fast: u32, depth: u32, frames: u64) waits {
+    let config = av1.EncodeConfig(width: 128, height: 128, bit_depth: depth, enc_mode: speed, fast_decode: fast, level_of_parallelism: 1, avif: avif, qp: 30, fps_num: 30, fps_den: 1)
+    let mut e = result.unwrap(av1.encoder(e_grant, config))
+    let mut d = result.unwrap(av1.decoder(d_grant, 8847360))
+    let frame = list.len(input) / frames
+    let mut at = 0u64
+    let mut shown = 0u64
+    for i in 0u64 .. frames {
+        result.unwrap(av1.encode_send(mut e, list.slice(input, i * frame, (i + 1) * frame)))
+        let (a, s) = drain(mut e, mut d, input, frame, expected, at, shown, depth)
+        at = a
+        shown = s
+    }
+    result.unwrap(av1.encode_finish(mut e))
+    let (a, s) = drain(mut e, mut d, input, frame, expected, at, shown, depth)
+    if a != list.len(expected) || s != frames {
+        fail("encoded stream length or frame count differs")
+    }
+}
+
+// An OBU_SEQUENCE_HEADER (AV1 §5.5) with a reduced still-picture header,
+// 16-bit frame size fields and max_frame_width/height of 65536.
+fn huge_sequence_header() -> Bytes {
+    let header: Inline[u8, 11] = [10, 9, 31, 255, 255, 255, 255, 255, 192, 0, 128]
+    let mut b: Bytes = list.with_capacity(11)
+    for i in 0u64 .. 11 {
+        list.push(mut b, header[i])
+    }
+    b
+}
+
+fn check_limits(f: Foreign[av1.DecoderCodec], e_grant: Foreign[av1.EncoderCodec]) waits {
+    let bomb = huge_sequence_header()
+    let Error(Limit) = av1.probe(f, 8847360, bomb) else {
+        fail("probe accepted a 65536x65536 sequence")
+    }
+    let mut d = result.unwrap(av1.decoder(f, 8847360))
+    let Error(Limit) = av1.decode_send(mut d, bomb) else {
+        fail("decoder accepted a 65536x65536 sequence")
+    }
+    let Error(Limit) = av1.decoder(f, 0) else {
+        fail("zero pixel limit accepted")
+    }
+    let config = av1.EncodeConfig(width: 128, height: 128, bit_depth: 8, enc_mode: 13, fast_decode: 0, level_of_parallelism: 2, avif: false, qp: 30, fps_num: 30, fps_den: 1)
+    let Error(Invalid) = av1.encoder(e_grant, config) else {
+        fail("multi-threaded encoder accepted")
+    }
+}
+
+@test
+fn codec_vectors(dec: Foreign[av1.DecoderCodec], enc: Foreign[av1.EncoderCodec], d: Dir) -> Result[(), ()] waits {
+    check_limits(dec, enc)
+    for i in 0u64 .. 4 {
+        let mut stem: String = string.with_capacity(10)
+        string.push(mut stem, "decode-")
+        string.push_u64(mut stem, i)
+        check_decode(dec, load(d, stem, ".av1"), load(d, stem, ".yuv"))
+    }
+    check_encode(enc, dec, load(d, "encode-0", ".yuv"), load(d, "encode-0", ".av1"), true, 6, 3, 8, 1)
+    check_encode(enc, dec, load(d, "encode-1", ".yuv"), load(d, "encode-1", ".av1"), false, 13, 2, 10, 20)
+    Ok(())
+}

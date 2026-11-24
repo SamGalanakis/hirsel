@@ -216,3 +216,6 @@ limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_ack_history"]
 limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_claim_witness"]
+limit = 134217728

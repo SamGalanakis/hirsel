@@ -267,3 +267,153 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
     }
     Ok(())
 }
+
+type WitnessCut {
+    head: HistoryHead,
+    manifest: HistoryRef,
+    manifest_bytes: Bytes,
+    entry_bytes: Bytes
+}
+
+fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
+    let mut manifest = page_manifest_empty()
+    manifest.generation = generation
+    manifest.first_live = pos
+    manifest.prev_first = pos
+    manifest.branches[0u64].version = rows_version
+    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
+    bucket_m2_object_header(mut raw_manifest, id, 1, generation)?
+    let reference = history_new_ref(generation, pair.epoch, raw_manifest)
+    let mut raw_entry: Bytes = list.with_capacity(1024)
+    let retained = HistoryRetention(floor: pos, earlier: list.new())
+    let locate = HistoryLocateRoot(depth: 0, rows: list.new())
+    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, predecessor, reference, retained, locate)?
+    let header = HistoryHead(store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding: [0; 32])
+    Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
+}
+
+fn witness_create(mut client: std.object.Client, key: String, data: Bytes, due: u64) -> Result[std.object.ETag, Error] waits {
+    let (created, _) = std.object.store_if(mut client, key, Absent, clone(data), due)
+    let Applied(meta) = created ?=> Remote else { fail("L52-W: a fixture key already existed") }
+    Ok(meta.etag)
+}
+
+fn witness_publish(mut client: std.object.Client, selected: HistoryHead, declaration: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
+    let mut data: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_head(mut data, selected, declaration)?
+    let (result, _) = std.object.store_if(mut client, "head", precondition, take data, due)
+    let Applied(meta) = result ?=> Remote else { fail("L52-W: a fixture head lost its precondition") }
+    Ok(meta.etag)
+}
+
+fn witness_install_cut(mut client: std.object.Client, cut: WitnessCut, metadata: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
+    let _ = witness_create(mut client, history_key("m-", cut.manifest), cut.manifest_bytes, due)?
+    let _ = witness_create(mut client, history_key("e-", cut.head.entry), cut.entry_bytes, due)?
+    witness_publish(mut client, cut.head, metadata, precondition, due)
+}
+
+type WitnessClaimant: send {
+    tasks: Tasks,
+    r: Random,
+    clock: Clock,
+    endpoint: std.sim.s3.Endpoint
+}
+
+fn witness_claim(take actor: WitnessClaimant) -> Result[(), Error] waits {
+    let mut client = bucket_endpoint_client(actor.endpoint, std.sim.s3.endpoint_network(actor.endpoint), actor.clock, actor.tasks, "s3.test", 22, true, 0)?
+    let mut opts = bucket_order_options(false)
+    opts.claim_ms = BUCKET_LAW_OP_MS
+    opts.retain = 1
+    let grant = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    match open_authority(actor.tasks, take grant, actor.clock, actor.r, opts) {
+        Ok(take unexpected) => { let _ = take unexpected; fail("L52-W: B opened after the pair changed") },
+        Error(Refusal(error: take reason, ..)) => Error(take reason),
+    }
+}
+
+fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u64, blocked_entry: String) -> Result[(), Error] {
+    let mut missing = false
+    let mut head_reads = 0u64
+    for event in report.requests {
+        if event.method != "GET" { continue }
+        if missing {
+            if event.key == "head" && event.status == 200 { head_reads += 1 }
+            if blocked_entry != "" && event.key == blocked_entry {
+                fail("L52-W: B read a checkpoint after observing another pair")
+            }
+        }
+        if event.key == removed && event.status == 404 { missing = true }
+    }
+    if !missing || head_reads != 1 { fail("L52-W: a missing checkpoint did not cause exactly one fresh head GET") }
+    if list.len(report.head_writes) != (if next_cut == 22 { 5 } else { 7 }) {
+        fail("L52-W: B wrote a head or C missed an advance")
+    }
+    let last_write = report.head_writes[list.len(report.head_writes) - 1]
+    if read_le(last_write.data, 88, 8) != 2 || read_le(last_write.data, 120, 8) != next_cut + 1 {
+        fail("L52-W: the successor did not advance after reclaim")
+    }
+    Ok(())
+}
+
+fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool) -> Result[(), Error] waits {
+    let id = StoreId(hi: 9, lo: 10)
+    let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12))
+    let previous = HistoryRef(seq: 19, epoch: 1, len: 112, digest: 0)
+    let first = witness_cut(id, pair, 20, previous, 1, 0)?
+    let manifest_key = history_key("m-", first.manifest)
+    let mut group: Bytes = list.with_capacity(1024)
+    bucket_m2_law_commit_packet(mut group, first.head, 1)?
+    let group_ref = history_new_ref(21, 1, group)
+    let later = witness_cut(id, pair, 22, group_ref, 2, 1)?
+    let entry_key = history_key("e-", later.head.entry)
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(manifest_key), from: 1, count: 1, until: Applied("DELETE", clone(manifest_key), 1), then: Apply))
+    if lost_marker {
+        list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(entry_key), from: 1, count: 1, until: Applied("DELETE", clone(entry_key), 1), then: Apply))
+    }
+    let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let mut publisher = bucket_law_client_with(sim, tasks, "s3.test", 19, true)?
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(publisher), level: "bucket"))?
+    let due = std.object.deadline_after_ms(publisher, BUCKET_LAW_OP_MS)
+    let first_tag = witness_install_cut(mut publisher, first, metadata, Absent, due)?
+    let claimant = WitnessClaimant(tasks, r, clock: sim.time, endpoint: sim.endpoint)
+    let pending_claim = task.spawn(tasks, bytes 33554432, take claimant, witness_claim)
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", manifest_key, 1))
+    if lost_marker {
+        let _ = witness_create(mut publisher, history_key("e-", group_ref), group, due)?
+        let mut head21 = first.head
+        head21.entry = group_ref
+        let group_tag = witness_publish(mut publisher, head21, metadata, Match(first_tag), due)?
+        let _ = witness_install_cut(mut publisher, later, metadata, Match(group_tag), due)?
+        // A's previous checkpoint is below its new floor.
+        std.object.erase(mut publisher, manifest_key, due) ?=> Remote
+        result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", entry_key, 1))
+    }
+
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 23, true)?
+    let mut opts = bucket_order_options(false)
+    opts.retain = 1
+    let grant = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    let mut successor = open_authority(tasks, take grant, sim.time, r, opts) ?=> |Refusal(error: take reason, ..)| take reason
+    bucket_law_checkpoint(mut successor)?
+    reclaim_barrier(successor)?
+    if let Error(Lost) = result.unwrap(task.join(take pending_claim)) {} else {
+        fail("L52-W: B did not return Lost")
+    }
+    let successor_ticket = bucket_order_commit(mut successor)?
+    durable(mut successor, successor_ticket)?
+    close(take successor)?
+    let _ = take publisher
+    let report = bucket_law_report(take sim)
+    if lost_marker {
+        witness_ceiling_check(report, entry_key, 24, "")
+    } else {
+        // C has already read its checkpoint when its sweep removes C20.
+        if list.len(report.head_writes) != 5 { fail("L52-W: the successor's head writes were missing") }
+        let body = view report.head_writes[3].data
+        let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8),
+            len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
+        let claimed_entry = history_key("e-", reference)
+        witness_ceiling_check(report, manifest_key, 22, claimed_entry)
+    }
+}

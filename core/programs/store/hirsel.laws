@@ -7,6 +7,7 @@ store@1/store/bucket_test_m2_admitted_claim src=15ae8b15e15a43b7 sig=5c781d0ad47
 store@1/store/bucket_test_m2_binding src=04593ebe0b588a32 sig=ab48b5f6d88b00fb run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_branch_position src=23c365cb5f778f32 sig=051073768083edae run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_checkpoint_advance src=5e1dd1b6ffda3057 sig=fcf32539b4ffa3c9 run=dbf6722727633166 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_claim_witness src=c2d94a15ac0f5469 sig=768b0f9328876547 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_export_replay src=19a927552a6f3ca8 sig=0ca4935738e4dc9e run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower src=150cd214ccb04486 sig=da2f974f7ac6f2fb run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_overlap src=cb80282b13ac0f5d sig=d76916183aef433e run=bc45ceb73933dadb bug=- oracle=- rows=pending

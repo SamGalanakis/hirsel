@@ -949,3 +949,10 @@ fn bucket_test_m2_ack_history(c: Clock, r: Random, tasks: Tasks, seed_grant: Env
     }
     Ok(())
 }
+
+@test
+fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 521)
+    witness_case(tasks, c, r, seed, false)?
+    witness_case(tasks, c, r, seed, true)
+}

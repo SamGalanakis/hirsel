@@ -120,17 +120,19 @@ fn bucket_absent_witness(c: Clock, rnd: Random) waits {
 }
 
 fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits {
-    trace_probe_authority(c, rnd, (1, 2), bytes_of(32, 1), bytes_of(32, if shared { 1u8 } else { 2u8 }), retain_r)
+    trace_probe_authority(c, rnd, (1, 2), bytes_of(32, 1), bytes_of(32, if shared { 1u8 } else { 2u8 }), None, retain_r)
 }
 
-fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identity: Bytes, new_identity: Bytes, retain_r: bool) -> Rig waits {
+// `old_claim` is the claim Preparing pinned for OLD: a Bucket OLD holds one, a Directory OLD none.
+fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identity: Bytes, new_identity: Bytes, old_claim: Option[(u64, Bytes)], retain_r: bool) -> Rig waits {
     let (take setup, _, _) = cut_case(c, rnd)
     let mut r = take setup
     let made = {
         let t = view r.h.t
         let before: Bytes = clone(old_identity)
         let after: Bytes = clone(new_identity)
-        store.run(mut r.h.db, None, (retain_r, take before, store.copy_env(t), expected, take after), fn(mut tx, call_env) -> Result[(), Refused] {
+        let pinned: Option[(u64, Bytes)] = clone(old_claim)
+        store.run(mut r.h.db, None, (retain_r, take before, store.copy_env(t), expected, take after, take pinned), fn(mut tx, call_env) -> Result[(), Refused] {
             let g0 = option.unwrap(st(store.fetch(tx, call_env.2.groups, "g"))?)
             let d0 = option.unwrap(st(store.fetch(tx, call_env.2.deploys, "g"))?)
             let mut g = g0
@@ -141,6 +143,7 @@ fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identi
             d.activation = 10u64
             d.outcome = Undecided(ProbeNew)
             d.old_binding = Some(Binding(identity: clone(call_env.1), n_place: 1048576u64))
+            d.old_claim = clone(call_env.5)
             d.binding = Some(Binding(identity: clone(call_env.4), n_place: 1048576u64))
             index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
             st(store.put(mut tx, call_env.2.groups, "g", g))?

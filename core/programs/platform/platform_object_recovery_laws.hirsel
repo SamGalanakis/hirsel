@@ -109,7 +109,10 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let (unmatched, take first_read) = read_bucket_activation(mut readers, tasks, sim, 2, owner, plan, options.expect)?
     description.n_place = 1048576
     let binding = result.unwrap(runner.identity_digest(description))
-    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), binding, binding, false)
+    // Preparing pinned OLD's claim. Neither hand-install writer holds it (their holders are
+    // random), so each read's claim differs from it and an absent witness is final.
+    let old_claim: Option[(u64, Bytes)] = Some((0u64, bytes_of(16u64, 0u8)))
+    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), binding, binding, old_claim, false)
     trace_current(mut host_test, unmatched, take first_read)
     expect(unmatched == 11 && rooted_at(host_test, image(), 3), "T1 bucket: the unmatched release moved the host")
     expect(collection_keeps(mut host_test, true, true), "T1 bucket: an unmatched release lost a candidate")

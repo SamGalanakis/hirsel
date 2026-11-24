@@ -532,6 +532,15 @@ tags!(HostOp {
     145 => UdpFillPackets,
     146 => SecretP256Key,
     147 => SecretKeyShare,
+    148 => ScheduleQuicInitial,
+    149 => ScheduleSealer,
+    150 => ScheduleOpener,
+    151 => ScheduleHeaderMask,
+    152 => PacketSeal,
+    153 => PacketSealInto,
+    154 => PacketOpen,
+    155 => PacketOpenInto,
+    156 => PacketMask,
 });
 
 tags!(RaiseCause {

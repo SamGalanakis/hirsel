@@ -50,7 +50,11 @@ pub enum Role {
 }
 impl Role {
     pub(super) fn of(path: &DefPath) -> Option<Role> {
-        if path.package_is("core", "1") && path.0.modules == ["secret"] && path.0.name == "KeyShare"
+        if path.package_is("core", "1")
+            && (path.0.modules == ["secret"] && path.0.name == "KeyShare"
+                || path.0.modules == ["schedule"] && path.0.name == "Schedule"
+                || path.0.modules == ["packet"]
+                    && matches!(path.0.name.as_str(), "Sealer" | "Opener" | "HeaderMask"))
         {
             return Some(Role::Media);
         }

@@ -1,0 +1,19 @@
+pub opaque resource type Sealer
+
+pub opaque resource type Opener
+
+pub opaque resource type HeaderMask
+
+pub type Space = Initial | Handshake | Application | Rtp | Rtcp
+
+pub type PacketError = Reused | Range | TooLong | Tampered | Capacity(Capacity)
+
+pub fn seal(mut c: Sealer, seq: u64, mut buf: Bytes, aad_at: u64, at: u64, extra: Bytes) -> Result[u64, PacketError]
+
+pub fn seal_into(mut c: Sealer, seq: u64, src: Bytes, from: u64, mut dst: Bytes, aad_at: u64, extra: Bytes) -> Result[u64, PacketError]
+
+pub fn open(c: Opener, domain: u64, seq: u64, mut buf: Bytes, aad_at: u64, at: u64, extra: Bytes) -> Result[u64, PacketError]
+
+pub fn open_into(c: Opener, domain: u64, seq: u64, src: Bytes, aad_at: u64, at: u64, extra: Bytes, mut dst: Bytes) -> Result[u64, PacketError]
+
+pub fn mask(m: HeaderMask, sample: Bytes, at: u64) -> Inline[u8, 5]

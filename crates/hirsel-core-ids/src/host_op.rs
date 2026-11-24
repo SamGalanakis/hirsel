@@ -125,6 +125,15 @@ host_ops! {
     UDP_FILL_PACKETS = 139,
     MEDIA_P256_KEY = 140,
     MEDIA_KEY_SHARE = 141,
+    SCHEDULE_QUIC_INITIAL = 142,
+    SCHEDULE_SEALER = 143,
+    SCHEDULE_OPENER = 144,
+    SCHEDULE_HEADER_MASK = 145,
+    PACKET_SEAL = 146,
+    PACKET_SEAL_INTO = 147,
+    PACKET_OPEN = 148,
+    PACKET_OPEN_INTO = 149,
+    PACKET_MASK = 150,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

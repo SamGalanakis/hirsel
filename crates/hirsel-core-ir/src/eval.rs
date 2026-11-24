@@ -17,6 +17,7 @@ mod frame;
 mod key_share;
 mod launch;
 mod map;
+mod media;
 mod provide;
 mod secret_kdf;
 mod secret_key;
@@ -164,7 +165,7 @@ struct World {
     grant_charges: Vec<(Limit, u64)>,
     /// Secret designations by key; a released one is `None` (TLS-5).
     secrets: Vec<Option<EvalSlot>>,
-    key_shares: Vec<Option<key_share::Share>>,
+    media: Vec<Option<media::Media>>,
     /// Each sealed secret's charge, refunded once no designation holds its token.
     seals: Vec<(std::sync::Weak<()>, Limit, u64)>,
     tls_writes: BTreeMap<u64, (Name, bool, hirsel_core_net::scram::Binding)>,
@@ -4216,21 +4217,6 @@ impl Machine<'_> {
         vec![key, 0, 0, 0]
     }
 
-    fn secret(&self, key: u64) -> Option<&EvalSecret> {
-        let slot = self.world.secrets.get(key as usize)?.as_ref()?;
-        Some(&slot.secret)
-    }
-
-    /// A new designation with one holder (native `Secrets::push`).
-    fn designate(&mut self, secret: EvalSecret, charge: (Limit, u64)) -> u64 {
-        self.world.secrets.push(Some(EvalSlot {
-            secret,
-            holders: 1,
-            charge,
-        }));
-        self.world.secrets.len() as u64 - 1
-    }
-
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
         let words = |this: &Self, carrier: u64| -> Vec<u64> {
@@ -4415,6 +4401,9 @@ impl Machine<'_> {
         if let Some(reply) = self.provide(t, op, a) {
             return reply;
         }
+        if op.is_media() {
+            return self.media_call(t, op, a);
+        }
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
@@ -4509,6 +4498,15 @@ impl Machine<'_> {
             | HostOp::SecretSign
             | HostOp::SecretP256Key
             | HostOp::SecretKeyShare
+            | HostOp::ScheduleQuicInitial
+            | HostOp::ScheduleSealer
+            | HostOp::ScheduleOpener
+            | HostOp::ScheduleHeaderMask
+            | HostOp::PacketSeal
+            | HostOp::PacketSealInto
+            | HostOp::PacketOpen
+            | HostOp::PacketOpenInto
+            | HostOp::PacketMask
             | HostOp::SecretAeadSeal
             | HostOp::SecretAeadOpen
             | HostOp::EnvGet

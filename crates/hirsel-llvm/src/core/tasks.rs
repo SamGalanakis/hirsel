@@ -178,6 +178,15 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretSign
             | HostOp::SecretP256Key
             | HostOp::SecretKeyShare
+            | HostOp::ScheduleQuicInitial
+            | HostOp::ScheduleSealer
+            | HostOp::ScheduleOpener
+            | HostOp::ScheduleHeaderMask
+            | HostOp::PacketSeal
+            | HostOp::PacketSealInto
+            | HostOp::PacketOpen
+            | HostOp::PacketOpenInto
+            | HostOp::PacketMask
             | HostOp::SecretAeadSeal
             | HostOp::SecretAeadOpen
             | HostOp::StdinRead

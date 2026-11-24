@@ -11,6 +11,7 @@ mod conn;
 #[cfg(test)]
 mod declarations;
 mod flow;
+mod media;
 mod net_error;
 mod provide;
 mod secret_kdf;
@@ -31,6 +32,7 @@ pub(crate) enum Kernel {
     Host(HostOp),
     ReadOnlyDir,
     Net(HostOp),
+    Media(HostOp),
     SecretSeal,
     SecretRender,
     RootLimit,
@@ -458,6 +460,15 @@ operations! {
     ("secret", "sign", Lane::Runtime(Kernel::Net(HostOp::SecretSign)), "B", "secret-wrap-sign-1781", false),
     ("secret", "p256_key", Lane::Runtime(Kernel::Net(HostOp::SecretP256Key)), "B", "media-w0-crypto-build-2282", false),
     ("secret", "key_share", Lane::Runtime(Kernel::Net(HostOp::SecretKeyShare)), "B", "media-w0-crypto-build-2282", false),
+    ("schedule", "quic_initial", Lane::Runtime(Kernel::Media(HostOp::ScheduleQuicInitial)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "sealer", Lane::Runtime(Kernel::Media(HostOp::ScheduleSealer)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleOpener)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "header_mask", Lane::Runtime(Kernel::Media(HostOp::ScheduleHeaderMask)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "seal", Lane::Runtime(Kernel::Media(HostOp::PacketSeal)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "seal_into", Lane::Runtime(Kernel::Media(HostOp::PacketSealInto)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "open", Lane::Runtime(Kernel::Media(HostOp::PacketOpen)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "open_into", Lane::Runtime(Kernel::Media(HostOp::PacketOpenInto)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "mask", Lane::Runtime(Kernel::Media(HostOp::PacketMask)), "A", "media-w0-crypto-build-2282", false),
     ("secret", "aead_seal", Lane::Runtime(Kernel::Net(HostOp::SecretAeadSeal)), "B", "crypto-aead-2123", false),
     ("secret", "aead_open", Lane::Runtime(Kernel::Net(HostOp::SecretAeadOpen)), "B", "crypto-aead-2123", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
@@ -937,6 +948,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(output)
             }
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
+            Kernel::Media(op) => self.runtime_media(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_secret_seal(f, vals, result, n),
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
             Kernel::Spawn | Kernel::TrySpawn => self.runtime_spawn(
@@ -1470,27 +1482,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-
-    fn runtime_case_payload(
-        &mut self,
-        to: AddressId,
-        case: u32,
-        ty: TyId,
-        value: Option<ValueId>,
-        n: NodeId,
-    ) {
-        self.inst(Inst::SetCase { address: to, case }, n);
-        let rep = match self.rep(ty) {
-            Ok(r) => r,
-            Err(what) => {
-                self.gap(n, what);
-                return;
-            }
-        };
-        if let Some(at) = self.runtime_field(to, &[Step::CaseField { case, field: 0 }], ty, n) {
-            self.install(at, rep, value, n);
-        }
     }
 
     fn runtime_closed(&mut self, to: AddressId, ty: TyId, value: Option<ValueId>, n: NodeId) {

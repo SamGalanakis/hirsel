@@ -43,7 +43,7 @@ impl AeadAlg {
         }
     }
 
-    fn max_input(self) -> u64 {
+    pub(super) fn max_input(self) -> u64 {
         match self {
             Self::ChaCha20Poly1305 => (1 << 38) - 64,
             Self::Aes128Gcm | Self::Aes256Gcm => (1 << 36) - 32,

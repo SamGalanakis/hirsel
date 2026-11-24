@@ -3,7 +3,6 @@ use hirsel_core_net::key_agreement::{Group, KeyShare};
 
 pub(super) struct Share {
     _key: KeyShare,
-    payer: Limit,
 }
 
 impl Machine<'_> {
@@ -45,13 +44,6 @@ impl Machine<'_> {
         };
         self.put(dst + len, point);
         self.store(a[2] + 8, 8, len + size);
-        let id = self.world.key_shares.len() as u64;
-        self.world.key_shares.push(Some(Share { _key: key, payer }));
-        Ok(vec![id, 0, 0, 0])
-    }
-
-    pub(super) fn drop_media(&mut self, id: u64) {
-        let share = self.world.key_shares[id as usize].take().unwrap();
-        self.refund(share.payer, 64);
+        Ok(self.media_hold(payer, media::Payload::Share(Share { _key: key })))
     }
 }

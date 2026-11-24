@@ -245,6 +245,7 @@ pub mod key_agreement;
 pub mod key_wrap;
 pub use cred_grant::{CredGrant, CredSource, StsSource};
 pub mod p256_key;
+pub mod packet_aead;
 pub mod packet_cipher;
 pub mod packet_epoch;
 pub mod packet_nonce;

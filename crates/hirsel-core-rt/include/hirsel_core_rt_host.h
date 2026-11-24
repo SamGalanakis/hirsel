@@ -371,6 +371,15 @@ HirselCoreHostOutcome hirsel_core_secret_sign(HirselCoreContext *, uint64_t, uin
 HirselCoreHostOutcome hirsel_core_secret_p256_key(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_key_share(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
 void hirsel_core_media_drop(HirselCoreContext *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_quic_initial(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_sealer(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_opener(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_header_mask(HirselCoreContext *, uint64_t, uint64_t, bool, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_seal(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_seal_into(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t, HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_open(HirselCoreContext *, uint64_t, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_open_into(HirselCoreContext *, uint64_t, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_mask(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, uint8_t *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_aead_seal(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_aead_open(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);

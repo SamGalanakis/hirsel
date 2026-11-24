@@ -1,6 +1,27 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn runtime_case_payload(
+        &mut self,
+        to: AddressId,
+        case: u32,
+        ty: TyId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) {
+        self.inst(Inst::SetCase { address: to, case }, n);
+        let rep = match self.rep(ty) {
+            Ok(r) => r,
+            Err(what) => {
+                self.gap(n, what);
+                return;
+            }
+        };
+        if let Some(at) = self.runtime_field(to, &[Step::CaseField { case, field: 0 }], ty, n) {
+            self.install(at, rep, value, n);
+        }
+    }
+
     pub(super) fn runtime_net_error(
         &mut self,
         to: AddressId,

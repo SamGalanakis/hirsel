@@ -51,6 +51,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Env(_) => true,
             // A virtual provider observes only run state the program made.
             Kernel::Provide(_)
+            | Kernel::Media(_)
             | Kernel::ReadOnlyDir
             | Kernel::CarrierMove
             | Kernel::CarrierView

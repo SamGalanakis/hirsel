@@ -4,10 +4,11 @@ use crate::{
     packet_cipher::HeaderMask,
     packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
     secret_aead::AeadAlg,
-    tls_kdf::{Tls13Labels, Tls13PacketKeys},
+    tls_kdf::{Side, Tls13Labels, Tls13PacketKeys, Tls13Traffic},
 };
 use std::collections::BTreeMap;
 
+pub const SCHEDULE_CHARGE: u64 = 512;
 pub const CIPHER_CHARGE: u64 = 1024;
 pub const DOMAIN_CHARGE: u64 = 16;
 pub const MASK_CHARGE: u64 = 512;
@@ -97,6 +98,26 @@ impl<C> Epoch<C> {
             (DirectionKeys::Missing, live)
         };
         Ok(Self::new(format, algorithm, send, receive))
+    }
+
+    pub fn quic_initial(side: Side, dcid: &[u8]) -> Option<Self> {
+        let traffic = Tls13Traffic::quic_initial(dcid)?;
+        let peer = match side {
+            Side::Client => Side::Server,
+            Side::Server => Side::Client,
+        };
+        let algorithm = AeadAlg::Aes128Gcm;
+        Some(Self::new(
+            NonceFormat::Quic,
+            algorithm,
+            DirectionKeys::Live(traffic.packet_keys(side, algorithm)),
+            DirectionKeys::Live(traffic.packet_keys(peer, algorithm)),
+        ))
+    }
+
+    /// The evaluator applies refunds through its task scheduler.
+    pub fn into_ledger(self) -> impl Iterator<Item = C> {
+        self.domains.into_iter().flat_map(BTreeMap::into_values)
     }
 
     pub fn new(

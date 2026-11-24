@@ -124,6 +124,15 @@ pub enum HostOp {
     SecretJwsHmacVerify = 130,
     SecretP256Key = hirsel_core_ids::host_op::MEDIA_P256_KEY as isize,
     SecretKeyShare = hirsel_core_ids::host_op::MEDIA_KEY_SHARE as isize,
+    ScheduleQuicInitial = hirsel_core_ids::host_op::SCHEDULE_QUIC_INITIAL as isize,
+    ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
+    ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
+    ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
+    PacketSeal = hirsel_core_ids::host_op::PACKET_SEAL as isize,
+    PacketSealInto = hirsel_core_ids::host_op::PACKET_SEAL_INTO as isize,
+    PacketOpen = hirsel_core_ids::host_op::PACKET_OPEN as isize,
+    PacketOpenInto = hirsel_core_ids::host_op::PACKET_OPEN_INTO as isize,
+    PacketMask = hirsel_core_ids::host_op::PACKET_MASK as isize,
 }
 
 impl HostOp {
@@ -225,6 +234,15 @@ impl HostOp {
         HostOp::SecretSign,
         HostOp::SecretP256Key,
         HostOp::SecretKeyShare,
+        HostOp::ScheduleQuicInitial,
+        HostOp::ScheduleSealer,
+        HostOp::ScheduleOpener,
+        HostOp::ScheduleHeaderMask,
+        HostOp::PacketSeal,
+        HostOp::PacketSealInto,
+        HostOp::PacketOpen,
+        HostOp::PacketOpenInto,
+        HostOp::PacketMask,
         HostOp::SecretAeadSeal,
         HostOp::SecretAeadOpen,
         HostOp::RecvBounded,
@@ -480,6 +498,38 @@ impl HostOp {
             | HostOp::WriteAt
             | HostOp::SecretWrap
             | HostOp::SecretKeyShare => (vec![V(u64_), V(u64_), V(p)], outcome),
+            HostOp::ScheduleQuicInitial => (vec![V(u64_), V(p)], outcome),
+            HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
+            HostOp::ScheduleOpener => (vec![V(u64_), V(u64_)], outcome),
+            HostOp::ScheduleHeaderMask => {
+                (vec![V(u64_), V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
+            }
+            HostOp::PacketSeal => (
+                vec![V(u64_), V(u64_), V(p), V(u64_), V(u64_), V(p)],
+                outcome,
+            ),
+            HostOp::PacketSealInto => (
+                vec![V(u64_), V(u64_), V(p), V(u64_), V(p), V(u64_), V(p)],
+                outcome,
+            ),
+            HostOp::PacketOpen => (
+                vec![V(u64_), V(u64_), V(u64_), V(p), V(u64_), V(u64_), V(p)],
+                outcome,
+            ),
+            HostOp::PacketOpenInto => (
+                vec![
+                    V(u64_),
+                    V(u64_),
+                    V(u64_),
+                    V(p),
+                    V(u64_),
+                    V(u64_),
+                    V(p),
+                    V(p),
+                ],
+                outcome,
+            ),
+            HostOp::PacketMask => (vec![V(u64_), V(p), V(u64_), V(p)], outcome),
             HostOp::CallPayloadPrefix => (vec![V(u64_), V(u64_), V(u64_), V(p)], outcome),
             HostOp::PortReply => (vec![V(u64_); 9], outcome),
             HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
@@ -623,6 +673,15 @@ impl HostOp {
             HostOp::SecretSign => "secret_sign",
             HostOp::SecretP256Key => "secret_p256_key",
             HostOp::SecretKeyShare => "secret_key_share",
+            HostOp::ScheduleQuicInitial => "schedule_quic_initial",
+            HostOp::ScheduleSealer => "schedule_sealer",
+            HostOp::ScheduleOpener => "schedule_opener",
+            HostOp::ScheduleHeaderMask => "schedule_header_mask",
+            HostOp::PacketSeal => "packet_seal",
+            HostOp::PacketSealInto => "packet_seal_into",
+            HostOp::PacketOpen => "packet_open",
+            HostOp::PacketOpenInto => "packet_open_into",
+            HostOp::PacketMask => "packet_mask",
             HostOp::SecretAeadSeal => "secret_aead_seal",
             HostOp::SecretAeadOpen => "secret_aead_open",
             HostOp::NetSplit => "net_split",
@@ -716,6 +775,15 @@ impl HostOp {
             Self::SecretSign => "hirsel_core_secret_sign",
             Self::SecretP256Key => "hirsel_core_secret_p256_key",
             Self::SecretKeyShare => "hirsel_core_secret_key_share",
+            Self::ScheduleQuicInitial => "hirsel_core_schedule_quic_initial",
+            Self::ScheduleSealer => "hirsel_core_schedule_sealer",
+            Self::ScheduleOpener => "hirsel_core_schedule_opener",
+            Self::ScheduleHeaderMask => "hirsel_core_schedule_header_mask",
+            Self::PacketSeal => "hirsel_core_packet_seal",
+            Self::PacketSealInto => "hirsel_core_packet_seal_into",
+            Self::PacketOpen => "hirsel_core_packet_open",
+            Self::PacketOpenInto => "hirsel_core_packet_open_into",
+            Self::PacketMask => "hirsel_core_packet_mask",
             Self::SecretAeadSeal => "hirsel_core_secret_aead_seal",
             Self::SecretAeadOpen => "hirsel_core_secret_aead_open",
             Self::NetSplit => "hirsel_core_net_split",
@@ -765,6 +833,21 @@ impl HostOp {
             Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
             _ => None,
         }
+    }
+
+    pub const fn is_media(self) -> bool {
+        matches!(
+            self,
+            HostOp::ScheduleQuicInitial
+                | HostOp::ScheduleSealer
+                | HostOp::ScheduleOpener
+                | HostOp::ScheduleHeaderMask
+                | HostOp::PacketSeal
+                | HostOp::PacketSealInto
+                | HostOp::PacketOpen
+                | HostOp::PacketOpenInto
+                | HostOp::PacketMask
+        )
     }
 
     pub const fn is_secret_key(self) -> bool {
@@ -821,6 +904,15 @@ impl HostOp {
                 | HostOp::SecretSign
                 | HostOp::SecretP256Key
                 | HostOp::SecretKeyShare
+                | HostOp::ScheduleQuicInitial
+                | HostOp::ScheduleSealer
+                | HostOp::ScheduleOpener
+                | HostOp::ScheduleHeaderMask
+                | HostOp::PacketSeal
+                | HostOp::PacketSealInto
+                | HostOp::PacketOpen
+                | HostOp::PacketOpenInto
+                | HostOp::PacketMask
                 | HostOp::SecretAeadSeal
                 | HostOp::SecretAeadOpen
                 | HostOp::NetSplit

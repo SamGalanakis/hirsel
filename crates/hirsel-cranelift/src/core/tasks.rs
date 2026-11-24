@@ -13,10 +13,6 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
-        let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
-        self.describe(storage, types, task_input)
-    }
     /// An explicit stack slot of its own, for a descriptor passed by pointer
     /// beside an indirect result that shares the call scratch.
     fn own_slot(&mut self, size: u32) -> Value {
@@ -345,6 +341,15 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretSign
                     | HostOp::SecretP256Key
                     | HostOp::SecretKeyShare
+                    | HostOp::ScheduleQuicInitial
+                    | HostOp::ScheduleSealer
+                    | HostOp::ScheduleOpener
+                    | HostOp::ScheduleHeaderMask
+                    | HostOp::PacketSeal
+                    | HostOp::PacketSealInto
+                    | HostOp::PacketOpen
+                    | HostOp::PacketOpenInto
+                    | HostOp::PacketMask
                     | HostOp::SecretAeadSeal
                     | HostOp::SecretAeadOpen
                     | HostOp::StdinRead

@@ -1,5 +1,8 @@
 //! Owned media state is pinned independently of the one-word resource carrier.
 use crate::Context;
+
+mod packet;
+mod schedule;
 use crate::{
     limit::Payer,
     secret::{Charge, ChargeCell, HandedOver},
@@ -71,6 +74,18 @@ pub(crate) fn hold<T: Send>(value: T) -> u64 {
         drop: drop_slot::<T>,
         value,
     })) as u64
+}
+
+/// # Safety
+/// The live handle's slot contains T and stays borrowed through the call.
+unsafe fn loan<'a, T>(handle: u64) -> &'a T {
+    unsafe { &(*(handle as *const Slot<T>)).value }
+}
+
+/// # Safety
+/// The live handle's slot contains T and the caller lends it exclusively.
+unsafe fn loan_mut<'a, T>(handle: u64) -> &'a mut T {
+    unsafe { &mut (*(handle as *mut Slot<T>)).value }
 }
 
 /// # Safety

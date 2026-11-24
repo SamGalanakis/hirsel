@@ -1,6 +1,21 @@
 use super::*;
 
 impl Machine<'_> {
+    pub(super) fn secret(&self, key: u64) -> Option<&EvalSecret> {
+        let slot = self.world.secrets.get(key as usize)?.as_ref()?;
+        Some(&slot.secret)
+    }
+
+    /// A new designation with one holder (native `Secrets::push`).
+    pub(super) fn designate(&mut self, secret: EvalSecret, charge: (Limit, u64)) -> u64 {
+        self.world.secrets.push(Some(EvalSlot {
+            secret,
+            holders: 1,
+            charge,
+        }));
+        self.world.secrets.len() as u64 - 1
+    }
+
     pub(super) fn store_sealed(
         &mut self,
         policy: SecretPolicy,

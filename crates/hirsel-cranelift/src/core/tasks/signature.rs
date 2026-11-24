@@ -1,6 +1,11 @@
 use super::*;
 
 impl Function<'_, '_, '_> {
+    pub(super) fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
+        let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
+        self.describe(storage, types, task_input)
+    }
+
     pub(super) fn signature_call(&mut self, op: RtOp, args: &[Value]) -> Result<Value> {
         let (name, params): (&str, &[Ty]) = match op {
             RtOp::Ed25519Verify => ("hirsel_core_ed25519_verify", &[P, U, P, U, P, U]),

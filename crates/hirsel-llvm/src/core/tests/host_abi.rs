@@ -82,6 +82,15 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::SecretUnwrap => &["u64", "ptr", "ptr"],
         HostOp::SecretSign => &["u64", "u64", "u64", "ptr", "ptr"],
         HostOp::SecretP256Key => &["u64", "ptr", "ptr"],
+        HostOp::ScheduleQuicInitial => &["u64", "ptr"],
+        HostOp::ScheduleSealer => &["u64", "u64", "u64", "u64"],
+        HostOp::ScheduleOpener => &["u64", "u64"],
+        HostOp::ScheduleHeaderMask => &["u64", "u64", "bool"],
+        HostOp::PacketSeal => &["u64", "u64", "ptr", "u64", "u64", "ptr"],
+        HostOp::PacketSealInto => &["u64", "u64", "ptr", "u64", "ptr", "u64", "ptr"],
+        HostOp::PacketOpen => &["u64", "u64", "u64", "ptr", "u64", "u64", "ptr"],
+        HostOp::PacketOpenInto => &["u64", "u64", "u64", "ptr", "u64", "u64", "ptr", "ptr"],
+        HostOp::PacketMask => &["u64", "ptr", "u64", "ptr"],
         HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
             &["u64", "u64", "ptr", "ptr", "ptr", "ptr"]
         }

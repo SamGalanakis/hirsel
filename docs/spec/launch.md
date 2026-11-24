@@ -29,8 +29,8 @@ program's entry ([PROG-9](programs.md#prog-9-code-descriptors)), the value a rec
 already compares ([recording](../recording.md#what-a-recording-holds)), or unavailable for a
 program assembled without revisions. It names the code, not the bytes: the same program built by
 Cranelift or LLVM, at another optimisation level, or as a recording build has one revision and
-different digests. The **release identity** is `revision`, `n_place` and the exported list
-(RUNNER-SPEC §6 "One identity"), and it, not the digest, binds a store, matches a host record and
+different digests. The **release identity** is `revision`, `n_place`, the exported list, the HTTP route
+bindings and the per-export slot schemas (RUNNER-SPEC §6 "One identity"), and it, not the digest, binds a store, matches a host record and
 stamps a granted trigger. `digest` and `target` are diagnostics: Welcome, `Status`, refusals and
 the release rows report them, and no rule compares them. An assembly record's name is the host's
 and is not launch metadata: v2.51's `assembly` field and its launch option are deleted.
@@ -102,7 +102,7 @@ type ReleaseManifest: codec + send { describe: Describe, release: Bytes, grants:
 
 `revision` is the launch's entry revision, empty when it is unavailable. A `Describe`'s
 **identity digest** is SHA-256 over `u8 18 ‖ "hirsel.identity.v1" ‖` the value codec's bytes of
-`ReleaseIdentity { revision, n_place, exported }` taken from it (RUNNER-SPEC §6 "One identity").
+`ReleaseIdentity { revision, n_place, exported, bindings, slots }` taken from it (RUNNER-SPEC §6 "One identity").
 Entries are in registration order. `Described` has the fields `kind`, `identity`,
 `args` and `result`, in that order, with no separate error field. Its `result`
 is the schema of the value carried by `Returned`: `Result[R, E]` for transact,
@@ -195,8 +195,8 @@ which a recording holds like every entry argument. The launcher passes
 
 A store is bound to the release identity that activated it (RUNNER-SPEC §6, "Restart and
 rebuild", "One identity"). The same code built by another backend, at another optimisation
-level or as a recording build opens it. Other code, another allowance or another exported
-list is refused `NotCurrent` with the store's version and identity digest and this launch's,
+level or as a recording build opens it. Other code, another allowance, another exported
+list, other HTTP route bindings or other slot schemas are refused `NotCurrent` with the store's version and identity digest and this launch's,
 and both executable digests as a diagnostic. To move a store to a new build, stop the old process and start
 the new build once with `--hirsel-install`<!-- doc-ref: external -->, or deploy it with `hirsel deploy`.
 
@@ -621,7 +621,7 @@ listener.
 
 *(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER` runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
+`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded
@@ -634,18 +634,343 @@ refuses a store held by another process. The candidate uses the root limit
 embedded in the executable and the same Store sizing overrides it would use
 when serving. Arguments after `--` go to the candidate.
 
-`SERVER` is the package to rebuild. The supervisor gives its first directory
-grant a temporary Store and holds a public loopback listener. The default
-address is `127.0.0.1:7700`, and `--listen ADDR` changes it. The server uses
-`runner.launch_selection` so the supervisor can run the ordinary install
-before restarting it. A build refusal leaves the current executable serving.
-A migration refusal before activation reopens the current executable.
-Its install passes `--hirsel-held=release`<!-- doc-ref: external -->, so a run in flight across a rebuild continues
-on the new code (RUNNER-SPEC §14.6 "The activation fate"). The
-supervisor retains each WebSocket, repeats its Hello and live Subscribe
-requests on the new connection, and forwards the complete groups with the
-original subscription numbers. It uses the new query's result fingerprint
-when the named entry still has the same argument fingerprint.
+### The dev loop
+
+`hirsel dev` keeps one place serving the bytes on disk while the developer edits them. Each
+edit that changes what the place runs is an ordinary activation: the same stop, install and
+start a standalone upgrade uses ("Place activation"), against a store that persists across
+sessions. Dev speaks no wire protocol. The listener belongs to dev and each serving generation
+inherits it, and every client recovers across a swap by itself, as it does across a production
+restart (the SDK client restores its subscriptions).
+
+**Built today and planned.** Main runs the older loop: a temporary store, a stat poll, a child
+`hirsel build`, and a session proxy that holds the public socket and replays each client's
+Hello and Subscribe on the new backend. B24's law (`cli_dev_restores_subscription` in
+`tools/tests/wire_admission.py`) checks that proxy and stays green until the replacement laws
+below land with the proxy's deletion. Everything else in this section is specified, not built;
+the forms marked planned are the ones that do not exist yet.
+
+**Commands.**
+
+| Form | Does |
+|---|---|
+| `hirsel dev [SERVER] [--listen ADDR] [--store DIR] [--fresh] [--sdk DIR] [--n-place BYTES] [--json]`<!-- doc-ref: planned --> | runs the loop |
+| `hirsel dev [SERVER] --wait [--timeout SECONDS] [--json]`<!-- doc-ref: planned --> | blocks until the bytes on disk serve, or have failed |
+| `hirsel dev [SERVER] --status [--json]`<!-- doc-ref: planned --> | prints the loop's latest event |
+| `hirsel dev [SERVER] --stop`<!-- doc-ref: planned --> | stops the loop |
+
+`SERVER` is a package directory with a server entry and defaults to the current directory.
+The loop also takes the build options `--limit`, `--grant`, `--dir`, `--backend`,
+`--libraries`, `--runtime`, `--source-core` and `--source-std`, and passes arguments after `--`
+to the place.
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--listen ADDR` | the address clients connect to; loopback only | `127.0.0.1:7700` |
+| `--store DIR` | use this existing or new store directory; dev never deletes it | the current dev-owned generation |
+| `--fresh`<!-- doc-ref: planned --> | start a new dev-owned store generation; refused with `--store` | off |
+| `--sdk DIR`<!-- doc-ref: planned --> | publish the TypeScript SDK to DIR for every activated generation | none |
+| `--n-place BYTES` | the one allowance for describe, install, serve and SDK generation | 16 MiB (`16777216`) |
+| `--json` | one JSON object per line on stdout and nothing else there | off |
+| `--timeout SECONDS` | with `--wait`<!-- doc-ref: planned -->, give up after this long | none |
+
+The control forms talk to the loop holding `SERVER`'s dev directory, as `hirsel serve --stop`
+does to a resident compiler. Builds go through the resident compiler (`--resident`), which
+stays running when dev exits.
+
+**One allowance.** A describe has no `PlaceConfig`, so dev cannot learn `PlaceConfig.n_place`
+without opening the store. Dev therefore passes the allowance explicitly on every launch it
+makes, from `--n-place`, defaulting to the describe default of 16 MiB, and prints it in the
+`serving` line. An app's `PlaceConfig.n_place` does not apply under dev unless `--n-place`
+names it. So a supplied store that the app activated at its own allowance has another identity,
+and dev's first start migrates it unless `--n-place` names that allowance. Every launch uses
+this argv order, so the allowance is inside the private prefix:
+
+```text
+<exe> --hirsel-n-place=N [--hirsel-install <install words>] <dev's store grant> <user --dir grants…> <user arguments…>
+```
+
+The store's `Dir` grant takes the first grant position whatever `--dir` values the user
+supplies. The compiler's store is a separate directory and is never the place's store. Dev's
+install passes `--hirsel-held=release`<!-- doc-ref: external -->, so a run in flight across a
+rebuild continues on the new code (RUNNER-SPEC §14.6 "The activation fate").
+
+**Identity.** Dev compares identity digests (RUNNER-SPEC §6 "One identity") computed from
+`Describe` by a driver port of the runner's `identity_digest`. The port's oracle is a vector set
+the runner package emits, `(describe bytes, identity digest)`, for a default allowance, a
+nondefault allowance, an HTTP-binding change, a slot-schema change and a backend-only change.
+Dev never treats `Describe.digest` (the executable digest) or `Status.release` (the exported
+list's digest) as the identity.
+
+**The dev directory** is `.hirsel-dev/` in `SERVER`:
+
+| Path | Content |
+|---|---|
+| `dev.lock` | `flock` held by the running loop for this package |
+| `dev.sock` | control socket for `--wait`<!-- doc-ref: planned -->, `--status` and `--stop` |
+| `stores/<G>/` | dev-owned store generations. `<G>` is a decimal dev creates with `mkdir` and never reuses; each holds a `.hirsel-dev-owned` marker written at creation |
+| `stores/current` | a regular file naming the current `<G>`, written by temp file, rename and parent sync |
+| `gen/<N>/place` | immutable executables. Dev keeps the serving one, the candidate, and both OLD and NEW of any unresolved install |
+| `state.json` | a locator only: the store path, the last known OLD and NEW executable paths and identity digests, and an interrupted attempt. It never authorizes a migration or a deletion |
+
+**Per-store supervisor lock.** `dev.lock` excludes only this package's loops, and another
+package's dev can name the same store with `--store`. Dev therefore also holds, for its whole
+life, `$XDG_RUNTIME_DIR/hirsel-dev/<st_dev>-<st_ino>.lock` (else
+`/tmp/hirsel-dev-<uid>/`), keyed by the device and inode of the opened store directory. A
+second dev on the same store refuses. Writers that are not dev loops are fenced by the store's
+own `LOCK` and by the install's predecessor check (rule 6). The supervisor lock is never the
+store's `LOCK` and never lives in the store.
+
+**States.** A **receipt** is the SHA-256 over the canonical list of `(path, content digest)` of
+every input a build read, plus the digest of the compiler executable that served it. The build
+returns it, on failure too. Content digests come from the bytes the build captured, never from
+file metadata, and the build compiles the same capture it hashes, so a tree that goes A, B, A
+during a build yields the receipt of the bytes compiled.
+
+| State | Serving | `--wait`<!-- doc-ref: planned --> |
+|---|---|---|
+| `Building` | the previous generation, if any | blocks |
+| `Swapping` | nothing; connections wait (rule 10) | blocks |
+| `Serving` | generation `g` | 0 at the success observation |
+| `Broken(build)`, `Broken(discover)` | the previous generation, if any | 1 at the failure observation |
+| `Broken(migration)` | OLD, reopened | 1 at the failure observation |
+| `Broken(start)`, `Broken(crashed)` | nothing | 1 at the failure observation |
+| `RecoveryPending` | nothing; dev makes no serving claim | 1, with both identities |
+
+Rules:
+
+1. **Start.** Take `dev.lock`. The store is `--store DIR`, else the generation `stores/current`
+   names, else a new generation; with `--fresh`<!-- doc-ref: planned -->, always a new one (rule 11). Take the per-store
+   supervisor lock, bind the listener, build and describe. Then start the candidate with a
+   plain reopen (no selection) through the launcher's child path with the host channel. On an
+   empty store that is genesis. A `PlaceOpened` reply proves the store holds this identity and
+   writes nothing; dev records the store ID from it. Only a `PlaceCurrent(version, read)` reply
+   leads to an install: the store holds another identity, `read.binding`, and dev installs with
+   it as the expected predecessor and `read`'s store ID as the expected store (rule 6), whether
+   or not `state.json` locates an executable for it. `PlaceRefused("Legacy")`, a held store,
+   corruption, `IdentityUnknown`, a failed readiness probe and a missing proof are each their
+   own `broken` cause and never lead to an install. `state.json` is updated after each typed
+   outcome; a crash before the update leaves a stale locator, and the next start's plain reopen
+   decides.
+2. **Change detection.** The watch set is the build's input set: every file workspace discovery
+   reads (manifests, `[sources]`, `tests.sources`, foreign archives) and the directories that
+   hold them. inotify watches directories, never files. Watches survive a failed discovery and
+   are rebuilt on `IN_Q_OVERFLOW`, `IN_IGNORED` or replacement of a watched directory, and a
+   2 s rescan is the floor. A new file reaches the build only when a manifest names it. Events
+   only wake the loop; the receipt decides.
+3. **Debounce.** A cycle starts 50 ms after the last wake and at most 500 ms after the first.
+4. **Busy.** A change during `Building` or `Swapping` never cancels the cycle. When it settles,
+   dev captures again and runs another cycle if the capture differs from the receipt.
+   Settlement is serialized with child exits and SDK publication.
+5. **Three-way gate.** Against the serving generation:
+   - the same executable digest: nothing the place runs changed. Dev discards the candidate,
+     records its receipt as serving and reports `unchanged`. The place keeps running;
+   - the same identity, another executable (a foreign archive, a backend option, a lowering
+     change): stop and reap OLD, start NEW with a plain reopen and require `PlaceOpened`
+     (rule 6a). No install runs. A refusal is `Broken(start)`, and dev reopens OLD as in rule 7;
+   - another identity: rule 6. An install always migrates and writes a new activation, so dev
+     never installs an identity the store already holds.
+6. **Swap.** Record OLD's and the candidate's immutable paths in `gen/` and `state.json` before
+   the cut. Send OLD SIGTERM, wait up to 5 s, send SIGKILL, and reap it. Then install NEW
+   through the launcher's child path with two install words: the **expected predecessor
+   identity digest**, which the runner compares with the store's current activation binding
+   under `LOCK` before `on_migrate` and refuses `InstallPredecessor(found)` on drift; and the
+   expected store ID (launch word 14), which the install checks. That install answers
+   `PlaceInstalled(v, _)`, `PlaceInstallRefused(cause)`, or nothing when uncertain, and the
+   launcher accepts `PlaceInstalled` without a target version. Dev never uses `InstallAt`,
+   whose target is the store's commit head, which advances with every commit. Then:
+   - `PlaceInstalled(v)`: start NEW with a plain reopen; it must reply `PlaceOpened` at `v`;
+   - `PlaceInstallRefused(cause)`: rule 7;
+   - no reply, a nonzero exit without a reply, or a dead child: rule 8.
+
+   6a. **Ready.** A generation serves only when its own child has sent `PlaceOpened` on the host
+   channel and `GET /hirsel/status` answers `phase: "ready"` (not `paused`) with the expected
+   executable digest and allowance, within 10 s; otherwise `Broken(start)`. Status and stop
+   answer throughout build, install and this wait.
+7. **Refused install.** The refusal is typed and came before the cut, so OLD's activation
+   stands. Dev reopens OLD with a plain reopen, requires `PlaceOpened`, and enters
+   `Broken(migration)` with the refusal and the install's stderr. If OLD's reopen is refused,
+   dev enters `RecoveryPending` instead of claiming OLD serves.
+8. **Uncertain install.** A failed install does not imply OLD reopens: after the durable cut a
+   lost proof can leave NEW current. Dev probes without installing: a plain reopen of NEW, and
+   if NEW is refused, a plain reopen of OLD. Whichever replies `PlaceOpened` is current and
+   serves (`Serving` for NEW, `Broken(migration)` for OLD). If neither does, dev keeps both
+   executables, reports `RecoveryPending` with both identity digests and the refusals, and makes
+   no serving claim. The next cycle probes again before any install. Dev never runs a second
+   install to resolve an uncertain one. The persistent-store guarantee covers a local directory
+   backing; on an objects@1 backing dev reports the backing at start and the probe rules of
+   "Hot deploy" apply.
+9. **A place that exits by itself** puts dev in `Broken(crashed)`. The next cycle still needs a
+   live child and rule 6a before dev reports `Serving`.
+10. **Listener.** Exactly one acceptor per phase. Dev's parent keeps the public listener open
+    continuously. Only a serving child inherits it, as FD 3 with `LISTEN_FDS`, and a child is
+    spawned only after its predecessor is reaped. A connection that arrives between OLD's reap
+    and NEW's start waits in the listener's backlog. When nothing will serve soon
+    (`Broken(start)`, `Broken(crashed)`, `RecoveryPending`, or `Broken(build)` or
+    `Broken(migration)` with no place), a dev worker accepts and closes each connection so that
+    clients back off instead of hanging; dev stops and joins that worker before it hands the
+    listener to a child.
+11. **Fresh.** `--fresh`<!-- doc-ref: planned --> creates `stores/<G+1>/` with its marker, writes `stores/current` and
+    starts there. It deletes nothing at start. A later start removes an old generation only if
+    all of these hold: it is under `.hirsel-dev/stores/`; it was opened with `O_NOFOLLOW` and is
+    not a symlink; it carries the marker; it is not `stores/current`; its `LOCK` can be taken
+    without blocking, so no writer holds it; and it overlaps no source, SDK or compiler
+    directory. Removal never deletes a held `LOCK` inode, which would let a second opener lock a
+    new inode beside a live writer. A `--store` directory is never removed.
+12. **Stop.** SIGINT, SIGTERM or `--stop` stops the place by rule 6's signal sequence, reaps it,
+    removes `dev.sock` and exits 0.
+
+**Inputs fixed for a session.** The trees named by `--libraries`, `--runtime`, `--source-core`
+and `--source-std`, and the build options, are not watched. Changing them needs a dev restart.
+A replaced compiler executable is in the receipt, so it does trigger a cycle.
+
+**Clients across a swap.** Every open connection belongs to the child that accepted it and
+ends when that child stops.
+
+| Client | Unchanged surface | Changed surface |
+|---|---|---|
+| SDK client, bound Caller | closes, backs off, reconnects with the same Caller, resubscribes with new IDs and replays its pending request; `admit(p)` returns the stored reply or runs a request that never committed | one `Placed(Gone)` for any want makes the client `Incompatible` before it sends its pending call; nothing reloads the page unless the app's handler or the bundler does, in no guaranteed order |
+| SDK client, anonymous | a new Caller on reconnect, so a pending call settles `LocallyUnknown` and its effect may exist | as above |
+| Page reload | promises and room handles are gone; a new client with the durable stream reports recovery through its callback | as left |
+| Raw WebSocket, HTTP | the socket closes during the swap; a raw client needs its own reconnect, Hello, placement and subscriptions, and an HTTP request can lose its reply | as left |
+
+Dev prints no warning about anonymous Callers; the client explains `LocallyUnknown` when it
+happens. There is no `Upgrade` frame: a changed surface reaches the page as `Placed(Gone)` and
+then `Incompatible` (RUNNER-SPEC §6 "Matching an old client").
+
+**Browser origin.** The runner's WebSocket ingress refuses an upgrade whose `Origin` header is
+present and is not `http://` + `Host`, under a launch option dev passes; a request with no
+`Origin` (a native client) passes. It defends a loopback place from pages of other origins in
+the developer's browser. The supported bundler topology is the bundler proxying the place's
+path: the page loads from the bundler (say `http://127.0.0.1:5173`) and the bundler forwards
+the WebSocket upgrade to `--listen` keeping its own `Host` (Vite's `server.proxy` with
+`ws: true` and `changeOrigin: false`), so `Origin == http://` + `Host` holds. A page that
+connects from the bundler's port directly to `--listen` is refused. There is no allow-list.
+
+**SDK publication.** `--sdk DIR`<!-- doc-ref: planned --> and `hirsel sdk ts` publish through one procedure, which
+defends DIR's parent against an externally supplied directory holding user files:
+
+1. **Lock.** Take a publisher `flock` on `<parent>/.<name>.hirsel-sdk.lock`, held to the end.
+2. **Stage.** Render into `<parent>/.<name>.next-<pid>` on the same filesystem and fsync every
+   file, the stage and the parent. A stage left by a dead publisher is removed under the lock.
+3. **Validate.** DIR must be absent, empty, or owned: a real directory (not a symlink) whose
+   inventory is exactly what the generator emits for the release its own `manifest.json`
+   names: the fixed files plus each entry's stub path and the directories those paths imply.
+   Any other file, directory or symlink is unknown. DIR must not contain or be contained by
+   `SERVER`'s sources, the dev directory, the store or the compiler store. Anything else
+   refuses with exit 2 and touches nothing.
+4. **Identical.** If DIR already holds byte-identical content, delete the stage and stop.
+5. **Publish.** Under the same lock validate again; a destination that changed since step 3
+   refuses. Rename the stage to DIR if DIR is absent, else exchange them with
+   `renameat2(RENAME_EXCHANGE)`. Fsync the parent, then remove the old tree, now at the stage
+   name. `EINVAL`, `ENOSYS` or `EXDEV` from the exchange is a refusal naming the filesystem;
+   there is no per-file fallback.
+
+The exchange publishes a pathname atomically; it is not a snapshot across opens. A reader that
+resolves files through DIR by path sees one generation per resolution. A reader that needs
+several files from one generation compares `entries.js`'s `identity.digest` with
+`manifest.json`'s `launch.digest` and retries the pass on a mismatch or `ENOENT`. In dev, steps
+1-3 run while OLD serves, and steps 4-5 after a successful install and before NEW starts, so the
+SDK never names a release that is not activated. Dev also publishes at genesis, on a plain
+reopen, and whenever DIR is missing or not current for the activated release. If publication
+fails after an install, NEW stays activated, dev reports `serving` with `sdk: "failed"` and the
+cause, and retries from NEW's describe on the next wake without reinstalling.
+
+**Output.** The first stdout line is `hirsel dev listening on <addr>`, printed once the first
+generation serves, even if that is after a failed first build. Status lines go to stderr, and
+the compiler's and the place's own output passes through. Nothing clears the screen.
+
+```text
+hirsel dev listening on 127.0.0.1:7700
+hirsel dev: serving generation 1, store .hirsel-dev/stores/1, allowance 16777216
+hirsel dev: generation 2 serving (built 212 ms, swapped 140 ms, sdk published)
+hirsel dev: unchanged
+hirsel dev: build failed; generation 2 still serving
+hirsel dev: migration refused; generation 2 reopened
+hirsel dev: recovery pending: neither <new> nor <old> opens the store; waiting for a change
+```
+
+With `--json`, stdout carries one object per line and nothing else: the place's stdout goes to
+dev's stderr, and dev drains both child pipes. Every object has `event`, `generation` (or
+`null`), `attempted` (the receipt of the latest attempted capture), `active` (the receipt
+serving, or `null`) and `activated` (the identity digest the store holds as far as dev has
+proof, or `null`).
+
+| `event` | Extra fields |
+|---|---|
+| `serving` | `listen`, `store`, `identity`, `n_place`, `build_ms`, `swap_ms`, `sdk` (`"published"`, `"identical"`, `"failed"` or `null`), `sdk_error` |
+| `unchanged` | `build_ms` |
+| `broken` | `cause` (`"build"`, `"discover"`, `"migration"`, `"start"`, `"crashed"`, `"held"`, `"identity"`, `"store"`), `detail` (at most 64 KiB), `status` |
+| `recovery_pending` | `old`, `new` (identity digests), `detail` |
+| `building`, `stopped` | none |
+
+`--status --json` prints the latest object, and `--wait --json`<!-- doc-ref: planned --> the observation it settled on.
+
+**`--wait`<!-- doc-ref: planned -->.** A waiter's request makes the loop take a fresh capture C after the request
+arrives. The **success observation** is the first point where the loop is `Serving` a
+generation `g` whose receipt equals C's digest, whose child passed rule 6a, and whose SDK
+publication is `published` or `identical` (or `--sdk`<!-- doc-ref: planned --> is off); `--wait`<!-- doc-ref: planned --> prints `g` and the
+receipt and exits 0. The **failure observation** is a settled `Broken(*)` or `RecoveryPending`
+with a receipt equal to C's digest, or C itself failing discovery (a malformed manifest, a
+missing named file) with a second capture after the debounce giving the same cause and the same
+partial digest; `--wait`<!-- doc-ref: planned --> prints the cause and exits 1. A waiter never waits for an edit later
+than its own capture, and later edits can supersede what it reported.
+
+| Command | 0 | 1 | 2 | 75 |
+|---|---|---|---|---|
+| `hirsel dev` | stopped by a signal or `--stop` | an I/O failure the loop cannot continue past | refused before serving | — |
+| `--wait`<!-- doc-ref: planned --> | success observation | failure observation | usage | no loop, or `--timeout` passed |
+| `--status` | a loop answered | — | usage | no loop |
+| `--stop` | the loop stopped | — | usage | no loop |
+
+**Refusals** are one block on stderr with exit 2:
+
+| Case | Text |
+|---|---|
+| `--listen` is not loopback | `dev listens on a loopback address` |
+| another loop holds `dev.lock` | `hirsel dev is already running for <dir> (pid N)` |
+| another dev holds the store's supervisor lock | `hirsel dev is already supervising store <dir> (pid N)` |
+| another process holds the store | the store's own `Held` refusal |
+| `--fresh`<!-- doc-ref: planned --> with `--store` | `--fresh starts a dev-owned store; it cannot be combined with --store`<!-- doc-ref: planned --> |
+| `--store` or `--sdk`<!-- doc-ref: planned --> overlaps sources, the dev directory, the compiler store or each other | `<dir> overlaps <other>` |
+| `--sdk DIR`<!-- doc-ref: planned --> is not absent, empty or owned | `<dir> is not an SDK directory hirsel generated; it holds <first unknown entry>` |
+| the exchange is unsupported | `<dir>: directory exchange is not supported on this filesystem` |
+| `SERVER` has no server entry | the build's refusal |
+| run inside the resident compiler | `dev must run in the terminal process` |
+| an option dev does not take | `unsupported dev option` |
+
+**Laws** (the dev/add design's slices S1-S5; cases in the package-directory harness of
+`crates/hirsel-core-driver/src/test_run_native.rs` unless named):
+
+- data written in one session is read in the next (the store is not recreated);
+- changed code installs and unchanged code reopens, by the typed replies (`PlaceInstalled(v)`
+  then `PlaceOpened` at `v`; a third session `PlaceOpened` at the same `v` with no install);
+- a refused migration keeps OLD serving on OLD's data;
+- the three-way gate: an unchanged executable keeps the child PID, and a backend-only change
+  gets a new PID at the same activation version with no install;
+- destructive ownership (release gate): `--fresh --store X`<!-- doc-ref: planned --> refuses; a supplied store, an old
+  generation that is a symlink, lacks the marker, holds a live `LOCK` or overlaps sources is
+  never removed; a held `LOCK` inode is never unlinked;
+- the allowance and identity match the runner-emitted vectors, and a nondefault `--n-place`
+  session reports it in `Status.n_place`;
+- fencing: a different writer's install between OLD's exit and NEW's install is refused
+  `InstallPredecessor`; a lost install reply after the cut probes NEW current and before it
+  probes OLD current, judged by a separate plain reopen afterwards;
+- watches see a rename-over, see a new file once a manifest names it, and an A, B, A edit during
+  a build serves B's receipt and then a further cycle serves A; a warm resident build equals a
+  fresh one-shot build of the same capture;
+- an SDK reader following the reader contract never pairs two generations; after a refused
+  migration `manifest.json` names OLD; publication never deletes user files (release gate);
+  publication after an install failure does not reinstall;
+- `--wait`<!-- doc-ref: planned --> right after an edit returns only once the edit serves; a broken edit exits 1 and its
+  fix exits 0; no loop exits 75; concurrent waiters each settle on their own capture;
+- swap recovery, replacing B24's same-socket assertion in `tools/tests/wire_admission.py`: a raw
+  socket closes across a swap with a retryable code; a fresh raw Hello with the old want is
+  answered `Placed(Gone)`; a regenerated client's want subscribes and reads the new value; an
+  unchanged want resubscribes on a new socket with new IDs and reads the current value. A bound
+  SDK tab's lost reply on both sides of the commit executes once (the stored reply returns after
+  it); an unapproved origin is refused and a native client without `Origin` admitted; a
+  connection queued between OLD's reap and NEW's start completes its Hello on NEW.
 
 ## Platform host and launcher
 

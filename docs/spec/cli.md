@@ -74,6 +74,46 @@ If the limit is still exceeded after eviction, the server exits when
 its launched clients finish. It also exits after a request that panics.
 `hirsel serve --stop` stops the store's server.
 
+## Dev loop
+
+*Specified, not built; [launch](launch.md#the-dev-loop) is the full text.* `hirsel dev`
+rebuilds a local place as its sources change, keeps its store across sessions, and activates
+each edit by the ordinary install and reopen. Its catalogue row reads "Rebuild a local place on
+each edit; the SDK client restores its subscriptions."
+
+| Form | Does |
+|---|---|
+| `hirsel dev [SERVER] [--listen ADDR] [--store DIR] [--fresh] [--sdk DIR] [--n-place BYTES] [--json] [build-opts] [-- args...]`<!-- doc-ref: planned --> | runs the loop |
+| `hirsel dev [SERVER] --wait [--timeout SECONDS] [--json]`<!-- doc-ref: planned --> | waits until the bytes on disk serve (0) or have failed (1) |
+| `hirsel dev [SERVER] --status [--json]`<!-- doc-ref: planned --> | prints the loop's latest event |
+| `hirsel dev [SERVER] --stop`<!-- doc-ref: planned --> | stops the loop |
+
+`--n-place` (default 16 MiB) is the one allowance for describe, install, serve and SDK
+generation. `--store DIR` is never deleted; `--fresh`<!-- doc-ref: planned --> starts a new
+dev-owned store generation. `--sdk DIR`<!-- doc-ref: planned --> publishes the TypeScript SDK
+for every activated generation by one directory exchange. Builds go through the resident
+compiler. The build options `--libraries`, `--runtime`, `--source-core` and `--source-std` are
+fixed for the session.
+
+| Command | 0 | 1 | 2 | 75 |
+|---|---|---|---|---|
+| the loop | stopped by a signal or `--stop` | an I/O failure it cannot continue past | refused before serving | — |
+| `--wait`<!-- doc-ref: planned --> | the edit serves | the edit failed | usage | no loop, or `--timeout` passed |
+| `--status` | a loop answered | — | usage | no loop |
+| `--stop` | the loop stopped | — | usage | no loop |
+
+## Adding a dependency
+
+*Specified, not built; [packages](packages.md#adding-a-dependency) is the full text.*
+`hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+binds one dependency in the nearest package manifest and updates `hirsel.lock`. `SOURCE` is an
+`https://` URL, `github:OWNER/REPO[/PACKAGE][@TAG]`, a `.hpkg` path, a `sha256:` root already in
+the package store, a toolchain `NAME@MAJOR`, or a member directory. It verifies the archive and
+resolves the workspace before it writes anything, and publishes one manifest at a time. It
+exits 0 for added, updated, unchanged or a dry run, 2 for a refusal (nothing written), and 1 for
+a failure after a manifest was written, including a partial `--workspace`<!-- doc-ref: planned -->
+placement that the same command completes when run again.
+
 ## CPU profiles
 
 ```text

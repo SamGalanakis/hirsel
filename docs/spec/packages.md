@@ -450,7 +450,8 @@ first:
 json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58
 ```
 
-Publishing never edits a manifest. Inside the producing workspace the member binding stays a
+Publishing never edits a manifest; `hirsel add`<!-- doc-ref: planned --> (section 11) is the one
+command that does. Inside the producing workspace the member binding stays a
 `path`, and the published root is what that path binding means to anyone else. A workspace
 that wants to depend on the published library instead writes `{ major, root, archive }` or
 `{ major, root, url }` with the printed root. A consumer of the archive gets every package its
@@ -508,6 +509,14 @@ edges between them. An entry's place is earned only by an edge of this archive: 
 the store already holds does not make up for its absence from the archive, and an entry no
 edge reaches is refused as extra. A refused archive leaves the store exactly as it was.
 
+**An I/O failure while keeping entries.** Writing a verified archive into the store is one
+rename per entry, so an I/O error part way through (a full disk, a permission change) can leave
+some entries written and others not. Each entry kept is whole and was verified, and a store
+entry is named by its content, so that subset is valid store state. A command that meets this
+reports it as a partial cache write with the I/O error, distinct from a refused archive, and
+writes no manifest and no lock. "A refused archive leaves the store exactly as it was" stays
+true: verification refusals come before step 4 and keep nothing.
+
 **Store.** The **package store** is the directory `--package-store DIR` names. By default it is
 `hirsel/packages` under the user cache (`$XDG_CACHE_HOME`, else `$HOME/.cache`), beside
 today's `hirsel/core-packages`. It holds each verified package as the file
@@ -518,6 +527,16 @@ entry whose bytes do not hash to its name, or that hashes to its name but does n
 section 1, is **damaged**. It is treated as missing: a fetch may
 replace it, and under `--frozen` its refusal says it is damaged (section 9). A store shared by
 several workspaces is safe, because its names are its contents.
+
+**The discovery index.** A website may list published libraries as rows
+`{id, root, url, first_seen}`, where `first_seen` is when the index first fetched that URL and
+verified that root (it cannot be derived from archive bytes); everything else it shows is
+derived from verified archives. Submission is a URL, no account owns a name, and two URLs may
+serve the same `name@major`. Rows are never edited: changed content at a URL gets a new row and
+a mark. **No command contacts it**, and `build` never treats it as an authority. Each row shows
+`hirsel add <url> --root sha256:<root>`<!-- doc-ref: planned -->. The index and the origin are
+then two observers: if the origin later serves other bytes, `add` refuses. A URL and root copied
+together from one compromised page authenticate nothing about the publisher.
 
 ## 8. `hirsel.lock`
 
@@ -692,6 +711,32 @@ Roots are always written in full.
 Several manifest refusals are reported together, in member order and then key order, so that
 one run shows all of them. The first refusal of a later resolution step is the only one shown.
 
+`hirsel add`<!-- doc-ref: planned --> (section 11) adds these refusals, each exit 2 with nothing written (the store may
+hold verified entries):
+
+| case | diagnostic |
+|---|---|
+| add, locked | `hirsel: <manifest> needs to be updated but --locked was passed` (or `--frozen`: the flag actually given) |
+| add, root differs | `hirsel: <id>: fetched root differs from --root`<!-- doc-ref: planned -->, then `  fetched: sha256:<Q>`, `  expected: sha256:<P>` and `  source: <url or archive>` |
+| add, source rebound | `hirsel: <source> is already bound to another root`, then `  bound: sha256:<P>`, `  fetched: sha256:<Q>` and `pass --update to accept the fetched root`<!-- doc-ref: planned --> |
+| add, manifest changed | `hirsel: <manifest> changed while hirsel add ran; nothing was written`<!-- doc-ref: planned --> |
+| add, shared binding | `hirsel: the workspace binds <id> for <members>; pass --update to change it`<!-- doc-ref: planned --> |
+| add, local and workspace | `hirsel: <manifest>: dependencies.<name> is bound here and in the workspace; pass --update to replace the local binding with { workspace = true }`<!-- doc-ref: planned -->, then both bindings |
+| add, root absent | `hirsel: sha256:<P> is not in the package store` |
+| add, toolchain | `hirsel: the toolchain does not provide <id>` |
+| add, not a member | `hirsel: <dir> is not a member of the workspace at <root manifest>` |
+| add, no asset | `hirsel: no release asset <package>.hpkg at <url>` |
+| add, bad redirect | `hirsel: unexpected latest redirect <location>` |
+| add, virtual root | `hirsel: <root manifest>: no package manifest here; pass --workspace to declare it for the workspace`<!-- doc-ref: planned --> |
+| add, no workspace | `hirsel: <manifest>: no [workspace]; hirsel add does not create a workspace boundary`<!-- doc-ref: planned --> |
+| add, root on a local form | `hirsel: --root applies to a fetched archive`<!-- doc-ref: planned --> |
+
+Resolution refusals (diamond, member and root, cycles) are the rows above, reported against the
+edited manifests before anything is written. A failure after `add` has renamed a manifest is
+exit status 1, not a refusal: its block names what was committed, what was not, and the command
+that completes it (the same `hirsel add`<!-- doc-ref: planned --> again). A partial cache write (section 7) is exit 2
+with `cache: partial` and the I/O error.
+
 ## 10. Keys, reuse and the recipe
 
 Every key that decides reuse already hashes the content it covers. This section says how a
@@ -785,6 +830,7 @@ R built from it, equal those of a build from fresh source.
 | `hirsel pack [DIR] --output FILE` | publishes the member at DIR (section 6) |
 | `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
+| `hirsel add SOURCE`<!-- doc-ref: planned --> | binds one dependency in a manifest and updates the lock (below; not built) |
 
 Inspect a dependency by its manifest name from the package that declares it.
 An archive supplies its head package and verified dependency closure.
@@ -796,6 +842,137 @@ writing it, which is the CI freshness check. `hirsel fetch --locked` followed by
 `--frozen` build over the same store is the offline build. `hirsel publish` keeps its meaning:
 it prints an executable's R ([launch](launch.md#release-recipe-and-host-assembly)), and a
 library is published by `pack`.
+
+### Adding a dependency
+
+*Specified, not built (the dev/add design's slices S6-S9).* `hirsel add`<!-- doc-ref: planned --> is the one command
+that edits a manifest. It adds or updates one dependency binding and the lock with it:
+
+`hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+
+| `SOURCE` | Fetches | Writes |
+|---|---|---|
+| `https://…` | one GET, `https` redirects only | `name = { major, root, url = "<as typed>" }` |
+| `github:OWNER/REPO[/PACKAGE][@TAG]` | at most one metadata lookup (untagged), then one archive GET | `url = "https://github.com/OWNER/REPO/releases/download/TAG/PACKAGE.hpkg"` |
+| a path ending `.hpkg` | a read confined to its directory descriptor | `name = { major, root, archive = "<relative to the declaring manifest>" }` |
+| `sha256:HEX` | nothing; the root must be in the package store | `name = { major, root }` |
+| `NAME@MAJOR` | nothing; the toolchain must provide it | `name = { major }` |
+| a directory holding `hirsel.toml` | nothing; it must be a listed member | `name = { major, path = "<relative to the declaring manifest>" }` |
+
+The name and major come from the fetched head (there is no rename). `--root`<!-- doc-ref: planned --> names the head
+root the archive must have (`Root::of` its head bytes, section 1) and applies only to the URL,
+`github:` and archive forms: it is a second witness for first use. `--update`<!-- doc-ref: planned --> allows a new root
+for a source already bound, or a change to a binding other members consume. `--dry-run`<!-- doc-ref: planned --> does
+everything before publication; verified archives may still enter the store. `--json` prints one
+object. `--locked` and `--frozen` refuse.
+
+**Which manifest.** The nearest `hirsel.toml` with a `[package]`, walking up from the working
+directory, or the workspace root when it has none (then `--workspace`<!-- doc-ref: planned --> is required).
+
+**Bindings already present.** The same URL or archive already bound to another root is treated
+as immutable: other bytes there are a moved tag or tampering, so `add` refuses and prints both
+roots, and `--update`<!-- doc-ref: planned --> accepts the new one. A different URL or archive for a name already bound
+replaces the binding and prints the old and new roots; naming a new source is how a dependency
+is updated when there are no version ranges.
+
+**Paths and placement.** Every `path` and `archive` is written relative to the manifest that
+declares it (section 2). A member at `apps/ui` adding `vendor/pkg.hpkg` at the workspace root
+writes `../../vendor/pkg.hpkg` in its own manifest, or `vendor/pkg.hpkg` in the root's
+`[workspace.dependencies]`.
+
+| Context | Without `--workspace`<!-- doc-ref: planned --> | With it |
+|---|---|---|
+| listed member | the member's `[dependencies]` | root `[workspace.dependencies]`, then the member's `{ workspace = true }`: two operations |
+| root that is also a package | its `[dependencies]` | both tables in the one root manifest: one operation |
+| virtual root | refused | declaration only: no member gains an edge, so the lock may stay identical (section 4) |
+| package with no `[workspace]` above | its `[dependencies]` | refused |
+| directory not listed, or nested under another root | refused by discovery | refused |
+
+A member that already binds the name and asks for `--workspace`<!-- doc-ref: planned --> is
+refused naming both bindings; `--update`<!-- doc-ref: planned --> replaces the local binding
+with `{ workspace = true }`. Changing a `[workspace.dependencies]` entry that members consume
+needs `--update`<!-- doc-ref: planned --> and prints the consuming members.
+
+**Transaction.** In this order, and nothing is written before step 8:
+
+1. Refuse `--locked` and `--frozen`. Take the workspace lock (`flock` on the workspace root's
+   directory descriptor), which excludes a concurrent `add`.
+2. Capture each target manifest and `hirsel.lock`: bytes and file identity.
+3. For an untagged `github:` reference, look up the latest tag (below).
+4. Capture the archive **once**: one capped HTTPS body or one confined read. Decode it once and
+   verify it as section 7 does: the head's root, every entry, and the whole reachable closure
+   (identities, published edges, missing, extra and duplicate entries), even for children the
+   store already holds. A failure refuses with the store untouched. One buffer and one decode
+   serve verification, resolution and admission; a body over the limit stops at the cap with
+   nothing admitted.
+5. With `--root`<!-- doc-ref: planned -->, a head root that differs refuses with the store untouched. Then the
+   same-source check, keyed on the URL or archive, not on the fetched name: the same source
+   bound to another root refuses without `--update`<!-- doc-ref: planned -->.
+6. Admit those same bytes to the store (section 7, including its I/O case).
+7. Build the edited manifests in memory and resolve the workspace through the real resolver on
+   that overlay. Every refusal of section 5 refuses here, with nothing written. Roots the
+   resolution needs that the store lacks are fetched under `fetch`'s rules and listed as
+   `fetched`, never silently. If every target manifest already has the same name, root and
+   source, the result is `unchanged`: derive and commit the lock if it is missing or stale, and
+   exit 0. `--dry-run`<!-- doc-ref: planned --> prints and exits 0 here.
+8. Capture each target manifest again; bytes or file identity that differ from step 2 refuse
+   (`changed while hirsel add ran`<!-- doc-ref: planned -->), never merge.
+9. **Publish one manifest:** write it to a temporary file beside it, fsync, rename over it,
+   fsync the directory. Then derive `hirsel.lock` from the committed manifests, never from the
+   overlay, and commit it as section 8 does.
+10. For `--workspace`<!-- doc-ref: planned --> at a listed member, publish the second manifest the same way, then the
+    lock again.
+
+**Split operations.** Each operation changes exactly one manifest and leaves a valid workspace
+by itself: a `[workspace.dependencies]` entry no member consumes adds no edge and no lock row
+(section 4), so "root declared, member not yet consuming" is a workspace every reader (an
+editor, `build`, `dev`'s watcher, git) already understands. A crash or failure between the two
+operations is reported as `partial` with exit 1, naming the committed manifest and the pending
+one; running the same `add` again completes it, and the root step then reports `unchanged`. A
+crash between a manifest rename and the lock commit leaves a stale lock, which the next
+unlocked command or the next `add` repairs and `--locked` reports. There is no intent journal:
+readers that do not take the lock would not see it.
+
+The edit preserves the file's formatting and comments. A new key goes in sorted position when
+its table is sorted, and last otherwise; a missing `[dependencies]` is created after
+`[package]`. The URL written is the canonical locator (as typed, or the constructed GitHub
+download URL), never a redirect target.
+
+**`github:` references.** `github:OWNER/REPO[/PACKAGE][@TAG]` names the release asset
+`PACKAGE.hpkg`, `PACKAGE` defaulting to `REPO`. Tagged, the URL is
+`https://github.com/OWNER/REPO/releases/download/TAG/PACKAGE.hpkg` with `TAG` percent-encoded
+as one path component, and nothing is looked up. Untagged, `add` makes one bounded request to
+`https://github.com/OWNER/REPO/releases/latest` that does not follow redirects and reads the
+first `Location`. It must be `https://github.com/OWNER/REPO/releases/tag/<TAG>` with the same
+owner and repository, and `<TAG>`, percent-decoded, must be one non-empty component; anything
+else refuses. The tagged URL is then fetched by one archive GET. The saved URL names a tag, not
+content: a release asset can be replaced or deleted. The pinned root makes changed content
+fail, but deletion still breaks a cold fetch. Hirsel does not fetch by asset ID.
+
+**Output.**
+
+```text
+hirsel: added json@1 sha256:cf1e…9a02 to hirsel.toml
+        from https://example.org/json-1.hpkg (3 packages, 41 KiB, 2 new in the store)
+hirsel: updated hirsel.lock:
+        + json@1 sha256:cf1e…9a02 url:https://example.org/json-1.hpkg
+        + text@2 sha256:77ab…10fe via:json@1
+```
+
+An update prints `hirsel: updated json@1 sha256:OLD… -> sha256:NEW…`; `--dry-run`<!-- doc-ref: planned --> prints `would
+add` and `would update`; a partial completion prints the committed manifest, the pending one,
+and `run the same hirsel add again to finish`<!-- doc-ref: planned -->. With `--json`, one object:
+
+```json
+{"result":"added","id":"json@1","root":"sha256:cf1e…","source":"url:https://example.org/json-1.hpkg",
+ "committed":["hirsel.toml","hirsel.lock"],"pending":[],"previous_root":null,"dry_run":false,
+ "cache":"complete","fetched":[],
+ "closure":[{"id":"json@1","root":"sha256:cf1e…","new":true},{"id":"text@2","root":"sha256:77ab…","new":true}]}
+```
+
+`result` is `added`, `updated`, `unchanged` or `partial`, and `cache` is `complete` or
+`partial`. Exit statuses: 0 for `added`, `updated`, `unchanged` or a dry run; 2 for a refusal
+before any manifest rename (section 9); 1 for a failure after one, including `partial`.
 
 ## 12. Bug laws
 
@@ -1132,3 +1309,73 @@ image. Rename the file to `new.hirsel`, module and bytes unchanged. The failure 
 app` reports now names its site in `json@1/new.hirsel`, and `hirsel publish app`
 prints the R of a cold run with no image, on the warm image path as on the cold one. The law
 catches an image keyed without file names and a producer that synthesises names.
+
+**Laws for `hirsel add`<!-- doc-ref: planned -->** (specified, not built; the design slice's own number in parentheses).
+X and Y are `jx`'s and `jy`'s roots and W is `wrap@1`'s (L6). Each `add` runs in a workspace
+whose `hirsel.toml` and `hirsel.lock` bytes the law records before it starts.
+
+**L15 (L6.1). A refused add changes no file.** The workspace resolves `json@1` at X through
+member `a`. Package `app` runs `hirsel add`<!-- doc-ref: planned --> on an archive whose closure holds `json@1` at Y
+(`wrap@1` rebuilt over `jy`). It exits 2 with the diamond refusal, and every manifest and
+`hirsel.lock` is byte-identical afterwards. The law catches Cargo's order: writing the manifest
+before resolving it.
+
+**L16 (L6.2). `--root`<!-- doc-ref: planned --> stops a substituted archive.** `vendor/jx.hpkg` holds `jy`'s archive;
+`hirsel add vendor/jx.hpkg --root <X>`<!-- doc-ref: planned --> exits 2 with
+`fetched root differs from --root`<!-- doc-ref: planned --> naming Y and X, writes nothing, and the store holds no entry
+named Y.
+
+**L17 (L6.3). The written binding builds offline, warm and cold.** After `hirsel add`<!-- doc-ref: planned --> of
+`vendor/jx.hpkg`, `hirsel build --frozen` passes with no network, and passes again over an
+empty store after `hirsel fetch` from the written source alone.
+
+**L18 (L6.4). The same source with other bytes is refused.** After adding `vendor/jx.hpkg`,
+replace the file with `jy`'s archive: `hirsel add vendor/jx.hpkg`<!-- doc-ref: planned --> exits 2 naming X and Y, and
+with `--update`<!-- doc-ref: planned --> it binds Y.
+
+**L19 (L6.5). Comments and order are kept.** A manifest with comments and a sorted
+`[dependencies]` gains the new key in sorted position, every other byte unchanged; the oracle is
+a hand-written expected file.
+
+**L20 (L6.6). One capture.** An HTTPS fixture that serves `jx`'s archive and then `jy`'s for the
+same URL gets exactly one request, and the admitted entries are X's. A local archive replaced
+after its read is read once. A head whose name changed cannot evade the same-source rule.
+
+**L21 (L6.7). Caps and partial admission.** A streamed response over 512 MiB, a bad final
+entry, and a missing or extra closure entry each admit nothing. An I/O failure injected during
+admission reports `cache: partial` and changes no manifest. One peak-RSS reading on a
+near-limit fixture and on many small entries stays under the 2 GiB cap.
+
+**L22 (L6.8). Crash points.** A crash after the manifest rename and before the lock commit
+leaves a lock that `hirsel lock` repairs, and the next `add`, even `unchanged`, repairs it too.
+Two concurrent adds of different sources both end committed or one refuses; neither loses the
+other's binding. The oracle is the lock `hirsel lock` derives from the committed manifests.
+
+**L23 (L7.1). An untagged GitHub reference is saved as a tag URL.** Against a local HTTPS
+fixture standing in for the release host, `github:o/r` with `latest` redirecting to
+`…/releases/tag/v1` writes `url = "https://github.com/o/r/releases/download/v1/r.hpkg"`, the
+URL built by hand.
+
+**L24 (L7.2). Bad redirects and moved content.** A `latest` redirect to another host, another
+repository, or a tag holding an escaped `/` refuses; a moved tag or replaced asset fails the
+pinned root; a deleted asset fails a cold fetch with the fetch diagnostic.
+
+**L25 (L8.1). Two members share one binding.** Two members adding `vendor/jx.hpkg` with
+`--workspace`<!-- doc-ref: planned --> end with one `[workspace.dependencies]` entry and two
+`{ workspace = true }` bindings.
+
+**L26 (L8.2). Paths are relative to the declaring manifest.** A member at `apps/ui` adding
+`vendor/jx.hpkg` writes `../../vendor/jx.hpkg` locally and `vendor/jx.hpkg` in the root, and a
+cold fetch from each succeeds.
+
+**L27 (L8.3). A virtual root only declares.** `--workspace`<!-- doc-ref: planned --> at a
+virtual root leaves `hirsel.lock` byte-identical.
+
+**L28 (L8.4). Partial completion.** A crash between the root and member operations leaves a
+workspace that `hirsel lock --locked` accepts after one derive, and rerunning the same `add`
+completes it. Two members with different local pins of `json@1` (X and Y) refuse through the
+resolver's diamond rule.
+
+**L29 (S9). Forms that fetch nothing.** `hirsel add json@1`<!-- doc-ref: planned --> for a
+toolchain package and `hirsel add ../a`<!-- doc-ref: planned --> for a listed member each write
+a binding that the next `--frozen` build accepts.

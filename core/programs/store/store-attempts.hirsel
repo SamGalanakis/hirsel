@@ -1,0 +1,221 @@
+// The drivers that run one call's or one read's attempts (§13.3): each
+// attempt runs the body over the pin map the driver holds, and a latched
+// miss is delivered into that map before the body runs again.
+
+// Abort and rerun (§13.3): each attempt runs the body at the head with a
+// fresh attempt record over the call's pin map. A latched miss is delivered
+// into the map and the body reruns; any other latch decides the call.
+fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Stage[R, A], Error] waits {
+    let mut pins = empty_tiered_pins(call_pin_root(db, i), db.writer_pin_bytes)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    loop {
+        let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes)
+        let staged = stage(mut db, i, wall, steps, keep_reply, attempt, pins.frames, body)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            return Ok(take staged)
+        }
+        match state.stopped {
+            None => return Ok(take staged),
+            Some(AttemptPinLimit(problem)) => return Ok(Over(Refused(Cache(problem)))),
+            Some(AttemptAllocation(problem)) => return Ok(Over(Refused(Allocation(problem)))),
+            Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
+            Some(AttemptMiss(_)) => {
+                let SeekKey(sought) = view state.seek else {
+                    fail("store: a call's miss has no seek key")
+                }
+                let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+                    Some(requests) => Some(view requests),
+                    None => None,
+                }
+                let source = tx_page_source(pager, db.heads[i].roots.collections, int.saturating_add(db.next_node, 1))?
+                serve_tiered_miss(source, call_pin_root(db, i), state, sought, TieredPoint, None, mut pins, mut pending)?
+            },
+        }
+    }
+}
+
+fn call_pin_root(db: Db, i: u64) -> TieredPinRoot {
+    let tree = view db.heads[i].roots.collections
+    let generation = match tree.paging {
+        Some(inventory) => inventory.generation,
+        None => 0,
+    }
+    TieredPinRoot(domain: open_number(db), branch: db.heads[i].id, generation: generation, root_stamp: tree_stamp(tree))
+}
+
+fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
+    // serve has no rerun loop yet (M3 S5 E): its attempt has no pins, so a
+    // Cold touch latches and the call is refused below.
+    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
+        let perform = scoped fn() -> Result[CallDraft, Capacity] {
+            let keep: Option[fn(ServeReply) -> bool] = None
+            let draft = bound bytes plan.n_e {
+                let reads: core.Log[Read] = log.new()
+                let issued: core.Log[u64] = log.new()
+                let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                    stage_reply(mut tx, complete, rec, plan.reply_max, body)
+                })
+                let finished = match prepare_metered_pages(take staged) {
+                    Ok(take ready) => take ready,
+                    Error(Full(problem)) => RolledBack(Refused(problem)),
+                    Error(take problem) => RolledBack(Aborted(Undone(value: StoreFailure(take problem), ticket: None))),
+                }
+                CallDraft(finished: take finished, reads: take reads, issued: take issued)
+            }
+            let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
+            // Encoding spends the call's steps and the head's frame bytes.
+            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, take result) {
+                Ok(take finished) => take finished,
+                Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
+            }
+            Ok(CallDraft(finished: take framed, reads: take reads, issued: take issued))
+        }
+        bound steps plan.s_e {
+            perform()
+        }
+    })
+    let mut next_id = db.next_node
+    let latched = match call_attempt_finish(take attempt) {
+        Some(take state) => take state.stopped,
+        None => None,
+    }
+    let staged: Stage[Bytes, ServeReply] = match latched {
+        Some(AttemptPinLimit(problem)) => Over(Refused(Cache(problem))),
+        Some(AttemptAllocation(problem)) => Over(Refused(Allocation(problem))),
+        Some(_) => Over(Aborted(Undone(value: StoreFailure(Io(Closed)), ticket: None))),
+        None => match take caught {
+        Error(problem) => Over(Refused(Allocation(problem))),
+        Ok(Error(take causes)) => match raised_capacity(causes) {
+            Some(problem) => Over(Refused(Allocation(problem))),
+            None => Over(Failed(Raised(take causes))),
+        },
+        Ok(Ok(Error(limit))) => Over(Stopped(limit)),
+        Ok(Ok(Ok(Error(problem)))) => Over(Refused(Allocation(problem))),
+        Ok(Ok(Ok(Ok(take draft)))) => {
+            let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
+            let consumed = log.finish(take issued)
+            for n in consumed {
+                if n > next_id {
+                    next_id = n
+                }
+            }
+            finish_stage(ci, take result, log.finish(take reads))
+        },
+        },
+    }
+    // A fault or step stop drops the private roots, so none of their IDs escape.
+    DraftedCall(stage: take staged, next_id: next_id)
+}
+
+fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
+    let tree = view tx.roots.collections
+    if list.len(key) < 4 {
+        return Ok(None)
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
+        return Ok(None)
+    }
+    if descriptor[53u64] != 1 {
+        return Ok(get_page_row(tree, key))
+    }
+    if descriptor[52u64] == 4 {
+        if list.len(key) != 12 {
+            return Ok(None)
+        }
+        let sequence: u64 = list.word_be(key, 4)
+        let window = descriptor_bounds(descriptor)
+        if sequence < window.first || sequence >= window.next {
+            return Ok(None)
+        }
+    }
+    if let Some(row) = tiered_replayed_row(tree, key) {
+        return Ok(match row.now {
+            ReplayPut(value) => Some(view value),
+            ReplayAbsent => None,
+        })
+    }
+    // The call made its attempt record because its head has this collection.
+    let Some(attempt) = tx.attempt else {
+        fail("store: a Tiered row read without an attempt record")
+    }
+    let inner = list.slice(key, 4, list.len(key))
+    tiered_seek(attempt, SeekKey(copied(inner)?))
+    let backing = TieredBorrowedRoot(edge: edge, pins: tx.pins)
+    let found = tiered_point_bytes(attempt, backing, inner)?
+    tiered_seek(attempt, SeekOperation)
+    Ok(found)
+}
+
+pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
+    read_access(r, s)?
+    if let None = steps {
+        if tiered_collections(s.roots.collections.root) {
+            return Error(Missing("steps"))
+        }
+    }
+    let partition = match r.pool {
+        Some(pool) => pool.grant.pin_bytes,
+        None => 0,
+    }
+    let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
+        Some(inventory) => inventory.generation,
+        None => 0,
+    }, root_stamp: tree_stamp(s.roots.collections))
+    let mut pins = empty_tiered_pins(root, partition)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    loop {
+        let attempt = call_attempt(s.roots.collections.root, partition)
+        let looked = look_attempt(s, steps, env, body, attempt, pins.frames)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            return Ok(take looked)
+        }
+        match state.stopped {
+            None => return Ok(take looked),
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Ok(Refused(Allocation(problem), list.new())),
+            Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
+            Some(AttemptMiss(_)) => {
+                let SeekKey(sought) = view state.seek else {
+                    fail("store: a look's miss has no seek key")
+                }
+                let Some(pool) = view r.pool else {
+                    return Error(Io(Closed))
+                }
+                let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
+                let source = tx_page_source(pager, s.roots.collections, s.watermark)?
+                serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
+            },
+        }
+    }
+}
+
+fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Looked[R] {
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Log[u64] = log.new()
+    let caught = isolate(fn() -> Result[R, OutOfTime] {
+        let perform = scoped fn() -> R {
+            let registry = empty_index_registry()
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+            body(tx, env)
+        }
+        match steps {
+            Some(n) => bound steps n {
+                perform()
+            },
+            None => Ok(perform()),
+        }
+    })
+    let _ = log.finish(take issued)
+    let seen = log.finish(take reads)
+    match take caught {
+        Error(c) => Refused(Allocation(c), take seen),
+        Ok(Error(take cs)) => match raised_capacity(cs) {
+            Some(c) => Refused(Allocation(c), take seen),
+            None => Failed(take cs, take seen),
+        },
+        Ok(Ok(Error(e))) => Stopped(e, take seen),
+        Ok(Ok(Ok(take value))) => Seen(Seen(value: take value, version: s.head, reads: take seen))
+    }
+}

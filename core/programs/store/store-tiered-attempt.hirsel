@@ -64,6 +64,30 @@ fn tiered_finish(take attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
     take state
 }
 
+// A call reads Tiered rows only from a head with Tiered collections, so only
+// such a call carries an attempt record and a Hot call allocates none.
+fn call_attempt(root: Arc[std.page.Page], partition: u64) -> Option[core.Cell[TieredTouchSet]] {
+    if tiered_collections(root) {
+        Some(tiered_attempt(partition, 0))
+    } else {
+        None
+    }
+}
+
+fn call_attempt_latched(attempt: Option[core.Cell[TieredTouchSet]]) -> bool {
+    match attempt {
+        Some(a) => tiered_stopped(a),
+        None => false,
+    }
+}
+
+fn call_attempt_finish(take attempt: Option[core.Cell[TieredTouchSet]]) -> Option[TieredTouchSet] {
+    match take attempt {
+        Some(take a) => Some(tiered_finish(take a)),
+        None => None,
+    }
+}
+
 fn tiered_touch_entry(mut a: TieredTouchSet, take t: TieredTouch) -> bool {
     let TieredTouch(stamp: stamp, payload: payload, miss: take miss) = take t
     tiered_settle(mut a)

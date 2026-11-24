@@ -293,7 +293,9 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let reads: core.Log[Read] = log.new()
     let issued: core.Log[u64] = log.new()
     let keep: Option[fn(Error) -> bool] = None
-    let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, scoped fn(mut tx: Tx) -> Result[(), Error] {
+    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
         tx.frame_bytes = Some(42)
         put_conflict_sequence(mut tx, items)
     })

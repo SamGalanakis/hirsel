@@ -46,6 +46,8 @@ type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u6
 pub opaque type Db {
     store: StoreId,
     pager: Option[Sender[TieredPagerMessage]],
+    // The writer partition every call's attempt is counted against (§13.2).
+    writer_pin_bytes: u64,
     indexes: IndexRegistry,
     fence: u32,
     disk: Option[DiskState],
@@ -495,6 +497,10 @@ pub opaque scoped type Tx {
     frame_tail: u64,
     reads: View[core.Log[Read]],
     issued: View[core.Log[u64]],
+    // The attempt record and the pin map it reads (§13.3, v2.81). The call's
+    // driver owns both, outside the body's isolation and step bound.
+    attempt: View[Option[core.Cell[TieredTouchSet]]],
+    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
     refusal: Option[Capacity],
     index_conflict: Option[String],
     frame_bytes: Option[u64],
@@ -585,7 +591,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
+    Db(store: id, pager: None, writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
 }
 
 pub type Accounts {
@@ -1148,7 +1154,10 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
         Some(Settlement(way: way, base: attempted.id.version - 1, at: attempted.at, seed: attempted.seed, stop: pending_run.stop))
     }
     let keep: Option[fn(ServeReply) -> bool] = None
-    let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+    // Saving a reply reads no Tiered row, so it carries no attempt record.
+    let attempt: Option[core.Cell[TieredTouchSet]] = None
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
         let held: Bytes = clone(output)
         let moved = take held
         match save_reply(mut tx, pending_run.completion, output, pending_run.record, settlement) {
@@ -1199,9 +1208,17 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
 
 fn append_transaction[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let wall = host.wall_ms(db.clock)
-    let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, steps, keep_reply, body) {
+    // A retry-capable call is bounded, so a body that loops on a caught
+    // Missed ends at its bound and the driver reruns it (§13.3).
+    if let None = steps {
+        if tiered_collections(db.heads[i].roots.collections.root) {
+            return Error(Missing("steps"))
+        }
+    }
+    let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, body)? {
         Over(take o) => Ok(take o),
-        Ran(take ran) => settle_admit(mut db, i, take ran)
+        Ran(take ran) => settle_admit(mut db, i, take ran),
+        Latched => fail("store: a decided stage is latched"),
     }
     handoff(mut db)?
     take outcome
@@ -1253,7 +1270,9 @@ type Ran[R, A] {
     reads: List[Read]
 }
 
-type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A])
+// Latched: the attempt's latch was set, so its result, writes, reads and
+// issued ids are discarded and the driver serves or refuses the stop.
+type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | Latched
 
 type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A])
 
@@ -1273,19 +1292,19 @@ type Prepared[R, A] {
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
-fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let no_record: Option[CallRecord] = None
-    stage_call(mut db, i, wall, steps, keep_reply, no_record, None, body)
+    stage_call(mut db, i, wall, steps, keep_reply, no_record, None, attempt, pins, body)
 }
 
 // The caller keeps owning the record so a refused publication can return it.
-fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Log[u64] = log.new()
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
-            let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, body)
+            let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
             let prepared = if let Some(_) = steps {
                 match prepare_metered_pages(take staged) {
                     Ok(take ready) => take ready,
@@ -1307,6 +1326,13 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             None => Ok(perform()),
         }
     })
+    // The latch is read before anything else: a latched attempt's ids and
+    // reads are discarded with it, so the watermark never depends on reruns.
+    if call_attempt_latched(attempt) {
+        let _ = log.finish(take issued)
+        let _ = log.finish(take reads)
+        return Latched
+    }
     let consumed = log.finish(take issued)
     // An overrun under rollback_writes_on_overrun drops its stamps, so a later
     // reservation may log a lower end: the watermark is the highest. The
@@ -1340,12 +1366,12 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
     None
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Log[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1474,59 +1500,6 @@ fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: 
         Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
         Ok(take drafted) => Ok(take drafted),
     }
-}
-
-fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
-    let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
-        let perform = scoped fn() -> Result[CallDraft, Capacity] {
-            let keep: Option[fn(ServeReply) -> bool] = None
-            let draft = bound bytes plan.n_e {
-                let reads: core.Log[Read] = log.new()
-                let issued: core.Log[u64] = log.new()
-                let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
-                    stage_reply(mut tx, complete, rec, plan.reply_max, body)
-                })
-                let finished = match prepare_metered_pages(take staged) {
-                    Ok(take ready) => take ready,
-                    Error(Full(problem)) => RolledBack(Refused(problem)),
-                    Error(take problem) => RolledBack(Aborted(Undone(value: StoreFailure(take problem), ticket: None))),
-                }
-                CallDraft(finished: take finished, reads: take reads, issued: take issued)
-            }
-            let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
-            // Encoding spends the call's steps and the head's frame bytes.
-            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, take result) {
-                Ok(take finished) => take finished,
-                Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
-            }
-            Ok(CallDraft(finished: take framed, reads: take reads, issued: take issued))
-        }
-        bound steps plan.s_e {
-            perform()
-        }
-    })
-    let mut next_id = db.next_node
-    let staged: Stage[Bytes, ServeReply] = match take caught {
-        Error(problem) => Over(Refused(Allocation(problem))),
-        Ok(Error(take causes)) => match raised_capacity(causes) {
-            Some(problem) => Over(Refused(Allocation(problem))),
-            None => Over(Failed(Raised(take causes))),
-        },
-        Ok(Ok(Error(limit))) => Over(Stopped(limit)),
-        Ok(Ok(Ok(Error(problem)))) => Over(Refused(Allocation(problem))),
-        Ok(Ok(Ok(Ok(take draft)))) => {
-            let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
-            let consumed = log.finish(take issued)
-            for n in consumed {
-                if n > next_id {
-                    next_id = n
-                }
-            }
-            finish_stage(ci, take result, log.finish(take reads))
-        },
-    }
-    // A fault or step stop drops the private roots, so none of their IDs escape.
-    DraftedCall(stage: take staged, next_id: next_id)
 }
 
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
@@ -1998,10 +1971,15 @@ fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
     Ok(())
 }
 
-fn fetch_logical(tx: Tx, take key: Bytes) -> Option[View[Bytes]] in tx {
-    let found = transaction_row(tx, key)
+// A Tiered row is resolved before its Point is logged, so the first touch's
+// count precedes the logical append on every path (§13.3).
+fn fetch_logical(tx: Tx, take key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
+    let found = match staged_row(tx, key) {
+        Some(staged) => staged,
+        None => tx_page_row(tx, key)?,
+    }
     log.append(tx.reads, Point(take key))
-    found
+    Ok(found)
 }
 
 fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
@@ -2461,22 +2439,30 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
 }
 
 fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
+    match staged_row(tx, key) {
+        Some(staged) => staged,
+        None => get_page_row(tx.roots.collections, key),
+    }
+}
+
+// The row this Tx or a layer beneath it staged for key, if any.
+fn staged_row(tx: Tx, key: Bytes) -> Option[Option[View[Bytes]]] in tx {
     if let Some(slot) = op_slot(tx.ops, key) {
-        return match data_row(tx.ops.rows, slot).value {
+        return Some(match data_row(tx.ops.rows, slot).value {
             Some(raw) => Some(staged_bytes(raw)),
             None => None,
-        }
+        })
     }
     if let Some(at) = newest_layer(tx.below, false, key) {
         let layer = view tx.below[at]
         if let Some(slot) = op_slot(layer.ops, key) {
-            return match data_row(layer.ops.rows, slot).value {
+            return Some(match data_row(layer.ops.rows, slot).value {
                 Some(raw) => Some(staged_bytes(raw)),
                 None => None,
-            }
+            })
         }
     }
-    get_page_row(tx.roots.collections, key)
+    None
 }
 
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
@@ -3023,7 +3009,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Byt
     let mut p: Bytes = list.with_capacity(12)
     list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
-    Ok(fetch_logical(tx, take p))
+    fetch_logical(tx, take p)
 }
 
 pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
@@ -3811,35 +3797,6 @@ pub type Seen[R] {
     value: R,
     version: u64,
     reads: List[Read]
-}
-
-pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
-    read_access(r, s)?
-    let reads: core.Log[Read] = log.new()
-    let issued: core.Log[u64] = log.new()
-    let caught = isolate(fn() -> Result[R, OutOfTime] {
-        let perform = scoped fn() -> R {
-            let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, index_conflict: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
-            body(tx, env)
-        }
-        match steps {
-            Some(n) => bound steps n {
-                perform()
-            },
-            None => Ok(perform()),
-        }
-    })
-    let seen = log.finish(take reads)
-    match take caught {
-        Error(c) => Ok(Refused(Allocation(c), take seen)),
-        Ok(Error(take cs)) => match raised_capacity(cs) {
-            Some(c) => Ok(Refused(Allocation(c), take seen)),
-            None => Ok(Failed(take cs, take seen)),
-        },
-        Ok(Ok(Error(e))) => Ok(Stopped(e, take seen)),
-        Ok(Ok(Ok(take value))) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
-    }
 }
 
 pub type Change {

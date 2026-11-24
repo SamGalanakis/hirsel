@@ -58,30 +58,14 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
         // body ended, an isolated failure included.
         let state = tiered_finish(take attempt)
         match state.stopped {
-            Some(AttemptMiss(target)) => {
-                let failed_here = match pending {
-                    Some((failed, _)) => tiered_frame_id(failed) == tiered_frame_id(target),
-                    None => false,
-                }
-                if failed_here {
-                    let (_, take problem) = option.unwrap(replace(mut pending, None))
-                    return Error(take problem)
-                }
+            Some(AttemptMiss(_)) => {
                 let sought = match state.seek {
                     SeekKey(secondary) => view secondary,
                     SeekUpper => option.unwrap(upper),
                     SeekOperation => view key,
                 }
-                let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
-                    siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
-                let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
+                serve_tiered_miss(source, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
                 window = int.saturating_mul(window, 2)
-                for frame in frames {
-                    let _ = tiered_install_pin(mut pins, root, state.stamps, frame)?
-                }
-                if let Some(take refused) = take failure {
-                    pending = Some(take refused)
-                }
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
@@ -92,4 +76,43 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
             },
         }
     }
+}
+
+// Delivers a latched miss's batch into the pin map, in the order the batch
+// names it. A target whose delivery failed once fails the read or call when
+// an attempt demands it again.
+fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection,
+    take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+    let Some(AttemptMiss(target)) = view state.stopped else {
+        fail("store: only a latched miss is delivered")
+    }
+    let failed_here = match pending {
+        Some((failed, _)) => tiered_frame_id(failed) == tiered_frame_id(target),
+        None => false,
+    }
+    if failed_here {
+        let (_, take problem) = option.unwrap(replace(mut pending, None))
+        return Error(take problem)
+    }
+    let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
+        siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant)
+    let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
+    for frame in frames {
+        let _ = tiered_install_pin(mut pins, root, state.stamps, frame)?
+    }
+    if let Some(take refused) = take failure {
+        pending = Some(take refused)
+    }
+    Ok(())
+}
+
+// The source a Tx attempt's misses are served from, at the root it reads.
+fn tx_page_source(pager: Option[View[Sender[TieredPagerMessage]]], tree: PageTree, next_stamp: u64) -> Result[TieredPageSource, Error] {
+    let Some(requests) = pager else {
+        return Error(Io(Closed))
+    }
+    let Some(inventory) = view tree.paging else {
+        fail("store: a Cold edge has no pack inventory")
+    }
+    Ok(TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(inventory.packs), next_stamp: next_stamp, deadline: 0))
 }

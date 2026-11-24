@@ -1,0 +1,115 @@
+// L63 (a), (b): a call's Tiered reads abort and rerun (§13.3 "Abort and rerun").
+
+// Rows 1, 3, 5 in a Cold `rows` collection with the pager running, plus a Hot
+// `marks` table the bodies write to.
+fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db, (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = create_table(mut db, spec("marks", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let marks = table(mut db, "marks", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L63: fixture inserts did not commit")
+    }
+    l62_prepare_snapshot_pages(mut db, fixtures, rows.id, 8)?
+    db.writer_pin_bytes = 1048576
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: db.writer_pin_bytes, pager_task_bytes: 1048576, cut_pins: false)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = call(mut db, (rows, marks))
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
+}
+
+// Reads `marks` back through a Hot body.
+fn l63_mark(mut db: Db, marks: Table[u64, u32], k: u64) -> Result[Option[u32], Error] waits {
+    let Committed(done) = run(mut db, Some(100000), (copy_env(marks), k), fn(mut tx: Tx, env: (Table[u64, u32], u64)) -> Result[Option[u32], Error] {
+        fetch(tx, env.0, env.1)
+    })? else {
+        fail("L63: reading a mark did not commit")
+    }
+    Ok(done.value)
+}
+
+// (a) The first attempt misses row 3 and its body, catching the failure in
+// `isolate`, retries forever until the step bound stops it; the driver discards that attempt, delivers the
+// page and reruns, and the rerun hits and commits once. Unbounded, the same call
+// is refused before it runs, since a body that loops on the miss never ends.
+fn l63_retry_until_hit(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
+    let before = version(snapshot(db))
+    let unbounded = run(mut db, None, copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
+        let _ = fetch(tx, env.0, 3u64)?
+        Ok(())
+    })
+    let Error(Missing(what)) = unbounded else {
+        fail("L63: an unbounded call over a Tiered collection is refused as Missing(steps)")
+    }
+    if what != "steps" {
+        fail("L63: an unbounded call names its missing step bound")
+    }
+    let Committed(_) = run(mut db, Some(100000), copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
+        loop {
+            let caught = isolate(fn() -> Result[Option[u32], Error] {
+                fetch(tx, env.0, 3u64)
+            })
+            match caught {
+                Ok(Ok(Ok(Some(v)))) => {
+                    put(mut tx, env.1, 2u64, v)?
+                    return Ok(())
+                },
+                Ok(Ok(Ok(None))) => fail("L63: row 3 is in the Cold page"),
+                _ => (),
+            }
+        }
+    })? else {
+        fail("L63: the rerun after the delivered miss commits")
+    }
+    if version(snapshot(db)) != before + 1 {
+        fail("L63: the call commits exactly once")
+    }
+    if l63_mark(mut db, handles.1, 2)? != Some(30) {
+        fail("L63: the committed attempt read row 3 as 30")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_caught_miss_reruns_and_commits_once(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l63_call_fixture(d, c, tasks, l63_retry_until_hit)
+}
+
+// (b) A body that answers its miss by writing a fallback and returning Ok
+// commits nothing from that attempt: only the rerun's write survives.
+fn l63_fallback_discarded(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
+    let before = version(snapshot(db))
+    let Committed(_) = run(mut db, Some(100000), copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
+        match fetch(tx, env.0, 5u64) {
+            Ok(Some(v)) => put(mut tx, env.1, 2u64, v),
+            Ok(None) => fail("L63: row 5 is in the Cold page"),
+            Error(_) => put(mut tx, env.1, 1u64, 1u32),
+        }
+    })? else {
+        fail("L63: the rerun after the delivered miss commits")
+    }
+    if version(snapshot(db)) != before + 1 {
+        fail("L63: the call commits exactly once")
+    }
+    if l63_mark(mut db, handles.1, 1)? != None {
+        fail("L63: the missed attempt's fallback write is discarded")
+    }
+    if l63_mark(mut db, handles.1, 2)? != Some(50) {
+        fail("L63: the rerun's write commits with row 5 as 50")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_missed_attempt_fallback_commits_nothing(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l63_call_fixture(d, c, tasks, l63_fallback_discarded)
+}

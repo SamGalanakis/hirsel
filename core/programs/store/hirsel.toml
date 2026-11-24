@@ -8,6 +8,7 @@ std = { major = 1 }
 
 [sources]
 "store.hirsel" = "store"
+"store-attempts.hirsel" = "store"
 "sizes.hirsel" = "store"
 "store-journal-worker.hirsel" = "store"
 "store-journal-status.hirsel" = "store"
@@ -121,6 +122,7 @@ dirs = ["."]
 "tiered_snapshot_laws.hirsel" = "store"
 "tiered_pager_batch_laws.hirsel" = "store"
 "tiered_attempt_laws.hirsel" = "store"
+"tiered_call_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"

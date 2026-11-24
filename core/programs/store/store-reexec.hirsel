@@ -185,11 +185,14 @@ type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Log[u64] = log.new()
+    // A re-run has no pins: a Cold touch latches, and the verdict is Unknown.
+    let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(R) -> bool] = None
-                let staged = draft_body(db, registry, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[R, R] {
+                let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(take staged) {
@@ -203,6 +206,11 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
     })
     let _ = log.finish(take reads)
     let _ = log.finish(take issued)
+    if let Some(state) = call_attempt_finish(take attempt) {
+        if let Some(_) = state.stopped {
+            return RoomRefused
+        }
+    }
     let finished = match take caught {
         Error(problem) => return Halted(OutOfBytes(problem)),
         Ok(Error(take causes)) => return match raised_capacity(causes) {

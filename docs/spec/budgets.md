@@ -279,7 +279,7 @@ type, never from a number it copied. Two pieces do it, and nothing else prices a
 package's charge policy (the "Sizes are logical" paragraph of MEM-24): the size a field, an
 element, a channel item or a task result of type `T` counts. It is a primary
 ([LANG-5](syntax.md#lang-5-grammar)) and a constant: it may appear in a `const` initializer
-([LANG-20](language.md#lang-20-constants)), it costs no step and charges nothing. `T` is any
+([LANG-20](language.md#lang-20-constants)), it costs no step and charges nothing. A constant whose `bytes[T]` reaches the constant itself, through an `Inline` length in `T`, is refused as LANG-20's other cycles are. `T` is any
 complete type, `bytes[T]` in a generic body included: there it is `T`'s size at each
 instantiation, exactly as `channel.new(n)` in that body charges `n` × that size. An opaque type
 of another package is accepted, because its size is already observable through every charge
@@ -288,7 +288,7 @@ resource type counts 8 here, as wherever it is held; its block is priced by `cha
 below. `bytes[T]` is a source of truth for what a type counts and never a prediction of an
 engine's layout: an engine may hold fewer bytes (MEM-28).
 
-These examples are `text` until the parser has the form (IMPL item 1); they become `hirsel` fences with it.
+These examples are `text` until the parser has the form; they become `hirsel` fences with it.
 
 ```text
 type Pair { a: u64, b: u32 }

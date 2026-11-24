@@ -864,19 +864,21 @@ pub unsafe extern "C" fn hirsel_core_region_refill(
 }
 
 /// Admit `charge` against the current limit for storage the emitter already holds
-/// (a frame-backed list's bytes), allocating nothing. On success the pointer is
-/// the context; on refusal it is null with the Capacity, as `hirsel_core_alloc`.
+/// (a frame-backed list's bytes or log node), allocating nothing. The charge
+/// pins no record (`Payer::admit_frame`); `hirsel_core_frame_refund` returns it.
+/// On success the pointer is the context; on refusal it is null with the
+/// Capacity, as `hirsel_core_alloc`.
 /// # Safety
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_admit(
+pub unsafe extern "C" fn hirsel_core_frame_admit(
     context: *const Context,
     charge: u64,
     overflow: bool,
 ) -> Allocation {
     // SAFETY: the emitter supplies a live context.
     let task = unsafe { &*context };
-    match crate::block::admit_storage(task.payer(), (!overflow).then_some(charge)) {
+    match task.payer().admit_frame((!overflow).then_some(charge)) {
         Ok(()) => Allocation {
             pointer: context.cast_mut().cast(),
             capacity: Capacity {
@@ -984,21 +986,14 @@ pub unsafe extern "C" fn hirsel_core_refund(payer: *mut crate::limit::LimitRecor
     crate::limit::Payer::from_current(payer).refund(bytes);
 }
 
-/// Refund with the context-aware raw-word equality fast path. Equal nonzero
-/// payer/current refunds directly; otherwise follows the original payer. No
-/// status, admission or allocation. Tags may send an equal payer to the slow path.
+/// Return a frame charge that `hirsel_core_frame_admit` or an inline frame
+/// admission took, to the current limit. No status, admission or allocation.
 /// # Safety
-/// Context is task-exclusive; payer is retained by these exact outstanding bytes.
+/// Context is task-exclusive, in the body that admitted these exact bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_refund_in(
-    context: *const Context,
-    payer: *mut crate::limit::LimitRecord,
-    bytes: u64,
-) {
-    // SAFETY: caller transfers the live block's exact remaining charge.
-    unsafe {
-        crate::limit::Payer::from_current(payer).settle_in(&*context, bytes);
-    }
+pub unsafe extern "C" fn hirsel_core_frame_refund(context: *const Context, bytes: u64) {
+    // SAFETY: the emitter supplies a live context.
+    unsafe { (*context).payer().refund_frame(bytes) }
 }
 
 /// Scheduler handoff: bind the native task to this worker and apply pending

@@ -1032,11 +1032,7 @@ impl FunctionEmitter<'_> {
             }
             Inst::FrameRefund { charge } => {
                 let n = self.numeric(charge);
-                let payer = self.current_payer();
-                self.runtime_void(
-                    "hirsel_core_refund_in",
-                    &[ptr(CONTEXT), ptr(payer), word(n)],
-                );
+                self.runtime_void("hirsel_core_frame_refund", &[ptr(CONTEXT), word(n)]);
             }
             Inst::Copy { to, from, bytes } => {
                 let pieces = match self.body.addresses[to.index()].ty {

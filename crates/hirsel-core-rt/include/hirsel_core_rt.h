@@ -220,11 +220,11 @@ void hirsel_core_refunds_drain(const HirselCoreContext *);
 void hirsel_core_task_bind(const HirselCoreContext *);
 void *hirsel_core_region_refill(HirselCoreRegion *, size_t bytes, size_t alignment);
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
-/* Context-aware refund: compare raw payer word with current, direct when equal;
-   otherwise use original-payer lookup. No status/admission/allocation. */
-void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
-/* Admission without allocation, for storage the caller holds (frame bytes). */
-HirselCoreAllocation hirsel_core_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
+/* Admission without allocation, for storage the caller holds (frame bytes).
+   Frame charges move only the current record's available bytes. */
+HirselCoreAllocation hirsel_core_frame_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
+/* Return a frame charge to the current limit. No status/admission/allocation. */
+void hirsel_core_frame_refund(const HirselCoreContext *, uint64_t bytes);
 HirselCoreAllocation hirsel_core_admit_lent_frame(const HirselCoreContext *, uint8_t *frame, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_head(const HirselCoreContext *, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_tail(const HirselCoreContext *, uint8_t *head, size_t bytes, uint64_t charge, bool charge_overflow);

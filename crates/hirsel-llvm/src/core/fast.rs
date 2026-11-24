@@ -149,11 +149,16 @@ impl FunctionEmitter<'_> {
         (fits, available)
     }
     pub(super) fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
-        let left = self.bin(Binary::Sub, &Type::I64, available, charge);
-        self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
         let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, Type::I64);
         let used = self.bin(Binary::Add, &Type::I64, &outstanding, charge);
         self.store_native(payer, LIMIT_OUTSTANDING, Type::I64, &used);
+        self.admit_room(payer, charge, available);
+    }
+    /// Take `charge` from the payer's room only. Frame charges pin no record
+    /// (`Payer::admit_frame`), so they leave `outstanding` alone.
+    fn admit_room(&mut self, payer: &Value, charge: &Value, available: &Value) {
+        let left = self.bin(Binary::Sub, &Type::I64, available, charge);
+        self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
         if self.observe_charge {
             self.cold_void("hirsel_core_observe_charge", &[]);
         }
@@ -288,7 +293,8 @@ impl FunctionEmitter<'_> {
     }
     /// Admit `charge` for the frame bytes at `frame` (`alloc .. frame`): the own
     /// allocation's inline admission with nothing allocated. A refusal, overflow
-    /// or test probe takes `hirsel_core_admit`, which keeps the Capacity event.
+    /// or test probe takes `hirsel_core_frame_admit`, which keeps the Capacity event.
+    /// Frame charges move only the room: no block names the record.
     pub(super) fn frame_admit(
         &mut self,
         frame: &Value,
@@ -318,11 +324,11 @@ impl FunctionEmitter<'_> {
         let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
         self.likely(&fits, if self.test_hooks { slow } else { debit }, slow);
         self.block(debit);
-        self.admit_balance(&payer, charge, &available);
+        self.admit_room(&payer, charge, &available);
         self.br(done);
         self.block(slow);
         let (admitted, room) = self.allocation_cold(
-            "hirsel_core_admit",
+            "hirsel_core_frame_admit",
             &[
                 ptr(CONTEXT),
                 word(charge.clone()),

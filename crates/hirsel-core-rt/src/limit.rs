@@ -5,6 +5,8 @@
 //! their range; they do not add guards against incorrect generated bookkeeping.
 //! User-visible size arithmetic, Capacity and count-increment overflow stay checked.
 use crate::Capacity;
+#[path = "limit_admit.rs"]
+mod admit;
 #[path = "limit_refunds.rs"]
 mod refunds;
 use refunds::{Inbox, Post, Queue, Remote, closed};
@@ -523,39 +525,6 @@ impl Payer {
     fn root(self) -> Self {
         self.forest().root(self)
     }
-    #[inline(always)]
-    pub(crate) fn admit(self, bytes: Option<u64>) -> Result<(), Capacity> {
-        let payer = self;
-        #[cfg(any(test, feature = "testing"))]
-        let injected = payer.injected();
-        #[cfg(not(any(test, feature = "testing")))]
-        let injected = false;
-        // SAFETY: admission takes a canonical live payer under the
-        // task's exclusive custody. Block words canonicalize before admission.
-        let r = unsafe { &mut *payer.0.as_ptr().cast::<LimitRecord>() };
-        match bytes {
-            Some(n) if !injected && n <= r.available => {
-                r.available = r.available.wrapping_sub(n);
-                r.outstanding = r.outstanding.wrapping_add(n);
-                #[cfg(feature = "prof")]
-                payer.observe(r.available);
-                #[cfg(any(test, feature = "charge-observation"))]
-                crate::peak::sample();
-                Ok(())
-            }
-            n => Err(crate::tasks::capacity_refused(
-                n.unwrap_or(u64::MAX),
-                r.available,
-            )),
-        }
-    }
-    pub(crate) fn admit_run_owned(self, bytes: Option<u64>) -> Result<(), Capacity> {
-        self.admit(bytes)?;
-        self.domain()
-            .run_owned
-            .fetch_add(bytes.unwrap(), Ordering::Relaxed);
-        Ok(())
-    }
 
     /// Whether both payers belong to one unit's limit table.
     pub(crate) fn same_domain(self, other: Payer) -> bool {
@@ -567,13 +536,6 @@ impl Payer {
         self.domain().run_owned.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn injected(self) -> bool {
-        let f = self.forest();
-        f.attempts += 1;
-        f.fail
-            .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
-    }
     pub(crate) fn pin_zero(self) {
         let f = self.forest();
         f.retain(self);

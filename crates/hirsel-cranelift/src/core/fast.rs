@@ -78,11 +78,16 @@ impl Function<'_, '_, '_> {
         Ok((fits, available))
     }
     fn debit(&mut self, payer: Value, charge: Value, available: Value) -> Result<()> {
-        let available = self.b.ins().isub(available, charge);
         let held = self.load_word(payer, memory_layout::LIMIT_OUTSTANDING);
         let held = self.b.ins().iadd(held, charge);
-        self.store_word(payer, memory_layout::LIMIT_AVAILABLE, available);
         self.store_word(payer, memory_layout::LIMIT_OUTSTANDING, held);
+        self.debit_room(payer, charge, available)
+    }
+    /// Take `charge` from the payer's room only. Frame charges pin no record
+    /// (`Payer::admit_frame`), so they leave `outstanding` alone.
+    fn debit_room(&mut self, payer: Value, charge: Value, available: Value) -> Result<()> {
+        let available = self.b.ins().isub(available, charge);
+        self.store_word(payer, memory_layout::LIMIT_AVAILABLE, available);
         if self.observe_charge {
             self.c_call("hirsel_core_observe_charge", &[], &[], &[])?;
         }
@@ -169,7 +174,8 @@ impl Function<'_, '_, '_> {
     }
     /// Admit `charge` for frame bytes at `frame` (`alloc .. frame`): the own
     /// allocation's inline admission, with nothing allocated; a refusal, overflow
-    /// or test probe takes `hirsel_core_admit`, which keeps the Capacity event.
+    /// or test probe takes `hirsel_core_frame_admit`, which keeps the Capacity event.
+    /// Frame charges move only the room: no block names the record.
     pub fn frame_admit(
         &mut self,
         frame: Value,
@@ -192,12 +198,12 @@ impl Function<'_, '_, '_> {
         let inline = if self.testing { slow } else { admit };
         self.b.ins().brif(fits, inline, &[], slow, &[]);
         self.b.switch_to_block(admit);
-        self.debit(payer, charge, available)?;
+        self.debit_room(payer, charge, available)?;
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[frame.into(), zero.into()]);
         self.b.switch_to_block(slow);
         let values = self.c_call(
-            "hirsel_core_admit",
+            "hirsel_core_frame_admit",
             &[P, U, B],
             &[P, U, U],
             &[self.context, charge, overflow],

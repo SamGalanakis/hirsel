@@ -467,12 +467,11 @@ impl Function<'_, '_, '_> {
             }
             Inst::FrameRefund { charge } => {
                 let charge = self.get(charge);
-                let payer = self.current_limit();
                 self.c_call(
-                    "hirsel_core_refund_in",
-                    &[p, p, u],
+                    "hirsel_core_frame_refund",
+                    &[p, u],
                     &[],
-                    &[self.context, payer, charge],
+                    &[self.context, charge],
                 )?;
             }
             Inst::Copy { to, from, bytes } => {

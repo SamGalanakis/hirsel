@@ -209,6 +209,10 @@ def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path,
     stripped = []
 
     def strip_proof(method, path, body, answer):
+        # Keep the initial HEAD response authenticated so the open reaches
+        # the separate provider-qualification probe.
+        if method != b'GET' or not path.endswith(b'?location='):
+            return answer
         head, _, data = answer.partition(b'\r\n\r\n')
         fields = head.split(b'\r\n')
         kept = [field for field in fields if not field.lower().startswith(b'x-hirsel-sim-proof:')]

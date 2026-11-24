@@ -897,13 +897,14 @@ fn invisible_retry_drive(take job: KeyedHorizonDrive) waits {
     if let Error(_) = task.join(take first) {
         fail("X's lost delivery failed")
     }
-    // The held delivery then commits X's one effect, invisible to X, and
-    // every later delivery goes straight to the head.
-    result.unwrap(channel.send(head, take held))
+    // The held delivery then commits X's one effect, invisible to X. Its
+    // Told is in the relay's inbox before X retries, so the position is
+    // released first (http.md B-8: the position stays until its Told) and
+    // the retry is forwarded: the head answers it from the Duplicate.
+    let (during, held_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
+    let answer_to = l15_forward(head, during, take held)
+    result.unwrap(channel.try_send(answer_to, result.unwrap(channel.receive(held_from))))
     let pump = task.spawn(tasks, bytes 65536u64, InvisiblePump(from: take waiting, to: take head), invisible_pump)
-    // The Abandoned send kept its slot (V2), so X's retry receives that one
-    // run's answer: effect 1, not a second run.
-    invisible_expect(http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32), false, b"\"1\"")
     invisible_expect(http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32), true, b"\"1\"")
     // Y on a newer stream evicts X at one stream per Caller.
     invisible_expect(http_law_post(net, time, address, "/old", b"token", 8u32, 0u64, b"{}", 1000u32), false, b"\"2\"")
@@ -953,8 +954,8 @@ fn invisible_pump(take job: InvisiblePump) waits {
 }
 
 // Carry 1 (http.md B-7, B-8; transition rows 4 and 6c): X's first delivery
-// commits after its client saw an unmarked 409, the retry gets that run's
-// answer and the next one replays it, Y evicts X, X's next retry is a marked 410 that runs nothing, and
+// commits after its client saw an unmarked 409, the retry replays the one
+// effect, Y evicts X, X's next retry is a marked 410 that runs nothing, and
 // the effects are X = 1, Y = 2, then a new stream 3.
 @test
 fn http_invisible_retry_keeps_one_effect(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {

@@ -323,6 +323,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
+    let mut test_laws = false;
     let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
@@ -356,6 +357,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
+            Opt::Laws => test_laws = true,
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
@@ -651,7 +653,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .to_owned();
         }
     }
-    let needs_recording = recording_build || record_path.is_some() || replay_command || test_replay;
+    let needs_recording =
+        recording_build || record_path.is_some() || replay_command || test_replay || test_laws;
     let stored_recipe = if let Some(root) = recipe_root {
         if dir.is_some()
             || manifest.is_some()
@@ -1392,6 +1395,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 timeout: test_timeout,
                 runner: &runner,
                 replay: test_replay,
+                laws: test_laws,
+                plain_runtime: installed.as_ref().and_then(|i| {
+                    if charge_observation {
+                        i.observed_runtime(&target, false)
+                    } else {
+                        i.runtime(&target)
+                    }
+                }),
                 expect_verdict: expect_verdict.as_deref(),
                 cache: cache.as_ref(),
                 rerun: test_rerun,
@@ -1441,6 +1452,25 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
                     if let Some(state) = outcome.corpus {
                         row["property_corpus"] = state.into();
+                    }
+                    if test_laws {
+                        match outcome.laws {
+                            crate::test_run::LawReport::Observed(summary) => {
+                                if !json {
+                                    for line in summary.lines().skip(1).filter(|line| *line != "end" && !line.starts_with('\t')) {
+                                        println!("  {line}");
+                                    }
+                                }
+                                row["law_observation"] = summary.into();
+                            }
+                            state => {
+                                let note = state.unobserved();
+                                if !json {
+                                    println!("  {note}");
+                                }
+                                row["law_observation"] = note.into();
+                            }
+                        }
                     }
                     row
                 }

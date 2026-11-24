@@ -55,8 +55,8 @@ into a pass or a pass into a failure. It can make a comparison red, under
 
 ## Observation
 
-The runner learns how strong a law's evidence is by **observing completed calls of the
-std engine functions** in the test's run. It never asks the law what it found. A law's
+The runner learns how strong a law's evidence is by **observing the settled outcomes
+of outermost std engine calls** in the test's run. It never asks the law what it found. A law's
 match arms can still fail the test, which makes the law stricter, but they cannot raise
 its row.
 
@@ -72,13 +72,18 @@ its row.
 When one of them calls another, for example `check` calling `search`, only the outermost
 call is observed.
 
-**What is observed.** At a call's return, the observer reads:
+**What is observed.** The observer reads the outcome when the engine settles it, on
+return or, for a failing check, immediately before the engine raises its own failure:
 
 - the outcome the function computed, with its counts;
 - the configuration fields the outcome depends on: `Config.cases`, `max_choices`,
   `max_rejects` and `gen_steps`, or `Bounds.depth` and `states`;
 - the `FailureClass` of a `Found` (`Returned`, a cause kind, `OutOfTime` or `Capacity`);
 - for `sometimes`, the label and whether `cond` was true.
+
+Version note (2026-11-24, verify-observer-2037): specifies where a check that
+raises a failure yields its typed outcome to the observer. The outcome is attributed
+to the outermost check call.
 
 **The observer changes nothing in the program.** The observer obeys CAP-9's rules for a
 recording:

@@ -148,8 +148,9 @@
     "lines": 1076
   },
   "crates/hirsel-core-driver/src/cli.rs": {
-    "lines": 1337,
-    "reason": "h-release-1895"
+    "lines": 1345,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
     "lines": 1203
@@ -172,8 +173,9 @@
     "lines": 1634
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2927,
-    "reason": "h-release-1895"
+    "lines": 2920,
+    "raise_revision": 2,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1121
@@ -188,12 +190,14 @@
     "lines": 2184
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
-    "lines": 4287
+    "lines": 4308,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1948,
-    "raise_revision": 1,
-    "reason": "m3-s3-slots-2010"
+    "lines": 1978,
+    "raise_revision": 2,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2641,
@@ -204,15 +208,17 @@
     "reason": "stale-codec-1910"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1184
+    "lines": 1189,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2706,
-    "raise_revision": 1,
-    "reason": "m3-s3-slots-2010"
+    "lines": 2770,
+    "raise_revision": 2,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -303,12 +309,14 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2482,
-    "raise_revision": 4,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2488,
+    "raise_revision": 5,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
-    "lines": 1145
+    "lines": 1145,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
     "lines": 2181
@@ -461,10 +469,14 @@
     "lines": 1897
   },
   "crates/hirsel-llvm/src/core/cleanup.rs": {
-    "lines": 1585
+    "lines": 1573,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2604
+    "lines": 2593,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
     "lines": 1222

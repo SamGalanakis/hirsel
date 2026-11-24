@@ -516,6 +516,9 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn return_at(&mut self, block: usize, values: PoolRange<ValueId>) {
         self.step_refund();
+        if !self.body.parked_returns.contains(&BlockId(block as u32)) {
+            self.law_leave(true);
+        }
         if (self.abi.ok.is_some() || self.abi.record.is_some())
             && self.body.parked_returns.contains(&BlockId(block as u32))
         {
@@ -543,6 +546,7 @@ impl FunctionEmitter<'_> {
         }
     }
     pub(super) fn emit_failure_return(&mut self) {
+        self.law_leave(false);
         let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
             self.ret(&abi_ty, &int(1));

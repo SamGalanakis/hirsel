@@ -26,6 +26,7 @@ mod failure;
 mod fast;
 mod function;
 mod growth;
+mod law;
 mod memory;
 mod place;
 pub mod profile;

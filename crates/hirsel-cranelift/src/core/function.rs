@@ -68,6 +68,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub testing: bool,
     pub empty_bound: bool,
     pub observe_charge: bool,
+    pub(super) law: Option<c::law::Hooks>,
 }
 
 pub(super) fn emit(
@@ -283,6 +284,7 @@ pub(super) fn emit(
         testing: tables.trace_drops,
         empty_bound: !tables.observe_charge && fast::empty_bound(body),
         observe_charge: tables.observe_charge,
+        law: c::law::Hooks::pick(input, function, body, layouts),
         calls: calls::Calls::new(
             &tables.runtimes,
             signatures,
@@ -298,6 +300,7 @@ pub(super) fn emit(
         if i != 0 {
             f.b.switch_to_block(f.blocks[i]);
         }
+        f.law_enter(i)?;
         let fill = fills.get(i).copied().flatten();
         let original_index =
             if let Some(fill) = fill {
@@ -353,6 +356,9 @@ pub(super) fn emit(
         f.at_anchor(block.anchor, body.insts.len() as u32 + i as u32 + 1);
         match &body.terminators[i] {
             Terminator::Return(range) => {
+                if !body.parked_returns.contains(&BlockId(i as u32)) {
+                    f.law_leave(true)?;
+                }
                 let mut results = std::mem::take(&mut f.calls.results);
                 results.clear();
                 results.extend(
@@ -718,6 +724,13 @@ impl Function<'_, '_, '_> {
             }
             Inst::Call { call } => {
                 let call = &self.body.calls[call.index()];
+                if self
+                    .law
+                    .as_ref()
+                    .is_some_and(|law| law.delegates(self.input, call.callee))
+                {
+                    self.law_hook(None, hirsel_core_layout::law::DELEGATE, None)?;
+                }
                 if let Callee::Runtime(op) = call.callee {
                     return self.runtime_call(op, call);
                 }

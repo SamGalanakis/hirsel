@@ -2151,6 +2151,9 @@ pub struct Module {
     /// condition derived from the launch, outside the checked body encoding.
     #[serde(skip)]
     pub external_call_sites: bool,
+    /// Insert engine observations only while emitting a recording build.
+    #[serde(skip)]
+    pub law_observation: bool,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
@@ -2173,6 +2176,9 @@ impl Module {
     pub fn passes_caller_site(&self, function: FuncId) -> bool {
         let function = &self.functions[function.index()];
         crate::source::inherits_site(&self.instances[function.instance.index()])
+            || (self.law_observation
+                && crate::law::callee(&self.instances[function.instance.index()].definition)
+                    .is_some())
             || (self.external_call_sites && function.body.is_none())
     }
 

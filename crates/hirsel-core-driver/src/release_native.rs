@@ -241,6 +241,7 @@ pub(super) fn emit_release_image(
     ),
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
+    joined.law_observation = options.recording;
     let _context = hirsel_guard::process_memory_context(format!(
         "building the release image of {}",
         instance.definition.0.name

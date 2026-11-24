@@ -501,6 +501,7 @@ impl PrebuiltStd {
         let generator = Generator {
             target: &self.target,
             observe_charge: false,
+            recording: false,
         };
         let kin = generator.kin()?;
         let (key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules)?;
@@ -644,6 +645,7 @@ fn lower_module(
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
+    module.law_observation = options.recording;
     // The joined module holds every body LLVM lowers; the per-unit modules
     // are not read again, so they leave before the optimiser runs.
     drop(modules);
@@ -771,6 +773,7 @@ fn lower_module(
 struct Generator<'a> {
     target: &'a str,
     observe_charge: bool,
+    recording: bool,
 }
 
 /// The instance limit every release std is walked and lowered under: the
@@ -782,6 +785,7 @@ impl<'a> Generator<'a> {
         Self {
             target: &options.target,
             observe_charge: options.logical_charge_report.is_some(),
+            recording: options.recording,
         }
     }
 
@@ -799,6 +803,7 @@ impl<'a> Generator<'a> {
                 llvm,
                 self.target,
                 self.observe_charge,
+                self.recording,
                 !hirsel_llvm_lazy::core::facts_enabled(),
             ),
         )

@@ -34,13 +34,18 @@ the recording runtime. These commands make one:
 | `hirsel test app --limit N --laws` (planned) | runs each selected test in the recording build with law observation on ([law table](laws.md#observation)) |
 
 **Law observation** (planned, Verification Phase 1.3) is part of the recording runtime. A
-recording executable started with `HIRSEL_LAWS=PATH` writes into PATH the outcome summaries of
-completed `std.prop` and `std.model` engine calls, as [law table](laws.md) says. It is read and
+recording executable started with `HIRSEL_LAWS=PATH` writes into PATH the settled outcomes of
+outermost `std.prop` and `std.model` engine calls, as [law table](laws.md) says. The observer
+captures the outcome on return or, for a failing check, immediately before the engine raises its
+own failure. It is read and
 removed like `HIRSEL_RECORD`, works with recording on or off, and is under the same-observation
 rule below. A build without recording contains none of it.
 
 Version note (2026-11-24, verify-phase-spec-2034): adds planned law observation to the
 recording build, so CAP-9 keeps one build switch.
+
+Version note (2026-11-24, verify-observer-2037): defines the observation point for
+an engine check that raises a failure.
 
 A program whose entry reaches a foreign function has no recording build. Each of these
 commands refuses it before building, reading a tape or running native code, as

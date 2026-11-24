@@ -38,6 +38,8 @@ pub mod host_ops;
 mod isa;
 pub mod isolate;
 pub mod latest;
+#[cfg(feature = "record")]
+mod law;
 pub mod limit;
 #[cfg(feature = "prof")]
 mod mem_prof;

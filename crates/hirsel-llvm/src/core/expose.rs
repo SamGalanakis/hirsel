@@ -598,6 +598,10 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         .map(|(i, f)| {
             f.body.as_ref().filter(|b| {
                 !step_entry(i)
+                    && !(module.law_observation
+                        && hirsel_core_ir::law::observes(
+                            &module.instances[f.instance.index()].definition,
+                        ))
                     && price(b) <= 192
                     && b.blocks.len() <= 24
                     && b.insts.iter().all(supported)

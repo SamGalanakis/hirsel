@@ -2,14 +2,20 @@
 //! stop can end that process without ending another test's run.
 use crate::native::EntryDecl;
 use crate::property_corpus;
-use crate::{CheckProduct, NativeOptions, NativeStop, PackageProduct, Reachable, Store};
+use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::{ContentHash, DefPath};
+
+mod cache;
+mod laws;
+pub use cache::TestCache;
+use cache::test_key;
+pub(crate) use laws::LawReport;
+use laws::{law_file, law_report};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// Execution inputs are separate from the target-independent checking products
@@ -95,6 +101,7 @@ impl Runner {
             "LISTEN_PIDFDID",
             "HIRSEL_RECORD",
             "HIRSEL_RECORD_ID",
+            "HIRSEL_LAWS",
             SEED_ENV,
             property_corpus::ENV,
         ] {
@@ -113,7 +120,9 @@ pub struct TestOutcome {
     /// A cached result has no child time.
     pub wall_time: Duration,
     pub(crate) corpus: Option<&'static str>,
+    pub(crate) laws: LawReport,
 }
+
 impl TestOutcome {
     /// PROG-3 maps every Error, failure, stop and not-started outcome to nonzero.
     pub fn passed(&self) -> bool {
@@ -150,8 +159,6 @@ impl Source {
         }
     }
 }
-
-const TEST_PASS_SCHEMA: u32 = 2;
 
 /// PROG-4: of its run's grants a test is granted only those its parameters
 /// take, so a test without parameters is granted nothing and a grant one
@@ -205,79 +212,6 @@ fn private_directory(command: &mut Command) -> io::Result<tempfile::TempDir> {
     Ok(directory)
 }
 
-/// Reused passes of determined tests (PROG-4).
-pub struct TestCache {
-    store: Store,
-}
-
-impl TestCache {
-    /// A cache that cannot be opened leaves every test to execute.
-    pub fn open(root: &Path) -> Option<Self> {
-        Some(Self {
-            store: Store::new(root).ok()?,
-        })
-    }
-
-    pub fn default_root() -> PathBuf {
-        PackageProduct::default_cache().join("test-results")
-    }
-
-    fn get(&self, key: ContentHash) -> Option<Output> {
-        let bytes = self.store.get(key).ok()??;
-        let (TEST_PASS_SCHEMA, stdout, stderr) = crate::decode(&bytes)? else {
-            return None;
-        };
-        Some(Output {
-            status: ExitStatus::from_raw(0),
-            stdout,
-            stderr,
-        })
-    }
-
-    fn put(&self, key: ContentHash, output: &Output) {
-        if let Ok(bytes) = crate::encode(&(TEST_PASS_SCHEMA, &output.stdout, &output.stderr)) {
-            let _ = self.store.put_keyed(key, &bytes);
-        }
-    }
-}
-
-fn test_key(
-    test: &DefPath,
-    decl: &EntryDecl,
-    reached: &Reachable<'_>,
-    site_digest: ContentHash,
-    options: &NativeOptions,
-) -> Option<ContentHash> {
-    let address = reached.address(test).ok()?;
-    let inputs = reached.native.as_ref()?;
-    let environment = match &inputs.records {
-        Some(records) => records.digest,
-        None => {
-            let env = crate::native::environment(options, inputs.toolchain.runtime).ok()?;
-            ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]])
-        }
-    };
-    // A test may compare site words or write them in its output. Its annexes
-    // are keyed separately from the address of its code.
-    crate::native::key(
-        "hirsel.test-pass.v1",
-        &(
-            TEST_PASS_SCHEMA,
-            test,
-            decl,
-            address,
-            site_digest,
-            environment,
-            inputs.toolchain.image,
-            inputs.recipe.identity,
-            inputs.toolchain.environment,
-            crate::native_entry::policy(options),
-            None::<u64>, // Seed, once test execution can select one.
-        ),
-    )
-    .ok()
-}
-
 pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     let mut mask = vec![0usize; 16];
     loop {
@@ -325,6 +259,8 @@ struct TestProcess<'a> {
     pass: Option<(&'a TestCache, ContentHash)>,
     /// Removed once the run is collected.
     _directory: tempfile::TempDir,
+    laws: Option<(tempfile::TempDir, PathBuf)>,
+    foreign: bool,
 }
 
 impl TestProcess<'_> {
@@ -336,6 +272,13 @@ impl TestProcess<'_> {
             timed_out,
             wall_time,
             corpus: None,
+            laws: if self.foreign {
+                LawReport::Foreign
+            } else {
+                self.laws
+                    .as_ref()
+                    .map_or_else(LawReport::default, |(_, file)| law_report(file))
+            },
         };
         if outcome.passed()
             && let Some((cache, key)) = self.pass
@@ -352,6 +295,8 @@ pub(crate) struct TestBatch<'a> {
     pub timeout: Option<Duration>,
     pub runner: &'a Runner,
     pub replay: bool,
+    pub laws: bool,
+    pub plain_runtime: Option<PathBuf>,
     pub expect_verdict: Option<&'a str>,
     pub cache: Option<&'a TestCache>,
     pub rerun: bool,
@@ -374,6 +319,7 @@ impl TestBatch<'_> {
                 self.cache,
                 self.rerun,
                 self.seed,
+                self.laws.then_some(self.plain_runtime.as_deref()),
             )?
             .finish(test, self.timeout)
     }
@@ -387,8 +333,15 @@ impl TestBatch<'_> {
     ) -> TestResult {
         corpus.check_grants(&product.granted(test, options).directories)?;
         let run = |seed, input: &str| {
-            let TestLaunch::Run(mut process) =
-                product.test_launch(test, options, self.runner, None, true, seed)?
+            let TestLaunch::Run(mut process) = product.test_launch(
+                test,
+                options,
+                self.runner,
+                None,
+                true,
+                seed,
+                self.laws.then_some(self.plain_runtime.as_deref()),
+            )?
             else {
                 unreachable!("corpus runs have no pass cache")
             };
@@ -513,7 +466,7 @@ impl TestBatch<'_> {
             || tests.len() <= 1
             || self.replay
             || self.corpus.is_some()
-            || options.recording
+            || (options.recording && !self.laws)
             || options.replay.is_some()
             || options.logical_charge_report.is_some()
             || !matches!(self.runner, Runner::Native)
@@ -528,12 +481,13 @@ impl TestBatch<'_> {
                 };
                 let result = if self.replay {
                     product
-                        .run_test_with_replay(
+                        .run_test_replay(
                             test,
                             &test_options,
                             self.timeout,
                             self.runner,
                             self.expect_verdict,
+                            self.laws,
                         )
                         .map(|outcome| (outcome, Source::Executed))
                 } else if let Some(corpus) = self.corpus {
@@ -590,6 +544,7 @@ impl TestBatch<'_> {
                     self.cache,
                     self.rerun,
                     self.seed,
+                    self.laws.then_some(self.plain_runtime.as_deref()),
                 ) {
                     Ok(TestLaunch::Run(process)) => process,
                     Ok(TestLaunch::Cached(outcome)) => {
@@ -678,10 +633,11 @@ impl CheckProduct {
         cache: Option<&TestCache>,
         rerun: bool,
     ) -> Result<(TestOutcome, Source), NativeStop> {
-        self.test_launch(test, options, runner, cache, rerun, None)?
+        self.test_launch(test, options, runner, cache, rerun, None, None)?
             .finish(test, timeout)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_launch<'a>(
         &self,
         test: &DefPath,
@@ -690,6 +646,7 @@ impl CheckProduct {
         cache: Option<&'a TestCache>,
         rerun: bool,
         seed: Option<u64>,
+        laws: Option<Option<&Path>>,
     ) -> Result<TestLaunch<'a>, NativeStop> {
         let Some(decl) = self.test_entries.get(test) else {
             return Err(NativeStop::Entry(format!(
@@ -699,7 +656,21 @@ impl CheckProduct {
         let parameterless = parameterless_test(decl);
         // An unused launch grant could otherwise touch host state before the
         // test starts.
-        let options = &self.granted(test, options);
+        let mut options = self.granted(test, options);
+        let foreign = laws.is_some()
+            && !options.foreign_grants.is_empty()
+            && self
+                .reachable(test, options.instance_limit)?
+                .foreign_functions()
+                .next()
+                .is_some();
+        if foreign {
+            options.recording = false;
+            if let Some(runtime) = laws.flatten() {
+                options.runtime = runtime.to_owned();
+            }
+        }
+        let options = &options;
         let reached = if options.foreign_grants.is_empty() || options.recording {
             self.reachable_for(test, options)?
         } else {
@@ -733,6 +704,7 @@ impl CheckProduct {
                 timed_out: false,
                 wall_time: Duration::ZERO,
                 corpus: None,
+                laws: LawReport::Unobserved,
             }));
         }
         let built = if options.foreign_grants.is_empty() || options.recording {
@@ -766,11 +738,16 @@ impl CheckProduct {
             command.env(SEED_ENV, seed.to_string());
         }
         let directory = private_directory(&mut command)?;
+        let laws = (laws.is_some() && !foreign)
+            .then(|| law_file(&mut command))
+            .transpose()?;
         Ok(TestLaunch::Run(TestProcess {
             command,
             executable,
             pass,
             _directory: directory,
+            laws,
+            foreign,
         }))
     }
 
@@ -827,6 +804,18 @@ impl CheckProduct {
         runner: &Runner,
         expect_verdict: Option<&str>,
     ) -> Result<TestOutcome, NativeStop> {
+        self.run_test_replay(test, options, timeout, runner, expect_verdict, false)
+    }
+
+    fn run_test_replay(
+        &self,
+        test: &DefPath,
+        options: &NativeOptions,
+        timeout: Option<Duration>,
+        runner: &Runner,
+        expect_verdict: Option<&str>,
+        laws: bool,
+    ) -> Result<TestOutcome, NativeStop> {
         use std::os::unix::fs::PermissionsExt;
         if !self.test_entries.contains_key(test) {
             return Err(NativeStop::Entry(format!(
@@ -845,8 +834,12 @@ impl CheckProduct {
             grant.approve(&mut cmd);
         }
         cmd.env("HIRSEL_RECORD", &tape_path);
+        let observation = laws.then(|| law_file(&mut cmd)).transpose()?;
         let directory = private_directory(&mut cmd)?;
         let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
+        let laws = observation
+            .as_ref()
+            .map_or_else(LawReport::default, |(_, file)| law_report(file));
         drop(directory);
         if timed_out || !output.status.success() {
             return Ok(TestOutcome {
@@ -855,6 +848,7 @@ impl CheckProduct {
                 timed_out,
                 wall_time,
                 corpus: None,
+                laws,
             });
         }
         let record_stderr = String::from_utf8_lossy(&output.stderr);
@@ -883,6 +877,7 @@ impl CheckProduct {
                 timed_out: true,
                 wall_time,
                 corpus: None,
+                laws,
             });
         }
         let expected = expect_verdict.unwrap_or("Sealed");
@@ -893,6 +888,7 @@ impl CheckProduct {
                 timed_out: false,
                 wall_time,
                 corpus: None,
+                laws,
             });
         }
         let replay_stderr = String::from_utf8_lossy(&replay_output.stderr);
@@ -906,6 +902,7 @@ impl CheckProduct {
                 timed_out: false,
                 wall_time,
                 corpus: None,
+                laws,
             });
         }
         Err(NativeStop::Entry(format!(

@@ -12,6 +12,31 @@ fn env_record_runtime() -> PathBuf {
         .expect("recording runtime archive")
 }
 
+#[test]
+fn law_observation_preserves_native_observations() {
+    let law = prop_law_package();
+    PackageLaw::pass(law.run(&["lock", "app"]));
+    let observations = |flags: &[&str]| {
+        let mut args = vec!["test", "app", "--json", "--rerun"];
+        args.extend_from_slice(flags);
+        let (status, stdout, stderr) = law.run(&args);
+        assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+        let mut json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let rows = json["tests"].as_array_mut().unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.iter().filter(|r| r["passed"] == true).count(), 3);
+        for row in rows {
+            let row = row.as_object_mut().unwrap();
+            row.remove("wall_ms");
+            if !flags.is_empty() {
+                assert!(row.remove("law_observation").unwrap().as_str().unwrap().starts_with("hirsel-laws-observation 1\n"));
+            }
+        }
+        (json, stderr)
+    };
+    assert_eq!(observations(&[]), observations(&["--laws"]));
+}
+
 fn env_observe_runtime() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

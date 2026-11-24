@@ -657,6 +657,7 @@ unsafe fn run_recording<const UNITS: bool>(
 ) -> u8 {
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
+        let _laws = crate::law::Run::start();
         if let Some((path, mode)) = pinned_replay(&*input) {
             #[cfg(feature = "prof")]
             let _profile = crate::prof::Run::start_replay();

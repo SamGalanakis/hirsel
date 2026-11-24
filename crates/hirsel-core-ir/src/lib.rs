@@ -1121,6 +1121,7 @@ pub mod extent;
 pub mod failure;
 pub mod fills;
 mod ir;
+pub mod law;
 pub mod native_layout;
 pub mod normal;
 pub mod release_recipe;

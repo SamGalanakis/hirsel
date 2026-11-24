@@ -16,6 +16,7 @@ pub enum OptionId {
     Record,
     Tape,
     Replay,
+    Laws,
     ExpectVerdict,
     IncludeCredentials,
     Diagnose,
@@ -560,6 +561,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("VERDICT"),
         ["test"],
         "With --replay, require each selected test's replay to end with VERDICT."
+    ),
+    option!(
+        Laws,
+        ["--laws"],
+        None,
+        ["test"],
+        "Observe settled law verdicts in the recording build."
     ),
     option!(
         IncludeCredentials,

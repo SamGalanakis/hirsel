@@ -41,6 +41,7 @@ impl Function<'_, '_, '_> {
         if let Some(block) = self.propagation {
             self.b.switch_to_block(block);
             self.b.set_srcloc(ir::SourceLoc::default());
+            self.law_leave(false)?;
             let mut results = std::mem::take(&mut self.calls.results);
             results.clear();
             for &t in &self.signature.results[..self.signature.results.len() - 1] {

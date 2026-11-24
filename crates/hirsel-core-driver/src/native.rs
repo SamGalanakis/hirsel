@@ -360,6 +360,7 @@ fn emit_unit(
     // the module (hirsel_core_ir::extent). Stored bodies and this object's key are
     // the unmerged IR; the compiler identity in every key names this step.
     let mut shared = module.clone();
+    shared.law_observation = options.recording;
     shared.external_call_sites = !options.foreign_grants.is_empty();
     let Module {
         functions,
@@ -417,6 +418,7 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
         &options.target,
         options.backend,
         options.optimize,
+        options.recording,
         options.logical_charge_report.is_some(),
         !options.foreign_grants.is_empty(),
         matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),

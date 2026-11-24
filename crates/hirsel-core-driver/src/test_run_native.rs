@@ -807,7 +807,8 @@ impl PackageLaw {
         if matches!(arguments[0], "run" | "test" | "build") {
             let options = native_options(Backend::Cranelift, self.dir.path());
             let Link::Driver(cc) = options.link else { unreachable!() };
-            args.extend(["--runtime".into(), options.runtime.canonicalize().unwrap().to_str().unwrap().into()]);
+            let runtime = if arguments.contains(&"--laws") { env_record_runtime() } else { options.runtime };
+            args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
             args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
         let output = process::tape_request_command(&args, self.dir.path())
@@ -855,6 +856,69 @@ impl PackageLaw {
 
     fn empty_store(&self) {
         assert!(std::fs::read_dir(self.path("packages")).unwrap().next().is_none());
+    }
+}
+
+const PROP_LAW_PACKAGE: &str = r#"
+fn ok(x: u64) -> Result[(), String] { Ok(()) }
+fn never(x: u64) -> bool { false }
+
+@test
+fn exhaustive() -> Result[(), ()] {
+    let _ = std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), ok)
+    Ok(())
+}
+
+@test
+fn catch_all() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 5
+    match std.prop.all(c, std.prop.u64_in(0, 9), ok) {
+        _ => Ok(()),
+    }
+}
+
+@test
+fn discards() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.filter(std.prop.u64_in(0, 3), never), ok) {
+        Held(_, _) => Ok(()),
+        _ => Error(()),
+    }
+}
+
+@test
+fn falsified() -> Result[(), ()] {
+    std.prop.check(std.prop.config(), std.prop.u64_in(0, 9), fn(x: u64) -> Result[(), String] {
+        if x < 5 { Ok(()) } else { Error(string.from("x < 5")) }
+    })
+}
+"#;
+
+fn prop_law_package() -> PackageLaw {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864");
+    law.write("app/main.hirsel", PROP_LAW_PACKAGE);
+    law
+}
+
+#[test]
+fn prop_law_recorder_captures_settled_outcomes() {
+    let law = prop_law_package();
+    let (status, stdout, stderr) = law.run(&["test", "app", "--laws", "--json"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tests = json["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 4);
+    for (test, expected, passed) in [
+        ("catch_all", "all#1 truncated 5/0 cases=5", true),
+        ("discards", "all#1 vacuous 0/4", true),
+        ("exhaustive", "all#1 held 10/0", true),
+        ("falsified", "check#1 falsified", false),
+    ] {
+        let row = tests.iter().find(|r| r["definition"] == format!("app@1/main/{test}")).unwrap();
+        assert_eq!(row["passed"], passed, "{row}");
+        let raw = row["law_observation"].as_str().expect("recording summary");
+        assert_eq!(raw.lines().skip(1).filter(|line| !line.starts_with('\t') && *line != "end").collect::<Vec<_>>(), [expected], "{row}");
     }
 }
 

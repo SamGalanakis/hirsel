@@ -24,6 +24,7 @@ mod fast;
 mod flow;
 mod forward;
 mod growth;
+mod law;
 mod scalar;
 mod simd;
 mod sink;
@@ -750,6 +751,7 @@ fn emit_module(
                 failures: &failures,
                 constants: &failures.constants[i],
                 observe_charge,
+                law: hirsel_core_ir::law::Hooks::pick(module, f, body, &recipes),
                 facts,
                 empty_bounds: if observe_charge {
                     empty::EmptyBounds::default()
@@ -984,6 +986,7 @@ fn emit_module(
             for (i, b) in body.blocks.iter().enumerate() {
                 e.block(Label::block(i));
                 e.enter_block(i);
+                e.law_enter(i);
                 if let Some((number, plan)) = step_loops
                     .iter()
                     .enumerate()
@@ -1024,7 +1027,8 @@ fn emit_module(
                         })?;
                         continue;
                     }
-                    if let Some(ending) = &ending
+                    if e.law.is_none()
+                        && let Some(ending) = &ending
                         && offset == ending.prefix
                         && {
                             e.anchor = body.inst_anchors[b.insts.start as usize + offset];
@@ -1583,6 +1587,7 @@ struct FunctionEmitter<'a> {
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,
     observe_charge: bool,
+    law: Option<hirsel_core_ir::law::Hooks>,
     facts: bool,
     aliases: Option<alias::Scopes>,
     pointer_origins: Box<[Option<storage::PointerOrigin>]>,
@@ -2332,10 +2337,18 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => {
+                let site = &self.body.calls[call.index()];
+                if self
+                    .law
+                    .as_ref()
+                    .is_some_and(|law| law.delegates(self.module, site.callee))
+                {
+                    self.law_hook(None, hirsel_core_layout::law::DELEGATE, None);
+                }
                 self.neutral_step_call = self.step_neutral.is_some_and(|neutral| {
                     steps::neutral_inst(self.module, self.body, inst, neutral)
                 });
-                let result = self.call_site(&self.body.calls[call.index()]);
+                let result = self.call_site(site);
                 self.neutral_step_call = false;
                 result?;
             }

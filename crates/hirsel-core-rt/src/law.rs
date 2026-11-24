@@ -1,0 +1,239 @@
+//! Recording-build verdicts, owned and written by the host outside program accounting.
+
+use hirsel_core_layout::{case_of, law::*};
+use std::collections::BTreeMap;
+use std::io::{BufWriter, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+static ACTIVE: Mutex<Option<Observation>> = Mutex::new(None);
+
+struct Observation {
+    calls: BTreeMap<usize, ActiveCall>,
+    rows: Vec<Row>,
+}
+
+struct ActiveCall {
+    depth: usize,
+    settling_depth: usize,
+    callee: u64,
+    site: u64,
+    bounds: [u64; 4],
+}
+
+struct Row {
+    callee: u64,
+    site: u64,
+    bounds: [u64; 4],
+    class: &'static str,
+    first: u64,
+    second: u64,
+    failure: u64,
+}
+
+pub(crate) struct Run(PathBuf);
+
+impl Run {
+    /// # Safety
+    /// Before other threads start and before any environment grant is snapshotted.
+    pub(crate) unsafe fn start() -> Option<Self> {
+        let path = std::env::var_os("HIRSEL_LAWS");
+        // SAFETY: caller starts observation at single-threaded process entry.
+        unsafe { std::env::remove_var("HIRSEL_LAWS") };
+        let path = path?;
+        *ACTIVE.lock().unwrap() = Some(Observation {
+            calls: BTreeMap::new(),
+            rows: Vec::new(),
+        });
+        Some(Self(path.into()))
+    }
+
+    fn write(&self, rows: &[Row]) -> std::io::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&self.0)?;
+        let mut output = BufWriter::new(file);
+        writeln!(output, "hirsel-laws-observation 1")?;
+        let mut sites = BTreeMap::new();
+        for row in rows {
+            sites.entry((row.callee, row.site)).or_insert(0);
+        }
+        let mut previous = None;
+        let mut ordinal = 0;
+        for (&(callee, _), number) in &mut sites {
+            if previous != Some(callee) {
+                previous = Some(callee);
+                ordinal = 0;
+            }
+            ordinal += 1;
+            *number = ordinal;
+        }
+        for row in rows {
+            let name = CALLEES[row.callee as usize];
+            let ordinal = sites[&(row.callee, row.site)];
+            let class = row.class;
+            write!(output, "{name}#{ordinal} {class}")?;
+            match class {
+                "held" | "vacuous" | "truncated" | "gave up" => {
+                    write!(output, " {}/{}", row.first, row.second)?
+                }
+                "sampled" | "unbounded" => write!(output, " {}", row.first)?,
+                _ => {}
+            }
+            if class == "truncated" {
+                if row.first + row.second == row.bounds[0] {
+                    write!(output, " cases={}", row.bounds[0])?;
+                } else {
+                    write!(output, " max_choices/gen_steps (per build)")?;
+                }
+            }
+            writeln!(output)?;
+            let [cases, max_choices, max_rejects, gen_steps] = row.bounds;
+            writeln!(
+                output,
+                "\t{}\t{cases}\t{max_choices}\t{max_rejects}\t{gen_steps}\t{}",
+                row.site, row.failure
+            )?;
+        }
+        writeln!(output, "end")?;
+        output.flush()
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let Some(observation) = ACTIVE.lock().unwrap().take() {
+            let _ = self.write(&observation.rows);
+        }
+    }
+}
+
+fn failure(read: &impl Fn(u64, u64) -> u64, base: u64, fields: &[u64]) -> (u64, u64) {
+    let tag = tag_from_words(&fields[2..]);
+    let class = base + fields[1];
+    let index = case_of(&tag, read(class + tag.offset, tag.width));
+    // Preserve the concrete cause kind when the engine classified a failure at a site.
+    let index = if index == 2 {
+        (u64::from(index) << 8) | read(class + fields[2 + TAG_WORDS], 1)
+    } else {
+        u64::from(index)
+    };
+    (read(base + fields[0], 8), index)
+}
+
+/// Borrow the selected value only for the native hook. An outer property call owns
+/// the slot for its execution context until it leaves, even across task switches.
+///
+/// # Safety
+/// For entry or outcome hooks `words` pins `len` compiler-generated descriptor
+/// words, and each offset of the active variant points to initialized bytes in
+/// `value`. Both borrows end on return. The context pointer is an identity only.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_law_observe(
+    context: *const crate::Context,
+    operation: u64,
+    callee: u64,
+    site: u64,
+    value: *const u8,
+    words: *const u64,
+    len: usize,
+) {
+    let mut active = ACTIVE.lock().unwrap();
+    let Some(observation) = active.as_mut() else {
+        return;
+    };
+    let context = context as usize;
+    if operation == LEAVE {
+        let call = observation.calls.get_mut(&context).unwrap();
+        call.depth -= 1;
+        if call.depth == 0 {
+            observation.calls.remove(&context);
+        }
+        return;
+    }
+    if operation == DELEGATE {
+        if let Some(call) = observation.calls.get_mut(&context)
+            && call.depth == 1
+        {
+            call.settling_depth = 2;
+        }
+        return;
+    }
+    // SAFETY: the native emitter pins exactly these initialized words through the hook.
+    let words = unsafe { std::slice::from_raw_parts(words, len) };
+    let read = |offset: u64, width: u64| {
+        let mut bytes = [0u8; 8];
+        // SAFETY: the recipe selected for the active case names only initialized bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                value.add(offset as usize),
+                bytes.as_mut_ptr(),
+                width as usize,
+            )
+        };
+        u64::from_le_bytes(bytes)
+    };
+    if operation == ENTER {
+        observation
+            .calls
+            .entry(context)
+            .and_modify(|call| call.depth += 1)
+            .or_insert_with(|| ActiveCall {
+                depth: 1,
+                settling_depth: 1,
+                callee,
+                site,
+                bounds: std::array::from_fn(|i| read(words[i], 8)),
+            });
+        return;
+    }
+    let Some(call) = observation.calls.get(&context) else {
+        return;
+    };
+    let outer_outcome = operation == OUTCOME && call.depth == 1;
+    let outer_check =
+        operation != OUTCOME && call.callee >= CHECK && call.depth == call.settling_depth;
+    if !outer_outcome && !outer_check {
+        return;
+    }
+    let (class, first, second, failure) = if operation == CORPUS_FAILURE {
+        let (cases, class) = failure(&read, 0, words);
+        ("falsified", cases, 0, class)
+    } else {
+        let exhaustive = call.callee == ALL;
+        let tag = tag_from_words(words);
+        let index = case_of(&tag, read(tag.offset, tag.width)) as usize;
+        let pairs = if exhaustive { 4 } else { 3 };
+        let offset = TAG_WORDS + 2 * index;
+        let (a, b) = (words[offset], words[offset + 1]);
+        if index + 1 == pairs {
+            let (cases, class) = failure(&read, a, &words[TAG_WORDS + 2 * pairs..]);
+            ("falsified", cases, 0, class)
+        } else {
+            let first = read(a, 8);
+            let second = if b == ABSENT { 0 } else { read(b, 8) };
+            let class = match (exhaustive, index, first) {
+                (_, 0, 0) => "vacuous",
+                (true, 0, _) => "held",
+                (true, 1, _) => "truncated",
+                (true, 2, _) => "unbounded",
+                (false, 0, _) => "sampled",
+                (false, 1, _) => "gave up",
+                _ => unreachable!(),
+            };
+            (class, first, second, ABSENT)
+        }
+    };
+    observation.rows.push(Row {
+        callee: call.callee,
+        site: call.site,
+        bounds: call.bounds,
+        class,
+        first,
+        second,
+        failure,
+    });
+}

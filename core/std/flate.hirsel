@@ -520,10 +520,16 @@ fn advance(mut d: Decoder, input: Bytes, limit: u64, mut out: Bytes) -> Result[S
 }
 
 fn adler(mut a: u32, mut b: u32, out: Bytes, lo: u64, hi: u64) {
-    for i in lo .. hi {
-        let byte: u32 = int.widen(out[i])
-        a = (a + byte) % 65521
-        b = (b + a) % 65521
+    let mut start = lo
+    while start < hi {
+        let end = start + order.min(hi - start, 5552) // Both sums fit u32 for 5552 bytes.
+        for i in start .. end {
+            a += (int.widen(out[i]) : u32)
+            b += a
+        }
+        a = a % 65521
+        b = b % 65521
+        start = end
     }
 }
 

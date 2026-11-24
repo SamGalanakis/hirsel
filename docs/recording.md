@@ -603,32 +603,243 @@ Format 14 is the clean bump that unit streams need. A reader of format 14 refuse
 earlier format, and format 13 has no reader once U1 lands (G-1 = B: no store format
 continuity).
 
-- Every block's head gains a `u32` **stream number** after its magic, and its sequence
-  number counts that stream's blocks. The block check covers the stream number, so a block
-  moved between streams fails its check. The root stream is number 0. A helper's number is
-  allocated when its spawn starts and is unique in the file. It is not part of the unit's
-  name and need not be dense or in spawn order.
-- A helper stream's first block is a **stream header**: its parent's stream number, its spawn
-  index, and its entry.
-- `TAKE` is frame kind 14 (kind 10 is `END`). Its head's task bit is 0: a take names no
-  task. Its fields, in order: the gap varint, the point kind byte (0 or 1; any other value is
-  corrupt), the count varint, then the body with its arrival tag (above). `UNIT_SPAWN`,
-  `CONN_SEND`, `CONN_TRY_SEND` and `UNIT_CANCEL` are operation codes 162, 163, 164 and 165
-  of `ISSUE`, `DONE` and `OP`, in `hirsel_core_ids::host_op`, whose table refuses a
-  duplicate code.
-- An entry, a `TAKE` body, an `END` result or a survivor list longer than one chunk
-  continues in `DATA` frames, as an `Exec` grant does.
-- Blocks of different streams interleave in the file in whatever order the writer took them.
-  A replay indexes the file in one sequential pass at open, recording each stream's blocks
-  in sequence, and then reads each stream from its own blocks. Discovery still never
-  resynchronises. The index requires each stream's sequence numbers to count from 0 without
-  a gap. A block failing its check, a sequence gap, a second header for one stream number,
-  or any byte after every indexed stream's `END` writes the file line
-  `replay: Damaged at block B` and exits 1, whatever the stream verdicts. A trailing
-  partial block is `Truncated` for each stream without `END`. The `END` and `TRUNCATED`
-  flags are per stream.
-- `tape show` prints the header, then each stream under its unit name, ordered by
-  spawn-index path, compared numerically.
+The layouts below use format 13's encodings from `crates/hirsel-tape-format`: `u8`, `u16`,
+`u32` and `u64` are little-endian fixed-width integers; `varint` is canonical unsigned LEB128
+(at most 10 bytes, no overlong final `0x00`, a 10th byte of at most 1); `bytes` is a `varint`
+length followed by that many bytes. A field that breaks its layout, a tag outside its table,
+or a byte string with bytes left after its last field is `Corrupt`. Format 13's header,
+frames and `Out` encoding are unchanged except where this section says so. Each layout is
+stated once, here.
+
+**Blocks.** Every block, in every stream, is:
+
+| field | width | value |
+|---|---|---|
+| flags | `u8` | `END` 2, `TRUNCATED` 4, as format 13; any other bit is `Damaged` |
+| magic | 3 bytes | `HTB` |
+| stream | `u32` | the stream number: 0 for the root; a helper's is allocated when its spawn starts, unique in the file, and need not be dense or in spawn order. It is not part of the unit's name |
+| seq | `u64` | this block's index among its own stream's blocks, from 0 |
+| len | `u32` | payload length, at most 1 MiB |
+| payload | `len` bytes | |
+| check | `u64` | xxh3-64, seed 0, over the 16-byte tape id, then the 20 head bytes (flags to len), then the payload |
+
+The head is 20 bytes, 4 more than format 13's. The check covers the stream number, so a
+block moved between streams fails its check. Each stream's block 0 is its **header block**,
+with flags 0; its later blocks hold frames, as format 13's blocks after block 0 do. The
+root's header block payload is format 13's header with `FORMAT = 14`; the tape id every check
+uses comes from it.
+
+**Helper stream header.** A helper stream's header block payload is:
+
+| field | width |
+|---|---|
+| parent | `u32`: the parent's stream number |
+| spawn index | `u64`: the helper's 0-based index among its parent's `UNIT_SPAWN`s that started |
+| entry | a carrier (below) holding the entry |
+
+The header block holds the entry's first chunk. When the entry is longer than one chunk, the
+stream's next blocks start with the `DATA` frames that continue it, and no other frame of the
+stream comes before the entry is complete. The joined entry is:
+
+| field | width |
+|---|---|
+| descriptor | `bytes`: `f`'s identity bytes ([PROG-9](spec/programs.md#prog-9-code-descriptors)), version byte `0x01` first |
+| `n` | `u64` |
+| bound | `u8` 0 when the helper received no step bound; `u8` 1 followed by the bound as a `u64` |
+| `x` | a value (below) |
+
+**Carriers.** A field that can outgrow one chunk is a **carrier**, laid out as an `Exec`
+`GRANT` frame lays out its profile snapshot: a `varint` total length `T`, then a `bytes`
+first chunk of 1 to `min(T, 65536)` bytes. Each `DATA` frame (head `0x09`, then a `bytes`
+chunk of 1 to 65536 bytes) that follows adds its chunk, until `T` bytes are held; no other
+frame comes between, and a chunk that passes `T` is `Corrupt`. The writer fills every chunk
+to 64 KiB but the last. The carrier's fields are read from the joined `T` bytes, never from a
+chunk. The carriers are a helper's entry, every `TAKE` body and a helper's `END` outcome. A
+helper end's survivor list is inside its `TAKE` body, so it continues with the body.
+
+**Values.** A value that crosses units, `x`, an item, a returned item, a helper's result
+or a `Shared` payload, is:
+
+| field | width |
+|---|---|
+| plain | `bytes`: the value's inline bytes at the receiving type's layout, with every owner word (each sequence carrier, handle word, capability word and function word) written as zero bytes |
+| part count | `varint` |
+| parts | each a part tag `u8`, then: 0 **sequence**: `bytes`, the elements in index order at their layout, their own owner words zeroed; 1 **handle**: a snapshot (below); 2 **function**: `bytes`, the function's identity bytes |
+
+Parts come in owner order: the value's owner words by ascending offset, and each sequence's
+part is followed at once by the parts of the owner words inside its elements, element by
+element, before the next owner word of the value that holds the sequence. The format reads a
+value without its type. Matching the parts to the receiving type's owners, their kinds and
+each sequence's length as a multiple of its element size, is the replay's: a mismatch is
+`Diverged(Take)` in a `TAKE` and `Diverged(Op)` at position 0 in an entry, as for a
+descriptor that does not resolve.
+
+**Snapshots.** A snapshot is its kind tag `u8` (above), its new object ordinal in the
+receiving stream as a `varint`, then:
+
+| tag | body |
+|---|---|
+| 0 `Client` | inbox stream `u32`; connection ordinal `varint`; `cap` `u64`; room `b` `u64` |
+| 1 `Shared` | home stream `u32`; node ordinal `varint`; the payload as a value |
+| 2 `Socket` | direction `u8` (its Net rule's direction byte); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received, bit 1 send side shut, other bits `Corrupt` |
+| 3 `Listener` | direction `u8`; bound address, 19 bytes |
+| 4 `UdpSocket` | direction `u8`; bound address, 19 bytes; peer `u8` 0, or 1 followed by the connected address, 19 bytes |
+| 5 capability | grant kind `u8`, as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
+| 6 virtual capability | grant kind `u8`; home stream `u32` |
+| 7 `Secret` | designation: stream `u32`, position `varint`; canonical policy text `bytes` |
+| 8 `KeyShare` | origin: stream `u32`, position `varint`; group `u8` (`X25519` 0, `P256` 1) |
+| 9 `Schedule` | origin; profile; side `u8` (`Client` 0, `Server` 1, imported send 2, imported receive 3); stage `u8` (handshake 0, `Application` 1); send generation `u64`; receive generation `u64`; retired spaces `u8`, bit `i` for space `i`; exported `u8` (1 once `srtp` was called on it); ledger count `varint`, then per issued domain of a current send epoch its space `u8` and domain `u64` |
+| 10 `Sealer` | origin; profile; space `u8`; domain `u64`; `floor` `u64`; sealed `u8` 0, or 1 followed by the highest sealed counter `u64` |
+| 11 `Opener` | origin; profile; space `u8` |
+| 12 `HeaderMask` | origin; profile; space `u8`; `local` `u8` |
+
+A **profile** is two bytes: the family `u8` (`Quic` 0, `Dtls13` 1, `Tls13` 2,
+`QuicMultipath` 3, `dtls12` 4, SRTP 5, `quic_initial` 6), then the suite `u8`, the case's
+index in its declared order in `Suite13`, `Suite12` or `SrtpProfile`, and 0 for
+`quic_initial`. A space is its case index in `Space`'s declared order (`Initial` 0 to
+`Rtcp` 4). A position is a frame position in the named stream, counted as verdicts count it.
+
+**`TAKE` frames.** `TAKE` is frame kind 14 (kind 10 is `END`), and its head is `0x0E`: the
+task bit is 0, because a take names no task. Then:
+
+| field | width |
+|---|---|
+| gap | `varint`: events since the previous frame, as a `WAKE`'s |
+| point | `u8`: 0 an in-operation take point, 1 a scheduler pump |
+| count | `varint`: the take point's count |
+| body | a carrier holding the arrival tag `u8` and the fields below |
+
+| tag | arrival | fields after the tag |
+|---|---|---|
+| 0 | item | inbox ordinal `varint`; the item as a value |
+| 1 | close | inbox ordinal `varint` |
+| 2 | seal answer | connection ordinal `varint` |
+| 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and a credit list, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
+| 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors |
+| 5 | credits | a credit list |
+| 6 | last release | connection ordinal `varint`; retained header `u64`; unused room `u64` |
+| 7 | shared release | node ordinal `varint` |
+| 8 | cancel | nothing |
+| 9 | refund | limit ordinal `varint`; amount `u64` |
+
+- A **credit list** is a count `varint`, then per credit its limit ordinal `varint` and
+  amount `u64`.
+- **Causes** are a count `varint` of at least 1, then each cause of the chain, primary
+  first: its kind `u8` in `CauseKind`'s declared order (`Overflow` 0 to `OutOfTime` 7), its
+  site `u64`, then for `Fail` its message as `bytes`, for `Capacity` its requested and
+  available bytes as two `u64`s, and nothing for the others.
+- A **survivor** is its kind `u8` (connection 0, `Shared` node 1, `Secret` designation 2,
+  key object 3, agreement registry entry 4, `UdpSocket` pool 5, group queue 6), its ordinal
+  `varint` and its amount `u64`. The ordinal is the object ordinal in the helper's stream,
+  and for kinds 2, 3 and 4 the position in the helper's stream of the delivery that made it.
+- A settlement's position must name a `CONN_SEND` `ISSUE` of this stream that is still
+  outstanding. The settlement completes it, as a `DONE` would, and its task may issue
+  again. Any other position is `Corrupt`.
+
+**Unit operations.** `UNIT_SPAWN`, `CONN_SEND`, `CONN_TRY_SEND` and `UNIT_CANCEL` are
+operation codes 164, 165, 166 and 167 of `ISSUE`, `DONE` and `OP`, in
+`hirsel_core_ids::host_op`, whose table refuses a duplicate code (162 and 163 are
+`SCHEDULE_SPACE_INFO` and `SCHEDULE_SEALER_PAIR`). Their frames are format 13's `ISSUE` and
+`OP`, task bit included. Their `Out` holds only the status, which is `OK` (0), and the
+`value` `varint`: no error, written count or payload. Any other status or value is
+`Corrupt`.
+
+| code | operation | frame | object | args | `Out` value |
+|---|---|---|---|---|---|
+| 164 | `UNIT_SPAWN` | `OP` | 0 | `Args` over the descriptor `bytes`, `n` as a `u64` and `x` as a value, as the entry writes them | the helper's stream number |
+| 165 | `CONN_SEND` | `OP`, or `ISSUE` for a send that waits | client ordinal | `Args` over the item as a value | 0 `Accepted`, 1 `Closed` |
+| 166 | `CONN_TRY_SEND` | `OP` | client ordinal | as 165 | 0 `Accepted`, 1 `Full`, 2 `Closed` |
+| 167 | `UNIT_CANCEL` | `OP` | the helper handle's ordinal | the empty literal | 0 |
+
+**`END`.** The root stream's `END` is format 13's. A helper stream's `END` (any stream number
+other than 0) is head `0x0A`, the gap `varint`, the status `u8` 0, the kind `u8`
+(`Returned` 0, `Failed` 1, `Cancelled` 2, `Deadlock` 3), then a carrier holding, for
+`Returned`, the result as a value; for `Failed` and `Cancelled`, the causes; for `Deadlock`,
+the event count `varint`. In either kind of stream, the block that holds the frame
+completing the `END`, the `END` itself or its last `DATA` frame, is flagged `END` and holds
+no frame after it.
+
+**The index.** Blocks of different streams interleave in the file in whatever order the
+writer took them. A replay indexes the file in one sequential pass at open and then reads
+each stream from its own blocks. Discovery never resynchronises. The reader numbers blocks
+`B` = 0, 1, 2, … in file order, across all streams; `B` is the number in
+`replay: Damaged at block B`. Block 0 must be stream 0's header block. Each later block is
+read whole and its head and check verified; then:
+
+- a block whose stream number is not yet indexed and whose sequence number is 0 opens a new
+  stream, with a helper stream header (stream number 0 cannot open again);
+- a block of an indexed stream that has not ended, with the next sequence number, continues
+  that stream;
+- anything else is `Damaged` at `B`: a failed check, a bad magic or flag, a length over
+  1 MiB, a sequence gap, a sequence number 0 for an indexed stream (a duplicate header),
+  and a block of a stream that already ended with `END` or `TRUNCATED`.
+
+So a stream may begin anywhere in the file, after the root's `END` included, and the reader
+tells a new stream from trailing bytes by these tests alone, never by position. The parent
+stream need not be indexed, since an orphan is named `?.<stream number>`. At the end of the
+file, a trailing partial block is `Truncated` for each stream without `END`. When every
+indexed stream has its `END`, any byte after them that does not begin a block opening a new
+stream, a partial block included, is `Damaged` at its block number. A `Damaged` index writes
+its one file line and exits 1, whatever the stream verdicts. A `TRUNCATED` block, with an
+empty payload, ends its own stream `Truncated` and no other. Each stream is decoded with its
+own state: its previous task, its outstanding issues and its open carrier.
+
+`tape show` prints the header, then each stream under its unit name, ordered by
+spawn-index path, compared numerically.
+
+**Example.** A root-only format 14 tape with one `TAKE`: a refund of 48 bytes to limit
+ordinal 0 (the root limit), taken at a scheduler pump with gap 0 and count 0, and then an
+`END` returning exit status 0. The tape id is the bytes `00` to `0f`. The header has an
+empty identity, a zero revision, charge policy 0, limit 65536, bound 0, the FIFO chooser,
+an empty `arg` and no grants; a runtime would refuse that empty launch metadata, which only
+keeps the example short. Checks are xxh3-64 with seed 0, written little-endian.
+
+Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
+
+```text
+00                         flags
+48 54 42                   magic "HTB"
+00 00 00 00                stream 0
+00 00 00 00 00 00 00 00    seq 0
+4b 00 00 00                len 75
+0e 00                      format 14
+01                         kind Run
+00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
+00                         identity: empty bytes
+00 × 32                    revision
+00 00 00 00                charge policy 0
+00 00 01 00 00 00 00 00    limit 65536
+00 00 00 00 00 00 00 00    bound 0
+00                         chooser FIFO
+00                         arg: empty bytes
+00                         grants: empty bytes
+1f 50 a3 6d 68 8a e8 78    check
+```
+
+Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:
+
+```text
+02                         flags END
+48 54 42                   magic "HTB"
+00 00 00 00                stream 0
+01 00 00 00 00 00 00 00    seq 1
+19 00 00 00                len 25
+0e                         TAKE (kind 14, task bit 0)
+00                         gap 0
+01                         point kind 1: scheduler pump
+00                         count 0
+0a                         body carrier: total length 10
+0a                         first chunk: 10 bytes
+09                           arrival tag 9: refund
+00                           limit ordinal 0
+30 00 00 00 00 00 00 00      amount 48
+0a                         END (kind 10)
+00                         gap 0
+00                         status complete
+00                         kind Returned
+04 00 00 00 00             outcome: literal args, 4 bytes, exit status 0 as u32
+91 50 4f bc 0f 1f 01 54    check
+```
 
 ### Prior art
 
@@ -643,7 +854,7 @@ continuity).
 
 | slice | size | depends on | builds | laws |
 |---|---|---|---|---|
-| **U1** format 14 | S | — | `crates/hirsel-tape-format`: stream number in the block head, stream header, `TAKE` (kind 14, point kind, arrival and snapshot tags), unit operation codes 162-165, `DATA` continuation of entries, takes, results and survivor lists; the open-time index with its `Damaged` rules (sequence gap, duplicate header, failed check, trailing bytes); `tape show` by spawn-index path; `FORMAT = 14`, format 13 refused; the recorder writes the root stream only | RL6 |
+| **U1** format 14 | S | — | `crates/hirsel-tape-format`: stream number in the block head, stream header, `TAKE` (kind 14, point kind, arrival and snapshot tags), unit operation codes 164-167, value and snapshot layouts, carriers (`DATA` continuation of entries, takes and helper results, survivor lists inside the helper-end body); the open-time index with its `Damaged` rules (sequence gap, duplicate header, failed check, trailing bytes); `tape show` by spawn-index path; `FORMAT = 14`, format 13 refused; the recorder writes the root stream only | RL6 |
 | **U2** helper streams | M | U1 | each helper gets its own recorder at its spawn; its entry, host frames and `END` go to its stream; the writer carries several recorders into one file; per-stream truncation and its report; no `END` at a run stop other than `Deadlock` | RL7's recording half, RL12 |
 | **U3** takes and unit operations | M | U2 | `TAKE` at every take point and all three take paths, with gap, point kind and count, the refund mailbox drain included; refund takes for posts from other units and for registry entry retirements; the unit operation frames; handle snapshots, with capability rows in the `cross` descriptor (`hirsel-core-layout` `cross.rs`, today without one) and key-object and virtual-capability snapshots; limit ordinals; designations by stream and position; imports always passing the replay point, `Spent` as a delivery; a virtual cell's home and its first foreign operation, and the replay point for foreign and later home operations on it; `RETIRED` in the refunded unit; key objects and registry entries in the helper-end survivor list | RL8, RL9 |
 | **U4** replay by stream | L | U3 | open every stream; start each unit from its entry; takes and unit outcomes from the stream; drop published arrivals and posted refunds; `UNIT_SPAWN` handles ended by the parent's `TAKE`; the missing-stream check; `Diverged(Take)` with its three cases; registry entries retired only at their refund takes, never by the replaying registry's share count (`ShareTicket::replay`); per-stream verdicts ordered by spawn-index path; `--unit` | RL7, RL10, RL11 |

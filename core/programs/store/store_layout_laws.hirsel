@@ -318,3 +318,40 @@ fn disk_test_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         Error(())
     }
 }
+
+fn migrate_workspace_row(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+    Ok(Some((k, v + 1)))
+}
+
+// AP13 and AP15. Each scalar table has a 5-byte catalog key and a
+// 59-byte catalog value: 62 + 8 + 64 + 126 = 260 with its descriptor.
+// The source has one row: 62 + round8(4 + 8) + round8(2 + 8) = 94.
+// The workspace peaks at (260 + 94) + 260 + (94 + 8) = 716.
+@test
+fn migrate_workspace_ceiling(c: Clock) -> Result[(), Error] waits {
+    for ceiling in 715u64 .. 717 {
+        let mut db = test_db(c, ceiling)
+        let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+        let old = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        if !typed_put(mut db, old, 7, 70) {
+            fail("workspace fixture did not commit")
+        }
+        let source: Table[u64, u64] = clone(old)
+        let replacement = spec("next", std.codec.key_u64(), std.codec.of_u64())
+        match migrate(mut db, take source, take replacement, migrate_workspace_row) {
+            Ok(_) if ceiling == 716 => {
+                let rebuilt = table(mut db, "next", std.codec.key_u64(), std.codec.of_u64())?
+                if version(snapshot(db)) != 3 || get(reader(db, 0)?, snapshot(db), rebuilt, 7)? != Some(71) {
+                    fail("migration at the ceiling did not publish the rebuilt row")
+                }
+            },
+            Error(Full(Resident(p))) if ceiling == 715 && p.requested == 716 && p.available == 715 => {
+                if version(snapshot(db)) != 2 || get(reader(db, 0)?, snapshot(db), old, 7)? != Some(70) {
+                    fail("workspace refusal changed the source table")
+                }
+            },
+            _ => fail("wrong result at the migration workspace ceiling"),
+        }
+    }
+    Ok(())
+}

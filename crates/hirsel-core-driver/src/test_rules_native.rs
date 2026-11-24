@@ -75,6 +75,53 @@ fn prog4_published_test_marker_and_edits_keep_reference_restrictions() {
 }
 
 #[test]
+fn default_check_resolves_frozen_foreign_handles() {
+    let law = PackageLaw::new();
+    law.write("hirsel.toml", "[workspace]\nmembers = [\"codec\", \"app\"]\n");
+    law.app("app", "[dependencies]\ncodec = { major = 1, path = \"../codec\" }\n");
+    law.write(
+        "app/main.hirsel",
+        "pub fn open(f: Foreign[codec.Codec]) waits { codec.open(f) }\n",
+    );
+    law.manifest(
+        "codec",
+        "codec",
+        1,
+        r#"
+[sources]
+"codec.hirsel" = "codec"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "fixture_"
+archives = [{ target = "x86_64-unknown-linux-gnu", file = "native.a", sha256 = "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5" }]
+"#,
+    );
+    law.write(
+        "codec/codec.hirsel",
+        r#"
+pub opaque type Codec {}
+pub opaque type Handle {}
+
+pub fn open(f: Foreign[Codec]) waits {
+    if let Some(p) = native.open(f) {
+        native.close(f, p)
+    }
+}
+"#,
+    );
+    law.write(
+        "codec/native.hirsel",
+        "pub fn open(f: Foreign[codec.Codec]) -> Option[foreign.Ptr[codec.Handle]]\npub fn close(f: Foreign[codec.Codec], take p: foreign.Ptr[codec.Handle]) waits\n",
+    );
+    law.write("codec/native.a", b"!<arch>\n");
+    PackageLaw::pass(law.run(&["check", "app", "--metrics", "metrics.json"]));
+    let metrics: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(law.path("metrics.json")).unwrap()).unwrap();
+    assert_eq!(metrics["image_selection"], "image used: workspace dependencies");
+}
+
+#[test]
 fn package_cred_grants_are_per_test_and_replay_uses_the_tape() {
     let law = PackageLaw::new();
     let (east, east_server) = fake_imds(b"fixture-east", b"east-token".to_vec(), 1);

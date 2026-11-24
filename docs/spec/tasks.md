@@ -498,7 +498,8 @@ action in one unit becomes visible in another.
   program can name them.
 - A recording of a unit other than the run's first: a recorded run records its first unit
   and not its helpers, so no replay of a helper, and no equality of recordings made at
-  different worker counts for a program with helpers, is promised.
+  different worker counts for a program with helpers, is promised. Its end state, one
+  stream per unit, is specified in [Unit recordings](../recording.md#unit-recordings).
 - A test configuration that fixes every input of a unit, including how many of the inputs
   that have reached it it takes at each point; until it exists, a test of units asserts only
   what holds for every such count.

@@ -10,6 +10,12 @@ pub fn listener_addr(l: Listener) -> Result[Addr, NetError] waits
 
 pub fn narrow(n: Net, r: Rule) -> Result[Net, RuleError]
 
+/// The class of an address under NET-18's table, which the `Public` reach reads.
+pub fn class(ip: Ip) -> AddressClass
+
+/// The connects `n`'s provider refused for the run under the `Public` reach (NET-18).
+pub fn denials(n: Net) -> NetDenials
+
 pub fn split(take s: Socket) -> (ReadHalf, WriteHalf)
 
 pub type Unjoined = Unjoined(ReadHalf, WriteHalf)

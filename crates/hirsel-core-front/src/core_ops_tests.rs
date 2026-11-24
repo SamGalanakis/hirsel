@@ -37,7 +37,7 @@ fn listening(n: Net) -> u64 waits {
     match host.listen(n, Addr(ip: V4(2130706433u32), port: 80), 16) { Ok((l, addr)) => if addr.port == 80 { 1 } else { 0 }, _ => 0 }
 }
 fn narrow(n: Net) -> u64 waits {
-    match net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16))) {
+    match net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16), reach: Any)) {
         Ok(child) => match host.connect(child, Addr(ip: V4(2130706433u32), port: 81), Never) { Error(Denied) => 1, _ => 0 },
         _ => 0
     }

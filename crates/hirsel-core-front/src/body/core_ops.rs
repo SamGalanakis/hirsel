@@ -13,6 +13,7 @@ mod conn;
 mod declarations;
 mod flow;
 mod media;
+mod net_class;
 mod net_error;
 mod provide;
 mod secret_kdf;
@@ -2161,9 +2162,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (pair, ports) = self.net_case_field(ty, at, 0, 3, n)?;
         let first = self.net_read_field(pair, ports, 0, n)?;
         let last = self.net_read_field(pair, ports, 1, n)?;
+        let (_, reach) = self.net_case_field(ty, at, 0, 4, n)?;
+        let reach = self.net_case(reach, n);
+        let reach8 = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: reach8,
+                flag: None,
+                operand: reach,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
         let [value, error, code, written] = self.runtime_row(
             RtOp::Host(HostOp::NetNarrow),
-            &[net, d8, family, hi, lo, bits, first, last].map(Arg::Value),
+            &[net, d8, family, hi, lo, bits, reach8, first, last].map(Arg::Value),
             n,
         )?;
         self.jump(join, &[value, error, code, written], n);
@@ -2771,6 +2784,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         if hirsel_core_ids::host_op::udp_operation(op.code()) {
             return self.runtime_udp(op, f, vals, result, n);
+        }
+        match op {
+            HostOp::NetClass => return self.runtime_net_class(f, vals, result, n),
+            HostOp::NetDenials => return self.runtime_net_denials(vals, result, n),
+            _ => {}
         }
         if matches!(
             op,

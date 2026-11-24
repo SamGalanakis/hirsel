@@ -64,9 +64,17 @@ pub struct Rule {
     pub hi: u64,
     pub lo: u64,
     pub bits: u8,
+    /// `Reach`: [`ANY`] or [`PUBLIC`] (NET-18).
+    pub reach: u8,
     pub first: u16,
     pub last: u16,
 }
+
+/// A rule's reach (NET-18), in `core.Reach` case order: every covered address.
+pub const ANY: u8 = 0;
+/// Only covered addresses whose class is `Public`; valid only on `Connect`.
+pub const PUBLIC: u8 = 1;
+
 impl Rule {
     fn prefix(self) -> u128 {
         (u128::from(self.hi) << 64) | u128::from(self.lo)
@@ -89,6 +97,14 @@ impl Rule {
             && self.prefix() & !self.mask() == 0
             && self.first <= self.last
             && !(self.family == 1 && self.hi == 0 && self.lo >> 32 == 0xffff)
+            && match self.reach {
+                ANY => true,
+                PUBLIC => {
+                    self.dir == AddressDirection::Connect as u8
+                        && class::covers_public(self.family, self.prefix(), self.bits)
+                }
+                _ => false,
+            }
     }
     pub fn intersect(self, other: Self) -> Option<Self> {
         if self.dir != other.dir || self.family != other.family {
@@ -104,21 +120,27 @@ impl Rule {
         }
         let first = self.first.max(other.first);
         let last = self.last.min(other.last);
-        (first <= last).then_some(Self {
+        let rule = Self {
             first,
             last,
+            reach: self.reach.max(other.reach),
             ..long
-        })
+        };
+        // A public-only intersection that covers no public address reaches nothing.
+        (first <= last && rule.valid()).then_some(rule)
     }
     pub fn permits(self, dir: u8, family: u8, hi: u64, lo: u64, port: u16) -> bool {
         self.covers_address(dir, family, hi, lo)
-            && if AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind)
-                && port == 0
-            {
-                self.first <= 1 && self.last == u16::MAX
-            } else {
-                (self.first..=self.last).contains(&port)
-            }
+            && (self.reach == ANY || class::class_of(family, hi, lo) == AddressClass::Public)
+            && self.ports_permit(dir, port)
+    }
+
+    fn ports_permit(self, dir: u8, port: u16) -> bool {
+        if AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind) && port == 0 {
+            self.first <= 1 && self.last == u16::MAX
+        } else {
+            (self.first..=self.last).contains(&port)
+        }
     }
 
     fn covers_address(self, dir: u8, family: u8, hi: u64, lo: u64) -> bool {
@@ -166,6 +188,7 @@ impl Rule {
             hi,
             lo,
             bits: bits.parse().map_err(|_| error())?,
+            reach: ANY,
             first: first.parse().map_err(|_| error())?,
             last: last.parse().map_err(|_| error())?,
         };
@@ -174,6 +197,24 @@ impl Rule {
         }
         Ok(rule)
     }
+}
+
+/// Whether a refused connect was refused only by NET-18's part 1: some rule
+/// covers its address and port, and each that does is public-only. Counted as
+/// `net.denials(n).not_public`. NET-6's own refusals (an IPv4-mapped address, an
+/// unscoped `fe80::/10`, the unspecified address) are covered by no rule.
+pub fn not_public(
+    rules: impl Iterator<Item = Rule>,
+    dir: u8,
+    family: u8,
+    hi: u64,
+    lo: u64,
+    port: u16,
+) -> bool {
+    class::class_of(family, hi, lo) != AddressClass::Public
+        && rules
+            .into_iter()
+            .any(|rule| rule.covers_address(dir, family, hi, lo) && rule.ports_permit(dir, port))
 }
 
 /// Refusal specific to an ephemeral listen whose matching rules leave a port uncovered.
@@ -193,6 +234,7 @@ pub fn address_denial(
     if !AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind) || port != 0 {
         return (!rules.any(|rule| rule.permits(dir, family, hi, lo, port))).then_some(1);
     }
+    // Bind rules never carry the `Public` reach (`Rule::valid`).
     let matching = rules.filter(|rule| rule.covers_address(dir, family, hi, lo));
     if matching.clone().next().is_none() {
         return Some(1);
@@ -214,6 +256,8 @@ pub fn address_denial(
     }
 }
 
+pub mod class;
+pub use class::AddressClass;
 mod ip;
 pub mod marks;
 pub use ip::{IP_RECORD_LEN, Ip, ip_record, ip_records};
@@ -265,6 +309,89 @@ pub use secret_grant::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NET-18 `public_reach_narrows`: `Public` is valid only on a `Connect` rule
+    /// that holds a public address; an intersection is `Public` when either side
+    /// is, and reaches nothing when no public address is left. Expected values
+    /// are the spec's table, not this crate's.
+    #[test]
+    fn public_reach_narrows() {
+        let public = |text: &str| Rule {
+            reach: PUBLIC,
+            ..Rule::parse(text).unwrap()
+        };
+        for bind in [
+            "Listen 0.0.0.0/0 1-65535",
+            "UdpBind 0.0.0.0/0 1-65535",
+            "UdpSend 0.0.0.0/0 1-65535",
+        ] {
+            assert!(!public(bind).valid(), "{bind}");
+        }
+        assert!(
+            !Rule {
+                reach: 2,
+                ..Rule::parse("Connect 0.0.0.0/0 1-65535").unwrap()
+            }
+            .valid()
+        );
+        // Holes and embeddings: none of these holds a public address.
+        for none in [
+            "Connect 10.0.0.0/8 1-1",
+            "Connect 224.0.0.0/3 1-65535",
+            "Connect 64:ff9b::a00:0/104 1-65535",
+            "Connect 2002:a00::/24 1-65535",
+            "Connect 2001:0:a00::/40 1-65535",
+            "Connect fc00::/7 1-65535",
+            "Connect 2001:db8::/32 1-65535",
+        ] {
+            assert!(!public(none).valid(), "{none}");
+        }
+        for some in [
+            "Connect 0.0.0.0/0 1-65535",
+            "Connect ::/0 1-65535",
+            "Connect 64:ff9b::/96 1-65535",
+            "Connect 2002::/16 1-65535",
+            "Connect 2001::/32 1-65535",
+            "Connect 126.0.0.0/7 1-65535",
+            "Connect 8.8.8.8/32 53-53",
+        ] {
+            assert!(public(some).valid(), "{some}");
+        }
+        let any = Rule::parse("Connect 0.0.0.0/0 1-65535").unwrap();
+        let world = public("Connect 0.0.0.0/0 443-443");
+        assert_eq!(any.intersect(world).unwrap().reach, PUBLIC);
+        assert_eq!(world.intersect(any).unwrap().reach, PUBLIC);
+        assert_eq!(any.intersect(any).unwrap().reach, ANY);
+        assert_eq!(
+            world.intersect(Rule::parse("Connect 10.0.0.0/8 1-65535").unwrap()),
+            None
+        );
+        let mixed = world
+            .intersect(Rule::parse("Connect 126.0.0.0/7 1-65535").unwrap())
+            .unwrap();
+        assert!(mixed.permits(mixed.dir, 0, 0, 0x7e00_0001, 443));
+        assert!(!mixed.permits(mixed.dir, 0, 0, 0x7f00_0001, 443));
+        assert!(not_public(
+            [mixed].into_iter(),
+            mixed.dir,
+            0,
+            0,
+            0x7f00_0001,
+            443
+        ));
+        assert!(!not_public(
+            [mixed].into_iter(),
+            mixed.dir,
+            0,
+            0,
+            0x7f00_0001,
+            80
+        ));
+        assert_eq!(
+            address_denial([mixed].into_iter(), mixed.dir, 0, 0, 0x7f00_0001, 443),
+            Some(1)
+        );
+    }
 
     #[test]
     fn udp_grants_bind_and_send_with_distinct_authority() {

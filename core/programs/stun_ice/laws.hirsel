@@ -630,3 +630,26 @@ fn kd4_digest_policy() -> Result[(), ()] {
     }
     Ok(())
 }
+
+/// bug: a lowering or table drift that lets `net.class` call a loopback, private, metadata or
+/// Teredo-wrapped address public, which TURN-7's peer policy shares with NET-18's preflight.
+/// oracle: NET-18's address-class table and its named embedded cases (RFC 6052, 3056, 4380),
+/// checked against the IANA special-purpose registries by crates/hirsel-core-net/src/class/oracle.py.
+@test
+fn public_class_table() -> Result[(), ()] {
+    if let Public = net.class(V4(0x08080808)) {} else { fail("8.8.8.8 is public") }
+    if let LinkLocal = net.class(V4(0xa9fea9fe)) {} else { fail("169.254.169.254 is link-local") }
+    if let Protocol = net.class(V4(0xc0000009)) {} else { fail("192.0.0.9 is denied with 192.0.0.0/24") }
+    if let Loopback = net.class(V4(0x7fffffff)) {} else { fail("127.255.255.255 is loopback") }
+    if let Public = net.class(V4(0x80000000)) {} else { fail("128.0.0.0 is public") }
+    if let Loopback = net.class(V6(0, 0x0000ffff7f000001)) {} else { fail("::ffff:127.0.0.1 is judged by its IPv4") }
+    if let LinkLocal = net.class(V6(0x0064ff9b00000000, 0xa9fea9fe)) {} else { fail("64:ff9b::a9fe:a9fe is the metadata service") }
+    if let Public = net.class(V6(0x0064ff9b00000000, 0x08080808)) {} else { fail("64:ff9b::808:808 is public") }
+    if let Loopback = net.class(V6(0x20027f0000010000, 1)) {} else { fail("2002:7f00:1::1 wraps loopback") }
+    if let Public = net.class(V6(0x2001000008080808, 0xf7f7f7f7)) {} else { fail("Teredo with public server and client is public") }
+    if let Private = net.class(V6(0x200100000a000001, 0xf7f7f7f7)) {} else { fail("Teredo with a private server") }
+    if let Loopback = net.class(V6(0x2001000008080808, 0x80fffffe)) {} else { fail("Teredo with a loopback client") }
+    if let NotGlobal6 = net.class(V6(0xfec0000000000000, 1)) {} else { fail("fec0::1 is outside 2000::/3") }
+    if let Public = net.class(V6(0x2606470000000000, 0x1111)) {} else { fail("2606:4700::1111 is public") }
+    Ok(())
+}

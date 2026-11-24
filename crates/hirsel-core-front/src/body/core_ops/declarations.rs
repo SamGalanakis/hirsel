@@ -45,11 +45,12 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             Kernel::Stream(_)
             | Kernel::StreamTerminal(_)
             | Kernel::Host(_)
-            | Kernel::Net(_)
             | Kernel::ArgsLen
             | Kernel::ArgsGet
             | Kernel::Env(_) => true,
             Kernel::Media(op) => op != HostOp::ScheduleQuicInitial,
+            // `net.class` reads only its address (NET-18).
+            Kernel::Net(op) => op != HostOp::NetClass,
             // A virtual provider observes only run state the program made.
             Kernel::Provide(_)
             | Kernel::ReadOnlyDir

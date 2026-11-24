@@ -17,6 +17,23 @@ impl Machine<'_> {
                         a[4] as u16,
                     );
                     if let Some(tag) = denial {
+                        let rules = rules.iter().filter_map(|rule| match rule {
+                            hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
+                            _ => None,
+                        });
+                        if op == HostOp::Connect
+                            && hirsel_core_net::not_public(
+                                rules,
+                                0,
+                                a[1] as u8,
+                                a[2],
+                                a[3],
+                                a[4] as u16,
+                            )
+                        {
+                            let provider = self.world.net_ports.get(&a[0]).copied();
+                            *self.world.not_public.entry(provider).or_default() += 1;
+                        }
                         let mut row = vec![0, u64::from(tag), 0, 0];
                         if op == HostOp::Listen {
                             row.extend([0; 4]);

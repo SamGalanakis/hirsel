@@ -178,6 +178,7 @@ impl GrantRule {
                     hi: 0,
                     lo: 0,
                     bits: 0,
+                    reach: crate::ANY,
                     first: 0,
                     last: u16::MAX,
                 })
@@ -279,6 +280,7 @@ impl RuleView {
                 hi: 0,
                 lo: 0,
                 bits: 0,
+                reach: crate::ANY,
                 first,
                 last,
             },
@@ -299,6 +301,7 @@ impl RuleView {
                 hi: 0,
                 lo: 0,
                 bits: 0,
+                reach: crate::ANY,
                 first: 0,
                 last: 0,
             })
@@ -324,6 +327,7 @@ impl RuleView {
                 hi: split as u64,
                 lo: 0,
                 bits: 0,
+                reach: crate::ANY,
                 first: 0,
                 last: 0,
             })

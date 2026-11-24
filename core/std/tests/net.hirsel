@@ -152,7 +152,7 @@ fn socket_served_by_receiving_unit(n: Net, clock: Clock, tasks: Tasks) -> bool w
     let owner = result.unwrap(task.spawn_unit(tasks, bytes 4096, take listening, return_listener))
     let mut listener = result.unwrap(task.join(take owner))
     let loopback = V4(2130706433)
-    let narrower = result.unwrap(net.narrow(n, Rule(dir: Listen, prefix: loopback, bits: 32, ports: (80u16, 80u16))))
+    let narrower = result.unwrap(net.narrow(n, Rule(dir: Listen, prefix: loopback, bits: 32, ports: (80u16, 80u16), reach: Any)))
     match host.listen(narrower, Addr(ip: loopback, port: 0), 8) {
         Error(EphemeralOutsideNetGrant) => {},
         _ => return false

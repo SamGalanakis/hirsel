@@ -168,7 +168,7 @@ pub unsafe extern "C" fn hirsel_core_host(
     // SAFETY: forwarded caller contract.
     unsafe {
         drive_with(context, provider, request, None, |provider, request| {
-            crate::net::authorize(provider, request)
+            crate::net::authorize(context, provider, request)
         })
     }
 }
@@ -260,7 +260,7 @@ pub(crate) unsafe fn returnable(
     // SAFETY: forwarded caller contract.
     unsafe {
         admit::<true>(context, provider, request, None, |provider, request| {
-            crate::net::authorize(provider, request)
+            crate::net::authorize(context, provider, request)
         })
     }
 }

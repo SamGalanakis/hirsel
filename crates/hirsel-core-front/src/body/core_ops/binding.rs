@@ -338,6 +338,8 @@ operations! {
     ("env", "name", Lane::Runtime(Kernel::Env(HostOp::EnvName)), "B", "stdin-env-1501", false),
     ("env", "narrow", Lane::Runtime(Kernel::Net(HostOp::EnvNarrow)), "B", "stdin-env-1501", false),
     ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
+    ("net", "class", Lane::Runtime(Kernel::Net(HostOp::NetClass)), "B", "net18-s1-2446", false),
+    ("net", "denials", Lane::Runtime(Kernel::Net(HostOp::NetDenials)), "B", "net18-s1-2446", false),
     ("tls", "connect", Lane::Runtime(Kernel::Net(HostOp::TlsConnect)), "B", "tls-t1-1442", false),
     ("tls", "send_secret", Lane::Runtime(Kernel::Net(HostOp::SendSecret)), "B", "tls-t4-1447", false),
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),

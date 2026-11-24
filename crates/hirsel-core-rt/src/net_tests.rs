@@ -186,14 +186,25 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
     let mut context = Context::new(40);
     context.host_files = &mut files;
     unsafe {
-        let invalid = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 8, 1, 80, 1);
+        let invalid = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 8, 0, 1, 80, 1);
         assert_eq!(invalid.error.tag, 1);
         assert_eq!(context.available(), 40);
-        let good = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 32, 80, 80, 1);
+        let good = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 32, 0, 80, 80, 1);
         assert_eq!(good.error, IoError::OK);
         assert_eq!(context.available(), 0);
-        let refused =
-            hirsel_core_net_narrow(&mut context, good.value, 0, 0, 0, 0x7f000001, 32, 80, 80, 1);
+        let refused = hirsel_core_net_narrow(
+            &mut context,
+            good.value,
+            0,
+            0,
+            0,
+            0x7f000001,
+            32,
+            0,
+            80,
+            80,
+            1,
+        );
         assert_eq!(refused.error.tag, 2);
         assert_eq!(refused.value, 40);
         assert_eq!(refused.written, 0);

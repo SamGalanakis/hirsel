@@ -14,6 +14,8 @@ impl HostOp {
             Self::RecvReady => "hirsel_core_host_recv_ready",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
+            Self::NetClass => "hirsel_core_net_class",
+            Self::NetDenials => "hirsel_core_net_denials",
             Self::ExecNarrow => "hirsel_core_exec_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
             Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",

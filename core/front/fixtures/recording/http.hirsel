@@ -33,7 +33,7 @@ fn stop_server(take stop: Stop) waits {
 pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let ip = V4(2130706433)
     let (control, stop_addr) = result.unwrap(host.listen(n, Addr(ip: ip, port: 0), 1))
-    let rule = Rule(dir: Listen, prefix: ip, bits: 32, ports: (0, 65535))
+    let rule = Rule(dir: Listen, prefix: ip, bits: 32, ports: (0, 65535), reach: Any)
     let limited = isolate(fn() -> Result[Result[Net, RuleError], Capacity] {
         bound bytes 40 {
             net.narrow(n, rule)
@@ -55,7 +55,7 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     }
     let parent = result.unwrap(net.narrow(n, rule))
     let sibling_ip = V4(2130706434)
-    let sibling = Rule(dir: Listen, prefix: sibling_ip, bits: 32, ports: (0, 65535))
+    let sibling = Rule(dir: Listen, prefix: sibling_ip, bits: 32, ports: (0, 65535), reach: Any)
     let empty = result.unwrap(net.narrow(parent, sibling))
     match host.listen(empty, Addr(ip: sibling_ip, port: 0), 1) {
         Error(Denied) => {},

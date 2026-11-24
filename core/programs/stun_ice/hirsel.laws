@@ -6,3 +6,4 @@ stun_ice@1/laws/lite_nat_rebinding src=d82b573ce220d680 sig=7472e34be1632bae run
 stun_ice@1/laws/lite_peer_signaling src=26cffcb9b463760b sig=9834a29434062e86 run=acdd7fe37d41c86f bug=2479a3ab4ac27c39 oracle=880d8e19f6335a90 rows=pending
 stun_ice@1/laws/long_term_key_vectors src=c2bbbaa1668d5ae3 sig=6afeda85acdff8c2 run=acdd7fe37d41c86f bug=489b4ee2036841a3 oracle=3d31d87049f7128d rows=pending
 stun_ice@1/laws/minted_credentials src=ce3c44d209e8b7d0 sig=5e38bcf503a5d406 run=acdd7fe37d41c86f bug=65261c7721b51be1 oracle=dbd8c8076b1b7b41 rows=pending
+stun_ice@1/laws/public_class_table src=f155876325da492e sig=5107f2fb916455dc run=acdd7fe37d41c86f bug=7df5a1df22b142d0 oracle=1ffb4e1e46111194 rows=pending

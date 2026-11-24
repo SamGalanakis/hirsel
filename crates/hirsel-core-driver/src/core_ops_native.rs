@@ -2311,8 +2311,15 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
     if local.port == 0 || peer.port == 0 { return Error(Exit(status: 6)) }
     match peer.ip { V4(2130706433u32) => {}, _ => return Error(Exit(status: 7)) }
     match host.listen(n, Addr(ip: V4(0u32), port: 0), 16) { Error(Denied) => {}, _ => return Error(Exit(status: 4)) }
-    let child = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16))))
+    let child = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16), reach: Any)))
     match host.connect(child, Addr(ip: V4(2130706433u32), port: 81), Never) { Error(Denied) => {}, _ => return Error(Exit(status: 5)) }
+    // NET-18: 126.0.0.0/7 holds public addresses, so the public child keeps it,
+    // and a loopback connect it covers is refused and counted once.
+    let public = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: V4(0u32), bits: 0, ports: (1u16, 65535u16), reach: Public)))
+    match host.connect(public, local, Never) { Error(Denied) => {}, _ => return Error(Exit(status: 8)) }
+    if net.denials(n).not_public != 1 { return Error(Exit(status: 9)) }
+    match net.class(V4(2130706433u32)) { Loopback => {}, _ => return Error(Exit(status: 10)) }
+    match net.narrow(n, Rule(dir: Listen, prefix: V4(0u32), bits: 0, ports: (1u16, 65535u16), reach: Public)) { Error(_) => {}, _ => return Error(Exit(status: 11)) }
     Ok(())
 }
 "#,
@@ -2339,7 +2346,7 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
             hirsel_core_net::RULE_SYNTAX
         ),
     );
-    options.net_rules = ["Connect 127.0.0.0/8 1-65535", "Listen 127.0.0.0/8 0-65535"]
+    options.net_rules = ["Connect 126.0.0.0/7 1-65535", "Listen 127.0.0.0/8 0-65535"]
         .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
         .to_vec();
     let granted = product.build(&entry, &options).unwrap();

@@ -48,6 +48,8 @@ fn read_net_rule(bytes: &[u8]) -> Rule {
         hi: u64::from_le_bytes(bytes[2..10].try_into().unwrap()),
         lo: u64::from_le_bytes(bytes[10..18].try_into().unwrap()),
         bits: bytes[18],
+        // Launch grants carry no `public` word before NET-18's S3.
+        reach: hirsel_core_net::ANY,
         first: u16::from_le_bytes(bytes[19..21].try_into().unwrap()),
         last: u16::from_le_bytes(bytes[21..23].try_into().unwrap()),
     }

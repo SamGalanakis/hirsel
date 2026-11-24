@@ -231,9 +231,21 @@ pub type TlsPin = SystemPin | Sha256(Bytes)
 
 pub type UnixDirection = UnixConnect | UnixListen | UnixBind | UnixSend
 
-pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
+// NET-18: a Connect rule's reach. `Public` covers only addresses `net.class` calls public.
+pub type Reach = Any | Public
+
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16), reach: Reach) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
 
 pub type RuleError = Invalid()
+
+// NET-18's address-class table (`net.class`).
+pub type AddressClass = Public | Unspecified | ThisNetwork | Private | SharedCgnat | Loopback | LinkLocal | Protocol | Documentation | Relay6to4 | Benchmarking | Multicast | Reserved | Broadcast | UniqueLocal | Nat64Local | NotGlobal6
+
+// NET-18: the connects a provider refused, by part of the public-only check.
+pub type NetDenials {
+    not_public: u64,
+    own_address: u64
+}
 
 pub opaque resource type HostFile
 

@@ -73,6 +73,8 @@ impl Machine<'_> {
                 | HostOp::MonoNs
                 | HostOp::ExecNarrow
                 | HostOp::NetNarrow
+                | HostOp::NetClass
+                | HostOp::NetDenials
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
                 | HostOp::NetNarrowUnix
@@ -249,6 +251,17 @@ impl Machine<'_> {
             HostOp::UdpBind | HostOp::UdpBindGroup | HostOp::UdpLocalAddr => {
                 vec![0, 1, 0, 0, 0, 0, 0, 0]
             }
+            HostOp::NetClass => ok(
+                hirsel_core_net::class::class_of(a[0] as u8, a[1], a[2]) as u64,
+                0,
+            ),
+            HostOp::NetDenials => {
+                let provider = self.world.net_ports.get(&a[0]).copied();
+                ok(
+                    self.world.not_public.get(&provider).copied().unwrap_or(0),
+                    0,
+                )
+            }
             HostOp::NetNarrow => {
                 let Some(dir) = hirsel_core_net::AddressDirection::from_variant(a[1] as u8) else {
                     return Ok(error(1));
@@ -259,8 +272,9 @@ impl Machine<'_> {
                     hi: a[3],
                     lo: a[4],
                     bits: a[5] as u8,
-                    first: a[6] as u16,
-                    last: a[7] as u16,
+                    reach: a[6] as u8,
+                    first: a[7] as u16,
+                    last: a[8] as u16,
                 };
                 if r.valid() {
                     self.narrow_net(t, a[0], hirsel_core_net::GrantRule::Address(r))

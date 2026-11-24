@@ -148,6 +148,8 @@ pub enum HostOp {
     PacketOpenInto = hirsel_core_ids::host_op::PACKET_OPEN_INTO as isize,
     PacketMask = hirsel_core_ids::host_op::PACKET_MASK as isize,
     SecretDeriveDigest = 166,
+    NetClass = 168,
+    NetDenials = 169,
 }
 
 mod symbol;
@@ -281,6 +283,8 @@ impl HostOp {
         HostOp::RecvReady,
         HostOp::SendPair,
         HostOp::NetNarrow,
+        HostOp::NetClass,
+        HostOp::NetDenials,
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
@@ -411,6 +415,8 @@ impl HostOp {
                 outcome,
             ),
             HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
+            HostOp::NetClass => (vec![V(u8_), V(u64_), V(u64_)], outcome),
+            HostOp::NetDenials => (vec![V(u64_)], outcome),
             HostOp::NetNarrow => (
                 vec![
                     V(u64_),
@@ -418,6 +424,7 @@ impl HostOp {
                     V(u8_),
                     V(u64_),
                     V(u64_),
+                    V(u8_),
                     V(u8_),
                     V(Ty::Scalar(Scalar::U16)),
                     V(Ty::Scalar(Scalar::U16)),
@@ -705,6 +712,8 @@ impl HostOp {
             HostOp::RecvReady => "host_recv_ready",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
+            HostOp::NetClass => "net_class",
+            HostOp::NetDenials => "net_denials",
             HostOp::ExecNarrow => "exec_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
             HostOp::NetNarrowResolve => "net_narrow_resolve",
@@ -894,6 +903,8 @@ impl HostOp {
                     | HostOp::MonoNs
                     | HostOp::Random
                     | HostOp::NetNarrow
+                    | HostOp::NetClass
+                    | HostOp::NetDenials
                     | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve

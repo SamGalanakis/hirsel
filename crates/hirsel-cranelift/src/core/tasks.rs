@@ -285,6 +285,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::RecvReady
                     | HostOp::SendPair
                     | HostOp::NetNarrow
+                    | HostOp::NetClass
+                    | HostOp::NetDenials
                     | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve

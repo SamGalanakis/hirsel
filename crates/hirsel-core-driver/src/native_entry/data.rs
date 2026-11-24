@@ -152,6 +152,7 @@ pub(super) fn write(
         row[8..16].copy_from_slice(&address.hi.to_le_bytes());
         row[16..24].copy_from_slice(&address.lo.to_le_bytes());
         row[24] = address.bits;
+        row[25] = address.reach;
         row[26..28].copy_from_slice(&address.first.to_le_bytes());
         row[28..30].copy_from_slice(&address.last.to_le_bytes());
         let len = offset_of!(RuleView, patterns_len);

@@ -3,7 +3,10 @@ mod addr;
 #[cfg(feature = "record")]
 pub(crate) use addr::{address_bytes, denial};
 pub(crate) use addr::{authorize, permits_address};
-pub use addr::{hirsel_core_net_local_addr, hirsel_core_net_narrow, hirsel_core_net_peer_addr};
+pub use addr::{
+    hirsel_core_net_class, hirsel_core_net_denials, hirsel_core_net_local_addr,
+    hirsel_core_net_narrow, hirsel_core_net_peer_addr,
+};
 
 use crate::{
     Context,

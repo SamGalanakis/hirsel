@@ -421,9 +421,27 @@ embedding rows. The embedded forms are judged, not denied outright, because a NA
 gateway or 6to4 relay forwards to the IPv4 address inside the IPv6 one. Judging that
 address blocks `64:ff9b::a9fe:a9fe` (`169.254.169.254`) as the IPv4 rule blocks the
 address itself, and leaves IPv6-only hosts able to reach public IPv4 servers through
-NAT64. The table is one Rust table (`crates/hirsel-core-net/src/class.rs`<!-- doc-ref: planned -->)
+NAT64. The table is one Rust table (`crates/hirsel-core-net/src/class.rs`)
 behind both the preflight and `net.class`, a core operation, so Hirsel code and the
 runtime cannot disagree.
+
+Decided in S1 (2026-11-24, net18-s1-2446), where the text above is silent:
+
+- An embedded address's class is the class of the IPv4 address inside it, so
+  `net.class(64:ff9b::7f00:1)` is `Loopback`. For Teredo, the server's class is
+  returned when the server is not `Public`, and otherwise the client's.
+- A `Public` rule must hold a public address, which is computed exactly over the
+  table's ranges, with the embedded forms read through their IPv4 bits. IPv4-mapped
+  addresses never count, because NET-6 denies them before the table is read. So
+  `Connect 224.0.0.0/3 1-65535 public` and `Connect 2002:a00::/24 1-65535 public` are
+  `Invalid`, and an intersection that is left with no public address is dropped.
+- A refusal counts as `not_public` when some rule covers the address and port and
+  every such rule is public-only. NET-6's own refusals (mapped, unscoped link-local,
+  unspecified) are covered by no rule and do not count. Until S2 builds part 2,
+  `own_address` is 0.
+- The tape header records only launch grants, and the S1 grant has no `public`
+  word, so its 23-byte address row is unchanged and reads back as `Any`. Narrowed
+  rules are recomputed on replay. S3 encodes the reach when it parses `public`.
 
 The table knows only IANA's ranges. A platform address in public space (Azure
 `168.63.129.16`) or an operator's own NAT64 prefix (RFC 6052 §2.2) is `Public`; an
@@ -529,7 +547,7 @@ Core's `Rule` type includes `Unix` for directory-relative endpoints. Use
 
 ```hirsel core
 pub type UnixDirection = UnixConnect | UnixListen | UnixBind | UnixSend
-pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16)) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16), reach: Reach) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
 ```
 
 A `Unix` rule names one exact endpoint as a **root label** and a valid path beneath it

@@ -556,6 +556,8 @@ tags!(HostOp {
     169 => SecretHmacSha1,
     170 => SecretVerifyHmacSha1,
     171 => SecretDeriveDigest,
+    172 => NetClass,
+    173 => NetDenials,
 });
 
 tags!(RaiseCause {

@@ -3,7 +3,11 @@ use hirsel_core_net::{AddressDirection, Rule};
 
 /// Check an address before issue. A tape records the denial for its inner grant
 /// and delivers it at its ordinary provider boundary.
-pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> Option<Outcome> {
+pub(crate) unsafe fn authorize(
+    context: *mut Context,
+    provider: &Provider,
+    request: &mut Request,
+) -> Option<Outcome> {
     if unix_operation(request.operation) {
         // SAFETY: the adapter pins this extension through the provider call.
         return unsafe { !(*request.path.cast::<crate::unix_net::UnixRequest>()).authorized }
@@ -22,13 +26,90 @@ pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> Op
         if crate::tape::owns(provider) {
             if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
                 let denial = request_denial(request, handle);
+                count_not_public(context, provider, request, handle, denial);
                 (*request.path.cast_mut().cast::<NetworkRequest>()).denial = denial;
             }
             return None;
         }
-        #[cfg(not(feature = "record"))]
-        let _ = provider;
-        request_denial(request, request.handle).map(crate::os_net::signal)
+        let denial = request_denial(request, request.handle);
+        count_not_public(context, provider, request, request.handle, denial);
+        denial.map(crate::os_net::signal)
+    }
+}
+
+/// NET-18: a connect refused because its address is not public, though a rule
+/// covers its address and port, counts once against the provider's `not_public`.
+unsafe fn count_not_public(
+    context: *mut Context,
+    provider: &Provider,
+    request: &Request,
+    handle: u64,
+    denial: Option<u8>,
+) {
+    if request.operation != CONNECT || denial != Some(1) {
+        return;
+    }
+    // SAFETY: network adapters pin the scalar address and the grant's Rules.
+    unsafe {
+        let address = &(*request.path.cast::<NetworkRequest>()).address;
+        let rules = (&*(handle as *const Rules)).as_slice();
+        if hirsel_core_net::not_public(
+            rules.iter().map(|row| row.address),
+            0,
+            address.family,
+            address.hi,
+            address.lo,
+            address.port,
+        ) {
+            let run = (*(*context).host_files).registry.run_grants();
+            *run.not_public
+                .lock()
+                .unwrap()
+                .entry(provider.state as usize)
+                .or_default() += 1;
+        }
+    }
+}
+
+/// # Safety
+/// The class of an address under NET-18's table, in `value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_class(
+    _context: *mut Context,
+    family: u8,
+    hi: u64,
+    lo: u64,
+    _site: u64,
+) -> Outcome {
+    Outcome {
+        value: hirsel_core_net::class::class_of(family, hi, lo) as u64,
+        ..Outcome::default()
+    }
+}
+
+/// # Safety
+/// `n` is a live Net designation of this run. Its provider's `not_public`
+/// count, in `value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_denials(
+    context: *mut Context,
+    n: u64,
+    _site: u64,
+) -> Outcome {
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let provider = &*crate::entry::hirsel_core_capability_provider(context, n);
+        let run = (*(*context).host_files).registry.run_grants();
+        let count = run
+            .not_public
+            .lock()
+            .unwrap()
+            .get(&(provider.state as usize))
+            .copied();
+        Outcome {
+            value: count.unwrap_or(0),
+            ..Outcome::default()
+        }
     }
 }
 
@@ -134,6 +215,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
     hi: u64,
     lo: u64,
     bits: u8,
+    reach: u8,
     first: u16,
     last: u16,
     _site: u64,
@@ -147,6 +229,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
         hi,
         lo,
         bits,
+        reach,
         first,
         last,
     };

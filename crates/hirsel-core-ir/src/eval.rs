@@ -186,6 +186,9 @@ struct World {
     /// A served Net's grants (in `network.grants`, so `net.narrow` works on
     /// them as on any Net) and their port.
     net_ports: BTreeMap<u64, usize>,
+    /// NET-18's `not_public` refusals per provider: a served Net's port, or
+    /// `None` for the run's own provider. Every Net from one provider shares it.
+    not_public: BTreeMap<Option<usize>, u64>,
     exec_grants: Vec<(usize, hirsel_core_net::exec::ExecRules)>,
     exec_handles: BTreeMap<u64, Limit>,
     /// A served Net caller's socket and listener keys (direction bits clear):

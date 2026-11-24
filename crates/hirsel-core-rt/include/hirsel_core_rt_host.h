@@ -164,6 +164,7 @@ typedef struct {
     uint8_t dir, family;
     uint64_t hi, lo;
     uint8_t bits;
+    uint8_t reach; /* NET-18: 0 Any, 1 Public (Connect only) */
     uint16_t first, last;
     const uint8_t *patterns;
     size_t patterns_len;
@@ -398,7 +399,10 @@ HirselCoreHostOutcome hirsel_core_packet_mask(HirselCoreContext *, uint64_t, con
 HirselCoreHostOutcome hirsel_core_secret_aead_seal(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_aead_open(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
-HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint8_t, uint16_t, uint16_t, uint64_t);
+/* NET-18: the class of an address (value), and a provider's not_public denials (value). */
+HirselCoreHostOutcome hirsel_core_net_class(HirselCoreContext *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_denials(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);

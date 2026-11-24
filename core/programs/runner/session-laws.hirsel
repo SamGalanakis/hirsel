@@ -267,38 +267,46 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 }
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
-    // Five WireEvents of 169 (8 plus FromRunner's Notice of 161, the largest payload once the
-    // cold controls, Reader and Writer are boxed) plus the channel header, four unit channels
-    // of 64, two task records of 288 (the reader, and the writer while a write blocks), and the
-    // owner record of 328 (288 plus 40 for Result[(), std.wsock.Error]).
-    let checked = bound bytes (5u64 * 169u64 + 64u64 + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
-        let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
-        let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)
-        let (a, ar): (Sender[()], Receiver[()]) = channel.new(1u64)
-        let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
-        let (end, er): (Sender[()], Receiver[()]) = channel.new(1u64)
-        let mut owner = task.spawn(tasks, bytes 0u64, take er, wire_owner_park)
-        let reader = task.spawn(tasks, bytes 0u64, take ar, wire_park)
-        let writer = task.spawn(tasks, bytes 0u64, take br, wire_park)
-        let mut probe: Bytes = list.new()
-        let exact = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
-        task.cancel(mut owner)
-        wire_join(take reader, Some(take writer))
-        let _ = task.join(take owner)
-        let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
-        let _ = channel.try_send(events, wire_event(Dropped))
-        let _ = channel.try_send(credit, ())
-        let live = match (channel.try_receive(hear), channel.try_receive(read_credit)) {
-            (Ok(WireEvent(e: Dropped)), Ok(())) => true,
-            _ => false,
-        }
-        let closed = match (channel.try_send(a, ()), channel.try_send(b, ())) {
-            (Error(Closed(_)), Error(Closed(_))) => true,
-            _ => false,
-        }
-        exact && live && closed && owner_closed
+    // MEM-24: Owe holds five 24-byte lists, four u64s and two bools (154 bytes).
+    // Updated holds version (8), Option[Owe] (162) and outcomes (24).
+    // PublisherEvent and WireInput each add an 8-byte tag: 210 bytes per WireEvent.
+    // Five events plus their channel header, four unit channels, two child task
+    // records of 288 and a 328-byte owner (288 + 40 for Result[(), std.wsock.Error]).
+    let record_bytes = 5u64 * 210u64 + 64u64 + 4u64 * 64u64 + 2u64 * 288u64 + 328u64
+    let exact = bound bytes record_bytes { wire_session_records(tasks) }
+    let short = bound bytes (record_bytes - 1u64) { wire_session_records(tasks) }
+    match (take exact, take short) {
+        (Ok(Ok(true)), Ok(Error(Capacity(requested: 288u64, available: 287u64)))) => true,
+        _ => false,
     }
-    match checked { Ok(ok) => ok, Error(_) => false }
+}
+
+fn wire_session_records(tasks: Tasks) -> Result[bool, Capacity] waits {
+    let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
+    let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)
+    let (a, ar): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (end, er): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let mut owner = task.spawn(tasks, bytes 0u64, take er, wire_owner_park)
+    let reader = task.spawn(tasks, bytes 0u64, take ar, wire_park)
+    let writer = task.try_spawn(tasks, bytes 0u64, take br, wire_park) ?=> |(cap, _)| cap
+    let mut probe: Bytes = list.new()
+    let exact = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
+    task.cancel(mut owner)
+    wire_join(take reader, Some(take writer))
+    let _ = task.join(take owner)
+    let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
+    let _ = channel.try_send(events, wire_event(Dropped))
+    let _ = channel.try_send(credit, ())
+    let live = match (channel.try_receive(hear), channel.try_receive(read_credit)) {
+        (Ok(WireEvent(e: Dropped)), Ok(())) => true,
+        _ => false,
+    }
+    let closed = match (channel.try_send(a, ()), channel.try_send(b, ())) {
+        (Error(Closed(_)), Error(Closed(_))) => true,
+        _ => false,
+    }
+    Ok(exact && live && closed && owner_closed)
 }
 
 // v2.44 (§3 Session): the owner writes without waiting and starts a writer child only when a

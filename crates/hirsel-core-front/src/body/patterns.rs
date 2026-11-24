@@ -1756,7 +1756,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (ot, ov) = if let Some(&other) = c.get(2) {
             self.result_expr(
                 other,
-                want.filter(|w| self.fixed_want(*w))
+                want.filter(|w| self.fixed_want(*w) && !(w.view && yt != NEVER))
                     .or_else(|| {
                         (yt != NEVER).then_some(Want {
                             ty: yt,

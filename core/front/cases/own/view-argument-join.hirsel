@@ -1,0 +1,43 @@
+// OWN-7 / OWN-16: an `if` whose arms are views, passed for a view parameter, joins a
+// view; the join owns nothing, so each local is finalized once, at its own end.
+// Locals end in reverse order: b (2), then a (1). A join that cleaned the viewed
+// value would finalize the chosen Mark a second time.
+// chosen(1): id_of(view a) = 1; trace 2,1. chosen(0): id_of(view b) = 2; trace 2,1.
+// chosen_let(1): `if let` arms likewise; 1; trace 2,1.
+// expect: run chosen(1) = 1 trace 2,1
+// expect: run chosen(0) = 2 trace 2,1
+// expect: run chosen_let(1) = 1 trace 2,1
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn chosen(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let b = result.unwrap(Mark(id: 2))
+    id_of(if c == 1 {
+        view a
+    } else {
+        view b
+    })
+}
+
+fn chosen_let(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let b = result.unwrap(Mark(id: 2))
+    let o: Option[u64] = if c == 1 {
+        Some(c)
+    } else {
+        None
+    }
+    id_of(if let Some(_) = o {
+        view a
+    } else {
+        view b
+    })
+}

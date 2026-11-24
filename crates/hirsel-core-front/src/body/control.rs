@@ -509,9 +509,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(no) = no_block {
             self.start(no);
         }
-        // An arm of type Never constrains nothing (LANG-11).
+        // A Never arm constrains nothing (LANG-11); a view want binds to the first arm (OWN-16).
         let other_want = want
-            .filter(|w| self.fixed_want(*w))
+            .filter(|w| self.fixed_want(*w) && !(w.view && yt != NEVER))
             .or(if yt == NEVER { None } else { expect(yt) })
             .or(want);
         let (ot, ov) = self.result_expr(other, other_want);

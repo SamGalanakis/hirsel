@@ -2873,12 +2873,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
-                let v = if self.plain_view(t, w.ty) {
-                    self.read_plain_view(w.ty, v, n)
-                } else {
-                    v
-                };
-                (w.ty, v)
+                if self.plain_view(t, w.ty) {
+                    return (w.ty, self.read_plain_view(w.ty, v, n));
+                }
+                // A view kept for a view parameter (OWN-7): a join carrying it owns nothing.
+                let kept = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
+                (if kept { t } else { w.ty }, v)
             }
             _ => (t, v),
         }

@@ -2,13 +2,13 @@
 
 [API overview](../API.md). [Types and operation contracts](../config.hirsel).
 
-Use `std.config` to read startup configuration from an explicit
-[`Env`](env.md). Read keys in declaration order, then call `finish` before
-using the values. A failed read records the requested key and its problem, so
-the remaining getters can run in the same pass.
+Use `std.config` to read startup configuration from the command line and an
+optional [`Env`](env.md) grant. Call `finish` before using the values. A failed
+read records the requested key and its problem, so the remaining getters can run
+in the same pass.
 
 ```hirsel
-let mut settings = std.config.new(e, 3)
+let mut settings = std.config.new(Some(e), a, 3)
 let address = std.config.string_or(mut settings, "APP_ADDRESS", "127.0.0.1")
 let port = std.config.port(mut settings, "APP_PORT")
 let timeout = std.config.duration_ms_or(mut settings, "APP_TIMEOUT_MS", 5000)
@@ -54,23 +54,9 @@ which the launcher prevents from overlapping with an `Env` grant.
 
 ## Flags
 
-*Specified 2026-11-24 (std Group 2), not yet implemented. Until it lands, `config.hirsel` is
-the reader described above.*
-
 The reader takes the program's command line as a second source. A flag on the command line
 overrides the environment, and both override a getter's fallback. One reader and one
-report cover both sources, so a program never writes a second argument parser.
-
-```
-pub fn new(source: Option[Env], a: Args, max_errors: u64) -> Reader
-pub type ConfigError = KeyError(String, ConfigProblem) | Unknown(String) | Unexpected(String) | More(u64) | Help(String)
-pub type ConfigProblem = Missing | Denied | NonUtf8 | Invalid(String) | NoValue | Repeated
-pub fn strings(mut r: Reader, key: String) -> List[String]
-pub fn positionals(mut r: Reader, min: u64, max: u64) -> List[String]
-pub fn log_level(mut r: Reader, key: String) -> trace.Level
-pub fn log_level_or(mut r: Reader, key: String, fallback: trace.Level) -> trace.Level
-pub fn finish(take r: Reader) -> Result[(), List[ConfigError]]
-```
+report cover both sources.
 
 ```hirsel
 fn main(e: Env, a: Args, err: Stderr) -> Result[(), String] waits {
@@ -94,9 +80,9 @@ Run as `app --app-port 9000 --app-verbose --app-tag=a --app-tag b in.csv`.
 Every getter key names one flag. The flag is `--` followed by the key with ASCII letters
 lowercased and each `_` written `-`: key `APP_PORT` is flag `--app-port`. No other name
 reaches the key, so the environment name and the flag name never drift apart, and
-`format_errors` names the key the program declared. A key that is not ASCII letters, digits
-and `_` gives `KeyError(key, Invalid("a key is ASCII letters, digits and _"))` the first time
-it is read, from either source.
+`format_errors` names the key the program declared. A key must contain one or more ASCII
+letters, digits or underscores. An invalid key gives
+`KeyError(key, Invalid("a key is ASCII letters, digits and _"))` when it is read.
 
 ### Reading the command line
 
@@ -163,8 +149,8 @@ takes no environment grant. Its environment reads then find every key absent, ne
   `KeyError(key, Repeated)` and its placeholder. `strings(r, key)` returns every value of
   the flag in command-line order. When the flag is absent, it returns the environment
   value as one element, or an empty list when that is absent too. It never splits a value.
-- **Positionals.** `positionals(r, min, max)` claims the loose tokens no flag took, in
-  order. Fewer than `min` gives `KeyError("ARGS", Invalid("expected at least N
+- **Positionals.** Call `positionals(r, min, max)` after the flag getters. It claims the loose
+  tokens no flag took, in order. Fewer than `min` gives `KeyError("ARGS", Invalid("expected at least N
   arguments"))`. Tokens beyond `max` stay unclaimed, so `finish` reports them as
   `Unexpected`. A second call returns an empty list.
 - **Log levels.** `log_level` reads `debug`, `info`, `warn` or `error`, exactly, as a
@@ -173,12 +159,12 @@ takes no environment grant. Its environment reads then find every key absent, ne
 
 ### Help and usage
 
-When the command line holds `--help` and no getter claims it, every getter still runs, and
+When the command line holds a bare `--help` before `--` and no getter claims it, every getter still runs, and
 `finish` returns `Error([Help(text)])`, with no other errors. `text` is a usage listing built
-from the reads, one line per key in call order: the flag, `<value>` for a valued getter, the
-environment key, and the fallback for an `_or` getter, written as `format_errors` writes
-values. `strings` is marked `(repeatable)`. `positionals` adds a final line, `ARGS: min..max
-arguments`. The reader records these lines only when `--help` is present, so a run without
+from the reads, one line per key in call order. Each line shows the flag, ` <value>` for a
+valued getter, two spaces, and the environment key. An `_or` getter appends
+` (default: VALUE)`. `strings` appends ` (repeatable)`. `positionals` adds a final line,
+`ARGS: min..max arguments`. The reader records these lines only when `--help` is present, so a run without
 it pays nothing for them. `format_errors` renders `Help(text)` as `text`, `Unknown(t)` as
 `t: unknown flag` and `Unexpected(t)` as `t: unexpected argument`. An error names the
 token the user typed but never a flag's value or an environment value. Descriptions, grouping, colour and subcommands are not generated. Those belong to a
@@ -190,8 +176,9 @@ CLI framework package (API.md, "Keep modules in separate libraries").
   environment half still needs the `Env` grant, as before.
 - **Failures.** Every problem above is recorded and reported by `finish`. None stops the
   reader. A refused allocation raises `Capacity`, and cleanup refunds the reader (FAIL-5).
-- **Charging.** `new` admits one claim byte per argument (`args.len(a)` bytes) and the
-  error list's growth, under the current limit. `strings` and `positionals` admit their
+- **Charging.** `new` admits one claim byte per argument (`args.len(a)` bytes) under the
+  current limit. The reader also admits flag names and their getter modes as each key
+  is read, along with the error list's growth. `strings` and `positionals` admit their
   lists, and each value is copied out of `Args`' host memory into an owned `String`. The
   usage lines are admitted only when `--help` is present. Steps: `new` takes
   O(`args.len(a)`). Each getter compares its flag against every flag token, so it takes

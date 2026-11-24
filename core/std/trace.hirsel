@@ -11,6 +11,9 @@ pub opaque type Context: key {
 /// SelfParent: the parent is the span itself.
 pub type Error: key = ZeroTrace | ZeroSpan | OtherTrace | SelfParent
 
+/// Minimum severity and severity of a structured log line, in increasing order.
+pub type Level: key = Debug | Info | Warn | Error
+
 /// OTLP Span.SpanKind 1 to 5.
 pub type SpanKind: key = Internal | Server | Client | Producer | Consumer
 

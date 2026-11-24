@@ -289,9 +289,9 @@ fn stamp() -> u64 { host.mono_ns() }                      // refused: CAP-1, no 
 
 Capability arguments stay explicit: there is no implicit context. Three habits keep them
 short. Capture an authority at construction when a value keeps using it: std's
-`config.new(source: Env, max_errors: u64)` stores the `Env` in its `Reader`, and every
-getter reads through `r.source`, as `store.Db` keeps its `Clock`. When three or more
-capabilities travel together, pass one small record of them. Give a leaf only the field it
+`config.new(source: Option[Env], a: Args, max_errors: u64)` stores the optional `Env` in
+its `Reader` for getters to use when a flag is absent, as `store.Db` keeps its `Clock`. When
+three or more capabilities travel together, pass one small record of them. Give a leaf only the field it
 needs, so its signature still names its whole authority.
 
 ```hirsel

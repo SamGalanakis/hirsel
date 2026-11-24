@@ -1,3 +1,3 @@
 hirsel.laws 1
 search@1/tests/filtered_top_k src=34d45df5e5984477 sig=f4b64922190dff45 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-search@1/tests/snapshot_bm25 src=1d406c749436f1b2 sig=e4fbc2ac4ea22cb9 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+search@1/tests/snapshot_bm25 src=1d406c749436f1b2 sig=fbc35425fce5fb03 run=b1818af2b24835d3 bug=- oracle=- rows=pending

@@ -15,6 +15,7 @@ std = { major = 1 }
 "rtx.hirsel" = "rtx"
 "twcc.hirsel" = "twcc"
 "bwe.hirsel" = "bwe"
+"pacer.hirsel" = "pacer"
 "stats.hirsel" = "stats"
 "loss.hirsel" = "loss"
 
@@ -25,3 +26,4 @@ limit = 67108864
 "laws.hirsel" = "laws"
 "bwe_laws.hirsel" = "bwe"
 "stats_laws.hirsel" = "laws"
+"pacer_laws.hirsel" = "laws"

@@ -929,8 +929,27 @@ the rates are measured on the **distinct received members** only, in send order,
 - receive rate `(bytes − first size) · 8 / (last arrival − first arrival)`;
 - `bytes` is the sum of the received members' sizes. A member reported twice counts once.
 
+The receive span runs from the earliest arrival to the latest, and the size taken off is
+the earliest-arriving member's, as libwebrtc's `ProbeBitrateEstimator` and str0m's
+`src/bwe/probe/estimator.rs` take them; in order the two edges coincide.
 A span of zero (fewer than two received members, or all at one time) gives no result. A
-result `min(send, receive)` above `A` sets `A` to it. The estimate a probe raises is the delay estimate `A`; the public
+result `min(send, receive)` above `A` sets `A` to it, within `[min_bps, max_bps]`, and moves
+the time of the last change to now. The result is taken once per `on_acked`, after rate
+control.
+
+The cluster's members are the indices `probe_sent` gave for its `id`, in send order. Transport
+numbers rise in send order, so an index at or below the last member's, or an `id` other than
+the outstanding cluster's, is ignored. The estimator ends the cluster by the pacer's rule, on
+the send times feedback reports: its last member is the first that is at least its
+`packets`-th and was sent at least `min_ns` after the first, and later members are ignored.
+Feedback covers the cluster when every member up to its last has been reported, received or
+lost; the cluster is measured then, once, and is no longer outstanding. The 1 s runs from the
+`probe` that answered it, checked by `probe` and at the end of `on_acked`. The cluster rate is
+`min(2·target(), want)`, with `2·target()` saturating. `Bwe` keeps one member list, sized by
+`probe` for the most probes a cluster can hold (`rate · 15 ms / 1,600 + 2`, since a probe is
+at least 200 bytes); a `probe_sent` past it is ignored. `bwe` admits no charge
+(it answers a `Bwe`, not a `Result`), so this per-cluster reserve is the probe's only growth,
+and no per-packet operation allocates. The estimate a probe raises is the delay estimate `A`; the public
 `target()` is still `min(A, L)`, so a binding loss limit keeps the target at `L`.
 
 Law: on a link whose queue grows, the detector answers `Overuse` and the target falls; on an
@@ -980,7 +999,30 @@ keyframe does not leave as one burst that overflows a bottleneck queue (`str0m`
     active**: a live cluster with empty queues never answers `Idle`;
   - `Idle` otherwise.
 - **Queue limit.** When the queued bytes would take longer than `queue_limit_ns` at the
-  pacing rate, the rate rises to send them within the limit.
+  pacing rate, the rate rises to send them within the limit. A limit of 0 sets no limit.
+  As str0m (`src/pacer/leaky.rs:355-388`) and libwebrtc compute it, the rate is
+  `max(base, queued · 8 / max(1 ms, queue_limit_ns − q̄))`, with `base` the pacing rate or a
+  running cluster's rate, `queued` every queued byte, audio included, and `q̄` the queued
+  entries' average time since their `push`.
+- **Rate in force.** `poll` takes the rate from the state at its start and uses it both for
+  the drain since the last poll and for the answer's `Wait`. A poll earlier than the last
+  drains nothing. Debts are `f64` bytes; `Wait` is rounded up to the nanosecond, and a debt
+  whose `Wait` time has come is 0, so a `poll` at the time a `Wait` named always finds it
+  paid. A rate of 0 holds no debt (its 500 ms cap is 0), so nothing waits.
+- **Sizes.** The probe size `rate / 8000` is truncated to whole bytes and is at least
+  `header + 1`, so `pad` is 1 to 255 for any header. A `Pad` takes the same size from the
+  padding rate.
+- **Padding.** A queued `Padding` packet is the lowest class, after Video; any queued packet
+  goes before a probe or a `Pad`. The padding debt drains at the padding rate, every answered
+  send adds to it as to the debt, and it holds at most 500 ms at the padding rate. `Pad` needs
+  both debts at 0. With a padding rate set and nothing else to answer, `poll` answers `Wait`
+  at the later time both debts reach 0, not `Idle`, so the caller knows when to poll.
+- **Clusters.** `probe` replaces a running cluster. The cluster's first time is the `poll`
+  that answers its first probe.
+- `pacer` refuses 0 slots, and `2^32 − 1` slots, with `Capacity`.
+- The caller logs each probe's send time ([RTP-8](#rtp-8-transport-wide-sequence-numbers-and-feedback))
+  as the `now` of the `poll` that answered it, so the estimator ends the cluster where the
+  pacer did.
 - `push` with no free slot gives back `q` (`Error(q)`), which the caller drops. Nothing is
   dropped silently.
 - `remove(stream)` moves every queued entry of the stream to `out` and answers the count.

@@ -1,5 +1,6 @@
 hirsel.laws 1
 rtp@1/bwe/aimd_steps src=7d67c168247e5369 sig=e6932753b1852051 run=c2c0c6612d4cbb79 bug=c0320e00415bfaa3 oracle=d46f4d3dac0401fa rows=pending
+rtp@1/bwe/probe_result src=cf2174ada7a916de sig=947f7e9da77c9351 run=c2c0c6612d4cbb79 bug=691186325244b5e7 oracle=d99171d4613f5d5b rows=pending
 rtp@1/bwe/trendline_flat src=dab3e92f9afa3835 sig=c25e921555197395 run=c2c0c6612d4cbb79 bug=c4d7d149fa80523a oracle=e571d6e10abcd9f1 rows=pending
 rtp@1/bwe/trendline_overuse src=e87e1f1727b8e258 sig=3ed2862a6fcc2803 run=c2c0c6612d4cbb79 bug=a7fdc063ba1076d4 oracle=67f7a08a08084569 rows=pending
 rtp@1/laws/bounded_views src=428d9bc253332764 sig=0f2adb6407fbcb86 run=c2c0c6612d4cbb79 bug=67cd72d855126d45 oracle=04d23f904e0ec381 rows=pending
@@ -10,10 +11,11 @@ rtp@1/laws/history_lookup src=e5ded7e240eae7d5 sig=b1df60ed80a51c0b run=c2c0c661
 rtp@1/laws/index_estimate src=80db1f817d3dc270 sig=8ca1009c3ef33b5a run=c2c0c6612d4cbb79 bug=40ddfef863011736 oracle=f04e60f22e9e11c3 rows=pending
 rtp@1/laws/keyframe_coalesce src=3238ca1d979ae0bb sig=5267c1230bc1feb8 run=c2c0c6612d4cbb79 bug=83e1947f21135b9c oracle=0dc23b3c2bca42a7 rows=pending
 rtp@1/laws/nack_pairs src=dc7869253ad91c4b sig=f3ca52bf180979a0 run=c2c0c6612d4cbb79 bug=e04e36c545be7fdc oracle=d3e56b204489c76b rows=pending
-rtp@1/laws/padding_counts src=aff74e460b677878 sig=12731abd93b13998 run=c2c0c6612d4cbb79 bug=458edda0f4aac832 oracle=cb09ac157a61d470 rows=pending
+rtp@1/laws/pacer_spacing src=05e9443f4729c100 sig=acda1db90247674d run=c2c0c6612d4cbb79 bug=788ee78ac492c7f9 oracle=426dcbc8aaa8536e rows=pending
+rtp@1/laws/padding_counts src=aff74e460b677878 sig=4ac3d7fce5c2b8d3 run=c2c0c6612d4cbb79 bug=458edda0f4aac832 oracle=cb09ac157a61d470 rows=pending
 rtp@1/laws/reception_report src=f130202e7ddd997b sig=699b19f216141ac3 run=c2c0c6612d4cbb79 bug=a6d44245ff175dd3 oracle=3c98d995e956e2ea rows=pending
-rtp@1/laws/rtcp_compound_rules src=74238701094bd3ab sig=ee1251ac75716034 run=c2c0c6612d4cbb79 bug=6a02d1b8e07f938f oracle=715e979a354ca8bb rows=pending
+rtp@1/laws/rtcp_compound_rules src=74238701094bd3ab sig=7e63024b97d46928 run=c2c0c6612d4cbb79 bug=6a02d1b8e07f938f oracle=715e979a354ca8bb rows=pending
 rtp@1/laws/rtt_example src=7c736fe2ecae2633 sig=de43867c0ec271a0 run=c2c0c6612d4cbb79 bug=6ea8d3b3d7c8f0fa oracle=87e941816295de87 rows=pending
-rtp@1/laws/rtx_layout src=2753acd8891c5855 sig=147e0e8359a166b2 run=c2c0c6612d4cbb79 bug=44e8570fff41092e oracle=0d977c675171d549 rows=pending
+rtp@1/laws/rtx_layout src=2753acd8891c5855 sig=77dcecb87a599c53 run=c2c0c6612d4cbb79 bug=44e8570fff41092e oracle=0d977c675171d549 rows=pending
 rtp@1/laws/twcc_chunks src=45ecbd1b76160ff4 sig=db6ee15d01472ece run=c2c0c6612d4cbb79 bug=1a61c5072fb2babb oracle=e747f10f97c62930 rows=pending
 rtp@1/laws/twcc_report_bytes src=b93a137d82151607 sig=bde427aec23ea97e run=c2c0c6612d4cbb79 bug=7ad8cd5ac94e9d69 oracle=31c9563c2e41242b rows=pending

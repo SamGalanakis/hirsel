@@ -1,0 +1,374 @@
+pub type Class: key = Audio | Retransmit | Video | Padding
+
+pub type Next[Q] = Send(Q) | Probe(u32, u8) | Pad(u8) | Wait(u64) | Idle
+
+// The cluster the pacer is running: its id and rate, how many probes it has
+// sent, when the first left, and the probe size in bytes.
+type Active {
+    id: u32,
+    rate: u64,
+    packets: u32,
+    min_ns: u64,
+    sent: u32,
+    first_ns: u64,
+    size: u32
+}
+
+// Queued entries live in slots, linked per class in push order. A free slot
+// is linked into the free list through next.
+pub opaque type Pacer[Q] {
+    factor: f64,
+    queue_limit_ns: u64,
+    header: u32,
+    target_bps: u64,
+    padding_bps: u64,
+    // Debts in bytes.
+    debt: f64,
+    padding_debt: f64,
+    last_ns: Option[u64],
+    cluster: Option[Active],
+    queued: u64,
+    count: u64,
+    // The sum of the queued entries' push times, as two words.
+    pushed_hi: u64,
+    pushed_lo: u64,
+    streams: List[u32],
+    sizes: List[u32],
+    pushed: List[u64],
+    next: List[u32],
+    values: List[Option[Q]],
+    heads: List[u32],
+    tails: List[u32],
+    free: u32
+}
+
+const NIL: u32 = 0xffffffff
+
+const CLASSES: u64 = 4
+
+// The debt holds at most 500 ms at the pacing rate.
+const MAX_DEBT_NS: f64 = 500000000.0
+
+const SECOND_NS: f64 = 1000000000.0
+
+fn order(c: Class) -> u64 {
+    match c {
+        Audio => 0,
+        Retransmit => 1,
+        Video => 2,
+        Padding => 3,
+    }
+}
+
+pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64, header: u32) -> Result[Pacer[Q], Capacity] {
+    let n: u64 = int.widen(slots)
+    if n == 0 || slots == NIL {
+        return Error(Capacity(requested: n, available: 0))
+    }
+    let mut streams: List[u32] = list.new()
+    let mut sizes: List[u32] = list.new()
+    let mut pushed: List[u64] = list.new()
+    let mut next: List[u32] = list.new()
+    let mut values: List[Option[Q]] = list.new()
+    let mut heads: List[u32] = list.new()
+    let mut tails: List[u32] = list.new()
+    list.try_reserve(mut streams, n)?
+    list.try_reserve(mut sizes, n)?
+    list.try_reserve(mut pushed, n)?
+    list.try_reserve(mut next, n)?
+    list.try_reserve(mut values, n)?
+    list.try_reserve(mut heads, CLASSES)?
+    list.try_reserve(mut tails, CLASSES)?
+    list.fill(mut streams, n, 0u32)
+    list.fill(mut sizes, n, 0u32)
+    list.fill(mut pushed, n, 0u64)
+    let mut i = 0u32
+    while i < slots {
+        list.push(mut next, if i + 1 < slots {
+            i + 1
+        } else {
+            NIL
+        })
+        list.push(mut values, None)
+        i += 1
+    }
+    list.fill(mut heads, CLASSES, NIL)
+    list.fill(mut tails, CLASSES, NIL)
+    Ok(Pacer(factor: factor, queue_limit_ns: queue_limit_ns, header: header, target_bps: 0, padding_bps: 0, debt: 0.0, padding_debt: 0.0, last_ns: None, cluster: None, queued: 0, count: 0, pushed_hi: 0, pushed_lo: 0, streams: streams, sizes: sizes, pushed: pushed, next: next, values: values, heads: heads, tails: tails, free: 0))
+}
+
+pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64) {
+    p.target_bps = target_bps
+    p.padding_bps = padding_bps
+}
+
+// A probe or padding packet of rate * 1 ms / 8 bytes, at least 200, kept
+// within header + 1 and header + 255 so its pad count is representable.
+fn probe_size(rate_bps: u64, header: u32) -> u32 {
+    let wide: u64 = int.widen(header)
+    let mut size = rate_bps / 8000
+    if size < 200 {
+        size = 200
+    }
+    if size > wide + 255 {
+        size = wide + 255
+    }
+    if size < wide + 1 {
+        size = wide + 1
+    }
+    int.narrow(size)
+}
+
+pub fn probe[Q](mut p: Pacer[Q], c: bwe.Cluster, now_ns: u64) {
+    // A new cluster replaces one still running.
+    p.cluster = Some(Active(id: c.id, rate: c.rate_bps, packets: c.packets, min_ns: c.min_ns, sent: 0, first_ns: now_ns, size: probe_size(c.rate_bps, p.header)))
+}
+
+pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u64, take q: Q) -> Result[(), Q] {
+    if p.free == NIL {
+        return Error(q)
+    }
+    let i = p.free
+    let at: u64 = int.widen(i)
+    p.free = p.next[at]
+    p.streams[at] = stream
+    p.sizes[at] = size
+    p.pushed[at] = now_ns
+    p.next[at] = NIL
+    drop(list.set(mut p.values, at, Some(q)))
+    let k = order(class)
+    let tail = p.tails[k]
+    if tail == NIL {
+        p.heads[k] = i
+    } else {
+        let t: u64 = int.widen(tail)
+        p.next[t] = i
+    }
+    p.tails[k] = i
+    let wide: u64 = int.widen(size)
+    p.queued += wide
+    p.count += 1
+    p.pushed_lo = int.wrapping_add(p.pushed_lo, now_ns)
+    if p.pushed_lo < now_ns {
+        p.pushed_hi += 1
+    }
+    Ok(())
+}
+
+// Unlink bookkeeping for slot at, leaving its value for the caller.
+fn release[Q](mut p: Pacer[Q], at: u64) {
+    let size: u64 = int.widen(p.sizes[at])
+    let t = p.pushed[at]
+    p.queued -= size
+    p.count -= 1
+    if p.pushed_lo < t {
+        p.pushed_hi -= 1
+    }
+    p.pushed_lo = int.wrapping_sub(p.pushed_lo, t)
+    p.next[at] = p.free
+    p.free = int.narrow(at)
+}
+
+// The rate that drains the debt, in bit/s: the cluster's while one runs,
+// else the pacing rate; raised, as str0m and libwebrtc raise it, so the queued
+// bytes leave within the limit less their average time queued (at least 1 ms).
+fn rate[Q](p: Pacer[Q], now_ns: u64) -> f64 {
+    let base: f64 = match p.cluster {
+        Some(c) => float.from_int(c.rate),
+        None => {
+            let target: f64 = float.from_int(p.target_bps)
+            p.factor * target
+        },
+    }
+    if p.queue_limit_ns == 0 || p.count == 0 {
+        return base
+    }
+    let count: f64 = float.from_int(p.count)
+    let now: f64 = float.from_int(now_ns)
+    let hi: f64 = float.from_int(p.pushed_hi)
+    let lo: f64 = float.from_int(p.pushed_lo)
+    let average = now - (hi * 18446744073709551616.0 + lo) / count
+    let limit: f64 = float.from_int(p.queue_limit_ns)
+    let window = fmax(limit - fmax(average, 0.0), 1000000.0)
+    let queued: f64 = float.from_int(p.queued)
+    let needed = queued * 8.0 * SECOND_NS / window
+    fmax(needed, base)
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if float.gt(b, a) {
+        b
+    } else {
+        a
+    }
+}
+
+// Drain a debt for the time from last to now at r bit/s. A debt whose due
+// time has come is 0, so a poll at a Wait's time always finds it paid.
+fn drain(debt: f64, last: u64, now_ns: u64, r: f64) -> f64 {
+    if now_ns >= due(last, debt, r) {
+        return 0.0
+    }
+    let elapsed: f64 = float.from_int(now_ns - last)
+    debt - elapsed * r / (8.0 * SECOND_NS)
+}
+
+// Charge one answered send to both debts, the media debt capped at 500 ms at r.
+fn charge[Q](mut p: Pacer[Q], size: u32, r: f64) {
+    let s: f64 = float.from_int(size)
+    let cap = r * MAX_DEBT_NS / (8.0 * SECOND_NS)
+    p.debt = p.debt + s
+    if float.gt(p.debt, cap) {
+        p.debt = cap
+    }
+    p.padding_debt = p.padding_debt + s
+    let padding: f64 = float.from_int(p.padding_bps)
+    let padding_cap = padding * MAX_DEBT_NS / (8.0 * SECOND_NS)
+    if float.gt(p.padding_debt, padding_cap) {
+        p.padding_debt = padding_cap
+    }
+}
+
+// The time a debt of `debt` bytes reaches 0 at r bit/s, rounded up to the ns.
+fn due(now_ns: u64, debt: f64, r: f64) -> u64 {
+    if !float.gt(debt, 0.0) {
+        return now_ns
+    }
+    if !float.gt(r, 0.0) {
+        return 0xffffffffffffffff
+    }
+    let ns = float.ceil(debt * 8.0 * SECOND_NS / r)
+    let converted: Result[u64, FloatError] = float.to_int(ns)
+    match converted {
+        Ok(wait) => {
+            if wait > 0xffffffffffffffff - now_ns {
+                0xffffffffffffffff
+            } else {
+                now_ns + wait
+            }
+        }
+        Error(_) => 0xffffffffffffffff,
+    }
+}
+
+fn take_head[Q](mut p: Pacer[Q], k: u64) -> Q {
+    let i = p.heads[k]
+    let at: u64 = int.widen(i)
+    p.heads[k] = p.next[at]
+    if p.heads[k] == NIL {
+        p.tails[k] = NIL
+    }
+    release(mut p, at)
+    let Some(q) = list.set(mut p.values, at, None) else {
+        fail("a linked pacer slot was empty")
+    }
+    q
+}
+
+pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q] {
+    let r = rate(p, now_ns)
+    // The poll clock only moves forward: a poll from the past drains nothing.
+    match p.last_ns {
+        None => {
+            p.last_ns = Some(now_ns)
+        }
+        Some(last) => {
+            if now_ns > last {
+                p.debt = drain(p.debt, last, now_ns, r)
+                let padding: f64 = float.from_int(p.padding_bps)
+                p.padding_debt = drain(p.padding_debt, last, now_ns, padding)
+                p.last_ns = Some(now_ns)
+            }
+        }
+    }
+    // Audio leaves whatever the debt.
+    if p.heads[0] != NIL {
+        let size = p.sizes[int.widen(p.heads[0])]
+        let q = take_head(mut p, 0)
+        charge(mut p, size, r)
+        return Send(q)
+    }
+    let free = !float.gt(p.debt, 0.0)
+    let mut k = 1u64
+    while k < CLASSES {
+        if p.heads[k] != NIL {
+            if !free {
+                return Wait(due(now_ns, p.debt, r))
+            }
+            let size = p.sizes[int.widen(p.heads[k])]
+            let q = take_head(mut p, k)
+            charge(mut p, size, r)
+            return Send(q)
+        }
+        k += 1
+    }
+    if let Some(c) = p.cluster {
+        if !free {
+            return Wait(due(now_ns, p.debt, r))
+        }
+        let first_ns = if c.sent == 0 {
+            now_ns
+        } else {
+            c.first_ns
+        }
+        let sent = c.sent + 1
+        if sent >= c.packets && now_ns >= first_ns && now_ns - first_ns >= c.min_ns {
+            p.cluster = None
+        } else {
+            p.cluster = Some(Active(id: c.id, rate: c.rate, packets: c.packets, min_ns: c.min_ns, sent: sent, first_ns: first_ns, size: c.size))
+        }
+        charge(mut p, c.size, r)
+        return Probe(c.id, int.narrow(c.size - p.header))
+    }
+    if p.padding_bps == 0 {
+        return Idle
+    }
+    let padding: f64 = float.from_int(p.padding_bps)
+    if !free || float.gt(p.padding_debt, 0.0) {
+        let media = due(now_ns, p.debt, r)
+        let pad = due(now_ns, p.padding_debt, padding)
+        return Wait(if media > pad {
+            media
+        } else {
+            pad
+        })
+    }
+    let size = probe_size(p.padding_bps, p.header)
+    charge(mut p, size, r)
+    Pad(int.narrow(size - p.header))
+}
+
+pub fn remove[Q](mut p: Pacer[Q], stream: u32, mut out: List[Q]) -> u64 {
+    let mut moved = 0u64
+    let mut k = 0u64
+    while k < CLASSES {
+        let mut prev = NIL
+        let mut i = p.heads[k]
+        while i != NIL {
+            let at: u64 = int.widen(i)
+            let after = p.next[at]
+            if p.streams[at] == stream {
+                if prev == NIL {
+                    p.heads[k] = after
+                } else {
+                    let b: u64 = int.widen(prev)
+                    p.next[b] = after
+                }
+                if p.tails[k] == i {
+                    p.tails[k] = prev
+                }
+                release(mut p, at)
+                let Some(q) = list.set(mut p.values, at, None) else {
+                    fail("a linked pacer slot was empty")
+                }
+                list.push(mut out, take q)
+                moved += 1
+            } else {
+                prev = i
+            }
+            i = after
+        }
+        k += 1
+    }
+    moved
+}

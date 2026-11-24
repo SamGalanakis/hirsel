@@ -6,7 +6,30 @@ pub type Config {
     max_bps: u64
 }
 
+pub type Cluster: key {
+    id: u32,
+    rate_bps: u64,
+    packets: u32,
+    min_ns: u64
+}
+
 type State: key = Increase | Decrease | Hold
+
+// One probe of the outstanding cluster, in send order. sent_ns and size come
+// from feedback; arrived is the first arrival feedback reported.
+type Member {
+    index: u64,
+    reported: bool,
+    sent_ns: u64,
+    size: u32,
+    arrived: Option[i64]
+}
+
+// The outstanding cluster and when probe() answered it.
+type Probing: key {
+    cluster: Cluster,
+    at_ns: u64
+}
 
 // An arrival group: send times in whole ms from the send origin, arrival
 // times in us on the remote clock. last_* are the maxima over its packets.
@@ -61,7 +84,11 @@ pub opaque type Bwe {
     reported: u64,
     lost: u64,
     lowered: Option[u64],
-    raised: Option[u64]
+    raised: Option[u64],
+    // Probing.
+    next_id: u32,
+    probing: Option[Probing],
+    members: List[Member]
 }
 
 const WINDOW: u64 = 20
@@ -104,35 +131,7 @@ pub fn bwe(c: Config) -> Bwe {
     let min: f64 = float.from_int(c.min_bps)
     let max: f64 = float.from_int(c.max_bps)
     let start: f64 = float.from_int(c.start_bps)
-    Bwe(
-        min: min,
-        max: max,
-        origin: None,
-        current: None,
-        previous: None,
-        seen: 0,
-        accumulated: 0.0,
-        smoothed: 0.0,
-        zero: None,
-        points: list.with_capacity(WINDOW + 1),
-        gamma: 12.5,
-        trend: 0.0,
-        over: None,
-        stamped: None,
-        usage: Normal,
-        window: list.new(),
-        state: Increase,
-        a: clamp(start, min, max),
-        changed: None,
-        rtt: None,
-        avg: None,
-        var: 0.4,
-        l: clamp(start, min, max),
-        reported: 0,
-        lost: 0,
-        lowered: None,
-        raised: None
-    )
+    Bwe(min: min, max: max, origin: None, current: None, previous: None, seen: 0, accumulated: 0.0, smoothed: 0.0, zero: None, points: list.with_capacity(WINDOW + 1), gamma: 12.5, trend: 0.0, over: None, stamped: None, usage: Normal, window: list.new(), state: Increase, a: clamp(start, min, max), changed: None, rtt: None, avg: None, var: 0.4, l: clamp(start, min, max), reported: 0, lost: 0, lowered: None, raised: None, next_id: 0, probing: None, members: list.new())
 }
 
 pub fn target(b: Bwe) -> u64 {
@@ -149,13 +148,14 @@ pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: 
         b.reported += 1
         match p.arrived_us {
             None => {
-            b.lost += 1
-        }
+                b.lost += 1
+            }
             Some(at) => {
                 arrive(mut b, at, p.size)
                 group(mut b, p.sent_ns, at)
             }
         }
+        member(mut b, p)
         i += 1
     }
     loss(mut b, now_ns)
@@ -164,6 +164,7 @@ pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: 
     if let Some(r) = rate {
         control(mut b, usage, r, now_ns)
     }
+    measure(mut b, now_ns)
 }
 
 // Arrival groups (RTP-9): a packet's send time is rounded to the nearest
@@ -515,5 +516,176 @@ fn since(last: Option[u64], now_ns: u64, gap: u64) -> bool {
     match last {
         None => true,
         Some(t) => now_ns >= t && now_ns - t >= gap,
+    }
+}
+
+// Probing (RTP-9).
+const PROBE_PACKETS: u32 = 5
+
+const PROBE_MIN_NS: u64 = 15000000
+
+const PROBE_LIFE_NS: u64 = 1000000000
+
+fn expired(b: Bwe, now_ns: u64) -> bool {
+    match b.probing {
+        None => false,
+        Some(p) => now_ns >= p.at_ns && now_ns - p.at_ns >= PROBE_LIFE_NS,
+    }
+}
+
+pub fn probe(mut b: Bwe, want_bps: u64, now_ns: u64) -> Option[Cluster] {
+    if expired(b, now_ns) {
+        b.probing = None
+    }
+    if b.probing != None {
+        return None
+    }
+    let t = target(b)
+    if want_bps <= t {
+        return None
+    }
+    let double = int.saturating_mul(t, 2u64)
+    let rate = if want_bps < double {
+        want_bps
+    } else {
+        double
+    }
+    let c = Cluster(id: b.next_id, rate_bps: rate, packets: PROBE_PACKETS, min_ns: PROBE_MIN_NS)
+    b.next_id = int.wrapping_add(b.next_id, 1u32)
+    b.probing = Some(Probing(cluster: c, at_ns: now_ns))
+    list.clear(mut b.members)
+    // Every probe is at least 200 bytes and the pacer sends them at the
+    // cluster rate, so a 15 ms cluster has at most rate * 15 ms / 1600 + 2.
+    let most = rate / 1600 * 15 / 1000 + 2
+    let wide: u64 = int.widen(PROBE_PACKETS)
+    list.reserve(mut b.members, if most > wide {
+        most
+    } else {
+        wide
+    })
+    Some(c)
+}
+
+pub fn probe_sent(mut b: Bwe, id: u32, index: u64) {
+    let Some(p) = b.probing else {
+        return
+    }
+    if p.cluster.id != id {
+        return
+    }
+    // Transport numbers rise in send order; any other index is not this
+    // cluster's next probe.
+    let n = list.len(b.members)
+    if n > 0 && index <= b.members[n - 1].index {
+        return
+    }
+    // probe() sized the list for the most probes the pacer sends in one
+    // cluster; a caller that sends more is not running this cluster.
+    if n == list.capacity(b.members) {
+        return
+    }
+    list.push(mut b.members, Member(index: index, reported: false, sent_ns: 0, size: 0, arrived: None))
+}
+
+// Record feedback for an outstanding cluster's member: members are sorted by
+// index, so a binary search finds it.
+fn member(mut b: Bwe, a: twcc.Acked) {
+    if b.probing == None {
+        return
+    }
+    let mut lo = 0u64
+    let mut hi = list.len(b.members)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let m = b.members[mid]
+        if m.index == a.index {
+            let arrived = match m.arrived {
+                Some(at) => Some(at),
+                None => a.arrived_us,
+            }
+            b.members[mid] = Member(index: m.index, reported: true, sent_ns: a.sent_ns, size: a.size, arrived: arrived)
+            return
+        }
+        if m.index < a.index {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+}
+
+// Once feedback covers the cluster, measure it on its distinct received
+// members. The cluster's last member is the first that is at least its
+// packets-th and was sent at least min_ns after the first, as the pacer
+// ends it (RTP-10).
+fn measure(mut b: Bwe, now_ns: u64) {
+    let Some(p) = b.probing else {
+        return
+    }
+    let c = p.cluster
+    let mut n = 0u64
+    let mut j = 0u64
+    let packets: u64 = int.widen(c.packets)
+    while j < list.len(b.members) && n == 0 {
+        let m = b.members[j]
+        if !m.reported {
+            break
+        }
+        let first = b.members[0].sent_ns
+        if j + 1 >= packets && m.sent_ns >= first && m.sent_ns - first >= c.min_ns {
+            n = j + 1
+        }
+        j += 1
+    }
+    if n == 0 {
+        if expired(b, now_ns) {
+            b.probing = None
+        }
+        return
+    }
+    b.probing = None
+    let mut received = 0u64
+    let mut total = 0u64
+    let mut first_send = 0u64
+    let mut last_send = 0u64
+    let mut last_size = 0u64
+    let mut first_arrival = 0i64
+    let mut last_arrival = 0i64
+    let mut first_size = 0u64
+    j = 0
+    while j < n {
+        let m = b.members[j]
+        if let Some(at) = m.arrived {
+            let size: u64 = int.widen(m.size)
+            if received == 0 {
+                first_send = m.sent_ns
+                first_arrival = at
+                last_arrival = at
+                first_size = size
+            }
+            if at < first_arrival {
+                first_arrival = at
+                first_size = size
+            }
+            if at > last_arrival {
+                last_arrival = at
+            }
+            last_send = m.sent_ns
+            last_size = size
+            total += size
+            received += 1
+        }
+        j += 1
+    }
+    if 5 * received < 4 * n || last_send <= first_send || last_arrival <= first_arrival {
+        return
+    }
+    let sent_bits: f64 = float.from_int((total - last_size) * 8)
+    let send_span: f64 = float.from_int(last_send - first_send)
+    let recv_bits: f64 = float.from_int((total - first_size) * 8)
+    let recv_span: f64 = float.from_int(last_arrival - first_arrival)
+    let measured = fmin(sent_bits * 1000000000.0 / send_span, recv_bits * 1000000.0 / recv_span)
+    if float.gt(measured, b.a) {
+        set(mut b, measured, now_ns)
     }
 }

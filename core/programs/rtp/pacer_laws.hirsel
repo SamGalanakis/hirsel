@@ -1,0 +1,66 @@
+fn expect_next(mut p: pacer.Pacer[u64], now: u64, expected: pacer.Next[u64]) {
+    let got = pacer.poll(mut p, now)
+    let same = match (got, expected) {
+        (Send(a), Send(b)) => a == b,
+        (Probe(a, x), Probe(b, y)) => a == b && x == y,
+        (Pad(x), Pad(y)) => x == y,
+        (Wait(a), Wait(b)) => a == b,
+        (Idle, Idle) => true,
+        _ => false,
+    }
+    if !same {
+        fail("wrong pacer answer")
+    }
+}
+
+fn three_video(slots: u32) -> pacer.Pacer[u64] {
+    let mut p: pacer.Pacer[u64] = result.unwrap(pacer.pacer(slots, 2.5, 100000000, 20))
+    pacer.set_rate(mut p, 400000, 0)
+    let mut i = 1u64
+    while i <= 3 {
+        result.unwrap(pacer.push(mut p, 7, Video, 1250, 0, i))
+        i += 1
+    }
+    p
+}
+
+/// bug: Send video before the debt allows, charge a send twice or never, hold audio behind video or skip its charge, answer Idle with packets queued, drop a packet silently when full, or lose an entry on remove.
+/// oracle: RTP-10's debt arithmetic, by hand. Pacing is 2.5 * 400 kbit/s = 1 Mbit/s, 125 bytes per ms; three 1,250-byte packets take 30 ms, inside the 100 ms limit. Scenario 1: each adds 1,250 bytes, 10 ms of drain: they leave at 0, 10 and 20 ms. A poll at 5 ms finds 625 bytes left and waits to 10 ms. Scenario 2: at 5 ms the debt is 1,250 - 625 = 625, the audio leaves and makes it 875, 7 ms of drain: video 2 at 12 ms, video 3 at 22 ms. Two slots refuse a third push; after remove frees one, the audio (250 bytes, 2 ms) leaves first and the video waits to 2 ms.
+@test
+fn pacer_spacing() -> Result[(), ()] {
+    let ms = 1000000u64
+    let mut p = three_video(4)
+    expect_next(mut p, 0, Send(1))
+    expect_next(mut p, 0, Wait(10 * ms))
+    expect_next(mut p, 5 * ms, Wait(10 * ms))
+    expect_next(mut p, 10 * ms, Send(2))
+    expect_next(mut p, 10 * ms, Wait(20 * ms))
+    expect_next(mut p, 20 * ms, Send(3))
+    expect_next(mut p, 20 * ms, Idle)
+    let mut q = three_video(4)
+    expect_next(mut q, 0, Send(1))
+    result.unwrap(pacer.push(mut q, 9, Audio, 250, 5 * ms, 10))
+    expect_next(mut q, 5 * ms, Send(10))
+    expect_next(mut q, 5 * ms, Wait(12 * ms))
+    expect_next(mut q, 12 * ms, Send(2))
+    expect_next(mut q, 12 * ms, Wait(22 * ms))
+    expect_next(mut q, 22 * ms, Send(3))
+    expect_next(mut q, 22 * ms, Idle)
+    let mut full: pacer.Pacer[u64] = result.unwrap(pacer.pacer(2, 2.5, 100000000, 20))
+    pacer.set_rate(mut full, 400000, 0)
+    result.unwrap(pacer.push(mut full, 7, Video, 1250, 0, 1))
+    result.unwrap(pacer.push(mut full, 9, Audio, 250, 0, 2))
+    let Error(3) = pacer.push(mut full, 7, Video, 1250, 0, 3) else {
+        fail("a full pacer took a packet or lost it")
+    }
+    let mut out: List[u64] = list.new()
+    if pacer.remove(mut full, 7, mut out) != 1 || list.len(out) != 1 || out[0] != 1 {
+        fail("remove of the video stream")
+    }
+    result.unwrap(pacer.push(mut full, 7, Video, 1250, 0, 4))
+    expect_next(mut full, 0, Send(2))
+    expect_next(mut full, 0, Wait(2 * ms))
+    expect_next(mut full, 2 * ms, Send(4))
+    expect_next(mut full, 2 * ms, Idle)
+    Ok(())
+}

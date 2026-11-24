@@ -91,7 +91,7 @@ fn take_span(mut spans: List[FileRange], start: u64, end: u64) {
     }
 }
 
-fn tracks_plan(vod: Vod, index: u64, input: List[VodSample], selection: Option[ClipTrack], mut cursor: u64, mut spans: List[FileRange]) -> Result[MuxTrack, ClipError] {
+fn tracks_plan(vod: Vod, index: u64, mut input: List[VodSample], selection: Option[ClipTrack], mut cursor: u64, mut spans: List[FileRange]) -> Result[MuxTrack, ClipError] {
     let track = vod.tracks[index].info
     let media = match track.handler {
         0x76696465 => Video(track.width, track.height),
@@ -128,14 +128,14 @@ fn tracks_plan(vod: Vod, index: u64, input: List[VodSample], selection: Option[C
             (0u64, list.len(input), track.movie_duration)
         },
     }
-    let mut samples: List[VodSample] = list.with_capacity(end - first)
+    let mut samples = replace(mut input, list.new())
     let base = if first < end {
-        input[first].decode_time
+        samples[first].decode_time
     } else {
         0u64
     }
     for i in first .. end {
-        let mut sample = input[i]
+        let mut sample = samples[i]
         let size: u64 = int.widen(sample.size)
         let Some(next) = int.checked_add(cursor, size) else {
             return Error(Container(BadTable))
@@ -144,8 +144,9 @@ fn tracks_plan(vod: Vod, index: u64, input: List[VodSample], selection: Option[C
         sample.offset = cursor
         sample.decode_time -= base
         cursor = next
-        list.push(mut samples, sample)
+        samples[i - first] = sample
     }
+    list.truncate(mut samples, end - first)
     Ok(MuxTrack(id: track.id, timescale: track.timescale, media: media, matrix: track.matrix, movie_duration: movie_length, sample_entry: take entry, edits: take edits, samples: take samples))
 }
 
@@ -157,8 +158,8 @@ pub fn remux_vod(vod: Vod, limits: MuxLimits) -> Result[RemuxPlan, ClipError] {
     let mut tracks: List[MuxTrack] = list.new()
     let mut cursor = 0u64
     for index in 0u64 .. list.len(vod.tracks) {
-        let samples = track_samples(vod, index, mut remaining)?
-        let track = tracks_plan(vod, index, samples, None, mut cursor, mut payload)?
+        let mut samples = track_samples(vod, index, mut remaining)?
+        let track = tracks_plan(vod, index, mut samples, None, mut cursor, mut payload)?
         list.push(mut tracks, take track)
     }
     let movie = vod.movie
@@ -418,7 +419,7 @@ pub fn clip_vod(vod: Vod, start_ms: u64, end_ms: u64, limits: ClipLimits, read: 
     }
     let mut remaining = limits.mux.sample_count
     let picture = vod.tracks[index].info
-    let video = track_samples(vod, index, mut remaining)?
+    let mut video = track_samples(vod, index, mut remaining)?
     let timeline = track_timeline(vod, index, picture)?
     let (first, key_pts, anchor) = clip_key(vod, index, video, timeline, start, limits.nal_headers, read)?
     let clip_length = stop - anchor
@@ -429,16 +430,16 @@ pub fn clip_vod(vod: Vod, start_ms: u64, end_ms: u64, limits: ClipLimits, read: 
         let info = vod.tracks[i].info
         if i == index {
             if let Some(s) = clip_track_samples(movie, info, video, timeline, anchor, stop, Some((first, key_pts)))? {
-                let chosen = tracks_plan(vod, i, video, Some(s), mut cursor, mut spans)?
+                let chosen = tracks_plan(vod, i, mut video, Some(s), mut cursor, mut spans)?
                 list.push(mut tracks, take chosen)
             } else {
                 return Error(InvalidWindow)
             }
         } else {
-            let audio = track_samples(vod, i, mut remaining)?
+            let mut audio = track_samples(vod, i, mut remaining)?
             let audio_time = track_timeline(vod, i, info)?
             if let Some(s) = clip_track_samples(movie, info, audio, audio_time, anchor, stop, None)? {
-                let chosen = tracks_plan(vod, i, audio, Some(s), mut cursor, mut spans)?
+                let chosen = tracks_plan(vod, i, mut audio, Some(s), mut cursor, mut spans)?
                 list.push(mut tracks, take chosen)
             }
         }

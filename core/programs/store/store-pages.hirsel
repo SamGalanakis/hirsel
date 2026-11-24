@@ -904,6 +904,10 @@ pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: 
         if !same(base.store, b.store) || base.open != b.open {
             return Error(Foreign)
         }
+    } else if lo < hi {
+        if let Some(inventory) = view b.roots.collections.paging {
+            return snapshot_tiered_initial_changes(r, b, inventory, lo, hi, l)
+        }
     }
     disk_allocation(scoped fn() -> Result[ChangePage, Error] {
         let mut out = change_output(Some(l))

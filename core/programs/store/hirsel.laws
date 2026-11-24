@@ -149,6 +149,7 @@ store@1/store/test_info_mut src=af1465a386e9ee6f sig=c21086ed29c1b1aa run=aff7b6
 store@1/store/test_keyset_pages src=628948c415d2c901 sig=36b762342d0205b0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_l62_attempt_touch_order src=94ffc7d2978dc615 sig=b8e918dad24d2325 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_batch_error_follows_touch src=7995084751e83cae sig=47ff63cafc31f27d run=722e0e8306f441ca bug=- oracle=- rows=pending
+store@1/store/test_l62_initial_change_pages_resolve_tiered_rows src=3df277adf9659026 sig=46e084eeb93eb659 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l62_pager_point_batch src=332a8edaaefd7bf9 sig=84eeb23a5cc6ae27 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_pager_reads_replayed_points src=fd3117767e38f9fc sig=07f7ad8f975bd0b7 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_reader_reservation src=750d22da473089cb sig=2327f06820701ae2 run=a6b003f729117be3 bug=- oracle=- rows=pending

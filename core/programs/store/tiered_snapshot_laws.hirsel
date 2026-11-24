@@ -263,6 +263,43 @@ fn test_l62_snapshot_span_resumes_cold_and_replay(d: Dir, c: Clock, tasks: Tasks
     l62_tiered_scan_fixture(d, c, tasks, true, l62_snapshot_span_reads)
 }
 
+fn l62_initial_change_pages(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let lo: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let limits = Limits(rows: 2, byte_limit: 36)
+    let first = changes_page(read_handle, None, s, lo, hi, limits)?
+    if list.len(first.changes) != 2 || list.len(first.trimmed) != 0 || list.len(first.bounds) != 0 {
+        fail("L62: the initial page must contain the first two visible rows")
+    }
+    l62_check_span_row(first.changes[0u64], rows_handle, 1, 10)?
+    l62_check_span_row(first.changes[1u64], rows_handle, 2, 20)?
+    let Some(resume) = view first.next else {
+        fail("L62: an initial page with more rows must keep its resume")
+    }
+    if resume != log_key(rows_handle.id, 5)? {
+        fail("L62: a change-page resume begins at the first unseen key")
+    }
+    let last_page = changes_page(read_handle, None, s, resume, hi, limits)?
+    if list.len(last_page.changes) != 2 || list.len(last_page.trimmed) != 0 || list.len(last_page.bounds) != 0 {
+        fail("L62: the resumed page must cross into the Memory collection")
+    }
+    let neighbor = catalog_handle(s.store, s.roots.catalog, "memory", std.codec.key_u64(), std.codec.of_u32())?
+    l62_check_span_row(last_page.changes[0u64], rows_handle, 5, 50)?
+    l62_check_span_row(last_page.changes[1u64], neighbor, 7, 70)?
+    if let Some(_) = last_page.next {
+        fail("L62: the last change page has no resume")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_initial_change_pages_resolve_tiered_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, true, l62_initial_change_pages)
+}
+
 fn l62_index_parity(value: u32) -> Result[u32, Capacity] {
     Ok(value % 2)
 }

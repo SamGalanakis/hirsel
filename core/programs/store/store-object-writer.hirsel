@@ -225,7 +225,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         pages: take pages, object: Some(take object),
         acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0,
         written: take written_receive, written_send: take written_send, synced: Some(take synced_receive),
-        poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer, pager_task: None, tasks, restamp: None))
+        poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer, pager_task: None, tasks, restamp: None, unload: None))
     Ok(take db)
 }
 

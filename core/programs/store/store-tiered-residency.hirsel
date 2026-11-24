@@ -153,7 +153,7 @@ fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
             if residency == 0 {
                 return Ok(())
             }
-            Error(Tiered(Migrate))
+            residency_to_memory(mut db, id, take key)
         },
     }
 }
@@ -165,12 +165,21 @@ fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
 // room, so it is not added on top of them.
 fn admit_tiered_plan(db: Db) -> Result[(), Error] {
     let o = disk_state(db).options
-    let reserve = int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes))
-    let requested = int.saturating_add(db.resident, reserve)
-    if !tiered_open_funded(o) || requested > o.resident_limit {
+    if !tiered_open_funded(o) {
+        let requested = int.saturating_add(tiered_plan_reserve(o), 64 * MIB)
         return Error(Full(Resident(Capacity(requested: requested, available: o.resident_limit))))
     }
-    Ok(())
+    over_ceiling(db.resident, tiered_memory_room(o))
+}
+
+// C + K + D + P: what the Tiered plan reserves inside `resident_limit`.
+fn tiered_plan_reserve(o: Options) -> u64 {
+    int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes))
+}
+
+// The Memory rows' room under the Tiered plan (§1.1, v2.76).
+fn tiered_memory_room(o: Options) -> u64 {
+    int.saturating_sub(o.resident_limit, tiered_plan_reserve(o))
 }
 
 fn start_residency_pager(mut db: Db) -> Result[(), Error] {
@@ -259,4 +268,64 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
     let _ = installed?
     publish(take publication)
     Ok(())
+}
+
+// §13.8 Tiered -> Memory. Admitted before anything changes: the Memory rows
+// plus the collection's Tiered row charge must fit the Memory room the Tiered
+// plan leaves inside `resident_limit` (§1.1). The load is a step
+// of the schema commit's cut (`load_memory_residency`), so a refused or
+// failed load publishes nothing and the collection stays Tiered.
+fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
+    let charge = match std.page.lookup(db.heads[0u64].roots.collections.root, key) {
+        Some(descriptor) => list.word_le(descriptor, 44),
+        None => return Error(Stale(id)),
+    }
+    over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options))?
+    let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
+    let head = db.heads[0u64].head + 1
+    let replacement = ProposedMain(roots: take roots, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None)
+    let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, ids))?
+    db.next_node = ids
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.unload = Some(id)
+    })
+    let installed = cut_install(mut db, ReplaceMain(take replacement, None))
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.unload = None
+    })
+    let _ = installed?
+    publish(take publication)
+    Ok(())
+}
+
+// §13.8 "Who pays for the load" (v2.74.2): after the fold, before the
+// candidate queue's added rows. Each Cold slot of main's tree is one load
+// step through the pager (`fold_frame_at` pins it on K), and every Hot page
+// and blob is copied, so the whole tree takes fresh stamps (v2.96). The old
+// tree is released as a dropped collection's is, so this cut's probe sees it.
+fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
+    let Some(id) = unload else {
+        return Ok(false)
+    }
+    let key = prefix(id)?
+    let source = tx_page_source(pager, roots[0u64].collections, next_stamp)?
+    let (take old, take record) = {
+        let Some((edge, before)) = std.page.collection_slot(roots[0u64].collections.root, key) else {
+            return Error(Stale(id))
+        }
+        let slot: std.page.Slot = clone(edge)
+        (take slot, copied(before)?)
+    }
+    let loaded = resident_page_from_tiered(source, old, mut next_stamp)?
+    residency_release(old, branches[0u64], mut queued)?
+    let mut descriptor = take record
+    let root = std.page.encode_ptr(std.page.unlocated(std.page.stamp(std.page.image_of(loaded))))
+    for at in 0u64 .. list.len(root) {
+        descriptor[at] = root[at]
+    }
+    descriptor[53] = 0u8
+    let private_from = next_stamp
+    let inline = roots[0u64].collections.inline
+    page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp))?
+    Ok(true)
 }

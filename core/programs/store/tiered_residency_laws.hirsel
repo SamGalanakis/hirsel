@@ -160,3 +160,98 @@ fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Ran
     residency_check_rows(db, snapshot(db), rows, 20)?
     close(take db)
 }
+
+// §13.8 Tiered -> Memory. The load re-stamps every page and blob (v2.96), so
+// no stamp of the head's Memory tree is one the Tiered tree's frames carry;
+// the frame walker taken before the change is the oracle. A pin of the old
+// descriptor still reads its Tiered tree, and the change survives a reopen.
+@test
+fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 200u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = residency_rows(mut db, row_count)?
+    set_residency(mut db, rows.id, Tiered)?
+    let _ = checkpoint(mut db)?
+    let tiered_walk = compact_walk(d, db, rows.id)?
+    let before = snapshot(db)
+    let _ = pin(mut db, "tiered", before)?
+    set_residency(mut db, rows.id, Memory)?
+    if residency_mode(db, rows.id)? != (1u8, 0u8) {
+        fail("residency: main's descriptor names the table Memory")
+    }
+    let mut loaded: List[u64] = list.new()
+    {
+        let Some((page, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+            fail("residency: main has the table")
+        }
+        residency_memory_stamps(arc.share(page), mut loaded)
+    }
+    for stamp in loaded {
+        if map.contains(tiered_walk.places, stamp) {
+            fail("residency: a loaded Memory page keeps a stamp of a Tiered frame")
+        }
+    }
+    residency_check_rows(db, snapshot(db), rows, row_count)?
+    residency_check_rows(db, before, rows, row_count)?
+    let generation = db.checkpointed
+    set_residency(mut db, rows.id, Memory)?
+    if db.checkpointed != generation {
+        fail("residency: an unchanged residency makes no cut")
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if residency_mode(reopened, rows.id)? != (1u8, 0u8) {
+        fail("residency: the change survives a reopen")
+    }
+    residency_check_rows(reopened, snapshot(reopened), rows, row_count)?
+    let Some(held) = pinned(reopened, "tiered") else {
+        fail("residency: the pin of the Tiered descriptor survives a reopen")
+    }
+    residency_check_rows(reopened, held, rows, row_count)?
+    close(take reopened)
+}
+
+// §13.8: Tiered -> Memory is admitted against `resident_limit` from the
+// collection's Tiered charge. Five 16 MB rows do not fit the 64 MiB a store
+// at the Tiered floor leaves Memory rows, so the change is
+// `Full(Resident(..))` and nothing changes.
+@test
+fn test_set_residency_refused_load_changes_nothing(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(182375272u64)?)?
+    let rows = residency_rows(mut db, 0)?
+    set_residency(mut db, rows.id, Tiered)?
+    for key in 0u64 .. 5 {
+        let fixture: Table[u64, Bytes] = clone(rows)
+        let mut body: Bytes = list.with_capacity(16000000)
+        list.fill(mut body, 16000000, int.truncate(key))
+        // A Tiered body is step-bounded (§13.3); this one reads no row.
+        let Committed(_) = run(mut db, Some(1099511627776u64), copy_env((fixture, key, take body)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Bytes)) -> Result[(), Error] {
+            put(mut tx, env.0, env.1, clone(env.2))
+        })? else {
+            fail("residency: a large Tiered row commits")
+        }
+        let _ = checkpoint(mut db)?
+    }
+    let generation = db.checkpointed
+    let next_pack = disk_state(db).pages.next_pack
+    let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Memory) else {
+        fail("residency: a collection larger than the Memory room refuses the load")
+    }
+    if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
+        fail("residency: a refused load publishes nothing")
+    }
+    if residency_mode(db, rows.id)? != (1u8, 1u8) {
+        fail("residency: a refused load leaves the table Tiered")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for key in 0u64 .. 5 {
+        let Some(value) = get(read_handle, snapshot(db), rows, key)? else {
+            fail("residency: a refused load keeps every row")
+        }
+        if list.len(value) != 16000000 || value[0u64] != int.truncate(key) {
+            fail("residency: a refused load keeps every row's value")
+        }
+    }
+    close(take db)
+}

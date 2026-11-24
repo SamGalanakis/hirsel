@@ -399,3 +399,55 @@ fn dtls13_seq_beyond_48_bits() {
     }
     assert_eq!(sealer.counter.check(u64::MAX), Err(CounterError::Reused));
 }
+
+#[test]
+fn dtls12_srtp_child_uses_each_exporter_direction_once() {
+    use crate::{
+        secret_aead::AeadAlg,
+        srtp_cipher::{SrtpProfile, SrtpSpace},
+    };
+    let shared = bytes("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d");
+    let client = std::array::from_fn(|i| i as u8);
+    let server = std::array::from_fn(|i| 0xa0 + i as u8);
+    let header = bytes("800f1234decafbadcafebabe");
+    let profile = SrtpProfile::Aes128CmHmacSha1_80;
+    let extra = [0; 4];
+    let plain = [0xab; 16];
+    // Independent Python P_SHA256 and OpenSSL AES-CTR with the RFC 5764 cut.
+    let known = [
+        bytes("a96910a3d7e66d0f6c03290697acbb07443b55797ea969d2e520"),
+        bytes("c8c224bfc6a8c71d2fe207d31482cc44eb3093e300355b0f3367"),
+    ];
+    for (side, local, peer) in [(Side::Client, 0, 1), (Side::Server, 1, 0)] {
+        let mut parent = dtls12::Dtls12Keys::new(
+            AeadAlg::Aes128Gcm,
+            shared.as_slice().try_into().unwrap(),
+            client,
+            server,
+            None,
+        )
+        .unwrap();
+        let [send, receive] = parent.take_srtp(profile, side).unwrap();
+        assert!(parent.take_srtp(profile, side).is_none());
+        assert!(send.keys(SrtpSpace::Rtp, false).is_none());
+        assert!(receive.keys(SrtpSpace::Rtp, true).is_none());
+        let key = send.keys(SrtpSpace::Rtp, true).unwrap();
+        let nonce = key.cm_nonce(0xcafebabe, 0x1234).unwrap();
+        let mut cipher = plain;
+        let tag = key
+            .expand_cm()
+            .unwrap()
+            .seal(nonce, &header, &extra, &mut cipher)
+            .unwrap();
+        assert_eq!([&cipher[..], &tag[..]].concat(), known[local]);
+        let key = receive.keys(SrtpSpace::Rtp, false).unwrap();
+        let nonce = key.cm_nonce(0xcafebabe, 0x1234).unwrap();
+        cipher.copy_from_slice(&known[peer][..16]);
+        let tag = known[peer][16..].try_into().unwrap();
+        key.expand_cm()
+            .unwrap()
+            .open(nonce, &header, &extra, &mut cipher, tag)
+            .unwrap();
+        assert_eq!(cipher, plain);
+    }
+}

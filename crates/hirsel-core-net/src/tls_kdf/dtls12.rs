@@ -1,6 +1,9 @@
 //! TLS 1.2 AEAD keys and the DTLS-SRTP exporter.
 use super::{Side, TlsHash, tls12_prf};
-use crate::secret_aead::AeadAlg;
+use crate::{
+    secret_aead::AeadAlg,
+    srtp_cipher::{SrtpKeys, SrtpProfile},
+};
 use zeroize::Zeroizing;
 
 pub struct Dtls12Keys {
@@ -10,6 +13,7 @@ pub struct Dtls12Keys {
     randoms: [[u8; 32]; 2],
     key_len: usize,
     iv_len: usize,
+    srtp_issued: bool,
 }
 
 impl Dtls12Keys {
@@ -60,6 +64,7 @@ impl Dtls12Keys {
             randoms: [client, server],
             key_len,
             iv_len,
+            srtp_issued: false,
         })
     }
 
@@ -92,6 +97,30 @@ impl Dtls12Keys {
             &mut out,
         );
         Some(out)
+    }
+
+    /// RFC 5764 gives the client and server their own master keys and salts.
+    /// The caller pre-admits the child's storage before taking the exporter.
+    pub fn take_srtp(&mut self, profile: SrtpProfile, local: Side) -> Option<[SrtpKeys; 2]> {
+        if self.srtp_issued {
+            return None;
+        }
+        let (key, salt) = profile.master_widths();
+        let mut exported = Zeroizing::new([0; 88]);
+        self.srtp_export(&mut exported[..2 * (key + salt)]);
+        let local = local as usize;
+        let make = |side: usize, send| {
+            let start = 2 * key + side * salt;
+            SrtpKeys::from_master(
+                profile,
+                send,
+                &exported[side * key..(side + 1) * key],
+                &exported[start..start + salt],
+            )
+        };
+        let child = [make(local, true), make(1 - local, false)];
+        self.srtp_issued = true;
+        Some(child)
     }
 
     pub fn srtp_export(&self, out: &mut [u8]) {

@@ -10,6 +10,24 @@ pub enum SrtpProfile {
     AeadAes256Gcm,
 }
 
+impl SrtpProfile {
+    pub(crate) fn master_widths(self) -> (usize, usize) {
+        match self {
+            Self::Aes128CmHmacSha1_80 => (16, 14),
+            Self::AeadAes128Gcm => (16, 12),
+            Self::AeadAes256Gcm => (32, 12),
+        }
+    }
+
+    fn algorithm(self) -> Option<AeadAlg> {
+        match self {
+            Self::Aes128CmHmacSha1_80 => None,
+            Self::AeadAes128Gcm => Some(AeadAlg::Aes128Gcm),
+            Self::AeadAes256Gcm => Some(AeadAlg::Aes256Gcm),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum SrtpSpace {
     Rtp,
@@ -42,22 +60,18 @@ impl SrtpKeys {
             ImportUse::SrtpReceive => false,
             _ => return Err(ImportError::Denied),
         };
-        let algorithm = match profile {
-            SrtpProfile::Aes128CmHmacSha1_80 => None,
-            SrtpProfile::AeadAes128Gcm => Some(AeadAlg::Aes128Gcm),
-            SrtpProfile::AeadAes256Gcm => Some(AeadAlg::Aes256Gcm),
-        };
-        let key_len = if matches!(profile, SrtpProfile::AeadAes256Gcm) {
-            32
-        } else {
-            16
-        };
-        let salt_len = if algorithm.is_some() { 12 } else { 14 };
+        let (key_len, salt_len) = profile.master_widths();
         if master.len() != key_len + 14 && master.len() != key_len + salt_len {
             return Err(ImportError::Invalid);
         }
         let (key, salt) = master.split_at(key_len);
-        let kdf = SrtpKdf::new(key, salt).map_err(|_| ImportError::Invalid)?;
+        Ok(Self::from_master(profile, send, key, salt))
+    }
+
+    pub(crate) fn from_master(profile: SrtpProfile, send: bool, key: &[u8], salt: &[u8]) -> Self {
+        let algorithm = profile.algorithm();
+        let (key_len, salt_len) = profile.master_widths();
+        let kdf = SrtpKdf::new(key, salt).expect("profile fixes the master widths");
         let spaces = [SrtpSpace::Rtp, SrtpSpace::Rtcp].map(|space| {
             let label = (space as u8) * 3;
             let mut payload = Zeroizing::new([0; 32]);
@@ -77,7 +91,7 @@ impl SrtpKeys {
                 algorithm,
             }
         });
-        Ok(Self { send, spaces })
+        Self { send, spaces }
     }
 
     pub fn keys(&self, space: SrtpSpace, sending: bool) -> Option<&SrtpSessionKey> {

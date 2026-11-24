@@ -312,6 +312,37 @@ pub fn copy_with_stamp(page: Arc[Page], id: u64) -> Arc[Page] {
     arc.new(Page(image: Image(raw: take raw, domain: page.image.domain), kids: clone(page.kids), blobs: clone(page.blobs), rows: page.rows, charge: page.charge, loose: page.loose, loose_below: page.loose_below))
 }
 
+/// Restore located slots for borrowed pages reached by this edit.
+pub fn restore_cold_slots(take root: Arc[Page], first_stamp: u64, locate: scoped[view] fn(u64) -> Option[PagePtr]) -> Slot {
+    let id = stamp(root.image)
+    if let Some(edge) = locate(id) {
+        return ColdPage(edge)
+    }
+    let mut staged = take root
+    if staged.image.domain == Collection && id >= first_stamp && level(staged.image) != 0 {
+        let restore = scoped fn(mut page: Page) {
+            for slot in 0u64 .. list.len(page.kids) {
+                let previous = replace(mut page.kids[slot], ColdPage(unlocated(0)))
+                let restored = match take previous {
+                    HotPage(take held) => restore_cold_slots(take held, first_stamp, locate),
+                    ColdPage(edge) => ColdPage(edge),
+                }
+                if let ColdPage(edge) = restored {
+                    let at = entry_at(page.image, slot)
+                    let field = at + 2 + u16_at(page.image.raw, at)
+                    put_ptr(mut page.image.raw, field, edge)
+                }
+                page.kids[slot] = take restored
+            }
+        }
+        if let None = arc.with_unique(mut staged, restore) {
+            staged = copy_with_stamp(staged, id)
+            let _ = option.unwrap(arc.with_unique(mut staged, restore))
+        }
+    }
+    HotPage(take staged)
+}
+
 pub fn value_at(page: Arc[Page], slot: u64) -> Option[View[Bytes]] in page {
     if level(page.image) != 0 || slot >= count(page.image) {
         return None

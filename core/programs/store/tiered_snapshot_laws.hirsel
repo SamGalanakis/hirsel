@@ -112,7 +112,7 @@ fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: T
         fail("L82: fixture Log appends must commit")
     }
     l62_prepare_snapshot_pages(mut db, fixtures, events.binding.id, 8)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
     let answer = l62_log_window_reads(mut db, events)
@@ -178,7 +178,7 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
     }
     let table_id = rows_handle.id
     l62_prepare_snapshot_pages(mut db, fixtures, table_id, 8)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
     let answered = l62_snapshot_point_reads(db, rows_handle)
@@ -254,7 +254,7 @@ fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, memory_sibling: bool,
     let collection = rows_handle.id
     l62_prepare_snapshot_pages(mut db, fixtures, collection, 8)?
     l62_prepare_scan_overlay(mut db, rows_handle)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
     let answer = read(db, rows_handle)
@@ -454,7 +454,7 @@ fn test_l62_snapshot_find_reads_cold_index_and_primary(d: Dir, c: Clock, tasks: 
     l62_prepare_snapshot_pages(mut db, fixtures, data_id, 8)?
     l62_prepare_snapshot_pages(mut db, fixtures, index_id, 9)?
     l62_replay_index_owner(mut db, rows_handle)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
     let answer = l62_snapshot_index_reads(db, parity)

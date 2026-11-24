@@ -1,7 +1,7 @@
-scoped type TieredCutInput {
-    source: View[TieredPageSource],
-    pin_bytes: u64
-}
+// Format 5 bounds the pins of one cut step (§13.8, v2.74).
+const CUT_HEIGHT_MAX: u64 = 65
+
+const CUT_PIN_BYTES: u64 = 4 * CUT_HEIGHT_MAX * (PAGE_LIMIT + 16) + (1048576 + 16) + (BLOB_LIMIT + 16)
 
 fn fold_frame(source: TieredPageSource, target: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
     let fetched = fold_frame_at(source, target)
@@ -11,7 +11,15 @@ fn fold_frame(source: TieredPageSource, target: TieredTarget) -> Result[Arc[Tier
             malformed_fault.why = Malformed
             Error(Corrupt(take malformed_fault))
         },
-        Ok(take frame) => Ok(take frame),
+        Ok(take frame) => {
+            if let TieredImage(page) = view frame.payload {
+                let height: u64 = int.widen(std.page.level(std.page.image_of(page)))
+                if height >= CUT_HEIGHT_MAX {
+                    return Error(disk_fault(paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed))
+                }
+            }
+            Ok(take frame)
+        },
         Error(take problem) => Error(take problem),
     }
 }
@@ -25,19 +33,20 @@ fn fold_frame_at(source: TieredPageSource, target: TieredTarget) -> Result[Arc[T
     channel.receive(delivered) ?=> |_| Io(Closed)
 }
 
-fn fold_cold_path(cut: TieredCutInput, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
+fn fold_cold_path(cut: TieredPageSource, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
     let mut path: List[Arc[TieredFrame]] = list.new()
     if base.stamp == 0 { return Ok(take path) }
     let mut target = TieredPage(base)
     let mut expected_level: Option[u8] = None
     let mut charged = 0u64
     loop {
-        charged = int.saturating_add(charged, 16 + tiered_frame_id(target).len)
-        if charged > cut.pin_bytes {
-            return Error(Full(Cache(Capacity(requested: charged, available: cut.pin_bytes))))
+        let wanted = tiered_frame_id(target)
+        charged += 16 + wanted.len
+        if wanted.len > PAGE_LIMIT || charged > CUT_PIN_BYTES {
+            return Error(disk_fault(paged_pack_path(wanted.pack)?, wanted.offset, Malformed))
         }
         capacity(list.try_reserve(mut path, 1))?
-        let frame = fold_frame(cut.source, target)?
+        let frame = fold_frame(cut, target)?
         let child = tiered_point_continuation(frame, key, TieredPoint, expected_level)?
         list.push(mut path, take frame)
         let Some((take following, height)) = take child else { return Ok(take path) }
@@ -53,7 +62,7 @@ fn fold_page(frame: TieredFrame) -> View[Arc[std.page.Page]] in frame {
     page
 }
 
-fn fold_base_prior(cut: TieredCutInput, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
+fn fold_base_prior(cut: TieredPageSource, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
     let sought = list.slice(logical, 4, list.len(logical))
     let path = fold_cold_path(cut, base, sought)?
     if list.len(path) == 0 {
@@ -65,7 +74,7 @@ fn fold_base_prior(cut: TieredCutInput, base: std.page.PagePtr, logical: Bytes) 
 
 // Sum the strict prefixes encountered while descending one boundary path.
 // Interior entries carry the charges for every subtree the path passes.
-fn fold_prefix_charge(cut: TieredCutInput, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
+fn fold_prefix_charge(cut: TieredPageSource, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
     let key = key_word(sequence_limit)
     let path = fold_cold_path(cut, base, key)?
     let mut total = 0u64
@@ -118,7 +127,7 @@ fn visit_fold_records[K: ordered + shareable + send, V: shareable + send](node: 
     Ok(())
 }
 
-fn verify_tiered_fold(cut: TieredCutInput, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
     let pack_file = paged_pack_path(base.pack)?
     if let Some(root) = std.omap.root(overlay.trims) {
         visit_fold_records(root, scoped fn(ordinal: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
@@ -145,21 +154,21 @@ fn verify_tiered_fold(cut: TieredCutInput, base: std.page.PagePtr, overlay: Arc[
 
 // The paused writer runs one verified edit at a time. These pins are
 // released before it hands the changed path to the pack writer.
-fn retry_fold_edit[R](cut: TieredCutInput, edit: scoped[view] fn(mut TieredTouchSet, Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(mut TieredTouchSet, Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     loop {
         let (take stop, take result) = disk_allocation(scoped fn() -> Result[(Option[TieredAttemptStop], Result[R, Error]), Error] {
-            let mut attempt = capacity(tiered_touch_set(cut.pin_bytes, 4))?
+            let mut attempt = capacity(tiered_touch_set(CUT_PIN_BYTES, 4))?
             let observed = edit(mut attempt, pins)
             Ok((take attempt.stopped, take observed))
         })?
         match take stop {
             Some(AttemptMiss(take target)) => {
                 capacity(map.try_reserve(mut pins, 1))?
-                let frame = fold_frame(cut.source, target)?
+                let frame = fold_frame(cut, target)?
                 map.insert(mut pins, tiered_cache_key(frame.identity), take frame)
             },
-            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptPinLimit(_)) => return Error(malformed(0)),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
             Some(AttemptFold(_)) => fail("store: a cut cannot wait for itself"),
             None => return take result,
@@ -167,24 +176,36 @@ fn retry_fold_edit[R](cut: TieredCutInput, edit: scoped[view] fn(mut TieredTouch
     }
 }
 
-fn fold_materialize_row(cut: TieredCutInput, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: ReplayRow,
-    inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
-    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(Arc[std.page.Page], u64), Error] {
+fn restore_fold_slots(take root: Arc[std.page.Page], first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> std.page.Slot {
+    std.page.restore_cold_slots(take root, first_stamp, scoped fn(stamp: u64) -> Option[std.page.PagePtr] {
+        for (_, frame) in visible {
+            let facts = frame.identity
+            if facts.stamp == stamp && facts.kind == 0x0021 {
+                return Some(std.page.PagePtr(pack: facts.pack, offset: facts.offset, len: int.truncate(facts.len), checksum: facts.checksum, stamp: stamp))
+            }
+        }
+        None
+    })
+}
+
+fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: ReplayRow,
+    inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64) -> Result[std.page.Slot, Error] waits {
+    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
         let mut draw = next_stamp
         let key = list.slice(logical, 4, list.len(logical))
         let page = stage_tiered_row(mut attempt, visible, current, empty_root, key, row.now, inline, log_rows, private_from, mut draw)?
-        Ok((take page, draw))
+        Ok((restore_fold_slots(take page, next_stamp, visible), draw))
     })?
     next_stamp = following_stamp
     Ok(take ready)
 }
 
-fn fold_materialize_trim(cut: TieredCutInput, current: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64,
-    floor: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
-    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(Arc[std.page.Page], u64), Error] {
+fn fold_materialize_trim(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64,
+    floor: u64, mut next_stamp: u64) -> Result[std.page.Slot, Error] waits {
+    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
         let mut draw = next_stamp
         let (take page, _) = stage_tiered_trim(mut attempt, visible, current, empty_root, limits, before, floor, mut draw)?
-        Ok((take page, draw))
+        Ok((restore_fold_slots(take page, next_stamp, visible), draw))
     })?
     next_stamp = following_stamp
     Ok(take ready)

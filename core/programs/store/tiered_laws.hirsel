@@ -590,7 +590,7 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let inventory = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let demand = TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
-    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
     let verified = l65_pager_exchange(requests, demand)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))

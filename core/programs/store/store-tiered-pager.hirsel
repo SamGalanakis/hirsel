@@ -59,14 +59,19 @@ type TieredPagerStart: send {
 type TieredPagerFunding {
     cache_bytes: u64,
     writer_pin_bytes: u64,
-    pager_task_bytes: u64
+    pager_task_bytes: u64,
+    cut_pins: bool
 }
 
 fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority: TieredPagerSource, funding: TieredPagerFunding, queue_slots: u64) -> Result[(Sender[TieredPagerMessage], Task[()]), Error] {
     let Some(shared) = int.checked_sub(funding.cache_bytes, funding.writer_pin_bytes) else {
         return Error(Missing("cache_bytes"))
     }
-    let Some(task_limit) = int.checked_add(funding.cache_bytes, funding.pager_task_bytes) else {
+    let cut_room = if funding.cut_pins { CUT_PIN_BYTES } else { 0u64 }
+    let Some(cache_and_task) = int.checked_add(funding.cache_bytes, funding.pager_task_bytes) else {
+        return Error(Missing("cache_bytes"))
+    }
+    let Some(task_limit) = int.checked_add(cache_and_task, cut_room) else {
         return Error(Missing("cache_bytes"))
     }
     let (take requests, take incoming) = disk_allocation(scoped fn() -> Result[(Sender[TieredPagerMessage], Receiver[TieredPagerMessage]), Error] {
@@ -74,7 +79,8 @@ fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority:
     })?
     let launch = TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared)
     // Frame ownership can leave the pager on delivery. Its allocations
-    // still draw on this task's reservation, including the writer's share.
+    // still draw on this task's reservation, including the writer's
+    // share of the cache and the separate room for cuts.
     match task.try_spawn(tasks, bytes task_limit, take launch, run_tiered_pager) {
         Ok(take worker) => Ok((take requests, take worker)),
         Error((problem, _)) => Error(Full(Allocation(problem))),

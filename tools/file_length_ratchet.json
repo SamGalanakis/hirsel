@@ -80,8 +80,8 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3605,
-    "raise_revision": 15,
+    "lines": 3636,
+    "raise_revision": 16,
     "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {

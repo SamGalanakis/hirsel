@@ -70,7 +70,7 @@ fn test_l62_tiered_count_uses_overlay_and_interior(d: Dir, c: Clock, tasks: Task
     let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let table_id = rows_handle.id
     l62_prepare_count_snapshot(mut db, fixtures, table_id)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
     let answer = l62_snapshot_counts(db, rows_handle)

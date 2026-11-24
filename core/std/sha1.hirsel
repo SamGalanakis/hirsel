@@ -1,12 +1,109 @@
-// RFC 3174 SHA-1 for RFC 6455 accept keys.
+// RFC 3174 SHA-1 for protocols that require it.
+const INITIAL: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+
 /// RFC 3174 SHA-1 digest, twenty bytes in network order. O(n), only the
 /// result allocates. Ex: `sha1.hash(string.as_bytes("abc"))`.
 pub fn hash(b: Bytes) -> Bytes {
-    let mut h: Inline[u32, 5] =[0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+    let mut h = INITIAL
     sha1.blocks(mut h, b)
     let mut out: Bytes = list.with_capacity(20)
     for word in h {
         list.put_word_be(mut out, word)
     }
     take out
+}
+
+pub opaque type Sha1 {
+    h: Inline[u32, 5],
+    pending: Inline[u8, 64],
+    used: u64,
+    total: u64
+}
+
+/// Initial SHA-1 state. Alloc: none. Cost: O(1).
+pub fn start() -> Sha1 {
+    Sha1(h: INITIAL, pending:[0; 64], used: 0, total: 0)
+}
+
+/// Start with one full block and an empty pending buffer. Alloc: none. Cost: O(1).
+pub fn start_block(b: Inline[u8, 64]) -> Sha1 {
+    let mut s = start()
+    sha1.block(mut s.h, b)
+    s.total = 64
+    s
+}
+
+/// Append input[lo,hi), with list.slice's checked range semantics.
+/// Alloc: none; retains no input view. Cost: O(hi-lo). Ex: `sha1.add(mut s, b, 0, list.len(b))`.
+pub fn add(mut s: Sha1, input: Bytes, lo: u64, hi: u64) {
+    let b = list.slice(input, lo, hi)
+    let n = list.len(b)
+    s.total = int.wrapping_add(s.total, n)
+    let mut at: u64 = 0
+    if s.used > 0 {
+        let room = 64 - s.used
+        let count = if n < room {
+            n
+        } else {
+            room
+        }
+        for i in 0u64 .. count {
+            s.pending[s.used + i] = b[i]
+        }
+        s.used += count
+        at = count
+        if s.used < 64 {
+            return
+        }
+        sha1.block(mut s.h, s.pending)
+        s.used = 0
+    }
+    let whole = (n - at) / 64
+    sha1.compress(mut s.h, b, at, whole)
+    at += whole * 64
+    s.used = n - at
+    for i in 0u64 .. s.used {
+        s.pending[i] = b[at + i]
+    }
+}
+
+/// Append one byte, as `add` of a one-byte input. Lets a caller frame its
+/// input with tags and lengths without building a buffer.
+/// Alloc: none. Cost: O(1), at most one compression block. Ex: `sha1.add_byte(mut s, 17)`.
+pub fn add_byte(mut s: Sha1, x: u8) {
+    s.total = int.wrapping_add(s.total, 1)
+    s.pending[s.used] = x
+    s.used += 1
+    if s.used == 64 {
+        sha1.block(mut s.h, s.pending)
+        s.used = 0
+    }
+}
+
+/// Twenty network-order digest bytes. Leaves s usable for further add calls.
+/// Alloc: none. Cost: O(1), at most two compression blocks.
+pub fn finish(s: Sha1) -> Inline[u8, 20] {
+    let mut h = s.h
+    let mut tail = s.pending
+    tail[s.used] = 128
+    for i in (s.used + 1) .. 64u64 {
+        tail[i] = 0
+    }
+    if s.used >= 56 {
+        sha1.block(mut h, tail)
+        for i in 0u64 .. 64u64 {
+            tail[i] = 0
+        }
+    }
+    let bits = s.total << 3
+    for i in 0u64 .. 8u64 {
+        tail[56 + i] = int.truncate(bits >> ((7 - i) * 8))
+    }
+    sha1.block(mut h, tail)
+    let mut out: Inline[u8, 20] =[0; 20]
+    for i in 0u64 .. 20u64 {
+        let shift: u32 = int.narrow(24 - (i % 4) * 8)
+        out[i] = int.truncate(h[i / 4] >> shift)
+    }
+    out
 }

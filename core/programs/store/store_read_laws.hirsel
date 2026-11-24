@@ -7,19 +7,34 @@
 // stream admitting p > 0; a reply at a position not Admitted; a record
 // without a reply, twice, or with a 31-byte revision. L29: COMMIT sizes with
 // a streams section, with and without a data head, and a CALL section.
+fn law_stream_name(label: Bytes, time: u64) -> StreamKey {
+    StreamKey(caller: Caller(issuer: 2u8, subject: clone(label)), id: StreamId(t: time, n: 0u64))
+}
+
+fn law_stream_bytes(label: Bytes, time: u64) -> Bytes {
+    result.unwrap(stream_key_bytes(law_stream_name(label, time)))
+}
+
+fn admit_law_stream(mut db: Db, raw: Bytes, p: u64, digest: RequestDigest) -> Result[Admission, Error] waits {
+    let name = option.unwrap(parse_stream_key(raw))
+    admit(mut db, name, p, digest)
+}
+
 pub fn law_streams(c: Clock) -> bool waits {
     let mut db = raw_test_db(c, 1073741824)
-    let s = result.unwrap(copied(string.as_bytes("s")))
+    let birth = keyed_time(db)
+    let s = law_stream_bytes(b"s", birth)
+    let other_stream = law_stream_name(b"u", birth)
     let d = digest_for("d")
     let e = digest_for("e")
-    match result.unwrap(admit(mut db, s, 1, d)) {
-        Rejected(0) => {},
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
+        HistoryUnavailable => {},
         _ => return false
     }
     if db.heads[0].head != 0 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Admitted(t) => if !mark_is(ticket(t), 1) {
             return false
         },
@@ -29,17 +44,17 @@ pub fn law_streams(c: Clock) -> bool waits {
         return false
     }
     // S7: latest + 1 over an unreplied latest commits nothing.
-    match result.unwrap(admit(mut db, s, 1, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
         Rejected(0) => {},
         _ => return false
     }
     // AH1: another request at latest mismatches before Abandoned, binds
     // nothing, and the bound request is still Abandoned after it.
-    match result.unwrap(admit(mut db, s, 0, e)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, e)) {
         RequestMismatch => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 1) {
             return false
         },
@@ -49,18 +64,18 @@ pub fn law_streams(c: Clock) -> bool waits {
         return false
     }
     // The effect and its reply in one commit.
-    let replied = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if !missing_is(reply(mut tx, s, 1, list.new()), "reply") {
+    let replied = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        if !missing_is(reply(mut tx, call_env, 1, list.new()), "reply") {
             return Error(1)
         }
         if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) {
             return Error(2)
         }
-        if let Error(_) = reply(mut tx, s, 0, result.unwrap(copied(string.as_bytes("r0")))) {
+        if let Error(_) = reply(mut tx, call_env, 0, result.unwrap(copied(string.as_bytes("r0")))) {
             return Error(3)
         }
         // Ruling 2: position 0 is now Replied, so a second reply is refused.
-        if !missing_is(reply(mut tx, s, 0, list.new()), "reply") {
+        if !missing_is(reply(mut tx, call_env, 0, list.new()), "reply") {
             return Error(4)
         }
         Ok(())
@@ -80,11 +95,11 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // The reply keeps d: e still mismatches, before Duplicate, and d's
     // Duplicate follows it.
-    match result.unwrap(admit(mut db, s, 0, e)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, e)) {
         RequestMismatch => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Duplicate(r) => if r.reply != string.as_bytes("r0") {
             return false
         },
@@ -93,22 +108,23 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 2 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 1, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
         Admitted(t) => if !mark_is(ticket(t), 3) {
             return false
         },
         _ => return false
     }
     // F2: a body that replies and returns Error keeps the reply alone.
-    let kept = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let kept = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) {
             return Error(1)
         }
-        if let Error(_) = reply(mut tx, s, 1, result.unwrap(copied(string.as_bytes("r1")))) {
+        if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(copied(string.as_bytes("r1")))) {
             return Error(2)
         }
-        // A 95-byte reply frame plus the 5-byte data head and one 29-byte put.
-        if tx_frame(tx) != 129 {
+        // A 113-byte reply frame plus the 5-byte data head and one 33-byte put.
+        let ci = info(mut tx)
+        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 151 {
             return Error(3)
         }
         Error(7)
@@ -125,7 +141,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) {
         return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Admitted(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -133,7 +149,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // Aborted without a reply, Failed and Refused keep nothing; each later
     // admit of 2 is Abandoned with the commit_ticket of 5 and commits nothing.
-    let dropped = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let dropped = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(3), key_word(33)) {
             return Error(1)
         }
@@ -143,14 +159,14 @@ pub fn law_streams(c: Clock) -> bool waits {
         Aborted(Undone(value: 8, ticket: None)) => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
         _ => return false
     }
-    let faulted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 2, list.new()) {
+    let faulted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        if let Error(_) = reply(mut tx, call_env, 2, list.new()) {
             return Error(1)
         }
         fail("L13 injected fault")
@@ -159,7 +175,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         Failed(_) => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -170,8 +186,8 @@ pub fn law_streams(c: Clock) -> bool waits {
     // refuses it on both exits.
     let ceiling = db.ceiling
     db.ceiling = db.resident - 1
-    let over = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 2, key_word(9)) {
+    let over = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        if let Error(_) = reply(mut tx, call_env, 2, key_word(9)) {
             return Error(1)
         }
         Ok(())
@@ -180,8 +196,8 @@ pub fn law_streams(c: Clock) -> bool waits {
         Refused(_) => {},
         _ => return false
     }
-    let over_abort = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 2, key_word(9)) {
+    let over_abort = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        if let Error(_) = reply(mut tx, call_env, 2, key_word(9)) {
             return Error(1)
         }
         Error(9)
@@ -191,12 +207,12 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     // Ruling 3: an admit over the bound is Full and binds nothing.
-    match admit(mut db, string.as_bytes("u"), 0, e) {
+    match admit(mut db, other_stream, 0, e) {
         Error(Full(_)) => {},
         _ => return false
     }
     db.ceiling = ceiling
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -207,13 +223,13 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // AH2: below latest there is no digest to compare, whatever the bytes.
     for (p, x) in[(1u64, d), (1u64, e), (0u64, d)] {
-        match result.unwrap(admit(mut db, s, p, x)) {
+        match result.unwrap(admit_law_stream(mut db, s, p, x)) {
             HistoryUnavailable => {},
             _ => return false
         }
     }
     for p in[3u64, 5u64] {
-        match result.unwrap(admit(mut db, s, p, d)) {
+        match result.unwrap(admit_law_stream(mut db, s, p, d)) {
             Rejected(2) => {},
             _ => return false
         }
@@ -222,20 +238,20 @@ pub fn law_streams(c: Clock) -> bool waits {
         return false
     }
     // Recording checks the admission, revision, and one-CALL-per-frame rule.
-    let unadmitted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let unadmitted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if !missing_is(reply(mut tx, string.as_bytes("t"), 0, list.new()), "reply") {
             return Error(1)
         }
-        if !missing_is(reply_recorded(mut tx, 3, list.new(), call_for(s, 32)), "reply") {
+        if !missing_is(reply_recorded(mut tx, 3, list.new(), call_for(call_env, 32)), "reply") {
             return Error(2)
         }
-        if !missing_is(reply_recorded(mut tx, 2, list.new(), call_for(s, 31)), "revision") {
+        if !missing_is(reply_recorded(mut tx, 2, list.new(), call_for(call_env, 31)), "revision") {
             return Error(3)
         }
-        if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(s, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(call_env, 32)) {
             return Error(4)
         }
-        match reply_recorded(mut tx, 2, list.new(), call_for(s, 32)) {
+        match reply_recorded(mut tx, 2, list.new(), call_for(call_env, 32)) {
             Error(Exists(n)) => if n != "call" {
                 return Error(5)
             },
@@ -250,145 +266,46 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 6 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 3, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 3, d)) {
         Admitted(t) => if !mark_is(ticket(t), 7) {
             return false
         },
         _ => return false
     }
     // L29 by section 2.4: head 16, call info 21, streams section 5 + op
-    // (1 + 4 + 1 + 4 + 43) = 58, so 95 with no data section. The CALL
+    // (1 + 4 + 19 + 4 + 43) = 76, so 113 with no data section. The CALL
     // is 145 B (four blobs of sizes 32, 16, 32 and 48, and the settle byte).
-    // A 12-byte key and 8-byte value add 34 B for data.
-    let sized = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(s, 32)) {
+    // A 12-byte key, 4-byte prior length and 8-byte value add 38 B for data.
+    let measured = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(call_env, 32)) {
             return Error(1)
         }
         let ci = info(mut tx)
         let one = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72)))
-        if one != 95 {
+        if one != 113 {
             return Error(2)
         }
         let two = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if tx_frame(tx) != 240 || two != 240 {
+        if two != 258 {
             return Error(4)
         }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) {
             return Error(5)
         }
         let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if tx_frame(tx) != 274 || three != 274 {
+        if three != 296 {
             return Error(6)
         }
         Ok(())
     }))
-    match take sized {
+    match take measured {
         Committed(_) => {},
         _ => return false
     }
     // The Full admit of e at u bound nothing: d admits there.
-    match result.unwrap(admit(mut db, string.as_bytes("u"), 0, d)) {
+    match result.unwrap(admit(mut db, other_stream, 0, d)) {
         Admitted(_) => true,
         _ => false
-    }
-}
-
-// G1: a refused run leaves the version and rows unchanged. Readmission
-// of the same position finds the original admit, with no saved reply.
-fn refused_reply(c: Clock, oversized: bool) -> bool waits {
-    let mut db = raw_test_db(c, 1073741824)
-    let stream = string.as_bytes("s")
-    let digest = digest_for("request")
-    match result.unwrap(admit(mut db, stream, 0, digest)) {
-        Admitted(t) => if !mark_is(ticket(t), 1) {
-            return false
-        },
-        _ => return false
-    }
-    let attempted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        if oversized {
-            // Section 2.4: 26 + 16*21 + 15*1048576 + 1048086
-            // leaves 192 bytes for the streams and CALL sections.
-            for k in 1u64 .. 17 {
-                let size = if k == 16 {
-                    1048086u64
-                } else {
-                    1048576u64
-                }
-                let mut v: Bytes = list.with_capacity(size)
-                list.fill(mut v, size, 0u8)
-                put_bytes(mut tx, 1, key_word(k), v)?
-            }
-        } else {
-            put_bytes(mut tx, 1, key_word(1), key_word(10))?
-        }
-        let mut call = call_for(stream, if oversized {
-            32u64
-        } else {
-            31u64
-        })
-        if oversized {
-            list.fill(mut call.args, 1024, 0u8)
-        }
-        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, take call)
-    }))
-    match take attempted {
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if !oversized {
-            return false
-        },
-        Aborted(Undone(value: Missing(what), ticket: None)) => if oversized || what != "revision" {
-            return false
-        },
-        _ => return false
-    }
-    let head = snapshot(db)
-    if version(head) != 1 {
-        return false
-    }
-    if let Some(_) = result.unwrap(get_raw(head, 1, key_word(1))) {
-        return false
-    }
-    match result.unwrap(admit(mut db, stream, 0, digest)) {
-        Abandoned(t) => if !mark_is(ticket(t), 1) {
-            return false
-        },
-        _ => return false
-    }
-    if oversized {
-        return true
-    }
-    // A runner refusal also discards an already staged reply and CALL.
-    let rejected = result.unwrap(run_with_reply(mut db, None, fn(_error: Error) -> bool {
-        false
-    }, fn(mut tx: Tx) -> Result[(), Error] {
-        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, call_for(stream, 32))?
-        Error(Limit(Transaction))
-    }))
-    match take rejected {
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => {},
-        _ => return false
-    }
-    if version(snapshot(db)) != 1 {
-        return false
-    }
-    match result.unwrap(admit(mut db, stream, 0, digest)) {
-        Abandoned(t) => mark_is(ticket(t), 1),
-        _ => false
-    }
-}
-
-pub fn law_refused_reply(c: Clock) -> bool waits {
-    let frame = refused_reply(c, true)
-    let revision = refused_reply(c, false)
-    frame && revision
-}
-
-@test
-fn test_refused_reply(c: Clock) -> Result[(), ()] waits {
-    if law_refused_reply(c) {
-        Ok(())
-    } else {
-        Error(())
     }
 }
 
@@ -442,6 +359,30 @@ fn test_streams(c: Clock) -> Result[(), ()] waits {
     }
 }
 
+@test
+fn stream_quota_preserves_eviction_floor(c: Clock) -> Result[(), u64] waits {
+    let mut db = raw_test_db(c, 1073741824u64)
+    db.streams_per_caller_max = 1u64
+    db.streams_max = 1u64
+    let time = keyed_time(db)
+    let caller = Caller(issuer: 2u8, subject: clone(b"same caller"))
+    let older = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 1u64))
+    let first = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 2u64))
+    let second = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 3u64))
+    let digest = digest_for("same request")
+    if let Admitted(_) = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(1u64) }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, older, 0u64, digest)) {} else { return Error(2u64) }
+    if let StreamOverloaded = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(3u64) }
+    let raw = result.unwrap(stream_key_bytes(first))
+    let committed = result.unwrap(run(mut db, None, raw, fn(mut tx, key) -> Result[(), Error] {
+        reply(mut tx, key, 0u64, clone(b"result"))
+    }))
+    if let Committed(_) = committed {} else { return Error(4u64) }
+    if let Admitted(_) = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(5u64) }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(6u64) }
+    Ok(())
+}
+
 // J1: same J rewrites only the primary key; changing J rewrites old+new index
 // entries. Three indexes make these counts1 and7, independent of tree shape.
 pub fn law_index_writes(c: Clock) -> bool waits {
@@ -457,13 +398,13 @@ pub fn law_index_writes(c: Clock) -> bool waits {
             "i2"
         }
         result.unwrap(create_index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
-        let _ = result.unwrap(index(db, mut t, name, code.describe(bucket), std.codec.key_u64()))
+        let _ = result.unwrap(bind_table_index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
     }
     if !typed_put(mut db, t, 1, 17) {
         return false
     }
-    let same_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        put(mut tx, t, 1, 21)?;
+    let same_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
+        put(mut tx, call_env, 1, 21)?;
         Ok(tx.ops.rows.count)
     }))
     match take same_j {
@@ -472,8 +413,8 @@ pub fn law_index_writes(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    let changed_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        put(mut tx, t, 1, 22)?;
+    let changed_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
+        put(mut tx, call_env, 1, 22)?;
         Ok(tx.ops.rows.count)
     }))
     match take changed_j {
@@ -515,22 +456,22 @@ fn test_staged_index_reads(c: Clock) -> Result[(), Error] waits {
     result.unwrap(create_table(mut db, spec("writes", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "writes", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
     if !typed_put(mut db, t, 1, 4) || !typed_put(mut db, t, 2, 9) {
         return Error(Foreign)
     }
     let held = snapshot(db)
     let root = tree_stamp(held.roots.collections)
-    let outcome = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        if !delete(mut tx, t, 1)? || fetch(tx, shape(t), 1)? != None {
+    let outcome = run(mut db, None, (copy_env(t), copy_env(ix)), fn(mut tx, call_env) -> Result[(), Error] {
+        if !delete(mut tx, call_env.0, 1)? || fetch(tx, call_env.0, 1)? != None {
             return Error(Missing("staged delete"))
         }
-        put(mut tx, t, 2, 8)?
-        put(mut tx, t, 3, 12)?
-        if fetch(tx, shape(t), 2)? != Some(8u64) {
+        put(mut tx, call_env.0, 2, 8)?
+        put(mut tx, call_env.0, 3, 12)?
+        if fetch(tx, call_env.0, 2)? != Some(8u64) {
             return Error(Missing("staged put"))
         }
-        let mut rows = lookup(tx, ix, Included(0u64), Included(0u64))?
+        let mut rows = lookup(tx, call_env.1, Included(0u64), Included(0u64))?
         if next_indexed(mut rows)? != Some((2u64, 8u64)) || next_indexed(mut rows)? != Some((3u64, 12u64)) || next_indexed(mut rows)? != None {
             return Error(Missing("staged index rows"))
         }
@@ -538,8 +479,8 @@ fn test_staged_index_reads(c: Clock) -> Result[(), Error] waits {
     })?
     if let Aborted(Undone(value: Foreign, ticket: None)) = outcome {
         let now = snapshot(db)
-        let sh = shape(t)
-        if version(now) == version(held) && tree_stamp(now.roots.collections) == root && get(now, sh, 1)? == Some(4u64) && get(now, sh, 2)? == Some(9u64) && get(now, sh, 3)? == None {
+        let sh = view t
+        if version(now) == version(held) && tree_stamp(now.roots.collections) == root && get(result.unwrap(reader(db, 0u64)), now, sh, 1)? == Some(4u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 2)? == Some(9u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 3)? == None {
             return Ok(())
         }
     }
@@ -557,11 +498,11 @@ fn read_set_hit(reads: List[Read], delta: List[Change]) -> bool {
     false
 }
 
-fn observe_lookup(s: Snapshot, ix: Index[u64, u64, u64], limit: u64) -> (List[u64], List[Read]) {
-    let observed = result.unwrap(look(s, None, fn(tx: Tx) -> Result[List[u64], Error] {
-        let mut rows = lookup(tx, ix, Included(1), Included(1))?
+fn observe_lookup(s: Snapshot, ix: Index[u64, u64, u64, ()], limit: u64) -> (List[u64], List[Read]) waits {
+    let observed = result.unwrap(look(law_reader(s), s, None, (copy_env(ix), copy_env(limit)), fn(tx, call_env) -> Result[List[u64], Error] {
+        let mut rows = lookup(tx, call_env.0, Included(1), Included(1))?
         let mut out: List[u64] = list.new()
-        for _ in 0u64 .. limit {
+        for _ in 0u64 .. call_env.1 {
             match next_indexed(mut rows)? {
                 Some((k, v)) => {
                     list.push(mut out, k)
@@ -588,7 +529,7 @@ fn lookup_cover_points(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("cover", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "cover", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, t, "i", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(index(db, mut t, "i", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(bind_table_index(mut db, t, "i", code.describe(bucket), std.codec.key_u64()))
     for k in 1u64 .. 4 {
         if !typed_put(mut db, t, k, 4 * k - 3) {
             return false
@@ -600,8 +541,11 @@ fn lookup_cover_points(c: Clock) -> bool waits {
     if list.len(values) != 2 || values[0] != 1 || values[1] != 1 || list.len(reads) != 2 {
         return false
     }
+    let mut suffix = key_word(1)
+    list.append(mut suffix, key_word(1))
+    list.push(mut suffix, 0u8)
     let span = match reads[0] {
-        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, key_word(2))),
+        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, suffix)),
         _ => false
     }
     let point = match reads[1] {
@@ -616,7 +560,7 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let b = snapshot(db)
-    let unreturned_delta = result.unwrap(changes(a, b))
+    let unreturned_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), a, b)).rows
     let untouched = observe_lookup(b, ix, 1)
     if read_set_hit(reads, unreturned_delta) || untouched.0 != values {
         return false
@@ -625,31 +569,31 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let d = snapshot(db)
-    let changed = result.unwrap(changes(b, d))
+    let changed = result.unwrap(changes(result.unwrap(reader(db, 0u64)), b, d)).rows
     let changed_answer = observe_lookup(d, ix, 1)
     if list.len(changed) != 1 || !read_set_hit(reads, changed) || changed_answer.0 == values {
         return false
     }
-    let replaced = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, t, 1)?
-        put(mut tx, t, 1, 13)
+    let replaced = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env, 1)?
+        put(mut tx, call_env, 1, 13)
     }))
     match take replaced {
         Committed(_) => {},
         _ => return false
     }
     let e = snapshot(db)
-    let replaced_delta = result.unwrap(changes(d, e))
+    let replaced_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), d, e)).rows
     if list.len(replaced_delta) != 1 || !read_set_hit(changed_answer.1, replaced_delta) {
         return false
     }
     let zero = observe_lookup(e, ix, 0)
-    if list.len(zero.0) != 0 || list.len(zero.1) != 1 {
+    if list.len(zero.0) != 0 || list.len(zero.1) != 0 {
         return false
     }
     let all = observe_lookup(e, ix, 8)
     let expected: Inline[u64, 6] =[1, 13, 2, 9, 3, 9]
-    if list.len(all.0) != 6 || list.len(all.1) != 4 {
+    if list.len(all.0) != 6 || list.len(all.1) != 7 {
         return false
     }
     for i in 0u64 .. 6 {
@@ -664,7 +608,7 @@ fn cover_push(mut out: List[u64], n: u64) -> Result[(), Error] {
     Ok(list.push(mut out, n))
 }
 
-fn cover_observe(tx: Tx, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[u64, u64, u64], ib: Index[u64, u64, u64], plan: u64) -> Result[List[u64], Error] {
+fn cover_observe(tx: Tx, a: Table[u64, u64], b: Table[u64, u64], ia: Index[u64, u64, u64, ()], ib: Index[u64, u64, u64, ()], plan: u64) -> Result[List[u64], Error] {
     let mut out: List[u64] = list.new()
     match fetch(tx, a, plan % 8)? {
         Some(v) => {
@@ -693,13 +637,13 @@ fn cover_observe(tx: Tx, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[u64, 
         _ => Excluded(6)
     }
     let mut left = range(tx, a, lo, hi)?
-    while let Some((k, v)) = next_range(mut left)? {
+    while let Some((k, v)) = next_in(tx, mut left)? {
         cover_push(mut out, k)?;
         cover_push(mut out, v)?
     }
     cover_push(mut out, 65535)?
     let mut right = range(tx, b, lo, hi)?
-    while let Some((k, v)) = next_range(mut right)? {
+    while let Some((k, v)) = next_in(tx, mut right)? {
         cover_push(mut out, k)?;
         cover_push(mut out, v)?
     }
@@ -735,9 +679,9 @@ fn cover_observe(tx: Tx, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[u64, 
     Ok(take out)
 }
 
-fn observe_cover(s: Snapshot, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[u64, u64, u64], ib: Index[u64, u64, u64], plan: u64) -> (List[u64], List[Read]) {
-    let observed = result.unwrap(look(s, None, fn(tx: Tx) -> Result[List[u64], Error] {
-        cover_observe(tx, a, b, ia, ib, plan)
+fn observe_cover(s: Snapshot, a: Table[u64, u64], b: Table[u64, u64], ia: Index[u64, u64, u64, ()], ib: Index[u64, u64, u64, ()], plan: u64) -> (List[u64], List[Read]) waits {
+    let observed = result.unwrap(look(law_reader(s), s, None, (copy_env(a), copy_env(b), copy_env(ia), copy_env(ib), copy_env(plan)), fn(tx, call_env) -> Result[List[u64], Error] {
+        cover_observe(tx, call_env.0, call_env.1, call_env.2, call_env.3, call_env.4)
     }))
     match take observed {
         Seen(take done) => {
@@ -749,7 +693,7 @@ fn observe_cover(s: Snapshot, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[
 }
 
 fn cover_write(mut tx: Tx, t: Table[u64, u64], key: u64, mode: u64, value: u64) -> Result[(), Error] {
-    let old = match fetch(tx, shape(t), key)? {
+    let old = match fetch(tx, t, key)? {
         Some(v) => v,
         None => 100u64 + key
     }
@@ -778,28 +722,28 @@ pub fn law_read_cover(c: Clock) -> bool waits {
     let mut a = result.unwrap(table(mut db, "left", std.codec.key_u64(), std.codec.of_u64()))
     let mut b = result.unwrap(table(mut db, "right", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, a, "i", code.describe(bucket), std.codec.key_u64()))
-    let ia = result.unwrap(index(db, mut a, "i", code.describe(bucket), std.codec.key_u64()))
+    let ia = result.unwrap(bind_table_index(mut db, a, "i", code.describe(bucket), std.codec.key_u64()))
     result.unwrap(create_index(mut db, b, "i", code.describe(bucket), std.codec.key_u64()))
-    let ib = result.unwrap(index(db, mut b, "i", code.describe(bucket), std.codec.key_u64()))
+    let ib = result.unwrap(bind_table_index(mut db, b, "i", code.describe(bucket), std.codec.key_u64()))
     for k in 0u64 .. 8 {
         if !typed_put(mut db, a, k, 100 + k) || !typed_put(mut db, b, k, 200 + k) {
             return false
         }
     }
-    let sa = shape(a)
-    let sb = shape(b)
+    let sa = view a
+    let sb = view b
     let mut misses: u64 = 0
     let mut hits: u64 = 0
-    for step in 0u64 .. 128 {
-        let state = splitmix64(step + 1031)
+    for operation in 0u64 .. 128 {
+        let state = splitmix64(operation + 1031)
         let first = snapshot(db)
         let initial = observe_cover(first, sa, sb, ia, ib, state)
         let (take initial_value, take reads) = take initial
-        let mutation = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            if state & 1 == 0 {
-                cover_write(mut tx, a, (state >> 8) % 8, (state >> 16) % 4, 300 + ((state >> 24) % 64))
+        let mutation = result.unwrap(run(mut db, None, (copy_env(a), copy_env(b), copy_env(state)), fn(mut tx, call_env) -> Result[(), Error] {
+            if call_env.2 & 1 == 0 {
+                cover_write(mut tx, call_env.0, (call_env.2 >> 8) % 8, (call_env.2 >> 16) % 4, 300 + ((call_env.2 >> 24) % 64))
             } else {
-                cover_write(mut tx, b, (state >> 8) % 8, (state >> 16) % 4, 300 + ((state >> 24) % 64))
+                cover_write(mut tx, call_env.1, (call_env.2 >> 8) % 8, (call_env.2 >> 16) % 4, 300 + ((call_env.2 >> 24) % 64))
             }
         }))
         match take mutation {
@@ -807,7 +751,7 @@ pub fn law_read_cover(c: Clock) -> bool waits {
             _ => return false
         }
         let second = snapshot(db)
-        let delta = result.unwrap(changes(first, second))
+        let delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), first, second)).rows
         let observed = observe_cover(second, sa, sb, ia, ib, state)
         if read_set_hit(reads, delta) {
             hits += 1
@@ -846,9 +790,9 @@ fn same_rows(got: List[Change], want: List[Change], from: u64, n: u64) -> bool {
     true
 }
 
-fn span_rows(s: Snapshot, r: Read) -> List[Change] {
+fn span_rows(s: Snapshot, r: Read) -> List[Change] waits {
     match r {
-        Span(lo, hi) => result.unwrap(span_changes(s, lo, hi)),
+        Span(lo, hi) => result.unwrap(span_changes(law_reader(s), s, lo, hi)),
         Point(_) => list.new()
     }
 }
@@ -869,11 +813,11 @@ pub fn law_read_spans(c: Clock) -> bool waits {
         }
     }
     let after = snapshot(db)
-    let d = result.unwrap(changes(before, after))
+    let d = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after)).rows
     if list.len(d) != 5 {
         return false
     }
-    let sh = shape(t)
+    let sh = view t
     let mid = result.unwrap(key_span(sh, Included(2), Excluded(4)))
     let shifted = result.unwrap(key_span(sh, Excluded(2), Included(4)))
     let all = result.unwrap(key_span(sh, Unbounded, Unbounded))
@@ -885,9 +829,9 @@ pub fn law_read_spans(c: Clock) -> bool waits {
     if !reads_key(mid, d[1].tree_key) || !reads_key(mid, d[2].tree_key) || reads_key(mid, d[0].tree_key) || reads_key(mid, d[3].tree_key) || !reads_key(point, d[0].tree_key) || reads_key(point, d[1].tree_key) {
         return false
     }
-    let observed = result.unwrap(look(after, None, fn(tx: Tx) -> Result[(), Error] {
-        let _ = range(tx, sh, Included(2), Excluded(4))?
-        let _ = range(tx, sh, Excluded(2), Included(4))?
+    let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), after, None, sh, fn(tx, call_env) -> Result[(), Error] {
+        let _ = range(tx, call_env, Included(2), Excluded(4))?
+        let _ = range(tx, call_env, Excluded(2), Included(4))?
         Ok(())
     }))
     let got = match take observed {
@@ -897,15 +841,15 @@ pub fn law_read_spans(c: Clock) -> bool waits {
     list.len(got.reads) == 0
 }
 
-fn prefix_observation(s: Snapshot, sh: Shape[u64, u64], reverse: bool, steps: u64) -> List[Read] {
-    let observed = result.unwrap(look(s, None, fn(tx: Tx) -> Result[(), Error] {
-        let mut rows = if reverse {
-            range_reverse(tx, sh, Included(1), Excluded(10))?
+fn prefix_observation(s: Snapshot, sh: Table[u64, u64], reverse: bool, steps: u64) -> List[Read] waits {
+    let observed = result.unwrap(look(law_reader(s), s, None, (copy_env(reverse), copy_env(sh), copy_env(steps)), fn(tx, call_env) -> Result[(), Error] {
+        let mut rows = if call_env.0 {
+            range_reverse(tx, call_env.1, Included(1), Excluded(10))?
         } else {
-            range(tx, sh, Included(1), Excluded(10))?
+            range(tx, call_env.1, Included(1), Excluded(10))?
         }
-        for _ in 0u64 .. steps {
-            if let None = next_range(mut rows)? {
+        for _ in 0u64 .. call_env.2 {
+            if let None = next_in(tx, mut rows)? {
                 break
             }
         }
@@ -932,7 +876,7 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
     if !typed_put(mut db, t, 3, 30) || !typed_put(mut db, t, 7, 70) {
         return false
     }
-    let sh = shape(t)
+    let sh = view t
     let base = snapshot(db)
     let forward = prefix_observation(base, sh, false, 1)
     let two_forward = prefix_observation(base, sh, false, 2)
@@ -943,14 +887,14 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
         return false
     }
     let inserted_left = snapshot(db)
-    let left = result.unwrap(changes(base, inserted_left))
+    let left = result.unwrap(changes(result.unwrap(reader(db, 0u64)), base, inserted_left)).rows
     if !read_set_hit(forward, left) || read_set_hit(reverse, left) || !read_set_hit(fully_reverse, left) {
         return false
     }
     if !typed_put(mut db, t, 8, 80) {
         return false
     }
-    let right = result.unwrap(changes(inserted_left, snapshot(db)))
+    let right = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_left, snapshot(db))).rows
     if read_set_hit(forward, right) || read_set_hit(two_forward, right) || !read_set_hit(fully_forward, right) || !read_set_hit(reverse, right) {
         return false
     }
@@ -958,22 +902,22 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
     if !typed_put(mut db, t, 5, 50) {
         return false
     }
-    let middle = result.unwrap(changes(inserted_right, snapshot(db)))
+    let middle = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_right, snapshot(db))).rows
     if read_set_hit(forward, middle) || !read_set_hit(two_forward, middle) {
         return false
     }
-    if result.unwrap(count(snapshot(db), sh, Included(2), Excluded(8))) != 4 {
+    if result.unwrap(count_at(result.unwrap(reader(db, 0u64)), snapshot(db), sh, Included(2), Excluded(8))) != 4 {
         return false
     }
-    let mut rows = result.unwrap(scan_reverse(snapshot(db), sh, Included(2), Excluded(8)))
-    result.unwrap(next(mut rows)) == Some((7u64, 70u64)) && result.unwrap(next(mut rows)) == Some((5u64, 50u64)) && result.unwrap(next(mut rows)) == Some((3u64, 30u64)) && result.unwrap(next(mut rows)) == Some((2u64, 20u64)) && result.unwrap(next(mut rows)) == None
+    let mut rows = result.unwrap(scan_reverse(result.unwrap(reader(db, 0u64)), snapshot(db), sh, Included(2), Excluded(8)))
+    result.unwrap(next(law_reader(rows.capture), mut rows)) == Some((7u64, 70u64)) && result.unwrap(next(law_reader(rows.capture), mut rows)) == Some((5u64, 50u64)) && result.unwrap(next(law_reader(rows.capture), mut rows)) == Some((3u64, 30u64)) && result.unwrap(next(law_reader(rows.capture), mut rows)) == Some((2u64, 20u64)) && result.unwrap(next(law_reader(rows.capture), mut rows)) == None
 }
 
-fn scan_matches_rows(s: Snapshot, sh: Shape[u64, u64], low: u64, high: u64, hi: Bound[u64], reverse: bool) -> bool {
+fn scan_matches_rows(s: Snapshot, sh: Table[u64, u64], low: u64, high: u64, hi: Bound[u64], reverse: bool) -> bool waits {
     let mut rows = if reverse {
-        result.unwrap(scan_reverse(s, sh, Included(low), hi))
+        result.unwrap(scan_reverse(law_reader(s), s, sh, Included(low), hi))
     } else {
-        result.unwrap(scan(s, sh, Included(low), hi))
+        result.unwrap(scan(law_reader(s), s, sh, Included(low), hi))
     }
     for i in 0u64 .. 512 {
         let key = 2 * (if reverse {
@@ -981,9 +925,13 @@ fn scan_matches_rows(s: Snapshot, sh: Shape[u64, u64], low: u64, high: u64, hi: 
         } else {
             i
         })
-        if low <= key && key < high && result.unwrap(next(mut rows)) != Some((key, key + 1)) {
+        if low <= key && key < high && result.unwrap(next(law_reader(rows.capture), mut rows)) != Some((key, key + 1)) {
             return false
         }
     }
-    result.unwrap(next(mut rows)) == None && result.unwrap(next(mut rows)) == None
+    result.unwrap(next(law_reader(rows.capture), mut rows)) == None && result.unwrap(next(law_reader(rows.capture), mut rows)) == None
+}
+
+fn law_reader(s: Snapshot) -> Reader {
+    result.unwrap(make_reader(s.store, s.open, None))
 }

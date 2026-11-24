@@ -15,7 +15,16 @@ the step bound of MEM-30, which counts steps, not bytes.
 Charges cover every block, node, region allocation, queue, task record, cause cell and
 grant a program makes. They do not cover the call stack, host memory behind provider
 operations ([CAP-5](capabilities.md#cap-5-provider-operations)), or the engine's own
-bookkeeping: drop flags and the limit records of MEM-20.
+bookkeeping: drop flags and the limit records of MEM-20. The one provider memory they do
+cover is a `UdpSocket`'s receive pool and a group's queues, whose size the program chooses
+([NET-16](net.md#net-16-udp-sockets-and-batches)). That charge is refunded at the pool's
+recorded retirement, not at the drop, so its credit never funds new storage while the old
+storage is live. A limit that ends before the retirement hands the charge over to its parent
+like any surviving charge (MEM-20), so a helper's join does not refund it
+([CONC-15](tasks.md#conc-15-units)). The kernel's socket queues behind a `UdpSocket` are not
+charged here. The run's UDP host allowance admits them nominally, at each socket's default
+sizes read at run start. That is a per-run count, not a ceiling on kernel memory (NET-16), and
+a refusal there is a provider error, not a refused admission.
 
 ### MEM-20: Limit records and hand-over
 
@@ -123,6 +132,7 @@ is the most any build charges for the allocation (MEM-28):
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |
 | region allocation | its byte count, rounded up to 8 |
+| `UdpSocket` receive pool ([NET-16](net.md#net-16-udp-sockets-and-batches)) | slots × slot bytes; a group: (members + 1) × slots × slot bytes; refunded at retirement |
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
 | a `build_in` or `build_stream_in` allocation | `n`, rounded up to 8; after `finish_trim`, its used bytes, rounded up to 8 |
@@ -133,8 +143,9 @@ is the most any build charges for the allocation (MEM-28):
 | channel | capacity × item size + 64 |
 | connection ([CONC-17](tasks.md#conc-17-connections)) | 64 + capacity × item size + its room, up to `2^22 − 1` slots and `2^40 − 1` bytes of room |
 | `Latest` root | 32 |
-| `log.new` node | 24 |
-| a log's entries | as `List[E]` storage |
+| `Shared` node ([CONC-15](tasks.md#conc-15-units)) | the payload's size + 40, rounded up to 8; the buffers the payload holds keep their own charges |
+| `log.new` | its cell's node: 24, the `List[E]` carrier; its entries as `List[E]` storage |
+| `cell.new` node | `T`'s size, rounded up to 8, as a `Box[T]` node; the blocks `T` holds keep their own charges |
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a cell: 32, from the current limit, held until the run ends as a narrowed grant's rule storage is, since its plain capability can be copied anywhere |
@@ -149,7 +160,7 @@ selected value's bytes when its type is streamable and the whole copied blob oth
 **Charge parity.** A provider operation's charges are the caller's, and they do not depend
 on the provider: against a virtual provider ([core](core.md#provide)) the caller pays exactly
 the admissions and steps it pays against the host for the same operations and results. Every
-byte the server keeps (handle records, staged reply bytes) comes out of its port's room `n`,
+byte the server keeps (handle records, staged reply bytes, staged UDP packet records) comes out of its port's room `n`,
 which the server admitted at `provide.dir`, `provide.net`, `provide.stdout` or
 `provide.stderr` or `provide.exec`. Bytes a server copies out with `provide.payload` land in capacity the server
 already holds. A reply that needs more room than is left raises `Capacity` in the server and
@@ -269,6 +280,81 @@ are a safety contract, not an observable to match: a body that fits under `bound
 its logical charges fits on every engine and at every optimisation level, and a build may
 admit what the logical charges would refuse.
 
+### MEM-33: Reading a logical charge
+
+A program reads the logical charges of MEM-24 from the
+type, never from a number it copied. Two pieces do it, and nothing else prices a type.
+
+**`bytes[T]`** is an expression of type `u64` whose value is `T`'s logical size under the
+package's charge policy (the "Sizes are logical" paragraph of MEM-24): the size a field, an
+element, a channel item or a task result of type `T` counts. It is a primary
+([LANG-5](syntax.md#lang-5-grammar)) and a constant: it may appear in a `const` initializer
+([LANG-20](language.md#lang-20-constants)), it costs no step and charges nothing. A constant whose `bytes[T]` reaches the constant itself, through an `Inline` length in `T`, is refused as LANG-20's other cycles are. `T` is any
+complete type, `bytes[T]` in a generic body included: there it is `T`'s size at each
+instantiation, exactly as `channel.new(n)` in that body charges `n` × that size. An opaque type
+of another package is accepted, because its size is already observable through every charge
+that counts it; opacity hides fields, not size ([PROG-2](programs.md#prog-2-visibility)). A
+resource type counts 8 here, as wherever it is held; its block is priced by `charge.block`
+below. `bytes[T]` is a source of truth for what a type counts and never a prediction of an
+engine's layout: an engine may hold fewer bytes (MEM-28).
+
+```hirsel
+type Pair { a: u64, b: u32 }
+const PAIR: u64 = bytes[Pair]                                // 12
+const SLOT: u64 = bytes[Option[Pair]]                        // 20: 8 + 12
+fn item[T](n: u64) -> u64 { n * bytes[T] }
+```
+```hirsel
+const BAD: u64 = bytes[List]                                 // refused: LANG-12, List takes a type argument
+```
+
+**The core module `charge`** holds MEM-24's recipes as functions of sizes and counts. They
+are the only place in any package where a recipe's own constants (the 256-byte task record,
+the 32-byte cause cell, the 64-byte channel base, Map's 16-byte entry overhead, the
+rounding to 8) are written, and each returns `None` on overflow:
+
+```hirsel core
+pub fn round(n: u64) -> Option[u64]                                    // up to a multiple of 8
+pub fn boxed(payload: u64) -> Option[u64]                              // Box[T]: round(payload)
+pub fn counted(payload: u64) -> Option[u64]                            // Rc, Arc, Unique node: round(payload + 8)
+pub fn shared(payload: u64) -> Option[u64]                             // Shared node: round(payload + 40)
+pub fn seq(element: u64, capacity: u64) -> Option[u64]                 // List, Deque, Heap, String storage
+pub fn map(key: u64, value: u64, capacity: u64) -> Option[u64]        // Map storage
+pub fn channel(item: u64, capacity: u64) -> Option[u64]                // 64 + capacity × item
+pub fn task(result: u64, limit: u64) -> Option[u64]                    // 256 + result + 32 + limit
+pub fn block(fields: u64, grant: u64) -> Option[u64]                   // a resource value's block: fields + 32 + grant
+pub fn port(item: u64, capacity: u64) -> Option[u64]                   // a flow port
+pub fn latest() -> Option[u64]                                       // a Latest root
+```
+
+A price is then the recipe applied to the type: `charge.channel(bytes[Ack], 3 * g + 3)`,
+`charge.task(bytes[Result[(), Error]], grant)`. These are ordinary functions, so a derived
+price is a `fn` or a `let`, never a `const` (LANG-20 calls no function). Their results are
+exactly MEM-24's rows; a later policy (MEM-24's last paragraph) changes the module and
+`bytes`, and no caller.
+
+**Who computes what.** A price that spans packages splits in exactly one way:
+- The **provider** of a value or a service derives the charge of **one owner** of it from
+  its own types, with `bytes` and `charge`, and publishes it as a function or a plan. A
+  provider's figure is never restated by a caller, in source or in a law.
+- The **caller** keeps the **number of simultaneous owners**, and multiplies or sums the
+  provider's figure by it with checked arithmetic. A caller that holds two stores asks the
+  provider for one store's price and doubles it; it does not know what a store holds.
+- A **law** pins a figure only in the package that derives it, against a hand derivation
+  from the recipes. A caller's law pins its own terms and its owner counts, and composes
+  them with the provider's published figure, so a provider's change moves no caller's
+  literal.
+
+Prior art:
+
+| system | what it exposes | verdict |
+|---|---|---|
+| Rust `core::mem::size_of::<T>()`, `Layout::new::<T>()`, `Layout::array::<T>(n)` | a `const fn` for a type's size and a checked layout calculator for arrays and extension | **ADAPTED.** A size readable in constants and generic code, and a checked composite (`Layout::array` returns `Err` on overflow, as `charge.*` returns `None`), are taken. Rust's figure is the target's layout, padding and alignment included, and differs by target; `bytes[T]` is the logical size, the same on every target. Rust has no recipe for a channel's or a task's cost: `std::sync::mpsc` and `tokio` allocate behind the call and no budget sees it, which MEM-24 exists to avoid. |
+| Zig `@sizeOf(T)`, `@alignOf(T)`, `std.mem.Allocator` byte counts | a builtin read at compile time; allocators take explicit byte counts | **ADAPTED.** A keyword-introduced form with a type operand, legal in comptime code, is the shape `bytes[T]` takes, since Hirsel never writes type arguments at a call (LANG-12) and `bytes` is already a keyword. Zig's figure is again the target's layout. Zig's allocator interface asks the caller for raw byte counts and leaves composite costs to each caller, the hand-copying this rule removes. |
+| Goose (`/tmp/ref-goose` at `d5ae5bb`) | no type-size expression in its spec, reference or stdlib docs (goose goose_spec.md, reference.md, stdlib.md); its tutorial measures C++ and Rust with `sizeof` and reads Goose's own sizes off packed declarations (goose tutorial.md:732) | **NOT TAKEN.** Its sizes are fixed by its packed layouts and are written beside declarations, which is the hand-copying this rule replaces. Its stdlib's explicit-cost stance (adopted in [HTTP](http.md)) is kept: every price is still explicit, only its source changes. |
+
+Reversible: before 1.0, the form, the module and the split are each spec and library text.
+
 ### MEM-30: Step bounds
 
 In the reference count (Determinism, below), a **step** is taken at each call, each loop
@@ -292,8 +378,17 @@ is core's plain record `{ steps: u64 }`.
   step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
   one further step for each PBKDF2 iteration it admits, at the call and before any
   derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
+  `argon2.id` and `secret.derive_argon2id` take one further step for each Argon2 block
+  compression their parameters choose, at the call and before any work, because a stored
+  hash or a caller names a cost that no limit bounds ([core](core.md#argon2id)).
   `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
-  16 KiB chunk, including a final partial chunk. Code an engine adds for drop, clone and growth
+  16 KiB chunk, including a final partial chunk. `host.udp_recv` takes one further step for each 64 entries, or part of 64, of
+  its `out` spare capacity, and one for each 16 KiB, or part, of the most it can deliver
+  (`min(r, e × (slot_bytes − 256))`). `host.udp_send` takes one for each 64 packets, or part
+  of 64, of its `pkts`, and after validating them one for each 16 KiB, or part, of the sum of
+  their lengths. The product and the sum are exact (128-bit) before rounding, so neither
+  wraps. All are taken at the call and before issue
+  ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
   takes no steps. This is the **reference count**, the count the reference evaluator takes;
   a build may count otherwise (Determinism, below).
 - **The current bound.** At each point exactly one step bound is current, or none: the
@@ -327,24 +422,8 @@ is core's plain record `{ steps: u64 }`.
   stop drops it, cleaning it as every failure does, so the place holds the copy. The copy's
   steps are taken before entry and count against the enclosing bound, not against `n`.
   The store's `rollback_writes_on_overrun(mut tx, n, body)` does this for a transaction:
-  an overrun rolls back the transaction's owned state and the writes `body` staged, and
-  the transaction goes on. Its reads and log appends stay (MEM-29, FAIL-16's list). It
-  copies no staged row: what the transaction staged becomes a shared, frozen layer, and
-  `body` writes an empty overlay above it, so its cost does not grow with the rows staged
-  before it. Its accounting starts at its call, after the arguments are evaluated: the
-  call, freezing the staged writes and setting up the overlay take 40 steps, then `n` is
-  reserved. A caller with at least 40 and fewer than `n + 40` steps left gets
-  `Error(OutOfTime(steps: n))` without running `body` (an admission refusal) and keeps
-  what it had less the 40. A caller with exactly `n + 40` runs `body`, and when `body`
-  exhausts `n`, the caller's bound is exhausted too: no step is refunded, so a following
-  `bound steps 1` is refused. A body that calls it from inside a bound counts one more
-  step for its own entry, so there the threshold is `n + 41`. A return, but not an
-  overrun, then takes steps after `body` to merge the overlay into the transaction, in
-  proportion to the rows `body` staged and the frozen layers it folds. Inside `body`, a
-  read or write of a key its own overlay does not hold looks through each frozen layer
-  below, a step or more per layer. The layers are the enclosing calls' overlays plus one
-  for each consecutive call that overran or was refused before the transaction next
-  merged, so a caller sizing `n` counts them.
+  an overrun rolls back the writes `body` staged, and the transaction goes on. Its costs
+  and bounds are the store's ([STORE-SPEC §1.3](../../core/programs/store/STORE-SPEC.md#13-transactions)).
 - **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits
@@ -373,8 +452,8 @@ is core's plain record `{ steps: u64 }`.
   across engines or optimisation levels. Every build takes at least one step for each
   iteration of a loop in user code and each call into user code that recursion reaches, and
   the extra steps of
-  `secret.scram_sha256`, `crc32c.update` and `crc64nvme.update` as the reference count
-  does, so code that computes without end exhausts every bound and work an untrusted input
+  `secret.scram_sha256`, `argon2.id`, `secret.derive_argon2id`, `crc32c.update` and
+  `crc64nvme.update`, `host.udp_recv` and `host.udp_send` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
   chooses is bounded by it. A step taken while no bound is current uses nothing and
   ends no slice, so an engine need not count it, even in code that also runs under a bound.
 

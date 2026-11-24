@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from wire_process import accept_from, stop_process
+from wire_process import accept_from, stop_listener, stop_process
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +19,7 @@ KEY = b'dGhlIHNhbXBsZSBub25jZQ=='
 GUID = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 REQUEST = (b'GET /hirsel HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
            b'Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n'
-           b'Sec-WebSocket-Key: ' + KEY + b'\r\n\r\n')
+           b'Sec-WebSocket-Key: ' + KEY + b'\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n')
 
 
 def exact(s, count):
@@ -219,7 +219,7 @@ def main():
                         assert s.recv(1) == b''
                     print('session text message Close 1003: PASS', flush=True)
                 finally:
-                    stop_process(process)
+                    stop_listener(process, 18094)
             if args.idle_session:
                 with (Path(tmp)/'idle-stderr').open('wb') as errors:
                     process = subprocess.Popen([str(args.idle_session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
@@ -235,7 +235,7 @@ def main():
                             assert s.recv(1) == b''
                         print('session idle Ping then Close 1001: PASS', flush=True)
                     finally:
-                        stop_process(process)
+                        stop_listener(process, 18094)
         return 0
     if args.echo is None or args.client is None:
         parser.error('--echo and --client are required unless --session is selected')
@@ -338,9 +338,9 @@ def main():
                     request = head(peer)
                     key = next(line.split(b':',1)[1].strip() for line in request.split(b'\r\n') if line.lower().startswith(b'sec-websocket-key:'))
                     assert len(base64.b64decode(key, validate=True)) == 16
-                    assert b'Sec-WebSocket-Protocol: hirsel.2' in request
+                    assert b'Sec-WebSocket-Protocol: hirsel.4' in request
                     accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
-                    peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: hirsel.2\r\nSec-WebSocket-Accept: '+accept+b'\r\n\r\n'+frame(2,b'abc',False))
+                    peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: hirsel.4\r\nSec-WebSocket-Accept: '+accept+b'\r\n\r\n'+frame(2,b'abc',False))
                     for opcode, payload in [(2,b'abc'), (9,b'abc'), (10,b'abc')]:
                         assert read_frame(peer, True) == (opcode, payload)
                         if opcode == 9:

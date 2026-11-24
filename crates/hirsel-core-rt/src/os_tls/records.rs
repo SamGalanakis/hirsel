@@ -1,5 +1,7 @@
+use super::packet_cipher::PacketCipher;
 use super::*;
-use hirsel_core_net::{TxSlot, TxState};
+use hirsel_core_net::{TxSlot, TxState, secret_aead::AeadAlg};
+#[cfg(all(test, target_arch = "x86_64"))]
 use ring::aead::{self, Aad, LessSafeKey, UnboundKey};
 use rustls::{
     AlertDescription, ConnectionTrafficSecrets, ExtractedSecrets,
@@ -7,6 +9,7 @@ use rustls::{
     crypto::cipher::{Iv, Nonce},
     kernel::KernelConnection,
 };
+use std::mem::MaybeUninit;
 use std::ops::Range;
 
 const ALERT: u8 = 21;
@@ -52,7 +55,7 @@ pub(super) fn check_fallback_seal() {
         ),
     ] {
         let mut sending = TrafficKey::new((255, secret)).unwrap();
-        assert!(sending.out_of_place.is_none());
+        assert!(!sending.key.writes_into());
         let opening = LessSafeKey::new(UnboundKey::new(algorithm, &key).unwrap());
         let mut slot = Slot::new(HEADER + usize::from(header[4]));
         for seq in 255u64..=257 {
@@ -77,11 +80,7 @@ pub(super) fn check_fallback_seal() {
 }
 
 struct TrafficKey {
-    key: LessSafeKey,
-    /// AES-GCM that seals straight from the caller's bytes into the send
-    /// slot and opens straight from the receive slot into the caller's bytes.
-    #[cfg(target_arch = "x86_64")]
-    out_of_place: Option<super::gcm::GcmKey>,
+    key: PacketCipher,
     iv: Iv,
     seq: u64,
 }
@@ -90,34 +89,22 @@ impl TrafficKey {
     /// A key that seals and opens AES-GCM out of place where the CPU allows.
     fn new((seq, secret): (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
         let (algorithm, key, iv) = match secret {
-            ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (&aead::AES_128_GCM, key, iv),
-            ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (&aead::AES_256_GCM, key, iv),
+            ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (AeadAlg::Aes128Gcm, key, iv),
+            ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (AeadAlg::Aes256Gcm, key, iv),
             ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => {
-                (&aead::CHACHA20_POLY1305, key, iv)
+                (AeadAlg::ChaCha20Poly1305, key, iv)
             }
             _ => return Err(tls_failure(4, 0)),
         };
-        #[cfg(target_arch = "x86_64")]
-        let out_of_place = (algorithm != &aead::CHACHA20_POLY1305)
-            .then(|| super::gcm::GcmKey::new(key.as_ref()))
-            .flatten();
-        let key = LessSafeKey::new(
-            UnboundKey::new(algorithm, key.as_ref()).map_err(|_| tls_failure(4, 0))?,
-        );
-        Ok(Self {
-            key,
-            #[cfg(target_arch = "x86_64")]
-            out_of_place,
-            iv,
-            seq,
-        })
+        let key = PacketCipher::new(algorithm, key.as_ref()).map_err(|_| tls_failure(4, 0))?;
+        Ok(Self { key, iv, seq })
     }
 
-    fn nonce(&mut self) -> aead::Nonce {
+    fn nonce(&mut self) -> [u8; 12] {
         let nonce = Nonce::new(&self.iv, self.seq);
         // Callers stop or rekey at the suite limit, before a sequence can wrap.
         self.seq += 1;
-        aead::Nonce::assume_unique_for_key(nonce.0)
+        nonce.0
     }
 
     fn seal(&mut self, slot: &mut Slot, kind: u8, input: &[u8]) -> Result<(), Outcome> {
@@ -135,20 +122,9 @@ impl TrafficKey {
         let [hi, lo] = (body.len() as u16).to_be_bytes();
         header.copy_from_slice(&[APPLICATION, 3, 3, hi, lo]);
         let nonce = self.nonce();
-        #[cfg(target_arch = "x86_64")]
-        if let Some(key) = &self.out_of_place {
-            key.seal(*nonce.as_ref(), header, input, kind, body);
-            return Ok(());
-        }
-        let (plain, tag) = body.split_at_mut(input.len() + 1);
-        plain[..input.len()].copy_from_slice(input);
-        plain[input.len()] = kind;
-        let sealed = self
-            .key
-            .seal_in_place_separate_tag(nonce, Aad::from(header), plain)
-            .map_err(|_| tls_failure(4, 0))?;
-        tag.copy_from_slice(sealed.as_ref());
-        Ok(())
+        self.key
+            .seal_record(nonce, header, input, kind, body)
+            .map_err(|_| tls_failure(4, 0))
     }
 
     /// Opens a whole record in place, header first. Returns its content type
@@ -161,7 +137,7 @@ impl TrafficKey {
         let nonce = self.nonce();
         let plaintext = self
             .key
-            .open_in_place(nonce, Aad::from(&*header), body)
+            .open(nonce, header, body)
             .map_err(|_| AlertDescription::BadRecordMac)?;
         if plaintext.len() > RECORD + 1 {
             return Err(AlertDescription::RecordOverflow);
@@ -176,17 +152,13 @@ impl TrafficKey {
     /// Whether `open_into` can open a record of `body` ciphertext bytes, tag
     /// included, into `out`.
     fn opens_into(&self, body: usize, out: &[u8]) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        return self.out_of_place.is_some() && body >= TAG && out.len() >= body - TAG;
-        #[cfg(not(target_arch = "x86_64"))]
-        return false;
+        self.key.writes_into() && body >= TAG && out.len() >= body - TAG
     }
 
     /// Opens a whole record, header first, into `out`, which takes its whole
     /// decrypted body (payload, content type and padding) and must hold it,
     /// as `opens_into` checks. Returns the content type and the payload
     /// length. A record that fails to open leaves `out` zeroed.
-    #[cfg(target_arch = "x86_64")]
     fn open_into(
         &mut self,
         record: &[u8],
@@ -199,9 +171,17 @@ impl TrafficKey {
         let (header, body) = record.split_at(HEADER);
         let plaintext = &mut out[..body.len() - TAG];
         let nonce = self.nonce();
-        let key = self.out_of_place.as_ref().unwrap();
-        key.open(*nonce.as_ref(), header, body, plaintext)
-            .map_err(|()| AlertDescription::BadRecordMac)?;
+        // SAFETY: MaybeUninit<u8> has the same layout. With an exact-size
+        // destination and a complete record, all paths write the body.
+        let destination = unsafe {
+            std::slice::from_raw_parts_mut(
+                plaintext.as_mut_ptr().cast::<MaybeUninit<u8>>(),
+                plaintext.len(),
+            )
+        };
+        self.key
+            .open_into(nonce, header, body, destination)
+            .map_err(|_| AlertDescription::BadRecordMac)?;
         if plaintext.len() > RECORD + 1 {
             return Err(AlertDescription::RecordOverflow);
         }
@@ -210,16 +190,6 @@ impl TrafficKey {
             .rposition(|&byte| byte != 0)
             .ok_or(AlertDescription::UnexpectedMessage)?;
         Ok((plaintext[content], content))
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn open_into(
-        &mut self,
-        _: &[u8],
-        _: &mut [u8],
-        _: u64,
-    ) -> Result<(u8, usize), AlertDescription> {
-        unreachable!("opens_into refuses")
     }
 }
 
@@ -419,7 +389,9 @@ impl Tx {
                     TxState::Sending | TxState::Filling => return Ok(()),
                     // An abandoned send's cancel (`cancel_send`) leaves the
                     // rest of its slot for the next send, which resumes it.
-                    TxState::Sent(error) if error == -libc::ECANCELED || error == -libc::EINTR => {
+                    TxState::Sent(error)
+                        if [-libc::ECANCELED, -libc::EINTR, -libc::EAGAIN].contains(&error) =>
+                    {
                         return flight.slot.send(zc.tag, flight.sent..flight.end);
                     }
                     TxState::Sent(error) if error < 0 => {

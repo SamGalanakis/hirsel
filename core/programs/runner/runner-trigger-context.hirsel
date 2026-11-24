@@ -1,0 +1,50 @@
+// Module runner: authority for calls from a granted trigger attempt.
+pub opaque type TriggerContext: send {
+    attempt: triggers.Attempt,
+    to: Sender[HeadInput]
+}
+
+pub fn share_trigger_context(ctx: TriggerContext) -> TriggerContext {
+    TriggerContext(attempt: ctx.attempt, to: channel.sender(ctx.to))
+}
+
+pub fn trigger_attempt(ctx: TriggerContext) -> triggers.Attempt { ctx.attempt }
+
+pub fn use_trigger_tables[G: send, H: shareable + inert + send](mut r: Registry[G, H], take select: own[send] fn(H) -> triggers.Tables) {
+    r.trigger_tables = Some(take select)
+}
+
+fn declared_triggers[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, snap: store.Snapshot) -> Result[Option[triggers.Tables], store.Error] {
+    if let Some(select) = view r.trigger_tables { return Ok(Some(select(h))) }
+    if triggers.present(snap)? { return Error(Missing("trigger table selector")) }
+    Ok(None)
+}
+
+type GrantRequest[G: send]: send { ctx: TriggerContext, reply: Sender[Result[G, Capacity]] }
+type GrantWorker[G: send, H: shareable + inert + send, S: send]: send {
+    grants: S,
+    handles: H,
+    grant: fn(S, H, take TriggerContext) -> Result[G, Capacity] waits,
+    inbox: Receiver[GrantRequest[G]],
+}
+
+fn supply_grants[G: send, H: shareable + inert + send, S: send](take supply: GrantWorker[G, H, S]) -> () waits {
+    // A grant callback may wait. Keep it off the head that serves its context.
+    while let Ok(take request) = channel.receive(supply.inbox) {
+        let GrantRequest(ctx: take ctx, reply: take reply) = take request
+        let given = (supply.grant)(supply.grants, supply.handles, take ctx)
+        let _ = channel.send(reply, take given)
+    }
+}
+
+fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext) -> Result[G, Outcome] waits {
+    let (reply, inbox): (Sender[Result[G, Capacity]], Receiver[Result[G, Capacity]]) = channel.new(1u64)
+    if let Error(_) = channel.send(to, GrantRequest(ctx: take ctx, reply: take reply)) {
+        return Error(Failed(Gone))
+    }
+    match channel.receive(inbox) {
+        Ok(Ok(take given)) => Ok(take given),
+        Ok(Error(cap)) => Error(Failed(OutOfBytes(room(cap)))),
+        Error(_) => Error(Failed(Gone)),
+    }
+}

@@ -6,12 +6,14 @@ charge = "charge-v1"
 [dependencies]
 std = { major = 1 }
 mcp = { major = 1, path = "../mcp" }
+search = { major = 1, path = "../search" }
 store = { major = 1, path = "../store" }
 runner = { major = 1, path = "../runner" }
 platform = { major = 1, path = "../platform" }
 
 [sources]
 "harness.hirsel" = "harness"
+"harness-wake.hirsel" = "harness"
 "turn.hirsel" = "harness"
 "prompt.hirsel" = "harness"
 "views.hirsel" = "harness"
@@ -21,6 +23,13 @@ platform = { major = 1, path = "../platform" }
 "harness-project.hirsel" = "harness"
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
+"provider_fault.hirsel" = "provider"
+"provider_hedge.hirsel" = "provider"
+"settle.hirsel" = "harness"
+"ingress.hirsel" = "harness"
+"frames.hirsel" = "harness"
+"warm.hirsel" = "harness"
+"present.hirsel" = "harness"
 "preview.hirsel" = "preview"
 "gateway.hirsel" = "gateway"
 "gateway_http.hirsel" = "gateway_http"
@@ -30,14 +39,20 @@ platform = { major = 1, path = "../platform" }
 
 [tests]
 limit = 268435456
-grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 dirs = ["."]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"life_fixture.hirsel" = "laws"
+"catalog_laws.hirsel" = "laws"
 "mcp_laws.hirsel" = "laws"
 "release_laws.hirsel" = "laws"
+"ingress_laws.hirsel" = "laws"
+"frame_laws.hirsel" = "laws"
+"present_laws.hirsel" = "laws"
 "provider_laws.hirsel" = "provider_laws"
 "gateway_laws.hirsel" = "gateway_laws"
 "route_laws.hirsel" = "gateway_laws"
+"gateway_paging_laws.hirsel" = "gateway_laws"
 "preview_test.hirsel" = "preview"

@@ -1,20 +1,21 @@
 //! Callable values, using FORM's code pointers and ordinary call rows (LANG-13).
+use super::callable_abi::CallableAbi;
 use super::calls::CallScratch;
 use super::*;
-
-#[derive(Clone, Copy)]
-pub(super) struct CallableAbi {
-    signature: SigId,
-    params: PoolRange<Rep>,
-    result: Rep,
-    regions: PoolRange<u32>,
-    scoped_result: bool,
-}
 
 #[derive(Clone, Copy)]
 enum CallFailure {
     Cleanup,
     Handler(BlockId),
+}
+
+/// Whether a value call steps on entering its callee (MEM-30): a callable a core
+/// function calls back takes one step on entry when it is user code, and core code
+/// takes none.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Entry {
+    Step,
+    Core,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -260,44 +261,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if want.is_some_and(|w| w.ty == ERROR) {
             return (ERROR, None);
         }
+        let Some(ty) = self.checked_function_item(f, n) else {
+            return (ERROR, None);
+        };
         let g = &self.p.fns[f];
-        if mentions_error(&self.t, g.callable)
-            || (f >= self.p.fns.base_len() && self.p.item(g.at).range.has_errors)
-        {
-            self.inherited_refusal = true;
-            self.halt();
-            return (ERROR, None);
-        }
-        if g.params.iter().any(|p| self.vector_shape(p.ty).is_some())
-            || self.vector_shape(g.result).is_some()
-        {
-            self.refuse(
-                "SEM-11",
-                n,
-                "a function with a vector parameter or result cannot be a callable value",
-            );
-            return (ERROR, None);
-        }
-        if g.anchors
-            .iter()
-            .any(|&i| !self.region_handle(g.params[i as usize].ty))
-        {
-            self.refuse(
-                "LANG-13",
-                n,
-                "a result anchored to a view parameter fits no callable type",
-            );
-            return (ERROR, None);
-        }
-        let ty = g.callable;
-        if let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
-            && !crate::decls::scoped_result_rooted(&self.p.decls, &self.t, *result, false)
-        {
-            return self.gap_ty(
-                n,
-                "scoped callable result region anchors are not represented",
-            );
-        }
         scratch.found.clear();
         scratch.found.resize(g.generics.len(), None);
         scratch.checked.clear();
@@ -591,6 +558,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             scratch,
             CallFailure::Cleanup,
+            Entry::Step,
         );
         if result == NEVER {
             self.dead = true;
@@ -607,7 +575,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        self.call_lowered_with_fail(ty, value, vals, n, CallFailure::Cleanup)
+        self.call_lowered_with_fail(ty, value, vals, n, CallFailure::Cleanup, Entry::Step)
+    }
+
+    /// [`Self::call_lowered`] whose callee steps on entry only for `Entry::Step`.
+    pub(super) fn call_lowered_entry(
+        &mut self,
+        ty: TyId,
+        value: ValueId,
+        vals: &[Option<ValueId>],
+        n: NodeId,
+        entry: Entry,
+    ) -> Option<ValueId> {
+        self.call_lowered_with_fail(ty, value, vals, n, CallFailure::Cleanup, entry)
     }
 
     /// Call a lowered callable with an explicit failure successor.  Isolation uses
@@ -620,7 +600,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         fail: BlockId,
     ) -> Option<ValueId> {
-        self.call_lowered_with_fail(ty, value, &[], n, CallFailure::Handler(fail))
+        self.call_lowered_with_fail(ty, value, &[], n, CallFailure::Handler(fail), Entry::Step)
     }
 
     fn call_lowered_with_fail(
@@ -630,6 +610,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
         failure: CallFailure,
+        entry: Entry,
     ) -> Option<ValueId> {
         if !self.generated && !self.flow_literals.contains(&value) {
             self.flow_callable(n);
@@ -653,7 +634,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(Some(value), 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch, failure);
+        let v = self.emit_value_call(
+            code,
+            environment,
+            abi,
+            result,
+            n,
+            &mut scratch,
+            failure,
+            entry,
+        );
         self.call_scratch.push(scratch);
         v
     }
@@ -682,131 +672,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
-    fn value_call_abi(
-        &mut self,
-        callable: TyId,
-        result: TyId,
-        n: NodeId,
-        scratch: &mut CallScratch,
-    ) -> Option<CallableAbi> {
-        let abi = match self.callable_signatures.get(&callable).copied() {
-            Some(abi) => abi,
-            None => {
-                let signature = match self.indirect_signature(
-                    &scratch.params,
-                    result,
-                    &mut scratch.ir_params,
-                ) {
-                    Ok(signature) => signature,
-                    Err(what) => {
-                        self.gap(n, what);
-                        return None;
-                    }
-                };
-                let start = self.callable_reps.len();
-                for &(_, ty) in &scratch.params {
-                    let rep = match self.rep(ty) {
-                        Ok(rep) => rep,
-                        Err(what) => {
-                            self.gap(n, what);
-                            return None;
-                        }
-                    };
-                    self.callable_reps.push(rep);
-                }
-                let result_ty = result;
-                let result = match self.rep(result) {
-                    Ok(rep) => rep,
-                    Err(what) => {
-                        self.gap(n, what);
-                        return None;
-                    }
-                };
-                let roots = self.callable_regions.len();
-                for (i, &(_, ty)) in scratch.params.iter().enumerate() {
-                    if self.region_handle(ty)
-                        && (self.parameter_region_result(result_ty, i as u32)
-                            || scratch
-                                .params
-                                .iter()
-                                .any(|&(_, ty)| self.parameter_region_result(ty, i as u32)))
-                    {
-                        self.callable_regions.push(i as u32);
-                    }
-                }
-                let abi = CallableAbi {
-                    signature,
-                    params: PoolRange::new(start as u32, scratch.params.len() as u32),
-                    result,
-                    scoped_result: matches!(
-                        self.type_kind(result_ty),
-                        Kind::Scoped | Kind::Generic
-                    ),
-                    regions: PoolRange::new(
-                        roots as u32,
-                        (self.callable_regions.len() - roots) as u32,
-                    ),
-                };
-                self.callable_signatures.insert(callable, abi);
-                abi
-            }
-        };
-        Some(abi)
-    }
-    fn scoped_result_regions_only(&self, ty: TyId, params: &[crate::decls::ParamDecl]) -> bool {
-        match self.t.kind(ty) {
-            TyKind::Region(Root::Parameter(i)) => self
-                .fd
-                .params
-                .get(*i as usize)
-                .is_some_and(|p| self.region_handle(p.ty)),
-            TyKind::Region(Root::CallableParameter { depth: 0, index: i }) => params
-                .get(*i as usize)
-                .is_some_and(|p| self.region_handle(p.ty)),
-            TyKind::Region(Root::Local(slot)) => self.vars[*slot as usize]
-                .map(|v| v.ty)
-                .or_else(|| self.captured_root_ty(*slot))
-                .is_some_and(|ty| self.region_handle(ty)),
-            TyKind::Anchored(x, root) => {
-                self.scoped_result_regions_only(*x, params)
-                    && self.scoped_result_regions_only(*root, params)
-            }
-            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
-                .iter()
-                .all(|&x| self.scoped_result_regions_only(x, params)),
-            TyKind::View(x) | TyKind::Array(x, _) => self.scoped_result_regions_only(*x, params),
-            _ => true,
-        }
-    }
-
-    fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
-        self.parameter_region_result_at(ty, parameter, 0)
-    }
-    fn parameter_region_result_at(&self, ty: TyId, parameter: u32, depth: u32) -> bool {
-        match self.t.kind(ty) {
-            TyKind::Region(Root::CallableParameter {
-                depth: bound,
-                index: i,
-            }) => *i == parameter && *bound == depth,
-            TyKind::Anchored(inner, root) => {
-                matches!(self.t.kind(*root), TyKind::Region(Root::CallableParameter {depth: bound, index: i}) if *i == parameter && *bound == depth)
-                    || self.parameter_region_result_at(*inner, parameter, depth)
-            }
-            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
-                .iter()
-                .any(|&x| self.parameter_region_result_at(x, parameter, depth)),
-            TyKind::Array(x, _) | TyKind::View(x) => {
-                self.parameter_region_result_at(*x, parameter, depth)
-            }
-            TyKind::Fn(ps, r, _, _) => {
-                ps.iter()
-                    .any(|&(_, p)| self.parameter_region_result_at(p, parameter, depth + 1))
-                    || self.parameter_region_result_at(*r, parameter, depth + 1)
-            }
-            _ => false,
-        }
-    }
-
+    #[allow(clippy::too_many_arguments)]
     fn emit_value_call(
         &mut self,
         code: Option<ValueId>,
@@ -816,17 +682,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         scratch: &mut CallScratch,
         failure: CallFailure,
+        entry: Entry,
     ) -> Option<ValueId> {
         if !self.live() {
             return None;
         }
         let code = code?;
         let abi = abi?;
-        let step_fail = match failure {
-            CallFailure::Cleanup => self.fail_to(n),
-            CallFailure::Handler(block) => Some(block),
-        };
-        self.callback_step_to(n, step_fail);
+        if entry == Entry::Step {
+            let step_fail = match failure {
+                CallFailure::Cleanup => self.fail_to(n),
+                CallFailure::Handler(block) => Some(block),
+            };
+            self.callback_step_to(n, step_fail);
+        }
         let signature = abi.signature;
         let dest = self.e.module.signatures[signature.index()]
             .dest
@@ -1858,7 +1727,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             base
                         }
                     };
-                    self.entry_address(
+                    self.entry_place(
                         AddressBase::Address(base),
                         &[Step::Field(index as u32)],
                         place,

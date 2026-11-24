@@ -339,7 +339,6 @@ pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storag
 /// the emitter immediately abandons this body and propagates after cleanup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) {
-    crate::sequencer::end_receive_run();
     // SAFETY: compiler failure paths use their obligation cell exactly once.
     unsafe {
         causes::record(&mut *context, cause);
@@ -566,7 +565,7 @@ pub unsafe extern "C" fn hirsel_core_arc_initialized(context: *const Context) {
 }
 /// Complete an emitted Arc increment. No status/admission/allocation.
 /// # Safety
-/// As for arc_initialized; node is live and its checked atomic increment completed.
+/// As for arc_initialized; node is live and its checked increment completed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *const u8) {
     count_arc_hook();
@@ -575,8 +574,7 @@ pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *
         if crate::tasks::arc_unobserved(context) {
             return;
         }
-        let count = (&*node.cast::<std::sync::atomic::AtomicU64>())
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let count = node.cast::<u64>().read();
         crate::tasks::event_in(context, crate::tasks::ARC_SHARE, 0, count);
     }
 }
@@ -642,8 +640,8 @@ pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool)
     // SAFETY: the caller owns a live holder in its provider event.
     unsafe { counted::try_unwrap(node, atomic) }
 }
-/// On replay the dispatcher grants the release before the atomic mutation.
-/// The emitter still fences the last release and reports the completed event.
+/// On replay the dispatcher grants the release before the count changes.
+/// The emitter still reports the completed event.
 /// # Safety
 /// Consumes a live Arc holder under the current task's event discipline.
 #[unsafe(no_mangle)]
@@ -787,7 +785,6 @@ pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u64) -> Allocation {
-    let _commit = crate::sequencer::enter();
     // SAFETY: caller owns this context; no operation between selecting and
     // consuming the free-list head can suspend or invoke a provider.
     unsafe {
@@ -867,19 +864,21 @@ pub unsafe extern "C" fn hirsel_core_region_refill(
 }
 
 /// Admit `charge` against the current limit for storage the emitter already holds
-/// (a frame-backed list's bytes), allocating nothing. On success the pointer is
-/// the context; on refusal it is null with the Capacity, as `hirsel_core_alloc`.
+/// (a frame-backed list's bytes or log node), allocating nothing. The charge
+/// pins no record (`Payer::admit_frame`); `hirsel_core_frame_refund` returns it.
+/// On success the pointer is the context; on refusal it is null with the
+/// Capacity, as `hirsel_core_alloc`.
 /// # Safety
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_admit(
+pub unsafe extern "C" fn hirsel_core_frame_admit(
     context: *const Context,
     charge: u64,
     overflow: bool,
 ) -> Allocation {
     // SAFETY: the emitter supplies a live context.
     let task = unsafe { &*context };
-    match crate::block::admit_storage(task.payer(), (!overflow).then_some(charge)) {
+    match task.payer().admit_frame((!overflow).then_some(charge)) {
         Ok(()) => Allocation {
             pointer: context.cast_mut().cast(),
             capacity: Capacity {
@@ -894,37 +893,7 @@ pub unsafe extern "C" fn hirsel_core_admit(
     }
 }
 
-/// Admit a nonempty static byte literal's logical charge. The odd token
-/// names the original payer, which the outstanding charge keeps alive.
-///
-/// # Safety
-/// Context is live and task-exclusive. Charge is positive and rounded as for Bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_admit_frozen_bytes(
-    context: *const Context,
-    charge: u64,
-) -> Allocation {
-    // SAFETY: the emitter supplies the live task context.
-    let payer = unsafe { (*context).payer() };
-    match payer.admit(Some(charge)) {
-        Ok(()) => Allocation {
-            pointer: std::ptr::with_exposed_provenance_mut(
-                payer.record_pointer().expose_provenance() | 1,
-            ),
-            capacity: Capacity {
-                requested: 0,
-                available: 0,
-            },
-        },
-        Err(capacity) => Allocation {
-            pointer: ptr::null_mut(),
-            capacity,
-        },
-    }
-}
-
-/// Drop one initialized FrozenBytes carrier, refunding its original payer.
-///
+/// Drop one initialized FrozenBytes carrier, settling a heap buffer's charge.
 /// # Safety
 /// The emitter owns this live carrier exclusively, in a live task context.
 #[unsafe(no_mangle)]
@@ -932,26 +901,16 @@ pub unsafe extern "C" fn hirsel_core_drop_frozen_bytes(
     context: *const Context,
     carrier: *const u8,
 ) {
-    // SAFETY: all three carrier words are initialized. The carrier can be inline
-    // in an aggregate and need not have Rust's pointer alignment.
+    // SAFETY: all three words are initialized; inline carriers may be unaligned.
     let capacity = unsafe { carrier.add(16).cast::<u64>().read_unaligned() };
-    if capacity == 0 {
+    let metadata = unsafe { carrier.add(8).cast::<u64>().read_unaligned() };
+    if capacity == 0 || metadata & 1 != 0 {
         return;
     }
-    let charge = capacity.next_multiple_of(8);
-    // SAFETY: the tag distinguishes a payer token from a doubled heap length.
-    let metadata = unsafe { carrier.add(8).cast::<usize>().read_unaligned() };
-    if metadata & 1 != 0 {
-        let record = std::ptr::with_exposed_provenance_mut(metadata & !1);
-        let payer = crate::limit::Payer::from_current(record);
-        // SAFETY: this live carrier's outstanding charge pins the payer.
-        payer.settle_in(unsafe { &*context }, charge);
-    } else {
-        // SAFETY: nonzero heap capacity owns a live, uniquely held block.
-        let pointer =
-            unsafe { std::ptr::NonNull::new_unchecked(carrier.cast::<*mut u8>().read_unaligned()) };
-        unsafe { crate::block::free_in(&*context, pointer, charge) };
-    }
+    // SAFETY: a nonempty heap carrier owns a live, unique block.
+    let pointer =
+        unsafe { std::ptr::NonNull::new_unchecked(carrier.cast::<*mut u8>().read_unaligned()) };
+    unsafe { crate::block::free_in(&*context, pointer, capacity.next_multiple_of(8)) };
 }
 
 /// Admit frame storage and publish its backing record for mutating callees.
@@ -1027,21 +986,14 @@ pub unsafe extern "C" fn hirsel_core_refund(payer: *mut crate::limit::LimitRecor
     crate::limit::Payer::from_current(payer).refund(bytes);
 }
 
-/// Refund with the context-aware raw-word equality fast path. Equal nonzero
-/// payer/current refunds directly; otherwise follows the original payer. No
-/// status, admission or allocation. Tags may send an equal payer to the slow path.
+/// Return a frame charge that `hirsel_core_frame_admit` or an inline frame
+/// admission took, to the current limit. No status, admission or allocation.
 /// # Safety
-/// Context is task-exclusive; payer is retained by these exact outstanding bytes.
+/// Context is task-exclusive, in the body that admitted these exact bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_refund_in(
-    context: *const Context,
-    payer: *mut crate::limit::LimitRecord,
-    bytes: u64,
-) {
-    // SAFETY: caller transfers the live block's exact remaining charge.
-    unsafe {
-        crate::limit::Payer::from_current(payer).settle_in(&*context, bytes);
-    }
+pub unsafe extern "C" fn hirsel_core_frame_refund(context: *const Context, bytes: u64) {
+    // SAFETY: the emitter supplies a live context.
+    unsafe { (*context).payer().refund_frame(bytes) }
 }
 
 /// Scheduler handoff: bind the native task to this worker and apply pending

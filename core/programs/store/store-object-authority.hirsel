@@ -1,0 +1,62 @@
+// Why an object endpoint cannot hold an objects@1 or sim@1 store (§12.2).
+pub type EndpointRefusal: send = Insecure | Unproven | NotSimulator | IgnoresIfNoneMatch | IgnoresIfMatch
+
+pub fn endpoint_refusal_text(reason: EndpointRefusal) -> String {
+    string.from(match reason {
+        Insecure => "the object store endpoint is not https",
+        Unproven => "the loopback endpoint did not answer with the simulator's proof",
+        NotSimulator => "a sim@1 store needs a std.sim.s3 client",
+        IgnoresIfNoneMatch => "the object store endpoint applied a PUT whose If-None-Match condition failed",
+        IgnoresIfMatch => "the object store endpoint applied a PUT whose If-Match condition failed",
+    })
+}
+
+// STORE §12.2: the live client's transport. The store never asks which
+// company runs the endpoint; conditional writes are checked at genesis.
+fn history_check_endpoint(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+    if std.object.simulated(client) {
+        return Ok(())
+    }
+    if std.object.proven(client) {
+        // The client refuses any answer without the loopback simulator's
+        // proof for its credential, so one answered request proves it.
+        let location = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
+        let Ok(_) = location else {
+            return Error(Endpoint(Unproven))
+        }
+        return Ok(())
+    }
+    if !std.object.endpoint_secure(client) {
+        return Error(Endpoint(Insecure))
+    }
+    Ok(())
+}
+
+fn history_check_namespace(capture: HistoryCapture, client: std.object.Client) -> Result[(), Error] {
+    disk_allocation(scoped fn() -> Result[(), Error] {
+        let live_bytes = std.object.bucket_config(client)
+        if capture.config.place.bucket != live_bytes.bucket || capture.config.place.prefix != live_bytes.prefix {
+            return Error(Foreign)
+        }
+        Ok(())
+    })
+}
+
+fn history_probe_head(mut client: std.object.Client, cached_tag: std.object.ETag, mut scratch: Bytes, deadline: u64) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
+    list.clear(mut scratch)
+    let (take outcome, take body) = std.object.fetch_if_changed(mut client, "head", cached_tag, replace(mut scratch, list.new()), deadline)
+    scratch = take body
+    match take outcome {
+        Ok(None) => Ok(None),
+        Ok(Some(meta)) => {
+            if meta.size != list.len(scratch) || meta.etag.len == 0 {
+                return Error(disk_fault("head", 0, Truncated))
+            }
+            let received = history_decode_head(scratch)?
+            history_check_namespace(received, client)?
+            Ok(Some((take received, meta.etag)))
+        },
+        Error(NotFound) => Error(disk_fault("head", 0, Absent)),
+        Error(take e) => Error(Remote(take e)),
+    }
+}

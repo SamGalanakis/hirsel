@@ -82,16 +82,74 @@ impl FunctionEmitter<'_> {
                 let mask = self.cmp(predicate, &ty, &a, &b.unwrap());
                 self.cast(LlvmCast::SExt, &vector_type(count, 1), &mask, &ty)
             }
-            WrappingAdd | WrappingSub | BitAnd | BitOr | BitXor => {
+            WrappingAdd | WrappingSub | WrappingMul | BitAnd | BitOr | BitXor => {
                 let binary = match op {
                     WrappingAdd => Binary::Add,
                     WrappingSub => Binary::Sub,
+                    WrappingMul => Binary::Mul,
                     BitAnd => Binary::And,
                     BitOr => Binary::Or,
                     BitXor => Binary::Xor,
                     _ => unreachable!(),
                 };
                 self.bin(binary, &ty, &a, &b.unwrap())
+            }
+            // pmulhw: the high 16 bits of each exact 32-bit product.
+            MulhiI16 => {
+                let wide = vector_type(count, 32);
+                let a = self.cast(LlvmCast::SExt, &ty, &a, &wide);
+                let b = self.cast(LlvmCast::SExt, &ty, &b.unwrap(), &wide);
+                let product = self.bin(Binary::Mul, &wide, &a, &b);
+                let sixteen = self.splat(&wide, &Type::Int(32), count, &int(16));
+                let high = self.bin(Binary::AShr, &wide, &product, &sixteen);
+                self.cast(LlvmCast::Trunc, &wide, &high, &ty)
+            }
+            // pmaddwd: exact 32-bit products, then adjacent pairs summed modulo 2^32.
+            MaddI16 => {
+                let Ty::Vector(from) = first_ty else {
+                    unreachable!()
+                };
+                let pairs = from.lanes();
+                let narrow = vector_type(pairs, 16);
+                let wide = vector_type(pairs, 32);
+                let a = self.cast(LlvmCast::SExt, &narrow, &a, &wide);
+                let b = self.cast(LlvmCast::SExt, &narrow, &b.unwrap(), &wide);
+                let product = self.bin(Binary::Mul, &wide, &a, &b);
+                let even: Vec<i32> = (0..count as i32).map(|i| 2 * i).collect();
+                let odd: Vec<i32> = (0..count as i32).map(|i| 2 * i + 1).collect();
+                let even = self.emit(Operation::Shuffle(&wide, &product, &Value::Poison, &even));
+                let odd = self.emit(Operation::Shuffle(&wide, &product, &Value::Poison, &odd));
+                self.bin(Binary::Add, &ty, &even, &odd)
+            }
+            // packss/packus: a's lanes then b's, each clamped to the result lane's range.
+            PackSaturating => {
+                let Ty::Vector(from) = first_ty else {
+                    unreachable!()
+                };
+                let in_bits = from.lane().size() as u32 * 8;
+                let half = vector_type(from.lanes(), in_bits);
+                let wide = vector_type(count, in_bits);
+                let concatenate: Vec<i32> = (0..count as i32).collect();
+                let both = self.emit(Operation::Shuffle(&half, &a, &b.unwrap(), &concatenate));
+                let (min, max) = if signed {
+                    (-(1_i64 << (bits - 1)), (1_i64 << (bits - 1)) - 1)
+                } else {
+                    (0, (1_i64 << bits) - 1)
+                };
+                let in_lane = Type::Int(in_bits);
+                let min = self.splat(&wide, &in_lane, count, &int(min));
+                let max = self.splat(&wide, &in_lane, count, &int(max));
+                let low = self.intrinsic(
+                    &format!("llvm.smax.v{count}i{in_bits}"),
+                    wide.clone(),
+                    &[arg(wide.clone(), both), arg(wide.clone(), min)],
+                );
+                let clamped = self.intrinsic(
+                    &format!("llvm.smin.v{count}i{in_bits}"),
+                    wide.clone(),
+                    &[arg(wide.clone(), low), arg(wide.clone(), max)],
+                );
+                self.cast(LlvmCast::Trunc, &wide, &clamped, &ty)
             }
             BitNot => {
                 let all = self.splat(&ty, &lane_ty, count, &int(-1));

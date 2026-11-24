@@ -78,11 +78,16 @@ impl Function<'_, '_, '_> {
         Ok((fits, available))
     }
     fn debit(&mut self, payer: Value, charge: Value, available: Value) -> Result<()> {
-        let available = self.b.ins().isub(available, charge);
         let held = self.load_word(payer, memory_layout::LIMIT_OUTSTANDING);
         let held = self.b.ins().iadd(held, charge);
-        self.store_word(payer, memory_layout::LIMIT_AVAILABLE, available);
         self.store_word(payer, memory_layout::LIMIT_OUTSTANDING, held);
+        self.debit_room(payer, charge, available)
+    }
+    /// Take `charge` from the payer's room only. Frame charges pin no record
+    /// (`Payer::admit_frame`), so they leave `outstanding` alone.
+    fn debit_room(&mut self, payer: Value, charge: Value, available: Value) -> Result<()> {
+        let available = self.b.ins().isub(available, charge);
+        self.store_word(payer, memory_layout::LIMIT_AVAILABLE, available);
         if self.observe_charge {
             self.c_call("hirsel_core_observe_charge", &[], &[], &[])?;
         }
@@ -167,19 +172,15 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])
     }
-    /// Admit `charge` for frame bytes at `frame` (`alloc .. frame`): the own
-    /// allocation's inline admission, with nothing allocated; a refusal, overflow
-    /// or test probe takes `hirsel_core_admit`, which keeps the Capacity event.
-    pub fn frame_admit(
-        &mut self,
-        frame: Value,
-        charge: Value,
-        overflow: Option<Value>,
-    ) -> Result<[Value; 2]> {
+    /// Admit `charge` for frame bytes: the own allocation's inline admission,
+    /// with nothing allocated. A refusal, overflow
+    /// or test probe takes `hirsel_core_frame_admit`, which keeps the Capacity event.
+    /// Frame charges move only the room: no block names the record.
+    pub fn frame_admit(&mut self, charge: Value, overflow: Option<Value>) -> Result<[Value; 2]> {
         let slow = self.cold_block();
         let fast = self.b.create_block();
         let done = self.b.create_block();
-        self.b.append_block_param(done, types::I64);
+        self.b.append_block_param(done, types::I8);
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
@@ -192,23 +193,38 @@ impl Function<'_, '_, '_> {
         let inline = if self.testing { slow } else { admit };
         self.b.ins().brif(fits, inline, &[], slow, &[]);
         self.b.switch_to_block(admit);
-        self.debit(payer, charge, available)?;
+        self.debit_room(payer, charge, available)?;
         let zero = self.b.ins().iconst(types::I64, 0);
-        self.b.ins().jump(done, &[frame.into(), zero.into()]);
+        let yes = self.b.ins().iconst(types::I8, 1);
+        self.b.ins().jump(done, &[yes.into(), zero.into()]);
         self.b.switch_to_block(slow);
         let values = self.c_call(
-            "hirsel_core_admit",
+            "hirsel_core_frame_admit",
             &[P, U, B],
             &[P, U, U],
             &[self.context, charge, overflow],
         )?;
-        let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
-        let zero = self.b.ins().iconst(types::I64, 0);
-        let pointer = self.b.ins().select(refused, zero, frame);
-        self.b.ins().jump(done, &[pointer.into(), values[2].into()]);
+        let admitted = self.b.ins().icmp_imm_s(IntCC::NotEqual, values[0], 0);
+        self.b
+            .ins()
+            .jump(done, &[admitted.into(), values[2].into()]);
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])
     }
+    pub(super) fn refund_frame_charge(&mut self, obligation: ir::StackSlot) -> Result<()> {
+        let charge = self
+            .b
+            .ins()
+            .stack_load(types::I64, types::I64, obligation, 0);
+        self.c_call(
+            "hirsel_core_frame_refund",
+            &[P, U],
+            &[],
+            &[self.context, charge],
+        )?;
+        Ok(())
+    }
+
     pub fn region_alloc(
         &mut self,
         slot: Value,
@@ -475,23 +491,27 @@ pub(super) fn share(
         )?;
         b.ins().jump(done, &[]);
         b.switch_to_block(inline);
-        let initial = b.ins().atomic_load(types::I64, Flags::trusted(), node);
-        let head = b.create_block();
-        let update = b.create_block();
-        b.append_block_param(head, types::I64);
-        b.ins().jump(head, &[initial.into()]);
-        b.switch_to_block(head);
-        let old = b.block_params(head)[0];
-        let one = b.ins().iconst(types::I64, 1);
-        let (next, wrapped) = b.ins().uadd_overflow(old, one);
-        b.ins().brif(wrapped, overflow, &[], update, &[]);
-        b.switch_to_block(update);
-        // Cranelift atomics are SeqCst, stronger than the runtime's Relaxed CAS.
-        let actual = b.ins().atomic_cas(Flags::trusted(), node, old, next);
-        let same = b.ins().icmp(IntCC::Equal, actual, old);
-        let observed = b.create_block();
-        b.ins().brif(same, observed, &[], head, &[actual.into()]);
-        b.switch_to_block(observed);
+    }
+    // Rc and Arc counts are plain words: an Arc never leaves the thread
+    // running its unit (CONC-2).
+    let old = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let one = b.ins().iconst(types::I64, 1);
+    let (next, wrapped) = b.ins().uadd_overflow(old, one);
+    let store = b.create_block();
+    b.ins().brif(wrapped, overflow, &[], store, &[]);
+    b.switch_to_block(store);
+    b.ins().store(
+        Flags::trusted(),
+        next,
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    if atomic {
         arc_event(
             b,
             calls,
@@ -501,27 +521,8 @@ pub(super) fn share(
             &[P],
             &[node],
         )?;
-        b.ins().jump(done, &[]);
-    } else {
-        let old = b.ins().load(
-            types::I64,
-            Flags::trusted(),
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        let one = b.ins().iconst(types::I64, 1);
-        let (next, wrapped) = b.ins().uadd_overflow(old, one);
-        let store = b.create_block();
-        b.ins().brif(wrapped, overflow, &[], store, &[]);
-        b.switch_to_block(store);
-        b.ins().store(
-            Flags::trusted(),
-            next,
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        b.ins().jump(done, &[]);
     }
+    b.ins().jump(done, &[]);
     b.switch_to_block(overflow);
     let atomic = b.ins().iconst(types::I8, i64::from(atomic));
     calls.c(
@@ -545,12 +546,11 @@ pub(super) fn decrement(
     node: Value,
     atomic: bool,
 ) -> Result<Value> {
-    let one = b.ins().iconst(types::I64, 1);
+    let done = b.create_block();
+    b.append_block_param(done, types::I8);
     if atomic {
         let inline = b.create_block();
         let replay = b.create_block();
-        let done = b.create_block();
-        b.append_block_param(done, types::I8);
         branch_on_arc_replay(b, context, inline, replay);
         b.switch_to_block(replay);
         let last = calls.c(
@@ -563,34 +563,25 @@ pub(super) fn decrement(
         )?[0];
         b.ins().jump(done, &[last.into()]);
         b.switch_to_block(inline);
-        // SeqCst includes the required Release decrement and Acquire on last.
-        let old = b.ins().atomic_rmw(
-            types::I64,
-            Flags::trusted(),
-            ir::AtomicRmwOp::Sub,
-            node,
-            one,
-        );
-        let last = b.ins().icmp_imm_s(IntCC::Equal, old, 1);
-        b.ins().jump(done, &[last.into()]);
-        b.switch_to_block(done);
-        Ok(b.block_params(done)[0])
-    } else {
-        let old = b.ins().load(
-            types::I64,
-            Flags::trusted(),
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        let next = b.ins().isub(old, one);
-        b.ins().store(
-            Flags::trusted(),
-            next,
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        Ok(b.ins().icmp_imm_s(IntCC::Equal, next, 0))
     }
+    let one = b.ins().iconst(types::I64, 1);
+    let old = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let next = b.ins().isub(old, one);
+    b.ins().store(
+        Flags::trusted(),
+        next,
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let last = b.ins().icmp_imm_s(IntCC::Equal, next, 0);
+    b.ins().jump(done, &[last.into()]);
+    b.switch_to_block(done);
+    Ok(b.block_params(done)[0])
 }
 
 pub(super) fn release(
@@ -656,6 +647,8 @@ pub(super) fn empty_bound(body: &Body) -> bool {
             Inst::Alloc { .. }
             | Inst::Grow { .. }
             | Inst::Free { .. }
+            | Inst::FrameAdmit { .. }
+            | Inst::FrameActive { .. }
             | Inst::FrameRefund { .. }
             | Inst::PromoteFrame { .. }
             | Inst::Drop { .. }

@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use crate::memory::MemoryEvent;
 use crate::profile::{Result, Timestamp, Unsigned};
 
-const MAGIC: &[u8; 8] = b"HIRSOBS1";
+const MAGIC: &[u8; 8] = b"HIRSOBS2";
 const END: u16 = u16::MAX - 1;
 const LOSS: u16 = u16::MAX;
 type Task = (u64, u64);
@@ -89,7 +89,10 @@ pub(crate) enum RecordKind {
         stack: Vec<u8>,
     },
     End,
-    Loss(u64),
+    Loss {
+        lost: u64,
+        memory_emitted: u64,
+    },
 }
 
 impl RecordKind {
@@ -183,19 +186,22 @@ impl RecordKind {
             (24 | 25, _, _) => {
                 return Err(format!("invalid runtime observation payload for kind {kind}").into());
             }
-            (16..=21, _, _) => Self::Memory {
+            (16..=21, _, _) | (22..=23, _, true) => Self::Memory {
                 event: MemoryEvent::decode(kind, words)?,
                 stack: bytes,
             },
             (END, [], true) => Self::End,
-            (LOSS, &[lost], true) => Self::Loss(lost),
+            (LOSS, &[lost, memory_emitted], true) => Self::Loss {
+                lost,
+                memory_emitted,
+            },
             (END | LOSS, _, _) => return Err("invalid runtime observation footer".into()),
             (1..=12, _, _) => {
                 return Err(format!("invalid runtime observation payload for kind {kind}").into());
             }
             _ => {
                 return Err(
-                    format!("unassigned runtime observation kind {kind} in HIRSOBS1").into(),
+                    format!("unassigned runtime observation kind {kind} in HIRSOBS2").into(),
                 );
             }
         };
@@ -212,6 +218,7 @@ pub(crate) struct Record {
 pub(crate) struct Observation {
     pub records: Vec<Record>,
     pub lost: u64,
+    pub memory_emitted: u64,
     pub complete: bool,
 }
 
@@ -226,6 +233,7 @@ impl Observation {
         let mut trace = Self {
             records: Vec::new(),
             lost: 0,
+            memory_emitted: 0,
             complete: false,
         };
         let mut header = [0u8; 20];
@@ -267,11 +275,18 @@ impl Observation {
                     trace.complete = true;
                     break;
                 }
-                RecordKind::Loss(lost) => {
+                RecordKind::Loss {
+                    lost,
+                    memory_emitted,
+                } => {
                     trace.lost = trace
                         .lost
                         .checked_add(lost)
                         .ok_or("runtime loss count overflows")?;
+                    trace.memory_emitted = trace
+                        .memory_emitted
+                        .checked_add(memory_emitted)
+                        .ok_or("runtime memory record count overflows")?;
                 }
                 kind => trace.records.push(Record { ts, tid, kind }),
             }
@@ -543,7 +558,7 @@ impl<'a> Import<'a> {
             | RecordKind::CpuSample { .. }
             | RecordKind::ThreadName { .. }
             | RecordKind::End
-            | RecordKind::Loss(_) => {}
+            | RecordKind::Loss { .. } => {}
         }
         Ok(())
     }

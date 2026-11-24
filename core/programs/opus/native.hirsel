@@ -1,0 +1,21 @@
+pub fn encoder_create(f: Foreign[opus.Opus], rate: i32, channels: i32, application: i32) -> Option[foreign.Ptr[opus.EncoderHandle]]
+
+pub fn encoder_destroy(f: Foreign[opus.Opus], take encoder: foreign.Ptr[opus.EncoderHandle])
+
+pub fn decoder_create(f: Foreign[opus.Opus], rate: i32, channels: i32) -> Option[foreign.Ptr[opus.DecoderHandle]]
+
+pub fn decoder_destroy(f: Foreign[opus.Opus], take decoder: foreign.Ptr[opus.DecoderHandle])
+
+pub fn encode(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], channels: u32, pcm: Bytes, mut packet: Bytes) -> i32
+
+pub fn decode(f: Foreign[opus.Opus], decoder: foreign.Ptr[opus.DecoderHandle], channels: u32, packet: Bytes, frames: u32, fec: i32, mut pcm: Bytes) -> i32
+
+pub fn set_bitrate(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], value: i32) -> i32
+
+pub fn set_fec(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], value: i32) -> i32
+
+pub fn set_packet_loss_percent(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], value: i32) -> i32
+
+pub fn set_dtx(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], value: i32) -> i32
+
+pub fn set_complexity(f: Foreign[opus.Opus], encoder: foreign.Ptr[opus.EncoderHandle], value: i32) -> i32

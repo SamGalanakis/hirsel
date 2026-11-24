@@ -3,17 +3,28 @@
 use crate::provider::*;
 
 mod listing;
-use hirsel_core_net::sys;
+mod metadata;
+mod path;
+mod random;
+pub(crate) mod temp;
+mod write;
 use listing::Listing;
+use metadata::{stat, zero_extension};
+pub(crate) use path::open_beneath;
+use path::{
+    beneath, close_file, leaf_kind, open_directory, parent, remove, remove_tree, valid_path,
+};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString},
     io,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     sync::Mutex,
 };
-pub(crate) const TEMP_ATTEMPTS: usize = 128;
+#[cfg(test)]
+pub(crate) use temp::TEMP_ATTEMPTS;
+pub(crate) use write::write_all;
+use write::write_request;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
 /// Queue a SYNC or SYNC_DIR on the sync helper; None for a handle this
@@ -82,6 +93,12 @@ impl OsProvider {
         self.files.insert(id, fd);
         id
     }
+    #[cfg(test)]
+    pub(crate) fn adopt_directory(&mut self, fd: OwnedFd) -> u64 {
+        let id = self.id();
+        self.directories.insert(id, fd);
+        id
+    }
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self::from_streams(Some(stdout), Some(stderr))
@@ -113,11 +130,13 @@ impl OsProvider {
     /// Only run configuration can acquire a root from an ambient host path.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
-        let _blocking = crate::units::blocking();
-        let file = std::fs::File::open(path)?;
-        if !file.metadata()?.is_dir() {
-            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-        }
+        let file = crate::units::off_slot(|| {
+            let file = std::fs::File::open(path)?;
+            if !file.metadata()?.is_dir() {
+                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+            Ok(file)
+        })?;
         let id = self.id();
         self.directories.insert(id, file.into());
         Ok(id)
@@ -125,13 +144,15 @@ impl OsProvider {
     /// Startup-only capability probe. The per-operation confined open is unchanged.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
-        let _blocking = crate::units::blocking();
-        drop(beneath(
-            self.directories[&handle].as_raw_fd(),
-            b".",
-            hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY,
-        )?);
-        Ok(())
+        let directory = self.directories[&handle].as_raw_fd();
+        crate::units::off_slot(|| {
+            drop(beneath(
+                directory,
+                b".",
+                hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY,
+            )?);
+            Ok(())
+        })
     }
     fn id(&mut self) -> u64 {
         let id = self.next;
@@ -180,23 +201,22 @@ impl OsProvider {
                     2 => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     4 => libc::O_RDWR | libc::O_CREAT,
+                    MODE_DURABLE | MODE_DIRECT => {
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_DSYNC
+                    }
                     _ => unreachable!(),
                 };
                 let fd = beneath(self.directories[&request.handle].as_raw_fd(), path, flags)?;
+                if request.mode == MODE_DIRECT {
+                    metadata::enable_direct(fd.as_fd(), flags)?;
+                }
                 let id = self.id();
                 self.files.insert(id, fd);
                 out.value = id;
             }
             OPEN_DIR => {
                 let root = self.directories[&request.handle].as_raw_fd();
-                let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
-                let dir = beneath(root, path, flags).map_err(|error| {
-                    if error.raw_os_error() == Some(libc::ENOTDIR) {
-                        io::Error::from_raw_os_error(libc::EACCES)
-                    } else {
-                        error
-                    }
-                })?;
+                let dir = open_directory(root, path)?;
                 let id = self.id();
                 self.directories.insert(id, dir);
                 out.value = id;
@@ -204,7 +224,13 @@ impl OsProvider {
             ENTRIES => {
                 let root = self.directories[&request.handle].as_raw_fd();
                 // Open a fresh description so independently opened listings have distinct cursors.
-                let fd = beneath(root, b".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let path = if path.is_empty() {
+                    b".".as_slice()
+                } else {
+                    valid_path(path)?;
+                    path
+                };
+                let fd = open_directory(root, path)?;
                 let listing = Listing::open(fd)?;
                 let id = self.id();
                 self.listings.insert(id, listing);
@@ -235,9 +261,11 @@ impl OsProvider {
             STAT => {
                 let root = self.directories[&request.handle].as_raw_fd();
                 let fd = beneath(root, path, LINK_ITSELF)?;
-                return stat(fd.as_raw_fd());
+                let result = stat(fd.as_fd());
+                let _ = close_file(fd);
+                return result;
             }
-            STAT_FILE => return stat(self.files[&request.handle].as_raw_fd()),
+            STAT_FILE => return stat(self.files[&request.handle].as_fd()),
             READ | READ_AT => {
                 let fd = self.files[&request.handle].as_raw_fd();
                 let offset = (request.operation == READ_AT).then(|| request.offset());
@@ -267,10 +295,7 @@ impl OsProvider {
                 ));
             }
             CLOSE => {
-                let fd = self.files.remove(&request.handle).unwrap().into_raw_fd();
-                // SAFETY: consumes the sole owned fd. Linux closes even on EINTR;
-                // retrying could close another operation's newly reused descriptor.
-                syscall(unsafe { libc::close(fd) } as isize)?;
+                close_file(self.files.remove(&request.handle).unwrap())?;
             }
             TRY_LOCK | UNLOCK => {
                 let fd = self.files[&request.handle].as_raw_fd();
@@ -342,77 +367,27 @@ impl OsProvider {
                     _ => unreachable!(),
                 }
             }
-            MKDTEMP => {
+            MKDTEMP | MKSTEMP => {
                 let fd = self.directories[&request.handle].as_raw_fd();
-                // Only the completed basename must be valid: dot prefixes are
-                // ordinary names once the nonempty alphanumeric suffix is added.
-                let prefix = if request.buffer.len == 0 {
-                    &[]
+                let opened = temp::create(fd, request, &mut self.temporary)?;
+                let id = self.id();
+                if request.operation == MKSTEMP {
+                    self.files.insert(id, opened);
                 } else {
-                    // SAFETY: issue borrows the carrier's existing initialized bytes.
-                    unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
-                };
-                if prefix.contains(&b'/') || prefix.contains(&0) {
-                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                    self.directories.insert(id, opened);
                 }
-                for _ in 0..TEMP_ATTEMPTS {
-                    let sequence = self.temporary;
-                    self.temporary = sequence
-                        .checked_add(1)
-                        .unwrap_or_else(|| crate::process::stop(b"HostNames"));
-                    let suffix = format!("h{:x}x{:x}", std::process::id(), sequence);
-                    let mut name = prefix.to_vec();
-                    name.extend_from_slice(suffix.as_bytes());
-                    let name_c = CString::new(name)?;
-                    // SAFETY: new single-component name in the granted directory.
-                    let result = unsafe { libc::mkdirat(fd, name_c.as_ptr(), 0o700) };
-                    if result < 0 {
-                        let error = io::Error::last_os_error();
-                        if error.raw_os_error() == Some(libc::EEXIST) {
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                    let opened = beneath(
-                        fd,
-                        name_c.as_bytes(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-                    );
-                    let directory = match opened {
-                        Ok(directory) => directory,
-                        Err(error) => {
-                            // SAFETY: remove the empty directory just created, no link traversal.
-                            unsafe {
-                                libc::unlinkat(fd, name_c.as_ptr(), libc::AT_REMOVEDIR);
-                            }
-                            return Err(error);
-                        }
-                    };
-                    // SAFETY: entry checked 32 spare bytes before issue; suffix
-                    // is at most 27 ASCII bytes. Prefix bytes are never rewritten.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            suffix.as_ptr(),
-                            request.buffer.data.add(request.buffer.len),
-                            suffix.len(),
-                        );
-                    }
-                    request.buffer.len += suffix.len();
-                    let id = self.id();
-                    self.directories.insert(id, directory);
-                    out.value = id;
-                    return Ok(out);
-                }
-                // Host namespace contention is recoverable. All attempts were
-                // collisions, so no directory or carrier bytes were changed.
-                return Err(io::Error::from_raw_os_error(libc::EAGAIN));
+                out.value = id;
             }
             SYNC => {
                 let fd = self.files[&request.handle].as_raw_fd();
                 // fdatasync makes file contents and the metadata required to
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
-                syscall(unsafe { sys::fdatasync(fd) } as isize)?;
+                syscall(unsafe { hirsel_core_net::sys::fdatasync(fd) } as isize)?;
+            }
+            ZERO_EXTENSION => {
+                let fd = self.directories[&request.handle].as_fd();
+                out.value = u64::from(zero_extension(fd)?);
             }
             SYNC_DIR => {
                 let fd = self.directories[&request.handle].as_raw_fd();
@@ -669,6 +644,10 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
 /// As `wait`.
 #[inline(never)]
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    // SAFETY: UDP adapters pin the request extension through delivery.
+    if unsafe { udp_operation((*request).operation) } {
+        return unsafe { crate::udp_net::step(request, token) };
+    }
     #[cfg(feature = "record")]
     // SAFETY: the tape pins the source's local socket registry in a typed CLOSE.
     unsafe {
@@ -709,22 +688,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
             deadline_ns: 0,
         };
     }
-    if unsafe {
-        matches!(
-            (*request).operation,
-            CONNECT
-                | LISTEN
-                | ACCEPT
-                | RECV_BOUNDED
-                | RECV_READY
-                | SEND_PAIR
-                | TLS_CONNECT
-                | SEND_SECRET
-                | SCRAM
-                | RESOLVE
-                | CRED_FETCH
-        )
-    } {
+    if unsafe { crate::os_net::is_operation((*request).operation) } {
         // SAFETY: socket adapters pin the request, and state is this run's
         // OS provider. Only the first LISTEN can take its inherited fd.
         let step = unsafe {
@@ -815,6 +779,7 @@ pub(crate) mod probe {
         });
     }
 }
+
 /// The Net adapters pin the private extension of each socket request.
 #[inline]
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
@@ -835,6 +800,8 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
             (crate::stdin::operations(request).step)(request, token, false)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).step)(&*state.cast(), &mut *request, token, false)
+        } else if udp_operation((*request).operation) {
+            crate::udp_net::step(request, token)
         } else {
             (socket_operations(request).step)(request, token, false)
         }
@@ -854,6 +821,8 @@ unsafe extern "C" fn abort(
             (crate::stdin::operations(request).abort)(request, token, reason)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).abort)(&*state.cast(), &mut *request, token, reason)
+        } else if udp_operation((*request).operation) {
+            crate::udp_net::abort(request, token, reason)
         } else {
             (socket_operations(request).abort)(request, token, reason)
         }
@@ -893,18 +862,41 @@ unsafe extern "C" fn abort_with_directory(
     unsafe { abort(state, request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: a provider operation exclusively owns the request during issue.
+    match unsafe { (*request).operation } {
+        // Waiting is owned by the scheduler; issue completes at once.
+        SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
+        RANDOM => return random::issue(unsafe { &mut *request }),
+        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | WRITE | WRITE_AT
+            if crate::units::uses_file_ring() =>
+        {
+            // SAFETY: the request is pinned until the CQE completes.
+            return unsafe { issue_now(state, request) };
+        }
+        _ => {}
+    }
+    struct Issue(*mut u8, *mut Request);
+    // SAFETY: the unit stays parked, and its operation pinned, until the
+    // helper returns.
+    unsafe impl Send for Issue {}
+    let issue = Issue(state, request);
+    // Every other operation can wait without bound, so it runs off the slot.
+    crate::units::off_slot(move || {
+        let issue = issue;
+        // SAFETY: forwarded caller contract.
+        unsafe { issue_now(issue.0, issue.1) }
+    })
+}
+
+/// # Safety
+/// As `issue_on_stack`.
+unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.
     let os = unsafe { &mut *state.cast::<OsProvider>() };
     let request = unsafe { &mut *request };
     match request.operation {
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
         STDERR => write_request(os.stderr_fd(), request),
-        // Waiting is owned by the scheduler; issue completes at once.
-        SLEEP_UNTIL | SLEEP_UNTIL_WALL => Outcome::default(),
-        RANDOM => {
-            let _blocking = crate::units::blocking();
-            request_outcome(random(request))
-        }
         _ => {
             let issue_file = os.issue_file.unwrap();
             // SAFETY: the directory provider was installed before the run issued this request.
@@ -913,9 +905,10 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
     }
 }
 
-thread_local! {
-    /// The token `submit_on_stack` queues for, and the step it answers.
-    static SUBMIT: std::cell::Cell<(u64, Step)> = std::cell::Cell::new((0, Step::default()));
+// The token `submit_on_stack` queues for, and the step it answers. Moved:
+// the submit can park the unit on the memory thread's reply.
+crate::units::moved_tls! {
+    static SUBMIT: (u64, Option<Step>) = (0, None);
 }
 
 /// SYNC and SYNC_DIR park while the helper syncs a duplicate of the handle's
@@ -936,10 +929,10 @@ unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option
     } else {
         os.files.get(&handle)
     }?;
-    SUBMIT.set((token, Step::default()));
-    // SAFETY: as `issue`; submit never suspends.
+    SUBMIT.set((token, None));
+    // SAFETY: as `issue`.
     unsafe { crate::tasks::host_operation(state, request, submit_on_stack) };
-    Some(SUBMIT.get().1)
+    Some(SUBMIT.take().1.unwrap_or_default())
 }
 
 unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
@@ -958,15 +951,12 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
     if let Some(cell) = untracked {
         os.in_flight_syncs.push(cell);
     }
-    SUBMIT.set((token, step));
+    SUBMIT.set((token, Some(step)));
     Outcome::default()
 }
 
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract.
-    let operation = unsafe { (*request).operation };
-    // Writes are marked by write_all_from, which also serves standard streams.
-    let _blocking = (!matches!(operation, WRITE | WRITE_AT)).then(crate::units::blocking_file);
     request_outcome(unsafe { (&mut *state.cast::<OsProvider>()).execute_file(&mut *request) })
 }
 
@@ -977,325 +967,12 @@ fn request_outcome(result: io::Result<Outcome>) -> Outcome {
     })
 }
 
-fn write_request(fd: i32, request: &Request) -> Outcome {
-    let bytes = if request.buffer.len == 0 {
-        &[]
-    } else {
-        // SAFETY: the caller pins the readable input bytes through delivery.
-        unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
-    };
-    let offset = (request.operation == WRITE_AT).then(|| request.offset());
-    write_all_from(fd, bytes, offset)
-}
-
-fn random(request: &mut Request) -> io::Result<Outcome> {
-    let mut filled = 0usize;
-    while filled < request.buffer.capacity.saturating_sub(request.buffer.len) {
-        let spare = request.buffer.capacity - request.buffer.len - filled;
-        // SAFETY: the carrier owns writable spare capacity and the
-        // syscall is bounded to that exact extent.
-        let n = unsafe {
-            sys::getrandom(
-                request.buffer.data.add(request.buffer.len + filled).cast(),
-                spare,
-                0,
-            )
-        };
-        let n = syscall(n as isize)? as usize;
-        if n == 0 {
-            return Err(io::Error::from_raw_os_error(libc::EIO));
-        }
-        filled += n;
-    }
-    request.buffer.len += filled;
-    Ok(Outcome {
-        written: filled as u64,
-        ..Outcome::default()
-    })
-}
-
 fn syscall(rc: isize) -> io::Result<isize> {
     if rc < 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(rc)
     }
-}
-pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
-    write_all_from(fd, bytes, None)
-}
-
-fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
-    let _blocking = crate::units::blocking_file();
-    let mut written = 0;
-    while written < bytes.len() {
-        // SAFETY: live descriptor and remaining readable bytes.
-        let n = unsafe {
-            let data = bytes[written..].as_ptr().cast();
-            let len = bytes.len() - written;
-            match offset {
-                Some(at) => {
-                    let Some(at) = at
-                        .checked_add(written as u64)
-                        .and_then(|n| i64::try_from(n).ok())
-                    else {
-                        return Outcome {
-                            written: written as u64,
-                            error: IoError::from_errno(libc::EFBIG),
-                            ..Outcome::default()
-                        };
-                    };
-                    libc::pwrite(fd, data, len, at)
-                }
-                None => libc::write(fd, data, len),
-            }
-        };
-        if n < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Outcome {
-                written: written as u64,
-                error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
-                ..Outcome::default()
-            };
-        }
-        if n == 0 {
-            return Outcome {
-                written: written as u64,
-                error: IoError::from_errno(libc::EIO),
-                ..Outcome::default()
-            };
-        }
-        written += n as usize;
-    }
-    Outcome {
-        written: written as u64,
-        ..Outcome::default()
-    }
-}
-
-// Validate user paths once, before any operation can touch the host. Internal
-// descriptor walks may still use "." to duplicate their already granted parent.
-fn valid_path(path: &[u8]) -> io::Result<()> {
-    if !hirsel_core_net::valid_relative_path(path) {
-        return Err(io::Error::from_raw_os_error(libc::EACCES));
-    }
-    Ok(())
-}
-/// Open flags for a final symlink itself rather than its target: macOS has
-/// no O_PATH, and opens the link with O_SYMLINK.
-#[cfg(target_os = "linux")]
-const LINK_ITSELF: i32 = libc::O_PATH | libc::O_NOFOLLOW;
-#[cfg(target_os = "macos")]
-const LINK_ITSELF: i32 = libc::O_SYMLINK;
-
-fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
-    open_beneath(fd, path, flags, sys::RESOLVE_NO_MAGICLINKS)
-}
-
-pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io::Result<OwnedFd> {
-    let mut short = [0; 64];
-    let long;
-    let path: &CStr = if path.len() < short.len() {
-        short[..path.len()].copy_from_slice(path);
-        CStr::from_bytes_with_nul(&short[..=path.len()]).map_err(|_| io::ErrorKind::InvalidInput)?
-    } else {
-        long = CString::new(path)?;
-        &long
-    };
-    let mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
-    // SAFETY: openat2 (or the host's equivalent open flags) atomically
-    // enforces confinement, including symlinks. Unsupported hosts return
-    // Other(ENOSYS); no unconstrained fallback.
-    let raw = unsafe {
-        sys::openat2(
-            fd,
-            path.as_ptr(),
-            flags | libc::O_CLOEXEC,
-            mode,
-            sys::RESOLVE_BENEATH | resolve,
-        )
-    };
-    syscall(raw as isize)?;
-    // SAFETY: successful openat2 transfers a fresh descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
-}
-fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
-    let split = path.iter().rposition(|&c| c == b'/');
-    let (prefix, name) = match split {
-        Some(at) => (&path[..at], &path[at + 1..]),
-        None => (b".".as_slice(), path),
-    };
-    Ok((
-        beneath(fd, prefix, hirsel_core_net::sys::O_PATH | libc::O_DIRECTORY)?,
-        CString::new(name)?,
-    ))
-}
-/// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
-/// `None` when nothing has that name.
-fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
-    Ok(leaf_stat(parent.as_raw_fd(), name)?.map(|st| st.st_mode & libc::S_IFMT))
-}
-
-fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
-    // SAFETY: the parent descriptor and basename are live. The final link is not followed.
-    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let rc = unsafe {
-        libc::fstatat(
-            parent,
-            name.as_ptr(),
-            st.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    match syscall(rc as isize) {
-        // SAFETY: a successful fstatat initialized the out parameter.
-        Ok(_) => Ok(Some(unsafe { st.assume_init() })),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn stat(fd: i32) -> io::Result<Outcome> {
-    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: the caller retains fd and fstat writes the supplied stat.
-    syscall(unsafe { libc::fstat(fd, st.as_mut_ptr()) } as isize)?;
-    let st = unsafe { st.assume_init() };
-    let overflow = |_| io::Error::from_raw_os_error(libc::EOVERFLOW);
-    let size = u64::try_from(st.st_size).map_err(overflow)?;
-    let nanos = i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec);
-    let nanos = i64::try_from(nanos).map_err(overflow)?;
-    Ok(Outcome {
-        value: size,
-        written: nanos as u64,
-        kind: file_kind(st.st_mode),
-        ..Outcome::default()
-    })
-}
-
-fn file_kind(mode: libc::mode_t) -> u8 {
-    match mode & libc::S_IFMT {
-        libc::S_IFREG => 0,
-        libc::S_IFDIR => 1,
-        libc::S_IFLNK => 2,
-        _ => 3,
-    }
-}
-fn remove(fd: i32, name: &CString) -> io::Result<()> {
-    // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.
-    let rc = unsafe { libc::unlinkat(fd, name.as_ptr(), 0) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    // macOS refuses to unlink a directory with EPERM rather than EISDIR.
-    let directory = match error.raw_os_error() {
-        Some(libc::EISDIR) => true,
-        Some(libc::EPERM) if cfg!(target_os = "macos") => {
-            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: the pinned parent, fixed leaf and result slot are live.
-            unsafe {
-                libc::fstatat(
-                    fd,
-                    name.as_ptr(),
-                    stat.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                ) == 0
-                    && stat.assume_init().st_mode & libc::S_IFMT == libc::S_IFDIR
-            }
-        }
-        _ => false,
-    };
-    if !directory {
-        return Err(error);
-    }
-    // SAFETY: same pinned parent and fixed leaf, directory-only removal.
-    syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
-    Ok(())
-}
-/// The names in the directory `directory` holds open, without `.` and `..`.
-#[cfg(target_os = "linux")]
-fn entry_names(directory: &OwnedFd) -> io::Result<Vec<CString>> {
-    use std::os::unix::ffi::OsStrExt;
-    std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?
-        .map(|entry| Ok(CString::new(entry?.file_name().as_bytes())?))
-        .collect()
-}
-
-/// The names in the directory `directory` holds open, without `.` and `..`:
-/// read through a duplicate, since closedir closes the descriptor it reads.
-#[cfg(not(target_os = "linux"))]
-fn entry_names(directory: &OwnedFd) -> io::Result<Vec<CString>> {
-    let copy = directory.try_clone()?;
-    // SAFETY: fdopendir takes ownership of the duplicate; closedir releases both.
-    let stream = unsafe { libc::fdopendir(copy.as_raw_fd()) };
-    if stream.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    std::mem::forget(copy);
-    let mut names = Vec::new();
-    // SAFETY: the stream is live until closedir; each entry's name is
-    // NUL-terminated and copied before the next readdir.
-    unsafe {
-        libc::rewinddir(stream);
-        loop {
-            let entry = libc::readdir(stream);
-            if entry.is_null() {
-                break;
-            }
-            let name = CStr::from_ptr((*entry).d_name.as_ptr());
-            if name.to_bytes() != b"." && name.to_bytes() != b".." {
-                names.push(name.to_owned());
-            }
-        }
-        libc::closedir(stream);
-    }
-    Ok(names)
-}
-
-fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
-    // Descriptor-based walk; never follow a leaf link. std's read_dir owns the
-    // /proc fd traversal, while every child open is relative to its pinned parent.
-    let root = beneath(
-        fd,
-        name.as_bytes(),
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-    )?;
-    let mut work = vec![(root, None::<(OwnedFd, CString)>)];
-    while let Some((directory, finish)) = work.pop() {
-        if let Some((parent, leaf)) = finish {
-            // SAFETY: children have been removed; no final link is followed.
-            syscall(
-                unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR) }
-                    as isize,
-            )?;
-            continue;
-        }
-        let mut children = Vec::new();
-        for child in entry_names(&directory)? {
-            let opened = beneath(
-                directory.as_raw_fd(),
-                child.as_bytes(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-            );
-            match opened {
-                Ok(opened) => children.push((opened, directory.try_clone()?, child)),
-                Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
-                    remove(directory.as_raw_fd(), &child)?
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        for (child, parent, leaf) in children {
-            work.push((child.try_clone()?, Some((parent, leaf))));
-            work.push((child, None));
-        }
-    }
-    // SAFETY: remove only the named root, without following a replacement link.
-    syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
-    Ok(())
 }
 
 /// # Safety
@@ -1311,3 +988,10 @@ pub(crate) unsafe fn diagnostic(fd: i32, data: *const u8, len: usize) {
         let _ = write_all(fd, bytes);
     }
 }
+
+/// Open flags for a final symlink itself rather than its target: macOS has
+/// no O_PATH, and opens the link with O_SYMLINK.
+#[cfg(target_os = "linux")]
+const LINK_ITSELF: i32 = libc::O_PATH | libc::O_NOFOLLOW;
+#[cfg(target_os = "macos")]
+const LINK_ITSELF: i32 = libc::O_SYMLINK;

@@ -1,0 +1,139 @@
+fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page]) -> Result[Map[u64, Arc[std.page.Page]], Error] {
+    let mut pages: Map[u64, Arc[std.page.Page]] = map.new()
+    let mut bodies: Map[u64, Arc[Bytes]] = map.new()
+    let stamps = replace(mut graph.postorder, list.new())
+    for stamp in stamps {
+        let frame = option.unwrap(map.remove(mut graph.frames, stamp))
+        match take frame {
+            ReadBlob(take raw) => {
+                let mut moved: Option[Bytes] = Some(take raw)
+                let mut counted = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
+                    let empty: Bytes = list.new()
+                    Ok(arc.new(take empty))
+                })?
+                let attached = arc.with_unique(mut counted, scoped fn(mut body: Bytes) {
+                    body = option.unwrap(replace(mut moved, None))
+                })
+                let _ = option.unwrap(attached)
+                capacity(map.try_reserve(mut bodies, 1))?
+                map.insert(mut bodies, stamp, take counted)
+            },
+            ReadPage(take image, take children, take refs) => {
+                let mut kids: List[std.page.Slot] = list.new()
+                let mut blobs: List[std.page.BlobSlot] = list.new()
+                capacity(list.try_reserve(mut kids, list.len(children)))?
+                capacity(list.try_reserve(mut blobs, list.len(refs)))?
+                for slot in 0u64 .. list.len(children) {
+                    let child = children[slot]
+                    let attached: std.page.Slot = match std.page.tiered_root_at(image, slot) {
+                        Some(ptr) if ptr.stamp != 0 => ColdPage(ptr),
+                        _ if child == 0 => HotPage(arc.share(empty_collection)),
+                        _ => {
+                            let Some(page) = map.get(pages, child) else {
+                                fail("missing validated child")
+                            }
+                            HotPage(arc.share(page))
+                        },
+                    }
+                    list.push(mut kids, take attached)
+                }
+                for body in refs {
+                    let Some(value) = map.get(bodies, body) else {
+                        fail("missing validated body")
+                    }
+                    list.push(mut blobs, HotBlob(arc.share(value)))
+                }
+                let page = page_result(capacity(std.page.attach_fallible(take image, take kids, take blobs))?)?
+                capacity(map.try_reserve(mut pages, 1))?
+                map.insert(mut pages, stamp, take page)
+            },
+        }
+    }
+    Ok(take pages)
+}
+
+type LoadedPageStore: send {
+    manifest: PageManifest,
+    holders: List[PageRoots],
+    lists: PagedLists,
+    locations: PageLocations
+}
+
+fn attach_manifest_holders(manifest: PageManifest, pages: Map[u64, Arc[std.page.Page]], empty_collection: Arc[std.page.Page]) -> List[PageRoots] {
+    let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
+    for item in manifest.branches {
+        list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
+    }
+    for held in manifest.pins {
+        list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
+    }
+    take all
+}
+
+fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[HistoryLocator]], generation: u64) -> Result[Arc[TieredReadInventory], Error] {
+    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let mut ids = 0u64
+    let mut rows = std.omap.range(locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, inventory)) = std.omap.next(mut rows) {
+        if inventory.class < 3 {
+            continue
+        }
+        let object: Option[HistoryRef] = match locator {
+            Some(remote) => {
+                let Some(item) = map.get(remote.rows, seq) else {
+                    fail("store: validated Bucket locator lost a Tiered pack")
+                }
+                Some(clone(item))
+            },
+            None => None,
+        }
+        let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, TieredPagerPack(inventory: clone(inventory), object: object))
+        packs = take revised
+    }
+    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation)))
+}
+
+fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[LoadedPageStore, Error] {
+    let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
+        rebuild_page_locations(validated)
+    })?
+    let ValidatedPageManifest(manifest: take manifest, graph: take resolved, lineage: take rows, allow_tiered, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[PageRoots], PagedLists), Error] {
+        let mut all = attach_manifest_holders(manifest, pages, empty_collection)
+        if allow_tiered {
+            let mut paging: Option[Arc[TieredReadInventory]] = None
+            for slot in 0u64 .. list.len(all) {
+                if tiered_collections(all[slot].collections.root) {
+                    if let None = paging {
+                        paging = Some(recovered_tiered_inventory(locations, locator, manifest.generation)?)
+                    }
+                    all[slot].collections.paging = clone(paging)
+                }
+            }
+        }
+        let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024, None)
+        let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
+        let PageTree(root: take packs, ..) = take list_tree
+        let PageTree(root: take retired, ..) = take retirement_tree
+        // An empty queue shares the empty retirement root; list edits copy it.
+        let deferred = if manifest.deferred_frees.stamp == 0 && manifest.retirement_root.stamp == 0 {
+            arc.share(retired)
+        } else {
+            let PageTree(root: take queue, ..) = attach_page_tree(pages, manifest.deferred_frees, Unprefixed, 1024, None)
+            take queue
+        }
+        let lineage = if manifest.lineage.stamp == 0 && manifest.retirement_root.stamp == 0 {
+            arc.share(retired)
+        } else {
+            let PageTree(root: take tree, ..) = attach_page_tree(pages, manifest.lineage, Unprefixed, 1024, None)
+            take tree
+        }
+        Ok((take all, PagedLists(packs: take packs, retired: take retired, deferred: deferred, deferred_next: manifest.deferred_next, lineage: lineage, rows: clone(rows))))
+    })?
+    Ok(LoadedPageStore(manifest: take manifest, holders: take holders, lists: take lists, locations: take locations))
+}

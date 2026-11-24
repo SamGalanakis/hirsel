@@ -21,7 +21,8 @@ def read_report(path):
 
 def last_complete(base):
     reports = []
-    for path in [base / "last-complete.json", *base.glob("runs/*/board/board.json")]:
+    promoted = (base / "last-complete.json").resolve()
+    for path in {promoted, *base.glob("runs/*/board/board.json")}:
         try:
             path = path.resolve()
             reports.append((path.stat().st_mtime, path))
@@ -29,7 +30,8 @@ def last_complete(base):
             continue
     for finished, path in sorted(reports, reverse=True):
         report = read_report(path)
-        if (report.get("complete") is True and report.get("exit_status") in (0, 3)
+        if (report.get("complete") is True
+                and (report.get("exit_status") in (0, 3) or path == promoted)
                 and path.with_name("board.md").is_file()):
             return finished, report["commit"], path.with_name("board.md")
     return None
@@ -88,12 +90,17 @@ def render(base, attempt, complete, now):
         if status is None:
             outcome = f"Running · {step}"
         elif status == 0:
-            outcome = "Success"
+            outcome = "Rebaselined · comparison refused" if step == "rebaseline" else "Success"
         else:
             comparison = {2: "Refused", 3: "Regression"} if step == "board comparison" else {}
             outcome = f"{comparison.get(status, 'Failed')} · {step} (exit {status})"
         commit = attempt["commit"] or "commit unavailable"
         lines.append(f"**Latest attempt** · `{commit}` · {timestamp(attempt['started'])} · {outcome}")
+        auxiliary = [f"{label} exit {attempt[field]}" for field, label in
+                     (("boat_status", "Boat"), ("vopr_status", "VOPR"), ("law_status", "Laws"))
+                     if attempt.get(field) is not None]
+        if auxiliary:
+            lines += ["", " · ".join(auxiliary)]
     lines.append("")
     if complete is None:
         lines.append("**Last complete board** · None.")
@@ -121,11 +128,15 @@ def main():
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--current", type=Path)
     parser.add_argument("--alert", action="store_true")
+    parser.add_argument("--last-complete-commit", action="store_true")
     parser.add_argument("--record", type=Path, help="attempt run directory")
     parser.add_argument("--started", type=int)
     parser.add_argument("--commit")
     parser.add_argument("--step")
     parser.add_argument("--status", type=int, help="exit status, omitted while running")
+    parser.add_argument("--boat-status", type=int)
+    parser.add_argument("--vopr-status", type=int)
+    parser.add_argument("--law-status", type=int)
     args = parser.parse_args()
     args.base.mkdir(parents=True, exist_ok=True)
     with (args.base / "freshness.lock").open("a") as lock:
@@ -137,9 +148,13 @@ def main():
                 report = read_report(args.record / "board" / "board.json")
                 args.step = ", ".join(report.get("failures", {})) or args.step
             attempt = {"started": args.started, "commit": args.commit,
-                       "step": args.step, "status": args.status}
+                       "step": args.step, "status": args.status,
+                       "boat_status": args.boat_status, "vopr_status": args.vopr_status,
+                       "law_status": args.law_status}
             atomic_write(args.record / "attempt.json", json.dumps(attempt) + "\n")
         complete = last_complete(args.base)
+        if args.last_complete_commit and complete:
+            print(complete[1])
         now = time.time()
         if args.current:
             atomic_write(args.current, render(args.base, latest_attempt(args.base), complete, now))

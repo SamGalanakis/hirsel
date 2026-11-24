@@ -142,9 +142,9 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
     caught
 }
 
-/// Charge the bounded SCRAM iterations at their source call, including slice
-/// boundaries. An unbounded task pays no iteration steps.
-pub(crate) unsafe fn scram_iterations(context: *mut Context, mut count: u64, site: u64) -> bool {
+/// Charge work at its source call, including slice boundaries.
+/// An unbounded task pays no additional steps.
+pub(crate) unsafe fn take_many(context: *mut Context, mut count: u64, site: u64) -> bool {
     if unsafe { (*context).step_bounds.is_empty() } {
         return true;
     }
@@ -165,7 +165,6 @@ pub(crate) unsafe fn scram_iterations(context: *mut Context, mut count: u64, sit
 /// Called immediately after a source Step decremented the flushed window to <= 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) -> u8 {
-    crate::sequencer::end_receive_run();
     // SAFETY: the engine supplies the exclusively running task's context.
     let ctx = unsafe { &mut *context };
     if ctx.steps < 0
@@ -188,7 +187,7 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     };
     install_window(ctx, slice);
     if slice_end {
-        let _commit = crate::tasks::before_commit();
+        crate::tasks::before_commit();
         crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
         // SAFETY: the step window is installed and no borrow spans the switch.
         unsafe { crate::tasks::step_checkpoint() };

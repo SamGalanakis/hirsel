@@ -1,12 +1,11 @@
 //! PROG-10 normal form for checked instance modules.
 
-use crate::decode::{DecodeBudget, DecodeError, DecodeResult};
+use crate::decode::{Debit, DecodeError, DecodeResult};
 use crate::source::SourcePositions;
 use crate::*;
 use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use hirsel_core_layout::{Case, Field, FieldTy, FuncRef, Handle, Repr, TypeRef, Width};
-use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
@@ -36,15 +35,17 @@ pub(crate) fn closure_hash(rows: &[ClosureRow]) -> ContentHash {
 
 pub(crate) fn decoded_closure_hash(
     rows: &[ClosureRow],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<ContentHash> {
     let empty = Module::default();
     let meter = PlanMeter::new(budget);
-    let mut order = ModuleOrder::metered(&empty, Some(&meter));
-    let mut out = Write::module(&mut order);
-    wire::encode_closure(rows, &mut out);
-    let bytes = out.bytes;
-    meter.finish(budget)?;
+    let bytes = {
+        let mut order = ModuleOrder::metered(&empty, Some(&meter));
+        let mut out = Write::module(&mut order);
+        wire::encode_closure(rows, &mut out);
+        out.bytes
+    };
+    meter.settle()?;
     Ok(ContentHash::of_parts(
         "hirsel.core-closure.v1",
         [&bytes[..]],
@@ -57,7 +58,15 @@ pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v3";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
+mod results;
+use results::results;
+mod charge;
+mod retained;
+pub use retained::RetainedSites;
+pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_annex};
 pub(crate) mod wire;
+use charge::{PlanMeter, reserve};
+pub(crate) use charge::{charge_identity, charge_shape};
 use wire::{Read, Tagged, Wire, Write};
 
 /// An operation tag in the normal form consumed by both native engines.
@@ -152,119 +161,6 @@ impl EncodedBody {
     }
 }
 
-/// Canonical traversal also serves the producer. In a decoder, keep the
-/// first refusal and stop descending before more work or allocation.
-struct PlanMeter {
-    budget: RefCell<DecodeBudget>,
-    error: Cell<Option<DecodeError>>,
-    depth: Cell<usize>,
-}
-
-pub(crate) fn charge_identity(
-    definition: &DefPath,
-    dictionaries: &[String],
-    budget: &mut DecodeBudget,
-) -> DecodeResult<()> {
-    let path = &definition.0;
-    budget.allocation::<String>(path.modules.len())?;
-    budget.allocation::<String>(dictionaries.len())?;
-    for component in [&path.package.name, &path.package.version, &path.name]
-        .into_iter()
-        .chain(&path.modules)
-        .chain(dictionaries)
-    {
-        budget.charge_bytes(component.len())?;
-    }
-    Ok(())
-}
-
-pub(crate) fn charge_shape(shape: &Shape, budget: &mut DecodeBudget) -> DecodeResult<()> {
-    fn field(ty: &FieldTy, budget: &mut DecodeBudget) -> DecodeResult<()> {
-        match ty {
-            FieldTy::Seq(element)
-            | FieldTy::Array(element, _)
-            | FieldTy::View(element)
-            | FieldTy::Locator(element)
-            | FieldTy::FixedSpan(element)
-            | FieldTy::SeqSpan(element)
-            | FieldTy::IndexedSpan(element) => {
-                budget.allocation::<FieldTy>(1)?;
-                field(element, budget)
-            }
-            FieldTy::Map(key, value) => {
-                budget.allocation::<FieldTy>(2)?;
-                field(key, budget)?;
-                field(value, budget)
-            }
-            _ => Ok(()),
-        }
-    }
-    fn fields(fields: &[Field], budget: &mut DecodeBudget) -> DecodeResult<()> {
-        budget.allocation::<Field>(fields.len())?;
-        for item in fields {
-            budget.charge_bytes(item.name.len())?;
-            field(&item.ty, budget)?;
-        }
-        Ok(())
-    }
-    budget.charge_bytes(shape.name.len())?;
-    match &shape.body {
-        hirsel_core_layout::Body::Record(items) => fields(items, budget)?,
-        hirsel_core_layout::Body::Variant(cases) => {
-            budget.allocation::<Case>(cases.len())?;
-            for case in cases {
-                budget.charge_bytes(case.name.len())?;
-                fields(&case.fields, budget)?;
-            }
-        }
-    }
-    if let Some(held) = &shape.held {
-        field(held, budget)?;
-    }
-    Ok(())
-}
-
-impl PlanMeter {
-    fn new(budget: &mut DecodeBudget) -> Self {
-        Self {
-            budget: RefCell::new(std::mem::replace(budget, DecodeBudget::unlimited())),
-            error: Cell::new(None),
-            depth: Cell::new(0),
-        }
-    }
-
-    fn finish(self, budget: &mut DecodeBudget) -> DecodeResult<()> {
-        *budget = self.budget.into_inner();
-        self.error.into_inner().map_or(Ok(()), Err)
-    }
-
-    fn do_with<T>(&self, action: impl FnOnce(&mut DecodeBudget) -> DecodeResult<T>) -> Option<T> {
-        if self.error.get().is_some() {
-            return None;
-        }
-        match action(&mut self.budget.borrow_mut()) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                self.error.set(Some(error));
-                None
-            }
-        }
-    }
-
-    fn descend<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
-        let depth = self.depth.get() + 1;
-        self.do_with(|budget| budget.check_depth(depth))?;
-        self.depth.set(depth);
-        let result = action();
-        self.depth.set(depth - 1);
-        Some(result)
-    }
-}
-
-fn reserve<T>(meter: Option<&PlanMeter>, vec: &mut Vec<T>, count: usize) -> bool {
-    meter.is_none_or(|meter| meter.do_with(|budget| budget.reserve(vec, count)).is_some())
-}
-
 #[derive(Default)]
 struct Numbers {
     order: Vec<usize>,
@@ -276,7 +172,7 @@ impl Numbers {
         self.number_metered(row, None)
     }
 
-    fn number_metered(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
+    fn number_metered(&mut self, row: usize, meter: Option<&PlanMeter<'_>>) -> (u32, bool) {
         if row >= self.by_row.len() {
             let additional = row + 1 - self.by_row.len();
             if !reserve(meter, &mut self.by_row, additional) {
@@ -321,7 +217,7 @@ impl Table {
         }
     }
 
-    fn discover(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
+    fn discover(&mut self, row: usize, meter: Option<&PlanMeter<'_>>) -> (u32, bool) {
         let (number, fresh) = self.numbers.number_metered(row, meter);
         if fresh && reserve(meter, &mut self.bytes, 1) {
             self.bytes.push(Vec::new());
@@ -348,7 +244,7 @@ enum LocalRow {
 
 struct ModuleOrder<'m> {
     module: &'m Module,
-    meter: Option<&'m PlanMeter>,
+    meter: Option<&'m PlanMeter<'m>>,
     types: Table,
     signatures: Table,
     statics: Table,
@@ -362,6 +258,7 @@ struct ModuleOrder<'m> {
     slots: Vec<Slot>,
     seen_slots: BTreeSet<Slot>,
     described: BTreeSet<Identity>,
+    closure_hashes: BTreeMap<TypeId, ContentHash>,
     canonical_locals: bool,
 }
 
@@ -370,9 +267,15 @@ impl<'m> ModuleOrder<'m> {
         Self::metered(module, None)
     }
 
-    fn metered(module: &'m Module, meter: Option<&'m PlanMeter>) -> Self {
+    fn metered(module: &'m Module, meter: Option<&'m PlanMeter<'m>>) -> Self {
         let mut live_functions = Vec::new();
-        if reserve(meter, &mut live_functions, module.functions.len()) {
+        if meter.is_none_or(|meter| {
+            meter
+                .paid_by(&meter.live, |live| {
+                    live.reserve(&mut live_functions, module.functions.len())
+                })
+                .is_some()
+        }) {
             live_functions.resize(module.functions.len(), false);
         }
         Self {
@@ -391,6 +294,7 @@ impl<'m> ModuleOrder<'m> {
             slots: Vec::new(),
             seen_slots: BTreeSet::new(),
             described: BTreeSet::new(),
+            closure_hashes: BTreeMap::new(),
             canonical_locals: true,
         }
     }
@@ -402,6 +306,13 @@ impl<'m> ModuleOrder<'m> {
             GlobalRow::Static => &mut self.statics,
             GlobalRow::Instance => &mut self.instances,
         }
+    }
+
+    fn closure_hash(&mut self, ty: TypeId) -> ContentHash {
+        *self
+            .closure_hashes
+            .entry(ty)
+            .or_insert_with(|| self.module.closure(ty).hash)
     }
 
     fn row(&mut self, kind: GlobalRow, row: usize) -> u32 {
@@ -474,18 +385,23 @@ impl<'m> ModuleOrder<'m> {
     }
 
     fn builtin_slot(&mut self, definition: &DefPath) {
-        if self.meter.is_some_and(|meter| {
-            meter
-                .do_with(|budget| charge_identity(definition, &[], budget))
+        let meter = self.meter;
+        // The slot's own identity, kept with the slots if it is new.
+        let identity = meter.map(|meter| meter.slots.scratch());
+        if let (Some(meter), Some(identity)) = (meter, &identity)
+            && meter
+                .paid_by(identity, |identity| {
+                    charge_identity(definition, &[], identity)
+                })
                 .is_none()
-        }) {
+        {
             return;
         }
         let slot = Slot::Builtin(definition.clone());
         if self.seen_slots.contains(&slot) {
             return;
         }
-        if self.meter.is_some_and(|meter| {
+        if meter.is_some_and(|meter| {
             meter
                 .do_with(|budget| {
                     budget.charge_slots(1)?;
@@ -495,12 +411,17 @@ impl<'m> ModuleOrder<'m> {
                     budget.charge_bytes(256)
                 })
                 .is_none()
-        }) || !reserve(self.meter, &mut self.slots, 1)
-        {
+                || meter
+                    .paid_by(&meter.slots, |slots| slots.reserve(&mut self.slots, 1))
+                    .is_none()
+        }) {
             return;
         }
         self.seen_slots.insert(slot.clone());
         self.slots.push(slot);
+        if let (Some(meter), Some(identity)) = (meter, identity) {
+            meter.slots.absorb(identity);
+        }
     }
 }
 
@@ -519,7 +440,7 @@ impl<'m> BodyOrder<'m> {
         Self::metered(body, None)
     }
 
-    fn metered(body: &'m Body, meter: Option<&PlanMeter>) -> Self {
+    fn metered(body: &'m Body, meter: Option<&PlanMeter<'_>>) -> Self {
         let mut blocks = Numbers::default();
         let mut values = Numbers::default();
         let mut pending = Vec::new();
@@ -569,80 +490,10 @@ impl<'m> BodyOrder<'m> {
     }
 }
 
-fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item = ValueId> + 'a {
-    let pair = |first, second| ([Some(first), second, None], &[][..]);
-    let (fixed, variable): (_, &[ValueId]) = match *inst {
-        Inst::Const { result, .. }
-        | Inst::ReadStatic { result, .. }
-        | Inst::FunctionRef { result, .. }
-        | Inst::DescriptorRef { result, .. }
-        | Inst::Unary { result, .. }
-        | Inst::Binary { result, .. }
-        | Inst::Compare { result, .. }
-        | Inst::MulAdd { result, .. }
-        | Inst::ScalarUnary { result, .. }
-        | Inst::Read { result, .. }
-        | Inst::UpdateMask { result, .. }
-        | Inst::Pointer { result, .. }
-        | Inst::Case { result, .. }
-        | Inst::RegionOpen { result }
-        | Inst::TryUnwrap { result, .. }
-        | Inst::LayoutConst { result, .. }
-        | Inst::CompactWidth { result, .. }
-        | Inst::Simd { result, .. } => pair(result, None),
-        Inst::IntArith { result, flag, .. } | Inst::Convert { result, flag, .. } => {
-            pair(result, flag)
-        }
-        Inst::Grow {
-            result, available, ..
-        } => pair(result, Some(available)),
-        Inst::LimitEnter {
-            admitted,
-            available,
-            ..
-        } => pair(admitted, Some(available)),
-        Inst::Alloc {
-            result,
-            available,
-            region_entry,
-            ..
-        } => ([Some(result), Some(available), region_entry], &[]),
-        Inst::Call { call } => (
-            [None; 3],
-            body.calls[call.index()]
-                .results
-                .get(&body.pools.values)
-                .unwrap(),
-        ),
-        Inst::Address { .. }
-        | Inst::Store { .. }
-        | Inst::StorageLive { .. }
-        | Inst::StorageDead { .. }
-        | Inst::Free { .. }
-        | Inst::FrameRefund { .. }
-        | Inst::Copy { .. }
-        | Inst::Move { .. }
-        | Inst::SetCase { .. }
-        | Inst::RegionClose { .. }
-        | Inst::Trim { .. }
-        | Inst::BuiltinUse { .. }
-        | Inst::LimitExit
-        | Inst::Drop { .. }
-        | Inst::Share { .. }
-        | Inst::Release { .. }
-        | Inst::Mark { .. }
-        | Inst::Unmark { .. }
-        | Inst::Step { .. }
-        | Inst::PromoteFrame { .. }
-        | Inst::PutLanes { .. } => ([None; 3], &[]),
-    };
-    fixed.into_iter().flatten().chain(variable.iter().copied())
-}
-
 /// A source position resolved against the current checked sources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Site {
-    pub file: String,
+    pub file: std::sync::Arc<str>,
     pub line: u32,
     pub column: u32,
 }
@@ -692,7 +543,7 @@ impl Annex {
     }
 
     /// Read the annex sections and check their shape against the decoded body.
-    pub fn decode(bytes: &[u8], body: &Module, budget: &mut DecodeBudget) -> DecodeResult<Self> {
+    pub fn decode(bytes: &[u8], body: &Module, budget: &Debit<'_>) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, ANNEX_MAGIC, budget)?;
         let len = input.count()?;
         if len != body.functions.len() {
@@ -763,7 +614,7 @@ impl Annex {
 
 /// Encode an instance's checked IR, keeping source and optimisation data out.
 pub fn encode(module: &Module, root: FuncId) -> EncodedBody {
-    encode_with_sources(module, root, None).0
+    encode_with_orders(module, root, |_| {})
 }
 
 /// Encode an instance's checked IR and collect its annex in the same numbering.
@@ -772,7 +623,10 @@ pub fn encode_with_annex(
     root: FuncId,
     sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex) {
-    let (body, annex) = encode_with_sources(module, root, Some(sources));
+    let mut annex = Vec::new();
+    let body = encode_with_orders(module, root, |order| {
+        annex.push(order.map(|order| function_annex(module, &order, sources)));
+    });
     (body, Annex(annex, None))
 }
 
@@ -783,109 +637,27 @@ pub fn prepare_assembly(
     sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex, Module) {
     let (body, annex) = encode_with_annex(module, root, sources);
-    let (module, _) = decode_payload(&body.bytes, &mut DecodeBudget::unlimited())
-        .expect("the producer's normal form is readable");
+    let module = assembly_module(&body.bytes);
     (body, annex, module)
 }
 
-/// `prepare_assembly` for a module `retain` produced, given the body bytes it
-/// returned: the retained module is already in canonical numbering, so its
-/// annex is read off in row order and the body is not encoded again.
-pub fn prepare_retained_assembly(
-    bytes: &[u8],
-    retained: &Module,
-    sources: &SourcePositions<'_>,
-) -> (Annex, Module) {
-    let functions = retained
-        .functions
-        .iter()
-        .map(|function| {
-            let body = function.body.as_ref()?;
-            let rows = |len: usize| (0..len).collect::<Vec<_>>();
-            Some(annex_in_order(
-                retained,
-                body,
-                &rows(body.blocks.len()),
-                |value| value as u32,
-                &rows(body.calls.len()),
-                &rows(body.edges.len()),
-                sources,
-            ))
-        })
-        .collect();
-    let (module, _) = decode_payload(bytes, &mut DecodeBudget::unlimited())
-        .expect("the producer's normal form is readable");
-    (Annex(functions, None), module)
-}
-
-/// Materialize the retained module for existing native and evaluator consumers.
-/// Source anchors and hints keep their original facts in the canonical numbering.
-pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
-    let sources = crate::source::SourceMap::default();
-    let (mut code, annex) = encode_with_annex(module, root, &sources.positions());
-    let mut retained = decode_payload(&code.bytes, &mut DecodeBudget::unlimited())
-        .expect("our own normal body decodes")
-        .0;
-    retained.items.clone_from(&module.items);
-    let mut functions = Numbers::default();
-    for (&row, (function, hints)) in code
-        .original_functions
-        .iter()
-        .zip(retained.functions.iter_mut().zip(annex.0))
-    {
-        functions.number(row);
-        let (Some(body), Some(hints)) = (&mut function.body, hints) else {
-            continue;
-        };
-        let original = module.functions[row]
-            .body
-            .as_ref()
-            .expect("retained function has a producer");
-        let order = BodyOrder::new(original);
-        for (block, &old) in body.blocks.iter_mut().zip(&order.blocks.order) {
-            let old = &original.blocks[old];
-            block.anchor = old.anchor;
-            let source = PoolRange::new(old.insts.start, old.insts.len);
-            let target = block.insts.start as usize;
-            let source = source.get(&original.inst_anchors).unwrap();
-            body.inst_anchors[target..target + source.len()].copy_from_slice(source);
-        }
-        for (call, cold) in body.calls.iter_mut().zip(hints.cold_calls) {
-            call.cold = cold;
-        }
-        for (edge, cold) in body.edges.iter_mut().zip(hints.cold_edges) {
-            edge.cold = cold;
-        }
-        body.callable_parameters = hints.callable_parameters.into_iter().map(ValueId).collect();
-    }
-    for slot in &mut code.slots {
-        if let Slot::External(f) = slot {
-            *f = FuncId(functions.get(f.index()));
-        }
-    }
-    (code, retained)
-}
-
-fn encode_with_sources(
-    module: &Module,
+fn encode_with_orders<'m>(
+    module: &'m Module,
     root: FuncId,
-    sources: Option<&SourcePositions<'_>>,
-) -> (EncodedBody, Vec<Option<FunctionAnnex>>) {
+    mut collect: impl FnMut(Option<BodyOrder<'m>>),
+) -> EncodedBody {
     let mut order = plan(module, root);
 
     let reachable = order.functions.order.clone();
     let mut functions = Vec::new();
-    let mut annex = Vec::new();
     for row in reachable {
         let body = order.live_functions[row]
             .then_some(&module.functions[row].body)
             .and_then(Option::as_ref)
             .map(BodyOrder::new);
-        let (bytes, extras) = write_function(&mut order, row, body, sources);
+        let (bytes, body) = write_function(&mut order, row, body);
         functions.push(bytes);
-        if sources.is_some() {
-            annex.push(extras);
-        }
+        collect(body);
     }
     for kind in [
         GlobalRow::Type,
@@ -917,20 +689,36 @@ fn encode_with_sources(
     for function in functions {
         bytes.extend(function);
     }
-    let encoded = EncodedBody {
+    EncodedBody {
         bytes,
         slots,
         described: order.described.into_iter().collect(),
         original_functions: order.functions.order,
-    };
-    (encoded, annex)
+    }
 }
 
-fn planned_closure(module: &Module, ty: TypeId, meter: Option<&PlanMeter>) -> Option<ContentHash> {
+fn planned_closure(
+    module: &Module,
+    ty: TypeId,
+    meter: Option<&PlanMeter<'_>>,
+) -> Option<ContentHash> {
     match meter {
         None => Some(module.closure(ty).hash),
-        Some(meter) => meter.do_with(|budget| module.decoded_closure(ty, budget).map(|c| c.hash)),
+        Some(meter) => {
+            meter.do_with(|budget| metered_closure_hash(module, ty, ClosureKind::Full, budget))
+        }
     }
+}
+
+/// The hash of row `ty`'s closure, its working set charged only while it is live.
+fn metered_closure_hash(
+    module: &Module,
+    ty: TypeId,
+    kind: ClosureKind,
+    budget: &Debit<'_>,
+) -> DecodeResult<ContentHash> {
+    let work = budget.scratch();
+    Ok(module.closure_impl(ty, kind, Some(&work))?.hash)
 }
 
 fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
@@ -940,7 +728,7 @@ fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
 fn plan_metered<'m>(
     module: &'m Module,
     root: FuncId,
-    meter: Option<&'m PlanMeter>,
+    meter: Option<&'m PlanMeter<'m>>,
 ) -> ModuleOrder<'m> {
     let mut order = ModuleOrder::metered(module, meter);
     order.planning = true;
@@ -953,7 +741,7 @@ fn plan_metered<'m>(
                 .body
                 .as_ref()
                 .map(|body| BodyOrder::metered(body, meter));
-            write_function(&mut order, row, body, None);
+            write_function(&mut order, row, body);
             next += 1;
         }
         let mut finalizers = Vec::new();
@@ -1027,8 +815,7 @@ fn write_function<'m>(
     order: &mut ModuleOrder<'m>,
     row: usize,
     body_order: Option<BodyOrder<'m>>,
-    sources: Option<&SourcePositions<'_>>,
-) -> (Vec<u8>, Option<FunctionAnnex>) {
+) -> (Vec<u8>, Option<BodyOrder<'m>>) {
     let module = order.module;
     let function = &module.functions[row];
     let mut out = Write::module(order);
@@ -1106,8 +893,7 @@ fn write_function<'m>(
         local.calls.append(&mut out.bytes);
         local.edges.append(&mut out.bytes);
     }
-    let annex = sources.map(|sources| function_annex(module, &local, sources));
-    (out.bytes, annex)
+    (out.bytes, Some(local))
 }
 
 fn function_annex(
@@ -1118,10 +904,10 @@ fn function_annex(
     annex_in_order(
         module,
         order.body,
-        &order.blocks.order,
+        order.blocks.order.iter().copied(),
         |value| order.values.get(value),
-        &order.calls.numbers.order,
-        &order.edges.numbers.order,
+        order.calls.numbers.order.iter().copied(),
+        order.edges.numbers.order.iter().copied(),
         sources,
     )
 }
@@ -1131,22 +917,13 @@ fn function_annex(
 fn annex_in_order(
     module: &Module,
     body: &Body,
-    blocks: &[usize],
+    blocks: impl Iterator<Item = usize> + Clone,
     value: impl Fn(usize) -> u32,
-    calls: &[usize],
-    edges: &[usize],
+    calls: impl Iterator<Item = usize>,
+    edges: impl Iterator<Item = usize>,
     sources: &SourcePositions<'_>,
 ) -> FunctionAnnex {
-    let site = |anchor: Option<Anchor>| {
-        let anchor = anchor?;
-        let (file, line, column) =
-            sources.position(&module.items[anchor.item.index()], anchor.start)?;
-        Some(Site {
-            file: file.path.clone(),
-            line,
-            column,
-        })
-    };
+    let site = |anchor| retained::resolve_site(&module.items, sources, anchor);
     let mut callable_parameters: Vec<_> = body
         .callable_parameters
         .iter()
@@ -1154,7 +931,7 @@ fn annex_in_order(
         .collect();
     callable_parameters.sort_unstable();
     callable_parameters.dedup();
-    let blocks = blocks.iter().map(|&row| &body.blocks[row]);
+    let blocks = blocks.map(|row| &body.blocks[row]);
     FunctionAnnex {
         instructions: blocks
             .clone()
@@ -1168,8 +945,8 @@ fn annex_in_order(
             })
             .collect(),
         terminators: blocks.map(|block| site(block.anchor)).collect(),
-        cold_calls: calls.iter().map(|&row| body.calls[row].cold).collect(),
-        cold_edges: edges.iter().map(|&row| body.edges[row].cold).collect(),
+        cold_calls: calls.map(|row| body.calls[row].cold).collect(),
+        cold_edges: edges.map(|row| body.edges[row].cold).collect(),
         callable_parameters,
     }
 }
@@ -1188,7 +965,7 @@ pub struct DecodedBody {
 impl DecodedBody {
     /// The function's canonical identity. The closure hashes have already
     /// been checked during the decode.
-    pub fn identity(&self, function: FuncId, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+    pub fn identity(&self, function: FuncId, budget: &Debit<'_>) -> DecodeResult<Identity> {
         let row = self
             .module
             .functions
@@ -1207,7 +984,7 @@ impl DecodedBody {
     }
 
     /// Resolve the retained slot in its canonical order.
-    pub fn slot_identity(&self, slot: usize, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+    pub fn slot_identity(&self, slot: usize, budget: &Debit<'_>) -> DecodeResult<Identity> {
         match self.slots.get(slot) {
             Some(Slot::External(function)) => self.identity(*function, budget),
             Some(Slot::Builtin(definition)) => {
@@ -1218,11 +995,7 @@ impl DecodedBody {
         }
     }
 
-    pub fn signature(
-        &mut self,
-        function: FuncId,
-        budget: &mut DecodeBudget,
-    ) -> DecodeResult<ContentHash> {
+    pub fn signature(&mut self, function: FuncId, budget: &Debit<'_>) -> DecodeResult<ContentHash> {
         let id = self
             .module
             .functions
@@ -1260,13 +1033,15 @@ impl DecodedBody {
             )?;
         }
         let meter = PlanMeter::new(budget);
-        let mut order = ModuleOrder::metered(&self.module, Some(&meter));
-        let mut out = Write::module(&mut order);
-        out.abi = true;
-        out.abi_closures = Some(&self.abi_closures);
-        signature.write(&mut out);
-        let bytes = out.bytes;
-        meter.finish(budget)?;
+        let bytes = {
+            let mut order = ModuleOrder::metered(&self.module, Some(&meter));
+            let mut out = Write::module(&mut order);
+            out.abi = true;
+            out.abi_closures = Some(&self.abi_closures);
+            signature.write(&mut out);
+            out.bytes
+        };
+        meter.settle()?;
         let hash = ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]);
         self.signatures[id] = Some(hash);
         Ok(hash)
@@ -1278,7 +1053,7 @@ fn cached_closure_hash(
     ty: TypeId,
     kind: ClosureKind,
     cached: &mut Vec<Option<ContentHash>>,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<ContentHash> {
     if cached.is_empty() {
         budget.reserve(cached, module.types.len())?;
@@ -1289,12 +1064,12 @@ fn cached_closure_hash(
         budget.check()?;
         return Ok(hash);
     }
-    let hash = module.closure_impl(ty, kind, Some(budget))?.hash;
+    let hash = metered_closure_hash(module, ty, kind, budget)?;
     *slot = Some(hash);
     Ok(hash)
 }
 
-pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBody> {
+pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
     let (module, closures) = decode_payload(bytes, budget)?;
     let malformed = || DecodeError::Malformed("noncanonical body");
     if module.functions.first().is_none_or(|f| f.body.is_none()) {
@@ -1309,8 +1084,9 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
                 budget.check()?;
                 if let Terminator::Switch { arms, .. } = term {
                     let arms = arms.get(&body.pools.arms).unwrap();
+                    let scratch = budget.scratch();
                     let mut values = Vec::new();
-                    budget.reserve(&mut values, arms.len())?;
+                    scratch.reserve(&mut values, arms.len())?;
                     values.extend(arms.iter().map(|arm| arm.value));
                     values.sort_unstable();
                     if values.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -1318,8 +1094,9 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
                     }
                 }
             }
+            let scratch = budget.scratch();
             let mut definitions = Vec::new();
-            budget.reserve(&mut definitions, body.values.len())?;
+            scratch.reserve(&mut definitions, body.values.len())?;
             definitions.resize(body.values.len(), false);
             for block in &body.blocks {
                 let values = block
@@ -1348,24 +1125,28 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
             }
         }
     }
+    // The plan is freed here but for its live-function bitmap and builtin
+    // slots, whose payers outlive it.
     let meter = PlanMeter::new(budget);
-    let plan = plan_metered(&module, FuncId(0), Some(&meter));
-    let canonical = plan.canonical_locals
-        && plan.functions.is_canonical(module.functions.len())
-        && plan.types.numbers.is_canonical(module.types.len())
-        && plan
-            .signatures
-            .numbers
-            .is_canonical(module.signatures.len())
-        && plan.instances.numbers.is_canonical(module.instances.len())
-        && plan.statics.numbers.is_canonical(module.statics.len());
-    let live_functions = plan.live_functions;
-    let builtins = plan.slots;
-    meter.finish(budget)?;
+    let (canonical, live_functions, builtins) = {
+        let plan = plan_metered(&module, FuncId(0), Some(&meter));
+        let canonical = plan.canonical_locals
+            && plan.functions.is_canonical(module.functions.len())
+            && plan.types.numbers.is_canonical(module.types.len())
+            && plan
+                .signatures
+                .numbers
+                .is_canonical(module.signatures.len())
+            && plan.instances.numbers.is_canonical(module.instances.len())
+            && plan.statics.numbers.is_canonical(module.statics.len());
+        (canonical, plan.live_functions, plan.slots)
+    };
+    let (_live, kept_slots) = meter.finish()?;
     if !canonical {
         return Err(malformed());
     }
-    let mut slots = Vec::new();
+    let externals = budget.scratch();
+    let mut external_slots = Vec::new();
     for (row, function) in module.functions.iter().enumerate() {
         if !live_functions[row] && function.versioned {
             return Err(malformed());
@@ -1381,16 +1162,22 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
         }
         if live_functions[row] && function.body.is_none() {
             budget.charge_slots(1)?;
-            budget.reserve(&mut slots, 1)?;
-            slots.push(Slot::External(FuncId(row as u32)));
+            externals.reserve(&mut external_slots, 1)?;
+            external_slots.push(Slot::External(FuncId(row as u32)));
         }
     }
-    budget.reserve(&mut slots, builtins.len())?;
-    slots.extend(builtins);
+    // External slots come first, then the builtins in first-use order.
+    let mut slots = builtins;
+    let builtin_count = slots.len();
+    kept_slots.reserve(&mut slots, external_slots.len())?;
+    slots.append(&mut external_slots);
+    slots.rotate_left(builtin_count);
+    budget.absorb(kept_slots);
+    let hashed = budget.scratch();
     let mut closure_hashes = Vec::new();
     for (key, hashes) in module.instances.iter().zip(&closures) {
         for (&ty, &hash) in key.arguments.iter().zip(hashes) {
-            if cached_closure_hash(&module, ty, ClosureKind::Full, &mut closure_hashes, budget)?
+            if cached_closure_hash(&module, ty, ClosureKind::Full, &mut closure_hashes, &hashed)?
                 != hash
             {
                 return Err(malformed());
@@ -1409,7 +1196,7 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
 
 fn decode_payload(
     bytes: &[u8],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<(Module, Vec<Vec<ContentHash>>)> {
     let mut input = Read::new(bytes, BODY_MAGIC, budget)?;
     let types = Wire::read(&mut input)?;
@@ -1449,9 +1236,17 @@ fn read_body(input: &mut Read<'_, '_>) -> DecodeResult<Body> {
     let mut body = Body::default();
     for _ in 0..input.count()? {
         let params = Wire::read(input)?;
-        let instructions = Vec::<Inst>::read(input)?;
-        input.budget.reserve(&mut body.insts, instructions.len())?;
-        let insts = PoolRange::push(&mut body.insts, instructions);
+        let len = input.count()?;
+        let start = body.insts.len();
+        input.nested(|input| {
+            for _ in 0..len {
+                let inst = Inst::read(input)?;
+                input.budget.reserve(&mut body.insts, 1)?;
+                body.insts.push(inst);
+            }
+            Ok(())
+        })?;
+        let insts = PoolRange::new(start as u32, len as u32);
         input.budget.reserve(&mut body.blocks, 1)?;
         input.budget.reserve(&mut body.terminators, 1)?;
         body.blocks.push(Block {

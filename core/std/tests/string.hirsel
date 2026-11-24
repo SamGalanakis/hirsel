@@ -1510,3 +1510,13 @@ fn unicode_push_refusal_is_atomic() -> bool {
     }
     count == 1
 }
+
+// expect: run micro_string() = true
+fn micro_string() -> bool {
+    let mut parts: List[String] = list.new()
+    list.push(mut parts, "ab")
+    list.push(mut parts, "")
+    list.push(mut parts, "é")
+    let empty: List[String] = list.new()
+    string.join(parts, "") == "abé" && string.join(parts, "/") == "ab//é" && string.join(empty, "/") == "" && string.replace("éa", "", "-") == "-é-a-" && string.replace("", "", "-") == "-" && string.replace("aaaaa", "aa", "b") == "bba" && string.replace("é", "a", "-") == "é"
+}

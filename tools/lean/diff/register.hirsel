@@ -1,0 +1,35 @@
+fn lean_diff_claim_observation(candidate: Bytes, saved: Inline[u8, 48], edit: u64) -> bool {
+    let mut observed: Bytes = list.new()
+    let size = if edit == 121u64 { 119u64 } else { 120u64 }
+    for i in 0u64..size {
+        let from_admitted = (8u64 <= i && i < 16u64) || (48u64 <= i && i < 56u64) ||
+            (80u64 <= i && i < 112u64)
+        let word = if from_admitted { i + 1u64 } else { i }
+        let byte: u8 = int.truncate(if edit == i { word + 2u64 } else { word })
+        list.push(mut observed, byte)
+    }
+    history_claim_same(candidate, saved, observed)
+}
+
+pub fn lean_diff_register(out: Stdout) -> Result[(), ()] waits {
+    let mut text_out = string.new()
+    let mut candidate: Bytes = list.new()
+    let mut admitted: Bytes = list.new()
+    for j in 0u64..120u64 {
+        list.push(mut candidate, int.truncate(j))
+        list.push(mut admitted, int.truncate(j + 1u64))
+    }
+    let saved = history_claim_saved(admitted)
+    for edit in 0u64..122u64 {
+        let readback_matches = lean_diff_claim_observation(candidate, saved, edit)
+        if readback_matches {
+            string.push(mut text_out, "true\n")
+        } else {
+            string.push(mut text_out, "false\n")
+        }
+    }
+    match stdout.write(out, text_out) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(()),
+    }
+}

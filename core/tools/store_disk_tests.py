@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import inputs
-from store_crash_tests import SCENARIOS, run_crashes
+from store_crash_tests import SCENARIOS, WINDOW_FAILURES, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
@@ -26,8 +26,9 @@ LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_lo
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.
 ASSEMBLY_OWNER = 'core-ops-914'
-KNOWN_ASSEMBLY = frozenset({'compact', 'worker_refusal', 'opening', 'db',
-                            'db_refusal', 'schema_refusal', 'pack_bound'})
+# Log@1 live reads: one uncut run each, the adapter staging the writer.
+LIVE_READ_SCENARIOS = ('follower-durable', 'follower-boundary', 'read-only-durable')
+KNOWN_ASSEMBLY = frozenset({'opening', 'db', 'db_refusal', 'schema_refusal', 'pack_bound'})
 
 
 def known_assembly(row):
@@ -45,7 +46,7 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
-    p.add_argument('--crash-scenario', choices=SCENARIOS)
+    p.add_argument('--crash-scenario', choices=SCENARIOS + LIVE_READ_SCENARIOS + WINDOW_FAILURES)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
@@ -76,10 +77,13 @@ def main():
                 if args.compiler is None or args.runtime is None or args.bridge is None:
                     p.error('native backends require --compiler, --runtime and --bridge')
                 try:
-                    cases = (args.crash_scenario,) if args.crash_scenario else SCENARIOS
-                    count_only = () if args.crash_scenario else (
+                    count = args.crash_scenario in LIVE_READ_SCENARIOS + WINDOW_FAILURES
+                    cases = () if count else (args.crash_scenario,) if args.crash_scenario else SCENARIOS
+                    count_only = (args.crash_scenario,) if count else () if args.crash_scenario else (
                         'checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
-                        'watermark-absent', 'watermark-torn')
+                        'watermark-absent', 'watermark-torn', *LIVE_READ_SCENARIOS, *WINDOW_FAILURES)
+                    if args.crash_scenario == 'window':
+                        count_only = WINDOW_FAILURES
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine, scenarios=cases,
                                        count_only=count_only)

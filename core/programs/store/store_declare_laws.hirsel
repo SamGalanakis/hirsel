@@ -1,0 +1,882 @@
+fn bucket_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, value % 4)
+    Ok(take keys)
+}
+
+fn declaration_law_rename(mut m: Migration) -> Result[(), Error] {
+    rename_table(mut m, "items", "renamed")
+}
+
+fn migration_list_baseline(mut m: Migration) -> Result[(), Error] {
+    let found = list_collections(m)?
+    if list.len(found) != 3 || found[0].name != "Z" || found[1].name != "a" || found[2].name != "é" {
+        fail("migration listing: expected only Z, a, é in byte order")
+    }
+    let (Table(), Cell(), Log()) = (found[0].kind, found[1].kind, found[2].kind) else {
+        fail("migration listing: expected Edge as Table, Cell, Log")
+    }
+    Ok(())
+}
+
+fn migration_list_fits(m: Migration, steps: u64) -> bool {
+    let probe = bound steps steps {
+        list_collections(m)
+    }
+    match take probe {
+        Ok(Ok(_)) => true,
+        Error(OutOfTime(steps: _)) => false,
+        _ => fail("migration listing: step probe failed without exhausting steps"),
+    }
+}
+
+fn migration_list_staged(mut m: Migration) -> Result[(), Error] {
+    let mut low = 0u64
+    let mut high = 65536u64
+    while low < high {
+        let mid = low + (high - low) / 2
+        if migration_list_fits(m, mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    if !migration_list_fits(m, low) {
+        fail("migration listing: baseline did not fit the step probe")
+    }
+    migration_create_table(mut m, spec("b", std.codec.key_u64(), std.codec.of_u64()))?
+    let found = list_collections(m)?
+    if list.len(found) != 4 || found[2].name != "b" {
+        fail("migration listing: expected newly staged b")
+    }
+    let Table() = found[2].kind else {
+        fail("migration listing: expected b to be a Table")
+    }
+    if migration_list_fits(m, low) {
+        fail("migration listing: a larger catalog did not spend more steps")
+    }
+    Ok(())
+}
+
+fn migration_list_retire(mut m: Migration) -> Result[(), Error] {
+    for item in list_collections(m)? {
+        if item.name == "retired" {
+            return drop_named_table(mut m, item.name)
+        }
+    }
+    Ok(())
+}
+
+fn migration_list_schema(mut d: Declare) -> Result[(u32, u32), Error] {
+    let log = declare_log(mut d, "é", std.codec.of_u64())?
+    let cell = declare_cell(mut d, "a", std.codec.of_u64())?
+    let pair_key: std.codec.Key[(u64, u64)] = std.codec.key_of()
+    let _ = declare_edge(mut d, "Z", "reverse", pair_key, std.codec.key_u64(), std.codec.key_u64())?
+    let (_, log_id) = log_identity(log)
+    let (_, cell_id) = cell_identity(cell)
+    Ok((log_id, cell_id))
+}
+
+// L17: the retirement publishes once and the same migration and schema then open unchanged.
+fn migration_list_retirement(mut db: Db, tasks: Tasks) -> Result[(), Error] waits {
+    let _ = create_table(mut db, spec("retired", std.codec.key_u64(), std.codec.of_u64()))?
+    let committed = version(snapshot(db)) + 1
+    for _ in 0u64 .. 2 {
+        let mut d = declare_migration(db, tasks, code.describe(migration_list_retire))?
+        let _ = migration_list_schema(mut d)?
+        let _ = seal(mut db, take d)?
+        let after = snapshot(db)
+        if has_table(after, "retired")? {
+            fail("L17: the retired collection is still present")
+        }
+        if version(after) != committed {
+            fail("L17: the retirement and its rerun must publish exactly once")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn test_migration_list_collections(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let _ = create_table(mut db, spec("hirsel.internal", std.codec.key_u64(), std.codec.of_u64()))?
+    let mut d = declare(db, Migrate)?
+    let (log_id, cell_id) = migration_list_schema(mut d)?
+    let _ = seal(mut db, take d)?
+    let before = version(snapshot(db))
+    run_migration(mut db, tasks, code.describe(migration_list_baseline))?
+    if version(snapshot(db)) != before {
+        fail("migration listing: a read-only migration published a new version")
+    }
+    let _ = stage_migration(db, tasks, code.describe(migration_list_staged))?
+    migration_list_retirement(mut db, tasks)?
+    refusal_attach_descriptors(mut db, log_id, cell_id)?
+    if let Error(Tiered(Migrate)) = stage_migration(db, tasks, code.describe(migration_list_baseline)) {
+        Ok(())
+    } else {
+        fail("migration listing: expected Tiered(Migrate)")
+    }
+}
+
+@test
+fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut staged = declare(db, Migrate)?
+    let mut items = declare_table(mut staged, "items", key, value)?
+    let ix = index(mut staged, mut items, "bucket", Many, code.describe(bucket_keys), key)?
+    let rows = finish(mut staged, take items)?
+    let omitted = declare_table(mut staged, "omitted", key, value)?
+    let _ = finish(mut staged, take omitted)?
+    if version(snapshot(db)) != 0 {
+        return Error(Foreign)
+    }
+    let _ = seal(mut db, take staged)?
+    if version(snapshot(db)) != 1 || !typed_put(mut db, rows, 7, 6) {
+        return Error(Foreign)
+    }
+    let mut found = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Included(2), Included(2))?
+    if next(law_reader(found.capture), mut found)? != Some((7, 6)) || next(law_reader(found.capture), mut found)? != None {
+        return Error(Foreign)
+    }
+    let before = version(snapshot(db))
+    let mut refused = declare(db, Migrate)?
+    let extra = declare_table(mut refused, "extra", key, value)?
+    let _ = finish(mut refused, take extra)?
+    match seal(mut db, take refused) {
+        Error(Undeclared(name)) if name == "items" => (),
+        _ => return Error(Foreign),
+    }
+    if version(snapshot(db)) != before {
+        return Error(Foreign)
+    }
+    let mut opened = declare(db, Open)?
+    let opened_table = declare_table(mut opened, "extra", key, value)
+    match take opened_table {
+        Error(Missing(name)) if name == "extra" => (),
+        _ => return Error(Foreign),
+    }
+    let mut stale = declare(db, Open)?
+    let mut declared_items = declare_table(mut stale, "items", key, value)?
+    let _ = index(mut stale, mut declared_items, "bucket", Many, code.describe(bucket_keys), key)?
+    let _ = finish(mut stale, take declared_items)?
+    let declared_omitted = declare_table(mut stale, "omitted", key, value)?
+    let _ = finish(mut stale, take declared_omitted)?
+    if !typed_put(mut db, rows, 8, 10) {
+        return Error(Foreign)
+    }
+    match seal(mut db, take stale) {
+        Error(Foreign) => (),
+        _ => return Error(Foreign),
+    }
+    let mut renamed = declare_migration(db, tasks, code.describe(declaration_law_rename))?
+    let mut table_decl = declare_table(mut renamed, "renamed", key, value)?
+    let _ = index(mut renamed, mut table_decl, "bucket", Many, code.describe(bucket_keys), key)?
+    let new_handle = finish(mut renamed, take table_decl)?
+    let untouched = declare_table(mut renamed, "omitted", key, value)?
+    let _ = finish(mut renamed, take untouched)?
+    let pre_rename = snapshot(db)
+    let _ = seal(mut db, take renamed)?
+    let after = snapshot(db)
+    if version(after) != version(pre_rename) + 1 || get(result.unwrap(reader(db, 0u64)), after, new_handle, 7)? != Some(6) || get(result.unwrap(reader(db, 0u64)), pre_rename, rows, 7)? != Some(6) {
+        return Error(Foreign)
+    }
+    match get(result.unwrap(reader(db, 0u64)), after, rows, 7) {
+        Error(Stale(_)) => Ok(()),
+        _ => Error(Foreign),
+    }
+}
+
+fn backfill_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, value)
+    list.push(mut keys, value)
+    Ok(take keys)
+}
+
+fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut initial = declare(db, Migrate)?
+    let first_decl = declare_table(mut initial, "rows", key, value)?
+    let primary_table = finish(mut initial, take first_decl)?
+    let _ = seal(mut db, take initial)?
+    let result = run(mut db, None, (primary_table, rows, duplicate), fn(mut tx, input) -> Result[(), Error] {
+        for i in 0u64 .. input.1 {
+            put(mut tx, input.0, i, if input.2 == Some(i) { 0u64 } else { i })?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = result {} else { return Error(MigrationFault) }
+    let before = snapshot(db)
+    let mut declaration = declare(db, Migrate)?
+    let mut target_decl = declare_table(mut declaration, "rows", key, value)?
+    let added = index(mut declaration, mut target_decl, "unique", Unique, code.describe(backfill_keys), key)
+    if let Some(_) = duplicate {
+        match take added {
+            Error(Conflict(name)) if name == "unique" => (),
+            _ => return Error(MigrationFault),
+        }
+        match seal(mut db, take declaration) {
+            Error(Conflict(name)) if name == "unique" => (),
+            _ => return Error(MigrationFault),
+        }
+        let after = snapshot(db)
+        if version(before) != version(after) || tree_stamp(before.roots.catalog) != tree_stamp(after.roots.catalog) ||
+            tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) {
+            return Error(MigrationFault)
+        }
+        return Ok(())
+    }
+    let ix = added?
+    let _ = finish(mut declaration, take target_decl)?
+    let _ = seal(mut db, take declaration)?
+    let after = snapshot(db)
+    let mut cursor = byte_cursor(after.roots.collections, Included(prefix(ix.id)?), prefix(ix.id + 1)?)?
+    for expected in 0u64 .. rows {
+        let Some((index_key, raw)) = next_bytes(mut cursor)? else { return Error(MigrationFault) }
+        if list.len(index_key) != 12 || list.len(raw) != 12 || read_le(raw, 0, 4) != 8 {
+            return Error(MigrationFault)
+        }
+        let j: u64 = list.word_be(index_key, 4)
+        let k: u64 = list.word_be(raw, 4)
+        if j != expected || k != expected { return Error(MigrationFault) }
+    }
+    if let Some(_) = next_bytes(mut cursor)? { return Error(MigrationFault) }
+    Ok(())
+}
+
+fn law_unique_backfill(c: Clock) -> Result[(), Error] waits {
+    let sizes: Inline[u64, 6] = [0, 1, 4095, 4096, 4097, 12289]
+    let duplicates: Inline[u64, 10] = [1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
+    for rows in sizes {
+        unique_backfill_case(c, rows, None)?
+        for duplicate in duplicates {
+            if duplicate < rows {
+                unique_backfill_case(c, rows, Some(duplicate))?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stable_cover_key(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, key)
+    Ok(take keys)
+}
+
+fn cover_sum(key: u64, value: u64) -> Result[u64, Capacity] {
+    Ok(key + value)
+}
+
+fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[(), Error] {
+    let mut logical = prefix(index_id)?
+    list.put_word_be(mut logical, key)
+    list.put_word_be(mut logical, key)
+    let s = snapshot(db)
+    let Some(raw) = get_page_row(s.roots.collections, logical) else { return Error(MigrationFault) }
+    if list.len(raw) != 10 || read_le(raw, 0, 2) != 0 || read_le(raw, 2, 8) != expected {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}
+
+fn covering_revision_case(c: Clock, change_project: bool) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut initial = declare(db, Migrate)?
+    let mut first_decl = declare_table(mut initial, "rows", key, value)?
+    let ix = covering(mut initial, mut first_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    let primary_table = finish(mut initial, take first_decl)?
+    let _ = seal(mut db, take initial)?
+    if !typed_put(mut db, primary_table, 5, 7) { return Error(MigrationFault) }
+    assert_cover_bytes(db, ix.id, 5, 12)?
+    if !typed_put(mut db, primary_table, 5, 8) { return Error(MigrationFault) }
+    assert_cover_bytes(db, ix.id, 5, 13)?
+
+    // Use the catalog bytes a previous release would leave. Its function names
+    // match and one revision differs. Give its entry a different payload too.
+    let mut prior = schema_plan(db)
+    let mut record = catalog_entry_in(prior.roots.catalog, ix.catalog_key)?
+    let mut prior_revision: Bytes = list.new()
+    list.fill(mut prior_revision, 32, 1u8)
+    if change_project {
+        record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+    } else {
+        record.revision = take prior_revision
+    }
+    let raw = encode_catalog(record)?
+    prior.roots = catalog_insert(mut prior.next_node, share_roots(prior.roots), ix.catalog_key, raw)?
+    let mut fake_key = prefix(ix.id)?
+    list.put_word_be(mut fake_key, 5u64)
+    list.put_word_be(mut fake_key, 5u64)
+    let mut fake_payload: Bytes = list.new()
+    list.put_word_le(mut fake_payload, 0u16)
+    list.put_word_le(mut fake_payload, 99u64)
+    let _ = put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node)?
+    prior.changed = true
+    let _ = publish_schema_plan(mut db, take prior)?
+    let read_modes: Inline[Mode, 2] = [Open, Follower]
+    for mode in read_modes {
+        let mut opened = declare(db, Open)?
+        opened.mode = mode
+        let mut open_decl = declare_table(mut opened, "rows", key, value)?
+        match covering(mut opened, mut open_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => return Error(MigrationFault),
+        }
+    }
+    let mut migration = declare(db, Migrate)?
+    let mut rebuilt_decl = declare_table(mut migration, "rows", key, value)?
+    let rebuilt = covering(mut migration, mut rebuilt_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    let _ = finish(mut migration, take rebuilt_decl)?
+    let _ = seal(mut db, take migration)?
+    if rebuilt.id == ix.id { return Error(MigrationFault) }
+    assert_cover_bytes(db, rebuilt.id, 5, 13)
+}
+
+@test
+fn test_index_declaration_laws(c: Clock) -> Result[(), Error] waits {
+    law_unique_backfill(c)?
+    covering_revision_case(c, false)?
+    covering_revision_case(c, true)
+}
+
+fn conflict_first(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, value.0)
+}
+
+fn conflict_second(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, value.1)
+}
+
+fn conflict_many(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {
+    backfill_keys(key, (value.0 + value.1) % 4)
+}
+
+fn conflict_setup(mut db: Db) -> Result[Table[u64, (u64, u64)], Error] waits {
+    let mut schema = declare(db, Migrate)?
+    let codec: std.codec.Codec[(u64, u64)] = std.codec.of()
+    let key = std.codec.key_u64()
+    let mut item_decl = declare_table(mut schema, "items", key, codec)?
+    let _ = index(mut schema, mut item_decl, "z_first", Unique, code.describe(conflict_first), key)?
+    let _ = index(mut schema, mut item_decl, "a_second", Unique, code.describe(conflict_second), key)?
+    let _ = index(mut schema, mut item_decl, "many", Many, code.describe(conflict_many), key)?
+    let items = finish(mut schema, take item_decl)?
+    let _ = seal(mut db, take schema)?
+    Ok(take items)
+}
+
+fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[(), Error] {
+    put(mut tx, items, 1, (1, 2))?
+    put(mut tx, items, 2, (3, 4))?
+    let _ = delete(mut tx, items, 2)?
+    put(mut tx, items, 4, (3, 4))?
+    put(mut tx, items, 1, (1, 2))?
+    let before = (tx.resident, tx.frame_bytes, tx.ids, tx.rows)
+    match put(mut tx, items, 3, (1, 4)) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    match delete(mut tx, items, 1) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    match put(mut tx, items, 5, (5, 6)) {
+        Error(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    Ok(())
+}
+
+@test
+fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let items = conflict_setup(mut db)?
+    let before = version(snapshot(db))
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
+    let keep: Option[fn(Error) -> bool] = None
+    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        tx.frame_bytes = Some(42)
+        put_conflict_sequence(mut tx, items)
+    })
+    match take staged {
+        RolledBack(Failed(Conflict(name))) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    let observed = log.finish(take reads)
+    if list.len(observed) != 6 { return Error(MigrationFault) }
+    for probe in observed {
+        if let Point(key) = probe {
+            if list.len(key) != 12 { return Error(MigrationFault) }
+        } else { return Error(MigrationFault) }
+    }
+    let attempted = run(mut db, None, items, fn(mut tx, handle) -> Result[(), Error] {
+        put_conflict_sequence(mut tx, handle)
+    })?
+    match take attempted {
+        Failed(Conflict(name)) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    let unchanged = snapshot(db)
+    if version(unchanged) != before || get(result.unwrap(reader(db, 0)), unchanged, items, 1)? != None {
+        return Error(MigrationFault)
+    }
+    let stream = law_stream_bytes(key_word(23), keyed_time(db))
+    let request = request_digest(stream, stream)
+    let admitted = admit_law_stream(mut db, stream, 0, request)?
+    let Admitted(take complete) = take admitted else { return Error(MigrationFault) }
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let served = serve(mut db, take complete, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
+        result.unwrap(put_conflict_sequence(mut tx, handle))
+        Error(key_word(7))
+    })
+    match take served {
+        Ok(Kept(receipt)) if receipt.reply == key_word(7) => (),
+        _ => return Error(MigrationFault),
+    }
+    if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None { return Error(MigrationFault) }
+    let next_admission = admit_law_stream(mut db, stream, 1, request)?
+    let Admitted(take next_completion) = take next_admission else { return Error(MigrationFault) }
+    let staged_base = version(snapshot(db))
+    let next_result = serve(mut db, take next_completion, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
+        result.unwrap(put_conflict_sequence(mut tx, handle))
+        Ok(key_word(8))
+    })
+    match take next_result {
+        Ok(Failed(_, Conflict(name))) if name == "z_first" => (),
+        _ => return Error(MigrationFault),
+    }
+    if version(snapshot(db)) != staged_base { return Error(MigrationFault) }
+    Ok(())
+}
+
+fn typed_read_keys(k: (u8, u64), value: u64) -> Result[List[(u8, u64)], Capacity] {
+    let mut keys: List[(u8, u64)] = list.new()
+    list.push(mut keys, (k.0, value % 2))
+    Ok(take keys)
+}
+
+fn typed_read_owner(k: (u8, u64), value: u64) -> Result[List[u64], Capacity] {
+    backfill_keys(k.1, k.1)
+}
+
+fn typed_read_payload(k: (u8, u64), value: u64) -> Result[u64, Capacity] {
+    Ok(k.1 + value)
+}
+
+fn typed_cursor_case(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key: std.codec.Key[(u8, u64)] = std.codec.key_of()
+    let value = std.codec.of_u64()
+    let mut schema = declare(db, Migrate)?
+    let mut item_decl = declare_table(mut schema, "items", key, value)?
+    let covering_index = covering(mut schema, mut item_decl, "cover", Many, code.describe(typed_read_keys), key, code.describe(typed_read_payload), value)?
+    let unique_index = covering_row(mut schema, mut item_decl, "owner", Unique, code.describe(typed_read_owner), std.codec.key_u64())?
+    let items = finish(mut schema, take item_decl)?
+    let _ = seal(mut db, take schema)?
+    let inserted = run(mut db, None, items, fn(mut tx, target) -> Result[(), Error] {
+        put(mut tx, target, (255u8, 1u64), 11)?
+        put(mut tx, target, (255u8, 2u64), 13)?
+        put(mut tx, target, (0u8, 20u64), 17)?
+        if count(tx, target, Included((255u8, 0u64)), Unbounded)? != 2 { return Error(MigrationFault) }
+        Ok(())
+    })?
+    if let Committed(_) = inserted {} else { return Error(MigrationFault) }
+    let at = snapshot(db)
+    let read_handle = reader(db, 0)?
+    let observed = look(read_handle, at, None, (items, covering_index, unique_index), fn(tx, input) -> Result[(), Error] {
+        let pair = (255u8, 1u64)
+        let leading: std.codec.Key[u8] = std.codec.key_of()
+        if fetch(tx, input.0, pair)? != Some(11u64) { return Error(MigrationFault) }
+        let mut table_cursor = range_prefix(tx, input.0, 255u8, leading)?
+        if next_in(tx, mut table_cursor)? != Some((pair, 11u64)) ||
+            next_in(tx, mut table_cursor)? != Some(((255u8, 2u64), 13u64)) || next_in(tx, mut table_cursor)? != None {
+            return Error(MigrationFault)
+        }
+        match range_prefix(tx, input.0, 255u64, std.codec.key_u64()) {
+            Error(Schema(0)) => (),
+            _ => return Error(MigrationFault),
+        }
+        let mut joined = lookup_prefix(tx, input.1, 255u8, leading)?
+        if next_indexed(mut joined)? != Some((pair, 11u64)) { return Error(MigrationFault) }
+        let mut covering_cursor = entries(tx, input.1, Included(pair), Included(pair))?
+        if next_entry(mut covering_cursor)? != Some((pair, pair, 12u64)) ||
+            next_entry(mut covering_cursor)? != Some((pair, (255u8, 2u64), 15u64)) || next_entry(mut covering_cursor)? != None {
+            return Error(MigrationFault)
+        }
+        let mut owners = entries(tx, input.2, Included(2), Included(2))?
+        if next_entry(mut owners)? != Some((2u64, (255u8, 2u64), 13u64)) || next_entry(mut owners)? != None {
+            return Error(MigrationFault)
+        }
+        Ok(())
+    })?
+    match take observed {
+        Seen(Seen(value: Ok(()), reads: observed_reads, ..)) => {
+            let mut points = 0u64
+            for cursor_read in observed_reads {
+                if let Point(_) = cursor_read { points += 1 }
+            }
+            if points != 2 { return Error(MigrationFault) }
+        },
+        _ => return Error(MigrationFault),
+    }
+    Ok(())
+}
+
+@test
+fn test_typed_read_laws(c: Clock) -> Result[(), Error] waits {
+    if !law_typed_model(c) || !law_schema_numbers(c) || !lookup_cover_points(c) {
+        return Error(MigrationFault)
+    }
+    typed_cursor_case(c)
+}
+
+type ProjectorFixture {
+    decl: ProjectionDecl,
+    source_table: Table[u64, u64],
+    second_table: Table[u64, u64],
+    image_table: Table[(u32, u64), u64]
+}
+
+fn projector_fixture(mut db: Db, mode: Mode) -> Result[ProjectorFixture, Error] waits {
+    let mut d = declare(db, mode)?
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let cursor = projection(mut d, "fixture")?
+    let source_decl = declare_table(mut d, "source", key, value)?
+    let source_table = finish(mut d, take source_decl)?
+    let second_decl = declare_table(mut d, "second", key, value)?
+    let second_table = finish(mut d, take second_decl)?
+    let generation_key: std.codec.Key[(u32, u64)] = std.codec.key_of()
+    let image_decl = declare_table(mut d, "image", generation_key, value)?
+    let image_table = finish(mut d, take image_decl)?
+    let _ = seal(mut db, take d)?
+    Ok(ProjectorFixture(decl: take cursor, source_table: take source_table, second_table: take second_table, image_table: take image_table))
+}
+
+fn projector_apply_law(mut tx: Tx, image_table: Table[(u32, u64), u64], delta: Delta[u64, u64]) -> Result[(), Error] {
+    let key = (delta.generation, delta.key)
+    match delta.value {
+        Some(value) => put(mut tx, image_table, key, value),
+        None => {
+            let _ = delete(mut tx, image_table, key)?
+            Ok(())
+        },
+    }
+}
+
+fn projector_drop_law(mut tx: Tx, image_table: Table[(u32, u64), u64], generation: u32, limits: Limits) -> Result[bool, Error] {
+    let (take keys, remains) = {
+        let mut cursor = range(tx, image_table, Included((generation, 0u64)), Included((generation, 18446744073709551615u64)))?
+        let mut keys: List[(u32, u64)] = list.new()
+        for _ in 0u64 .. limits.rows {
+            let Some((key, _)) = next_in(tx, mut cursor)? else { break }
+            list.push(mut keys, key)
+        }
+        (take keys, next_in(tx, mut cursor)? != None)
+    }
+    for key in keys {
+        let _ = delete(mut tx, image_table, key)?
+    }
+    Ok(remains)
+}
+
+fn projector_fold(fixture: ProjectorFixture) -> Fold[Table[(u32, u64), u64], u64, u64, Error] {
+    Fold(env: clone(fixture.image_table), apply: projector_apply_law, drop: projector_drop_law)
+}
+
+fn projector_refusal(take problem: ProjectError[Error]) -> Error {
+    match take problem {
+        Store(take error) => take error,
+        Apply(take error) => take error,
+    }
+}
+
+fn project_step_law(mut p: Projector[u64, u64], mut db: Db, fixture: ProjectorFixture, limits: Limits) -> Result[Stepped, Error] waits {
+    let result = step(mut p, mut db, limits, projector_fold(fixture)) ?=> projector_refusal
+    Ok(result)
+}
+
+fn project_until_idle(mut p: Projector[u64, u64], mut db: Db, fixture: ProjectorFixture, limits: Limits) -> Result[(), Error] waits {
+    for _ in 0u64 .. 16 {
+        if let Idle = project_step_law(mut p, mut db, fixture, limits)? { return Ok(()) }
+    }
+    Error(MigrationFault)
+}
+
+fn image_row(db: Db, fixture: ProjectorFixture, generation: u32, key: u64) -> Result[Option[u64], Error] waits {
+    get(reader(db, 0)?, snapshot(db), fixture.image_table, (generation, key))
+}
+
+fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut db, Migrate)?
+    let source_binding = binding(fixture.source_table, main_branch(db))
+    if !typed_put(mut db, fixture.source_table, 1, 11) || !typed_put(mut db, fixture.source_table, 2, 22) {
+        return Error(MigrationFault)
+    }
+    let narrow = Limits(rows: 1, byte_limit: 1024)
+    let wide = Limits(rows: 8, byte_limit: 4096)
+    let mut original = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+    if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if let Paged(1) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != None { return Error(MigrationFault) }
+    let _ = rebuild(mut original, mut db)?
+    let requested = version(snapshot(db))
+    let _ = rebuild(mut original, mut db)?
+    if version(snapshot(db)) != requested { return Error(MigrationFault) }
+    if let Published(_) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(0u32) { return Error(MigrationFault) }
+    if let Paged(1) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(0u32) { return Error(MigrationFault) }
+
+    let removed = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
+        let _ = delete(mut tx, input, 1)?
+        Ok(())
+    })?
+    if let Committed(_) = removed {} else { return Error(MigrationFault) }
+    let mut restart = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+    if let Reloaded = project_step_law(mut restart, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    project_until_idle(mut restart, mut db, fixture, narrow)?
+    let current = read_projection(db, fixture.decl)?
+    let Some(generation) = live(current, source_binding) else { return Error(MigrationFault) }
+    if image_row(db, fixture, generation, 1)? != None || image_row(db, fixture, generation, 2)? != Some(22u64) {
+        return Error(MigrationFault)
+    }
+    let stopped_at = version(snapshot(db))
+    let cuts = db.file_seq
+    if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if let Idle = project_step_law(mut restart, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if version(snapshot(db)) != stopped_at || db.file_seq != cuts { return Error(MigrationFault) }
+
+    let moved = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
+        let _ = delete(mut tx, input, 2)?
+        put(mut tx, input, 9, 22)
+    })?
+    if let Committed(_) = moved {} else { return Error(MigrationFault) }
+    if let Updated(2) = project_step_law(mut restart, mut db, fixture, wide)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(generation) ||
+        image_row(db, fixture, generation, 2)? != None || image_row(db, fixture, generation, 9)? != Some(22u64) {
+        return Error(MigrationFault)
+    }
+    if !typed_put(mut db, fixture.second_table, 4, 44) { return Error(MigrationFault) }
+    let second_binding = binding(fixture.second_table, main_branch(db))
+    if live(read_projection(db, fixture.decl)?, second_binding) != None { return Error(MigrationFault) }
+    let mut second = projector(fixture.decl, fixture.second_table, Local, reader(db, 0)?)
+    project_until_idle(mut second, mut db, fixture, wide)?
+    let Some(second_generation) = live(read_projection(db, fixture.decl)?, second_binding) else { return Error(MigrationFault) }
+    if image_row(db, fixture, second_generation, 4)? != Some(44u64) || image_row(db, fixture, second_generation, 9)? != None {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}
+
+fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_io(host.mkdir(d, "projector-cuts"))?
+    let directory = disk_io(host.open_dir(d, "projector-cuts"))?
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    {
+        let mut db = open(tasks, directory, c, r, options)?
+        let fixture = projector_fixture(mut db, Migrate)?
+        let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+        if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
+        project_until_idle(mut worker, mut db, fixture, limits)?
+        let row = read_projection(db, fixture.decl)?
+        if !typed_put(mut db, fixture.source_table, 3, 31) { return Error(MigrationFault) }
+        let staged_target = snapshot(db)
+        let _ = pin_projection_target(worker, mut db, row, staged_target)?
+        let _ = close(take db)?
+    }
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let loaded = projector_fixture(mut reopened, Open)?
+    let saved_binding = binding(loaded.source_table, main_branch(reopened))
+    let Some(generation) = live(read_projection(reopened, loaded.decl)?, saved_binding) else { return Error(MigrationFault) }
+    if image_row(reopened, loaded, generation, 3)? != Some(30u64) { return Error(MigrationFault) }
+    let mut resumed = projector(loaded.decl, loaded.source_table, Local, reader(reopened, 0)?)
+    if let Updated(1) = project_step_law(mut resumed, mut reopened, loaded, limits)? {} else { return Error(MigrationFault) }
+    if image_row(reopened, loaded, generation, 3)? != Some(31u64) { return Error(MigrationFault) }
+    let _ = close(take reopened)?
+    Ok(())
+}
+
+@test
+fn test_local_projector_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    law_projector_memory(c)?
+    law_projector_disk(d, c, r, tasks)
+}
+
+@test
+fn test_local_projector_pin_ownership(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    let name = "hirsel.projector.fixture.0"
+    let (app_version, projector_version) = {
+        let mut db = open(tasks, directory, c, r, options)?
+        let fixture = projector_fixture(mut db, Migrate)?
+        let app = snapshot(db)
+        let _ = pin(mut db, name, app)?
+        if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
+        let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+        if let Reloaded = project_step_law(mut worker, mut db, fixture, limits)? {} else { return Error(MigrationFault) }
+        let target = version(snapshot(db))
+        project_until_idle(mut worker, mut db, fixture, limits)?
+        let _ = close(take db)?
+        (version(app), target)
+    }
+    let mut db = open(tasks, directory, c, r, options)?
+    let fixture = projector_fixture(mut db, Open)?
+    let Some(app) = pinned(db, name) else { fail("the application pin must survive projector publication and reopen") }
+    if version(app) != app_version || get(reader(db, 0)?, app, fixture.source_table, 3)? != None {
+        fail("projector publication replaced the application pin")
+    }
+    let _ = unpin(mut db, name)?
+    let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+    let source = binding(fixture.source_table, main_branch(db))
+    let row = read_projection(db, fixture.decl)?
+    let Some(image) = row.image else { return Error(MigrationFault) }
+    let Some(base) = borrowed_projection_base(mut worker, db, source, image)? else { fail("application unpin removed the projector base") }
+    if version(base) != projector_version || get(reader(db, 0)?, base, fixture.source_table, 3)? != Some(30u64) {
+        fail("the projector pin must retain the published source root")
+    }
+    let _ = pin(mut db, name, base)?
+    let _ = remove_pin(mut db, ProjectorPin, name)?
+    let Some(retained) = pinned(db, name) else { fail("projector unpin removed the application pin") }
+    if version(retained) != projector_version || get(reader(db, 0)?, retained, fixture.source_table, 3)? != Some(30u64) {
+        fail("the application pin must retain the shared root after projector unpin")
+    }
+    let _ = close(take db)?
+    Ok(())
+}
+
+fn followed_rows(f: Follower) -> Result[Table[u64, u64], Error] {
+    let mut schema = declare_follower(f)
+    let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut schema, take declared)?
+    seal_follower(f, take schema)?
+    Ok(take rows)
+}
+
+fn first_follower_versions(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(u64, u64), Error] waits {
+    let mut writer = open(tasks, directory, c, r, options)?
+    let mut schema = declare(writer, Migrate)?
+    let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut schema, take declared)?
+    let _ = seal(mut writer, take schema)?
+    if !typed_put(mut writer, rows, 1, 10) { return Error(MigrationFault) }
+    let floor_version = version(snapshot(writer))
+    let _ = checkpoint(mut writer)?
+    if !typed_put(mut writer, rows, 1, 20) { return Error(MigrationFault) }
+    let image_version = version(snapshot(writer))
+    close(take writer)?
+    Ok((floor_version, image_version))
+}
+
+@test
+fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_io(host.mkdir(d, "follower-projector"))?
+    let directory = disk_io(host.open_dir(d, "follower-projector"))?
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let (floor_version, image_version) = first_follower_versions(directory, c, r, tasks, options)?
+    let mut destination = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut destination, Migrate)?
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    let mut ids = followers()
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let owner = follower_owner(service)?
+    let original_generation = {
+        let mut upstream = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
+        let rows = followed_rows(upstream)?
+        let source_binding = binding(rows, follower_main(upstream))
+        let read_handle = follower_reader(upstream, 0)?
+        let Some(take lower) = follower_floor(mut upstream, image_version)? else { return Error(MigrationFault) }
+        if version(lower) != floor_version || get(read_handle, lower, rows, 1)? != Some(10u64) {
+            return Error(MigrationFault)
+        }
+        if let Some(_) = follower_floor(mut upstream, floor_version - 1)? { return Error(MigrationFault) }
+        let mut worker = projector(fixture.decl, rows, Follower(take upstream), take read_handle)
+        project_until_idle(mut worker, mut destination, fixture, limits)?
+        let saved = read_projection(destination, fixture.decl)?
+        let Some(generation) = live(saved, source_binding) else { return Error(MigrationFault) }
+        if image_row(destination, fixture, generation, 1)? != Some(20u64) { return Error(MigrationFault) }
+        generation
+    }
+    {
+        let mut writer = open(tasks, directory, c, r, options)?
+        let mut schema = declare(writer, Open)?
+        let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        let rows = finish(mut schema, take declared)?
+        let _ = seal(mut writer, take schema)?
+        if !typed_put(mut writer, rows, 1, 10) { return Error(MigrationFault) }
+        close(take writer)?
+    }
+    let mut reopened = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
+    let rows = followed_rows(reopened)?
+    let source_binding = binding(rows, follower_main(reopened))
+    let read_handle = follower_reader(reopened, 0)?
+    let Some(take retained) = follower_floor(mut reopened, image_version)? else { return Error(MigrationFault) }
+    if version(retained) != floor_version || floor_version >= image_version { return Error(MigrationFault) }
+    let mut worker = projector(fixture.decl, rows, Follower(take reopened), take read_handle)
+    project_until_idle(mut worker, mut destination, fixture, limits)?
+    let Some(rebuilt) = live(read_projection(destination, fixture.decl)?, source_binding) else { return Error(MigrationFault) }
+    if rebuilt == original_generation || image_row(destination, fixture, rebuilt, 1)? != Some(10u64) {
+        return Error(MigrationFault)
+    }
+    if list.len(destination.pins) != 0 { return Error(MigrationFault) }
+    Ok(())
+}
+
+fn preview_law_schema(mut d: Declare) -> Result[(), Error] {
+    let key = std.codec.key_u64()
+    let mut rows = declare_table(mut d, "rows", key, std.codec.of_u64())?
+    let _ = index(mut d, mut rows, "unique", Unique, code.describe(backfill_keys), key)?
+    let _ = finish(mut d, take rows)?
+    Ok(())
+}
+
+@test
+fn test_migration_preview_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, directory, c, r, options)?
+    let mut initial = declare(db, Migrate)?
+    let declared = declare_table(mut initial, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut initial, take declared)?
+    let _ = seal(mut db, take initial)?
+    let saved = run(mut db, None, rows, fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 9u64, 22u64)?
+        put(mut tx, t, 3u64, 22u64)?
+        put(mut tx, t, 5u64, 17u64)
+    })?
+    let Committed(done) = saved else { return Error(MigrationFault) }
+    durable(mut db, done.ticket)?
+    let before = refusal_directory(directory)
+    let head = version(snapshot(db))
+    let result = preview_migration(db, tasks, None, code.describe(preview_law_schema))?
+    if let Some(_) = result.failure { return Error(MigrationFault) }
+    if list.len(result.changes) != 1u64 || list.len(result.backfills) != 1u64 {
+        return Error(MigrationFault)
+    }
+    let CollectionAdded(added) = result.changes[0] else { return Error(MigrationFault) }
+    let backfill = result.backfills[0]
+    let Conflict(keys) = backfill.outcome else { return Error(MigrationFault) }
+    if added.kind != 2u8 || added.name != "unique" || backfill.table != "rows" ||
+        backfill.index != Some("unique") || backfill.read != 3u64 || backfill.written != 2u64 ||
+        keys.first != b"\x00\x00\x00\x00\x00\x00\x00\x03" || keys.second != b"\x00\x00\x00\x00\x00\x00\x00\x09" ||
+        head != version(snapshot(db)) || !refusal_directory_unchanged(directory, before) {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}

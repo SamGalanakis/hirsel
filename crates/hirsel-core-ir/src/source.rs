@@ -1,6 +1,7 @@
 //! Current source bindings for native diagnostics, separate from semantic bodies.
 use hirsel_core_ids::DefPath;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 mod native;
 pub use native::*;
@@ -72,18 +73,21 @@ impl SourceMap {
         let files = self
             .files
             .iter()
-            .map(|file| match self.points.get(&file.path) {
-                Some(points) => FilePositions::Ordinals(points),
-                None => {
-                    let mut starts = vec![0];
-                    starts.extend(
-                        file.text
-                            .bytes()
-                            .enumerate()
-                            .filter_map(|(byte, b)| (b == b'\n').then_some(byte + 1)),
-                    );
-                    FilePositions::LineStarts(starts)
-                }
+            .map(|file| {
+                let positions = match self.points.get(&file.path) {
+                    Some(points) => FilePositions::Ordinals(points),
+                    None => {
+                        let mut starts = vec![0];
+                        starts.extend(
+                            file.text
+                                .bytes()
+                                .enumerate()
+                                .filter_map(|(byte, b)| (b == b'\n').then_some(byte + 1)),
+                        );
+                        FilePositions::LineStarts(starts)
+                    }
+                };
+                (Arc::from(file.path.as_str()), positions)
             })
             .collect();
         SourcePositions { map: self, files }
@@ -93,7 +97,7 @@ impl SourceMap {
 /// Position lookup for a borrowed source snapshot.
 pub struct SourcePositions<'a> {
     map: &'a SourceMap,
-    files: Vec<FilePositions<'a>>,
+    files: Vec<(Arc<str>, FilePositions<'a>)>,
 }
 
 enum FilePositions<'a> {
@@ -105,16 +109,30 @@ impl SourcePositions<'_> {
     /// Resolve an item-relative source offset. Lines and Unicode scalar
     /// columns start at one, and a tab counts as one.
     pub fn position(&self, item: &DefPath, start: u32) -> Option<(&SourceFile, u32, u32)> {
+        let (index, line, column) = self.item_position(item, start)?;
+        Some((&self.map.files[index], line, column))
+    }
+
+    pub(crate) fn annex_position(
+        &self,
+        item: &DefPath,
+        start: u32,
+    ) -> Option<(Arc<str>, u32, u32)> {
+        let (index, line, column) = self.item_position(item, start)?;
+        Some((Arc::clone(&self.files[index].0), line, column))
+    }
+
+    fn item_position(&self, item: &DefPath, start: u32) -> Option<(usize, u32, u32)> {
         let binding = self.map.items.get(item)?;
         let index = binding.file as usize;
         let offset = (binding.file_offset + start) as usize;
         let (line, column) = self.file_position(index, offset)?;
-        Some((&self.map.files[index], line, column))
+        Some((index, line, column))
     }
 
     /// Resolve a file-relative byte offset or annex ordinal.
     pub fn file_position(&self, index: usize, offset: usize) -> Option<(u32, u32)> {
-        let (line, column) = match &self.files[index] {
+        let (line, column) = match &self.files[index].1 {
             FilePositions::Ordinals(points) => *points.get(offset)?,
             FilePositions::LineStarts(starts) => {
                 let file = &self.map.files[index];
@@ -130,15 +148,26 @@ impl SourcePositions<'_> {
 /// The items a failure anchor in `module` names, outside core@1 (whose anchors
 /// a native unit never emits): the items whose first sites a run needs.
 pub fn anchored_items(module: &crate::Module) -> Vec<DefPath> {
-    let mut named = vec![false; module.items.len()];
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
-        let blocks = body.blocks.iter().map(|b| &b.anchor);
-        for anchor in body.inst_anchors.iter().chain(blocks).flatten() {
-            named[anchor.item.index()] = true;
-        }
+    let anchors = module
+        .functions
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .flat_map(|body| {
+            let blocks = body.blocks.iter().map(|b| &b.anchor);
+            body.inst_anchors.iter().chain(blocks).flatten()
+        });
+    named_items(&module.items, anchors)
+}
+
+pub(crate) fn named_items<'a>(
+    items: &[DefPath],
+    anchors: impl Iterator<Item = &'a crate::Anchor>,
+) -> Vec<DefPath> {
+    let mut named = vec![false; items.len()];
+    for anchor in anchors {
+        named[anchor.item.index()] = true;
     }
-    module
-        .items
+    items
         .iter()
         .zip(named)
         .filter(|(item, named)| *named && !item.package_is("core", "1"))

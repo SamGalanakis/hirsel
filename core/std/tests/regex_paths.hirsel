@@ -77,3 +77,14 @@ fn simple_unicode_word_includes_marks_and_letter_numbers() -> bool {
     let text = "é_Ⅷ"
     find(re, mut c, text, 0) == Some(Match(start: 0, end: 3)) && find(re, mut c, text, 3) == Some(Match(start: 4, end: 7))
 }
+
+// expect: run micro_regex() = true
+fn micro_regex() -> bool {
+    let empty = result.unwrap(new(""))
+    let mut ec = cache(empty, 0)
+    let parts = split(empty, mut ec, "éz")
+    let caps = result.unwrap(new("(?P<word>[a-z]+)([0-9])?"))
+    let mut cc = cache(caps, 0)
+    let rendered = replace(caps, mut cc, "ab3/cd", "${word}:$2:$$:$0:${missing}")
+    list.len(parts) == 4 && parts[0] == "" && parts[1] == "é" && parts[2] == "z" && parts[3] == "" && replace(empty, mut ec, "éz", "-") == "-é-z-" && rendered == "ab:3:$:ab3:/cd::$:cd:"
+}

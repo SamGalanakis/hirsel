@@ -5,7 +5,8 @@
 pub type BlobRef: codec + send {
     digest: Bytes,
     len: u64,
-    mime: String
+    mime: String,
+    excerpt: Option[String]
 }
 
 pub type Payload: codec + send = Inline(Bytes) | Blob(BlobRef)
@@ -20,7 +21,10 @@ pub type Call: codec + send {
 
 pub type Usage: codec + send {
     input: u64,
-    output: u64
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: u64
 }
 
 // model.answer: the complete, validated provider outcome.
@@ -56,7 +60,15 @@ pub type Patch: codec + send {
     tools: Option[List[ToolDef]]
 }
 
-pub type Entry: codec + send = User(String) | Inform(String) | Assistant(Answer) | ToolResult(String, Outcome) | System(Patch) | Reset(String) | Note(String, Bytes)
+// What the model is shown for a tool outcome, recorded with the result entry
+// (ADR 0120): resume, resend, forks and releases read it and never word the
+// outcome again.
+pub type Presented: codec + send {
+    text: String,
+    error: bool
+}
+
+pub type Entry: codec + send = User(String) | Inform(String) | Assistant(Answer) | ToolResult(String, Outcome, Presented) | System(Patch) | Note(String, Bytes)
 
 // ---- the harness tables ----
 pub type Narrow: codec + send = All | Only(List[String])
@@ -69,21 +81,50 @@ pub type SectionHash: codec + send {
 pub type Session: codec + send {
     model: String,
     tools_narrow: Narrow,
-    head_pos: u64,
+    admitted: List[String],
+    // The current agent frame's base; 0 is the root frame, which has no row.
+    frame: u64,
     next_pos: u64,
     active_run: Option[u64],
     next_run: u64,
+    next_seq: u64,
     active_sections_hashes: List[SectionHash],
     active_tools_hash: Bytes,
     active_tools_pos: Option[u64],
+    warm_left: u64,
+    warm: Option[WarmState],
 }
+
+pub type WarmState: codec + send = Waiting(EffectKey, runner.park.ParkId, u64) | Warming(EffectKey)
 
 pub type InboxKey: codec + send {
     caller: store.Caller,
     client_key: String
 }
 
-pub type Disposition: codec + send = Placed(u64) | Busy
+// Where an admitted item stands. Queued(seq) waits in the ingress; the drain
+// that takes it rewrites the inbox row to Placed(run) when it starts a run,
+// Joined(run) when an Early input joins the running run, or Applied when a
+// command applies. A resubmission answers the current row.
+pub type Disposition: codec + send = Placed(u64) | Queued(u64) | Joined(u64) | Applied
+
+// Early input steers the running run of the same caller at its next prepare;
+// NextTurn input waits for a turn boundary. Early input that no running run of
+// its caller can take is next-turn input by rule.
+pub type When: codec + send = Early | NextTurn
+
+// A session command applies alone at a turn boundary, never mid-turn, ahead of
+// the inputs queued with it.
+pub type Command: codec + send = Narrow(Narrow) | Compact(String)
+
+pub type Item: codec + send = Input(When, String) | Command(Command)
+
+// One admitted ingress item, keyed by the session's enqueue_seq. The submitter
+// is `key.caller`.
+pub type Lodged: codec + send {
+    key: InboxKey,
+    item: Item
+}
 
 pub type Received: codec + send {
     digest: Bytes,
@@ -92,7 +133,7 @@ pub type Received: codec + send {
 
 pub type Finish: codec + send = Answered | OutOfRounds | Stopped(String) | Cancelled
 
-pub type Phase: codec + send = Preparing | AwaitingModel(u64) | AnswerReady(u64) | AwaitingRound(u64, u64) | Finished(Finish)
+pub type Phase: codec + send = Preparing | AwaitingModel(u64) | AnswerReady(u64, u64) | AwaitingRound(u64, u64) | Finished(Finish)
 
 // Known spend is settled usage; reserved is the bound held for calls that may
 // still be charged; unresolved is a reservation whose call is in doubt.
@@ -107,12 +148,16 @@ pub type Run: codec + send {
     phase: Phase,
     round: u64,
     rounds_left: u64,
+    // Consecutive tool rounds in which no tool returned.
+    stalled: u64,
     spend: Spend
 }
 
 pub const MODEL: u8 = 0u8
 
 pub const TOOL: u8 = 1u8
+
+pub const WARM: u8 = 2u8
 
 pub type EffectKey: codec + send {
     run: u64,
@@ -122,24 +167,73 @@ pub type EffectKey: codec + send {
 }
 
 // The immutable logical cutoff of a model request. The worker builds the body
-// from entries[head_pos..=tail_pos] through a snapshot, off the write lock.
+// from the frame's seed and entries[frame..=tail_pos] through a snapshot, off
+// the write lock, leaving out the messages the sealed `omit` ranges cover.
 pub type Cutoff: codec + send {
-    head_pos: u64,
+    frame: u64,
     tail_pos: u64,
     route: String,
     policy: u64,
-    tools_pos: Option[u64]
+    tools_pos: Option[u64],
+    omit: List[Omit]
 }
+
+// An agent frame (ADR 0001): the prompt starts at `base` with `seed` as its
+// first message. The history is never rewritten; a frame only moves where the
+// prompt starts. Keyed by base, so one open per base, ever.
+pub type Frame: codec + send {
+    parent: u64,
+    reason: String,
+    seed: String
+}
+
+pub type FrameOpen: codec + send {
+    base: u64,
+    reason: String,
+    seed: String
+}
+
+// What the pressure and view hooks are shown at a prepare.
+pub type Pressure: codec + send {
+    frame: u64,
+    next_pos: u64,
+    run: u64,
+    round: u64
+}
+
+pub type Pressed: codec + send = Continue | OpenFrame(FrameOpen)
+
+// Positions from..=upto left out of one request's messages. System entries in
+// the range still fold.
+pub type Omit: codec + send {
+    from: u64,
+    upto: u64
+}
+
+pub const MAX_OMIT: u64 = 8u64
+
+// Consecutive tool rounds with no Returned outcome before the run stops.
+pub type NoProgress: send = Bounded(u64) | Unbounded
+
+// How often a model call that may already have been billed may be sent again
+// (crash resend, dropped stream, backoff retry). RequireGuarantee sends once;
+// BoundedDuplicate(n) allows n duplicates.
+pub type ChargeSafety: send = RequireGuarantee | BoundedDuplicate(u64)
 
 // Once dispatches at most one body. Repeatable(n) resends with the same key
 // up to n dispatches within the deadline.
 pub type Repeat: codec + send = Once | Repeatable(u64)
 
-pub type Receipt: codec + send = Model(Answer) | ModelFailed(String) | Tool(Outcome)
+// Retry delays in ModelFault are seconds. Store and runner clocks use milliseconds.
+pub const MAX_MODEL_BACKOFF_SECONDS: u64 = 60u64
+
+pub type ModelFault: codec + send = Throttled(String, u64) | Transient(String, u64) | ContextExceeded(String) | StreamDropped(String) | Rejected(String)
+
+pub type Receipt: codec + send = Model(Answer) | ModelFailed(ModelFault) | Tool(Outcome)
 
 // Held waits for an approval; Parked waits for `resume` after an Inside tool
 // returned Later.
-pub type EffectPhase: codec + send = Pending | Held | Parked | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
+pub type EffectPhase: codec + send = Pending | Held | Parked(runner.park.ParkId) | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
 
 pub type Effect: codec + send {
     cutoff: Cutoff,
@@ -149,10 +243,11 @@ pub type Effect: codec + send {
     phase: EffectPhase,
     trigger: Option[runner.triggers.Id],
     dispatches: u64,
+    stream: bool,
     reserve: u64,
 }
 
-pub type WaitKey: codec + send {
+pub type WaitKey: codec + key + send {
     run: u64,
     slot: u64,
     kind: u8,
@@ -160,24 +255,28 @@ pub type WaitKey: codec + send {
 }
 
 // An open approval holds its key and the wall-clock ms at which it expires.
-pub type Wait: codec + send = Open(Bytes, u64) | Decided(Bytes, bool) | Expired | Revoked
+pub type Wait: codec + send = Open(Bytes, u64, runner.park.ParkId) | Decided(Bytes, bool) | Expired | Revoked
 
 // The public Cover projection. Key 0 is the status row; key p + 1 is the
 // visible line of entry p.
 pub type View: codec + send = Status(String) | Line(String, String)
 
-pub type Handles: send {
+pub type Handles: shareable + send {
     session: store.Table[u64, Session],
     entries: store.Table[u64, Entry],
     inbox: store.Table[InboxKey, Received],
+    ingress: store.Table[u64, Lodged],
+    frames: store.Table[u64, Frame],
     runs: store.Table[u64, Run],
     effects: store.Table[EffectKey, Effect],
     waits: store.Table[WaitKey, Wait],
+    wakes: runner.park.Tables[Wake],
     views: store.Table[u64, View],
     readers: store.Table[Bytes, bool],
     fork_cuts: store.Table[u64, u64],
     mcp_catalog: store.Table[String, mcp_tools.Remote],
     triggers: runner.triggers.Tables,
+    source: release.Tables
 }
 
 fn session_name() -> String {
@@ -190,6 +289,10 @@ fn entries_name() -> String {
 
 fn inbox_name() -> String {
     "harness.inbox"
+}
+
+fn ingress_name() -> String {
+    "harness.ingress"
 }
 
 fn runs_name() -> String {
@@ -282,56 +385,40 @@ pub fn wait_key() -> std.codec.Key[WaitKey] {
 
 // Re-running the migration on a migrated store is a no-op, as for the
 // trigger tables, so a place reopens a store a host seeded.
-fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
+fn declare_table[K, V](mut d: store.Declare, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
+    let table = store.declare_table(mut d, name, key, value)?
+    store.finish(mut d, take table)
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    runner.triggers.migrate(mut phase)?
-    mcp_tools.migrate(mut phase)?
+pub fn declare_tables(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let trigger_tables = runner.triggers.declare_tables(mut d)?
+    let mcp_catalog = mcp_tools.declare_catalog(mut d)?
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
     let c_received: std.codec.Codec[Received] = std.codec.of()
-    let c_run: std.codec.Codec[Run] = std.codec.of()
-    let c_effect: std.codec.Codec[Effect] = std.codec.of()
-    let c_wait: std.codec.Codec[Wait] = std.codec.of()
-    let c_shown: std.codec.Codec[View] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec(session_name(), std.codec.key_u64(), c_session)))?
-    created(store.migration_create_table(mut phase, store.spec(entries_name(), std.codec.key_u64(), c_entry)))?
-    created(store.migration_create_table(mut phase, store.spec(inbox_name(), inbox_key(), c_received)))?
-    created(store.migration_create_table(mut phase, store.spec(runs_name(), std.codec.key_u64(), c_run)))?
-    created(store.migration_create_table(mut phase, store.spec(effects_name(), effect_key(), c_effect)))?
-    created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
-    created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))?
-    let c_reader: std.codec.Codec[bool] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("harness.readers", std.codec.key_bytes(), c_reader)))?
-    created(store.migration_create_table(mut phase, store.spec("harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())))
-}
-
-pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
-    let c_session: std.codec.Codec[Session] = std.codec.of()
-    let c_entry: std.codec.Codec[Entry] = std.codec.of()
-    let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
+    let c_frame: std.codec.Codec[Frame] = std.codec.of()
     let c_run: std.codec.Codec[Run] = std.codec.of()
     let c_effect: std.codec.Codec[Effect] = std.codec.of()
     let c_wait: std.codec.Codec[Wait] = std.codec.of()
     let c_shown: std.codec.Codec[View] = std.codec.of()
     let c_reader: std.codec.Codec[bool] = std.codec.of()
     Ok(Handles(
-        session: store.schema_table(schema, session_name(), std.codec.key_u64(), c_session)?,
-        entries: store.schema_table(schema, entries_name(), std.codec.key_u64(), c_entry)?,
-        inbox: store.schema_table(schema, inbox_name(), inbox_key(), c_received)?,
-        runs: store.schema_table(schema, runs_name(), std.codec.key_u64(), c_run)?,
-        effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
-        waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
-        views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
-        readers: store.schema_table(schema, "harness.readers", std.codec.key_bytes(), c_reader)?,
-        fork_cuts: store.schema_table(schema, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
-        mcp_catalog: mcp_tools.catalog(schema)?,
-        triggers: runner.triggers.tables(schema)?,
+        session: declare_table(mut d, session_name(), std.codec.key_u64(), c_session)?,
+        entries: declare_table(mut d, entries_name(), std.codec.key_u64(), c_entry)?,
+        inbox: declare_table(mut d, inbox_name(), inbox_key(), c_received)?,
+        ingress: declare_table(mut d, ingress_name(), std.codec.key_u64(), c_lodged)?,
+        frames: declare_table(mut d, "harness.frames", std.codec.key_u64(), c_frame)?,
+        runs: declare_table(mut d, runs_name(), std.codec.key_u64(), c_run)?,
+        effects: declare_table(mut d, effects_name(), effect_key(), c_effect)?,
+        waits: declare_table(mut d, waits_name(), wait_key(), c_wait)?,
+        wakes: runner.park.declare_tables(mut d, "harness.wakes", clone(trigger_tables))?,
+        views: declare_table(mut d, views_name(), std.codec.key_u64(), c_shown)?,
+        readers: declare_table(mut d, "harness.readers", std.codec.key_bytes(), c_reader)?,
+        fork_cuts: declare_table(mut d, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
+        mcp_catalog: take mcp_catalog,
+        triggers: take trigger_tables,
+        source: release.declare_tables(mut d)?,
     ))
 }
 
@@ -346,7 +433,9 @@ pub type Request: codec + send {
     system: List[String],
     tools: List[ToolDef],
     messages: List[Entry],
-    key: Bytes
+    key: Bytes,
+    stream: bool,
+    warm: bool
 }
 
 // What an Inside tool is given: its call's key, which `resume` takes, and its
@@ -361,18 +450,18 @@ pub type Invoke: codec + send {
 // place's reply), and the call stays parked until then.
 pub type Reply: codec + send = Now(Bytes) | Later
 
-pub type ToolRun[G: send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat) | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
+pub type ToolRun[G: send, App: inert + send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat, Option[StaticFn[fn(G, EffectKey) -> Result[Option[Bytes], Fault] waits]]) | Inside(StaticFn[fn(mut store.Tx, Handles, App, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
 
 // `rev` names the tool's behaviour in approval keys: raise it when the same
 // arguments would now do something else, so earlier approvals stop matching.
 // `repair` is a pure rewrite of the arguments that runs before the gates.
-pub type Tool[G: send]: send {
+pub type Tool[G: send, App: inert + send]: send {
     name: String,
     about: String,
     input: String,
     rev: u64,
     repair: Option[StaticFn[fn(Bytes) -> Result[Bytes, Fault]]],
-    run: ToolRun[G]
+    run: ToolRun[G, App]
 }
 
 // A gate's verdict. Verdicts fold by maximum, Pass < Hold < Deny, so adding
@@ -387,25 +476,25 @@ pub type Ask: codec + send {
     call: Call
 }
 
-pub type Gate: send {
+pub type Gate[App: inert + send]: send {
     name: String,
-    check: StaticFn[fn(store.Tx, Ask) -> Verdict]
+    check: StaticFn[fn(store.Tx, Handles, App, Ask) -> Verdict]
 }
 
 // A keyed system-prompt section, rendered from rows each time a request is
 // prepared. List order is prompt order. `None` removes it; a render that
 // fails or overruns keeps the text it showed last.
-pub type Section: send {
+pub type Section[App: inert + send]: send {
     key: String,
-    render: StaticFn[fn(store.Tx) -> Result[Option[String], store.Error]]
+    render: StaticFn[fn(store.Tx, Handles, App) -> Result[Option[String], store.Error]]
 }
 
 // Runs in the transaction that appends an entry, with the entry's position.
 // It may write its own rows and triggers. It cannot veto or edit the entry:
 // a reaction that fails has its writes rolled back and is recorded as a Note.
-pub type After: send {
+pub type After[App: inert + send]: send {
     name: String,
-    run: StaticFn[fn(mut store.Tx, u64, Entry) -> Result[(), Fault]]
+    run: StaticFn[fn(mut store.Tx, Handles, App, u64, Entry) -> Result[(), Fault]]
 }
 
 pub type Limits: send {
@@ -421,52 +510,72 @@ pub type Limits: send {
     section_bytes: u64,
     section_steps: u64,
     hold_ms: u64,
+    ingress: u64,
+    no_progress: NoProgress,
 }
 
-pub type Agent[G: send]: send {
+// The provider cache mode and the maximum refreshes per answered idle period.
+pub type KeepWarm: send {
+    cache: provider.CacheControl,
+    lifetime_ms: u64,
+    margin_ms: u64,
+    requests: u64
+}
+
+pub type Agent[G: send, App: inert + send]: send {
     name: String,
     route: String,
+    app: App,
     // The model gets a draft source when the effect has a preview target; it may
     // ignore it.
-    model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits],
-    model_repeat: Repeat,
+    model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits],
+    charge: ChargeSafety,
+    keep_warm: Option[KeepWarm],
+    hedged_model: Option[StaticFn[fn(G, take Request, mut Option[preview.Source], Hedge) -> Result[Answer, ModelFault] waits]],
+    // Words a settled outcome for the model, once, in the transaction that
+    // appends the result. Bounded like a gate; absent, failing, overrunning or
+    // oversized, the standard `worded` text is recorded instead.
+    presenter: Option[StaticFn[fn(Call, Outcome) -> Presented]],
+    // Asked once per prepare, read-only and bounded like a gate. An invalid
+    // open, a failure or an overrun counts as Continue.
+    pressure: Option[StaticFn[fn(store.Tx, Pressure) -> Pressed]],
+    // The per-request prompt view, sealed into the cutoff at prepare.
+    prompt_view: Option[StaticFn[fn(store.Tx, Pressure) -> List[Omit]]],
     // The app supplies object authority when a result outgrows the journal.
     store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
-    tools: List[Tool[G]],
+    tools: List[Tool[G, App]],
     mcp_peer: Option[StaticFn[fn(G, String) -> Option[mcp_tools.Peer]]],
-    gates: List[Gate],
-    sections: List[Section],
-    reactions: List[After],
+    gates: List[Gate[App]],
+    sections: List[Section[App]],
+    reactions: List[After[App]],
     limits: Limits,
 }
 
-pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
-    // Gates and sections read rows; opening a table alone takes over
-    // 10,000 steps.
-    inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64))
+pub fn agent[G: send, App: inert + send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits], take app: App) -> Agent[G, App] {
+    Agent(name: take name, route: take route, app: take app, model: model, charge: RequireGuarantee, keep_warm: None, hedged_model: None, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
+    inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64, no_progress: Bounded(3u64)))
 }
 
-pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
-    Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat))
+pub fn outside[G: send, App: inert + send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G, App] {
+    Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat, None))
 }
 
-pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) -> Tool[G] {
+pub fn inside[G: send, App: inert + send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Handles, App, Invoke) -> Result[Reply, Fault]]) -> Tool[G, App] {
     Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Inside(f))
 }
 
 // ---- wiring: the app's trigger targets, rebuilt in each transaction ----
-pub type Wake: codec + send = Kick | Deadline(EffectKey) | Expire(WaitKey)
+pub type Wake: codec + send = Kick | EffectDue(EffectKey) | ApprovalDue(WaitKey) | Warm(u64)
 
 pub type Refused: codec + send = NotAllowed | Conflict | TooLarge | Malformed(String) | Storage
 
 pub opaque type Wiring {
     entries: runner.triggers.Entries,
-    advance: runner.triggers.Entry[Wake],
+    advance: runner.triggers.Entry[runner.park.ParkId],
     effect: runner.triggers.Entry[EffectKey]
 }
 
-pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
+pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take runner.park.ParkId) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
     let a = runner.triggers.transact(advance_fn) ?=> |_| Malformed("advance target")
     let e = runner.triggers.granted(effect_fn) ?=> |_| Malformed("effect target")
     let mut allowed = runner.triggers.empty_entries()
@@ -495,7 +604,7 @@ fn armed(take r: Result[runner.triggers.Id, runner.triggers.Error]) -> Result[ru
 }
 
 fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
-    match kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    match kept(store.fetch(tx, h.session, 0u64))? {
         Some(take s) => Ok(take s),
         None => Error(Malformed("no session")),
     }
@@ -503,10 +612,10 @@ fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
 
 // Opens the singleton session. Idempotent: an existing session is kept.
 pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narrow: Narrow) -> Result[(), Refused] {
-    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    if let Some(_) = kept(store.fetch(tx, h.session, 0u64))? {
         return Ok(())
     }
-    let s = Session(model: take model, tools_narrow: take narrow, head_pos: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let s = Session(model: take model, tools_narrow: take narrow, admitted: list.new(), frame: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None)
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
@@ -518,25 +627,31 @@ pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narro
 pub type Prefix: codec + send {
     model: String,
     tools_narrow: Narrow,
-    head_pos: u64,
+    frame: u64,
+    frames: List[Framed],
     entries: List[Entry],
     cuts: List[u64]
+}
+
+pub type Framed: codec + send {
+    base: u64,
+    frame: Frame
 }
 
 // Exports entries[0..upto) through a snapshot. A cut inside a tool round (an
 // Assistant whose calls do not all have results before `upto`) conflicts: the
 // fork's first request would carry calls with no results.
-pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] {
-    let Some(s) = kept(store.get(snap, store.shape(h.session), 0u64))? else {
+pub fn export(read_handle: store.Reader, snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] waits {
+    let Some(s) = kept(store.get(read_handle, snap, h.session, 0u64))? else {
         return Error(Malformed("no session"))
     }
-    if upto > s.next_pos || s.head_pos > upto {
+    if upto > s.next_pos {
         return Error(Malformed("cut outside the log"))
     }
     let mut log: List[Entry] = list.with_capacity(upto)
     let mut open: List[String] = list.new()
     for p in 0u64 .. upto {
-        let Some(take e) = kept(store.get(snap, store.shape(h.entries), p))? else {
+        let Some(take e) = kept(store.get(read_handle, snap, h.entries, p))? else {
             return Error(Malformed("entry"))
         }
         match e {
@@ -546,7 +661,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
                     list.push(mut open, clone(c.id))
                 }
             },
-            ToolResult(id, _) => {
+            ToolResult(id, _, _) => {
                 let mut rest: List[String] = list.new()
                 for o in open {
                     if o != id {
@@ -566,12 +681,22 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     // itself a fork. A cut is the first row owned by the newer segment.
     let mut cuts: List[u64] = list.new()
     if upto > 0u64 {
-        let mut rows = kept(store.scan(snap, store.shape(h.fork_cuts), Unbounded, Included(upto)))?
-        while let Some((cut, _)) = kept(store.next(mut rows))? {
+        let mut rows = kept(store.scan(read_handle, snap, h.fork_cuts, Unbounded, Included(upto)))?
+        while let Some((cut, _)) = kept(store.next(read_handle, mut rows))? {
             list.push(mut cuts, cut)
         }
     }
-    Ok(Prefix(model: clone(s.model), tools_narrow: clone(s.tools_narrow), head_pos: s.head_pos, entries: take log, cuts: take cuts))
+    // The frames whose base the cut keeps; the latest one is the fork's frame.
+    let mut frames: List[Framed] = list.new()
+    let mut frame = 0u64
+    if upto > 0u64 {
+        let mut rows = kept(store.scan(read_handle, snap, h.frames, Unbounded, Excluded(upto)))?
+        while let Some((base, f)) = kept(store.next(read_handle, mut rows))? {
+            list.push(mut frames, Framed(base: base, frame: clone(f)))
+            frame = base
+        }
+    }
+    Ok(Prefix(model: clone(s.model), tools_narrow: clone(s.tools_narrow), frame: frame, frames: take frames, entries: take log, cuts: take cuts))
 }
 
 // Seeds an empty session from a prefix: its entries and their visible lines,
@@ -579,11 +704,14 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
 // they wrote in the parent stays there. The section and tool hashes start
 // empty, so the fork's first prepare appends a baseline.
 pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused] {
-    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    if let Some(_) = kept(store.fetch(tx, h.session, 0u64))? {
         return Error(Conflict)
     }
-    let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log, cuts: take cuts) = take p
-    let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None, next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let Prefix(model: take model, tools_narrow: take narrow, frame: frame, frames: take frames, entries: take log, cuts: take cuts) = take p
+    for f in frames {
+        kept(store.put(mut tx, h.frames, f.base, clone(f.frame)))?
+    }
+    let mut s = Session(model: take model, tools_narrow: take narrow, admitted: list.new(), frame: frame, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None)
     for e in log {
         let _ = put_entry(mut tx, h, mut s, e)?
     }

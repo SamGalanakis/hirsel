@@ -1,0 +1,96 @@
+pub type SqlError {
+    sqlstate: String,
+    severity: String,
+    message: String,
+    detail: Option[String],
+    constraint: Option[String],
+    table: Option[String],
+    column: Option[String],
+    hint: Option[String],
+    position: Option[u32]
+}
+
+fn diagnostic(b: Bytes) -> Result[SqlError, Error] {
+    let mut at: u64 = 0
+    let mut d = SqlError(sqlstate: string.from(""), severity: string.from(""), message: string.from(""), detail: None, constraint: None, table: None, column: None, hint: None, position: None)
+    let mut seen: Inline[bool, 256] =[false; 256]
+    loop {
+        let start = end_at(b, mut at, 1)?
+        let tag = b[start]
+        if tag == 0 {
+            break
+        }
+        let index: u64 = int.widen(tag)
+        if seen[index] {
+            return Error(fields())
+        }
+        seen[index] = true
+        let low = at
+        let high = cstring_end(b, mut at)?
+        let raw = list.slice(b, low, high)
+        match tag {
+            b'C' => {
+                if list.len(raw) != 5 {
+                    return Error(fields())
+                }
+                for byte in raw {
+                    if !(b'0' <= byte && byte <= b'9' || b'A' <= byte && byte <= b'Z') {
+                        return Error(fields())
+                    }
+                }
+                d.sqlstate = text(raw)?
+            },
+            b'V' => {
+                d.severity = text(raw)?
+            },
+            b'S' => {
+                if !seen[int.widen(b'V')] {
+                    d.severity = text(raw)?
+                }
+            },
+            b'M' => {
+                d.message = text(raw)?
+            },
+            b'D' => {
+                d.detail = Some(text(raw)?)
+            },
+            b'n' => {
+                d.constraint = Some(text(raw)?)
+            },
+            b't' => {
+                d.table = Some(text(raw)?)
+            },
+            b'c' => {
+                d.column = Some(text(raw)?)
+            },
+            b'H' => {
+                d.hint = Some(text(raw)?)
+            },
+            b'P' => match std.int.parse_decimal_span(b, low, high, 4294967295u64) {
+                Ok(n) => {
+                    if n == 0 {
+                        return Error(fields())
+                    }
+                    d.position = Some(int.narrow(n))
+                },
+                Error(_) => return Error(fields()),
+            },
+            _ => {},
+        }
+    }
+    consumed(b, at)?
+    if !seen[int.widen(b'C')] || !seen[int.widen(b'M')] || !(seen[int.widen(b'V')] || seen[int.widen(b'S')]) {
+        return Error(fields())
+    }
+    Ok(take d)
+}
+
+fn is_fatal(e: SqlError) -> bool {
+    let severity = string.as_bytes(e.severity)
+    equal(severity, b"FATAL") || equal(severity, b"PANIC")
+}
+
+fn startup_error(b: Bytes) -> Result[(), Error] {
+    let e = diagnostic(b)?
+    Error(sql_error(take e))
+}

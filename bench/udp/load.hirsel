@@ -1,0 +1,222 @@
+const S1_BYTES: u64 = 1200
+const S2_BYTES: u64 = 200
+const BIN_NS: u64 = 1000
+const BINS: u64 = 65536
+const FINE_BINS: u64 = 60000
+const TAIL_BIN_NS: u64 = 200000
+
+type ReceiveJob: cross {
+    socket: UdpSocket,
+    clock: Clock,
+    epoch: u64,
+    size: u64,
+    stop: u64
+}
+
+type Sample: cross {
+    datagrams: u64,
+    delays: List[u64]
+}
+
+fn latency(bins: List[u64], target: u64) -> u64 {
+    let mut seen = 0u64
+    for at in 0u64 .. BINS {
+        seen = seen + bins[at]
+        if seen >= target {
+            return if at < FINE_BINS {
+                (at + 1) * BIN_NS
+            } else {
+                FINE_BINS * BIN_NS + (at + 1 - FINE_BINS) * TAIL_BIN_NS
+            }
+        }
+    }
+    fail("missing latency samples")
+}
+
+fn receive(take job: ReceiveJob) -> Sample waits {
+    let ReceiveJob(socket: take incoming, clock, epoch, size, stop) = take job
+    let mut socket = take incoming
+    let mut data: Bytes = list.with_capacity(64 * size)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    let mut delays: List[u64] = list.with_capacity(BINS)
+    list.fill(mut delays, BINS, 0)
+    let mut datagrams = 0u64
+    let until = At(clock, stop)
+    while host.mono_ns(clock) < stop {
+        list.clear(mut data)
+        list.clear(mut packets)
+        let count = match host.udp_recv(mut socket, mut data, mut packets, until) {
+            Ok(n) => n,
+            Error(TimedOut) => break,
+            Error(_) => fail("UDP receive failed")
+        }
+        let now = host.mono_ns(clock) + epoch
+        if count != list.len(packets) || list.len(data) != count * size {
+            fail("UDP batch is inconsistent")
+        }
+        for packet in packets {
+            let UdpPacket(peer: _, at, len, truncated, ecn: _) = packet
+            if len != size || truncated {
+                fail("UDP packet is incomplete")
+            }
+            let sent: u64 = list.word_le(data, at)
+            if sent > now {
+                fail("UDP packet timestamp is in the future")
+            }
+            let delay = now - sent
+            let bin = if delay < FINE_BINS * BIN_NS {
+                delay / BIN_NS
+            } else {
+                FINE_BINS + (delay - FINE_BINS * BIN_NS) / TAIL_BIN_NS
+            }
+            if bin >= BINS {
+                fail("UDP packet latency exceeds histogram")
+            }
+            let hits = delays[bin] + 1
+            let _ = list.set(mut delays, bin, hits)
+        }
+        datagrams = datagrams + count
+    }
+    Sample(datagrams, delays: take delays)
+}
+
+fn merge(mut total: Sample, sample: Sample) {
+    total.datagrams = total.datagrams + sample.datagrams
+    for at in 0u64 .. BINS {
+        let combined = total.delays[at] + sample.delays[at]
+        let _ = list.set(mut total.delays, at, combined)
+    }
+}
+
+fn number(mut line: String, value: u64) {
+    string.push_char(mut line, ' ')
+    string.push_u64(mut line, value)
+}
+
+fn print_sample(out: Stdout, sample: Sample) waits {
+    let count = sample.datagrams
+    if count == 0 {
+        fail("UDP receiver delivered no datagrams")
+    }
+    let mut line = string.from("RECV")
+    number(mut line, count)
+    number(mut line, latency(sample.delays, (count * 99 + 99) / 100))
+    number(mut line, latency(sample.delays, (count * 999 + 999) / 1000))
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+}
+
+fn standalone(net: Net, clock: Clock, out: Stdout, to: Addr, stop: u64, epoch: u64, high_rate: bool) waits {
+    let options = if high_rate {
+        UdpOptions(slots: 8, slot_bytes: 65792)
+    } else {
+        UdpOptions(slots: 32, slot_bytes: 1536)
+    }
+    let (take socket, _) = result.unwrap(host.udp_bind(net, to, options))
+    result.unwrap(stdout.write(out, "READY\n"))
+    let sample = receive(ReceiveJob(socket: take socket, clock, epoch, size: if high_rate { S1_BYTES } else { S2_BYTES }, stop))
+    print_sample(out, sample)
+}
+
+fn group(net: Net, clock: Clock, tasks: Tasks, out: Stdout, to: Addr, stop: u64, epoch: u64) waits {
+    let options = UdpOptions(slots: 32, slot_bytes: 1536)
+    let mut members: List[UdpSocket] = list.with_capacity(8)
+    result.unwrap(host.udp_bind_group(net, to, options, 8, Hash, mut members))
+    let mut remote: List[Task[Sample]] = list.with_capacity(4)
+    for _ in 0u64 .. 4u64 {
+        let socket = option.unwrap(list.pop(mut members))
+        let job = ReceiveJob(socket: take socket, clock, epoch, size: S2_BYTES, stop)
+        let child = result.unwrap(task.spawn_unit(tasks, bytes 1048576, take job, receive))
+        list.push(mut remote, take child)
+    }
+    let mut local: List[Task[Sample]] = list.with_capacity(4)
+    for _ in 0u64 .. 4u64 {
+        let socket = option.unwrap(list.pop(mut members))
+        let job = ReceiveJob(socket: take socket, clock, epoch, size: S2_BYTES, stop)
+        let child = task.spawn(tasks, bytes 1048576, take job, receive)
+        list.push(mut local, take child)
+    }
+    result.unwrap(stdout.write(out, "READY\n"))
+    let mut delays: List[u64] = list.with_capacity(BINS)
+    list.fill(mut delays, BINS, 0)
+    let mut total = Sample(datagrams: 0, delays: take delays)
+    for _ in 0u64 .. 4u64 {
+        let worker = option.unwrap(list.pop(mut local))
+        let sample = result.unwrap(task.join(take worker))
+        print_sample(out, sample)
+        merge(mut total, sample)
+    }
+    for _ in 0u64 .. 4u64 {
+        let worker = option.unwrap(list.pop(mut remote))
+        let sample = result.unwrap(task.join(take worker))
+        print_sample(out, sample)
+        merge(mut total, sample)
+    }
+    print_sample(out, total)
+    host.sleep_until(clock, host.mono_ns(clock) + 5000000u64)
+}
+
+fn transmit(net: Net, clock: Clock, out: Stdout, to: Addr, start: u64, epoch: u64, packets: u64) waits {
+    let mut socket = result.unwrap(host.udp_open(net, false, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let mut data: Bytes = list.with_capacity(64 * S1_BYTES)
+    list.fill(mut data, 64 * S1_BYTES, 0)
+    let mut tx: List[UdpTx] = list.with_capacity(64)
+    for at in 0u64 .. 64u64 {
+        list.push(mut tx, UdpTx(to, at: at * S1_BYTES, len: S1_BYTES, ecn: 0))
+    }
+    let mut sent = 0u64
+    result.unwrap(stdout.write(out, "READY\n"))
+    while sent < packets {
+        let at = start + sent * 1000u64
+        let mut now = host.mono_ns(clock)
+        while now < at {
+            now = host.mono_ns(clock)
+        }
+        for index in 0u64 .. 64u64 {
+            list.set_word_le(mut data, index * S1_BYTES, now + epoch)
+        }
+        let committed = result.unwrap(host.udp_send(mut socket, data, tx, Never))
+        if committed != 64 {
+            fail("UDP sender committed a partial batch")
+        }
+        sent = sent + committed
+    }
+    let mut line = string.from("SENT")
+    number(mut line, sent)
+    number(mut line, host.mono_ns(clock) - start)
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+}
+
+pub fn main(net: Net, clock: Clock, tasks: Tasks, input: Stdin, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(port_text) = args.get(argv, 1) else {
+        return Error(Exit(status: 2))
+    }
+    let port: u16 = result.unwrap(int.parse(port_text))
+    let mut schedule: Bytes = list.with_capacity(16)
+    while list.len(schedule) < 16 {
+        if result.unwrap(stdin.read(input, mut schedule, Never)) == 0 {
+            fail("missing controller clock schedule")
+        }
+    }
+    let epoch: u64 = list.word_le(schedule, 0)
+    let at: u64 = list.word_le(schedule, 8)
+    let to = Addr(ip: V4(0x7f000001), port)
+    if mode == "tx" {
+        let Some(count_text) = args.get(argv, 2) else {
+            return Error(Exit(status: 2))
+        }
+        let packets: u64 = result.unwrap(int.parse(count_text))
+        transmit(net, clock, out, to, at, epoch, packets)
+    } else if mode == "group" {
+        group(net, clock, tasks, out, to, at, epoch)
+    } else if mode == "s1" || mode == "s2" {
+        standalone(net, clock, out, to, at, epoch, mode == "s1")
+    } else {
+        return Error(Exit(status: 2))
+    }
+    Ok(())
+}

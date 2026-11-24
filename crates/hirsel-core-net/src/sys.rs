@@ -37,6 +37,7 @@ mod linux {
         epoll_ctl, epoll_event, epoll_wait, eventfd, fdatasync, getrandom, pipe2, socket,
         socketpair,
     };
+    pub use libc::{GRND_NONBLOCK, mmsghdr, recvmmsg, sendmmsg};
     pub use libc::{RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS};
 
     /// `openat2(2)` with `how.resolve = resolve`. Returns the new descriptor, or -1 with errno.
@@ -390,6 +391,9 @@ mod macos {
 
     /// # Safety
     /// As Linux `getrandom(2)`: `buf` has `len` writable bytes.
+    /// Accepted and ignored: macOS's entropy source never blocks.
+    pub const GRND_NONBLOCK: c_uint = 1;
+
     pub unsafe fn getrandom(buf: *mut c_void, len: size_t, _flags: c_uint) -> ssize_t {
         let mut done = 0;
         while done < len {
@@ -849,5 +853,74 @@ mod macos {
                 return -1;
             }
         }
+    }
+
+    /// Linux's `mmsghdr`: one message of a batch and the bytes it moved.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct mmsghdr {
+        pub msg_hdr: libc::msghdr,
+        pub msg_len: c_uint,
+    }
+
+    /// `sendmmsg` as one `sendmsg` per message: the messages sent before the
+    /// first that fails, or that failure when it is the first.
+    pub unsafe fn sendmmsg(
+        fd: c_int,
+        messages: *mut mmsghdr,
+        count: c_uint,
+        flags: c_int,
+    ) -> c_int {
+        for i in 0..count as usize {
+            // SAFETY: the caller passes `count` initialized messages.
+            let message = unsafe { &mut *messages.add(i) };
+            let sent = unsafe { libc::sendmsg(fd, &message.msg_hdr, flags) };
+            if sent < 0 {
+                return if i == 0 { -1 } else { i as c_int };
+            }
+            message.msg_len = sent as c_uint;
+        }
+        count as c_int
+    }
+
+    /// `recvmmsg` as one `recvmsg` per message, under the same rule as
+    /// [`sendmmsg`]. A timeout is not supported: callers pass none. Under
+    /// `MSG_TRUNC` a message's length is the datagram's, as on Linux, read
+    /// beforehand with `SO_NREAD`.
+    pub unsafe fn recvmmsg(
+        fd: c_int,
+        messages: *mut mmsghdr,
+        count: c_uint,
+        flags: c_int,
+        _timeout: *mut libc::timespec,
+    ) -> c_int {
+        for i in 0..count as usize {
+            // SAFETY: the caller passes `count` initialized messages.
+            let message = unsafe { &mut *messages.add(i) };
+            let mut pending: c_int = 0;
+            let mut size = size_of::<c_int>() as socklen_t;
+            // SAFETY: SO_NREAD writes one int, the next datagram's length.
+            let known = flags & libc::MSG_TRUNC != 0
+                && unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_NREAD,
+                        (&raw mut pending).cast(),
+                        &mut size,
+                    )
+                } == 0;
+            let received =
+                unsafe { libc::recvmsg(fd, &mut message.msg_hdr, flags & !libc::MSG_TRUNC) };
+            if received < 0 {
+                return if i == 0 { -1 } else { i as c_int };
+            }
+            message.msg_len = if known && pending as isize > received {
+                pending as c_uint
+            } else {
+                received as c_uint
+            };
+        }
+        count as c_int
     }
 }

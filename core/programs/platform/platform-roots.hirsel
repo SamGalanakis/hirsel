@@ -1,0 +1,68 @@
+// The collection roots, from one snapshot: each group's current and retained assemblies,
+// NEW's assembly of each Preparing, Pending or Undecided deploy (OLD's is the group's
+// current one, so both choices stay), and each unexpired recording pin's. A Failed or
+// Installed row is history and roots nothing. A read error gives no roots at all.
+fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] waits {
+    let read_handle = result.unwrap(store.reader(h.db, 0u64))
+    let snap = store.snapshot(h.db)
+    let mut roots: List[Bytes] = list.new()
+    {
+        let Ok(take scanned) = store.scan(read_handle, snap, h.t.groups, Unbounded, Unbounded) else {
+            return Error("groups")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(read_handle, mut rows) {
+                Ok(Some((_, g))) => {
+                    // A registering group has no assembly yet.
+                    if list.len(g.assembly) > 0u64 {
+                        list.push(mut roots, clone(g.assembly))
+                    }
+                    for kept in g.retained {
+                        list.push(mut roots, clone(kept))
+                    }
+                },
+                Ok(None) => break,
+                Error(_) => return Error("groups"),
+            }
+        }
+    }
+    {
+        let Ok(take scanned) = store.scan(read_handle, snap, h.t.deploys, Unbounded, Unbounded) else {
+            return Error("deploys")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(read_handle, mut rows) {
+                Ok(Some((_, d))) => match d.outcome {
+                    Preparing => list.push(mut roots, clone(d.assembly)),
+                    Pending => list.push(mut roots, clone(d.assembly)),
+                    Undecided(_) => list.push(mut roots, clone(d.assembly)),
+                    _ => (),
+                },
+                Ok(None) => break,
+                Error(_) => return Error("deploys"),
+            }
+        }
+    }
+    {
+        let Ok(take scanned) = store.scan(read_handle, snap, h.t.pins, Unbounded, Unbounded) else {
+            return Error("pins")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(read_handle, mut rows) {
+                Ok(Some((_, pin))) => {
+                    if pin.expires > now_s {
+                        list.push(mut roots, clone(pin.assembly))
+                    }
+                },
+                Ok(None) => break,
+                Error(_) => return Error("pins"),
+            }
+        }
+    }
+    Ok(take roots)
+}
+
+// A describe, preview or prepare child of a deploy: no store, listener or endpoint.

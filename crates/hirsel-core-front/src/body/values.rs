@@ -175,8 +175,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let Some(charge) = self.konst(u64t, len.next_multiple_of(8), n) else {
                 return (ty, None);
             };
-            // MEM-24: both carriers admit a List[u8] of capacity len, rounded
-            // up to eight. The heap block uses the rounded size for word stores.
+            // MEM-24 gives the reference charge for both carriers.
             let block = self.value(Ty::Ptr);
             let Some(size) = (if frozen {
                 self.konst(u64t, 0, n)
@@ -217,37 +216,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             self.raise_unless(admitted, charge, available, n);
+            let data = self.e.static_bytes(&bytes);
+            let source = self.value(Ty::Ptr);
+            self.inst(
+                Inst::ReadStatic {
+                    result: source,
+                    data,
+                },
+                n,
+            );
             if frozen {
-                let data = self.e.static_bytes(&bytes);
-                let value = self.value(Ty::Ptr);
+                ok(self, source, Some(block));
+            } else {
+                let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+                let from = self.address(AddressBase::Value(source), &[], byte, n);
+                let to = self.address(AddressBase::Value(block), &[], byte, n);
                 self.inst(
-                    Inst::ReadStatic {
-                        result: value,
-                        data,
+                    Inst::Copy {
+                        to,
+                        from,
+                        bytes: length,
                     },
                     n,
                 );
-                ok(self, value, Some(block));
-            } else {
-                // The bytes as little-endian words (memory.md: scalars are little-endian),
-                // the last one zero-padded inside the rounded block.
-                for (k, word) in bytes.chunks(8).enumerate() {
-                    let mut w = [0u8; 8];
-                    w[..word.len()].copy_from_slice(word);
-                    let (Some(offset), Some(value)) = (
-                        self.konst(u64t, 8 * k as u64, n),
-                        self.konst(u64t, u64::from_le_bytes(w), n),
-                    ) else {
-                        return (ty, None);
-                    };
-                    let at = self.address(
-                        AddressBase::Value(block),
-                        &[Step::Byte(offset)],
-                        PlaceTy::Value(u64t),
-                        n,
-                    );
-                    self.inst(Inst::Store { address: at, value }, n);
-                }
                 ok(self, block, None);
             }
         }

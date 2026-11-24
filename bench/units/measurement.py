@@ -11,7 +11,7 @@ import signal
 import subprocess
 import time
 
-from receipt import measurement_slot
+from timing_shield import hold as timing_hold
 
 MEASUREMENT_SECONDS = 240
 IDLE_LIMIT = .05
@@ -183,8 +183,7 @@ def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
             if max(busy.values()) < IDLE_LIMIT:
                 locks = ExitStack()
                 try:
-                    for path in lock_paths:
-                        locks.enter_context(measurement_slot(Path(path), blocking=False))
+                    locks.enter_context(timing_hold(*lock_paths, blocking=False))
                 except BlockingIOError:
                     locks.close()
                 except BaseException:

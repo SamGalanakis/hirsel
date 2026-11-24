@@ -1,0 +1,464 @@
+type DirectoryInfo {
+    offset: u64,
+    end: u64,
+    count: u64,
+}
+
+fn directory_info(size: u64, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[Option[DirectoryInfo], limits.Error] waits {
+    if size < 22 {
+        return Ok(None())
+    }
+    let width = order.min(size, 22 + MAX16)
+    let start = size - width
+    let tail = limits.fetch(mut budget, size, start, width, source)?
+    let mut i = width - 22
+    while true {
+        let signature: u32 = list.word_le(tail, i)
+        if signature == END && u16_at(tail, i + 20) == width - i - 22 {
+            break
+        }
+        if i == 0 {
+            return Ok(None())
+        }
+        i -= 1
+    }
+    let eocd = start + i
+    let disk = u16_at(tail, i + 4)
+    let central_disk = u16_at(tail, i + 6)
+    if disk != 0 || central_disk != 0 {
+        return Error(Unsupported)
+    }
+    let disk_count = u16_at(tail, i + 8)
+    let count = u16_at(tail, i + 10)
+    let length = u32_at(tail, i + 12)
+    let offset = u32_at(tail, i + 16)
+    if eocd >= 20 {
+        let locator = limits.fetch(mut budget, size, eocd - 20, 20, source)?
+        let signature: u32 = list.word_le(locator, 0)
+        if signature == LOCATOR64 {
+            return Ok(Some(zip64_directory(locator, eocd - 20, disk_count, count, length, offset, mut budget, source)?))
+        }
+    }
+    if disk_count != count || offset > eocd || length != eocd - offset || count == MAX16 || offset == MAX32 || length == MAX32 {
+        return Error(Invalid)
+    }
+    Ok(Some(DirectoryInfo(offset: offset, end: eocd, count: count)))
+}
+
+fn zip64_directory(locator: Bytes, end: u64, disk_count: u64, count: u64, length: u64, offset: u64, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[DirectoryInfo, limits.Error] waits {
+    if u32_at(locator, 4) != 0 || u32_at(locator, 16) != 1 {
+        return Error(Unsupported)
+    }
+    let at: u64 = list.word_le(locator, 8)
+    let record = limits.fetch(mut budget, end, at, 56, source)?
+    let signature: u32 = list.word_le(record, 0)
+    let record_size: u64 = list.word_le(record, 4)
+    if signature != END64 || record_size != end - at - 12 {
+        return Error(Invalid)
+    }
+    if u32_at(record, 16) != 0 || u32_at(record, 20) != 0 {
+        return Error(Unsupported)
+    }
+    let disk64: u64 = list.word_le(record, 24)
+    let count64: u64 = list.word_le(record, 32)
+    let length64: u64 = list.word_le(record, 40)
+    let offset64: u64 = list.word_le(record, 48)
+    if count64 != disk64 || offset64 > at || length64 != at - offset64 {
+        return Error(Invalid)
+    }
+    if (count != MAX16 && count != count64) || (disk_count != MAX16 && disk_count != disk64) || (length != MAX32 && length != length64) || (offset != MAX32 && offset != offset64) {
+        return Error(Invalid)
+    }
+    Ok(DirectoryInfo(offset: offset64, end: at, count: count64))
+}
+
+fn central(at: u64, end: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[(Record, u64), limits.Error] waits {
+    let fixed = limits.fetch(mut budget, end, at, 46, source)?
+    let signature: u32 = list.word_le(fixed, 0)
+    if signature != CENTRAL {
+        return Error(Invalid)
+    }
+    let flags: u16 = list.word_le(fixed, 8)
+    let method = method_from(u16_at(fixed, 10))?
+    check_flags(flags, method)?
+    let name_width = u16_at(fixed, 28)
+    let extra_width = u16_at(fixed, 30)
+    let comment_width = u16_at(fixed, 32)
+    let data = limits.fetch(mut budget, end, at + 46, name_width + extra_width, source)?
+    let next = at + 46 + list.len(data)
+    if comment_width > end - next {
+        return Error(Truncated)
+    }
+    let name: Bytes = clone(list.slice(data, 0, name_width))
+    check_name(name, flags, caps)?
+    let nums = Numbers(size: u32_at(fixed, 24), packed: u32_at(fixed, 20), offset: u32_at(fixed, 42), disk: u16_at(fixed, 34))
+    let numbers = sizes64(nums, list.slice(data, name_width, list.len(data)), mut budget)?
+    let kind = entry_kind(name, fixed[5], u32_at(fixed, 38))?
+    let record = Record(name: take name, kind: kind, method: method, flags: flags, crc: list.word_le(fixed, 16), numbers: numbers, wide: nums.size == MAX32 || nums.packed == MAX32)
+    Ok((take record, next + comment_width))
+}
+
+fn local(at: u64, end: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[(Record, u64), limits.Error] waits {
+    let fixed = limits.fetch(mut budget, end, at, 30, source)?
+    let signature: u32 = list.word_le(fixed, 0)
+    if signature != LOCAL {
+        return Error(Invalid)
+    }
+    let flags: u16 = list.word_le(fixed, 6)
+    let method = method_from(u16_at(fixed, 8))?
+    check_flags(flags, method)?
+    let name_width = u16_at(fixed, 26)
+    let extra_width = u16_at(fixed, 28)
+    let data = limits.fetch(mut budget, end, at + 30, name_width + extra_width, source)?
+    let name: Bytes = clone(list.slice(data, 0, name_width))
+    check_name(name, flags, caps)?
+    let nums = Numbers(size: u32_at(fixed, 22), packed: u32_at(fixed, 18), offset: 0, disk: 0)
+    let numbers = sizes64(nums, list.slice(data, name_width, list.len(data)), mut budget)?
+    let kind: limits.Kind = if slash_end(name) {
+        Folder
+    } else {
+        Regular
+    }
+    let record = Record(name: take name, kind: kind, method: method, flags: flags, crc: list.word_le(fixed, 14), numbers: numbers, wide: nums.size == MAX32 || nums.packed == MAX32)
+    Ok((take record, at + 30 + list.len(data)))
+}
+
+fn descriptor_matches(data: Bytes, at: u64, rec: Record, wide: bool) -> bool {
+    let crc: u32 = list.word_le(data, at)
+    if crc != rec.crc {
+        return false
+    }
+    if wide {
+        let packed: u64 = list.word_le(data, at + 4)
+        let size: u64 = list.word_le(data, at + 12)
+        return packed == rec.numbers.packed && size == rec.numbers.size
+    }
+    u32_at(data, at + 4) == rec.numbers.packed && u32_at(data, at + 8) == rec.numbers.size
+}
+
+fn descriptor_end(rec: Record, wide: bool, at: u64, end: u64, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[u64, limits.Error] waits {
+    let width: u64 = if wide {
+        20
+    } else {
+        12
+    }
+    if at > end || end - at < width {
+        return Error(Truncated)
+    }
+    let data = limits.fetch(mut budget, end, at, width, source)?
+    if descriptor_matches(data, 0, rec, wide) {
+        return Ok(at + width)
+    }
+    let signature: u32 = list.word_le(data, 0)
+    if signature == DESCRIPTOR {
+        let rest = limits.fetch(mut budget, end, at + width, 4, source)?
+        let mut fields: Bytes = clone(list.slice(data, 4, width))
+        list.append(mut fields, rest)
+        if descriptor_matches(fields, 0, rec, wide) {
+            return Ok(at + width + 4)
+        }
+    }
+    Error(Invalid)
+}
+
+fn location(rec: Record, end: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[Location, limits.Error] waits {
+    let (local_rec, body) = local(rec.numbers.offset, end, caps, mut budget, source)?
+    if local_rec.name != rec.name || local_rec.method != rec.method || local_rec.flags != rec.flags {
+        return Error(Invalid)
+    }
+    let size = rec.numbers.size
+    let packed = rec.numbers.packed
+    if packed > end - body {
+        return Error(Overlap)
+    }
+    let data_end = body + packed
+    let has_descriptor = (rec.flags & 8) != 0
+    if (!has_descriptor || local_rec.crc != 0) && local_rec.crc != rec.crc {
+        return Error(Invalid)
+    }
+    if (!has_descriptor || local_rec.numbers.size != 0) && local_rec.numbers.size != size {
+        return Error(Invalid)
+    }
+    if (!has_descriptor || local_rec.numbers.packed != 0) && local_rec.numbers.packed != packed {
+        return Error(Invalid)
+    }
+    let record_end = if has_descriptor {
+        descriptor_end(rec, rec.wide || local_rec.wide, data_end, end, mut budget, source)?
+    } else {
+        data_end
+    }
+    Ok(Location(body: body, end: record_end))
+}
+
+fn read_directory(dir: DirectoryInfo, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    if dir.count > caps.entries {
+        return Error(CountLimit)
+    }
+    if dir.count > (dir.end - dir.offset) / 46 {
+        return Error(Truncated)
+    }
+    let mut records: List[Record] = list.with_capacity(dir.count)
+    let mut at = dir.offset
+    for _ in 0u64 .. dir.count {
+        let (take record, next) = central(at, dir.end, caps, mut budget, source)?
+        verify_entry(record, caps, mut budget)?
+        list.push(mut records, take record)
+        at = next
+    }
+    if at != dir.end {
+        return Error(Invalid)
+    }
+    list.sort_stable(mut records, scoped fn(a: Record, b: Record) -> Order {
+        order.compare(a.numbers.offset, b.numbers.offset)
+    })
+    let mut locations: List[Location] = list.with_capacity(dir.count)
+    let mut previous = 0u64
+    for record in records {
+        limits.record_start(record.numbers.offset, previous, dir.offset)?
+        let span = location(record, dir.offset, caps, mut budget, source)?
+        previous = span.end
+        list.push(mut locations, span)
+    }
+    for i in 0u64 .. dir.count {
+        read_entry(records[i], locations[i].body, caps, mut budget, source, receive)?
+    }
+    Ok(())
+}
+
+type Decoded {
+    packed: u64,
+    size: u64,
+    crc: u32,
+}
+
+fn copy_stored(start: u64, end: u64, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[Decoded, limits.Error] waits {
+    let mut crc = 0u32
+    let mut at = start
+    while at < end {
+        let n = order.min(CHUNK, end - at)
+        let data = limits.fetch(mut budget, end, at, n, source)?
+        crc = std.crc32.update(crc, data, 0, n)
+        sink(data)?
+        at += n
+    }
+    Ok(Decoded(packed: end - start, size: end - start, crc: crc))
+}
+
+fn decompress(method: Method, start: u64, end: u64, max_window: u64, max_output: u64, over_limit: limits.Error, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[Decoded, limits.Error] waits {
+    let mut flate = if method == Deflate {
+        Some(std.flate.decoder(Raw))
+    } else {
+        None()
+    }
+    let mut zstd = if method == Zstd {
+        Some(std.zstd.decoder_bounded(max_window, max_output))
+    } else {
+        None()
+    }
+    let mut crc = 0u32
+    let mut at = start
+    let mut decoded = 0u64
+    let mut piece: Bytes = list.with_capacity(CHUNK)
+    let mut input: Bytes = list.new()
+    let mut lo = 0u64
+    while true {
+        if lo == list.len(input) && at < end {
+            let n = order.min(CHUNK, end - at)
+            input = limits.fetch(mut budget, end, at, n, source)?
+            at += n
+            lo = 0
+        }
+        limits.step(mut budget)?
+        list.clear(mut piece)
+        let step = if let Some(mut d) = flate {
+            match std.flate.decode_step_bounded(mut d, input, lo, list.len(input), mut piece, max_output - decoded) {
+                Ok(info) => info,
+                Error(TooLarge()) => return Error(over_limit),
+                Error(_) => return Error(Invalid),
+            }
+        } else if let Some(mut d) = zstd {
+            match std.zstd.decode_step(mut d, input, lo, list.len(input), mut piece) {
+                Ok(info) => info,
+                Error(TooLarge()) => return Error(over_limit),
+                Error(WindowTooLarge(_)) => return Error(WindowLimit),
+                Error(_) => return Error(Invalid),
+            }
+        } else {
+            return Error(Unsupported)
+        }
+        lo += step.consumed
+        decoded += step.produced
+        if step.produced != 0 {
+            crc = std.crc32.update(crc, piece, 0, step.produced)
+            sink(piece)?
+        }
+        if step.ended {
+            let packed = at - start - (list.len(input) - lo)
+            return Ok(Decoded(packed: packed, size: decoded, crc: crc))
+        }
+        if step.consumed == 0 && step.produced == 0 {
+            return Error(Truncated)
+        }
+    }
+    Error(Invalid)
+}
+
+fn transfer(rec: Record, start: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let end = start + rec.numbers.packed
+    let decoded = if rec.method == Store {
+        copy_stored(start, end, mut budget, source, sink)?
+    } else {
+        decompress(rec.method, start, end, caps.zstd_window_bytes, rec.numbers.size, Invalid, mut budget, source, sink)?
+    }
+    if decoded.packed != rec.numbers.packed || decoded.size != rec.numbers.size {
+        return Error(Invalid)
+    }
+    if decoded.crc != rec.crc {
+        return Error(Checksum)
+    }
+    Ok(())
+}
+
+fn read_entry(rec: Record, at: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let item = Member(name: clone(rec.name), kind: rec.kind, method: rec.method, size: rec.numbers.size)
+    if rec.kind == SymbolicLink {
+        let mut target: Bytes = list.with_capacity(rec.numbers.size)
+        transfer(rec, at, caps, mut budget, source, scoped fn(chunk: Bytes) -> Result[(), limits.Error] {
+            list.append(mut target, chunk)
+            Ok(())
+        })?
+        limits.link(target, caps.depth)?
+        receive(ZipEntry(take item))?
+        let n = list.len(target)
+        receive(ZipData(clone(list.slice(target, 0, order.min(n, CHUNK)))))?
+        if n > CHUNK {
+            receive(ZipData(clone(list.slice(target, CHUNK, n))))?
+        }
+        return Ok(())
+    }
+    receive(ZipEntry(take item))?
+    transfer(rec, at, caps, mut budget, source, scoped fn(chunk: Bytes) -> Result[(), limits.Error] waits {
+        receive(ZipData(clone(chunk)))
+    })
+}
+
+// Keep any bytes past the compressed stream boundary in one bounded window.
+type Forward {
+    start: u64,
+    data: Bytes,
+}
+
+fn forward_read(mut stream: Forward, at: u64, size: u64, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits) -> Result[Bytes, limits.Error] waits {
+    let next = stream.start + list.len(stream.data)
+    if at < stream.start || at > next {
+        return Error(Invalid)
+    }
+    let buffered = next - at
+    let start = at - stream.start
+    if size <= buffered {
+        return Ok(clone(list.slice(stream.data, start, start + size)))
+    }
+    let more = source(next, size - buffered)?
+    if list.len(more) != size - buffered {
+        return Error(Truncated)
+    }
+    let mut data: Bytes = clone(list.slice(stream.data, start, list.len(stream.data)))
+    list.append(mut data, more)
+    stream.data = clone(data)
+    stream.start = at
+    Ok(take data)
+}
+
+fn read_local_descriptor(take input_record: Record, payload: u64, size: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[u64, limits.Error] waits {
+    let mut rec = take input_record
+    let (max_output, over_limit) = limits.output_bound(budget, size - payload)?
+    let mut contents: Bytes = list.new()
+    let mut given = false
+    let decoded = if rec.method == Store {
+        // Store has no end marker. A directory or a local size is required.
+        if rec.numbers.packed == 0 || rec.numbers.packed > size - payload {
+            return Error(Unsupported)
+        }
+        verify_entry(rec, caps, mut budget)?
+        receive(ZipEntry(Member(name: clone(rec.name), kind: rec.kind, method: rec.method, size: rec.numbers.size)))?
+        given = true
+        copy_stored(payload, payload + rec.numbers.packed, mut budget, source, scoped fn(chunk: Bytes) -> Result[(), limits.Error] waits {
+            receive(ZipData(clone(chunk)))
+        })?
+    } else {
+        decompress(rec.method, payload, size, caps.zstd_window_bytes, max_output, over_limit, mut budget, source, scoped fn(chunk: Bytes) -> Result[(), limits.Error] {
+            list.append(mut contents, chunk)
+            Ok(())
+        })?
+    }
+    if (rec.numbers.packed != 0 && decoded.packed != rec.numbers.packed) || (rec.numbers.size != 0 && decoded.size != rec.numbers.size) {
+        return Error(Invalid)
+    }
+    if rec.crc != 0 && rec.crc != decoded.crc {
+        return Error(Checksum)
+    }
+    rec.numbers.packed = decoded.packed
+    rec.numbers.size = decoded.size
+    rec.crc = decoded.crc
+    let next = descriptor_end(rec, rec.wide, payload + decoded.packed, size, mut budget, source)?
+    if !given {
+        verify_entry(rec, caps, mut budget)?
+        receive(ZipEntry(Member(name: clone(rec.name), kind: rec.kind, method: rec.method, size: decoded.size)))?
+        let mut at = 0u64
+        while at < decoded.size {
+            limits.step(mut budget)?
+            let n = order.min(CHUNK, decoded.size - at)
+            receive(ZipData(clone(list.slice(contents, at, at + n))))?
+            at += n
+        }
+    }
+    Ok(next)
+}
+
+fn read_local_records(size: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut at = 0u64
+    while at < size {
+        let (take rec, payload) = local(at, size, caps, mut budget, source)?
+        if (rec.flags & 8) != 0 {
+            at = read_local_descriptor(take rec, payload, size, caps, mut budget, source, receive)?
+        } else {
+            if rec.numbers.packed > size - payload {
+                return Error(Truncated)
+            }
+            verify_entry(rec, caps, mut budget)?
+            read_entry(rec, payload, caps, mut budget, source, receive)?
+            at = payload + rec.numbers.packed
+        }
+    }
+    Ok(())
+}
+
+fn read_local_members(size: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut stream = Forward(start: 0, data: list.new())
+    read_local_records(size, caps, mut budget, scoped fn(at: u64, n: u64) -> Result[Bytes, limits.Error] waits {
+        forward_read(mut stream, at, n, source)
+    }, receive)
+}
+
+/// Read a seekable ZIP using its central directory, falling back to local
+/// records when the input ends at a record boundary without a directory.
+/// Members are delivered by local-header offset. Commit effects only on Ok.
+pub fn read(size: u64, caps: limits.Limits, depth: u64, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut budget = limits.new_budget(caps, size, depth)?
+    if size == 0 {
+        return Error(Truncated)
+    }
+    match directory_info(size, mut budget, source)? {
+        Some(dir) => read_directory(dir, caps, mut budget, source, receive),
+        None() => read_local_members(size, caps, mut budget, source, receive),
+    }
+}
+
+/// Read a directory-free stream with forward-only source requests. Local
+/// Deflate and Zstd records with unknown sizes are buffered up to the limits
+/// until their descriptor validates. Store records require a local size.
+/// Only regular files and directories are exposed.
+pub fn read_local(size: u64, caps: limits.Limits, depth: u64, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut budget = limits.new_budget(caps, size, depth)?
+    read_local_members(size, caps, mut budget, source, receive)
+}

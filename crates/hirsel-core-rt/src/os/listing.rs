@@ -1,5 +1,5 @@
 //! A provider-owned readdir cursor with at most one pending record.
-use super::{file_kind, leaf_stat};
+use super::{metadata::file_kind, path::leaf_stat};
 use crate::provider::Buffer;
 use std::{
     ffi::CStr,

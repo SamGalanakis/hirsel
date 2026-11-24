@@ -8,7 +8,18 @@ use crate::{
     limit::Payer,
     provider::{Buffer, IoError, Outcome, Provider, Request, STEP_DONE, Step, Wait},
 };
-use hirsel_core_net::{Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse};
+#[doc(hidden)]
+pub mod agreement;
+pub(crate) mod kdf;
+pub(crate) mod key;
+pub(crate) mod key_share;
+pub(crate) mod p256_generation;
+use hirsel_core_net::{
+    HmacSha2, Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse,
+    secret_aead::SecretBytes,
+};
+pub use kdf::hirsel_core_secret_derive_hmac_sha256;
+use key::key_issue;
 use std::{
     io::Read,
     sync::{Arc, Mutex, Weak},
@@ -33,6 +44,7 @@ pub(crate) enum Origin {
     /// A credential fetch (TLS-7), whose bytes the host sealed, designated
     /// by its delivery position under a tape (0 otherwise).
     Fetched(u64),
+    GeneratedP256(u64),
 }
 
 impl Origin {
@@ -40,7 +52,7 @@ impl Origin {
     /// derived or unwrapped from one (TLS-5).
     pub(crate) fn opaque(self) -> bool {
         match self {
-            Self::Granted(_) | Self::Fetched(_) => true,
+            Self::Granted(_) | Self::Fetched(_) | Self::GeneratedP256(_) => true,
             Self::Sealed(_) => false,
             Self::Derived { opaque, .. } | Self::Unwrapped { opaque, .. } => opaque,
         }
@@ -55,6 +67,7 @@ impl Origin {
             Self::Derived { ordinal, .. } => (2, ordinal),
             Self::Unwrapped { ordinal, .. } => (3, ordinal),
             Self::Fetched(ordinal) => (4, ordinal),
+            Self::GeneratedP256(ordinal) => (5, ordinal),
         }
     }
 }
@@ -63,7 +76,7 @@ impl Origin {
 pub(crate) struct Secret {
     pub(crate) origin: Origin,
     pub(crate) policy: SecretPolicy,
-    pub(crate) bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    pub(crate) bytes: Option<Arc<SecretBytes>>,
     /// A sealed secret's charge, shared by every designation of its bytes.
     pub(crate) seal: Option<Arc<ChargeCell>>,
 }
@@ -98,7 +111,7 @@ impl Granted {
             secret: Secret {
                 origin: Origin::Granted(index),
                 policy: SecretPolicy::parse(&record.policy)?,
-                bytes: Some(Arc::new(bytes)),
+                bytes: Some(Arc::new(SecretBytes::new(bytes))),
                 seal: None,
             },
             record,
@@ -157,8 +170,32 @@ unsafe impl Send for ChargeCell {}
 unsafe impl Sync for ChargeCell {}
 
 impl ChargeCell {
-    fn new(charge: Charge) -> Arc<Self> {
+    pub(crate) fn new(charge: Charge) -> Arc<Self> {
         Arc::new(Self(Mutex::new(Some(charge))))
+    }
+
+    pub(crate) fn take_charge(&self, payer: Payer) -> Option<Charge> {
+        let mut charge = self.0.lock().unwrap();
+        if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
+            charge.take()
+        } else {
+            None
+        }
+    }
+}
+
+impl Charge {
+    pub(crate) fn new(payer: Payer, bytes: u64) -> Self {
+        Self(payer, bytes)
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.1
+    }
+
+    pub(crate) fn partition(&mut self, bytes: u64) -> Self {
+        self.1 -= bytes;
+        Self(self.0, bytes)
     }
 }
 
@@ -255,9 +292,7 @@ impl Secrets {
         let mut refunds = Vec::new();
         for entry in self.entries.iter().flatten() {
             for cell in [&entry.charge, &entry.secret.seal].into_iter().flatten() {
-                let mut charge = cell.0.lock().unwrap();
-                if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
-                    let c = charge.take().unwrap();
+                if let Some(c) = cell.take_charge(payer) {
                     handed.push((Arc::downgrade(cell), c.1));
                     refunds.push(c);
                 }
@@ -366,7 +401,10 @@ pub(crate) const INVALID: Outcome = Outcome {
 };
 
 fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
-    let size = SecretGrant::logical_size(policies, len);
+    admit_size(payer, SecretGrant::logical_size(policies, len))
+}
+
+fn admit_size(payer: Payer, size: Option<u64>) -> Result<Charge, Outcome> {
     match payer.admit(size) {
         Ok(()) => Ok(Charge(payer, size.unwrap())),
         Err(c) => Err(Outcome {
@@ -382,7 +420,7 @@ fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome
 unsafe fn store_sealed(
     context: *mut Context,
     policy: SecretPolicy,
-    bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    bytes: Option<Arc<SecretBytes>>,
     charge: Charge,
     origin: Option<Origin>,
 ) -> Outcome {
@@ -436,7 +474,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        let owned = Arc::new(Zeroizing::new(bytes.to_vec()));
+        let owned = Arc::new(SecretBytes::new(Zeroizing::new(bytes.to_vec())));
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }
@@ -503,39 +541,6 @@ pub(crate) struct MacTape {
     pub(crate) handle: u64,
 }
 
-pub(crate) struct KdfRequest<'a> {
-    pub(crate) secret: &'a Secret,
-    pub(crate) prefix: &'a [u8],
-    pub(crate) data: &'a [u8],
-    #[cfg(feature = "record")]
-    pub(crate) child: &'a SecretPolicy,
-    output: *mut Option<Arc<Zeroizing<Vec<u8>>>>,
-}
-
-pub(crate) const KDF_PROVIDER: Provider = Provider {
-    issue: kdf_issue,
-    ..MAC_PROVIDER
-};
-
-unsafe extern "C" fn kdf_issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
-    // SAFETY: the adapter pins the input and exclusive output slot.
-    unsafe {
-        let args = &*(*request).path.cast::<KdfRequest<'_>>();
-        let key = args.secret.bytes.as_deref().unwrap();
-        args.output
-            .write(Some(Arc::new(hirsel_core_net::derive_hmac_sha256(
-                key,
-                args.prefix,
-                args.data,
-            ))));
-    }
-    Step {
-        kind: STEP_DONE,
-        outcome: Outcome::default(),
-        deadline_ns: 0,
-    }
-}
-
 unsafe fn drive_secret_sink(
     context: *mut Context,
     live: Provider,
@@ -549,73 +554,42 @@ unsafe fn drive_secret_sink(
     unsafe { crate::provider::drive(context, &live, request, None) }
 }
 
-/// # Safety
-/// The Secret is live and all three input carriers stay pinned through delivery.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_secret_derive_hmac_sha256(
-    context: *mut Context,
-    s: u64,
-    prefix: *const Buffer,
-    data: *const Buffer,
-    uses: *const Buffer,
-    site: u64,
-) -> Outcome {
-    unsafe {
-        crate::process::deny_describe_capability(context);
-        let secret = resolve(context, s);
-        let uses = crate::tls::bytes(&*uses);
-        let Some(child) = std::str::from_utf8(uses)
-            .ok()
-            .and_then(|uses| secret.policy.derived(uses))
-        else {
-            return INVALID;
+// SECRET_MAC mode tags in recording.md.
+const JWS_MAC_FIRST: u8 = 11;
+const JWS_MAC_LAST: u8 = 16;
+pub(crate) const SHORT_JWS_KEY: u8 = 2;
+
+pub(crate) fn is_jws_mac_mode(mode: u8) -> bool {
+    (JWS_MAC_FIRST..=JWS_MAC_LAST).contains(&mode)
+}
+
+enum MacProfile {
+    Raw(HmacSha2),
+    Jws(HmacSha2),
+}
+
+impl MacProfile {
+    fn mode(&self, verify: bool) -> u8 {
+        let sign = match self {
+            Self::Raw(HmacSha2::Sha256) => 0,
+            Self::Raw(HmacSha2::Sha384) => 7,
+            Self::Raw(HmacSha2::Sha512) => 9,
+            Self::Jws(HmacSha2::Sha256) => JWS_MAC_FIRST,
+            Self::Jws(HmacSha2::Sha384) => 13,
+            Self::Jws(HmacSha2::Sha512) => 15,
         };
-        let charge = match admit((*context).payer(), &child.send, 32) {
-            Ok(charge) => charge,
-            Err(error) => return error,
-        };
-        let mut bytes = None;
-        let args = KdfRequest {
-            secret: &secret,
-            prefix: crate::tls::bytes(&*prefix),
-            data: crate::tls::bytes(&*data),
-            #[cfg(feature = "record")]
-            child: &child,
-            output: &raw mut bytes,
-        };
-        let mut request = Request {
-            operation: crate::provider::SECRET_KDF,
-            mode: 0,
-            handle: 0,
-            path: (&raw const args).cast(),
-            path_len: std::mem::size_of_val(&args),
-            buffer: crate::net::empty_buffer(),
-            site,
-        };
-        let outcome = drive_secret_sink(context, KDF_PROVIDER, &mut request);
-        if outcome.error.tag != 0 {
-            return outcome;
+        sign + u8::from(verify)
+    }
+
+    fn algorithm(&self) -> HmacSha2 {
+        match *self {
+            Self::Raw(algorithm) | Self::Jws(algorithm) => algorithm,
         }
-        if outcome.status != 0 {
-            return INVALID;
-        }
-        #[cfg(feature = "record")]
-        let ordinal = outcome.value;
-        #[cfg(not(feature = "record"))]
-        let ordinal = 0;
-        // A key derived from a grant is as unknown to the program as the
-        // grant, so `wrap` and served streams treat it alike.
-        let origin = Origin::Derived {
-            ordinal,
-            opaque: secret.origin.opaque(),
-        };
-        // A replay leaves bytes absent. The sinks that can read this key
-        // are themselves replay deliveries.
-        store_sealed(context, child, bytes, charge, Some(origin))
     }
 }
 
 pub(crate) struct MacRequest<'a> {
+    algorithm: HmacSha2,
     pub(crate) secret: &'a Secret,
     pub(crate) data: &'a [u8],
     pub(crate) tag: Option<&'a [u8]>,
@@ -634,7 +608,7 @@ unsafe extern "C" fn mac_issue(_: *mut u8, request: *mut Request, _: u64) -> Ste
     // SAFETY: the adapter pins MacRequest and its output through delivery.
     let outcome = unsafe {
         let request = &mut *request;
-        if request.mode >= KEY_WRAP {
+        if key::is_key_mode(request.mode) {
             return Step {
                 kind: STEP_DONE,
                 outcome: key_issue(request),
@@ -644,11 +618,14 @@ unsafe extern "C" fn mac_issue(_: *mut u8, request: *mut Request, _: u64) -> Ste
         let args = &*request.path.cast::<MacRequest<'_>>();
         let key = args.secret.bytes.as_deref().unwrap();
         let mut outcome = Outcome::default();
-        if let Some(tag) = args.tag {
-            outcome.value = u64::from(hirsel_core_net::verify_hmac_sha256(key, args.data, tag));
+        if is_jws_mac_mode(request.mode) && key.len() < args.algorithm.tag_len() {
+            outcome.error.tag = SHORT_JWS_KEY;
+        } else if let Some(tag) = args.tag {
+            outcome.value = u64::from(args.algorithm.verify(key, args.data, tag));
         } else {
-            let tag = hirsel_core_net::hmac_sha256(key, args.data);
-            request.buffer.data.cast::<[u8; 32]>().write(tag);
+            let signed = args.algorithm.sign(key, args.data);
+            let tag = signed.as_ref();
+            std::ptr::copy_nonoverlapping(tag.as_ptr(), request.buffer.data, tag.len());
             request.buffer.len = tag.len();
         }
         outcome
@@ -675,8 +652,9 @@ unsafe fn mac(
     tag: Option<*const Buffer>,
     out: *mut u8,
     site: u64,
+    profile: MacProfile,
 ) -> Outcome {
-    // SAFETY: the two entry points pin the Secret and all carriers.
+    // SAFETY: the entry points pin the Secret and all carriers.
     unsafe {
         crate::process::deny_describe_capability(context);
         let secret = resolve(context, handle);
@@ -688,21 +666,31 @@ unsafe fn mac(
         if !secret.policy.uses.permits(needed) {
             return crate::net::DENIED;
         }
+        let data = crate::tls::bytes(&*data);
+        if !crate::steps::take_many(context, data.len() as u64, site) {
+            return crate::provider::CANCELLED;
+        }
+        let algorithm = profile.algorithm();
         let args = MacRequest {
+            algorithm,
             secret: &secret,
-            data: crate::tls::bytes(&*data),
+            data,
             tag: tag.map(|tag| crate::tls::bytes(&*tag)),
         };
         let mut request = Request {
             operation: crate::provider::SECRET_MAC,
-            mode: u8::from(tag.is_some()),
+            mode: profile.mode(tag.is_some()),
             handle: 0,
             path: (&raw const args).cast(),
             path_len: std::mem::size_of_val(&args),
             buffer: Buffer {
                 data: out,
                 len: 0,
-                capacity: if tag.is_none() { 32 } else { 0 },
+                capacity: if tag.is_none() {
+                    algorithm.tag_len()
+                } else {
+                    0
+                },
             },
             site,
         };
@@ -720,7 +708,17 @@ pub unsafe extern "C" fn hirsel_core_secret_hmac_sha256(
     out: *mut u8,
     site: u64,
 ) -> Outcome {
-    unsafe { mac(context, s, data, None, out, site) }
+    unsafe {
+        mac(
+            context,
+            s,
+            data,
+            None,
+            out,
+            site,
+            MacProfile::Raw(HmacSha2::Sha256),
+        )
+    }
 }
 
 /// # Safety
@@ -733,286 +731,162 @@ pub unsafe extern "C" fn hirsel_core_secret_verify_hmac_sha256(
     tag: *const Buffer,
     site: u64,
 ) -> Outcome {
-    unsafe { mac(context, s, data, Some(tag), std::ptr::null_mut(), site) }
-}
-
-/// Tape modes of SECRET_MAC for the key operations (recording.md).
-pub(crate) const KEY_WRAP: u8 = 2;
-pub(crate) const KEY_UNWRAP: u8 = 3;
-pub(crate) const KEY_SIGN: u8 = 4;
-
-/// `KeyError` as an outcome's error tag: the case index plus one.
-const KEY_DENIED: u8 = 1;
-const KEY_INVALID: u8 = 2;
-const KEY_TAMPERED: u8 = 3;
-const KEY_CAPACITY: u8 = 4;
-
-pub(crate) enum KeyOp<'a> {
-    Wrap(&'a Secret),
-    Unwrap {
-        blob: &'a [u8],
-        uses: &'a SecretPolicy,
-        /// The opened bytes, when the key was read; never on replay.
-        plain: std::cell::Cell<Option<Zeroizing<Vec<u8>>>>,
-    },
-    Sign {
-        alg: hirsel_core_net::key_wrap::SignAlg,
-        msg: &'a [u8],
-    },
-}
-
-pub(crate) struct KeyRequest<'a> {
-    /// The KEK, or the signing key.
-    pub(crate) key: &'a Secret,
-    pub(crate) op: KeyOp<'a>,
-}
-
-fn key_error(tag: u8) -> Outcome {
-    Outcome {
-        error: IoError { tag, code: 0 },
-        ..Outcome::default()
-    }
-}
-
-fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Outcome {
-    use hirsel_core_net::key_wrap::KeyFailure;
-    key_error(match failure {
-        KeyFailure::Denied => KEY_DENIED,
-        KeyFailure::Invalid => KEY_INVALID,
-        KeyFailure::Tampered => KEY_TAMPERED,
-    })
-}
-
-/// The key operation inside its frame: the only place key bytes are read.
-unsafe fn key_issue(request: &mut Request) -> Outcome {
-    use hirsel_core_net::key_wrap;
-    // SAFETY: the key adapter pins KeyRequest and its carrier through delivery.
     unsafe {
-        let args = &*request.path.cast::<KeyRequest<'_>>();
-        let key = args.key.bytes.as_deref().unwrap();
-        let produced = match &args.op {
-            KeyOp::Wrap(secret) => key_wrap::wrap_with_salt(
-                key,
-                &secret.policy.text(),
-                secret.bytes.as_deref().unwrap(),
-                key_wrap::salt(),
-            ),
-            KeyOp::Sign { alg, msg } => key_wrap::sign(*alg, key, msg),
-            KeyOp::Unwrap { blob, uses, plain } => {
-                let mut out = Zeroizing::new(Vec::new());
-                return match key_wrap::unwrap_into(key, blob, &mut out)
-                    .and_then(|bound| key_wrap::within(uses, bound))
-                {
-                    Ok(()) => {
-                        plain.set(Some(out));
-                        Outcome::default()
-                    }
-                    Err(failure) => key_failure(failure),
-                };
-            }
-        };
-        let bytes = match produced {
-            Ok(bytes) => bytes,
-            Err(failure) => return key_failure(failure),
-        };
-        let spare = request.buffer.capacity - request.buffer.len;
-        if bytes.len() > spare {
-            return Outcome {
-                error: IoError {
-                    tag: KEY_CAPACITY,
-                    code: 0,
-                },
-                value: bytes.len() as u64,
-                written: spare as u64,
-                ..Outcome::default()
-            };
-        }
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            request.buffer.data.add(request.buffer.len),
-            bytes.len(),
-        );
-        request.buffer.len += bytes.len();
-        Outcome {
-            value: bytes.len() as u64,
-            ..Outcome::default()
-        }
+        mac(
+            context,
+            s,
+            data,
+            Some(tag),
+            std::ptr::null_mut(),
+            site,
+            MacProfile::Raw(HmacSha2::Sha256),
+        )
     }
 }
 
-/// Run one key operation in its immediate frame. `out` is appended into its
-/// spare capacity; unwrap's carrier is empty.
-unsafe fn key_op(
+/// # Safety
+/// The Secret is live, `data` is pinned, and `out` is writable for 48 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_hmac_sha384(
     context: *mut Context,
-    args: &KeyRequest<'_>,
-    mode: u8,
-    out: *mut Buffer,
+    s: u64,
+    data: *const Buffer,
+    out: *mut u8,
     site: u64,
 ) -> Outcome {
-    // SAFETY: the entry points pin the Secrets and all carriers.
     unsafe {
-        #[cfg(feature = "record")]
-        let tape = (*(*context).host_files).secret_mac_tape;
-        #[cfg(feature = "record")]
-        let (p, h) = tape.map_or((MAC_PROVIDER, 0), |tape| (tape.provider, tape.handle));
-        #[cfg(not(feature = "record"))]
-        let (p, h) = (MAC_PROVIDER, 0);
-        let buffer = if out.is_null() {
-            Buffer {
-                data: std::ptr::null_mut(),
-                len: 0,
-                capacity: 0,
-            }
-        } else {
-            *out
-        };
-        let mut request = Request {
-            operation: crate::provider::SECRET_MAC,
-            mode,
-            handle: h,
-            path: (args as *const KeyRequest<'_>).cast(),
-            path_len: std::mem::size_of::<KeyRequest<'_>>(),
-            buffer,
+        mac(
+            context,
+            s,
+            data,
+            None,
+            out,
             site,
-        };
-        let outcome = crate::provider::drive(context, &p, &mut request, None);
-        if !out.is_null() {
-            (*out).len = request.buffer.len;
+            MacProfile::Raw(HmacSha2::Sha384),
+        )
+    }
+}
+
+/// # Safety
+/// The Secret is live and both input carriers are pinned through delivery.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_verify_hmac_sha384(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    tag: *const Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        mac(
+            context,
+            s,
+            data,
+            Some(tag),
+            std::ptr::null_mut(),
+            site,
+            MacProfile::Raw(HmacSha2::Sha384),
+        )
+    }
+}
+
+/// # Safety
+/// The Secret is live, `data` is pinned, and `out` is writable for 64 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_hmac_sha512(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    out: *mut u8,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        mac(
+            context,
+            s,
+            data,
+            None,
+            out,
+            site,
+            MacProfile::Raw(HmacSha2::Sha512),
+        )
+    }
+}
+
+/// # Safety
+/// The Secret is live and both input carriers are pinned through delivery.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_verify_hmac_sha512(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    tag: *const Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        mac(
+            context,
+            s,
+            data,
+            Some(tag),
+            std::ptr::null_mut(),
+            site,
+            MacProfile::Raw(HmacSha2::Sha512),
+        )
+    }
+}
+
+/// # Safety
+/// The Secret is live, `data` is pinned, and `out` is writable for 64 bytes.
+/// `alg` is a JwsMacAlg case.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_jws_hmac_sign(
+    context: *mut Context,
+    s: u64,
+    data: *const Buffer,
+    out: *mut u8,
+    alg: u64,
+    site: u64,
+) -> Outcome {
+    let algorithm = HmacSha2::from_jws_case(alg);
+    unsafe {
+        let outcome = mac(
+            context,
+            s,
+            data,
+            None,
+            out,
+            site,
+            MacProfile::Jws(algorithm),
+        );
+        if outcome.status == 0 && outcome.error == IoError::OK {
+            let len = algorithm.tag_len();
+            out.add(len).write_bytes(0, 64 - len);
         }
         outcome
     }
 }
 
-/// `secret.wrap`: `s` sealed under `kek`, bound to `s`'s canonical policy.
 /// # Safety
-/// Both Secrets are live and `out` is a pinned exclusive Bytes carrier.
+/// The Secret is live, both input carriers are pinned, and `alg` is a JwsMacAlg case.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_secret_wrap(
+pub unsafe extern "C" fn hirsel_core_secret_jws_hmac_verify(
     context: *mut Context,
-    kek: u64,
     s: u64,
-    out: *mut Buffer,
-    site: u64,
-) -> Outcome {
-    unsafe {
-        crate::process::deny_describe_capability(context);
-        let kek = resolve(context, kek);
-        let secret = resolve(context, s);
-        // A program that holds the KEK's bytes could open the blob itself,
-        // so it never wraps bytes it does not hold under that KEK.
-        if !kek.policy.uses.permits(SecretUse::WRAP)
-            || (secret.origin.opaque() && !kek.origin.opaque())
-        {
-            return key_error(KEY_DENIED);
-        }
-        let args = KeyRequest {
-            key: &kek,
-            op: KeyOp::Wrap(&secret),
-        };
-        key_op(context, &args, KEY_WRAP, out, site)
-    }
-}
-
-/// `secret.unwrap`: a new Secret limited to `uses`, which must be within the
-/// policy the blob binds. Charged as `seal` charges, before the frame.
-/// # Safety
-/// The KEK is live and both carriers are pinned.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_secret_unwrap(
-    context: *mut Context,
-    kek: u64,
-    blob: *const Buffer,
-    uses: *const Buffer,
-    site: u64,
-) -> Outcome {
-    unsafe {
-        crate::process::deny_describe_capability(context);
-        let kek = resolve(context, kek);
-        if !kek.policy.uses.permits(SecretUse::WRAP) {
-            return key_error(KEY_DENIED);
-        }
-        let Some(requested) = policy(uses) else {
-            return key_error(KEY_INVALID);
-        };
-        let blob = crate::tls::bytes(&*blob);
-        let len = hirsel_core_net::key_wrap::unwrapped_len(blob).unwrap_or(0);
-        let charge = match admit((*context).payer(), &requested.send, len as u64) {
-            Ok(charge) => charge,
-            Err(mut error) => {
-                error.error.tag = KEY_CAPACITY;
-                return error;
-            }
-        };
-        let args = KeyRequest {
-            key: &kek,
-            op: KeyOp::Unwrap {
-                blob,
-                uses: &requested,
-                plain: std::cell::Cell::new(None),
-            },
-        };
-        let outcome = key_op(context, &args, KEY_UNWRAP, std::ptr::null_mut(), site);
-        if outcome.error != IoError::OK || outcome.status != 0 {
-            return outcome;
-        }
-        let KeyOp::Unwrap { plain, .. } = args.op else {
-            unreachable!()
-        };
-        let mut secrets = (*(*context).host_files)
-            .registry
-            .run_grants()
-            .secrets
-            .lock()
-            .unwrap();
-        let origin = Origin::Unwrapped {
-            ordinal: secrets.unwraps,
-            opaque: kek.origin.opaque(),
-        };
-        secrets.unwraps += 1;
-        let value = secrets.push(
-            Secret {
-                origin,
-                policy: requested,
-                bytes: plain.into_inner().map(Arc::new),
-                seal: Some(ChargeCell::new(charge)),
-            },
-            None,
-        );
-        Outcome {
-            value,
-            ..Outcome::default()
-        }
-    }
-}
-
-/// `secret.sign`: `msg` signed with `alg`, which the key's uses must name.
-/// # Safety
-/// The key is live, `msg` is pinned and `out` is a pinned exclusive carrier.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_secret_sign(
-    context: *mut Context,
-    key: u64,
+    data: *const Buffer,
+    tag: *const Buffer,
     alg: u64,
-    msg: *const Buffer,
-    out: *mut Buffer,
     site: u64,
 ) -> Outcome {
     unsafe {
-        crate::process::deny_describe_capability(context);
-        let key = resolve(context, key);
-        let Some(alg) = hirsel_core_net::key_wrap::SignAlg::from_case(alg) else {
-            crate::process::stop(b"SignAlg")
-        };
-        if !key.policy.uses.permits(alg.needed()) {
-            return key_error(KEY_DENIED);
-        }
-        let args = KeyRequest {
-            key: &key,
-            op: KeyOp::Sign {
-                alg,
-                msg: crate::tls::bytes(&*msg),
-            },
-        };
-        key_op(context, &args, KEY_SIGN, out, site)
+        mac(
+            context,
+            s,
+            data,
+            Some(tag),
+            std::ptr::null_mut(),
+            site,
+            MacProfile::Jws(HmacSha2::from_jws_case(alg)),
+        )
     }
 }

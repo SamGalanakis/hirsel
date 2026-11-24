@@ -1,0 +1,21 @@
+[package]
+name = "yaml"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"yaml.hirsel" = "yaml"
+"reader.hirsel" = "yaml"
+"scalar.hirsel" = "yaml"
+"properties.hirsel" = "yaml"
+
+[tests]
+limit = 67108864
+grants = []
+
+[tests.sources]
+"laws.hirsel" = "laws"
+"vectors.hirsel" = "laws"

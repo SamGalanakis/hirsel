@@ -289,9 +289,9 @@ fn stamp() -> u64 { host.mono_ns() }                      // refused: CAP-1, no 
 
 Capability arguments stay explicit: there is no implicit context. Three habits keep them
 short. Capture an authority at construction when a value keeps using it: std's
-`config.new(source: Env, max_errors: u64)` stores the `Env` in its `Reader`, and every
-getter reads through `r.source`, as `store.Db` keeps its `Clock`. When three or more
-capabilities travel together, pass one small record of them. Give a leaf only the field it
+`config.new(source: Option[Env], a: Args, max_errors: u64)` stores the optional `Env` in
+its `Reader` for getters to use when a flag is absent, as `store.Db` keeps its `Clock`. When
+three or more capabilities travel together, pass one small record of them. Give a leaf only the field it
 needs, so its signature still names its whole authority.
 
 ```hirsel
@@ -441,7 +441,7 @@ fn serve(take job: Server) waits {
     let mut builder: std.router.Builder[()] = std.router.builder()
     result.unwrap(std.router.add(mut builder, "GET", "/", std.router.raw(hello)))
     let routes = result.unwrap(std.router.build(take builder))
-    let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    let cfg = std.http.defaults()
     result.unwrap(std.http.serve(take listeners, c, tasks, take cfg, take routes, ()))
 }
 

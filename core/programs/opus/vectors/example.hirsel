@@ -1,0 +1,13 @@
+@test
+fn decode_stereo_frame(f: Foreign[opus.Opus], fixtures: Dir) -> Result[(), opus.OpusError] waits {
+    let stream = load(fixtures, "0-1", ".encoded")
+    // opus_demo prefixes each packet with the size and the range coder state.
+    let packet = list.slice(stream, 8, packet_end(stream, 0))
+    let mut decoder = opus.decoder(f, 48000, 2)?
+    let mut pcm = buffer(960 * 2 * 2)
+    let frames = opus.decode(mut decoder, packet, 960, false, mut pcm)?
+    if frames != 48000 * 20 / 1000 {
+        fail("a 20 ms packet at 48 kHz has 960 samples per channel")
+    }
+    Ok(())
+}

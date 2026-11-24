@@ -1,0 +1,25 @@
+[package]
+name = "h264"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+media_bits = { major = 1, path = "../media_bits" }
+std = { major = 1 }
+
+[sources]
+"h264.hirsel" = "h264"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hh264_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_h264.a", sha256 = "0ad007335b669d8145b8e3eece706305f4203222b3062006d33343a3eec627b0" },
+]
+
+[tests]
+limit = 536870912
+grants = ["Foreign=h264@1/h264/H264"]
+
+[tests.sources]
+"bounds.hirsel" = "tests"

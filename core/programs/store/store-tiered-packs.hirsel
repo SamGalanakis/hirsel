@@ -1,0 +1,85 @@
+type TieredPackDraft {
+    context: DiskContext,
+    class: u8,
+    cap: u64,
+    raw: Bytes,
+    rows: List[PackIndexRow],
+    planned_bytes: u64,
+    index_room: u64,
+    live: u64
+}
+
+fn tiered_page_index_key(collection: u32, image: std.page.Image) -> Result[Bytes, Error] {
+    let slot = if std.page.level(image) == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    if let Some(suffix) = std.page.key_at(image, slot) {
+        return logical_key(collection, suffix)
+    }
+    prefix(collection)
+}
+
+fn begin_tiered_pack(owner: StoreId, seq: u64, class: u8, cap: u64) -> Result[TieredPackDraft, Error] {
+    let context = DiskContext(store: owner, role: 3, seq: seq)
+    let raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        capacity(disk_header_bytes(context, 0, 0))
+    })?
+    let header_bytes = list.len(raw)
+    Ok(TieredPackDraft(context: context, class: class, cap: cap, raw: take raw, rows: list.new(), planned_bytes: header_bytes, index_room: 0, live: 0))
+}
+
+fn tiered_frame_extent(bytes_written: u64, index_room: u64, size: u64, key_size: u64) -> Result[(u64, u64), Error] {
+    let row_width = PACK_INDEX_ROW + key_size
+    if row_width > PACK_INDEX_LIMIT - PACK_INDEX_PREFIX {
+        return Error(Limit(Key))
+    }
+    let starts_index = index_room == 0 || row_width > PACK_INDEX_LIMIT - index_room
+    if starts_index {
+        return Ok((bytes_written + 16 + size + 16 + PACK_INDEX_PREFIX + row_width, PACK_INDEX_PREFIX + row_width))
+    }
+    Ok((bytes_written + 16 + size + row_width, index_room + row_width))
+}
+
+fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collection: u32, key: Bytes, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[Option[std.page.PagePtr], Error] {
+    let (class, kind): (u8, u8) = match frame.body {
+        PageBody(_) => (3, 0x21),
+        BlobBody(_) => (4, 0x22),
+    }
+    if draft.class != class {
+        fail("store: attempted to mix Tiered pack classes")
+    }
+    let (next_size, next_index_room) = tiered_frame_extent(draft.planned_bytes, draft.index_room, frame.size, list.len(key))?
+    if list.len(draft.rows) != 0 && (next_size > draft.cap || list.len(draft.rows) == 4294967295) {
+        return Ok(None)
+    }
+    let logical = copied(key)?
+    capacity(list.try_reserve(mut draft.rows, 1))?
+    capacity(list.try_reserve(mut draft.raw, 16 + frame.size))?
+    let offset = list.len(draft.raw)
+    let encoded = emit_located_frame(mut draft.raw, draft.context, frame, locate)
+    let place = match take encoded {
+        Ok(ptr) => ptr,
+        Error(take problem) => {
+            list.truncate(mut draft.raw, offset)
+            return Error(take problem)
+        },
+    }
+    list.push(mut draft.rows, PackIndexRow(offset: place.offset, len: place.len, kind: kind, collection: collection, stamp: place.stamp, key: take logical))
+    draft.planned_bytes = next_size
+    draft.index_room = next_index_room
+    draft.live += frame.size
+    Ok(Some(place))
+}
+
+fn finish_tiered_pack(take draft: TieredPackDraft) -> Result[(Bytes, PagePack), Error] {
+    let TieredPackDraft(context, class, raw: take bytes_out, rows: take rows, live: live_bytes, ..) = take draft
+    if list.len(rows) == 0 {
+        fail("store: attempted to seal an empty Tiered pack")
+    }
+    let mut raw = take bytes_out
+    let index_offset = append_pack_index(mut raw, context, rows)?
+    let pack = PagePack(class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
+    Ok((take raw, pack))
+}

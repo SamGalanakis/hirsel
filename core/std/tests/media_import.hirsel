@@ -1,0 +1,40 @@
+fn refuses_mixed_policy(uses: String) -> bool {
+    let data = b"a media key"
+    match secret.seal(take data, uses) {
+        Error((Invalid, _)) => true,
+        _ => false,
+    }
+}
+
+fn only_import(send: String, receive: String) -> bool {
+    let data = b"0123456789abcdef0123456789abcdef"
+    let key = match secret.seal(take data, send) {
+        Ok(take s) => take s,
+        _ => return false,
+    }
+    let wrapper = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+    let kek = result.unwrap(secret.seal(take wrapper, "wrap"))
+    let mut out: Bytes = list.with_capacity(128)
+    let denied_wrap = match secret.wrap(kek, key, mut out) {
+        Error(Denied) => true,
+        _ => false,
+    }
+    let denied_open = match secret.unwrap(kek, b"", receive) {
+        Error(Invalid) => true,
+        _ => false,
+    }
+    let wrong_direction = match secret.narrow(key, receive) {
+        Error(Invalid) => true,
+        _ => false,
+    }
+    let denied_aead = match secret.aead_seal(key, Aes128Gcm, b"0123456789ab", b"", b"message", mut out) {
+        Error(Denied) => true,
+        _ => false,
+    }
+    denied_wrap && denied_open && wrong_direction && denied_aead && list.len(out) == 0
+}
+
+// expect: run import_uses_stay_exclusive() = true
+fn import_uses_stay_exclusive() -> bool {
+    only_import("srtp_import(send)", "srtp_import(receive)") && only_import("srtp_import(receive)", "srtp_import(send)") && only_import("traffic_import(send)", "traffic_import(receive)") && only_import("traffic_import(receive)", "traffic_import(send)") && refuses_mixed_policy("srtp_import(send) mac") && refuses_mixed_policy("traffic_import(send) kdf") && refuses_mixed_policy("srtp_import(send) traffic_import(send)") && refuses_mixed_policy("srtp_import(send) srtp_import(receive)")
+}

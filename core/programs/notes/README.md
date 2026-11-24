@@ -12,8 +12,9 @@ that wires every part an app composes into one agent and runs it offline.
 | reaction | `tally` | counts tool results in the transaction that appends each one |
 | section | `notes` | the current notes, rendered from rows before each request |
 
-The app's migration runs `harness.migrate` and then creates its own two
-tables. Each place reserves its store's resident cache, pack buffer and
+The app's `schema` declares the Harness tables and the two Notes tables.
+Inside tools, reactions and sections receive the Notes handles from the place's
+declaration. Each place reserves its store's resident cache, pack buffer and
 journal group when it starts, so `options()` sizes them for one session
 (4 MiB resident) instead of the 1 GiB default.
 

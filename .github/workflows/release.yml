@@ -29,7 +29,9 @@ jobs:
                 sh -s -- -y --profile minimal --default-toolchain 1.99.0
               export PATH="/root/.cargo/bin:$PATH"
               cargo fetch --locked
-              tools/toolchain-dist/build --local --num-threads 4 --output /tmp/hirsel-prefix
+              tools/native-toolchain/install --bolt-tools /tmp/hirsel-bolt-tools
+              PATH="/tmp/hirsel-bolt-tools/bin:$PATH" \
+                tools/toolchain-dist/build --bolt --local --num-threads 4 --output /tmp/hirsel-prefix
               tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
               asset=hirsel-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz
               tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
@@ -84,7 +86,7 @@ jobs:
               hirsel run
               hirsel build
               sed -i "/^\[dependencies\]/a store = { major = 1 }" hirsel.toml
-              sed -i "/^pub fn main/a\    let _ = store.defaults()" main.hirsel
+              sed -i "/^pub fn main/a\    let _ = result.unwrap(store.sized(Directory, 2147483648u64))" main.hirsel
               hirsel lock 2>&3
               hirsel check --locked
               test ! -s /tmp/hirsel-smoke.stderr

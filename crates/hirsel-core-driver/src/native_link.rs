@@ -1,11 +1,61 @@
 //! Final ELF link of the checked native inputs.
-use super::{NativeStop, command};
+use super::{NativeOptions, NativeStop, key};
+use hirsel_core_ids::ContentHash;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
+    let result = command
+        .output()
+        .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
+    if !result.status.success() {
+        return Err(NativeStop::Link(format!(
+            "{command:?}: {}\n{}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    Ok(result.stdout)
+}
+
+/// The build a recording and its replay share: the executable key without
+/// the entry plan, whose launch policy (grants, directories, replay plan) is
+/// the only difference between the two links of one build. The image objects
+/// are linked as their image unit; the source map enters by its digest, the
+/// runtime headers by the compiler identity, which embeds them.
+pub(super) fn build_key(
+    (toolchain, recipe, objects, archives): (
+        ContentHash,
+        ContentHash,
+        &[ContentHash],
+        &[ContentHash],
+    ),
+    sources: ContentHash,
+    options: &NativeOptions,
+    link_mode: &str,
+) -> std::io::Result<ContentHash> {
+    key(
+        "hirsel.core-build.v1",
+        &(
+            crate::compiler_identity()?,
+            toolchain,
+            recipe,
+            objects,
+            archives,
+            sources,
+            &options.target,
+            options.backend,
+            options.optimize,
+            options.debug_lines,
+            link_mode,
+        ),
+    )
+}
 
 pub(super) fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,
     inputs: &[PathBuf],
-    support_libs: &[&str],
+    whole: Option<&Path>,
     output: &Path,
     optimize: bool,
     debug_lines: bool,
@@ -43,14 +93,14 @@ pub(super) fn direct_link(
             "-z",
             "keep-text-section-prefix",
         ]);
-        // The startup data stays at the front of read-only data. Align the
-        // source table separately so ordinary reads do not share its pages.
+        // Put the failure-only site table after the unwind metadata so it can
+        // share a page with that metadata without padding the file.
         let layout = tempfile::NamedTempFile::new_in(parent.unwrap_or(Path::new(".")))?;
         std::fs::write(
             layout.path(),
             "SECTIONS {\n\
-                .rodata.hirsel_sites : ALIGN(CONSTANT(MAXPAGESIZE)) { *(.rodata.hirsel_sites) }\n\
-             } INSERT AFTER .rodata;\n",
+                .rodata.hirsel_sites : { *(.rodata.hirsel_sites) }\n\
+             } INSERT AFTER .eh_frame;\n",
         )?;
         process.arg("-T").arg(std::path::absolute(layout.path())?);
         Some(layout)
@@ -68,10 +118,18 @@ pub(super) fn direct_link(
         if argument == crate::tool_inputs::INPUT_MARKER && darwin {
             // A large program's object paths exceed macOS's argument limit:
             // ld64 reads them one per line from a file list instead.
+            // The bundle of the link's objects loads every member (-force_load).
             let mut list = Vec::new();
             for input in inputs {
                 use std::os::unix::ffi::OsStrExt;
-                list.extend_from_slice(std::path::absolute(input)?.as_os_str().as_bytes());
+                let input = std::path::absolute(input)?;
+                if whole == Some(input.as_path()) {
+                    let mut flag = std::ffi::OsString::from("-Wl,-force_load,");
+                    flag.push(&input);
+                    process.arg(flag);
+                    continue;
+                }
+                list.extend_from_slice(input.as_os_str().as_bytes());
                 list.push(b'\n');
             }
             let path = std::path::absolute(directory.path().join("inputs.filelist"))?;
@@ -79,16 +137,18 @@ pub(super) fn direct_link(
             let mut flag = std::ffi::OsString::from("-Wl,-filelist,");
             flag.push(&path);
             process.arg(flag);
-            for library in support_libs {
-                process.arg(library);
-            }
             inserted = true;
         } else if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
-                process.arg(std::path::absolute(input)?);
-            }
-            for library in support_libs {
-                process.arg(library);
+                // The bundle of the link's objects loads every member.
+                if whole == Some(input.as_path()) {
+                    process
+                        .args(["--push-state", "--whole-archive"])
+                        .arg(input)
+                        .arg("--pop-state");
+                } else {
+                    process.arg(std::path::absolute(input)?);
+                }
             }
             inserted = true;
         } else {

@@ -64,6 +64,7 @@ tags!(Handle {
     10 => Client,
     11 => Inbox,
     12 => Secret,
+    13 => Media,
 });
 
 tags!(Repr {
@@ -96,6 +97,7 @@ tags!(FieldTy {
     18 => Link(part0),
     19 => Locator(part0),
     20 => FrozenBytes,
+    21 => Shared(part0),
 });
 
 tags!(hirsel_core_layout::Body {
@@ -238,6 +240,10 @@ tags!(SimdOp {
     16 => Shl,
     17 => Shr,
     18 => Lanes,
+    19 => WrappingMul,
+    20 => MaddI16,
+    21 => MulhiI16,
+    22 => PackSaturating,
 });
 
 tags!(Inst {
@@ -262,7 +268,7 @@ tags!(Inst {
     18 => Pointer { result, address },
     19 => Alloc { result, available, region_entry, kind, place, charge, overflow, size, align },
     20 => Free { block, charge },
-    21 => FrameRefund { charge },
+    // Tag 21 was the count-based frame refund.
     22 => Copy { to, from, bytes },
     23 => Grow { result, available, carrier, charge, overflow, size, align, capacity, moved, refund },
     24 => Case { result, address },
@@ -286,6 +292,9 @@ tags!(Inst {
     42 => PutLanes { to, vector, count },
     43 => BuiltinUse { definition },
     44 => Move { to, from, bytes },
+    45 => FrameAdmit { storage, admitted, available, charge, overflow, replace },
+    46 => FrameActive { storage, result },
+    47 => FrameRefund { storage },
 });
 
 tags!(LayoutQuery {
@@ -306,7 +315,7 @@ tags!(AllocPlace {
     0 => Current,
     1 => Like(part0),
     2 => Region(part0),
-    3 => Frame(part0),
+    // Tag 3 was the untracked lexical frame admission.
     4 => LentFrame(part0),
     5 => ByteHead,
     6 => ByteTail(part0),
@@ -385,6 +394,17 @@ tags!(RtOp {
     69 => Crc32cCombine,
     70 => Crc64NvmeCombine,
     71 => Transfer { x, r },
+    72 => SharedNew { item },
+    73 => SharedShare,
+    74 => SharedRelease { item },
+    75 => RootLimit,
+    76 => Sha512Blocks,
+    77 => P384Verify,
+    78 => P384VerifyDer,
+    79 => RsaVerifyPkcs1Sha256,
+    80 => RsaVerifyPssSha256,
+    81 => Argon2id,
+    82 => Sha1Compress,
 });
 
 tags!(Wait {
@@ -487,6 +507,40 @@ tags!(HostOp {
     120 => SecretUnwrap,
     121 => SecretSign,
     122 => CredFetch,
+    123 => LocalAddr,
+    124 => PeerAddr,
+    125 => CallPayloadPrefix,
+    126 => Mkstemp,
+    127 => SecretAeadSeal,
+    128 => SecretAeadOpen,
+    129 => SecretDeriveHkdf,
+    130 => SecretDeriveArgon2id,
+    131 => ZeroExtension,
+    132 => SecretHmacSha384,
+    133 => SecretHmacSha512,
+    134 => SecretVerifyHmacSha384,
+    135 => SecretVerifyHmacSha512,
+    136 => SecretJwsHmacSign,
+    137 => SecretJwsHmacVerify,
+    138 => ProvideRandomTape,
+    139 => UdpOpen,
+    140 => UdpBind,
+    141 => UdpBindGroup,
+    142 => UdpRecv,
+    143 => UdpSend,
+    144 => UdpLocalAddr,
+    145 => UdpFillPackets,
+    146 => SecretP256Key,
+    147 => SecretKeyShare,
+    148 => ScheduleQuicInitial,
+    149 => ScheduleSealer,
+    150 => ScheduleOpener,
+    151 => ScheduleHeaderMask,
+    152 => PacketSeal,
+    153 => PacketSealInto,
+    154 => PacketOpen,
+    155 => PacketOpenInto,
+    156 => PacketMask,
 });
 
 tags!(RaiseCause {

@@ -67,7 +67,7 @@ fn sv5_wycheproof_lengths() -> bool {
 }
 
 // SV10. One step and zero bytes suffice with TEST 1's local arguments.
-// expect: run sv10_ed25519_charge() = true
+// expect: reference run sv10_ed25519_charge() = true
 fn sv10_ed25519_charge() -> bool {
     let (key, msg, sig) = rfc_test_1()
     let work = bound bytes 0 {

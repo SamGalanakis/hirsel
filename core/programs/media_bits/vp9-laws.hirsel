@@ -1,0 +1,45 @@
+fn expect_invalid(packet: Bytes) {
+    if let Ok(_) = vp9.parse(packet) {
+        fail("malformed VP9 descriptor accepted")
+    }
+}
+
+/// bug: Lose Picture ID width, misplace scalability offsets or reject a valid RTP frame prefix.
+/// oracle: RFC 9628 figures 2–4 and FFmpeg VP9 frames from str0m tests/data/vp9.pcap.
+@test
+fn vp9_descriptor_wire() -> Result[(), ()] {
+    // Captured RTP 19357 and 19358. FFprobe decodes them as key and inter.
+    let mut captured = b"\x8f\xe6\xfb\x18\x01\xee\x01\x73\x01\x14\x01\x82\x49\x83\x42"
+    let key = result.unwrap(vp9.parse(captured))
+    if let Some(LongId(id)) = key.picture_id {
+        if id != 26363 {
+            fail("captured keyframe Picture ID")
+        }
+    } else {
+        fail("long Picture ID missing")
+    }
+    let structure = option.unwrap(key.scalability)
+    if !key.first || !key.last || key.predicted || key.payload_start != 11 || structure.layers != 1 || option.unwrap(structure.resolutions_start) != 4 || structure.picture_group_count != 1 || !result.unwrap(vp9.is_keyframe(list.slice(captured, key.payload_start, list.len(captured)))) {
+        fail("captured keyframe descriptor")
+    }
+    result.unwrap(vp9.rewrite_picture_id(mut captured, 257))
+    if list.compare_bytes(captured, b"\x8f\x81\x01\x18\x01\xee\x01\x73\x01\x14\x01\x82\x49\x83\x42") != Equal {
+        fail("rewrite changed width or touched payload")
+    }
+    let inter = b"\xcd\xe6\xfc\x86\x00\x40"
+    let delta = result.unwrap(vp9.parse(inter))
+    if !delta.first || !delta.last || !delta.predicted || delta.payload_start != 3 || result.unwrap(vp9.is_keyframe(list.slice(inter, delta.payload_start, list.len(inter)))) {
+        fail("captured inter-frame descriptor")
+    }
+    // I/P/L/F/B/E set, seven-bit PID 112, TID 2, SID 1, U/D set, P_DIFF 3 and 4.
+    let flex = result.unwrap(vp9.parse(b"\xfc\x70\x53\x07\x08\x86"))
+    let layer = option.unwrap(flex.layer)
+    if !flex.flexible || layer.temporal != 2 || layer.spatial != 1 || !layer.switching_up || !layer.inter_layer_dependency || flex.reference_count != 2 || flex.reference_diffs[0] != 3 || flex.reference_diffs[1] != 4 || flex.payload_start != 5 {
+        fail("RFC 9628 flexible inter-layer descriptor")
+    }
+    expect_invalid(b"\xd0\x01\x00\x86")
+    expect_invalid(b"\xd0\x01\x03\x03\x03\x02\x86")
+    expect_invalid(b"\x02\x10\x00")
+    expect_invalid(b"\x8c\x80")
+    Ok(())
+}

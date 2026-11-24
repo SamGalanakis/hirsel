@@ -1,0 +1,74 @@
+fn l63_tiered_table_base(ptr: std.page.PagePtr) -> Result[PageTree, Error] {
+    let mut raw = l68_collection_map_wire()
+    list.copy_from_slice(mut raw, 33, std.page.encode_ptr(ptr))
+    list.set_word_le(mut raw, 69, 2u64)
+    list.set_word_le(mut raw, 77, 172u64)
+    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let mut slots: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut slots, ColdPage(ptr))
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    tree.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    Ok(take tree)
+}
+
+@test
+fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
+    let leaf = l63_edit_leaf(1, 2, (6u64, 6u64), 40)?
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 59, checksum: 111, stamp: 40)
+    let base = l63_tiered_table_base(ptr)?
+    let source = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(ptr)), payload: TieredImage(arc.share(leaf))))
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut visible, (8u64, 72u64), take source)
+    let mut operations = new_data_rows()
+    push_data_row(mut operations, DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None))
+    push_data_row(mut operations, DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None))
+    let missed = tiered_attempt(75, 0)
+    let Error(Missed) = plan_tiered_edits(base, missed, map.new(), operations, 101) else {
+        fail("L63: a Cold plan must latch before the encoder runs")
+    }
+    let stopped = tiered_finish(take missed)
+    let (Some(AttemptMiss(TieredPage(want))), SeekKey(sought)) = (view stopped.stopped, view stopped.seek) else {
+        fail("L63: the driver needs the plan's demand and seek key")
+    }
+    if want != ptr || sought != key_word(2) {
+        fail("L63: the first miss must seek the first op in wire order")
+    }
+    let attempt = tiered_attempt(75, 0)
+    let Some(take plan) = plan_tiered_edits(base, attempt, visible, operations, 101)? else {
+        fail("L63: Tiered ops must have a plan before encoding")
+    }
+    // K=12 and V=6 charge 86 in either mode. The overwrite adds
+    // nothing in exact mode and adds one final staged value when retained.
+    if settled_tiered_bytes(172, false, base, plan.tree, operations)? != 258 ||
+        settled_tiered_bytes(172, true, base, plan.tree, operations)? != 344 {
+        fail("L63: exact and conservative Tiered totals follow the final ops")
+    }
+    let owner = StoreId(hi: 3, lo: 4)
+    let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
+    let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72))?
+    // The section starts at byte 37 and has a five-byte head. Each put
+    // takes 31 bytes, and its prior comes 17 bytes after its tag.
+    if list.len(wire) != 104 || word_be(wire, 51) != 2 || read_le(wire, 59, 4) != 7 ||
+        word_be(wire, 82) != 3 || read_le(wire, 90, 4) != 0 {
+        fail("L63: the encoder must use the deciding root's priors in key order")
+    }
+    let Some((HotPage(ready), descriptor)) = std.page.collection_slot(plan.tree.root, prefix(9)?) else {
+        fail("L63: the plan must prepare the changed collection")
+    }
+    if read_le(descriptor, 36, 8) != 3 || read_le(descriptor, 44, 8) != 258 || tiered_attempt_state(attempt).touched_bytes != 75 {
+        fail("L63: planning changed the wrong row, charge, or pin usage")
+    }
+    let Some(revised) = std.page.lookup(ready, key_word(2)) else {
+        fail("L63: staged overwrite is missing")
+    }
+    if list.compare_bytes(revised, string.as_bytes("update")) != Equal {
+        fail("L63: the staged overwrite does not match the wire edit")
+    }
+    let Some((ColdPage(unchanged), _)) = std.page.collection_slot(base.root, prefix(9)?) else {
+        fail("L63: planning changed its deciding base")
+    }
+    if unchanged != ptr {
+        fail("L63: planning rewrote the original pointer")
+    }
+    Ok(())
+}

@@ -32,9 +32,9 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     let mut old = true
     let mut new = true
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 96 {
-        let found = get(snapshot(db), sh, k)?
+        let found = get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)?
         let old_value: Option[u64] = if scenario == "genesis" {
             if k + 1 < db.heads[0].head {
                 Some(k + 1)
@@ -85,7 +85,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) {
             good = false
         }
-        match get(snapshot(db), shape(big), 1)? {
+        match get(result.unwrap(reader(db, 0u64)), snapshot(db), big, 1)? {
             Some(value) => {
                 if db.heads[0].head != 99 || string.byte_len(value) != 1048566 {
                     good = false
@@ -105,7 +105,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         // k + 1001, and by_v lists all 96 in key order. Nothing between.
         let mut moved = true
         for k in 0u64 .. 96 {
-            if get(snapshot(db), sh, k)? != Some(k + 1001) {
+            if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)? != Some(k + 1001) {
                 moved = false
             }
         }
@@ -113,11 +113,11 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         let mut whole = false
         if moved && listed == 1 && db.heads[0].head == 98 {
             let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-            let ix = index(db, mut indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
-            let mut rows = find(snapshot(db), ix, Unbounded, Unbounded)?
+            let ix = bind_table_index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let mut rows = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded)?
             let mut expect = 0u64
             whole = true
-            while let Some((k, v)) = next(mut rows)? {
+            while let Some((k, v)) = next(law_reader(rows.capture), mut rows)? {
                 if k != expect || v != k + 1001 {
                     whole = false
                 }
@@ -137,7 +137,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.
         let has_pin = match pinned(db, "p") {
             Some(s) => {
-                if version(s) != 97 || get(s, sh, 0)? != Some(1u64) {
+                if version(s) != 97 || get(law_reader(s), s, sh, 0)? != Some(1u64) {
                     good = false
                 };
                 true
@@ -152,7 +152,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
                 } else {
                     Some(1)
                 }
-                if get(at_b, sh, 0)? != k0 || get(at_b, sh, 95)? != Some(96u64) {
+                if get(result.unwrap(reader(db, 0u64)), at_b, sh, 0)? != k0 || get(result.unwrap(reader(db, 0u64)), at_b, sh, 95)? != Some(96u64) {
                     good = false
                 }
                 version(at_b)
@@ -181,7 +181,7 @@ fn install_next(mut phase: Migration) -> Result[(), Error] {
     migration_migrate(mut phase, take second, take replacement, crash_thousand)
 }
 
-fn install_target_value(target: PreparedTarget) -> Result[Bytes, DeployError] {
+fn install_target_value(target: PreparedTarget, _witness: Inline[u8, 32]) -> Result[Bytes, DeployError] {
     deploy_result(copied(target.release))
 }
 
@@ -244,6 +244,55 @@ fn crash_install_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[u64, 
     crash_apply(mut db, attempt, digest)
 }
 
+@test
+fn export_refuses_a_second_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let directory = disk_test_directory(d)
+    let scratch = disk_test_directory(d)
+    let mut db = deploy_result(open(tasks, directory, c, r, disk_crash_options("install")))?
+    let first = install_fixture_bytes(16, 7)
+    let second = install_fixture_bytes(16, 8)
+    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(first))?, 0)?
+    if let Error(AttemptBusy) = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0) {} else {
+        fail("a second export replaced the current lease")
+    }
+    release_export(mut db, second)
+    if !export_leased(db) {
+        fail("the refused attempt could release the first export")
+    }
+    release_export(mut db, first)
+    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0)?
+    release_export(mut db, second)
+    deploy_result(close(take db))
+}
+
+@test
+fn expired_cutover_keeps_old_serving(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let directory = disk_test_directory(d)
+    deploy_result(crash_install_init(directory, c, r, tasks))?
+    let mut db = deploy_result(open(tasks, directory, c, r, disk_crash_options("install")))?
+    let attempt = install_fixture_bytes(16, 7)
+    let (scratch, base) = crash_install_prepared(mut db, directory, c, tasks, attempt)?
+    let digest = crash_import(mut db, scratch, c, tasks, attempt, 66, 16781392)?
+    let request = Cutover(attempt: take attempt, digest: digest, deadline: 0)
+    let description = install_fixture_bytes(32, 65)
+    match perform_cutover(mut db, request, 1, description, std.codec.of_bytes(), install_target_value, scoped fn() -> bool {
+        true
+    }) {
+        Error(Expired) => (),
+        _ => fail("the prepared cutover did not refuse the expired deadline"),
+    }
+    let old = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let read = deploy_result(reader(db, 0))?
+    let snap = snapshot(db)
+    if version(snap) != base || deploy_result(get(read, snap, old, 0))? != Some(1) {
+        fail("the expired cutover changed OLD's serving state")
+    }
+    if !typed_put(mut db, old, 0, 99) {
+        fail("OLD could not commit after the expired cutover")
+    }
+    deploy_result(close(take db))
+}
+
 fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
     // AP1b gives 212 + 32 bytes for this fixture's 32-byte describe.
@@ -296,8 +345,8 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let (scratch_writes, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let stale = crash_import(mut db, scratch_writes, c, tasks, attempt, 66u8, 16781392u64)?
     let t = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let acknowledged = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 0u64, 77u64)
+    let acknowledged = deploy_result(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 0u64, 77u64)
     }))?
     if let Committed(done) = acknowledged {
         deploy_result(durable(mut db, done.ticket))?
@@ -323,7 +372,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let reopened = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
     let migrated = deploy_result(system_table(reopened, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let _ = deploy_result(system_table(reopened, "kept", std.codec.key_u64(), std.codec.of_u64()))?
-    if deploy_result(get(snapshot(reopened), shape(migrated), 0u64))? != Some(1077u64) {
+    if deploy_result(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), migrated, 0u64))? != Some(1077u64) {
         fail("fresh export lost the acknowledged row")
     }
     deploy_result(close(take reopened))
@@ -352,7 +401,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     let installed = v == 98
     let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
     let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
-    let found = option.unwrap(get(snap, shape(activated), 0u8)?)
+    let found = option.unwrap(get(result.unwrap(reader(db, 0u64)), snap, activated, 0u8)?)
     if found != install_fixture_bytes(32u64, if installed {
         66u8
     } else {
@@ -360,7 +409,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }) || db.fence != 1 {
         return Ok(false)
     }
-    let new_release = get(snap, shape(release), 98u64)?
+    let new_release = get(result.unwrap(reader(db, 0u64)), snap, release, 98u64)?
     if installed {
         if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 {
             return Ok(false)
@@ -370,7 +419,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }
     let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96u64 {
-        if get(snap, shape(t), k)? != Some(k + if installed {
+        if get(result.unwrap(reader(db, 0u64)), snap, t, k)? != Some(k + if installed {
             1001u64
         } else {
             1u64
@@ -392,7 +441,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         close(take db)?
         let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
         for k in 0u64 .. 96u64 {
-            if get(snapshot(reopened), shape(t), k)? != Some(k + 1001u64) {
+            if get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), t, k)? != Some(k + 1001u64) {
                 return Ok(false)
             }
         }
@@ -408,6 +457,9 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
 pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "window" || scenario == "window-chunk-failure" || scenario == "window-sync-failure" {
+        return disk_window_crash(d, c, r, tasks, argv, out, phase, scenario != "window")
+    }
     if scenario == "read-only" {
         if phase == "init" {
             disk_crash_init(d, c, r, tasks, "checkpoint") ?=> |_| Exit(status: 31)
@@ -426,6 +478,9 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
         let published = option.unwrap(args.get(argv, 2)) == "new"
         disk_crash_read_only(d, published) ?=> |_| Exit(status: 33)
         return Ok(())
+    }
+    if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" {
+        return disk_crash_live_read_main(d, c, r, tasks, argv, out, scenario)
     }
     if scenario == "watermark-absent" || scenario == "watermark-torn" {
         if phase == "write" {
@@ -524,9 +579,9 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
         }
         fail("read-only open accepted a published torn MANIFEST or lost its fault")
     }
-    let reader = opened?
-    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if version(reader.snapshot) != 161 {
+    let read_source = opened?
+    let rows = read_only_table(read_source, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if version(read_source.snapshot) != 161 {
         fail("read-only open recovered the wrong journal prefix")
     }
     for k in 0u64 .. 96 {
@@ -535,7 +590,7 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
         } else {
             k + 1
         }
-        if read_only_get(reader, rows, k)? != Some(expected) {
+        if read_only_get(read_source, rows, k)? != Some(expected) {
             fail("read-only open recovered the wrong row")
         }
     }
@@ -545,18 +600,18 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
 @test
 fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
-    if let Error(NotFound) = open_read_only(child, defaults()) {} else {
+    if let Error(NotFound) = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64))) {} else {
         fail("read-only open of an empty directory must refuse")
     }
-    let mut db = open(tasks, child, c, r, defaults())?
+    let mut db = open(tasks, child, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let opened_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut db, opened_rows, 7, 70) {
         fail("could not commit first row")
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
-    durable(mut db, last)?
-    let saved = open_read_only(child, defaults())?
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, final_item)?
+    let saved = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64)))?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
         fail("read-only open missed a durable journal row")
@@ -566,8 +621,8 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     checkpoint(mut db)?
     close(take db)?
-    let fresh = open_read_only(child, defaults())?
-    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(fresh.snapshot) != 3 || read_only_get(fresh, rows, 7)? != Some(71u64) {
+    let newer = open_read_only(child, result.unwrap(sized(Directory, 2147483648u64)))?
+    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(newer.snapshot) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
         fail("read-only reads changed after the writer replaced the row")
     }
     Ok(())
@@ -613,13 +668,16 @@ pub fn journal_law_payload() -> bool {
     result.unwrap(le(mut payload, 2, 4))
     result.unwrap(le(mut payload, 1, 1))
     result.unwrap(blob(mut payload, string.as_bytes("key")))
+    result.unwrap(le(mut payload, 0, 4))
     result.unwrap(blob(mut payload, string.as_bytes("value")))
     result.unwrap(le(mut payload, 2, 1))
     result.unwrap(blob(mut payload, string.as_bytes("gone")))
+    result.unwrap(le(mut payload, 10, 4))
     result.unwrap(le(mut payload, 1, 1))
     result.unwrap(le(mut payload, 1, 4))
     result.unwrap(le(mut payload, 3, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    let stream = journal_vector_stream()
+    result.unwrap(blob(mut payload, stream))
     let mut replied: Bytes = list.new()
     list.fill(mut replied, 40, 0u8)
     list.push(mut replied, 2u8)
@@ -634,7 +692,7 @@ pub fn journal_law_payload() -> bool {
     if got.branch != 3 || got.version != 257 || got.at != 1234 || list.len(got.data) != 2 || list.len(got.streams) != 1 {
         return false
     }
-    if got.data[0].key != string.as_bytes("key") {
+    if got.data[0].key != string.as_bytes("key") || got.data[0].prior != 0 {
         return false
     }
     match got.data[0].value {
@@ -643,10 +701,10 @@ pub fn journal_law_payload() -> bool {
         },
         None => return false
     }
-    if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None {
+    if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None || got.data[1].prior != 10 {
         return false
     }
-    if got.streams[0].key != string.as_bytes("stream") {
+    if got.streams[0].key != stream {
         return false
     }
     match got.streams[0].value {
@@ -656,20 +714,20 @@ pub fn journal_law_payload() -> bool {
         None => return false
     }
     match got.call {
-        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != string.as_bytes("stream") || !revision_is_vector(c.record.revision) {
+        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != journal_vector_stream_name() || !revision_is_vector(c.record.revision) {
             return false
         },
         None => return false
     }
-    // The 21-byte fixed header, 31-byte data section, 66-byte streams prefix,
-    // 9-byte entry key and 13-byte args place revision at [140, 176).
+    // The 21-byte fixed header, 39-byte data section, 84-byte streams prefix,
+    // 9-byte entry key and 13-byte args place revision at [166, 202).
     for size in 0u64 .. 2 {
-        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 140)))
+        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 166)))
         result.unwrap(le(mut other, size, 4))
         if size == 1 {
             list.push(mut other, 0u8)
         }
-        list.append(mut other, list.slice(payload, 176, list.len(payload)))
+        list.append(mut other, list.slice(payload, 202, list.len(payload)))
         let read_back = journal_decode_commit("j-7", other)
         if size == 1 {
             match read_back {
@@ -698,18 +756,18 @@ pub fn journal_law_payload() -> bool {
     if !disk_corrupt(journal_decode_commit("j-7", trailing)) {
         return false
     }
-    // The CALL's stream op must have state Replied. The value starts at 72.
+    // The CALL's stream op must have state Replied. The value starts at 98.
     let mut no_reply = result.unwrap(copied(payload))
-    let _ = list.set(mut no_reply, 112, 1u8)
+    let _ = list.set(mut no_reply, 138, 1u8)
     if !disk_corrupt(journal_decode_commit("j-7", no_reply)) {
         return false
     }
     // A second op, put or delete, cannot overwrite the CALL's stream op.
     for tag in 1u64 .. 3 {
         let mut repeated: Bytes = result.unwrap(copied(payload))
-        list.set_word_le(mut repeated, 53, 2u32)
+        list.set_word_le(mut repeated, 61, 2u32)
         result.unwrap(le(mut repeated, tag, 1))
-        result.unwrap(blob(mut repeated, string.as_bytes("stream")))
+        result.unwrap(blob(mut repeated, stream))
         if tag == 1 {
             result.unwrap(blob(mut repeated, replied))
         }
@@ -718,24 +776,24 @@ pub fn journal_law_payload() -> bool {
         }
     }
     let mut two_calls: Bytes = result.unwrap(copied(payload))
-    list.set_word_le(mut two_calls, 53, 2u32)
-    list.append(mut two_calls, list.slice(payload, 57, list.len(payload)))
-    let _ = list.set(mut two_calls, 234, 120u8)
+    list.set_word_le(mut two_calls, 61, 2u32)
+    list.append(mut two_calls, list.slice(payload, 65, list.len(payload)))
+    let _ = list.set(mut two_calls, list.len(payload) + 7, b'x')
     if !disk_corrupt(journal_decode_commit("j-7", two_calls)) {
         return false
     }
-    // The stream section cannot precede data. Tag 2 is retired.
+    // The stream section cannot precede data. Format 6 tag 2 accepts only control.
     let mut reversed: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
-    list.append(mut reversed, list.slice(payload, 52, list.len(payload)))
-    list.append(mut reversed, list.slice(payload, 21, 52))
+    list.append(mut reversed, list.slice(payload, 60, list.len(payload)))
+    list.append(mut reversed, list.slice(payload, 21, 60))
     if !disk_corrupt(journal_decode_commit("j-7", reversed)) {
         return false
     }
-    let mut retired: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
-    let _ = list.set(mut retired, 20, 1u8)
-    result.unwrap(le(mut retired, 2, 1))
-    list.append(mut retired, list.slice(payload, 118, list.len(payload)))
-    if !disk_corrupt(journal_decode_commit("j-7", retired)) {
+    let mut control: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    let _ = list.set(mut control, 20, 1u8)
+    result.unwrap(le(mut control, 2, 1))
+    list.append(mut control, list.slice(payload, 61, list.len(payload)))
+    if !disk_corrupt(journal_decode_commit("j-7", control)) {
         return false
     }
     // Two sections with the same tag are malformed, including an empty one.
@@ -771,11 +829,11 @@ fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
     result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
 }
 
-fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], last: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
+fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], final_item: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
     disk_write_synced(d, "j-7", raw)?
     let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
     let mut events: List[JournalEvent] = list.new()
-    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, last, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, final_item, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
         list.push(mut observed, take event)
         Ok(())
     })
@@ -812,6 +870,19 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     }
     let (middle_end, middle_bytes, take middle) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), false))
     if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 {
+        return false
+    }
+    // D3: the segment length survives, but every byte past the durable frame is zero.
+    let mut zeroed = result.unwrap(copied(list.slice(raw, 0, 114)))
+    list.fill(mut zeroed, 42, 0u8)
+    let (zeroed_end, zeroed_bytes, take zeroed_events) = result.unwrap(journal_scan_fixture(d, id, zeroed, Some(114), true))
+    if zeroed_end != 114 || zeroed_bytes != 42 || list.len(zeroed_events) != 1 {
+        return false
+    }
+    let Commit(first_commit) = zeroed_events[0] else {
+        return false
+    }
+    if first_commit.version != 1 || first_commit.at != 101 {
         return false
     }
     for n in 114u64 .. 156 {
@@ -864,8 +935,8 @@ fn journal_law_segment_fork(d: Dir) -> bool waits {
     let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
     list.append(mut raw, journal_empty_commit(ctx, 72, 64))
     list.append(mut raw, fork_frame_bytes())
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
-    if end != 152 || accepted != 80 || list.len(events) != 2 {
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(160), true))
+    if end != 160 || accepted != 88 || list.len(events) != 2 {
         return false
     }
     let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else {
@@ -885,11 +956,11 @@ fn journal_law_chunked_segment(d: Dir) -> bool waits {
     result.unwrap(le(mut raw, 65536, 4))
     result.unwrap(le(mut raw, 17032182677987914202, 8))
     list.fill(mut raw, 65536, 9u8)
-    // One COMMIT: 42 + put (9 + key 12 + value 65,536) = 65,599.
+    // One COMMIT: 42 + put (9 + key 12 + prior length 4 + value 65,536) = 65,603.
     result.unwrap(le(mut raw, 0x0011, 2))
     result.unwrap(le(mut raw, 1, 2))
-    result.unwrap(le(mut raw, 65583, 4))
-    result.unwrap(le(mut raw, 11866033783025652971, 8))
+    result.unwrap(le(mut raw, 65587, 4))
+    result.unwrap(le(mut raw, 3906595394227617390, 8))
     result.unwrap(le(mut raw, 0, 4))
     result.unwrap(le(mut raw, 1, 8))
     result.unwrap(le(mut raw, 100, 8))
@@ -900,11 +971,12 @@ fn journal_law_chunked_segment(d: Dir) -> bool waits {
     result.unwrap(le(mut raw, 12, 4))
     result.unwrap(append_be(mut raw, 1, 4))
     result.unwrap(append_be(mut raw, 7, 8))
+    result.unwrap(le(mut raw, 0, 4))
     result.unwrap(le(mut raw, 65536, 4))
     list.fill(mut raw, 65536, 17u8)
     list.fill(mut raw, 11, 0u8)
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131223), true))
-    if end != 131223 || accepted != 65599 || list.len(events) != 1 {
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131227), true))
+    if end != 131227 || accepted != 65603 || list.len(events) != 1 {
         return false
     }
     let Commit(commit) = events[0] else {
@@ -925,8 +997,4 @@ fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
     } else {
         Error(())
     }
-}
-
-fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
-    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node))
 }

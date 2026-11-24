@@ -1,0 +1,230 @@
+// Resolve the color space of the embedded ICC profile. A separate inflated
+// limit keeps profile handling bounded without allocating during probe.
+pub fn embedded_color_space(input: Bytes, limits: Limits, max_profile_bytes: u64) -> Result[Option[ColorSpace], Error] {
+    if list.len(input) > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    match (bound steps limits.max_steps {
+        embedded_color_inner(input, limits, max_profile_bytes)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn embedded_color_inner(input: Bytes, limits: Limits, max_profile_bytes: u64) -> Result[Option[ColorSpace], Error] {
+    let header = probe_header(input, limits)?
+    if let Some(profile) = header.icc_profile {
+        let color = match profile.storage {
+            Raw => {
+                if profile.end - profile.start > max_profile_bytes {
+                    return Error(ByteLimit)
+                }
+                raw_icc_color(input, profile.start, profile.end)?
+            },
+            Zlib => {
+                let compressed = list.slice(input, profile.start, profile.end)
+                let inflated = match std.flate.decode(Zlib, compressed, max_profile_bytes) {
+                    Ok(take data) => take data,
+                    Error(Data(TooLarge)) => return Error(ByteLimit),
+                    Error(_) => return Error(Malformed),
+                }
+                raw_icc_color(inflated, 0, list.len(inflated))?
+            },
+            JpegSegments => {
+                let assembled = assemble_jpeg_icc(input, profile, max_profile_bytes)?
+                raw_icc_color(assembled, 0, list.len(assembled))?
+            },
+        }
+        Ok(Some(color))
+    } else {
+        Ok(None)
+    }
+}
+
+fn assemble_jpeg_icc(input: Bytes, profile: IccProfile, cap: u64) -> Result[Bytes, Error] {
+    let mut ranges: Inline[(u64, u64), 256] =[(0, 0); 256]
+    let mut total = 0u64
+    let mut count = 0u64
+    let mut at = profile.start
+    // The JPEG probe validated marker framing, sequence numbers and that all
+    // segments are present. ICC parts may be separated by ordinary markers.
+    while at < profile.end {
+        if input[at] != 0xff {
+            at += 1
+            continue
+        }
+        while at < profile.end && input[at] == 0xff {
+            at += 1
+        }
+        let marker = input[at]
+        at += 1
+        if marker == 0 || (marker >= 0xd0 && marker <= 0xd7) {
+            continue
+        }
+        let span: u64 = int.widen(tiff_short(input, at, false))
+        let body = at + 2
+        let end = at + span
+        if marker == 0xe2 && span > 16 && jpeg_icc_signature(input, body) {
+            let part: u64 = int.widen(input[body + 12])
+            count = int.widen(input[body + 13])
+            let start = body + 14
+            let size = end - start
+            if size > cap - total {
+                return Error(ByteLimit)
+            }
+            ranges[part] = (start, end)
+            total += size
+        }
+        at = end
+    }
+    let mut out = alloc_bytes(total)?
+    for i in 1u64 .. count + 1 {
+        let (start, end) = ranges[i]
+        list.append(mut out, list.slice(input, start, end))
+    }
+    Ok(take out)
+}
+
+fn raw_icc_color(input: Bytes, start: u64, end: u64) -> Result[ColorSpace, Error] {
+    icc_header(input, start, end)?
+    let model: u32 = list.word_be(input, start + 16)
+    let pcs: u32 = list.word_be(input, start + 20)
+    let count: u64 = int.widen(tiff_long(input, start + 128, false))
+    let mut found = 0u64
+    let mut matches_srgb = true
+    let mut matches_p3 = true
+    let mut explicit = Unspecified
+    for i in 0u64 .. count {
+        let entry = start + 132 + 12 * i
+        let tag: u32 = list.word_be(input, entry)
+        let body = start + int.widen(tiff_long(input, entry + 4, false))
+        let size: u64 = int.widen(tiff_long(input, entry + 8, false))
+        if tag == 0x63696370 {
+            if size < 12 || found & 64 != 0 {
+                return Error(Malformed)
+            }
+            let signature: u32 = list.word_be(input, body)
+            if signature != tag {
+                return Error(Malformed)
+            }
+            if input[body + 9] == 13 && input[body + 10] == 0 && input[body + 11] == 1 {
+                if input[body + 8] == 1 {
+                    explicit = Srgb
+                } else if input[body + 8] == 12 {
+                    explicit = DisplayP3
+                }
+            }
+            found |= 64
+            continue
+        }
+        let index: u64 = match tag {
+            0x7258595a => 0,
+            0x6758595a => 1,
+            0x6258595a => 2,
+            0x72545243 => 3,
+            0x67545243 => 4,
+            0x62545243 => 5,
+            _ => 6,
+        }
+        if index >= 6 {
+            continue
+        }
+        let bit = 1u64 << index
+        if found & bit != 0 {
+            return Error(Malformed)
+        }
+        found |= bit
+        if index < 3 {
+            matches_srgb = matches_srgb && icc_primary(input, body, size, index, false)
+            matches_p3 = matches_p3 && icc_primary(input, body, size, index, true)
+        } else if !icc_srgb_transfer(input, body, size) {
+            matches_srgb = false
+            matches_p3 = false
+        }
+    }
+    if let Unspecified = explicit {} else {
+        return Ok(explicit)
+    }
+    if found & 63 == 63 && model == 0x52474220 && pcs == 0x58595a20 {
+        if matches_srgb {
+            return Ok(Srgb)
+        }
+        if matches_p3 {
+            return Ok(DisplayP3)
+        }
+    }
+    Ok(EmbeddedIcc)
+}
+
+fn icc_fixed(input: Bytes, at: u64) -> i32 {
+    let word: u32 = list.word_be(input, at)
+    int.truncate(word)
+}
+
+fn icc_primary(input: Bytes, at: u64, size: u64, index: u64, display_p3: bool) -> bool {
+    if size != 20 {
+        return false
+    }
+    let signature: u32 = list.word_be(input, at)
+    if signature != 0x58595a20 {
+        return false
+    }
+    // D50-adapted RGB matrix columns, in ICC s15Fixed16 units.
+    let matrix: Inline[i32, 18] =[28579, 14582, 913, 25236, 46981, 6364, 9377, 3973, 46804, 33758, 15806, -69, 19134, 45366, 2745, 10299, 4363, 51405]
+    let offset: u64 = (if display_p3 {
+        9u64
+    } else {
+        0
+    }) + index * 3
+    for j in 0u64 .. 3 {
+        let got: i64 = int.widen(icc_fixed(input, at + 8 + 4 * j))
+        let want: i64 = int.widen(matrix[offset + j])
+        if int.abs(got - want) > 192 {
+            return false
+        }
+    }
+    true
+}
+
+fn icc_srgb_transfer(input: Bytes, at: u64, size: u64) -> bool {
+    if size < 12 {
+        return false
+    }
+    let signature: u32 = list.word_be(input, at)
+    if signature == 0x70617261 {
+        let kind = tiff_short(input, at + 8, false)
+        if (kind != 3 || size != 32) && (kind != 4 || size != 40) {
+            return false
+        }
+        let curve: Inline[i32, 5] =[157286, 62119, 3417, 5072, 2651]
+        for i in 0u64 .. 5 {
+            let actual: i64 = int.widen(icc_fixed(input, at + 12 + 4 * i))
+            let want: i64 = int.widen(curve[i])
+            if int.abs(actual - want) > 64 {
+                return false
+            }
+        }
+        return kind == 3 || (icc_fixed(input, at + 32) == 0 && icc_fixed(input, at + 36) == 0)
+    }
+    if signature != 0x63757276 {
+        return false
+    }
+    let count: u64 = int.widen(tiff_long(input, at + 8, false))
+    if count < 16 || count * 2 > size - 12 {
+        return false
+    }
+    for i in 0u64 .. count {
+        let position = i * 255
+        let base = position / (count - 1)
+        let fraction: i64 = int.narrow(position % (count - 1))
+        let step: i64 = int.narrow(count - 1)
+        let high = order.min(base + 1, 255)
+        let expected = (SRGB_TO_LINEAR[base] * (step - fraction) + SRGB_TO_LINEAR[high] * fraction + step / 2) / step
+        let actual: i64 = int.widen(tiff_short(input, at + 12 + i * 2, false))
+        if int.abs(actual - expected) > 32 {
+            return false
+        }
+    }
+    true
+}

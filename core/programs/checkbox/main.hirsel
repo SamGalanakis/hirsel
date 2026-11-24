@@ -16,24 +16,16 @@ fn bit(take i: u32) -> Result[Bit, ()] {
     }
 }
 
-type Handles: send {
+type Handles: shareable + send {
     chunks: store.Table[u32, Bytes]
 }
 
 type Registry = runner.Registry[(), Handles]
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("chunks", std.codec.key_u32(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Handles, store.Error] {
-    let codec: std.codec.Codec[Bytes] = std.codec.of()
-    let chunks = store.schema_table(catalog, "chunks", std.codec.key_u32(), codec)?
+    let table = store.declare_table(mut d, "chunks", std.codec.key_u32(), codec)?
+    let chunks = store.finish(mut d, take table)?
     Ok(Handles(chunks: chunks))
 }
 
@@ -58,7 +50,7 @@ fn flip(mut data: Bytes, i: Bit) -> bool {
 
 fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> Result[bool, Never] {
     let key = chunk(i)
-    let old = result.unwrap(store.fetch(tx, store.shape(h.chunks), key))
+    let old = result.unwrap(store.fetch(tx, h.chunks, key))
     let mut data = match take old {
         Some(take value) => take value,
         None => zero_chunk()
@@ -68,13 +60,21 @@ fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> R
     Ok(checked)
 }
 
-fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)
+fn query_table(h: Handles) -> store.Table[u32, Bytes] {
+    clone(h.chunks)
+}
+
+fn query_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("chunks", code.describe(query_table))
+}
+
+fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("chunks", h.chunks, Unbounded, Unbounded)
 }
 
 fn place(mut registry: Registry) -> Result[(), runner.RegisterError] {
     runner.transact(mut registry, code.describe(toggle), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut registry, code.describe(board), std.codec.key_u32(), std.codec.of_bytes(), 1048576u64, runner.DEFAULT_STEPS)
+    runner.query(mut registry, code.describe(board), query_slots()?, 1048576u64, runner.DEFAULT_STEPS)
 }
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {
@@ -143,30 +143,31 @@ const STOP_GRACE_MS: u64 = 5000u64
 
 // runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
 // `stop` (runner.main), which drains and closes the store.
-fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-    let selection = runner.launch_selection(a) ?=> Usage
-    let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
-    let mut session = runner.wire_defaults(65536u64, N_PLACE)
+fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, (), ()] {
+    let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    let config: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(directory, store.defaults()),
-        selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(),
+        selection: selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema),
         session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
         listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-    let ended = runner.operate(take config, take stop, result.unwrap(runner.status_root()), None) ?=> Start
+}
+
+fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, errors: Stderr, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+    let selected = runner.launch_selection(a) ?=> Usage
+    let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
+    let configured = config(n, directory, web, c, random, tasks, selected, listen, take proxies)
+    let ended = runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
     Ok(ended)
 }
 
 pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
-    runner.main(a, process, errors, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+    runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         if let Some(take candidate) = runner.launch_prepare_args(a) ?=> Usage {
             let runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
-            let setup = runner.PrepareConfig(scratch: directory, options: store.defaults(),
-                attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
-                place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles),
-                triggers: runner.triggers.empty_entries())
-            return match runner.prepare_deploy(setup) { Ok(()) => Ok(Unstarted), Error(_) => Error(Usage(Exit(status: 1u8))) }
+            let configured = config(n, directory, web, c, random, tasks, Reopen, Addr(ip: V4(0x7f000001u32), port: 0u16), list.new())
+            return Ok(runner.prepare_place(take configured, take attempt, take digest, errors) ?=> Start)
         }
-        start(n, directory, web, c, random, tasks, a, take stop)
+        start(n, directory, web, c, random, tasks, a, errors, take stop)
     })
 }
 

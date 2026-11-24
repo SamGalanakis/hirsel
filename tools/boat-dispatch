@@ -396,7 +396,8 @@ def execute(invoke, vm, jobs, archives, log):
         work = f"{root}/job-{index}"
         cleanup = f"rm -rf -- {previous} && " if previous else ""
         command = (f"{cleanup}cp -a --reflink=auto -- {stage_dir} {work} && cd {work} && "
-                   'export PATH="$PWD/toolchain:$PATH" && ulimit -Sn "$(ulimit -Hn)" && '
+                   'export PATH="$PWD/toolchain:$PATH" HIRSEL_BOAT_DISK_TMPDIR="$PWD" && '
+                   'ulimit -Sn "$(ulimit -Hn)" && '
                    f"exec bash -c {shlex.quote(job.command)}")
         run_log = log / f"{index}-{job.lane}.log"
         print(f"Boat {vm}: {job.lane} -> {run_log}", file=sys.stderr, flush=True)

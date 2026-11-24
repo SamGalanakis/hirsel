@@ -21,6 +21,17 @@ It follows TCP half-close/drain practice in Go and Tokio; ordinary drop alone
 cannot prevent unread input from making final close reset the connection.
 Goose's hypothetical socket sketch has no graceful completion operation.
 
+## TCP addresses and peer selection
+
+`net.local_addr(socket)` and `net.peer_addr(socket)` return the connection's
+local and remote IP address and port. `net.listener_addr(listener)` returns the
+listener's bound address, including the kernel-selected port after a port-zero
+listen. These operations borrow their handles. [NET-1](../../../docs/spec/net.md#net-1-socket-operation-declarations)
+
+`std.net.accept_from(mut listener, peer, until)` accepts a connection from an
+expected IP address and port, closing other accepted connections. It preserves
+the original deadline across accepts.
+
 ## Name lookup
 
 `std.net.lookup(n: Net, name: String, until: Until) -> Result[List[Ip], LookupError] waits`

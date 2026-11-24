@@ -1,25 +1,15 @@
 // L4's native case (RUNNER-SPEC v2.5 §8): one program, two modes, compared by
 // core/tools/runner_tests.py on the charge-observation runtime's peak_retained_bytes.
-// argv: mode. Mode 0: one valid call through a session and the head. Mode 1: 10,000
-// malformed calls (a 4,096-byte String plus one byte, so each decode reads the whole
-// String before it is refused), then the same valid call. Refused frames leave nothing
-// behind, so the two modes' peaks are equal.
-type Hd: send { t: store.Table[u64, u64] }
+// argv: number of malformed calls before the valid call. Each malformed call appends
+// one byte to a 4,096-byte String, so the decoder reads the full String before refusal.
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
 }
 
@@ -81,14 +71,14 @@ fn drive(take d: D) -> () waits {
     let bad = string_arg(4096u64, true)
     for _ in 0u64 .. d.flood {
         let a: Bytes = clone(bad)
-        let request: runner.Frame = Call(0u32, 0u64, 0u32, 4294967295u32, take a)
+        let request: runner.Frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 4294967295u32, take a)
         wire_client.send_frame(cn, take request)
         match answer(cn) {
             Refused(Malformed(_)) => (),
             _ => fail("runner_rss: a malformed call not Refused(Malformed)"),
         }
     }
-    let request: runner.Frame = Call(0u32, 0u64, 0u32, 4294967295u32, string_arg(4096u64, false))
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 4294967295u32, string_arg(4096u64, false))
     wire_client.send_frame(cn, take request)
     match answer(cn) {
         Returned(_) => (),
@@ -100,15 +90,15 @@ fn drive(take d: D) -> () waits {
 
 pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
-    let flood = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { 10000u64 } else { 0u64 }
-    let mut db = store.memory(clock, random, store.defaults())
+    let flood = result.unwrap(std.int.parse_uint(m, 10u32))
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood, net: net, random: random)
     let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

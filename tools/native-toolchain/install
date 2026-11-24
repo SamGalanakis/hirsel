@@ -3,6 +3,7 @@
 #
 #   install                 print the install command and pinned asset URLs
 #   install --unpack DIR    install the verified toolchain below DIR without root
+#   install --bolt-tools DIR  unpack the verified BOLT build tools below DIR
 #   install --source        print the pinned source build commands
 set -euo pipefail
 
@@ -10,7 +11,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lock="$here/llvm-23.lock"
 
 fail() { echo "native-toolchain install: $*" >&2; exit 1; }
-usage() { echo "usage: install [--unpack DIR | --source]" >&2; exit 2; }
+usage() { echo "usage: install [--unpack DIR | --bolt-tools DIR | --source]" >&2; exit 2; }
 
 lock_value() {
   local value
@@ -23,7 +24,7 @@ case "${1:-}" in
   "")
     (( $# == 0 )) || usage
     printf '%q --unpack DIR\n' "$here/install"
-    for key in bootstrap_llvm static_lld engine_llvm; do
+    for key in bootstrap_llvm static_lld engine_llvm bolt_tools; do
       read -r _ _ asset <<< "$(lock_value "$key")"
       echo "# $(lock_value asset_pool)/$asset"
     done
@@ -38,11 +39,22 @@ case "${1:-}" in
     printf 'export LLVM_SYS_231_PREFIX=%q\n' "$llvm_prefix"
     printf "export LD_LIBRARY_PATH=%q\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\n" "$llvm_prefix/lib"
     ;;
+  --bolt-tools)
+    (( $# == 2 )) || usage
+    read -r sha size asset <<< "$(lock_value bolt_tools)"
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    curl -fsSL "$(lock_value asset_pool)/$asset" -o "$scratch/$asset"
+    [[ "$(stat -c %s "$scratch/$asset")" == "$size" ]] || fail "incorrect BOLT tools archive size"
+    printf '%s  %s\n' "$sha" "$scratch/$asset" | sha256sum -c --status || fail "incorrect BOLT tools archive SHA-256"
+    mkdir -p "$2"
+    tar -xJf "$scratch/$asset" -C "$2"
+    ;;
   --source)
     (( $# == 1 )) || usage
     printf '%q DIR ARTIFACTS bootstrap\n' "$here/build-libllvm"
     printf '%q DIR\n' "$here/build-static-lld"
-    for stage in instr train opt guard; do
+    for stage in instr train opt bolt-tools bolt guard; do
       printf '%q DIR ARTIFACTS %s\n' "$here/build-libllvm" "$stage"
     done
     ;;

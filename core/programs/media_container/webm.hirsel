@@ -1,0 +1,594 @@
+// EBML framing and Matroska blocks. Offsets are local to a caller byte window.
+pub type Error = Truncated | InvalidVint | InvalidElement | InvalidBlock | InvalidTrack | Unsupported | ShortBuffer
+
+pub opaque type Element {
+    id: u32,
+    body: u64,
+    next: u64,
+    known_size: bool
+}
+
+type Vint {
+    value: u64,
+    width: u64,
+    unknown: bool
+}
+
+const SEGMENT: u32 = 0x18538067
+
+const CLUSTER: u32 = 0x1f43b675
+
+const TIMESTAMP: u32 = 0xe7
+
+const SIMPLE_BLOCK: u32 = 0xa3
+
+const GROUP: u32 = 0xa0
+
+const BLOCK: u32 = 0xa1
+
+const MAX_SIZE: u64 = 0x00fffffffffffffe
+
+fn read_vint(input: Bytes, at: u64, limit: u64, max_width: u64) -> Result[Vint, Error] {
+    if at == limit {
+        return Error(Truncated)
+    }
+    let first = input[at]
+    if first == 0 {
+        return Error(InvalidVint)
+    }
+    let mut marker = 128u8
+    let mut width = 1u64
+    while (first & marker) == 0 {
+        marker >>= 1
+        width += 1
+    }
+    if width > max_width {
+        return Error(InvalidVint)
+    }
+    if width > limit - at {
+        return Error(Truncated)
+    }
+    let mut value: u64 = int.widen(first & (marker - 1))
+    for i in 1u64 .. width {
+        let byte: u64 = int.widen(input[at + i])
+        value = (value << 8) | byte
+    }
+    Ok(Vint(value: value, width: width, unknown: value == (1u64 << (7 * width)) - 1))
+}
+
+fn element_header(input: Bytes, at: u64, limit: u64) -> Result[Element, Error] {
+    if limit > list.len(input) || at > limit {
+        return Error(Truncated)
+    }
+    let id = read_vint(input, at, limit, 4)?
+    if id.unknown || (id.value < ((1u64 << (7 * (id.width - 1))) - 1) && id.width > 1) {
+        return Error(InvalidVint)
+    }
+    let marker = 1u64 << (7 * id.width)
+    let kind: u32 = int.narrow(marker | id.value)
+    let size = read_vint(input, at + id.width, limit, 8)?
+    let body = at + id.width + size.width
+    if size.unknown {
+        if kind != SEGMENT && kind != CLUSTER {
+            return Error(Unsupported)
+        }
+        return Ok(Element(id: kind, body: body, next: limit, known_size: false))
+    }
+    let Some(end_element) = int.checked_add(body, size.value) else {
+        return Error(InvalidElement)
+    }
+    Ok(Element(id: kind, body: body, next: end_element, known_size: true))
+}
+
+pub fn read_element(input: Bytes, at: u64, limit: u64) -> Result[Element, Error] {
+    let e = element_header(input, at, limit)?
+    if e.next > limit {
+        return Error(Truncated)
+    }
+    Ok(e)
+}
+
+pub fn element_id(e: Element) -> u32 {
+    e.id
+}
+
+pub fn element_body(e: Element) -> u64 {
+    e.body
+}
+
+pub fn element_next(e: Element) -> Option[u64] {
+    if e.known_size {
+        Some(e.next)
+    } else {
+        None
+    }
+}
+
+pub type Frame {
+    track: u64,
+    timestamp: i64,
+    key: bool,
+    invisible: bool,
+    discardable: bool,
+    duration: Option[u64],
+    discard_padding: i64,
+    lace_index: u16,
+    lace_count: u16
+}
+
+fn uint(input: Bytes, lo: u64, hi: u64) -> Result[u64, Error] {
+    if hi - lo > 8 {
+        return Error(InvalidElement)
+    }
+    let mut value = 0u64
+    for i in lo .. hi {
+        let byte: u64 = int.widen(input[i])
+        value = (value << 8) | byte
+    }
+    Ok(value)
+}
+
+fn xiph_size(input: Bytes, limit: u64, mut at: u64) -> Result[u64, Error] {
+    let mut size = 0u64
+    while at < limit {
+        let byte = input[at]
+        at += 1
+        let b: u64 = int.widen(byte)
+        let Some(total) = int.checked_add(size, b) else {
+            return Error(InvalidBlock)
+        }
+        size = total
+        if byte != 255 {
+            return Ok(size)
+        }
+    }
+    Error(Truncated)
+}
+
+fn add_delta(value: u64, delta: i64) -> Result[u64, Error] {
+    if delta >= 0 {
+        let positive: u64 = int.truncate(delta)
+        let Some(next_size) = int.checked_add(value, positive) else {
+            return Error(InvalidBlock)
+        }
+        return Ok(next_size)
+    }
+    let negative: u64 = int.truncate(-delta)
+    if negative > value {
+        return Error(InvalidBlock)
+    }
+    Ok(value - negative)
+}
+
+fn lace_sizes(input: Bytes, limit: u64, mut at: u64, mode: u8, mut sizes: Inline[u64, 256]) -> Result[u64, Error] {
+    if mode == 0 {
+        sizes[0] = limit - at
+        return Ok(1)
+    }
+    if at == limit {
+        return Error(Truncated)
+    }
+    let offset: u64 = int.widen(input[at])
+    let count = 1 + offset
+    at += 1
+    if count == 1 {
+        return Error(InvalidBlock)
+    }
+    if mode == 2 {
+        let total = limit - at
+        if total % count != 0 {
+            return Error(InvalidBlock)
+        }
+        for i in 0u64 .. count {
+            sizes[i] = total / count
+        }
+        return Ok(count)
+    }
+    let mut used = 0u64
+    let mut previous = 0u64
+    for i in 0u64 .. offset {
+        let size = if mode == 1 {
+            xiph_size(input, limit, mut at)?
+        } else {
+            let code = read_vint(input, at, limit, 8)?
+            at += code.width
+            if i == 0 {
+                code.value
+            } else {
+                let biased: i64 = int.narrow(code.value)
+                let bias: i64 = int.narrow((1u64 << (7 * code.width - 1)) - 1)
+                add_delta(previous, biased - bias)?
+            }
+        }
+        if used > limit - at || size > limit - at - used {
+            return Error(InvalidBlock)
+        }
+        sizes[i] = size
+        previous = size
+        used += size
+    }
+    sizes[offset] = limit - at - used
+    Ok(count)
+}
+
+fn frames(input: Bytes, b: Element, base: i64, in_group: bool, mut info: Frame, receive: scoped fn(Frame, Bytes)) -> Result[(), Error] {
+    let id = read_vint(input, b.body, b.next, 8)?
+    if id.value == 0 || b.next - b.body - id.width < 3 {
+        return Error(InvalidBlock)
+    }
+    let mut at = b.body + id.width
+    let encoded: u16 = list.word_be(input, at)
+    let delta: i16 = int.truncate(encoded)
+    let d: i64 = int.widen(delta)
+    let Some(timestamp) = int.checked_add(base, d) else {
+        return Error(InvalidBlock)
+    }
+    let flags = input[at + 2]
+    if (flags & 0x70) != 0 || (in_group && (flags & 0x81) != 0) {
+        return Error(InvalidBlock)
+    }
+    at += 3
+    info.track = id.value
+    info.timestamp = timestamp
+    if !in_group {
+        info.key = (flags & 0x80) != 0
+    }
+    info.invisible = (flags & 8) != 0
+    info.discardable = (flags & 1) != 0
+    let mode = (flags >> 1) & 3
+    if mode == 0 {
+        receive(info, list.slice(input, at, b.next))
+        return Ok(())
+    }
+    let mut sizes: Inline[u64, 256] =[0; 256]
+    let count = lace_sizes(input, b.next, mut at, mode, mut sizes)?
+    info.lace_count = int.narrow(count)
+    for i in 0u64 .. count {
+        info.lace_index = int.narrow(i)
+        let hi = at + sizes[i]
+        receive(info, list.slice(input, at, hi))
+        at = hi
+    }
+    Ok(())
+}
+
+fn empty_frame() -> Frame {
+    Frame(track: 0, timestamp: 0, key: true, invisible: false, discardable: false, duration: None, discard_padding: 0, lace_index: 0, lace_count: 1)
+}
+
+fn sint(input: Bytes, lo: u64, hi: u64) -> Result[i64, Error] {
+    let mut word = uint(input, lo, hi)?
+    let width = hi - lo
+    if width > 0 && width < 8 && (input[lo] & 0x80) != 0 {
+        word |= ~0u64 << (8 * width)
+    }
+    Ok(int.truncate(word))
+}
+
+fn group_frames(input: Bytes, group: Element, base: i64, receive: scoped fn(Frame, Bytes)) -> Result[(), Error] {
+    let mut at = group.body
+    let mut block: Option[Element] = None
+    let mut info = empty_frame()
+    while at < group.next {
+        let b = read_element(input, at, group.next)?
+        if !b.known_size {
+            return Error(InvalidBlock)
+        }
+        if b.id == BLOCK {
+            if let Some(_) = block {
+                return Error(InvalidBlock)
+            }
+            block = Some(b)
+        } else if b.id == 0xfb {
+            info.key = false
+        } else if b.id == 0x9b {
+            info.duration = Some(uint(input, b.body, b.next)?)
+        } else if b.id == 0x75a2 {
+            info.discard_padding = sint(input, b.body, b.next)?
+        }
+        at = b.next
+    }
+    let Some(b) = block else {
+        return Error(InvalidBlock)
+    }
+    frames(input, b, base, true, mut info, receive)
+}
+
+fn segment_child(id: u32) -> bool {
+    id == CLUSTER || id == 0x114d9b74 || id == 0x1549a966 || id == 0x1654ae6b || id == 0x1c53bb6b || id == 0x1941a469 || id == 0x1043a770 || id == 0x1254c367
+}
+
+// Read a Cluster. For unknown-sized clusters, use eof only at the actual end
+// of the enclosing Segment. Laced frames share the block timestamp.
+pub fn read_cluster(input: Bytes, at: u64, limit: u64, eof: bool, receive: scoped fn(Frame, Bytes)) -> Result[u64, Error] {
+    let cluster = read_element(input, at, limit)?
+    if cluster.id != CLUSTER {
+        return Error(InvalidElement)
+    }
+    let end_cluster = if cluster.known_size {
+        cluster.next
+    } else {
+        unknown_cluster_end(input, cluster.body, limit, eof)?
+    }
+    let mut child_at = cluster.body
+    let mut seen_time = false
+    let mut base = 0i64
+    while child_at < end_cluster {
+        let b = read_element(input, child_at, end_cluster)?
+        if !b.known_size {
+            return Error(InvalidElement)
+        }
+        if b.id == TIMESTAMP {
+            if seen_time {
+                return Error(InvalidElement)
+            }
+            let timestamp = uint(input, b.body, b.next)?
+            if timestamp > 0x7fffffffffffffff {
+                return Error(InvalidElement)
+            }
+            base = int.narrow(timestamp)
+            seen_time = true
+        } else if b.id == SIMPLE_BLOCK || b.id == GROUP {
+            if !seen_time {
+                return Error(InvalidElement)
+            }
+            if b.id == SIMPLE_BLOCK {
+                let mut info = empty_frame()
+                frames(input, b, base, false, mut info, receive)?
+            } else {
+                group_frames(input, b, base, receive)?
+            }
+        }
+        child_at = b.next
+    }
+    if !seen_time {
+        return Error(InvalidElement)
+    }
+    Ok(end_cluster)
+}
+
+fn unknown_cluster_end(input: Bytes, start: u64, limit: u64, eof: bool) -> Result[u64, Error] {
+    let mut at = start
+    while at < limit {
+        let e = element_header(input, at, limit)?
+        if segment_child(e.id) {
+            return Ok(at)
+        }
+        if !e.known_size {
+            return Error(InvalidElement)
+        }
+        if e.next > limit {
+            return Error(Truncated)
+        }
+        at = e.next
+    }
+    if eof {
+        Ok(limit)
+    } else {
+        Error(Truncated)
+    }
+}
+
+pub type Codec = Opus(u8, u16) | Vp8(u16, u16) | Vp9(u16, u16) | Av1(u16, u16)
+
+fn put_id(mut out: Bytes, id: u32) {
+    if id <= 0xff {
+        list.push(mut out, int.narrow(id))
+    } else if id <= 0xffff {
+        let value: u16 = int.narrow(id)
+        list.put_word_be(mut out, value)
+    } else if id <= 0xffffff {
+        list.push(mut out, int.truncate(id >> 16))
+        let tail: u16 = int.truncate(id)
+        list.put_word_be(mut out, tail)
+    } else {
+        list.put_word_be(mut out, id)
+    }
+}
+
+fn vint_width(n: u64) -> u64 {
+    let mut width = 1u64
+    while width < 8 && n >= (1u64 << (7 * width)) - 1 {
+        width += 1
+    }
+    width
+}
+
+fn put_vint(mut out: Bytes, n: u64) {
+    let width = vint_width(n)
+    let coded = n | (1u64 << (7 * width))
+    for i in 0u64 .. width {
+        list.push(mut out, int.truncate(coded >> (8 * (width - i - 1))))
+    }
+}
+
+fn start_element(mut out: Bytes, id: u32) -> u64 {
+    put_id(mut out, id)
+    let at = list.len(out)
+    list.put_word_be(mut out, 0u64)
+    at
+}
+
+fn finish_element(mut out: Bytes, at: u64) {
+    let size = list.len(out) - at - 8
+    list.set_word_be(mut out, at, (1u64 << 56) | size)
+}
+
+fn uint_width(n: u64) -> u64 {
+    let mut width = 1u64
+    while width < 8 && n >> (8 * width) != 0 {
+        width += 1
+    }
+    width
+}
+
+fn put_uint(mut out: Bytes, id: u32, n: u64) {
+    let width = uint_width(n)
+    put_id(mut out, id)
+    put_vint(mut out, width)
+    for i in 0u64 .. width {
+        list.push(mut out, int.truncate(n >> (8 * (width - i - 1))))
+    }
+}
+
+fn put_binary(mut out: Bytes, id: u32, body: Bytes) {
+    put_id(mut out, id)
+    put_vint(mut out, list.len(body))
+    list.append(mut out, body)
+}
+
+fn video_fields(mut out: Bytes, w: u16, h: u16) {
+    let video = start_element(mut out, 0xe0)
+    put_uint(mut out, 0xb0, int.widen(w))
+    put_uint(mut out, 0xba, int.widen(h))
+    finish_element(mut out, video)
+}
+
+fn valid_codec(codec: Codec) -> bool {
+    match codec {
+        Opus(channels, _) => channels == 1 || channels == 2,
+        Vp8(w, h) => w != 0 && h != 0,
+        Vp9(w, h) => w != 0 && h != 0,
+        Av1(w, h) => w != 0 && h != 0,
+    }
+}
+
+// Emit an EBML header, unknown-size WebM Segment, Info, and a single TrackEntry.
+// The timestamp scale is in nanoseconds. Opus requires a matching OpusHead.
+// Allocate up to 256 bytes plus the codec private data in the output buffer.
+pub fn write_init(mut out: Bytes, track: u64, scale: u64, codec: Codec, private_data: Bytes) -> Result[(), Error] {
+    let length = list.len(private_data)
+    if track == 0 || track > MAX_SIZE || scale == 0 || length > MAX_SIZE - 256 || !valid_codec(codec) {
+        return Error(InvalidTrack)
+    }
+    if let Opus(channels, delay) = codec {
+        let h = match opus.read_head(private_data) {
+            Ok(value) => value,
+            Error(_) => {
+                return Error(InvalidTrack)
+            },
+        }
+        if h.family != 0 || h.channels != channels || h.pre_skip != delay {
+            return Error(InvalidTrack)
+        }
+    }
+    if list.capacity(out) < length + 256 {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    let ebml = start_element(mut out, 0x1a45dfa3)
+    put_uint(mut out, 0x4286, 1)
+    put_uint(mut out, 0x42f7, 1)
+    put_uint(mut out, 0x42f2, 4)
+    put_uint(mut out, 0x42f3, 8)
+    put_binary(mut out, 0x4282, b"webm")
+    put_uint(mut out, 0x4287, 4)
+    put_uint(mut out, 0x4285, 2)
+    finish_element(mut out, ebml)
+    put_id(mut out, SEGMENT)
+    list.push(mut out, 0xff)
+    let info = start_element(mut out, 0x1549a966)
+    put_uint(mut out, 0x2ad7b1, scale)
+    put_binary(mut out, 0x4d80, b"Hirsel")
+    put_binary(mut out, 0x5741, b"Hirsel")
+    finish_element(mut out, info)
+    let tracks = start_element(mut out, 0x1654ae6b)
+    let entry = start_element(mut out, 0xae)
+    put_uint(mut out, 0xd7, track)
+    put_uint(mut out, 0x73c5, track)
+    put_uint(mut out, 0x9c, 0)
+    match codec {
+        Opus(channels, delay) => {
+            put_uint(mut out, 0x83, 2)
+            put_binary(mut out, 0x86, b"A_OPUS")
+            let samples: u64 = int.widen(delay)
+            put_uint(mut out, 0x56aa, samples * 1000000000 / 48000)
+            put_uint(mut out, 0x56bb, 80000000)
+            let audio = start_element(mut out, 0xe1)
+            put_uint(mut out, 0x9f, int.widen(channels))
+            put_binary(mut out, 0xb5, b"\x47\x3b\x80\x00")
+            finish_element(mut out, audio)
+        },
+        Vp8(w, h) => {
+            put_uint(mut out, 0x83, 1)
+            put_binary(mut out, 0x86, b"V_VP8")
+            video_fields(mut out, w, h)
+        },
+        Vp9(w, h) => {
+            put_uint(mut out, 0x83, 1)
+            put_binary(mut out, 0x86, b"V_VP9")
+            video_fields(mut out, w, h)
+        },
+        Av1(w, h) => {
+            put_uint(mut out, 0x83, 1)
+            put_binary(mut out, 0x86, b"V_AV1")
+            video_fields(mut out, w, h)
+        },
+    }
+    if length != 0 {
+        put_binary(mut out, 0x63a2, private_data)
+    }
+    finish_element(mut out, entry)
+    finish_element(mut out, tracks)
+    Ok(())
+}
+
+// Emit a complete Cluster and SimpleBlock prefix for one frame. Follow it with
+// exactly size bytes. Neither building the prefix nor sending it copies frame data.
+pub fn write_frame(mut out: Bytes, track: u64, timestamp: u64, key: bool, size: u64) -> Result[(), Error] {
+    if track == 0 || track > MAX_SIZE || timestamp > 0x7fffffffffffffff || size > MAX_SIZE - 32 {
+        return Error(InvalidBlock)
+    }
+    if list.capacity(out) < 42 {
+        return Error(ShortBuffer)
+    }
+    let block_size = vint_width(track) + 3 + size
+    let time_width = uint_width(timestamp)
+    let cluster_size = 2 + time_width + 1 + vint_width(block_size) + block_size
+    list.clear(mut out)
+    put_id(mut out, CLUSTER)
+    put_vint(mut out, cluster_size)
+    put_uint(mut out, TIMESTAMP, timestamp)
+    put_id(mut out, SIMPLE_BLOCK)
+    put_vint(mut out, block_size)
+    put_vint(mut out, track)
+    list.put_word_be(mut out, 0u16)
+    list.push(mut out, if key {
+        0x80
+    } else {
+        0
+    })
+    Ok(())
+}
+
+// Write a keyframe BlockGroup with signed DiscardPadding in nanoseconds. The
+// padding is trailing metadata. Send this prefix, the frame, then the suffix.
+pub fn write_padded_frame(mut prefix: Bytes, mut suffix: Bytes, track: u64, timestamp: u64, size: u64, padding: i64) -> Result[(), Error] {
+    if track == 0 || track > MAX_SIZE || timestamp > 0x7fffffffffffffff || size > MAX_SIZE - 64 {
+        return Error(InvalidBlock)
+    }
+    if list.capacity(prefix) < 51 || list.capacity(suffix) < 11 {
+        return Error(ShortBuffer)
+    }
+    let time_width = uint_width(timestamp)
+    let block_size = vint_width(track) + 3 + size
+    let group_size = 1 + vint_width(block_size) + block_size + 11
+    let cluster_size = 2 + time_width + 1 + vint_width(group_size) + group_size
+    list.clear(mut prefix)
+    list.clear(mut suffix)
+    put_id(mut prefix, CLUSTER)
+    put_vint(mut prefix, cluster_size)
+    put_uint(mut prefix, TIMESTAMP, timestamp)
+    put_id(mut prefix, GROUP)
+    put_vint(mut prefix, group_size)
+    put_id(mut prefix, BLOCK)
+    put_vint(mut prefix, block_size)
+    put_vint(mut prefix, track)
+    list.put_word_be(mut prefix, 0u16)
+    list.push(mut prefix, 0)
+    put_id(mut suffix, 0x75a2)
+    put_vint(mut suffix, 8)
+    let bits: u64 = int.truncate(padding)
+    list.put_word_be(mut suffix, bits)
+    Ok(())
+}

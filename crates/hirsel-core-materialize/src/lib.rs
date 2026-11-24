@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 mod join;
-pub use join::{Unit, join, link_symbol};
+pub use join::{Unit, join, join_units, link_symbol};
 
 /// A published definition's body: its module, its function row and, for a generic
 /// body, the template its instances substitute.

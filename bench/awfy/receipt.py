@@ -3,7 +3,6 @@
 import argparse
 from contextlib import contextmanager, nullcontext
 from decimal import Decimal, InvalidOperation
-import fcntl
 import hashlib
 import json
 import math
@@ -23,16 +22,23 @@ import elf_census
 import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
+from timing_shield import file_locks, hold, measurement_affinity
 
-VERSION = 5
+VERSION = 6
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
 GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
-CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256", "image_sha256")
+CANDIDATE_HASHES = (*ARTIFACT_HASHES, "clang_sha256", "std_sha256", "workload_sources_sha256", "image_sha256")
 WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
+
+
+class OlderBoardReceipt(ValueError):
+    def __init__(self, version):
+        self.version = version
+        super().__init__(f"instruction receipt version changed from {version} to {VERSION}")
 
 
 def read(path):
@@ -48,8 +54,7 @@ def write(path, data):
 
 @contextmanager
 def measurement_slot(path, *, blocking=True):
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    with file_locks((path,), blocking=blocking):
         yield
 
 
@@ -100,7 +105,7 @@ def verified_build(row):
     record = row.get("build_record")
     if not isinstance(record, dict) or record.get("accepted") is not True or record.get("linked") is not True:
         return False
-    for field in (*ARTIFACT_HASHES, *build.MANIFEST_HASHES, "image_sha256"):
+    for field in (*CANDIDATE_HASHES, "manifest_sha256"):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
@@ -143,6 +148,7 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
         "image_sha256": image,
+        "clang_sha256": provenance["clang_sha256"],
         "build_record": build_record(report),
         "marker": marker.decode(),
         **fixture,
@@ -211,7 +217,7 @@ def sample(args):
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
         raise ValueError("use a new evidence directory outside the checkout")
-    if args.cpu not in os.sched_getaffinity(0):
+    if args.cpu not in measurement_affinity(args.lock):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     siblings = sibling_cpus((args.cpu,))
     cases = dict(runtime_rows(args))
@@ -236,7 +242,7 @@ def sample(args):
         except (OSError, ValueError, KeyError) as error:
             receipt["failures"][key] = str(error)
     env = build.capped_env(out)
-    with measurement_slot(args.lock):
+    with hold(args.lock):
         os.sched_setaffinity(0, {args.cpu})
         for key, row in rows.items():
             try:
@@ -256,13 +262,14 @@ def sample(args):
 
 def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_baseline=False):
     data = read(path)
-    previous_board = False
     if "instruction_receipt" in data:
         if data["complete"] is not True and not allow_incomplete:
             raise ValueError(f"{path}: incomplete board")
         data = data["instruction_receipt"]
-        previous_board = compare_baseline and data["version"] == 4
-    if data["version"] != VERSION and not previous_board:
+        version = data["version"]
+        if compare_baseline and type(version) is int and 0 < version < VERSION:
+            raise OlderBoardReceipt(version)
+    if data["version"] != VERSION:
         raise ValueError(f"{path}: unsupported instruction receipt")
     declared = data["expected_rows"]
     if (not isinstance(declared, list) or not declared
@@ -279,11 +286,6 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_bas
             continue
         if key in rows:
             refusals[key] = f"{path}: duplicate row"
-        if previous_board:
-            try:
-                row = board_v4_row(row)
-            except INVALID_RECEIPT as error:
-                refusals[key] = f"{path}: {error}"
         rows[key] = row
     for key in rows.keys() - keys:
         refusals[key] = f"{path}: unexpected row"
@@ -294,22 +296,6 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_bas
     for key, reason in data["failures"].items():
         refusals[key] = f"{path}: failed sample: {reason}"
     return rows, refusals
-
-
-def board_v4_row(row):
-    # Version 4 used the runtime mode to record Step certification. Version 5
-    # records a release build in either case. Compile modes did not change.
-    certified, mode = row["certified"], row["mode"]
-    if type(certified) is not bool:
-        raise ValueError("invalid Step certification")
-    if row["suite"] != "compile":
-        if mode != ("certified" if certified else "bounded"):
-            raise ValueError("runtime mode disagrees with Step certification")
-        mode = "release"
-    record = row.get("build_record")
-    if record is not None and record.get("certified") is not certified:
-        raise ValueError("build record disagrees with Step certification")
-    return {**row, "mode": mode}
 
 
 def validate_row(key, row):
@@ -533,7 +519,7 @@ def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=Fals
 def cycle_pairs(args):
     limit = args.sibling_busy_threshold
     affinity = os.sched_getaffinity(0)
-    if args.cpu not in affinity:
+    if args.cpu not in measurement_affinity(args.lock, force=True):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     if args.peer and (args.candidate is not None or args.aa):
         raise ValueError("--peer takes one Hirsel receipt and cannot be combined with --aa")
@@ -546,7 +532,7 @@ def cycle_pairs(args):
     if target.resolve() in {path.resolve() for path in [args.lock, *inputs]}:
         raise ValueError("--out must differ from the input receipts and lock")
     report = pair_report(args, "peer" if args.peer else "A/A" if args.aa else "A/B")
-    with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
+    with hold(args.lock, force=True), tempfile.TemporaryDirectory() as temporary:
         siblings = sibling_cpus((args.cpu,))
         env = build.capped_env(Path(temporary))
         activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
@@ -785,7 +771,7 @@ def pair_samples(args):
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
         raise ValueError("use a new evidence directory outside the checkout")
-    if args.cpu not in os.sched_getaffinity(0):
+    if args.cpu not in measurement_affinity(args.lock):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     siblings = sibling_cpus((args.cpu,))
     env = build.capped_env(out)
@@ -796,7 +782,7 @@ def pair_samples(args):
     if not comparing:
         limit = None
     failed = False
-    with measurement_slot(args.lock):
+    with hold(args.lock):
         os.sched_setaffinity(0, {args.cpu})
         for key in keys:
             pairs = report["rows"][key] = []
@@ -834,7 +820,7 @@ def profile(args):
     base_identity, candidate = match_rows(args.row, left, right)
     affinity = set(left["affinity"])
     assigned = os.sched_getaffinity(0)
-    if not affinity <= assigned:
+    if not affinity <= measurement_affinity(args.lock):
         raise ValueError(f"run on the recorded affinity {sorted(affinity)}")
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
@@ -851,7 +837,7 @@ def profile(args):
         sides.append((out / label, row, verify_runtime_files(row, label)))
     out.mkdir(parents=True)
     try:
-        with measurement_slot(args.lock):
+        with hold(args.lock):
             os.sched_setaffinity(0, affinity)
             for directory, row, _ in sides:
                 directory.mkdir()

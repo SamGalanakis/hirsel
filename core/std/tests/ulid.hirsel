@@ -1,0 +1,37 @@
+// Example values from https://github.com/ulid/spec (GPL-3.0), canonical
+// encoding and monotonicity. Binary oracles are the base-32 integers in
+// network byte order, with the top 48 bits giving the millisecond value.
+// expect: run ulid_law() = true
+fn ulid_law() -> bool {
+    let text = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    let expected = ulid.Ulid(hi: 0x01563e3ab5d3d676, lo: 0x4c61efb99302bd5b)
+    let bytes_match = ulid.from_bytes(b"\0\x01\x56\x3e\x3a\xb5\xd3\xd6\x76\x4c\x61\xef\xb9\x93\x02\xbd\x5b", 1) == Ok(expected)
+    let millis = 1469922850259u64
+    let generated = ulid.generate(millis, b"\0\xd6\x76\x4c\x61\xef\xb9\x93\x02\xbd\x5b", 1) == Ok(expected)
+    let parsed = ulid.parse("01arz3ndektsv4rrffq69g5fav") == Ok(expected)
+    let time_matches = ulid.unix_ms(expected) == millis
+    let mut text_out = string.from("id=")
+    ulid.push(mut text_out, expected)
+    let formatted = ulid.to_string(expected) == text && text_out == "id=01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    let earlier = ulid.Ulid(hi: 0x015549f01d7e3a66, lo: 0xa08c07ce13d25363)
+    let earlier_matches = ulid.parse("01AN4Z07BY79KA1307SR9X4MV3") == Ok(earlier)
+    let ordered = earlier < expected
+    let last = ulid.Ulid(hi: 0x015f4bffcd735334, lo: 0xada78edc1d4a6f1f)
+    let next = ulid.Ulid(hi: 0x015f4bffcd735334, lo: 0xada78edc1d4a6f20)
+    let spec_increment = ulid.parse("01BX5ZZKBKACTAV9WEVGEMMVRZ") == Ok(last) && ulid.to_string(next) == "01BX5ZZKBKACTAV9WEVGEMMVS0" && ulid.increment(last) == Ok(next)
+    let before_carry = ulid.Ulid(hi: 0x015f4bffcd735334, lo: 0xffffffffffffffff)
+    let after_carry = ulid.Ulid(hi: 0x015f4bffcd735335, lo: 0)
+    let carry = ulid.increment(before_carry) == Ok(after_carry) && before_carry < after_carry
+    let full = ulid.Ulid(hi: 0x015f4bffcd73ffff, lo: 0xffffffffffffffff)
+    let refuses_full = ulid.increment(full) == Error(RandomOverflow)
+    let max = ulid.Ulid(hi: 0xffffffffffffffff, lo: 0xffffffffffffffff)
+    let bounds = ulid.parse("7ZZZZZZZZZZZZZZZZZZZZZZZZZ") == Ok(max) && ulid.parse("80000000000000000000000000") == Error(InvalidUlid(0))
+    let invalid_i = ulid.parse("01iRZ3NDEKTSV4RRFFQ69G5FAV") == Error(InvalidUlid(2))
+    let invalid_l = ulid.parse("01LRZ3NDEKTSV4RRFFQ69G5FAV") == Error(InvalidUlid(2))
+    let invalid_o = ulid.parse("01oRZ3NDEKTSV4RRFFQ69G5FAV") == Error(InvalidUlid(2))
+    let invalid_u = ulid.parse("01URZ3NDEKTSV4RRFFQ69G5FAV") == Error(InvalidUlid(2))
+    let sizes = ulid.parse("") == Error(InvalidUlid(0)) && ulid.parse("01ARZ3NDEKTSV4RRFFQ69G5FAVA") == Error(InvalidUlid(26))
+    let invalid_ranges = ulid.from_bytes(b"", 0xffffffffffffffff) == Error(ShortInput) && ulid.generate(1, b"", 0) == Error(ShortInput)
+    let overflow = ulid.generate(1u64 << 48, b"", 0) == Error(TimestampOverflow)
+    bytes_match && generated && parsed && time_matches && formatted && earlier_matches && ordered && spec_increment && carry && refuses_full && bounds && invalid_i && invalid_l && invalid_o && invalid_u && sizes && invalid_ranges && overflow
+}

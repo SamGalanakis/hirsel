@@ -20,15 +20,15 @@
 //! unregistered, and its sends name its bytes directly.
 use super::{Backend, Poller, Uring};
 use std::{
+    collections::HashMap,
     io,
     ops::Range,
     os::fd::AsRawFd,
     sync::{Arc, MutexGuard},
 };
 
-/// Completions of transmit slots: the unit 0xffff, which no shared tag uses
-/// (WAKE and REMOVED sit at its top), a send sequence, then the slot index.
-const TX: u64 = 0xffff << 48;
+/// Reserve the remaining high bits of completion data for other operations.
+const SEND_ID_LIMIT: u64 = 1 << 62;
 /// Registered-buffer table entries; slots above it send unregistered.
 pub(super) const REGISTERED: u32 = 64;
 /// `IORING_SEND_ZC_REPORT_USAGE`, and the notification bit it sets when the
@@ -39,18 +39,15 @@ const ZC_COPIED: u32 = 1 << 31;
 /// waits at most this long while any are kept.
 pub(super) const TRIM: std::time::Duration = std::time::Duration::from_secs(1);
 
-pub(super) fn is_tx(user_data: u64) -> bool {
-    user_data & TX == TX
-}
-
 #[derive(Default)]
 struct Entry {
     bytes: Box<[u8]>,
     registered: bool,
     outstanding: u8,
-    notifs: u8,
+    notifs: usize,
     held: bool,
-    sequence: u16,
+    send_id: u64,
+    cancel_queued: bool,
     /// The owning socket's registration tag, readied at each completion.
     tag: u64,
     /// The first completion of the latest send, once it has arrived.
@@ -61,15 +58,13 @@ impl Entry {
     fn busy(&self) -> bool {
         self.outstanding != 0 || self.notifs != 0
     }
-
-    fn send_id(&self, index: u32) -> u64 {
-        TX | (u64::from(self.sequence) << 32) | u64::from(index)
-    }
 }
 
 #[derive(Default)]
 pub(super) struct Table {
     entries: Vec<Entry>,
+    next_send: u64,
+    sends: HashMap<u64, u32>,
     /// Entries with no bytes and nothing in the kernel.
     free: Vec<u32>,
     /// Idle entries that keep their (registered) bytes.
@@ -145,7 +140,7 @@ impl Poller {
                     None => {
                         let index = u32::try_from(table.entries.len())
                             .ok()
-                            .filter(|&index| index < u32::MAX - 1)?;
+                            .filter(|&index| index <= i32::MAX as u32)?;
                         table.entries.push(Entry::default());
                         index
                     }
@@ -178,7 +173,7 @@ impl Poller {
                 let table = ring.tx();
                 (table.notified, table.copied)
             }
-            Backend::Epoll(_) => (0, 0),
+            Backend::Epoll { .. } => (0, 0),
         }
     }
 }
@@ -187,7 +182,7 @@ impl TxSlot {
     fn ring(&self) -> &Uring {
         match &self.poller.backend {
             Backend::Uring(ring) => ring,
-            Backend::Epoll(_) => unreachable!(),
+            Backend::Epoll { .. } => unreachable!(),
         }
     }
 
@@ -212,32 +207,66 @@ impl TxSlot {
     pub fn send(&mut self, tag: u64, range: Range<usize>) -> io::Result<()> {
         use io_uring::{opcode, types};
         assert!(range.start <= range.end && range.end <= self.len);
+        let len =
+            u32::try_from(range.len()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         // SAFETY: in bounds of the slot's live bytes.
         let start = unsafe { self.data.add(range.start) };
         let ring = self.ring();
-        let watched = ring.watched.lock().unwrap_or_else(|e| e.into_inner());
+        let watched = ring.watches();
         let watch = watched
             .get(&tag)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
         let mut table = ring.tx();
+        assert_eq!(
+            table.entries[self.index as usize].outstanding, 0,
+            "one send per slot at a time"
+        );
+        let send_id = table.next_send + 1;
+        let zero_copy = send_id < SEND_ID_LIMIT && ring.completion.reserve_send();
+        if zero_copy {
+            table.next_send = send_id;
+            table.sends.insert(send_id, self.index);
+        }
         let entry = &mut table.entries[self.index as usize];
-        assert_eq!(entry.outstanding, 0, "one send per slot at a time");
+        if !zero_copy {
+            // SAFETY: this slot pins the bytes and the watch pins the descriptor.
+            let n = unsafe {
+                libc::send(
+                    watch.fd.as_raw_fd(),
+                    start.cast(),
+                    range.len(),
+                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                )
+            };
+            entry.result = Some(if n < 0 {
+                -io::Error::last_os_error().raw_os_error().unwrap()
+            } else {
+                n as i32
+            });
+            drop(table);
+            drop(watched);
+            self.submitted = true;
+            return Ok(());
+        }
         let registered = entry.registered;
         entry.tag = tag;
         entry.result = None;
         entry.outstanding += 1;
         entry.notifs += 1;
-        entry.sequence = entry.sequence.wrapping_add(1);
-        let send = opcode::SendZc::new(types::Fd(watch.fd.as_raw_fd()), start, range.len() as u32)
+        entry.send_id = send_id;
+        entry.cancel_queued = false;
+        let send = opcode::SendZc::new(types::Fd(watch.fd.as_raw_fd()), start, len)
             .buf_index(registered.then_some(self.index as u16))
             .flags(libc::MSG_NOSIGNAL | libc::MSG_WAITALL)
             .zc_flags(REPORT_USAGE)
             .build()
-            .user_data(entry.send_id(self.index));
-        ring.push(send, Some(watch.fd.clone()));
+            .user_data(send_id);
+        ring.completion.push(send, Some(watch.fd.clone()));
         drop(table);
         drop(watched);
         self.submitted = true;
+        // Only the poller's owner holds a send target, so it submits now.
+        self.poller.submit_or_wake(true);
         Ok(())
     }
 
@@ -255,17 +284,20 @@ impl TxSlot {
     /// count or `-ECANCELED`) arrives as any other.
     pub fn cancel(&self) {
         let ring = self.ring();
-        let table = ring.tx();
-        let entry = &table.entries[self.index as usize];
-        if entry.outstanding != 0 {
+        let mut table = ring.tx();
+        let entry = &mut table.entries[self.index as usize];
+        if entry.outstanding != 0 && !entry.cancel_queued {
             // A queued cancel targets this send even if its answer is reaped
             // and another send on the same slot is queued before the cancel enters.
-            ring.push(
-                io_uring::opcode::AsyncCancel::new(entry.send_id(self.index))
+            entry.cancel_queued = true;
+            ring.completion.push(
+                io_uring::opcode::AsyncCancel::new(entry.send_id)
                     .build()
                     .user_data(super::REMOVED),
                 None,
             );
+            drop(table);
+            self.poller.submit_or_wake(true);
         }
     }
 }
@@ -294,8 +326,17 @@ impl Uring {
         self.tx.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[cfg(test)]
+    pub(super) fn busy_tx_slots(&self) -> usize {
+        self.tx()
+            .entries
+            .iter()
+            .filter(|entry| entry.busy())
+            .count()
+    }
+
     fn register(&self, index: u32, bytes: &mut [u8]) -> bool {
-        if !self.sparse {
+        if !self.completion.sparse {
             return false;
         }
         let iov = libc::iovec {
@@ -305,7 +346,8 @@ impl Uring {
         // SAFETY: the bytes stay alive and in place until unregistered or
         // leaked with the ring (Table::drop).
         unsafe {
-            self.ring
+            self.completion
+                .ring
                 .submitter()
                 .register_buffers_update(index, &[iov], None)
         }
@@ -319,7 +361,8 @@ impl Uring {
         };
         // SAFETY: an empty entry names no memory.
         let _ = unsafe {
-            self.ring
+            self.completion
+                .ring
                 .submitter()
                 .register_buffers_update(index, &[iov], None)
         };
@@ -374,10 +417,17 @@ impl Uring {
     /// Apply one transmit completion. Returns the tag to ready, if any.
     pub(super) fn tx_complete(&self, user_data: u64, result: i32, flags: u32) -> Option<u64> {
         use io_uring::cqueue;
-        let index = (user_data & u64::from(u32::MAX)) as u32;
         let mut table = self.tx();
-        let entry = table.entries.get_mut(index as usize)?;
-        if cqueue::notif(flags) {
+        let notif = cqueue::notif(flags);
+        let more = cqueue::more(flags);
+        let index = if notif || !more {
+            table.sends.remove(&user_data)?
+        } else {
+            *table.sends.get(&user_data)?
+        };
+        let entry = &mut table.entries[index as usize];
+        if notif {
+            self.completion.release_send(1, 0);
             entry.notifs -= 1;
             let copied = result as u32 & ZC_COPIED != 0;
             let (held, tag, busy) = (entry.held, entry.tag, entry.busy());
@@ -390,7 +440,9 @@ impl Uring {
         }
         entry.outstanding -= 1;
         entry.result = Some(result);
-        if !cqueue::more(flags) {
+        self.completion
+            .release_send(1 + usize::from(!more), usize::from(!entry.cancel_queued));
+        if !more {
             // No notification follows a send that failed before taking data.
             entry.notifs -= 1;
         }

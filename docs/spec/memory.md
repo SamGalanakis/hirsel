@@ -709,31 +709,90 @@ fn same_pool(a: Handle, b: Handle) -> bool { a.pool == b.pool }
 fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: LANG-21, Unique is not ordered
 ```
 
-### MEM-29: Append-only logs
+### MEM-29: Append-only logs and task-local cells
 
-A `Log[E]` is an own, task-local, opaque handle of 8 bytes to a separately admitted node of
-24 bytes, which owns the log's entries. It is never `send`, `shareable`, `key` or
-`ordered`. Its entries are state that no view exposes
-([OWN-8](ownership.md#own-8-views)): no operation reads, counts, clears or iterates them.
+A `Cell[T]` is an own, task-local, opaque handle of 8 bytes to a separately admitted node
+that owns one `T`. It is never `send`, `shareable`, `key`, `ordered` or `codec`, and it is
+never cloned ([MEM-17](#mem-17-clone)): it holds an opaque owner, and its element's holds.
+What the node owns is state that no view exposes ([OWN-8](ownership.md#own-8-views)):
+every operation takes a view of the handle and writes only the node and what it owns,
+never the handle's 8 bytes, so no byte a view of the handle exposes changes.
+
+A `Log[E: inert]` is a library type, not a primitive: core's `log` module declares it
+`pub opaque type Log[E: inert] { entries: Cell[List[E]] }`, with ordinary bodies over the
+cell ([PROG-2](programs.md#prog-2-visibility)). It is a cell to everything above, its
+summary included. Outside the module its only operations are `new`, `append` and a
+consuming `finish`, so no holder of a view can read, remove or replace an entry.
+
+**The element condition.** A `Cell[T]` is accepted only where `T` holds no resource, no
+capability, no view, no scoped value and no region reference at any depth, as its summary
+records ([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
+captures ([LANG-14](language.md#lang-14-captures)). A rigid type parameter is read from
+its bounds: one bounded by `inert` meets the condition, and an unbounded one, which may
+hold a capability, does not. The condition is checked where the type is formed and at
+every call of a `cell` operation, inferred and forwarded type arguments included, and for
+`cell.with`'s `A`, which appears in no result. Any other `Cell` or argument type is
+refused here, at the type; core's `cell` module declares its operations over open
+parameters, and the condition holds where they are called. `Log[E]` refuses scoped type
+arguments under [OWN-19](ownership.md#own-19-scoped-values). A scoped argument also
+fails its `inert` bound ([LANG-12](language.md#lang-12-generics), OWN-4), as does an
+opaque owner such as `Causes`.
+
+**Logs.** A log is charged as its cell: the 24-byte node of a `Cell[List[E]]`. No
+operation reads, counts, clears or iterates its entries.
 
 - `log.new() -> Log[E]` admits the node.
-- `log.append(l: Log[E], take e: E)` takes a view of the log.
-  It admits the growth of the entries' storage, as `list.push` grows a `List[E]`
-  ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a refused growth
-  raises `Capacity`, has not taken `e` and leaves the log unchanged. An append writes only the node and the entries'
-  storage, never the handle's 8 bytes, so no byte a view of the log exposes changes.
-- An append stays: a later `Error` or failure undoes nothing
-  ([FAIL-16](failure.md#fail-16-isolation)).
+- `log.append(l: Log[E], take e: E)` takes a view of the log and pushes `e` through
+  `cell.with`. It admits the growth of the entries' storage, as `list.push` grows a
+  `List[E]` ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a
+  refused growth raises `Capacity` and leaves the log unchanged. Its callback is a core
+  function, so the call is one step ([MEM-30](budgets.md#mem-30-step-bounds)).
 - `log.finish(take l: Log[E]) -> List[E]` returns the entries in append order, moving their
   storage into the `List` without admitting, and frees and refunds the node. Dropping a
   log cleans its entries in append order, then frees and refunds the node.
 
-A `Log[T]` is accepted only where `T` holds no resource, no capability, no view, no scoped
-value and no region reference at any depth, as its summary records
-([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
-captures ([LANG-14](language.md#lang-14-captures)). Any other `Log[T]` is refused here, at
-`T`; a type parameter may hold a capability, so a `Log` over one is refused outside core's
-`log` module.
+**Cells.** A cell's node is a `Box[T]`'s: its logical size is `T`'s rounded up to 8
+([MEM-24](budgets.md#mem-24-logical-charges)), so a `Cell[List[E]]` is charged the 24
+bytes a `Log[E]` is, and a `Cell[()]` nothing.
+
+- `cell.new(take v: T) -> Cell[T]` admits the node before it takes `v`; a refused
+  admission raises `Capacity` and leaves `v` the caller's.
+- `cell.get[T: plain](c: Cell[T]) -> T` copies the payload.
+- `cell.replace(c: Cell[T], take v: T) -> T` moves the payload out and installs `v`. It
+  admits nothing and cannot fail. `cell.set(c, take v)` is `replace` with the old payload
+  dropped.
+- `cell.with(c: Cell[T], take a: A, f: fn(mut T, take A) -> R) -> R` lends the payload in
+  place to `f` as its `mut` parameter ([OWN-12](ownership.md#own-12-assignment)), moves
+  `a` into `f`, and returns `f`'s result. It copies and admits nothing itself; `f` admits
+  as any code does, charged to the limit current where it runs
+  ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)), and entering `f` is a step
+  when `f` is user code ([MEM-30](budgets.md#mem-30-step-bounds)); a core function takes
+  none.
+- `cell.into_inner(take c: Cell[T]) -> T` moves the payload out without admitting, its
+  blocks keeping their payers, and frees and refunds the node. Dropping a cell drops its
+  payload, then frees and refunds the node.
+
+While `f` runs no expression names `c`, so `with` needs no flag and no `Option`:
+
+- `f` is a plain `fn` and captures nothing ([LANG-13](language.md#lang-13-callables)).
+- `a` holds no view and no scoped value, and no argument of the call may move the owner
+  `c` is a view of, nor any part of it ([OWN-9](ownership.md#own-9-overlap)), so `a`
+  cannot carry it in.
+- The `mut T` parameter reaches only the payload; a cell inside it is a different cell,
+  which the payload owns.
+- There are no mutable statics ([CONC-12](tasks.md#conc-12-no-shared-mutable-state)), and
+  a cell is never sent.
+
+`R` is a plain callable's result, which anchors to no parameter (LANG-13), so no loan of the
+payload outlives `f`. A second operation on `c` inside `f` is unreachable by typing.
+
+**Persisting effects.** An append to a log and every change to a cell stay: a later
+`Error`, failure or exhausted inner `bound` undoes nothing
+([FAIL-16](failure.md#fail-16-isolation)). A cell's payload is a complete `T` at every
+point, since it changes only by `replace` and by `mut` loans. If `f` fails, the payload
+holds what `f` installed before the failure, and the cell is not poisoned: `with` is not
+atomic. Log and cell operations act on a value only their own task reaches, so none is an
+event ([CONC-10](tasks.md#conc-10-event-order)).
 
 ```hirsel
 type Row { name: String }
@@ -743,7 +802,8 @@ fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Option[View[Row]] in m {
 }
 ```
 ```hirsel
-fn names(l: Log[View[String]]) {}                 // refused: MEM-29, at View[String]
+// refused: OWN-19, View[String] is scoped
+fn names(l: Log[View[String]]) {}                 // refused: LANG-12, View[String] is not inert
 ```
 ```hirsel
 fn seen(take l: Log[u64]) -> List[u64] {
@@ -751,6 +811,20 @@ fn seen(take l: Log[u64]) -> List[u64] {
   let xs = log.finish(take l)                     // refused: OWN-10, l is frozen
   log.append(v, 1)
   xs
+}
+```
+```hirsel
+fn bump(mut n: u64, take by: u64) -> u64 {
+  n += by
+  n
+}
+fn hits(c: Cell[u64]) -> u64 { cell.with(c, 1, bump) }
+```
+```hirsel
+fn senders(c: Cell[Sender[u64]]) {}               // refused: MEM-29, at Sender[u64]
+fn keep(mut n: u64, take c: Cell[u64]) -> u64 { n }
+fn again(take c: Cell[u64]) -> u64 {
+  cell.with(c, take c, keep)                      // refused: OWN-9, c is viewed by this call
 }
 ```
 

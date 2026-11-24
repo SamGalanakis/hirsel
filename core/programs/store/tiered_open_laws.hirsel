@@ -1,0 +1,330 @@
+// L70: the public open of a Directory store with a Tiered collection (§1.1
+// "The Tiered plan", §13.8 resident account). At the default floor r =
+// 182,375,272 (W = D = 34,471,936, C = 52,232,192, K = 19,944,296,
+// P = 8,617,984, Memory 64 MiB) the open starts the pager and a body reads a
+// Cold row; one byte below, no q is feasible, `sized` sets the Tiered fields
+// to 0 and the open is `Missing("cache_bytes")`.
+
+fn l70_open_options(resident: u64) -> Result[Options, Error] {
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(resident)
+    Ok(sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing"))
+}
+
+@test
+fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L70: fixture inserts did not commit")
+    }
+    let pack_seq = disk_state(db).pages.next_pack
+    match db.disk {
+        Some(mut state) => {
+            state.pages.next_pack = pack_seq + 1
+        },
+        None => fail("L70: the fixture store is on disk"),
+    }
+    l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
+    let _ = cut_install(mut db, NoHolderChange)?
+    close(take db)?
+
+    // The fixture produced the Cold graph. The three 6-byte values with
+    // 12-byte keys each cost 62 + 16 + 8 in the Tiered account.
+    let (_, id, take selected) = read_only_manifest(d)?
+    let mut manifest = take selected
+    manifest.account_tiered = 258
+    let memory_bytes = manifest.account_memory
+    publish_page_manifest_bytes(d, disk_page_manifest_bytes(id, manifest)?)?
+
+    let below = l70_open_options(floor - 1)?
+    if below.cache_bytes != 0 {
+        fail("L70: one byte below the floor no Tiered plan is feasible")
+    }
+    let Error(Missing(what)) = open(tasks, d, c, r, below) else {
+        fail("L70: an unfunded open of a Tiered catalog is refused")
+    }
+    if what != "cache_bytes" {
+        fail("L70: an unfunded open of a Tiered catalog is Missing(cache_bytes)")
+    }
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let recovered = accounts(reopened)
+    if recovered.tiered != 258 || recovered.logical != memory_bytes + 258 {
+        fail("L70: the reopened logical account includes the Tiered total")
+    }
+    let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[Option[u32], Error] {
+        fetch(tx, handle, 3u64)
+    })? else {
+        fail("L70: a read of the reopened Tiered collection commits")
+    }
+    if done.value != Some(30) {
+        fail("L70: the reopened Cold row 3 reads 30")
+    }
+    l70_reexecute_cold_read(mut reopened, rows_again)?
+    close(take reopened)
+}
+
+fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Error] waits {
+    let plan = Plan(n_e: 65536, s_e: 65536, reply_max: 16)
+    let (take complete, take record) = reexecute_admit(mut db, 81)
+    let read = fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[Bytes, Bytes] {
+        match fetch(tx, handle, 3u64) {
+            Ok(Some(value)) => Ok(key_word(int.widen(value))),
+            _ => Error(key_word(0)),
+        }
+    }
+    let body = fn(mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
+        (env.1)(mut tx, env.0)
+    }
+    // The Cold read parks the call until its delivery lands (§13.3a).
+    let served = serve(mut db, take complete, plan, Some(take record), (copy_env(rows), read), body)
+    let Ok(Committed(receipt)) = l63_settle(mut db, take served, (copy_env(rows), read), body) else {
+        fail("L62: serve must record the Tiered read")
+    }
+    durable(mut db, receipt.ticket)?
+    if receipt.reply != key_word(30) {
+        fail("L62: the recorded reply must come from the Cold row")
+    }
+    let before = version(snapshot(db))
+    let failed = fn(_stop: Stop) -> Bytes {
+        key_word(0)
+    }
+    let replay_read = fn(_record: Recorded, mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
+        (env.1)(mut tx, env.0)
+    }
+    let requests = replace(mut db.pager, None)
+    let unserved = reexecute(db, main_branch(db), before, plan, failed, (copy_env(rows), read), replay_read)
+    db.pager = take requests
+    let Ok(Unknown(StateGone)) = unserved else {
+        fail("L62: a replay miss with no pager must be Unknown(StateGone)")
+    }
+    let answer = reexecute(db, main_branch(db), before, plan, failed, (copy_env(rows), read), replay_read)?
+    let Same = answer else {
+        fail("L62: reexecute must deliver the Cold miss and compare the recorded reply")
+    }
+    if version(snapshot(db)) != before {
+        fail("L62: reexecute must not publish")
+    }
+    Ok(())
+}
+
+// L68 (e2) through the real cut (§13.6a "The tiered-write-2188 sequence"):
+// row 3 = 30 is Cold, a put of 31 leaves a Hot class-3 path, and
+// `checkpoint` with no reopen first must emit it (T2) and seal the map to it.
+// Production apply is not wired yet, so the Hot leaf is built by hand from
+// the Memory leaf the fixture sealed, with only row 3's value byte changed.
+@test
+fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L68: fixture inserts did not commit")
+    }
+    let id = prefix(rows.id)?
+    let memory_leaf = {
+        let Some((here, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, id) else {
+            fail("L68: the fixture has no collection")
+        }
+        arc.share(here)
+    }
+    let pack_seq = disk_state(db).pages.next_pack
+    match db.disk {
+        Some(mut state) => {
+            state.pages.next_pack = pack_seq + 1
+        },
+        None => fail("L68: the fixture store is on disk"),
+    }
+    l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
+    let _ = cut_install(mut db, NoHolderChange)?
+
+    // put(3, 31): the same-width value keeps the descriptor's totals.
+    let image = std.page.image_of(memory_leaf)
+    let row_key = option.unwrap(std.page.key_at(image, 1))
+    let mut written: Bytes = clone(option.unwrap(std.page.value_at(memory_leaf, 1)))
+    let mut changed = 0u64
+    for at in 0u64 .. list.len(written) {
+        if written[at] == 30u8 {
+            let _ = list.set(mut written, at, 31u8)
+            changed += 1
+        }
+    }
+    if changed != 1 {
+        fail("L68: the fixture value 30 must be one byte")
+    }
+    let mut hot = arc.share(memory_leaf)
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut hot, row_key, take written, None, 1024, first, mut draw))?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(arc.share(hot)), mut draw))?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(reopened).tiered != 258 {
+        fail("L68: the cut publishes the Tiered account of the three rows")
+    }
+    let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32]), Error] {
+        Ok((fetch(tx, handle, 3u64)?, fetch(tx, handle, 5u64)?))
+    })? else {
+        fail("L68: a read of the reopened Tiered collection commits")
+    }
+    if done.value != (Some(31u32), Some(50u32)) {
+        fail("L68: after the cut, row 3 reads the acknowledged 31 from a class-3 leaf")
+    }
+    close(take reopened)
+}
+
+// Rows 1→10, 3→30 and 5→50 in a Tiered table whose root is Cold on disk.
+fn l68_cold_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L68: fixture inserts did not commit")
+    }
+    let pack_seq = disk_state(db).pages.next_pack
+    match db.disk {
+        Some(mut state) => {
+            state.pages.next_pack = pack_seq + 1
+        },
+        None => fail("L68: the fixture store is on disk"),
+    }
+    l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
+    let _ = cut_install(mut db, NoHolderChange)?
+    close(take db)
+}
+
+fn l68_write_rows(mut db: Db, put_key: u64, put_value: u32, deleted: Option[u64]) -> Result[(), Error] waits {
+    let handle_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, Some(100000), copy_env((handle_rows, put_key, put_value, deleted)), fn(mut tx: Tx, env: (Table[u64, u32], u64, u32, Option[u64])) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, env.2)?
+        if let Some(removed) = env.3 {
+            let _ = delete(mut tx, env.0, removed)?
+        }
+        Ok(())
+    })? else {
+        fail("L68: the served write to the Tiered collection commits")
+    }
+    Ok(())
+}
+
+fn l68_read_rows(mut db: Db) -> Result[(Option[u32], Option[u32], Option[u32]), Error] waits {
+    let rows_again = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut db, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32], Option[u32]), Error] {
+        Ok((fetch(tx, handle, 1u64)?, fetch(tx, handle, 3u64)?, fetch(tx, handle, 5u64)?))
+    })? else {
+        fail("L68: a read of the reopened Tiered collection commits")
+    }
+    Ok(done.value)
+}
+
+// Production apply over a Cold Tiered root: a served put and a served
+// delete edit the class-3 leaf through the Tiered plan, the cut emits the
+// edited leaf, and a reopen reads the acknowledged rows back.
+@test
+fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    l68_write_rows(mut cold, 3u64, 33u32, Some(1u64))?
+    if accounts(cold).tiered != 172 {
+        fail("L68: the served delete charges the live Tiered account")
+    }
+    let _ = checkpoint(mut cold)?
+    close(take cold)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut reopened)? != (None, Some(33u32), Some(50u32)) {
+        fail("L68: the served put and delete survive the cut and reopen")
+    }
+    if accounts(reopened).tiered != 172 {
+        fail("L68: the Tiered account covers the two remaining rows")
+    }
+    close(take reopened)
+}
+
+// L68 (e): writes that reach only the journal reopen as a replay overlay.
+// The next write into that collection waits for the fold cut, which applies
+// the overlay to the Cold tree, then reruns; the following checkpoint
+// publishes all three edits and the reopen reads them from class-3 leaves.
+@test
+fn test_l68_fold_cut_publishes_replayed_writes(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    l68_write_rows(mut cold, 3u64, 33u32, Some(1u64))?
+    close(take cold)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(replayed).tiered != 172 {
+        fail("L68: replay charges the journaled delete from its prior")
+    }
+    if l68_read_rows(mut replayed)? != (None, Some(33u32), Some(50u32)) {
+        fail("L68: the overlay reads the journaled put and delete")
+    }
+    l68_write_rows(mut replayed, 5u64, 55u32, None)?
+    let _ = checkpoint(mut replayed)?
+    if accounts(replayed).tiered != 172 {
+        fail("L68: the fold cut settles the live Tiered account")
+    }
+    close(take replayed)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut reopened)? != (None, Some(33u32), Some(55u32)) {
+        fail("L68: the fold cut publishes the replayed and the rerun writes")
+    }
+    if accounts(reopened).tiered != 172 {
+        fail("L68: the fold cut's Tiered account covers the two remaining rows")
+    }
+    close(take reopened)
+}
+
+// L68: the fold cut publishes X over the roots it publishes. A pin keeps the
+// Cold three-row leaf (3 × 86 = 258) and the head's journaled delete folds
+// into a fresh two-row leaf (172), so X = 430 live and after the reopen. A
+// figure taken over the pre-fold roots sees one shared Cold stamp and
+// counts only the head's 172.
+@test
+fn test_l68_fold_cut_counts_pinned_cold_root(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let held = snapshot(cold)
+    let _ = pin(mut cold, string.from("before"), held)?
+    l68_write_rows(mut cold, 3u64, 30u32, Some(1u64))?
+    close(take cold)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = checkpoint(mut replayed)?
+    if accounts(replayed).tiered != 430 {
+        fail("L68: the fold cut counts the pinned leaf and the folded leaf")
+    }
+    close(take replayed)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(reopened).tiered != 430 {
+        fail("L68: the published account_tiered covers the pin's rows")
+    }
+    close(take reopened)
+}

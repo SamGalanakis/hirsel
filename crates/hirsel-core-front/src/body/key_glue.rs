@@ -64,20 +64,10 @@ impl KeyOp {
         let mut params = vec![view(ty)];
         match self {
             Self::NeedsDrop => {
-                return Signature {
-                    params: vec![],
-                    results: vec![Ty::Scalar(Scalar::Bool)],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(vec![], vec![Ty::Scalar(Scalar::Bool)], None);
             }
             Self::Class => {
-                return Signature {
-                    params: vec![],
-                    results: vec![Ty::Scalar(Scalar::U8)],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(vec![], vec![Ty::Scalar(Scalar::U8)], None);
             }
             Self::Hash | Self::Place | Self::Strong => {}
             Self::Fold => params.push(Param::Value(Ty::Ptr)),
@@ -88,25 +78,16 @@ impl KeyOp {
                 } else {
                     params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
                 }
-                return Signature {
-                    params,
-                    results: vec![],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(params, vec![], None);
             }
         }
-        Signature {
-            params,
-            results: match self {
-                Self::Fold => vec![],
-                Self::Equal | Self::Ordered(_) => vec![Ty::Scalar(Scalar::Bool)],
-                Self::Order => vec![Ty::Scalar(Scalar::I8)],
-                _ => vec![Ty::Scalar(Scalar::U64)],
-            },
-            dest: None,
-            never: false,
-        }
+        let results = match self {
+            Self::Fold => vec![],
+            Self::Equal | Self::Ordered(_) => vec![Ty::Scalar(Scalar::Bool)],
+            Self::Order => vec![Ty::Scalar(Scalar::I8)],
+            _ => vec![Ty::Scalar(Scalar::U64)],
+        };
+        Signature::new(params, results, None)
     }
 }
 
@@ -777,7 +758,7 @@ impl Derive<'_> {
         c.inst(Inst::Call { call });
         result
     }
-    fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
+    pub(super) fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
         let sig = op.signature();
         let result = sig.results.first().map(|&ty| c.value(ty));
         let signature = signature_id(self.module, sig);
@@ -806,6 +787,11 @@ impl Derive<'_> {
         if matches!(self.recipes[ty.index()].layout, Layout::Compact(_)) {
             return self.order_located(c, &FieldTy::Inline(TypeRef(ty.0)), a, b, different);
         }
+        let (a, b) = if super::ordered_codec::is_desc_row(&self.module.types[ty.index()].name) {
+            (b, a)
+        } else {
+            (a, b)
+        };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.iter().enumerate() {
@@ -934,9 +920,9 @@ impl Derive<'_> {
         &mut self,
         c: &mut Code,
         field: &FieldTy,
-        blobs: [ValueId; 2],
+        mut blobs: [ValueId; 2],
         mut ats: [ValueId; 2],
-        widths: [ValueId; 2],
+        mut widths: [ValueId; 2],
         different: BlockId,
     ) -> Result<[ValueId; 2], &'static str> {
         match field {
@@ -1006,8 +992,18 @@ impl Derive<'_> {
                 };
                 match self.module.types[ty.index()].body.clone() {
                     ShapeBody::Record(fields) => {
+                        let inverted =
+                            super::ordered_codec::is_desc_row(&self.module.types[ty.index()].name);
+                        if inverted {
+                            blobs.swap(0, 1);
+                            ats.swap(0, 1);
+                            widths.swap(0, 1);
+                        }
                         for f in &fields {
                             ats = self.order_packed(c, &f.ty, blobs, ats, widths, different)?;
+                        }
+                        if inverted {
+                            ats.swap(0, 1);
                         }
                     }
                     ShapeBody::Variant(cases) => {
@@ -1190,7 +1186,7 @@ impl Derive<'_> {
                 let n = c.constant(*len);
                 self.order_sequence(c, item, [a, b], [n, n], different)?;
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut x = c.read(a, Ty::Ptr);
                 let mut y = c.read(b, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {
@@ -1337,6 +1333,7 @@ impl Derive<'_> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
@@ -1434,7 +1431,7 @@ impl Derive<'_> {
                 let len = c.constant(*len);
                 self.fold_sequence(c, item, p, len, state)?
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut data = c.read(p, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {
                     data = c.offset(data, 8);
@@ -1933,7 +1930,7 @@ impl Derive<'_> {
                 let len = c.constant(*len);
                 self.equal_sequence(c, item, a, b, len, no)?;
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut x = c.read(a, Ty::Ptr);
                 let mut y = c.read(b, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {
@@ -2337,11 +2334,10 @@ mod tests {
             .unwrap();
             let f = ensure(&mut m, TypeId(0), KeyOp::Hash).unwrap();
             wf::module(&m).unwrap();
-            assert_eq!(
-                eval::run(&m, f, &[bits], u64::MAX).outcome,
-                eval::Outcome::Returned(vec![want]),
-                "{name}"
-            );
+            let outcome = eval::run_map_hash(&m, f, &[bits], u64::MAX, [0; 16])
+                .0
+                .outcome;
+            assert_eq!(outcome, eval::Outcome::Returned(vec![want]), "{name}");
             assert!(
                 m.functions[f.index()]
                     .body
@@ -2622,7 +2618,7 @@ mod tests {
             );
             let m = text::parse(&fixture).unwrap();
             wf::module(&m).unwrap();
-            let run = eval::run(&m, FuncId(f as u32), &[], 0);
+            let run = eval::run_map_hash(&m, FuncId(f as u32), &[], 0, [0; 16]).0;
             assert_eq!(run.outcome, eval::Outcome::Returned(vec![want]), "{types}");
             assert_eq!(run.used, 0);
         }
@@ -2827,7 +2823,7 @@ mod located_order_tests {
                 };
                 let m = text::parse(&source).unwrap();
                 wf::module(&m).unwrap();
-                let run = eval::run(&m, FuncId(row as u32), &[], 0);
+                let run = eval::run_map_hash(&m, FuncId(row as u32), &[], 0, [0; 16]).0;
                 assert_eq!(run.used, 0);
                 match run.outcome {
                     eval::Outcome::Returned(v) => v[0],

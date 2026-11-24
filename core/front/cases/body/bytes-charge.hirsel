@@ -1,0 +1,55 @@
+// library: std
+// expect: run channel_charge_matches_admission() = true used 32
+type Record {
+    small: u8,
+    wide: u64
+}
+
+type Slotted = Empty | Full(bool)
+
+const RECORD_BYTES: u64 = bytes[Record]
+
+const VARIANT_BYTES: u64 = bytes[Slotted]
+
+const OPAQUE_BYTES: u64 = bytes[std.time.Timestamp]
+
+fn admit[T: plain + send](cap: u64, bytes budget: u64, _sample: T) -> Result[bool, Capacity] {
+    bound bytes budget {
+        let (_tx, _rx): (Sender[T], Receiver[T]) = channel.new(cap)
+        true
+    }
+}
+
+fn refusal[T: plain + send](cap: u64, budget: u64, sample: T) -> Capacity {
+    let Ok(Error(causes)) = isolate(fn() -> Result[bool, Capacity] {
+        admit(cap, bytes budget, sample)
+    }) else {
+        fail("expected channel admission refusal")
+    }
+    for cause in causes {
+        if let Capacity(c) = cause.kind {
+            return c
+        }
+    }
+    fail("expected Capacity")
+}
+
+fn matches_admission[T: plain + send](sample: T, constant: u64) -> bool {
+    let smaller = refusal(2, 0, sample)
+    let measured = refusal(3, 0, sample)
+    let item = bytes[T]
+    let need = option.unwrap(charge.channel(bytes[T], 3))
+    let short = refusal(3, need - 1, sample)
+    item == constant && item == measured.requested - smaller.requested && need == measured.requested && short.requested == need && short.available == need - 1 && result.unwrap(admit(3, bytes need, sample))
+}
+
+fn overflow_returns_none() -> bool {
+    let max = 18446744073709551615u64
+    charge.round(max) == None && charge.boxed(max) == None && charge.counted(max) == None && charge.shared(max) == None && charge.seq(max, 2) == None && charge.map(max, 0, 0) == None && charge.channel(1, max) == None && charge.task(0, max) == None && charge.block(max, 0) == None && charge.port(max, 0) == None
+}
+
+fn channel_charge_matches_admission() -> bool {
+    let empty: Slotted = Empty
+    let timestamp = option.unwrap(std.time.from_unix(0, 0))
+    matches_admission(Record(small: 0, wide: 0), RECORD_BYTES) && matches_admission(empty, VARIANT_BYTES) && matches_admission(timestamp, OPAQUE_BYTES) && overflow_returns_none()
+}

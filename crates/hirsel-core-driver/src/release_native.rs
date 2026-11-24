@@ -11,18 +11,42 @@
 //! held, and its object is cut per part. An unchanged definition is generated
 //! once, whichever program and build reached it.
 use super::*;
+use super::{recipe_build::Unit, std_release::StdSide};
 use hirsel_core_ir::{Callee, FuncId, RtOp};
 use serde::{Deserialize, Serialize};
+
+#[derive(Default)]
+pub(crate) struct LentBodies {
+    pub(crate) bytes: Vec<u8>,
+    key: Option<ContentHash>,
+}
+
+impl LentBodies {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        let key = (!bytes.is_empty())
+            .then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [bytes.as_slice()]));
+        Self { bytes, key }
+    }
+
+    pub(crate) fn key(&self) -> Option<ContentHash> {
+        self.key
+    }
+}
 
 /// The release unit's key: its inputs and the role facts each unit consumed.
 fn unit_key(
     inputs: &impl serde::Serialize,
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
-    crate::native::key(
-        "hirsel.core-release-unit.v6",
-        &(hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs),
-    )
+    use std::io::Write as _;
+
+    let fields = (hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs);
+    let length = encoding::fixed_size(&fields)?;
+    ContentHash::of_stream("hirsel.core-release-unit.v6", length, |digest| {
+        let mut buffered = io::BufWriter::new(digest);
+        encoding::write_fixed(&mut buffered, &fields)?;
+        buffered.flush()
+    })
 }
 
 /// A part's key: the compiler, libLLVM and target
@@ -87,8 +111,8 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
             crate::native_object::load(self.shared, key)
         });
         match loaded {
-            Ok(Some((bare, object, file))) => {
-                self.held.push((bare, object, file, false));
+            Ok(Some((bare, object))) => {
+                self.held.push((bare, object, false));
                 true
             }
             Ok(None) => false,
@@ -155,7 +179,6 @@ const PARTS_SCHEMA: u32 = 5;
 type Held = (
     crate::store::Bare,
     hirsel_core_ir::source::NativeObject,
-    std::fs::File,
     bool,
 );
 
@@ -172,10 +195,10 @@ fn load_parts(
     }
     let mut held = Vec::with_capacity(record.parts.len());
     for &key in &record.parts {
-        let Some((bare, object, file)) = crate::native_object::load(shared, key)? else {
+        let Some((bare, object)) = crate::native_object::load(shared, key)? else {
             return Ok(None);
         };
-        held.push((bare, object, file, false));
+        held.push((bare, object, false));
     }
     Ok(Some((record, held)))
 }
@@ -188,7 +211,7 @@ pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
 pub(super) fn join_modules(
     entry: &Identity,
     reached: &[Identity],
-    modules: &[Cow<'_, Module>],
+    modules: Vec<Cow<'_, Module>>,
     root: impl Fn(&Identity) -> FuncId,
 ) -> Result<(Module, FuncId), NativeStop> {
     let roots = modules
@@ -208,17 +231,11 @@ pub(super) fn join_modules(
         })
         .collect::<Vec<_>>();
     let units = modules
-        .iter()
+        .into_iter()
         .zip(&roots)
-        .map(
-            |(module, (identity, function))| hirsel_core_materialize::Unit {
-                identity,
-                module,
-                function: *function,
-            },
-        )
+        .map(|(module, (identity, function))| (identity, module, *function))
         .collect::<Vec<_>>();
-    hirsel_core_materialize::join(&units, entry).map_err(|message| NativeStop::Emit {
+    hirsel_core_materialize::join_units(units, entry).map_err(|message| NativeStop::Emit {
         definition: entry.definition.clone(),
         message,
     })
@@ -237,21 +254,21 @@ pub(super) fn emit_release_image(
     (summaries, std_key, lent): (
         &BTreeMap<ContentHash, hirsel_core_ir::step_contexts::Summary>,
         ContentHash,
-        &[u8],
+        &LentBodies,
     ),
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
+    joined.law_observation = options.recording;
     let _context = hirsel_guard::process_memory_context(format!(
         "building the release image of {}",
         instance.definition.0.name
     ));
     // The bodies a program imports shape its code, so they key its parts.
-    let lent_key =
-        (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));
-    let lend = if lent.is_empty() {
+    let lent_key = lent.key();
+    let lend = if lent.bytes.is_empty() {
         hirsel_llvm_lazy::Lend::None
     } else {
-        hirsel_llvm_lazy::Lend::Borrow(lent)
+        hirsel_llvm_lazy::Lend::Borrow(&lent.bytes)
     };
     let jobs = hirsel_guard::jobs() as u32;
     let entry = &instance.definition;
@@ -347,7 +364,7 @@ pub(super) fn emit_release_image(
     // The Core modules and facts are read only until the unit is lowered.
     let mut core = Some((modules, facts));
     // Every part, whichever program reached it, is in the shared parts cache.
-    let shared = Store::new(&options.parts)?;
+    let shared = Store::release_parts(&options.parts)?;
     let emit = |message: String| NativeStop::Emit {
         definition: entry.clone(),
         message,
@@ -465,8 +482,8 @@ pub(super) fn emit_release_image(
                 true => hits.next().expect("a reused part was loaded"),
                 false => {
                     let object = made.next().expect("a missed part was generated");
-                    let (bare, file) = crate::native_object::publish(&shared, key, &object)?;
-                    (bare, object, file, true)
+                    let bare = crate::native_object::publish(&shared, key, &object)?;
+                    (bare, object, true)
                 }
             });
         }
@@ -486,13 +503,13 @@ pub(super) fn emit_release_image(
     }
     let objects = held
         .into_iter()
-        .map(|(bare, object, file, compiled)| ObjectProduct {
+        .map(|(bare, object, compiled)| ObjectProduct {
             private_variants: std::mem::take(&mut private_variants),
             instance: instance.clone(),
             path: crate::native_object::path(&shared, bare.address),
             identity: bare.address,
             check: bare.check,
-            held: Some(file),
+            bytes: Some(object.bytes.into()),
             debug: object.debug.map(std::sync::Arc::new),
             debug_record: None,
             compiled,
@@ -506,6 +523,57 @@ pub(super) fn emit_release_image(
         release_debug_sites: debug_sites,
         remarks,
     })
+}
+
+/// The release objects of `units`, which hold `entry`'s closure apart from
+/// the exports of `std`, over `std`: the program's image parts and the std's
+/// objects. `closed_executable`: the hirsel launcher alone enters the image.
+pub(super) fn release_objects(
+    units: BTreeMap<Identity, Unit>,
+    entry: &Identity,
+    std: StdSide,
+    options: &NativeOptions,
+    runtime: ContentHash,
+    store: &Store,
+    closed_executable: bool,
+) -> Result<Emitted, NativeStop> {
+    let reached = units.keys().cloned().collect::<Vec<_>>();
+    let mut modules = Vec::with_capacity(units.len());
+    let mut owners = Vec::with_capacity(units.len());
+    for unit in units.into_values() {
+        owners.push(unit.owner()?);
+        modules.push(Cow::Owned(unit.into_module()));
+    }
+    let mut owners = owners.into_iter();
+    let body_keys = crate::callable_variants::prepare_inputs(
+        &mut modules,
+        &reached,
+        crate::callable_variants::Roots::Entry(&entry.definition),
+        options.instance_limit,
+        |identity| {
+            let owner = owners.next().expect("an owner for each reached module");
+            Ok((
+                FuncId(0),
+                owner,
+                !identity.closures.is_empty() || !identity.dictionaries.is_empty(),
+            ))
+        },
+    )?;
+    let joined = join_modules(entry, &reached, modules, |_| FuncId(0))?;
+    let mut emitted = emit_release_image(
+        entry,
+        &reached,
+        &body_keys,
+        joined,
+        options,
+        runtime,
+        store,
+        closed_executable,
+        (&std.summaries, std.key, &std.lent),
+    )?;
+    let linked = std.objects(&emitted.objects, options)?;
+    emitted.objects.extend(linked);
+    Ok(emitted)
 }
 
 #[cfg(test)]

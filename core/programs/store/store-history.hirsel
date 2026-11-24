@@ -1,0 +1,335 @@
+const HISTORY_HEAD_LIMIT: u64 = 65776
+
+const HISTORY_ENTRY_READ_LIMIT: u64 = 72 + 40 + 4294967296 + 16 + 16777280
+
+const HISTORY_OPEN_LIMIT: u64 = 9223372036854775808
+
+type HistoryRef {
+    seq: u64,
+    epoch: u64,
+    len: u64,
+    digest: u64
+}
+
+type HistoryPair {
+    epoch: u64,
+    holder: StoreId
+}
+
+type HistoryHead {
+    authority_kind: u8,
+    store: StoreId,
+    pair: HistoryPair,
+    activation: u64,
+    entry: HistoryRef,
+    checkpoint: HistoryRef,
+    floor: u64,
+    binding: Inline[u8, 32]
+}
+
+type HistoryConfig {
+    place: std.object.Bucket,
+    levels: List[String]
+}
+
+type HistoryCapture {
+    head: HistoryHead,
+    config: HistoryConfig
+}
+
+fn history_number(mut key: String, n: u64) {
+    let mut divisor = 10000000000000000000u64
+    while divisor > n && divisor > 1 {
+        string.push_char(mut key, '0')
+        divisor /= 10
+    }
+    string.push_u64(mut key, n)
+}
+
+fn history_fill_key(mut key: String, lead: String, reference: HistoryRef) {
+    string.clear(mut key)
+    string.push(mut key, lead)
+    history_number(mut key, reference.seq)
+    string.push_char(mut key, '-')
+    history_number(mut key, reference.epoch)
+    string.push_char(mut key, '-')
+    std.hex.push_u64(mut key, reference.digest)
+}
+
+fn history_key(lead: String, reference: HistoryRef) -> String {
+    let mut key = string.with_capacity(60)
+    history_fill_key(mut key, lead, reference)
+    take key
+}
+
+fn history_pair_matches(a: HistoryPair, b: HistoryPair) -> bool {
+    a.epoch == b.epoch && same(a.holder, b.holder)
+}
+
+fn history_ref_matches(a: HistoryRef, b: HistoryRef) -> bool {
+    a.seq == b.seq && a.epoch == b.epoch && a.len == b.len && a.digest == b.digest
+}
+
+fn history_entry_range(item: HistoryRef, epoch: u64) -> bool {
+    item.epoch != 0 && item.epoch <= epoch && item.len >= 112 && item.len <= HISTORY_ENTRY_READ_LIMIT
+}
+
+fn history_frame(path: String, ctx: DiskContext, raw: Bytes, at: u64, kind: u16) -> Result[DiskFrame, Error] {
+    let frame = disk_frame_bytes(path, ctx, raw, at)?
+    if frame.kind != kind {
+        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
+            return Error(Unsupported(int.widen(frame.kind)))
+        }
+        return Error(disk_fault(path, at, Malformed))
+    }
+    if frame.flags != 1 {
+        return Error(disk_fault(path, at, Flags))
+    }
+    Ok(frame)
+}
+
+fn history_text(raw: Bytes, mut cursor: u64, lo: u64, hi: u64, frame_at: u64) -> Result[String, Error] {
+    if list.len(raw) - cursor < 2 {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
+    let size = read_le(raw, cursor, 2)
+    cursor += 2
+    if size < lo || size > hi || size > list.len(raw) - cursor {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
+    let text: Bytes = capacity(bound bytes round8(size) { clone(list.slice(raw, cursor, cursor + size)) })?
+    let Ok(take parsed) = string.from_utf8(take text) else {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
+    cursor += size
+    Ok(take parsed)
+}
+
+fn history_config(raw: Bytes, frame_at: u64, authority_kind: u8) -> Result[HistoryConfig, Error] {
+    if list.len(raw) == 0 || raw[0] > 1 {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
+    let style: std.object.Style = if raw[0] == 0 {
+        Virtual
+    } else {
+        Path
+    }
+    let mut cursor = 1u64
+    let endpoint = history_text(raw, mut cursor, 1, 2048, frame_at)?
+    let aws_region_name = history_text(raw, mut cursor, 0, 64, frame_at)?
+    let bucket_name = history_text(raw, mut cursor, 3, 63, frame_at)?
+    let key_prefix = history_text(raw, mut cursor, 0, 1024, frame_at)?
+    if cursor == list.len(raw) { return Error(disk_fault("head", frame_at, Malformed)) }
+    let level_total: u64 = int.widen(raw[cursor])
+    if level_total == 0 || level_total > 16 || (authority_kind == 1 && level_total != 1) {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
+    cursor += 1
+    let mut names: List[String] = capacity(bound bytes (24 * level_total) { list.with_capacity(level_total) })?
+    for slot_index in 0u64 .. level_total {
+        let name = history_text(raw, mut cursor, 1, 64, frame_at)?
+        let survives = if slot_index + 1 == level_total { 2u8 } else { 0u8 }
+        if cursor == list.len(raw) || raw[cursor] != survives || list.contains(names, name) {
+            return Error(disk_fault("head", frame_at, Malformed))
+        }
+        cursor += 1
+        list.push(mut names, take name)
+    }
+    if cursor != list.len(raw) { return Error(disk_fault("head", frame_at, Malformed)) }
+    let place = std.object.Bucket(endpoint: take endpoint, aws_region: take aws_region_name, bucket: take bucket_name, prefix: take key_prefix, style)
+    Ok(HistoryConfig(place: take place, levels: take names))
+}
+
+fn history_head_frame(raw: Bytes) -> Result[(DiskContext, DiskFrame), Error] {
+    if list.len(raw) < 72 {
+        return Error(disk_fault("head", 0, Truncated))
+    }
+    if list.len(raw) > HISTORY_HEAD_LIMIT {
+        return Error(disk_fault("head", 0, Malformed))
+    }
+    let id = StoreId(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8))
+    let context = DiskContext(store: id, role: 7, seq: read_le(raw, 56, 8))
+    let header = history_frame("head", context, raw, 0, 0x0001)?
+    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || raw[28] != 7 || read_le(raw, 30, 2) != 0 || read_le(raw, 64, 8) != 0 {
+        return Error(disk_fault("head", 0, Header))
+    }
+    let format = read_le(raw, 24, 4)
+    if format != DISK_FORMAT {
+        return Error(Unsupported(format))
+    }
+    if raw[29] != 1 && raw[29] != 2 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    let field = history_frame("head", context, raw, 72, 0x00A0)?
+    if field.end - field.payload != 136 {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    Ok((context, field))
+}
+
+fn history_frame_pair(raw: Bytes, field: DiskFrame) -> HistoryPair {
+    let at = field.payload
+    HistoryPair(epoch: read_le(raw, at, 8), holder: StoreId(hi: read_le(raw, at + 8, 8), lo: read_le(raw, at + 16, 8)))
+}
+
+fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
+    let (context, field) = history_head_frame(raw)?
+    let head = list.slice(raw, field.payload, field.end)
+    let pair = history_frame_pair(raw, field)
+    let epoch = pair.epoch
+    let newest = HistoryRef(seq: read_le(head, 32, 8), epoch: read_le(head, 40, 8), len: read_le(head, 48, 8), digest: read_le(head, 56, 8))
+    let base = HistoryRef(seq: read_le(head, 64, 8), epoch: read_le(head, 72, 8), len: read_le(head, 80, 8), digest: read_le(head, 88, 8))
+    let floor = read_le(head, 96, 8)
+    if epoch == 0 || floor == 0 || floor > base.seq || base.seq > newest.seq || context.seq != newest.seq || read_le(raw, 48, 8) != epoch {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    if !history_entry_range(newest, epoch) || !history_entry_range(base, epoch) || (newest.seq == base.seq && !history_ref_matches(newest, base)) {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    let mut schema_binding: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        schema_binding[i] = head[104 + i]
+    }
+    let config = history_frame("head", context, raw, field.end, 0x00D0)?
+    if config.end != list.len(raw) || config.end - config.payload > AUTHORITY_LIMIT {
+        return Error(disk_fault("head", field.end, Malformed))
+    }
+    let meta = history_config(list.slice(raw, config.payload, config.end), field.end, raw[29])?
+    let captured = HistoryHead(authority_kind: raw[29], store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding: schema_binding)
+    Ok(HistoryCapture(head: captured, config: take meta))
+}
+
+fn history_next_id(n: u64) -> Result[u64, Error] {
+    if n >= HISTORY_OPEN_LIMIT - 1 {
+        return Error(Limit(Ids))
+    }
+    Ok(n + 1)
+}
+
+fn history_ref_encode(mut raw_bytes: Bytes, reference: HistoryRef) {
+    list.put_word_le(mut raw_bytes, reference.seq)
+    list.put_word_le(mut raw_bytes, reference.epoch)
+    list.put_word_le(mut raw_bytes, reference.len)
+    list.put_word_le(mut raw_bytes, reference.digest)
+}
+
+// The frame buffer has room for the binding immediately after the frame.
+fn history_seal(mut raw_bytes: Bytes, context: DiskContext, at: u64, kind: u16) -> Result[(), Capacity] {
+    let end = list.len(raw_bytes)
+    let size = end - at - 16
+    list.set_word_le(mut raw_bytes, at, kind)
+    list.set_word_le(mut raw_bytes, at + 2, 1u16)
+    let encoded: u32 = int.narrow(size)
+    list.set_word_le(mut raw_bytes, at + 4, encoded)
+    put_binding(mut raw_bytes, context, at)?
+    let mut checksum = std.check.start()
+    std.check.add(mut checksum, raw_bytes, end, end + BINDING_BYTES)
+    std.check.add(mut checksum, raw_bytes, at, at + 8)
+    std.check.add(mut checksum, raw_bytes, at + 16, end)
+    list.truncate(mut raw_bytes, end)
+    list.set_word_le(mut raw_bytes, at + 8, std.check.finish(checksum))
+    Ok(())
+}
+
+fn history_append_header(mut raw_bytes: Bytes, context: DiskContext, epoch: u64, kind: u8) -> Result[(), Capacity] {
+    list.fill(mut raw_bytes, 16, 0u8)
+    list.append(mut raw_bytes, string.as_bytes("HIRSTORE"))
+    let format: u32 = int.narrow(DISK_FORMAT)
+    list.put_word_le(mut raw_bytes, format)
+    list.push(mut raw_bytes, context.role)
+    list.push(mut raw_bytes, kind)
+    list.put_word_le(mut raw_bytes, 0u16)
+    list.put_word_le(mut raw_bytes, context.store.hi)
+    list.put_word_le(mut raw_bytes, context.store.lo)
+    list.put_word_le(mut raw_bytes, epoch)
+    list.put_word_le(mut raw_bytes, context.seq)
+    list.put_word_le(mut raw_bytes, 0u64)
+    history_seal(mut raw_bytes, context, 0, 0x0001)
+}
+
+const AUTHORITY_LIMIT: u64 = 65536
+
+fn history_append_text(mut raw: Bytes, text: String) {
+    let size: u16 = int.narrow(string.byte_len(text))
+    list.put_word_le(mut raw, size)
+    list.append(mut raw, string.as_bytes(text))
+}
+
+fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
+    let place = view config.place
+    let endpoint = string.byte_len(place.endpoint)
+    let name = string.byte_len(place.bucket)
+    if endpoint == 0 || endpoint > 2048 || name < 3 || name > 63 || string.byte_len(place.aws_region) > 64 || string.byte_len(place.prefix) > 1024 {
+        return Error(Limit(Name))
+    }
+    let mut level_bytes = 0u64
+    let level_total = list.len(config.levels)
+    if level_total == 0 || level_total > 16 { return Error(Limit(Name)) }
+    for i in 0u64 .. level_total {
+        let level_name = view config.levels[i]
+        let size = string.byte_len(level_name)
+        if size == 0 || size > 64 { return Error(Limit(Name)) }
+        if list.contains(list.slice(config.levels, 0, i), level_name) {
+            return Error(Exists(string.from(level_name)))
+        }
+        level_bytes += 3 + size
+    }
+    disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        let mut raw_bytes: Bytes = list.with_capacity(10 + endpoint + name + level_bytes + string.byte_len(place.aws_region) + string.byte_len(place.prefix))
+        list.push(mut raw_bytes, if place.style == Virtual {
+            0u8
+        } else {
+            1u8
+        })
+        history_append_text(mut raw_bytes, place.endpoint)
+        history_append_text(mut raw_bytes, place.aws_region)
+        history_append_text(mut raw_bytes, place.bucket)
+        history_append_text(mut raw_bytes, place.prefix)
+        list.push(mut raw_bytes, int.narrow(level_total))
+        for i in 0u64 .. level_total {
+            history_append_text(mut raw_bytes, config.levels[i])
+            list.push(mut raw_bytes, if i + 1 == level_total { 2u8 } else { 0u8 })
+        }
+        Ok(take raw_bytes)
+    })
+}
+
+fn history_encode_head(mut raw_bytes: Bytes, head: HistoryHead, authority: Bytes) -> Result[(), Error] {
+    let needed = 240 + list.len(authority) + BINDING_BYTES
+    if list.capacity(raw_bytes) < needed {
+        return Error(Full(Allocation(Capacity(requested: needed, available: list.capacity(raw_bytes)))))
+    }
+    let ctx = DiskContext(store: head.store, role: 7, seq: head.entry.seq)
+    list.clear(mut raw_bytes)
+    capacity(history_append_header(mut raw_bytes, ctx, head.pair.epoch, head.authority_kind))?
+    list.fill(mut raw_bytes, 16, 0u8)
+    list.put_word_le(mut raw_bytes, head.pair.epoch)
+    list.put_word_le(mut raw_bytes, head.pair.holder.hi)
+    list.put_word_le(mut raw_bytes, head.pair.holder.lo)
+    list.put_word_le(mut raw_bytes, head.activation)
+    history_ref_encode(mut raw_bytes, head.entry)
+    history_ref_encode(mut raw_bytes, head.checkpoint)
+    list.put_word_le(mut raw_bytes, head.floor)
+    for i in 0u64 .. 32 {
+        list.push(mut raw_bytes, head.binding[i])
+    }
+    capacity(history_seal(mut raw_bytes, ctx, 72, 0x00A0))?
+    let at = list.len(raw_bytes)
+    list.fill(mut raw_bytes, 16, 0u8)
+    list.append(mut raw_bytes, authority)
+    capacity(history_seal(mut raw_bytes, ctx, at, 0x00D0))
+}
+
+fn history_claim_head(current: HistoryHead, holder: StoreId) -> Result[HistoryHead, Error] {
+    let epoch = history_next_id(current.pair.epoch)?
+    let _ = history_next_id(current.entry.seq)?
+    let mut candidate = current
+    candidate.pair = HistoryPair(epoch, holder)
+    Ok(candidate)
+}
+
+fn object_history_config(take place: std.object.Bucket, take single_name: String) -> HistoryConfig {
+    let mut names: List[String] = list.with_capacity(1)
+    list.push(mut names, take single_name)
+    HistoryConfig(place: take place, levels: take names)
+}

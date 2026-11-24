@@ -40,7 +40,8 @@ pub type Serve: codec + send {
     activation: u64,
     idle: u64,
     candidate: Option[u64],
-    store_id: Option[(u64, u64)]
+    store_id: Option[(u64, u64)],
+    witness: Option[u64]
 }
 
 // What the child runs, by mode (launch.md "Child modes"). Preview carries OLD's entry
@@ -228,9 +229,13 @@ pub type End: codec + send {
 
 pub type Phase: codec + send = Started | Exited(End)
 
+pub type Selection: codec + send { activation: u64, assembly: Bytes }
+
 pub type ChildState: codec + send {
     child: Child,
-    phase: Phase
+    phase: Phase,
+    selection: Option[Selection],
+    answer: Option[runner.HostReply]
 }
 
 pub type Refusal: codec + send = Held | Retiring | UnknownGroup | Mismatch | Image(String) | Spawn(String) | Unbuilt(String)
@@ -563,7 +568,11 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             match take refusal {
                 Some(take why) => push_event(mut out, Refused(take child, take why)),
                 None => {
-                    list.push(mut f.children, Kept(state: ChildState(child: clone(child), phase: Started)))
+                    let selected = match launch.mode {
+                        ServingMode(_, serve) => Some(Selection(activation: serve.activation, assembly: clone(launch.assembly))),
+                        _ => None,
+                    }
+                    list.push(mut f.children, Kept(state: ChildState(child: clone(child), phase: Started, selection: take selected, answer: None)))
                     push_event(mut out, Launched(take child, Started))
                 },
             }
@@ -614,6 +623,13 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
         },
     }
     take out
+}
+
+// The fake can keep a startup reply while the host has no session.
+pub fn remember_place_answer(mut f: Fake, c: Child, take answer: runner.HostReply) {
+    if let Some(i) = find_child(f, c) {
+        if live(f.children[i].state.phase) { f.children[i].state.answer = Some(take answer) }
+    }
 }
 
 // A live child ends. The fake samples the listener first and sends the end with it, and

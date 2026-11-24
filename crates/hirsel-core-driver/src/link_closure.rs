@@ -143,13 +143,10 @@ pub(crate) struct Closure {
     pub absent: Vec<PathBuf>,
 }
 
-/// The closure of `args`, with `support` (libraries the link appends at the
-/// input marker) read where the marker stands. The marker's own inputs are
-/// the request's objects, keyed by the request.
+/// The closure of `args`. The input marker stands for the request's own inputs.
 pub(crate) fn closure(
     args: &[String],
     marker: &str,
-    support: &[&str],
     require_libraries: bool,
 ) -> io::Result<Closure> {
     let refuse = |what: String| io::Error::other(format!("link recipe refused: {what}"));
@@ -158,18 +155,8 @@ pub(crate) fn closure(
     let mut words: Vec<(Kind, &str)> = Vec::new();
     let mut sysroot: Option<PathBuf> = None;
     let mut directories: Vec<&str> = Vec::new();
-    let expanded = args.iter().flat_map(|arg| {
-        if arg == marker {
-            support.iter().map(|s| s.to_string()).collect::<Vec<_>>()
-        } else {
-            vec![arg.clone()]
-        }
-    });
-    let expanded: Vec<String> = expanded.collect();
-    let mut i = 0;
-    while i < expanded.len() {
-        let arg = expanded[i].as_str();
-        i += 1;
+    let mut args = args.iter().map(String::as_str).filter(|arg| *arg != marker);
+    while let Some(arg) = args.next() {
         if arg.starts_with('@') {
             return Err(refuse(format!("response file {arg}")));
         }
@@ -208,11 +195,10 @@ pub(crate) fn closure(
             (_, Some(value)) => Some(value),
             (_, None) if joined_only(name) => None,
             (_, None) => {
-                let value = expanded
-                    .get(i)
+                let value = args
+                    .next()
                     .ok_or_else(|| refuse(format!("{arg} has no operand")))?;
-                i += 1;
-                Some(value.as_str())
+                Some(value)
             }
         };
         match (kind, operand) {

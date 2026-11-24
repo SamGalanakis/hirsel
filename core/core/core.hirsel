@@ -26,6 +26,8 @@ pub type Deque[T] = deque.Deque[T]
 
 pub type Heap[T: ordered] = heap.Heap[T]
 
+pub type Log[E: inert] = log.Log[E]
+
 pub opaque type Map[K: key, V]
 
 pub opaque type Box[T]
@@ -33,6 +35,8 @@ pub opaque type Box[T]
 pub opaque type Rc[T: shareable]
 
 pub opaque type Arc[T: shareable + send]
+
+pub opaque type Shared[T: shareable + cross]
 
 pub opaque resource type Latest[T: shareable + send]
 
@@ -163,9 +167,15 @@ pub type SecretError = Invalid | Capacity(Capacity)
 
 pub type MacError = Denied()
 
+pub type JwsMacAlg = Sha256 | Sha384 | Sha512
+
+pub type JwsMacError = Denied() | ShortKey()
+
 pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
 
 pub type SignAlg = Ed25519 | P256 | Rs256
+
+pub type AeadAlg = ChaCha20Poly1305 | Aes128Gcm | Aes256Gcm
 
 pub opaque resource type Socket
 
@@ -179,20 +189,32 @@ pub opaque resource type UnixListener
 
 pub opaque resource type UnixDatagram
 
+pub opaque resource type UdpSocket
+
+pub type Steer = Hash | Quic
+
+pub type UdpOptions = UdpOptions(slots: u32, slot_bytes: u32)
+
+pub type UdpPacket = UdpPacket(peer: Addr, at: u64, len: u64, truncated: bool, ecn: u8)
+
+pub type UdpTx = UdpTx(to: Addr, at: u64, len: u64, ecn: u8)
+
+pub type UdpStaged = UdpStaged(peer: Addr, len: u64, appended: u64, ecn: u8)
+
 pub type Received = Received(len: u64, truncated: bool)
 
-pub type Ip = V4(u32) | V6(u64, u64)
+pub type Ip: key = V4(u32) | V6(u64, u64)
 
-pub type Addr {
+pub type Addr: key {
     ip: Ip,
     port: u16
 }
 
 pub type Until = Never | At(Clock, u64)
 
-pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32) | EphemeralOutsideNetGrant | Oversize(max: u32) | Exhausted
 
-pub type Trust = System | Roots(Bytes)
+pub type Trust: send = System | Roots(Bytes)
 
 pub type Handshake {
     protocol: Option[u64],
@@ -203,7 +225,7 @@ pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(
 
 pub type CertFailure = UnknownIssuer | NameMismatch | Expired | NotYetValid | Invalid
 
-pub type NetDirection = Connect | Listen
+pub type NetDirection = Connect | Listen | UdpBind | UdpSend
 
 pub type TlsPin = SystemPin | Sha256(Bytes)
 
@@ -236,9 +258,9 @@ pub type StreamReply = Done | WriteFailed(WriteError)
 
 // A served Dir's operations and answers: a path or data field is its byte
 // length; ids name the server's objects, 0 the Dir `provide.dir` returned.
-pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64)
+pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64, path: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64) | Mkstemp(dir: u64, prefix: u64, room: u64) | ZeroExtension(dir: u64)
 
-pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
+pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64) | ZeroExtensionSupported(bool)
 
 // A socket's part a dropped handle releases: the whole socket, or one half
 // of a split one (core.md, Provide).
@@ -246,9 +268,9 @@ pub type Part = Whole | Read | Write
 
 // A served Net's operations and answers: a name or data field is its byte
 // length; ids name the server's sockets and listeners.
-pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64)
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64) | LocalAddr(id: u64) | PeerAddr(socket: u64) | UdpOpen(v6: bool, slots: u32, slot_bytes: u32) | UdpBind(addr: Addr, slots: u32, slot_bytes: u32, members: u16, steer: Steer) | UdpRecv(socket: u64, room: u64, entries: u64) | UdpSend(socket: u64, data: u64, pkts: u64) | UdpLocal(socket: u64)
 
-pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
+pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool) | Address(Addr) | UdpSockets(first: u64, count: u16, addr: Addr) | UdpPackets(count: u64)
 
 pub type Kind = File | Directory | Symlink | Other
 
@@ -258,12 +280,20 @@ pub type Stat {
     modified_ns: i64
 }
 
-pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite
+pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite | Durable | Direct
 
 pub type Capacity {
     requested: u64,
     available: u64
 }
+
+pub type Argon2Cost {
+    memory_kib: u32,
+    passes: u32,
+    lanes: u32
+}
+
+pub type Argon2Error = Params | Capacity(Capacity)
 
 pub type OutOfTime {
     steps: u64
@@ -290,7 +320,8 @@ pub fn site_word(site: Site) -> u64
 // cause first (docs/spec/core.md, "Built-in types").
 pub opaque type Causes
 
-pub opaque type Log[E]
+// A task-local cell: one value, written through a view (MEM-29).
+pub opaque type Cell[T]
 
 pub opaque type StaticFn[F]
 

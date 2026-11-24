@@ -1,25 +1,183 @@
 /// A startup configuration reader with room for up to max_errors failed reads.
 pub opaque type Reader {
-    source: Env,
+    source: Option[Env],
+    arguments: Args,
+    claims: Bytes,
+    modes: Map[String, bool],
+    help: bool,
+    usage: String,
+    positional_bounds: Option[(u64, u64)],
     errors: List[ConfigError],
     max_errors: u64,
     omitted: u64
 }
 
-/// A failed read with its key, or the number of additional failures.
-pub type ConfigError = KeyError(String, ConfigProblem) | More(u64)
+/// A failed configuration read or a request for usage.
+pub type ConfigError = KeyError(String, ConfigProblem) | Unknown(String) | Unexpected(String) | More(u64) | Help(String)
 
 /// Why a read failed. Invalid describes the expected format without including the value.
-pub type ConfigProblem = Missing | Denied | NonUtf8 | Invalid(String)
+pub type ConfigProblem = Missing | Denied | NonUtf8 | Invalid(String) | NoValue | Repeated
 
-/// Starts a reader. Pass the number of planned getter calls to retain every key error.
-/// Further errors are counted for the final report.
-pub fn new(source: Env, max_errors: u64) -> Reader {
-    Reader(source, errors: list.new(), max_errors, omitted: 0)
+const LOOSE: u8 = 0
+
+const POSITIONAL: u8 = 1
+
+const LONG_FLAG: u8 = 2
+
+const UNKNOWN_FLAG: u8 = 3
+
+const CLAIMED_FLAG: u8 = 4
+
+const FLAG_VALUE: u8 = 5
+
+const CONSUMED: u8 = 6
+
+fn argument(a: Args, i: u64) -> View[String] in a {
+    option.unwrap(args.get(a, i))
 }
 
-fn read[T](source: Env, key: String, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> Result[Option[T], ConfigProblem] {
-    match env.get(source, key) {
+/// Starts a reader over the command line and an optional environment grant.
+pub fn new(source: Option[Env], a: Args, max_errors: u64) -> Reader {
+    let mut claims: Bytes = list.with_capacity(args.len(a))
+    let mut flags = true
+    let mut help = false
+    for i in 0 .. args.len(a) {
+        let token = argument(a, i)
+        let kind = if !flags || token == "-" {
+            POSITIONAL
+        } else if token == "--" {
+            flags = false
+            CONSUMED
+        } else if string.starts_with(token, "--") {
+            if token == "--help" {
+                help = true
+            }
+            LONG_FLAG
+        } else if string.starts_with(token, "-") {
+            UNKNOWN_FLAG
+        } else {
+            LOOSE
+        }
+        list.push(mut claims, kind)
+    }
+    Reader(source, arguments: a, claims: take claims, modes: map.new(), help, usage: string.new(), positional_bounds: None, errors: list.new(), max_errors, omitted: 0)
+}
+
+fn flag_name(key: String) -> Result[String, ConfigProblem] {
+    let raw = string.as_bytes(key)
+    if list.len(raw) == 0 {
+        return Error(Invalid("a key is ASCII letters, digits and _"))
+    }
+    let mut name: Bytes = list.with_capacity(list.len(raw) + 2)
+    list.push(mut name, 45u8)
+    list.push(mut name, 45u8)
+    for i in 0 .. list.len(raw) {
+        let c = raw[i]
+        if c >= 65 && c <= 90 {
+            list.push(mut name, c + 32u8)
+        } else if (c >= 97 && c <= 122) || (c >= 48 && c <= 57) {
+            list.push(mut name, c)
+        } else if c == 95 {
+            list.push(mut name, 45u8)
+        } else {
+            return Error(Invalid("a key is ASCII letters, digits and _"))
+        }
+    }
+    Ok(result.unwrap(string.from_utf8(take name)))
+}
+
+fn has_error_room(mut r: Reader) -> bool {
+    if list.len(r.errors) == r.max_errors {
+        r.omitted += 1
+        false
+    } else {
+        true
+    }
+}
+
+fn key_error(mut r: Reader, key: String, take problem: ConfigProblem) {
+    if has_error_room(mut r) {
+        list.push(mut r.errors, KeyError(string.from(key), take problem))
+    }
+}
+
+fn usage_line(mut r: Reader, name: String, key: String, switch: bool) {
+    if string.byte_len(r.usage) != 0 {
+        string.push(mut r.usage, "\n")
+    }
+    string.push(mut r.usage, name)
+    if !switch {
+        string.push(mut r.usage, " <value>")
+    }
+    string.push(mut r.usage, "  ")
+    string.push(mut r.usage, key)
+}
+
+fn declare_flag(mut r: Reader, key: String, switch: bool, suffix: scoped fn(mut String)) -> Result[String, ConfigProblem] {
+    let name = flag_name(key)?
+    let declared = option.copied(map.get(r.modes, name))
+    if let Some(previous) = declared {
+        if previous != switch {
+            return Error(Invalid("read as a switch and as a value"))
+        }
+    } else {
+        map.insert(mut r.modes, string.from(name), switch)
+        if r.help {
+            usage_line(mut r, name, key, switch)
+            suffix(mut r.usage)
+        }
+    }
+    Ok(take name)
+}
+
+fn flag_end(token: String) -> u64 {
+    match string.find(token, 0, "=") {
+        Some(i) => i,
+        None => string.byte_len(token),
+    }
+}
+
+fn claim_flag(mut r: Reader, name: String, switch: bool, mut next: u64) -> Option[u64] {
+    while next < list.len(r.claims) {
+        let i = next
+        next += 1
+        let kind = r.claims[i]
+        if kind != LONG_FLAG && kind != CLAIMED_FLAG {
+            continue
+        }
+        let token = argument(r.arguments, i)
+        let end = flag_end(token)
+        if string.slice(token, 0, end) != name {
+            continue
+        }
+        let _ = list.set(mut r.claims, i, CLAIMED_FLAG)
+        if !switch && end == string.byte_len(token) && next < list.len(r.claims) && r.claims[next] == LOOSE {
+            let _ = list.set(mut r.claims, next, FLAG_VALUE)
+        }
+        return Some(i)
+    }
+    None
+}
+
+fn read_flag[T](r: Reader, i: u64, switch: bool, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> Result[T, ConfigProblem] {
+    let token = argument(r.arguments, i)
+    let end = flag_end(token)
+    if end < string.byte_len(token) {
+        parse(string.slice(token, end + 1, string.byte_len(token)))
+    } else if switch {
+        parse("true")
+    } else if i + 1 < list.len(r.claims) && r.claims[i + 1] == FLAG_VALUE {
+        parse(argument(r.arguments, i + 1))
+    } else {
+        Error(NoValue)
+    }
+}
+
+fn read_env[T](source: Option[Env], key: String, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> Result[Option[T], ConfigProblem] {
+    let Some(e) = source else {
+        return Ok(None)
+    }
+    match env.get(e, key) {
         Ok(Some(value)) => Ok(Some(parse(value)?)),
         Ok(None) => Ok(None),
         Error(Denied) => Error(Denied),
@@ -27,8 +185,31 @@ fn read[T](source: Env, key: String, parse: scoped fn(String) -> Result[T, Confi
     }
 }
 
-fn get[T](mut r: Reader, key: String, take fallback: Option[T], take placeholder: T, parse: scoped fn(String) -> Result[T, ConfigProblem]) -> T {
-    let reading = read(r.source, key, parse)
+fn read[T](mut r: Reader, key: String, switch: bool, parse: scoped fn(String) -> Result[T, ConfigProblem], suffix: scoped fn(mut String)) -> Result[Option[T], ConfigProblem] {
+    let name = declare_flag(mut r, key, switch, suffix)?
+    let mut next: u64 = 0
+    let Some(first) = claim_flag(mut r, name, switch, mut next) else {
+        return read_env(r.source, key, parse)
+    }
+    let mut repeated = false
+    while let Some(_) = claim_flag(mut r, name, switch, mut next) {
+        repeated = true
+    }
+    if repeated {
+        Error(Repeated)
+    } else {
+        Ok(Some(read_flag(r, first, switch, parse)?))
+    }
+}
+
+fn get[T](mut r: Reader, key: String, take fallback: Option[T], take placeholder: T, switch: bool, parse: scoped fn(String) -> Result[T, ConfigProblem], show: scoped fn(mut String, T)) -> T {
+    let reading = read(mut r, key, switch, parse, scoped fn(mut text: String) {
+        if let Some(value) = fallback {
+            string.push(mut text, " (default: ")
+            show(mut text, value)
+            string.push(mut text, ")")
+        }
+    })
     let problem = match take reading {
         Ok(Some(take value)) => return take value,
         Ok(None) => match take fallback {
@@ -37,11 +218,7 @@ fn get[T](mut r: Reader, key: String, take fallback: Option[T], take placeholder
         },
         Error(take problem) => take problem,
     }
-    if list.len(r.errors) == r.max_errors {
-        r.omitted += 1
-    } else {
-        list.push(mut r.errors, KeyError(string.from(key), take problem))
-    }
+    key_error(mut r, key, take problem)
     take placeholder
 }
 
@@ -91,68 +268,217 @@ fn parse_duration_ms(s: String) -> Result[u64, ConfigProblem] {
 
 /// Returns an owned UTF-8 value, or an empty placeholder on error.
 pub fn string(mut r: Reader, key: String) -> String {
-    get(mut r, key, None, string.new(), parse_string)
+    get(mut r, key, None, string.new(), false, parse_string, string.push)
 }
 
 /// Uses fallback when the key is absent. Other read errors return an empty placeholder.
 pub fn string_or(mut r: Reader, key: String, take fallback: String) -> String {
-    get(mut r, key, Some(take fallback), string.new(), parse_string)
+    get(mut r, key, Some(take fallback), string.new(), false, parse_string, string.push)
 }
 
 /// Reads an unsigned decimal integer, or returns zero on error.
 pub fn u64(mut r: Reader, key: String) -> u64 {
-    get(mut r, key, None, 0, parse_u64)
+    get(mut r, key, None, 0, false, parse_u64, string.push_u64)
 }
 
 /// Reads an unsigned decimal integer, with fallback for an absent key.
 pub fn u64_or(mut r: Reader, key: String, fallback: u64) -> u64 {
-    get(mut r, key, Some(fallback), 0, parse_u64)
+    get(mut r, key, Some(fallback), 0, false, parse_u64, string.push_u64)
 }
 
 /// Reads a signed decimal integer, or returns zero on error.
 pub fn i64(mut r: Reader, key: String) -> i64 {
-    get(mut r, key, None, 0, parse_i64)
+    get(mut r, key, None, 0, false, parse_i64, string.push_i64)
 }
 
 /// Reads a signed decimal integer, with fallback for an absent key.
 pub fn i64_or(mut r: Reader, key: String, fallback: i64) -> i64 {
-    get(mut r, key, Some(fallback), 0, parse_i64)
+    get(mut r, key, Some(fallback), 0, false, parse_i64, string.push_i64)
 }
 
 /// Reads exactly "true" or "false", or returns false on error.
 pub fn bool(mut r: Reader, key: String) -> bool {
-    get(mut r, key, None, false, parse_bool)
+    get(mut r, key, None, false, true, parse_bool, push_bool)
 }
 
 /// Reads a boolean, with fallback for an absent key.
 pub fn bool_or(mut r: Reader, key: String, fallback: bool) -> bool {
-    get(mut r, key, Some(fallback), false, parse_bool)
+    get(mut r, key, Some(fallback), false, true, parse_bool, push_bool)
 }
 
 /// Reads a decimal port in 1..65535, or returns zero on error.
 pub fn port(mut r: Reader, key: String) -> u16 {
-    get(mut r, key, None, 0, parse_port)
+    get(mut r, key, None, 0, false, parse_port, push_port)
 }
 
 /// Reads a port, with the caller's u16 fallback for an absent key.
 pub fn port_or(mut r: Reader, key: String, fallback: u16) -> u16 {
-    get(mut r, key, Some(fallback), 0, parse_port)
+    get(mut r, key, Some(fallback), 0, false, parse_port, push_port)
 }
 
 /// Reads an unsigned decimal millisecond count, or returns zero on error.
 pub fn duration_ms(mut r: Reader, key: String) -> u64 {
-    get(mut r, key, None, 0, parse_duration_ms)
+    get(mut r, key, None, 0, false, parse_duration_ms, string.push_u64)
 }
 
 /// Reads a millisecond count, with fallback for an absent key.
 pub fn duration_ms_or(mut r: Reader, key: String, fallback: u64) -> u64 {
-    get(mut r, key, Some(fallback), 0, parse_duration_ms)
+    get(mut r, key, Some(fallback), 0, false, parse_duration_ms, string.push_u64)
 }
 
-/// Consumes the reader. Returns retained errors in getter call order, followed
-/// by More if needed. Returns Ok(()) when every read succeeded.
+fn push_bool(mut text: String, b: bool) {
+    string.push(mut text, if b {
+        "true"
+    } else {
+        "false"
+    })
+}
+
+fn push_port(mut text: String, n: u16) {
+    string.push_u64(mut text, int.widen(n))
+}
+
+fn parse_level(s: String) -> Result[trace.Level, ConfigProblem] {
+    if s == "debug" {
+        Ok(Debug)
+    } else if s == "info" {
+        Ok(Info)
+    } else if s == "warn" {
+        Ok(Warn)
+    } else if s == "error" {
+        Ok(Error)
+    } else {
+        Error(Invalid("expected debug, info, warn or error"))
+    }
+}
+
+fn push_level(mut text: String, level: trace.Level) {
+    string.push(mut text, match level {
+        Debug => "debug",
+        Info => "info",
+        Warn => "warn",
+        Error => "error",
+    })
+}
+
+/// Reads a log level, or returns Info on error.
+pub fn log_level(mut r: Reader, key: String) -> trace.Level {
+    get(mut r, key, None, Info, false, parse_level, push_level)
+}
+
+/// Reads a log level, with fallback when the flag and environment key are absent.
+pub fn log_level_or(mut r: Reader, key: String, fallback: trace.Level) -> trace.Level {
+    get(mut r, key, Some(fallback), Info, false, parse_level, push_level)
+}
+
+/// Reads every occurrence in command-line order, or one unsplit environment value.
+pub fn strings(mut r: Reader, key: String) -> List[String] {
+    let mut values: List[String] = list.new()
+    let named = declare_flag(mut r, key, false, scoped fn(mut text: String) {
+        string.push(mut text, " (repeatable)")
+    })
+    let name = match take named {
+        Ok(take name) => take name,
+        Error(take problem) => {
+            key_error(mut r, key, take problem)
+            return take values
+        },
+    }
+    let mut seen = false
+    let mut next: u64 = 0
+    while let Some(i) = claim_flag(mut r, name, false, mut next) {
+        seen = true
+        match read_flag(r, i, false, parse_string) {
+            Ok(take value) => list.push(mut values, take value),
+            Error(take problem) => key_error(mut r, key, take problem),
+        }
+    }
+    if !seen {
+        match read_env(r.source, key, parse_string) {
+            Ok(Some(take value)) => list.push(mut values, take value),
+            Ok(None) => {},
+            Error(take problem) => key_error(mut r, key, take problem),
+        }
+    }
+    take values
+}
+
+/// Claims up to max positionals in argument order, after the flag getters have run.
+pub fn positionals(mut r: Reader, min: u64, max: u64) -> List[String] {
+    let mut values: List[String] = list.new()
+    if let Some(_) = r.positional_bounds {
+        return take values
+    }
+    r.positional_bounds = Some((min, max))
+    for i in 0 .. list.len(r.claims) {
+        if list.len(values) == max {
+            break
+        }
+        if r.claims[i] == LOOSE || r.claims[i] == POSITIONAL {
+            list.push(mut values, string.from(argument(r.arguments, i)))
+            let _ = list.set(mut r.claims, i, CONSUMED)
+        }
+    }
+    if list.len(values) < min && has_error_room(mut r) {
+        let mut reason = string.from("expected at least ")
+        string.push_u64(mut reason, min)
+        string.push(mut reason, " arguments")
+        list.push(mut r.errors, KeyError("ARGS", Invalid(take reason)))
+    }
+    take values
+}
+
+fn unclaimed_help(r: Reader) -> bool {
+    if !r.help {
+        return false
+    }
+    for i in 0 .. list.len(r.claims) {
+        if r.claims[i] == LONG_FLAG && argument(r.arguments, i) == "--help" {
+            return true
+        }
+    }
+    false
+}
+
+fn render_usage(take r: Reader) -> String {
+    let Reader(usage: take lines, positional_bounds, ..) = take r
+    let mut text = take lines
+    if let Some((min, max)) = positional_bounds {
+        if string.byte_len(text) != 0 {
+            string.push(mut text, "\n")
+        }
+        string.push(mut text, "ARGS: ")
+        string.push_u64(mut text, min)
+        string.push(mut text, "..")
+        string.push_u64(mut text, max)
+        string.push(mut text, " arguments")
+    }
+    take text
+}
+
+/// Consumes the reader. Unclaimed --help returns just the usage. Otherwise
+/// errors appear in getter order, then unclaimed arguments, then More if needed.
 pub fn finish(take r: Reader) -> Result[(), List[ConfigError]] {
-    let Reader(errors: take saved, omitted, ..) = take r
+    if unclaimed_help(r) {
+        let mut errors: List[ConfigError] = list.with_capacity(1)
+        list.push(mut errors, Help(render_usage(take r)))
+        return Error(take errors)
+    }
+    let mut reader = take r
+    for i in 0 .. list.len(reader.claims) {
+        let kind = reader.claims[i]
+        if kind == LONG_FLAG || kind == UNKNOWN_FLAG {
+            if has_error_room(mut reader) {
+                let token = argument(reader.arguments, i)
+                let name = string.from(string.slice(token, 0, flag_end(token)))
+                list.push(mut reader.errors, Unknown(take name))
+            }
+        } else if (kind == LOOSE || kind == POSITIONAL) && has_error_room(mut reader) {
+            let token = string.from(argument(reader.arguments, i))
+            list.push(mut reader.errors, Unexpected(take token))
+        }
+    }
+    let Reader(errors: take saved, omitted, ..) = take reader
     let mut errors = take saved
     if omitted != 0 {
         list.push(mut errors, More(omitted))
@@ -180,8 +506,19 @@ pub fn format_errors(errors: List[ConfigError]) -> String {
                     Denied => string.push(mut text, "read denied"),
                     NonUtf8 => string.push(mut text, "not UTF-8"),
                     Invalid(reason) => string.push(mut text, reason),
+                    NoValue => string.push(mut text, "no value"),
+                    Repeated => string.push(mut text, "repeated flag"),
                 }
             },
+            Unknown(token) => {
+                string.push(mut text, token)
+                string.push(mut text, ": unknown flag")
+            },
+            Unexpected(token) => {
+                string.push(mut text, token)
+                string.push(mut text, ": unexpected argument")
+            },
+            Help(usage) => string.push(mut text, usage),
             More(n) => {
                 string.push(mut text, "and ")
                 string.push_u64(mut text, n)

@@ -27,8 +27,8 @@
 //! # What it runs
 //!
 //! The pool's own code runs unchanged: `worker_main`, `find`, `enqueue`,
-//! `wake`, `notify_worker`, `add_timer`, `fire_timers`, `poll_due` and
-//! `poll_global`, with units that switch onto their own stacks and call
+//! `wake`, `notify_worker`, `add_timer`, `fire_timers`, `check_slot` and
+//! `poll_slot`, with units that switch onto their own stacks and call
 //! `park`, `wake_id`, `maybe_yield` and `take_xready` as the task scheduler
 //! does. A sync completion goes through its real cell (`os_sync`) and the
 //! unit's waiter (`tasks::Readies`), whose state also passes the seam. Every
@@ -40,19 +40,22 @@
 //! Kernel and host model:
 //! - Time is modelled: every scheduling point advances it by `DELTA_NS`
 //!   (20 ns); when every thread waits, it jumps to the earliest timeout.
-//! - The pool's wake eventfd is level-triggered: `epoll_wait` reports it
-//!   while its counter is nonzero; a read takes the counter.
-//! - A socket edge (edge-triggered) joins the ready list once and stays
-//!   there until one `epoll_wait` reports it.
+//! - Each worker slot has its own epoll set and wake eventfd, registered
+//!   edge-triggered and never read: a write to the eventfd queues one wake
+//!   on that slot's set, which the next `epoll_wait` on it reports once.
+//! - A socket edge (edge-triggered) joins its home slot's ready list once
+//!   and stays there until one `epoll_wait` on that slot reports it. A
+//!   unit's home is the slot it registered from (`wait_arrival`, or
+//!   `register`): the worker slot its thread runs.
 //! - `epoll_wait` returns at once if anything is ready, returns 0 for a
 //!   zero timeout, and otherwise blocks until something is ready or modelled
 //!   time reaches its timeout (milliseconds, as the pool passes it).
-//! - `thread::park` has the standard token semantics and no spurious
-//!   returns.
 //! - The statistics, log and untied-switch objects are not scheduling
 //!   points (they still block when held).
 //! - A host write that never returns (stalled standard output) blocks for
 //!   ever, after the pool records entry.
+//! - The memory thread is not modelled: a scheduled thread runs its jobs
+//!   in place (a first stack's mapping, then the unit's publish).
 //! - Outside producers (a client, a sync helper) are checker threads; a
 //!   helper waiting for work rechecks every 300 ns of modelled time.
 //! - Not modelled: the crossing eventfd and the reactor's own threads; no
@@ -64,7 +67,7 @@
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
 use super::{
-    BASE, Base, Memory, NONE, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur,
+    BASE, Base, Memory, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur,
     enable_pool, maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
@@ -93,9 +96,8 @@ fn t0() -> u64 {
 enum Wait {
     Run,
     Lock(usize),
-    Park,
-    ParkUntil(u64),
-    Epoll(Option<u64>),
+    /// Blocked in slot `.0`'s epoll set.
+    Epoll(usize, Option<u64>),
     Sleep(u64),
     Host,
     Done,
@@ -104,18 +106,23 @@ enum Wait {
 struct Th {
     name: String,
     wait: Wait,
-    token: bool,
     os: Option<std::thread::Thread>,
     producer: bool,
     at: &'static str,
     line: u32,
 }
 
-struct Kernel {
+/// One slot's epoll set as the kernel holds it.
+#[derive(Debug)]
+struct KSlot {
     epfd: i32,
     wakefd: i32,
-    counter: u64,
+    /// A wake queued on the set and not yet reported (edge-triggered).
+    wake: bool,
     edges: VecDeque<(u64, u32)>,
+}
+struct Kernel {
+    slots: Vec<KSlot>,
 }
 
 struct State {
@@ -139,7 +146,6 @@ struct State {
     goals: fn() -> bool,
     out: String,
     case: &'static str,
-    slot_owners: Vec<Option<usize>>,
     seed: u64,
     /// PCT: per-thread priorities and the steps at which the running
     /// thread's priority drops. Empty: uniform random choice.
@@ -161,6 +167,10 @@ thread_local! {
     static LAST_QUIET: Cell<bool> = const { Cell::new(false) };
 }
 #[inline(never)]
+/// Whether the calling thread is one the checker schedules.
+pub(super) fn modelled() -> bool {
+    me().is_some()
+}
 fn me() -> Option<usize> {
     let m = ME.get();
     (m != usize::MAX && SCHED.get().is_some()).then_some(m)
@@ -214,24 +224,22 @@ impl State {
         let now = self.time;
         for t in &mut self.threads {
             match t.wait {
-                Wait::Epoll(Some(d)) | Wait::Sleep(d) | Wait::ParkUntil(d) if d <= now => {
-                    t.wait = Wait::Run
-                }
+                Wait::Epoll(_, Some(d)) | Wait::Sleep(d) if d <= now => t.wait = Wait::Run,
                 _ => {}
             }
         }
     }
-    fn wake_epoll(&mut self) {
+    fn wake_epoll(&mut self, k: usize) {
         for t in &mut self.threads {
-            if let Wait::Epoll(_) = t.wait {
+            if let Wait::Epoll(j, _) = t.wait
+                && j == k
+            {
                 t.wait = Wait::Run;
             }
         }
     }
     fn complete(&self) -> bool {
         (self.goals)()
-            && (!self.case.starts_with("handoff_")
-                || self.threads.iter().all(|t| t.wait == Wait::Done))
     }
 
     /// Pick the next thread to run, advancing time over idle stretches.
@@ -251,7 +259,7 @@ impl State {
                 .threads
                 .iter()
                 .filter_map(|t| match t.wait {
-                    Wait::Epoll(Some(d)) | Wait::Sleep(d) | Wait::ParkUntil(d) => Some(d),
+                    Wait::Epoll(_, Some(d)) | Wait::Sleep(d) => Some(d),
                     _ => None,
                 })
                 .min();
@@ -320,11 +328,13 @@ impl State {
                 t.name, t.wait, t.at, t.line
             );
         }
-        let _ = writeln!(
-            s,
-            "kernel: eventfd counter {}, edges queued {:?}",
-            self.kernel.counter, self.kernel.edges
-        );
+        for (k, ks) in self.kernel.slots.iter().enumerate() {
+            let _ = writeln!(
+                s,
+                "kernel slot {k}: wake pending {}, edges queued {:?}",
+                ks.wake, ks.edges
+            );
+        }
         s.push_str(&pool_state());
         let _ = writeln!(s, "trace (last {} steps):", self.trace.len());
         for (_, l) in &self.trace {
@@ -391,49 +401,6 @@ fn point(
     let text = line(&st);
     st.log(me, text);
 }
-pub(super) fn slot_enter(ix: usize) {
-    if let Some(id) = me() {
-        let mut st = lock();
-        if st.case.starts_with("handoff_") {
-            assert_eq!(
-                st.slot_owners[ix].replace(id),
-                None,
-                "two threads own slot {ix}"
-            );
-        }
-    }
-}
-
-pub(super) fn slot_use(ix: usize) {
-    if let Some(id) = me() {
-        let st = lock();
-        if st.case.starts_with("handoff_") {
-            assert_eq!(st.slot_owners[ix], Some(id), "thread {id} lost slot {ix}");
-        }
-    }
-}
-
-pub(super) fn slot_taken(ix: usize) {
-    if me().is_some() {
-        let mut st = lock();
-        assert!(
-            st.slot_owners[ix].take().is_some(),
-            "slot {ix} has no owner"
-        );
-    }
-}
-
-// Hold the queue lock across the transfer. Sleep on the model clock, so
-// the monitor runs while the victim remains blocked.
-pub(super) fn during_steal(ix: usize) {
-    if me().is_some() && lock().case == "handoff_steal" && ix == 0 && !FLAG[3].raw() {
-        FLAG[3].store(true, Ordering::SeqCst);
-        while pool().host_calls[ix].0.raw() > super::HOST_ACTIVITY {
-            sleep_producer(now() + 100);
-        }
-    }
-}
-
 fn short(f: &'static str) -> &'static str {
     f.rsplit('/').next().unwrap_or(f)
 }
@@ -463,555 +430,8 @@ fn say(text: String) {
 
 // ----------------------------------------------------------- seam items
 
-pub(crate) mod seam {
-    use super::{Wait, lock, me, note, point, quiet, shown};
-    use std::panic::Location;
-    use std::sync::atomic::Ordering;
-
-    fn at_point(addr: usize, op: &'static str, at: &'static Location<'static>) {
-        if let Some(m) = me() {
-            let q = quiet(addr);
-            super::LAST_QUIET.set(q);
-            if !q {
-                point(m, Wait::Run, |st| format!("{op} {}", st.name(addr)), at);
-            }
-        }
-    }
-
-    macro_rules! int_atomic {
-        ($name:ident, $t:ty) => {
-            #[repr(transparent)]
-            pub(crate) struct $name(std::sync::atomic::$name);
-            impl $name {
-                pub(crate) const fn new(v: $t) -> Self {
-                    Self(std::sync::atomic::$name::new(v))
-                }
-                fn a(&self) -> usize {
-                    self as *const Self as usize
-                }
-                pub(crate) fn raw(&self) -> $t {
-                    self.0.load(Ordering::SeqCst)
-                }
-                #[track_caller]
-                pub(crate) fn load(&self, o: Ordering) -> $t {
-                    at_point(self.a(), "load", Location::caller());
-                    let v = self.0.load(o);
-                    note(|| format!("{}", shown(v as u64)));
-                    v
-                }
-                #[track_caller]
-                pub(crate) fn store(&self, v: $t, o: Ordering) {
-                    at_point(self.a(), "store", Location::caller());
-                    self.0.store(v, o);
-                    note(|| format!("{}", shown(v as u64)));
-                }
-                #[track_caller]
-                pub(crate) fn swap(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "swap", Location::caller());
-                    let r = self.0.swap(v, o);
-                    note(|| format!("{} => {}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn compare_exchange(
-                    &self,
-                    c: $t,
-                    n: $t,
-                    s: Ordering,
-                    f: Ordering,
-                ) -> Result<$t, $t> {
-                    at_point(self.a(), "compare_exchange", Location::caller());
-                    let r = self.0.compare_exchange(c, n, s, f);
-                    note(|| format!("{c}=>{n}: {r:?}"));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_update<F: FnMut($t) -> Option<$t>>(
-                    &self,
-                    s: Ordering,
-                    f: Ordering,
-                    g: F,
-                ) -> Result<$t, $t> {
-                    at_point(self.a(), "fetch_update", Location::caller());
-                    let r = self.0.fetch_update(s, f, g);
-                    let now = self.0.load(Ordering::SeqCst);
-                    note(|| format!("{r:?} => {now}"));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn try_update<F: FnMut($t) -> Option<$t>>(
-                    &self,
-                    s: Ordering,
-                    f: Ordering,
-                    g: F,
-                ) -> Result<$t, $t> {
-                    at_point(self.a(), "try_update", Location::caller());
-                    let r = self.0.try_update(s, f, g);
-                    let now = self.0.load(Ordering::SeqCst);
-                    note(|| format!("{r:?} => {now}"));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_add(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "fetch_add", Location::caller());
-                    let r = self.0.fetch_add(v, o);
-                    note(|| format!("{} +{}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_sub(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "fetch_sub", Location::caller());
-                    let r = self.0.fetch_sub(v, o);
-                    note(|| format!("{} -{}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_min(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "fetch_min", Location::caller());
-                    let r = self.0.fetch_min(v, o);
-                    note(|| format!("{} min {}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_max(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "fetch_max", Location::caller());
-                    let r = self.0.fetch_max(v, o);
-                    note(|| format!("{} max {}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-                #[track_caller]
-                pub(crate) fn fetch_or(&self, v: $t, o: Ordering) -> $t {
-                    at_point(self.a(), "fetch_or", Location::caller());
-                    let r = self.0.fetch_or(v, o);
-                    note(|| format!("{} or {}", shown(r as u64), shown(v as u64)));
-                    r
-                }
-            }
-        };
-    }
-    int_atomic!(AtomicU8, u8);
-    int_atomic!(AtomicU32, u32);
-    int_atomic!(AtomicU64, u64);
-    int_atomic!(AtomicUsize, usize);
-
-    #[repr(transparent)]
-    pub(crate) struct AtomicBool(std::sync::atomic::AtomicBool);
-    impl AtomicBool {
-        pub(crate) const fn new(v: bool) -> Self {
-            Self(std::sync::atomic::AtomicBool::new(v))
-        }
-        fn a(&self) -> usize {
-            self as *const Self as usize
-        }
-        pub(crate) fn raw(&self) -> bool {
-            self.0.load(Ordering::SeqCst)
-        }
-        #[track_caller]
-        pub(crate) fn load(&self, o: Ordering) -> bool {
-            at_point(self.a(), "load", Location::caller());
-            let v = self.0.load(o);
-            note(|| format!("{v}"));
-            v
-        }
-        #[track_caller]
-        pub(crate) fn store(&self, v: bool, o: Ordering) {
-            at_point(self.a(), "store", Location::caller());
-            self.0.store(v, o);
-            note(|| format!("{v}"));
-        }
-        #[track_caller]
-        pub(crate) fn swap(&self, v: bool, o: Ordering) -> bool {
-            at_point(self.a(), "swap", Location::caller());
-            let r = self.0.swap(v, o);
-            note(|| format!("{r} => {v}"));
-            r
-        }
-    }
-
-    #[repr(transparent)]
-    pub(crate) struct AtomicPtr<T>(std::sync::atomic::AtomicPtr<T>);
-    impl<T> AtomicPtr<T> {
-        pub(crate) const fn new(v: *mut T) -> Self {
-            Self(std::sync::atomic::AtomicPtr::new(v))
-        }
-        fn a(&self) -> usize {
-            self as *const Self as usize
-        }
-        pub(crate) fn raw(&self) -> *mut T {
-            self.0.load(Ordering::SeqCst)
-        }
-        #[track_caller]
-        pub(crate) fn load(&self, o: Ordering) -> *mut T {
-            at_point(self.a(), "load", Location::caller());
-            let v = self.0.load(o);
-            note(|| super::unit_name(v as usize));
-            v
-        }
-        #[track_caller]
-        pub(crate) fn store(&self, v: *mut T, o: Ordering) {
-            at_point(self.a(), "store", Location::caller());
-            self.0.store(v, o);
-            note(|| super::unit_name(v.addr()));
-        }
-        #[track_caller]
-        pub(crate) fn swap(&self, v: *mut T, o: Ordering) -> *mut T {
-            at_point(self.a(), "swap", Location::caller());
-            let r = self.0.swap(v, o);
-            note(|| {
-                format!(
-                    "{} => {}",
-                    super::unit_name(r as usize),
-                    super::unit_name(v as usize)
-                )
-            });
-            r
-        }
-        #[track_caller]
-        pub(crate) fn compare_exchange(
-            &self,
-            c: *mut T,
-            n: *mut T,
-            s: Ordering,
-            f: Ordering,
-        ) -> Result<*mut T, *mut T> {
-            at_point(self.a(), "compare_exchange", Location::caller());
-            self.0.compare_exchange(c, n, s, f)
-        }
-    }
-
-    /// A mutex whose lock is a scheduling point and whose contention blocks
-    /// the thread in the checker, so a descheduled holder never spins the
-    /// scheduler.
-    pub(crate) struct Mutex<T> {
-        inner: std::sync::Mutex<T>,
-    }
-    pub(crate) struct MutexGuard<'a, T> {
-        g: std::mem::ManuallyDrop<std::sync::MutexGuard<'a, T>>,
-        addr: usize,
-    }
-    #[derive(Debug)]
-    pub(crate) struct WouldBlock;
-    impl<T> Mutex<T> {
-        pub(crate) const fn new(v: T) -> Self {
-            Self {
-                inner: std::sync::Mutex::new(v),
-            }
-        }
-        fn a(&self) -> usize {
-            self as *const Self as usize
-        }
-        fn guard(&self) -> Option<MutexGuard<'_, T>> {
-            let g = match self.inner.try_lock() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return None,
-            };
-            Some(MutexGuard {
-                g: std::mem::ManuallyDrop::new(g),
-                addr: self.a(),
-            })
-        }
-        /// The contents for a state dump, if nobody holds the lock.
-        pub(crate) fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-            self.inner.try_lock().ok().map(|g| f(&g))
-        }
-        #[track_caller]
-        pub(crate) fn lock(&self) -> Result<MutexGuard<'_, T>, WouldBlock> {
-            let at = Location::caller();
-            let Some(m) = me() else {
-                let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                return Ok(MutexGuard {
-                    g: std::mem::ManuallyDrop::new(g),
-                    addr: self.a(),
-                });
-            };
-            // A quiet lock is no scheduling point, but a held one still waits.
-            if !quiet(self.a()) {
-                point(m, Wait::Run, |st| format!("lock {}", st.name(self.a())), at);
-            }
-            loop {
-                if let Some(g) = self.guard() {
-                    return Ok(g);
-                }
-                point(
-                    m,
-                    Wait::Lock(self.a()),
-                    |st| format!("lock {} (held: waits)", st.name(self.a())),
-                    at,
-                );
-            }
-        }
-        #[track_caller]
-        pub(crate) fn try_lock(&self) -> Result<MutexGuard<'_, T>, WouldBlock> {
-            at_point(self.a(), "try_lock", Location::caller());
-            let r = self.guard().ok_or(WouldBlock);
-            note(|| {
-                if r.is_ok() {
-                    "taken".into()
-                } else {
-                    "held".into()
-                }
-            });
-            r
-        }
-    }
-    impl<T> Drop for MutexGuard<'_, T> {
-        fn drop(&mut self) {
-            // SAFETY: dropped once, here.
-            unsafe { std::mem::ManuallyDrop::drop(&mut self.g) };
-            if SCHED_ON.load(Ordering::Relaxed) {
-                let mut st = lock();
-                for t in &mut st.threads {
-                    if t.wait == Wait::Lock(self.addr) {
-                        t.wait = Wait::Run;
-                    }
-                }
-            }
-        }
-    }
-    #[track_caller]
-    pub(crate) fn read_arrival<T>(node: *const T) {
-        at_point(node.addr(), "read arrival", Location::caller());
-    }
-
-    pub(super) static SCHED_ON: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    impl<T> std::ops::Deref for MutexGuard<'_, T> {
-        type Target = T;
-        fn deref(&self) -> &T {
-            &self.g
-        }
-    }
-    impl<T> std::ops::DerefMut for MutexGuard<'_, T> {
-        fn deref_mut(&mut self) -> &mut T {
-            &mut self.g
-        }
-    }
-
-    pub(crate) mod thread {
-        use super::super::{Wait, lock, me, point};
-        use std::panic::Location;
-        /// A worker's handle: the checker's thread index inside a run, the
-        /// standard handle outside one.
-        #[derive(Clone)]
-        pub(crate) enum Thread {
-            Checked(usize),
-            Os(std::thread::Thread),
-        }
-        impl Thread {
-            #[track_caller]
-            pub(crate) fn unpark(&self) {
-                let at = Location::caller();
-                let (Some(m), Thread::Checked(t)) = (me(), self) else {
-                    if let Thread::Os(t) = self {
-                        t.unpark();
-                    }
-                    return;
-                };
-                let t = *t;
-                point(
-                    m,
-                    Wait::Run,
-                    |st| format!("unpark {}", st.threads[t].name),
-                    at,
-                );
-                let mut st = lock();
-                st.threads[t].token = true;
-                if matches!(st.threads[t].wait, Wait::Park | Wait::ParkUntil(_)) {
-                    st.threads[t].wait = Wait::Run;
-                }
-            }
-        }
-        pub(crate) fn current() -> Thread {
-            match me() {
-                Some(m) => Thread::Checked(m),
-                None => Thread::Os(std::thread::current()),
-            }
-        }
-        #[track_caller]
-        pub(crate) fn park() {
-            let at = Location::caller();
-            let Some(m) = me() else {
-                return std::thread::park();
-            };
-            point(m, Wait::Run, |_| "park".into(), at);
-            let mut st = lock();
-            if std::mem::take(&mut st.threads[m].token) {
-                st.log(m, "park returns at once (token)".into());
-                return;
-            }
-            drop(st);
-            point(m, Wait::Park, |_| "park: sleeps on its handle".into(), at);
-            lock().threads[m].token = false;
-        }
-
-        #[track_caller]
-        pub(crate) fn park_timeout(duration: std::time::Duration) {
-            let at = Location::caller();
-            let Some(m) = me() else {
-                return std::thread::park_timeout(duration);
-            };
-            point(m, Wait::Run, |_| "park with timeout".into(), at);
-            let mut st = lock();
-            if std::mem::take(&mut st.threads[m].token) {
-                return;
-            }
-            let at_ns = st.time + duration.as_nanos() as u64;
-            drop(st);
-            point(
-                m,
-                Wait::ParkUntil(at_ns),
-                |_| "park until timeout".into(),
-                at,
-            );
-            lock().threads[m].token = false;
-        }
-    }
-
-    #[track_caller]
-    pub(crate) fn monotonic_ns() -> u64 {
-        if SCHED.get().is_none() {
-            return crate::os::monotonic_ns();
-        }
-        if let Some(m) = me() {
-            point(m, Wait::Run, |_| "clock".into(), Location::caller());
-        }
-        lock().time
-    }
-    use super::SCHED;
-
-    /// # Safety
-    /// `evs` has room for `max` events.
-    #[track_caller]
-    pub(crate) unsafe fn epoll_wait(
-        epfd: i32,
-        evs: *mut hirsel_core_net::sys::epoll_event,
-        max: i32,
-        timeout: i32,
-    ) -> i32 {
-        let at = Location::caller();
-        let Some(m) = me() else {
-            // SAFETY: the caller's contract.
-            return unsafe { hirsel_core_net::sys::epoll_wait(epfd, evs, max, timeout) };
-        };
-        point(
-            m,
-            Wait::Run,
-            |_| format!("epoll_wait timeout {timeout}ms"),
-            at,
-        );
-        let mut deadline = None;
-        loop {
-            let mut st = lock();
-            assert_eq!(
-                epfd, st.kernel.epfd,
-                "epoll_wait on an unmodelled descriptor"
-            );
-            let mut n = 0usize;
-            let mut got = Vec::new();
-            if st.kernel.counter > 0 && n < max as usize {
-                // SAFETY: n < max.
-                unsafe {
-                    *evs.add(n) = hirsel_core_net::sys::epoll_event {
-                        events: hirsel_core_net::sys::EPOLLIN as u32,
-                        u64: super::super::WAKE_TAG,
-                    }
-                };
-                n += 1;
-                got.push("wake eventfd".to_string());
-            }
-            while n < max as usize
-                && let Some((tag, ev)) = st.kernel.edges.pop_front()
-            {
-                // SAFETY: n < max.
-                unsafe {
-                    *evs.add(n) = hirsel_core_net::sys::epoll_event {
-                        events: ev,
-                        u64: tag,
-                    }
-                };
-                n += 1;
-                got.push(format!(
-                    "edge unit {} key {}",
-                    tag >> hirsel_core_net::SHARED_UNIT_SHIFT,
-                    tag & 0xffff_ffff
-                ));
-            }
-            if n > 0 {
-                st.log(m, format!("epoll_wait returns {n}: {}", got.join(", ")));
-                return n as i32;
-            }
-            if timeout == 0 {
-                st.log(m, "epoll_wait returns 0".into());
-                return 0;
-            }
-            if deadline.is_none() && timeout > 0 {
-                deadline = Some(st.time + timeout as u64 * 1_000_000);
-            }
-            if let Some(d) = deadline
-                && st.time >= d
-            {
-                st.log(m, "epoll_wait times out".into());
-                return 0;
-            }
-            drop(st);
-            point(
-                m,
-                Wait::Epoll(deadline),
-                |_| {
-                    format!(
-                        "epoll_wait blocks (deadline {:?})",
-                        deadline.map(|d| (d - super::t0()) / 1000)
-                    )
-                },
-                at,
-            );
-        }
-    }
-    /// # Safety
-    /// `buf` has eight writable bytes.
-    #[track_caller]
-    pub(crate) unsafe fn read(fd: i32, buf: *mut libc::c_void, n: usize) -> isize {
-        let at = Location::caller();
-        let Some(m) = me() else {
-            // SAFETY: the caller's contract.
-            return unsafe { libc::read(fd, buf, n) };
-        };
-        point(m, Wait::Run, |_| "read wake eventfd".into(), at);
-        let mut st = lock();
-        assert!(
-            fd == st.kernel.wakefd && n == 8,
-            "read on an unmodelled descriptor"
-        );
-        let c = std::mem::take(&mut st.kernel.counter);
-        if c == 0 {
-            return -1;
-        }
-        // SAFETY: eight writable bytes.
-        unsafe { *buf.cast::<u64>() = c };
-        8
-    }
-    /// # Safety
-    /// `buf` has eight readable bytes.
-    #[track_caller]
-    pub(crate) unsafe fn write(fd: i32, buf: *const libc::c_void, n: usize) -> isize {
-        let at = Location::caller();
-        let Some(m) = me() else {
-            // SAFETY: the caller's contract.
-            return unsafe { libc::write(fd, buf, n) };
-        };
-        point(m, Wait::Run, |_| "write wake eventfd".into(), at);
-        let mut st = lock();
-        assert!(
-            fd == st.kernel.wakefd && n == 8,
-            "write on an unmodelled descriptor"
-        );
-        // SAFETY: eight readable bytes.
-        st.kernel.counter += unsafe { *buf.cast::<u64>() };
-        st.wake_epoll();
-        8
-    }
-}
+#[path = "units_check_seam.rs"]
+pub(crate) mod seam;
 
 /// A unit record read without a scheduling point, for the checker's own
 /// trace and dumps (which run while the scheduler lock is held).
@@ -1043,23 +463,25 @@ fn pool_state() -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "pool: queued {} searching {} nsleep {} poller_blocked {} poll_until {} next_timer {} live {} stop {}",
+        "pool: queued {} searching {} nsleep {} live {} stop {}",
         p.queued.raw(),
         p.searching.raw(),
         p.nsleep.raw(),
-        p.poller_blocked.raw(),
-        rel(p.poll_until.raw()),
-        rel(p.next_timer.raw()),
         super::LIVE.raw(),
         p.stop.raw()
     );
     for ix in 0..p.w {
         let _ = writeln!(
             s,
-            "  worker {ix}: private slot {}, local queue {:?}, handed {}",
+            "  worker {ix}: private slot {}, local queue {:?}, handed {}, next timer {}, last poll {}, timers {:?}",
             unit_name(p.lifo[ix].raw() as usize),
             p.locals[ix].peek(ids),
-            p.handed[ix].raw()
+            p.handed[ix].raw(),
+            rel(p.slots[ix].next_timer.raw()),
+            rel(p.slots[ix].last_poll.raw()),
+            p.slots[ix]
+                .timers
+                .peek(|h| h.iter().map(|r| (rel(r.0), r.1)).collect::<Vec<_>>())
         );
     }
     let _ = writeln!(
@@ -1067,12 +489,6 @@ fn pool_state() -> String {
         "  injector {:?}, idle {:?}",
         p.injector.peek(ids),
         p.idle.peek(|v| v.clone())
-    );
-    let _ = writeln!(
-        s,
-        "  timers {:?}",
-        p.timers
-            .peek(|h| h.iter().map(|r| (rel(r.0), r.1)).collect::<Vec<_>>())
     );
     for id in 0..16u32 {
         if let Some(u) = unit_raw(id) {
@@ -1163,8 +579,26 @@ fn wait_flag(f: usize) {
         unit_park(None);
     }
 }
-/// The task scheduler's wait for readiness on one of its keys.
+/// Each unit's socket home: the slot its last registration came from.
+static HOME: [std::sync::atomic::AtomicUsize; 16] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 16];
+/// Register the running unit's socket as the reactor does: on the slot its
+/// thread runs (`units::here`).
+fn register() {
+    let here = super::here().unwrap();
+    HOME[here.unit as usize].store(here.slot, Ordering::Relaxed);
+    say(format!(
+        "unit {} registers its socket on slot {}",
+        here.unit, here.slot
+    ));
+}
+/// The task scheduler's wait for readiness on a key it registers first.
 fn wait_arrival(ident: u64) {
+    register();
+    await_arrival(ident);
+}
+/// The wait for readiness on a key already registered.
+fn await_arrival(ident: u64) {
     loop {
         let mut got = false;
         take_xready(|id, _| got |= id == ident);
@@ -1176,7 +610,6 @@ fn wait_arrival(ident: u64) {
 }
 /// A blocking host call that never returns (a write to a stalled pipe).
 fn host_block() -> ! {
-    let _blocking = super::blocking_file();
     let m = me().unwrap();
     point(
         m,
@@ -1192,17 +625,18 @@ fn compute_forever() -> ! {
         let _ = now();
     }
 }
-/// A socket edge for unit `unit`'s key `ident` reaches the shared epoll set.
+/// A socket edge for unit `unit`'s key `ident` reaches its home slot.
 fn edge(unit: u32, ident: u64) {
+    let k = HOME[unit as usize].load(Ordering::Relaxed);
     say(format!(
-        "a client's bytes make unit {unit} key {ident} readable"
+        "a client's bytes make unit {unit} key {ident} readable on slot {k}"
     ));
     let mut st = lock();
-    st.kernel.edges.push_back((
+    st.kernel.slots[k].edges.push_back((
         (u64::from(unit) << hirsel_core_net::SHARED_UNIT_SHIFT) | ident,
         hirsel_core_net::sys::EPOLLIN as u32,
     ));
-    st.wake_epoll();
+    st.wake_epoll(k);
 }
 fn sleep_producer(t: u64) {
     let m = me().unwrap();
@@ -1256,28 +690,6 @@ const SYNC_TOKEN: u64 = 0x5ec0;
 static SYNC_CELL: std::sync::atomic::AtomicPtr<crate::os_sync::SyncCell> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-fn host_for(delay: u64) {
-    let _blocking = super::blocking_file();
-    sleep_producer(now() + delay);
-}
-
-fn expect_arrivals(expected: &[u64]) {
-    let mut ids = Vec::new();
-    take_xready(|id, _| ids.push(id));
-    assert_eq!(ids, expected);
-    let mut stream = conn::OBS[this_unit() as usize].lock().unwrap();
-    stream.extend(ids.iter().map(|id| format!("I arrival {id}")));
-    stream.push("O consumed once in order".into());
-}
-
-fn host_until(flag: usize) {
-    let _blocking = super::blocking_file();
-    FLAG[2].store(true, Ordering::SeqCst);
-    producer_wait_flag(flag);
-}
-
-const HOST_THRESHOLD: u64 = 2_000;
-
 /// Iterations of the looping unit in the stale-bound case.
 const TICKS: u32 = 40;
 
@@ -1309,12 +721,14 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
-    // 2. Nobody in the poller (lens-sleep/VERIFY.md M1). Unit 0 computes,
-    // wakes unit 1 and ends; unit 1 then computes for ever (a long CPU-bound
-    // turn). Unit 2 computes for a while, then waits for a client's bytes,
-    // which arrive from outside later. Both workers run for over 100 us
-    // without polling, so the end of unit 0's turn makes a due probe of the
-    // epoll set while the other worker is about to go idle.
+    // 2. Busy owner (slot pollers). A socket's readiness reaches only its
+    // home slot's poller, and only that slot's thread waits in it. Unit 0
+    // registers on its slot, wakes unit 1 (onto the same worker's private
+    // slot) and waits for its client's bytes. Unit 1 computes for longer
+    // than the poll cadence; the bytes arrive meanwhile. It then wakes unit
+    // 2 and ends; unit 2 computes for ever on that worker. The owner's
+    // check at the end of unit 1's turn must take the arrival and hand it
+    // on, so the other worker (parked in its own poller) runs unit 0.
     Case {
         name: "nobody_in_poller",
         workers: 2,
@@ -1322,38 +736,73 @@ pub(super) static CASES: &[Case] = &[
         body: |id| {
             match id {
                 0 => {
-                    compute_until(t0() + param(0));
                     FLAG[0].store(true, Ordering::SeqCst);
                     wake_id(1);
-                    compute_until(now() + param(1));
+                    wait_arrival(5);
+                    served(0, "unit 0 read its client's bytes");
                 }
                 1 => {
                     wait_flag(0);
-                    compute_forever();
+                    compute_until(now() + param(0));
+                    FLAG[1].store(true, Ordering::SeqCst);
+                    wake_id(2);
                 }
                 _ => {
-                    compute_until(t0() + param(3));
-                    wait_arrival(5);
-                    served(0, "unit 2 read its client's bytes");
+                    wait_flag(1);
+                    compute_forever();
                 }
             }
             0
         },
         producers: &[("client", || {
-            sleep_producer(t0() + param(2));
-            edge(2, 5);
+            sleep_producer(t0() + param(1));
+            edge(0, 5);
         })],
         goals: 0b1,
         params: |r| {
-            PARAM[0].store(r(100_000, 160_000), Ordering::Relaxed); // unit 0 computes before the wake
-            PARAM[1].store(r(0, 5_000), Ordering::Relaxed); // and after it
-            PARAM[2].store(r(300_000, 600_000), Ordering::Relaxed); // the client sends
-            PARAM[3].store(r(100_000, 160_000), Ordering::Relaxed); // unit 2 computes first
+            PARAM[0].store(r(150_000, 250_000), Ordering::Relaxed); // unit 1 computes
+            PARAM[1].store(r(20_000, 140_000), Ordering::Relaxed); // the client sends
         },
-        // The race needs the probing worker preempted for microseconds while
-        // it holds the poll turn; uniform choice almost never does that (0
-        // of 400), PCT at depth 8 over the first 9000 steps does (3 of 3000).
-        pct: Some((8, 9_000)),
+        pct: None,
+    },
+    // 2b. Deadline on a busy slot (slot pollers). Only a slot's own thread
+    // fires its timers. Unit 0 wakes unit 1 onto its worker and sleeps;
+    // unit 1 computes past unit 0's deadline, wakes unit 2 and ends; unit 2
+    // computes for ever on that worker. The deadline must fire at the end
+    // of unit 1's turn, the slot's next unit switch, so the other worker
+    // runs unit 0.
+    Case {
+        name: "busy_slot_deadline",
+        workers: 2,
+        units: 3,
+        body: |id| {
+            match id {
+                0 => {
+                    FLAG[0].store(true, Ordering::SeqCst);
+                    wake_id(1);
+                    sleep_until(now() + param(0));
+                    served(0, "unit 0's deadline fired");
+                }
+                1 => {
+                    wait_flag(0);
+                    compute_until(now() + param(0) + param(1));
+                    FLAG[1].store(true, Ordering::SeqCst);
+                    wake_id(2);
+                }
+                _ => {
+                    wait_flag(1);
+                    compute_forever();
+                }
+            }
+            0
+        },
+        producers: &[],
+        goals: 0b1,
+        params: |r| {
+            PARAM[0].store(r(5_000, 50_000), Ordering::Relaxed); // unit 0's sleep
+            PARAM[1].store(r(0, 30_000), Ordering::Relaxed); // unit 1 computes past it
+        },
+        pct: None,
     },
     // 3. Requeue without notification (lens-sleep/VERIFY.md M4 variant 2).
     // Unit 0 wakes unit 1, submits a file sync to a helper thread (not a
@@ -1531,119 +980,6 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
-    Case {
-        name: "handoff_return",
-        workers: 1,
-        units: 2,
-        body: |id| {
-            if id == 1 {
-                wait_flag(0);
-                return 0;
-            }
-            host_for(param(0));
-            host_for(param(0));
-            maybe_yield();
-            FLAG[0].store(true, Ordering::SeqCst);
-            wake_id(1);
-            served(0, "unit returns from its host call and keeps running once");
-            0
-        },
-        producers: &[],
-        goals: 0b1,
-        params: |r| PARAM[0].store(r(1_000, 5_000), Ordering::Relaxed),
-        pct: None,
-    },
-    Case {
-        name: "handoff_steal",
-        workers: 2,
-        units: 3,
-        body: |id| {
-            match id {
-                0 => {
-                    wait_flag(0);
-                    FLAG[1].store(true, Ordering::SeqCst);
-                    wake_id(1);
-                    wake_id(2);
-                    {
-                        let _blocking = super::blocking_file();
-                        FLAG[2].store(true, Ordering::SeqCst);
-                        while !GOAL[1].load(Ordering::Relaxed) {
-                            sleep_producer(now() + 300);
-                        }
-                    }
-                    maybe_yield();
-                }
-                1 => wait_flag(1),
-                _ => {
-                    FLAG[0].store(true, Ordering::SeqCst);
-                    wake_id(0);
-                    wait_flag(1);
-                }
-            }
-            served(id as usize, "unit completed its turn");
-            0
-        },
-        producers: &[],
-        goals: 0b111,
-        params: |_| {},
-        pct: None,
-    },
-    Case {
-        name: "handoff_private",
-        workers: 1,
-        units: 2,
-        body: |id| {
-            if id == 0 {
-                wait_flag(0);
-                FLAG[1].store(true, Ordering::SeqCst);
-                wake_id(1);
-                host_until(3);
-                maybe_yield();
-            } else {
-                FLAG[0].store(true, Ordering::SeqCst);
-                wake_id(0);
-                wait_flag(1);
-                FLAG[3].store(true, Ordering::SeqCst);
-            }
-            served(id as usize, "unit completed its turn");
-            0
-        },
-        producers: &[],
-        goals: 0b11,
-        params: |_| {},
-        pct: None,
-    },
-    Case {
-        name: "handoff_wake",
-        workers: 1,
-        units: 2,
-        body: |id| {
-            if id == 1 {
-                wait_flag(0);
-                return 0;
-            }
-            host_until(3);
-            // The wake was published while this unit was still running.
-            unit_park(None);
-            expect_arrivals(&[10, 11]);
-            FLAG[0].store(true, Ordering::SeqCst);
-            wake_id(1);
-            served(0, "unit received both arrivals after its host call");
-            0
-        },
-        producers: &[("client", || {
-            producer_wait_flag(2);
-            sleep_producer(now() + 4 * HOST_THRESHOLD);
-            let unit = unit_raw(0).unwrap();
-            super::push_arrival(unit, 10, 0);
-            super::push_arrival(unit, 11, 0);
-            super::wake(unit);
-            FLAG[3].store(true, Ordering::SeqCst);
-        })],
-        goals: 0b1,
-        params: |_| {},
-        pct: None,
-    },
     // 5-8. The connection path and the ledger on pool units
     // (`units_conn_check.rs`, which states the cases and their laws).
     Case {
@@ -1713,28 +1049,6 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
-    // 17. The same client and law across the blocking-call hand-off: the
-    // unit moves to the other OS thread while the client is parked, and the
-    // client resumes there (`units_returnable_check.rs`).
-    Case {
-        name: "handoff_returnable",
-        workers: 1,
-        units: 2,
-        body: |id| {
-            if id == 1 {
-                wait_flag(0);
-                return 0;
-            }
-            // A second unit gives the monitor a reason to hand the slot off.
-            let status = returnable::handoff_body(id);
-            wake_id(1);
-            status
-        },
-        producers: &[("provider", returnable::producer)],
-        goals: 0b1,
-        params: |r| PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed),
-        pct: None,
-    },
     // 18. A receiver that returned its stack at a channel receive is woken
     // by each send after another task reused and overwrote that stack, and
     // cancelled while parked. What it receives equals the stackful
@@ -1777,29 +1091,6 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
-    // 21. The same, with the blocking-call hand-off at one of the waits whose
-    // wake comes from the helper: the client resumes on another thread.
-    Case {
-        name: "handoff_park_waits",
-        workers: 2,
-        units: 2,
-        body: |id| {
-            if id == 1 {
-                wait_flag(0);
-                return 0;
-            }
-            let status = park_waits::handoff_body(id);
-            wake_id(1);
-            status
-        },
-        producers: &[],
-        goals: 0b1,
-        params: |r| {
-            PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed);
-            PARAM[1].store(r(0, 3), Ordering::Relaxed);
-        },
-        pct: None,
-    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -1835,8 +1126,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
             .and_then(|v| v.parse().ok())
             .unwrap_or(d)
     };
-    let shared = hirsel_core_net::share_epoll_poller(super::shared_unit).unwrap();
-    let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
+    let pollers = hirsel_core_net::slot_epoll_pollers(case.workers, super::here).unwrap();
     // Setup stamps (unit creation) use the real clock; start the model 10 s
     // ahead of it so no setup stamp is later than modelled time.
     T0V.store(
@@ -1844,8 +1134,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         Ordering::Relaxed,
     );
     let w = case.workers;
-    let handoff = case.name.starts_with("handoff_");
-    let steal = case.name == "handoff_steal";
     let mut st = State {
         threads: Vec::new(),
         cur: usize::MAX,
@@ -1860,10 +1148,15 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         live: std::env::var_os("HIRSEL_CHECK_LIVE").is_some(),
         quiet: Vec::new(),
         kernel: Kernel {
-            epfd: gep,
-            wakefd: gwake,
-            counter: 0,
-            edges: VecDeque::new(),
+            slots: pollers
+                .iter()
+                .map(|p| KSlot {
+                    epfd: p.raw_fd(),
+                    wakefd: p.wake_fd(),
+                    wake: false,
+                    edges: VecDeque::new(),
+                })
+                .collect(),
         },
         quiet_from: None,
         bound: env("HIRSEL_CHECK_BOUND", 100_000),
@@ -1871,7 +1164,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         goals: goals_met,
         out: out.to_string(),
         case: case.name,
-        slot_owners: vec![None; w],
         seed,
         prio: Vec::new(),
         changes: Vec::new(),
@@ -1880,7 +1172,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     // Parameters come from the seed's stream before any scheduling choice.
     (case.params)(&mut |lo, hi| lo + st.rand() % (hi - lo + 1));
     NEEDED.store(case.goals, Ordering::Relaxed);
-    let spare = handoff.then(|| std::sync::Arc::new(super::Spare::new()));
     super::LIVE.store(case.units as usize, Ordering::SeqCst);
     let _ = POOL.set(Pool {
         w,
@@ -1896,31 +1187,13 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         searching: super::AtomicUsize::new(0),
         idle: super::Mutex::new(Vec::with_capacity(w)),
         nsleep: super::AtomicUsize::new(0),
-        threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
-        handoff_ticks: if handoff { 4 } else { 0 },
-        handoff_tick_ns: HOST_THRESHOLD / 4,
-        host_calls: (0..w)
-            .map(|_| super::HostCall(super::AtomicU64::new(0)))
-            .collect(),
-        spares: super::Mutex::new(spare.iter().cloned().collect()),
-        monitor: std::sync::OnceLock::new(),
         handed: (0..w).map(|_| super::AtomicBool::new(false)).collect(),
-        poll: super::Mutex::new(()),
-        poller_blocked: super::AtomicBool::new(false),
-        poll_until: super::AtomicU64::new(u64::MAX),
-        poll_held: super::AtomicBool::new(false),
-        gep,
-        gwake,
+        slots: pollers.into_iter().map(super::Slot::new).collect(),
         uring: false,
-        _shared: shared,
         net_used: super::AtomicBool::new(true),
-        timers: super::Mutex::new(std::collections::BTreeSet::new()),
-        next_timer: super::AtomicU64::new(u64::MAX),
         stop: super::AtomicBool::new(false),
-        last_poll: super::AtomicU64::new(0),
         spin_ns: 5_000,
         connection_spins: 8,
-        spin_poll_ns: 20_000,
         slice_ns: 500_000,
         poll_every_ns: 100_000,
     });
@@ -1946,27 +1219,18 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     n(addr(&p.queued), "queued".into());
     n(addr(&p.searching), "searching".into());
     n(addr(&p.nsleep), "nsleep".into());
-    n(addr(&p.poller_blocked), "poller_blocked".into());
-    n(addr(&p.poll_until), "poll_until".into());
-    n(addr(&p.next_timer), "next_timer".into());
-    n(addr(&p.last_poll), "last_poll".into());
     n(addr(&super::LIVE), "live".into());
-    n(addr(&super::HOST_TICK.0), "host clock tick".into());
-    n(
-        addr(&super::HOST_MONITOR_PARKED),
-        "host monitor parked".into(),
-    );
     n(addr(&p.stop), "stop".into());
     n(addr(&p.injector), "injector".into());
     n(addr(&p.idle), "idle list".into());
-    n(addr(&p.poll), "poll turn".into());
-    n(addr(&p.timers), "timer heap".into());
     for ix in 0..w {
         n(addr(&p.lifo[ix]), format!("private slot {ix}"));
         n(addr(&p.lifo_runs[ix]), format!("lifo_runs {ix}"));
         n(addr(&p.locals[ix]), format!("local queue {ix}"));
         n(addr(&p.handed[ix]), format!("handed {ix}"));
-        n(addr(&p.host_calls[ix].0), format!("slot {ix} host call"));
+        n(addr(&p.slots[ix].timers), format!("slot {ix} timers"));
+        n(addr(&p.slots[ix].next_timer), format!("slot {ix} timer"));
+        n(addr(&p.slots[ix].last_poll), format!("slot {ix} last_poll"));
     }
     for id in 0..case.units {
         let u = unit_raw(id).unwrap();
@@ -1985,21 +1249,16 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         .push((addr(&USTATS), addr(&USTATS) + size_of_val(&USTATS)));
     st.quiet.push((addr(&UNTIED_ON), addr(&UNTIED_ON) + 1));
     let base_threads = w + case.producers.len();
-    let nthreads = base_threads + if handoff { 2 } else { 0 };
+    let nthreads = base_threads;
     for i in 0..nthreads {
         let (name, producer) = if i < w {
             (format!("w{i}"), false)
-        } else if i < base_threads {
-            (case.producers[i - w].0.to_string(), true)
-        } else if i == base_threads {
-            ("spare".into(), false)
         } else {
-            ("monitor".into(), false)
+            (case.producers[i - w].0.to_string(), true)
         };
         st.threads.push(Th {
             name,
             wait: Wait::Run,
-            token: false,
             os: None,
             producer,
             at: "",
@@ -2034,7 +1293,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     seam::SCHED_ON.store(true, Ordering::SeqCst);
     let mut handles = Vec::new();
     for i in 0..nthreads {
-        let spare = spare.clone();
         let producer = (w..base_threads)
             .contains(&i)
             .then(|| case.producers[i - w].1);
@@ -2048,15 +1306,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
                 }
                 if let Some(f) = producer {
                     f();
-                } else if i < w {
-                    if steal && i == 1 {
-                        producer_wait_flag(2);
-                    }
-                    worker_main(pool(), Some(i), None);
-                } else if i == base_threads {
-                    worker_main(pool(), None, spare);
                 } else {
-                    super::watch_blocking(pool(), |_| false);
+                    worker_main(pool(), i);
                 }
                 let mut st = lock();
                 st.threads[i].wait = Wait::Done;
@@ -2251,6 +1502,10 @@ mod tests {
         check("nobody_in_poller");
     }
     #[test]
+    fn busy_slot_deadline() {
+        check("busy_slot_deadline");
+    }
+    #[test]
     fn requeue_without_notification() {
         check("requeue_without_notification");
     }
@@ -2265,22 +1520,6 @@ mod tests {
     #[test]
     fn connection_spin_yields_to_work() {
         check("connection_spin_yields_to_work");
-    }
-    #[test]
-    fn handoff_return() {
-        check("handoff_return");
-    }
-    #[test]
-    fn handoff_steal() {
-        check("handoff_steal");
-    }
-    #[test]
-    fn handoff_private() {
-        check("handoff_private");
-    }
-    #[test]
-    fn handoff_wake() {
-        check("handoff_wake");
     }
     #[test]
     fn conn_wait_serve() {
@@ -2307,10 +1546,6 @@ mod tests {
         check("returnable_stack_reuse");
     }
     #[test]
-    fn handoff_returnable() {
-        check("handoff_returnable");
-    }
-    #[test]
     fn returnable_receive() {
         check("returnable_receive");
     }
@@ -2321,10 +1556,6 @@ mod tests {
     #[test]
     fn park_waits() {
         check("park_waits");
-    }
-    #[test]
-    fn handoff_park_waits() {
-        check("handoff_park_waits");
     }
 
     #[test]

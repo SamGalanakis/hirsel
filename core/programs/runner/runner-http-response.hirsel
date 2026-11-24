@@ -1,0 +1,152 @@
+fn http_reply(status: u16, take body: String, close: bool, retry: bool, replayed: bool) -> Result[std.http.Response, std.http.HandlerError] {
+    let has_body = string.byte_len(body) != 0u64
+    let mut response = std.http.response(status, std.http.copy_bytes(string.as_bytes(body)), close)?
+    if has_body { std.http.content_type(mut response, ApplicationJson)? }
+    if retry { std.http.header(mut response, b"Retry-After", b"1")? }
+    if replayed { std.http.header(mut response, b"Idempotent-Replayed", b"true")? }
+    Ok(take response)
+}
+
+fn http_refusal(take why: Refusal) -> Result[std.http.Response, std.http.HandlerError] {
+    match take why {
+        NoEntry => http_reply(404u16, "", false, false, false),
+        NotAllowed => http_reply(403u16, "", false, false, false),
+        Malformed(detail) => {
+            let mut body_text = string.from("{\"refused\":\"malformed\",\"kind\":")
+            string.push_u64(mut body_text, int.widen(detail.kind))
+            string.push(mut body_text, "}")
+            http_reply(400u16, take body_text, false, false, false)
+        },
+        Overloaded => http_reply(503u16, "", false, true, false),
+        Budget(_) => http_reply(503u16, "", false, true, false),
+        Deadline => http_reply(504u16, "", false, false, false),
+        RequestMismatch => http_reply(422u16, "{\"refused\":\"request_mismatch\"}", false, false, false),
+        HistoryUnavailable => http_reply(410u16, "", false, false, false),
+    }
+}
+
+fn http_fault(detail: Fault, replayed: bool) -> Result[std.http.Response, std.http.HandlerError] {
+    let mut text = string.from("{\"fault\":")
+    match detail {
+        Raised(kind) => {
+            string.push(mut text, "\"raised\",\"kind\":")
+            string.push_u64(mut text, int.widen(kind))
+        },
+        OutOfBytes(cap) => {
+            string.push(mut text, "\"out_of_bytes\",\"requested\":")
+            string.push_u64(mut text, cap.requested)
+            string.push(mut text, ",\"available\":")
+            string.push_u64(mut text, cap.available)
+        },
+        OutOfTime(steps_used) => {
+            string.push(mut text, "\"out_of_time\",\"steps\":")
+            string.push_u64(mut text, steps_used)
+        },
+        Gone => string.push(mut text, "\"gone\""),
+        Conflict(name) => {
+            string.push(mut text, "\"conflict\",\"name\":")
+            std.json.write(mut text, false, scoped fn(w: std.json.Writer) { std.json.write_string_value(w, name) })
+        },
+    }
+    string.push(mut text, "}")
+    http_reply(500u16, take text, false, false, replayed)
+}
+
+fn http_assembly_error(take problem: HttpAssemblyError) -> Result[std.http.Response, std.http.HandlerError] {
+    match take problem {
+        RequestBody(e) => http_reply(e.status, "", e.close, e.status == 503u16, false),
+        MediaType => http_reply(415u16, "", true, false, false),
+        BadArgument(kind) => http_refusal(Malformed(Bad(kind: kind, at: 0u64))),
+        ArgumentCapacity => http_reply(503u16, "", false, true, false),
+    }
+}
+
+fn http_json_reply(status: u16, take data: Bytes, offset: u64, plan: Arc[std.json.JsonPlan], root: u64, replayed: bool) -> Result[std.http.Response, std.http.HandlerError] {
+    match std.http.response_json(status, take data, offset, arc.share(plan), root) {
+        Ok(take response) => {
+            let mut reply = take response
+            std.http.content_type(mut reply, ApplicationJson)?
+            if replayed { std.http.header(mut reply, b"Idempotent-Replayed", b"true")? }
+            Ok(take reply)
+        },
+        Error(JsonEncoding(DepthLimit)) => http_reply(500u16, "{\"fault\":\"depth\"}", false, false, replayed),
+        Error(JsonEncoding(_)) => http_reply(500u16, "{\"fault\":\"codec\"}", false, false, replayed),
+        Error(JsonResponse(e)) => Error(e),
+    }
+}
+
+fn http_mark_outcome(mut reply: std.http.Response, req: std.http.Request, mode: Mode, expires: Option[u64]) -> Result[(), std.http.ResponseError] {
+    if mode == Keyed {
+        let Some(at) = expires else { return Ok(()) }
+        let mut value = string.new()
+        if at == 18446744073709551615u64 { string.push(mut value, "never") } else { string.push_u64(mut value, at) }
+        std.http.header(mut reply, b"Hirsel-Dedup-Until", string.into_bytes(take value))?
+    }
+    std.http.mark_committed(mut reply, req)
+}
+
+fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan], take delivered: RelayOutcome) -> Result[std.http.Response, std.http.HandlerError] {
+    let RelayOutcome(payload: take payload, replayed: replayed, expires: expires) = take delivered
+    let mut offset = 0u64
+    let tag = std.codec.take_tag(payload, mut offset, 5u32) ?=> |_| StatusInvalid
+    if tag == 0u32 {
+        // Returned carries one counted codec value. Keep the relay backing
+        // through the write so the connection never copies the stored payload.
+        let n: u64 = int.widen(std.codec.take_u32(payload, mut offset) ?=> |_| StatusInvalid)
+        if list.len(payload) - offset != n { return Error(StatusInvalid) }
+        let tag_value = std.codec.take_tag(payload, mut offset, 2u32) ?=> |_| StatusInvalid
+        let Outcome(ok, error_case) = plan.shapes[plan.facts[plan.root].form] else {
+            fail("transact result plan has a Result shape")
+        }
+        let status = if tag_value == 0u32 { binding.ok_status } else { binding.error_status }
+        let root = if tag_value == 0u32 { ok } else { error_case }
+        let mut reply = http_json_reply(status, take payload, offset, plan, root, replayed)?
+        http_mark_outcome(mut reply, req, binding.mode, expires)?
+        return Ok(take reply)
+    }
+    let co: std.codec.Codec[Outcome] = std.codec.of()
+    let answer = std.codec.decode(co, payload) ?=> |_| StatusInvalid
+    match take answer {
+        Returned(_) => fail("Returned is rendered from relay backing"),
+        Failed(detail) => {
+            let mut reply = http_fault(detail, replayed)?
+            http_mark_outcome(mut reply, req, binding.mode, expires)?
+            Ok(take reply)
+        },
+        Refused(take why) => http_refused_attempt(req, take why),
+        Abandoned => http_reply(409u16, "", false, true, false),
+        InDoubt => http_reply(502u16, "{\"outcome\":\"in_doubt\"}", false, false, replayed),
+    }
+}
+
+fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.http.Response, std.http.HandlerError] {
+    if let None = std.http.field(req, b"idempotency-key") { return http_refusal(take why) }
+    let kind = match why {
+        NoEntry => b"no_entry",
+        NotAllowed => b"not_allowed",
+        Malformed(_) => b"malformed",
+        Overloaded => b"overloaded",
+        Budget(_) => b"budget",
+        Deadline => b"deadline",
+        RequestMismatch => b"request_mismatch",
+        HistoryUnavailable => b"history_unavailable",
+    }
+    let sample = match why { Malformed(detail) if detail.kind == 7u32 => Some(detail.at), _ => None }
+    let mut response = http_refusal(take why)?
+    if let Some(time) = sample {
+        let mut now = string.new()
+        string.push_u64(mut now, time)
+        std.http.header(mut response, b"Hirsel-Now", string.into_bytes(take now))?
+    }
+    std.http.mark_refused(mut response, req, kind)?
+    Ok(take response)
+}
+
+fn http_render_delivery(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan],
+    take delivery: RelayDelivery) -> Result[std.http.Response, std.http.HandlerError] {
+    match take delivery {
+        Answered(take delivered) => http_render_stream(req, binding, plan, take delivered),
+        RefusedBeforePost(take why) => http_refused_attempt(req, take why),
+        Unanswered(take why) => http_refusal(take why),
+    }
+}

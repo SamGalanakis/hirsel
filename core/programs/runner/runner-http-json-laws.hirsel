@@ -1,0 +1,208 @@
+type HttpLawJson { measured: u64, payload: Bytes }
+
+fn http_law_emit(c: Clock, plan: std.json.JsonPlan, binary: Bytes) -> HttpLawJson waits {
+    let measured = result.unwrap(result.unwrap(bound bytes 0u64 { std.json.wire_length(plan, plan.root, binary) }))
+    let mut chunk: Bytes = list.with_capacity(7u64)
+    let mut payload: Bytes = list.with_capacity(measured)
+    let flush = scoped fn(piece: Bytes) -> bool waits {
+        host.sleep_until(c, host.mono_ns(c))
+        if list.len(piece) > 7u64 { fail("B-5 writer exceeded the output buffer") }
+        list.append(mut payload, piece)
+        true
+    }
+    let written = bound bytes 0u64 { std.json.write_wire(plan, plan.root, binary, mut chunk, flush) }
+    if !result.unwrap(result.unwrap(take written)) || list.len(payload) != measured {
+        fail("B-5 count and writer disagree")
+    }
+    HttpLawJson(measured: measured, payload: take payload)
+}
+
+fn http_law_json_plan[T: codec](ca: std.codec.Codec[T]) -> std.json.JsonPlan {
+    result.unwrap(std.json.prepare_schema(result.unwrap(std.codec.describe(ca)), Strict))
+}
+
+fn http_law_round_trip(c: Clock, plan: std.json.JsonPlan, input: String, binary: Bytes, canonical: Bytes) waits {
+    let from_input = result.unwrap(std.json.wire_bytes(plan, input))
+    if from_input != binary { fail("L12 decoded bytes differ from the hand-derived bytes") }
+    let written = http_law_emit(c, plan, binary)
+    if written.payload != canonical { fail("L12 output differs from the canonical spelling") }
+    let canonical_text = result.unwrap(string.from_utf8(std.http.copy_bytes(canonical)))
+    if result.unwrap(std.json.wire_bytes(plan, canonical_text)) != binary {
+        fail("L12 canonical JSON does not round-trip")
+    }
+}
+
+@test
+fn test_l12(c: Clock) -> Result[(), ()] waits {
+    let one: std.codec.Codec[HttpLawArg] = std.codec.of()
+    let corpus = http_law_json_plan(one)
+    http_law_round_trip(c, corpus, "{\"request\":\"Unit\"}", b"\x00\x00\x00\x00", b"{\"request\":\"Unit\"}")
+    http_law_round_trip(c, corpus, "{\"request\":{\"Collections\":[\"AP8=\",[1,256],[[\"9\",null],[\"-0\",null],[\"2\",null]]]}}",
+        b"\x02\x00\x00\x00\x02\x00\x00\x00\x00\xff\x02\x00\x00\x00\x01\x00\x00\x01\x03\x00\x00\x00\x01\x00\x00\x009\x02\x00\x00\x00-0\x01\x00\x00\x002",
+        b"{\"request\":{\"Collections\":[\"AP8=\",[1,256],[[\"9\",null],[\"-0\",null],[\"2\",null]]]}}")
+    http_law_round_trip(c, corpus, "{\"request\":{\"Optional\":null}}", b"\x03\x00\x00\x00\x00\x00\x00\x00",
+        b"{\"request\":{\"Optional\":null}}")
+    http_law_round_trip(c, corpus, "{\"request\":{\"ResultValue\":{\"error\":\"x\"}}}",
+        b"\x04\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00x", b"{\"request\":{\"ResultValue\":{\"error\":\"x\"}}}")
+    http_law_round_trip(c, corpus, "{\"request\":{\"Validated\":9}}",
+        b"\x05\x00\x00\x00\x09", b"{\"request\":{\"Validated\":9}}")
+    let scalars: std.codec.Codec[HttpLawScalars] = std.codec.of()
+    let scalar_plan = http_law_json_plan(scalars)
+    http_law_round_trip(c, scalar_plan,
+        "{\"text\":\"h\\u00e9\",\"double\":\"NaN\",\"single\":-0,\"h\":\"-4\",\"g\":-3,\"f\":-2,\"e\":-1,\"d\":\"9007199254740993\",\"c\":305419896,\"b\":4660,\"a\":255,\"scalar\":\"\\u03bb\",\"flag\":true,\"unit\":null}",
+        b"\x01\xbb\x03\x00\x00\xff\x34\x12\x78\x56\x34\x12\x01\x00\x00\x00\x00\x00\x20\x00\xff\xfe\xff\xfd\xff\xff\xff\xfc\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x80\x00\x00\x00\x00\x00\x00\xf8\x7f\x03\x00\x00\x00h\xc3\xa9",
+        b"{\"unit\":null,\"flag\":true,\"scalar\":\"\xce\xbb\",\"a\":255,\"b\":4660,\"c\":305419896,\"d\":\"9007199254740993\",\"e\":-1,\"f\":-2,\"g\":-3,\"h\":\"-4\",\"single\":-0,\"double\":\"NaN\",\"text\":\"h\xc3\xa9\"}")
+    let f32_codec: std.codec.Codec[f32] = std.codec.of()
+    let f32_plan = http_law_json_plan(f32_codec)
+    // The decimal is just above the f32 midpoint. Rounding to f64 first
+    // loses the excess and then rounds f32 down to the even word.
+    let midpoint_input = "1.00000005960464477539062500000000001"
+    let bits = result.unwrap(std.json.wire_bytes(f32_plan, midpoint_input))
+    if bits != b"\x01\x00\x80\x3f" || http_law_emit(c, f32_plan, bits).payload != b"1.0000001" {
+        fail("L12 f32 did not round once at its own width")
+    }
+    http_law_round_trip(c, f32_plan, "-0", b"\x00\x00\x00\x80", b"-0")
+    http_law_round_trip(c, f32_plan, "\"Infinity\"", b"\x00\x00\x80\x7f", b"\"Infinity\"")
+    http_law_round_trip(c, f32_plan, "\"-Infinity\"", b"\x00\x00\x80\xff", b"\"-Infinity\"")
+    http_law_round_trip(c, f32_plan, "\"NaN\"", b"\x00\x00\xc0\x7f", b"\"NaN\"")
+    for text in ["NaN", "Infinity", "-Infinity", "1e39", "-1e39"] {
+        if let Ok(_) = std.json.wire_bytes(f32_plan, text) { fail("L12 wrote invalid float JSON") }
+    }
+    let double_codec: std.codec.Codec[f64] = std.codec.of()
+    let double_plan = http_law_json_plan(double_codec)
+    http_law_round_trip(c, double_plan, "5e-324", b"\x01\x00\x00\x00\x00\x00\x00\x00", b"5e-324")
+    if let Ok(_) = std.json.wire_bytes(double_plan, "1e309") { fail("L12 accepted an exponent beyond f64") }
+    Ok(())
+}
+
+type HttpLawDoubleOption: codec { nested: Option[Option[u8]] }
+type HttpLawTupleField: codec { pair: (u8, u8) }
+type HttpLawEmptyList: codec { entries: List[()] }
+type HttpLawEmptyMap: codec { entries: Map[(), ()] }
+type HttpLawBlank: codec {}
+type HttpLawLongVariant: codec =
+    VeryLongVariantNameDeliberatelyLongerThanItsFourByteCodecTag(HttpLawLeaf) | StopHere
+
+type HttpLawLeaf: codec { empty: HttpLawBlank, following: List[HttpLawLongVariant] }
+
+fn http_law_unit[A: codec](take _arg: A) -> Result[(), Capacity] { Ok(()) }
+
+fn http_law_check_shape[A: codec](definition: StaticFn[fn(take A) -> Result[(), Capacity]], field: String, expected: u8) {
+    let mut r: Registry[(), ()] = registry()
+    result.unwrap(compute(mut r, definition, 65536u64, DEFAULT_STEPS))
+    let k = http_law_key(r.exported[0u64])
+    let mut inputs: List[FieldSource] = list.with_capacity(1u64)
+    list.push(mut inputs, FieldSource(field: string.from(field), source: Body))
+    let binding = HttpBinding(op: "check", method: Post, path: "/check", entry: take k, fields: take inputs,
+        mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 65536u64, arg_max: 65536u64,
+        deadline_ms: 1000u64, steps: DEFAULT_STEPS)
+    if let Error(InvalidBinding(BindError(check: Shape(_, issue), ..))) = bind(mut r, take binding) {
+        if issue == expected { return }
+    }
+    fail("L13 did not refuse the declared HTTP shape")
+}
+
+fn http_law_within_bound(c: Clock, plan: std.json.JsonPlan, binary: Bytes) waits {
+    let bound_value = option.unwrap(std.json_schema.length_bound(plan))
+    let emitted = http_law_emit(c, plan, binary)
+    if emitted.measured > bound_value.a * list.len(binary) + bound_value.b {
+        fail("L13 reply exceeded the schema's length bound")
+    }
+}
+
+@test
+fn test_l13(c: Clock) -> Result[(), ()] waits {
+    let nested_option: StaticFn[fn(take HttpLawDoubleOption) -> Result[(), Capacity]] = code.describe(http_law_unit)
+    let tuple_value: StaticFn[fn(take HttpLawTupleField) -> Result[(), Capacity]] = code.describe(http_law_unit)
+    let empty_items: StaticFn[fn(take HttpLawEmptyList) -> Result[(), Capacity]] = code.describe(http_law_unit)
+    let empty_pairs: StaticFn[fn(take HttpLawEmptyMap) -> Result[(), Capacity]] = code.describe(http_law_unit)
+    http_law_check_shape(nested_option, "nested", 2u8)
+    http_law_check_shape(tuple_value, "pair", 1u8)
+    http_law_check_shape(empty_items, "entries", 3u8)
+    http_law_check_shape(empty_pairs, "entries", 4u8)
+
+    let mut registered: Registry[(), HttpLawHandles] = registry()
+    result.unwrap(http_law_place(mut registered))
+    let mut broken: HttpBinding = clone(registered.bindings[0u64].binding)
+    broken.op = "duplicate"
+    broken.path = "/duplicate"
+    list.push(mut broken.fields, FieldSource(field: "request", source: Query))
+    if let Error(InvalidBinding(BindError(check: Fields, ..))) = bind(mut registered, take broken) {} else {
+        fail("L13 accepted multiple sources for one field")
+    }
+
+    let blank: std.codec.Codec[HttpLawBlank] = std.codec.of()
+    http_law_within_bound(c, http_law_json_plan(blank), b"")
+    let map_of_unit: std.codec.Codec[Map[String, ()]] = std.codec.of()
+    http_law_within_bound(c, http_law_json_plan(map_of_unit), b"\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00x")
+    let recursive: std.codec.Codec[HttpLawLongVariant] = std.codec.of()
+    let plan = http_law_json_plan(recursive)
+    let mut binary: Bytes = list.new()
+    for _ in 0u64 .. 21u64 { list.append(mut binary, b"\x00\x00\x00\x00\x01\x00\x00\x00") }
+    list.append(mut binary, b"\x01\x00\x00\x00")
+    http_law_within_bound(c, plan, binary)
+    let mut too_deep: Bytes = list.with_capacity(list.len(binary) + 8u64)
+    list.append(mut too_deep, b"\x00\x00\x00\x00\x01\x00\x00\x00")
+    list.append(mut too_deep, binary)
+    if let Error(DepthLimit) = std.json.wire_length(plan, plan.root, too_deep) {} else {
+        fail("L13 an over-depth result obtained a Content-Length")
+    }
+    http_law_key_projection(c)
+    Ok(())
+}
+
+type HttpAccountKey: codec + key { account: u32 }
+type HttpPartitionKey: codec + key { partition: u32 }
+type HttpDisplayKey: codec + key via String (to: http_law_key_label, from: http_law_label_key) {
+    sort: String,
+    label: String,
+}
+
+fn http_law_key_label(key: HttpDisplayKey) -> View[String] in key { view key.label }
+fn http_law_label_key(take label: String) -> Result[HttpDisplayKey, ()] {
+    Ok(HttpDisplayKey(sort: "", label: take label))
+}
+
+fn http_law_key_projection(c: Clock) waits {
+    let first_key: std.codec.Key[HttpAccountKey] = std.codec.key_of()
+    let other_key: std.codec.Key[HttpPartitionKey] = std.codec.key_of()
+    let first_codec: std.codec.Codec[HttpAccountKey] = std.codec.of()
+    let other_codec: std.codec.Codec[HttpPartitionKey] = std.codec.of()
+    let mut first: Bytes = list.new()
+    let mut other: Bytes = list.new()
+    std.codec.encode_key(first_key, HttpAccountKey(account: 9u32), mut first)
+    std.codec.encode_key(other_key, HttpPartitionKey(partition: 9u32), mut other)
+    if first != b"\x00\x00\x00\x09" || first != other { fail("L13 ordered key oracle disagrees") }
+    let mut canonical: Bytes = list.new()
+    result.unwrap(canonical_http_key(first_key, first_codec, first, mut canonical))
+    if http_law_emit(c, http_law_json_plan(first_codec), canonical).payload != b"{\"account\":9}" {
+        fail("L13 lost the account field name")
+    }
+    list.clear(mut canonical)
+    result.unwrap(canonical_http_key(other_key, other_codec, other, mut canonical))
+    if http_law_emit(c, http_law_json_plan(other_codec), canonical).payload != b"{\"partition\":9}" {
+        fail("L13 lost the partition field name")
+    }
+    let ordered_schema = result.unwrap(std.codec.key_schema(first_key))
+    if ordered_schema != result.unwrap(std.codec.key_schema(other_key)) { fail("L13 ordered schemas differ") }
+    let mut declared: List[SlotSchema] = list.with_capacity(1u64)
+    list.push(mut declared, SlotSchema(name: "key", kind: Table(), key: take ordered_schema,
+        key_json: result.unwrap(std.codec.schema(first_codec)), value: b"\x03\x00\x00\x00\x00\x00"))
+    let mut exports: List[Exported] = list.with_capacity(1u64)
+    list.push(mut exports, Exported(described: Described(kind: Query, identity: b"key-schema", args: list.new(), result: list.new()),
+        args_fp: 0u64, result_fp: 0u64, revision: list.new(), slots: take declared, value: list.new()))
+    let mut description = Describe(digest: list.new(), target: "", n_place: 65536u64, revision: b"11111111111111111111111111111111",
+        exported: take exports, tables: list.new(), bindings: list.new())
+    let original_digest = result.unwrap(identity_digest(description))
+    description.exported[0u64].slots[0u64].key_json = result.unwrap(std.codec.schema(other_codec))
+    if original_digest == result.unwrap(identity_digest(description)) { fail("L13 Describe digest omitted the canonical key schema") }
+    let display_key: std.codec.Key[HttpDisplayKey] = std.codec.key_of()
+    let display_codec: std.codec.Codec[HttpDisplayKey] = std.codec.of()
+    let mut ordered: Bytes = list.new()
+    std.codec.encode_key(display_key, HttpDisplayKey(sort: "ignored", label: "displayed"), mut ordered)
+    list.clear(mut canonical)
+    result.unwrap(canonical_http_key(display_key, display_codec, ordered, mut canonical))
+    if http_law_emit(c, http_law_json_plan(display_codec), canonical).payload != b"\"displayed\"" {
+        fail("L13 the publisher ignored the key's actual via codec")
+    }
+}

@@ -1,5 +1,8 @@
 //! Run tapes are owned by process startup. Main receives only substitutes;
 //! Replay constructs its grants from the entry signature, with no host provider.
+mod launch;
+use launch::{read_launch, write_launch};
+
 use super::*;
 use crate::{
     Context,
@@ -27,6 +30,9 @@ struct Run {
     path: Vec<u8>,
     identity: Vec<u8>,
     revision: [u8; 32],
+    /// The build digest the driver gave this executable: its objects,
+    /// runtime, toolchain, engine and link mode, without the launch policy.
+    build: [u8; 32],
     mode: u64,
     sources: *const SourceTable,
     stderr: i32,
@@ -92,46 +98,6 @@ unsafe extern "C" fn emit_describe(state: *mut u8, bytes: *const u8, len: usize)
     }
 }
 
-fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) {
-    for bytes in [launch.digest(), launch.target().as_bytes()] {
-        put_varint(out, bytes.len() as u64);
-        out.extend_from_slice(bytes);
-    }
-    out.extend_from_slice(&launch.n_place().to_le_bytes());
-    out.push(
-        u8::from(launch.is_describe())
-            | (u8::from(managed) << 1)
-            | (u8::from(launch.is_wake()) << 2),
-    );
-    if launch.is_wake() {
-        out.extend_from_slice(&launch.idle_ms().to_le_bytes());
-    }
-}
-
-fn read_launch(arg: &[u8]) -> Result<(Metadata, bool), Corrupt> {
-    let mut c = Cursor::new(arg);
-    for _ in 0..c.varint()? {
-        c.bytes()?;
-    }
-    let digest = match c.bytes()? {
-        [] => None,
-        bytes => Some(bytes.try_into().map_err(|_| Corrupt)?),
-    };
-    let target = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
-    let n_place = u64::from_le_bytes(c.fixed()?);
-    let flags = c.u8()?;
-    if !matches!(flags, 0 | 1 | 2 | 4 | 6) {
-        return Err(Corrupt);
-    }
-    let mut launch = Metadata::embedded(digest, target, n_place, flags == 1);
-    if flags & 4 != 0 {
-        launch = launch.with_wake(u64::from_le_bytes(c.fixed()?));
-    }
-    if !c.done() {
-        return Err(Corrupt);
-    }
-    Ok((launch, flags & 2 != 0))
-}
 unsafe extern "C" fn diagnostic(state: *mut u8, bytes: *const u8, len: usize) {
     // SAFETY: the process pins Run and the caller pins this diagnostic view.
     unsafe {
@@ -328,7 +294,12 @@ unsafe fn record_header(
                 arg.extend_from_slice(std::slice::from_raw_parts(b.data, b.len));
             }
         }
-        write_launch(&mut arg, &*(*config).launch, !run.host.is_null());
+        write_launch(
+            &mut arg,
+            &*(*config).launch,
+            !run.host.is_null(),
+            &run.build,
+        );
         let mut net_rules = vec![];
         if !(*(*config).launch).is_describe() {
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
@@ -382,7 +353,6 @@ unsafe fn record_header(
             secret_grants,
             cred_grants,
             env,
-            map_hash_key: format::MapHashKey((*context).map_hash_key.to_bytes()),
         })
     }
 }
@@ -402,7 +372,9 @@ unsafe extern "C" fn invoke(
             arg: None,
             across: run.mode == 2,
         };
+        let mut launch_revision = run.revision;
         let opened = if let Some(replay) = run.replay.take() {
+            launch_revision = replay.stored.revision;
             Tape::open_with_startup(run.revision, TapeInput::Replay(replay), &expect)
         } else {
             let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
@@ -450,8 +422,14 @@ unsafe extern "C" fn invoke(
         let (launch, managed) = if run.mode == 0 {
             ((*(*config).launch).clone(), !run.host.is_null())
         } else {
-            match read_launch(&startup.arg) {
-                Ok(launch) => launch,
+            match read_launch(&startup.arg, launch_revision) {
+                Ok((launch, managed, build)) => {
+                    if build != run.build {
+                        let label = b"replay: build differs\n";
+                        crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
+                    }
+                    (launch, managed)
+                }
                 Err(_) => return stopped(run, Fault::Corrupt),
             }
         };
@@ -644,8 +622,8 @@ unsafe extern "C" fn invoke(
 /// Reads and removes `HIRSEL_RECORD` before any grant snapshot is taken.
 /// With HIRSEL_RECORD unset, forward to the ordinary runtime entry.
 /// # Safety
-/// The generated config, names, source tables, entry and 32-byte revision stay
-/// pinned for the call. Identity is a NUL-terminated native string.
+/// The generated config, names, source tables, entry, 32-byte revision and
+/// 32-byte build digest stay pinned for the call. Identity is a NUL-terminated native string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_recording(
     input: *const OsConfig,
@@ -654,9 +632,10 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
-    unsafe { run_recording::<false>(input, names, sources, entry, identity, revision) }
+    unsafe { run_recording::<false>(input, names, sources, entry, identity, revision, build) }
 }
 
 /// Recording entry for a program whose ordinary run can spawn helper units.
@@ -671,9 +650,10 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
-    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision) }
+    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision, build) }
 }
 
 unsafe fn run_recording<const UNITS: bool>(
@@ -683,14 +663,16 @@ unsafe fn run_recording<const UNITS: bool>(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
+        let _laws = crate::law::Run::start(sources);
         if let Some((path, mode)) = pinned_replay(&*input) {
             #[cfg(feature = "prof")]
             let _profile = crate::prof::Run::start_replay();
             return run_taped(
-                input, names, sources, entry, path, mode, identity, revision, None,
+                input, names, sources, entry, path, mode, identity, revision, build, None,
             );
         }
         let path = std::env::var_os("HIRSEL_RECORD");
@@ -725,6 +707,7 @@ unsafe fn run_recording<const UNITS: bool>(
             0,
             identity,
             revision,
+            build,
             record_id,
         );
         super::writer::flush();
@@ -757,8 +740,8 @@ fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64)> {
 /// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
 /// Replay is never reachable from the program's environment.
 /// # Safety
-/// The generated config, names, source tables, entry and 32-byte revision stay
-/// pinned for the call. Path and identity are NUL-terminated native strings.
+/// The generated config, names, source tables, entry, 32-byte revision and
+/// 32-byte build digest stay pinned for the call. Path and identity are NUL-terminated native strings.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_replay(
@@ -770,6 +753,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     #[cfg(feature = "prof")]
     let _profile = crate::prof::Run::start_replay();
@@ -784,6 +768,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
             mode,
             identity,
             revision,
+            build,
             None,
         )
     }
@@ -799,6 +784,7 @@ unsafe fn run_taped(
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
     record_id: Option<[u8; 16]>,
 ) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
@@ -820,6 +806,7 @@ unsafe fn run_taped(
             path,
             identity: CStr::from_ptr(identity).to_bytes().to_vec(),
             revision: *revision,
+            build: *build,
             mode,
             sources,
             stderr,
@@ -911,9 +898,8 @@ unsafe fn run_taped(
             if replay.stored.kind != KIND_RUN {
                 return refused(&mut run, OpenError::Unreadable(Fault::Corrupt));
             }
-            let key = replay.stored.map_hash_key.0;
             run.replay = Some(replay);
-            process::run_with_map_hash_key(&config, invoke, key, process::run_plain)
+            process::hirsel_core_run(&config, invoke)
         };
         if let Some((at, err)) = run.record_truncated {
             report_truncation(run.stderr, at, err);
@@ -923,183 +909,7 @@ unsafe fn run_taped(
 }
 
 #[cfg(test)]
-pub(super) fn check_launch_replay() {
-    // The entropy-denial filter is permanent for its thread.
-    std::thread::spawn(check_launch_replay_without_entropy)
-        .join()
-        .unwrap();
-}
-
+#[path = "run_tests.rs"]
+mod tests;
 #[cfg(test)]
-fn check_launch_replay_without_entropy() {
-    fn deny_getrandom() {
-        let mut filter = [
-            libc::sock_filter {
-                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-                jt: 0,
-                jf: 0,
-                k: 0,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 1,
-                k: libc::SYS_getrandom as u32,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_RET | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 0,
-                k: libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_RET | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 0,
-                k: libc::SECCOMP_RET_ALLOW,
-            },
-        ];
-        let program = libc::sock_fprog {
-            len: filter.len() as u16,
-            filter: filter.as_mut_ptr(),
-        };
-        // SAFETY: these calls affect only the fixture thread and the kernel copies the filter.
-        unsafe {
-            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-            assert_eq!(
-                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
-                0
-            );
-            let mut byte = 0u8;
-            assert_eq!(libc::getrandom((&mut byte as *mut u8).cast(), 1, 0), -1);
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ENOSYS)
-            );
-        }
-    }
-    #[derive(Debug, PartialEq)]
-    struct Snapshot {
-        digest: Vec<u8>,
-        target: Vec<u8>,
-        n_place: u64,
-        describe: u64,
-        emitted: bool,
-        key: format::MapHashKey,
-    }
-    thread_local! {
-        static OBSERVED: std::cell::RefCell<Vec<Snapshot>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    unsafe extern "C" fn entry(context: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
-        // SAFETY: process startup pins the context and launch views through entry.
-        unsafe {
-            let word = |field, index| process::hirsel_core_launch_word(context, field, index);
-            let mut target = empty_buffer();
-            process::hirsel_core_launch_target(context, &mut target);
-            let snapshot = Snapshot {
-                digest: (0..word(1, 0)).map(|i| word(2, i) as u8).collect(),
-                target: std::slice::from_raw_parts(target.data, target.len).to_vec(),
-                n_place: word(0, 0),
-                describe: word(5, 0),
-                key: format::MapHashKey((*context).map_hash_key.to_bytes()),
-                emitted: process::hirsel_core_describe_emit(
-                    context,
-                    &Buffer {
-                        data: b"describe\n".as_ptr().cast_mut(),
-                        len: 9,
-                        capacity: 0,
-                    },
-                ),
-            };
-            OBSERVED.with_borrow_mut(|seen| seen.push(snapshot));
-        }
-        0
-    }
-    let scratch = tempfile::tempdir().unwrap();
-    let root = scratch.path();
-    use std::os::fd::AsRawFd;
-    let output = std::fs::File::create(root.join("describe")).unwrap();
-    let path = std::ffi::CString::new(root.join("run.tape").as_os_str().as_bytes()).unwrap();
-    for mode in [0, 1] {
-        if mode == 1 {
-            deny_getrandom();
-        }
-        let (target, arguments): (&[u8], &[&[u8]]) = if mode == 0 {
-            (
-                b"record-target",
-                &[b"--hirsel-describe", b"--hirsel-n-place=73"],
-            )
-        } else {
-            (b"replay-target", &[b"--hirsel-n-place=1"])
-        };
-        let args: Vec<_> = arguments
-            .iter()
-            .map(|a| View {
-                data: a.as_ptr(),
-                len: a.len(),
-            })
-            .collect();
-        let input = OsConfig {
-            root_limit: 1 << 20,
-            args: args.as_ptr(),
-            args_len: args.len(),
-            directories: ptr::null(),
-            directories_len: 0,
-            grant_mask: 0,
-            stdout_fd: output.as_raw_fd(),
-            stderr_fd: 2,
-            parameters: ptr::null(),
-            parameters_len: 0,
-            net_rules: ptr::null(),
-            net_rules_len: 0,
-            directory_ops: std::ptr::null(),
-            process_ops: std::ptr::null(),
-            socket_activation: std::ptr::null(),
-            secret_grants: core::ptr::null(),
-            secret_grants_len: 0,
-            env_patterns: crate::process::View {
-                data: std::ptr::null(),
-                len: 0,
-            },
-            secret_ops: std::ptr::null(),
-            env_ops: std::ptr::null(),
-            exec_bindings: std::ptr::null(),
-            exec_bindings_len: 0,
-            exec_ops: std::ptr::null(),
-            cred_grants: std::ptr::null(),
-            cred_grants_len: 0,
-            target: View {
-                data: target.as_ptr(),
-                len: target.len(),
-            },
-        };
-        // SAFETY: all startup tables and names remain pinned until the run ends.
-        let status = unsafe {
-            run_taped(
-                &input,
-                ptr::null(),
-                ptr::null(),
-                entry,
-                path.as_bytes().to_vec(),
-                mode,
-                c"launch-case".as_ptr(),
-                &[7; 32],
-                None,
-            )
-        };
-        assert_eq!(status, 0);
-    }
-    let seen = OBSERVED.with(|seen| seen.take());
-    assert_eq!(seen.len(), 2);
-    assert_eq!(seen[0].digest.len(), 32);
-    assert_eq!(seen[0].target, b"record-target");
-    assert_eq!(seen[0].n_place, 73);
-    assert_eq!(seen[0].describe, 1);
-    assert!(seen[0].emitted);
-    let bytes = std::fs::read(root.join("run.tape")).unwrap();
-    let mut data = bytes.as_slice();
-    let (_, header) = Blocks::open(|buf| std::io::Read::read(&mut data, buf)).unwrap();
-    assert_eq!(seen[0].key, header.map_hash_key);
-    assert_eq!(seen[1], seen[0]);
-    assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
-}
+pub(super) use tests::check_launch_replay;

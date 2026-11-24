@@ -1,0 +1,2 @@
+/// The current task's original byte limit, independent of charges and lexical bounds.
+pub fn root_limit() -> u64

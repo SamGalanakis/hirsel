@@ -314,15 +314,6 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
     assert_eq!(ctx.available(), 32);
     ctx.limit_exit();
     assert_eq!(ctx.available(), 128);
-    // The C refund hook implements the same test for emitted native frees.
-    // SAFETY: we retain the block while settling, then release its physical base.
-    unsafe {
-        let block = inline_own_alloc(&ctx, Some(8), 8, 8).unwrap();
-        let payer = hirsel_core_block_payer(block);
-        hirsel_core_refund_in(&ctx, payer, 8);
-        crate::task_heap::release(&ctx, block);
-    }
-    assert_eq!(ctx.available(), 128);
 }
 
 #[test]

@@ -490,7 +490,8 @@ fn run_logical_charge_report_selects_the_installed_observer() {
     let command = process::request_command_at(&compiler, &args, dir.path());
     let (code, _, error) = process::tape_request_output(command);
     assert_eq!(code, Some(0), "{error}");
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert_eq!(report["observation_mode"], true);
     assert_eq!(report["metric_version"], 2);
     // MEM-19 charges 256 bytes for the root task and 32 for its cause cell.
@@ -703,6 +704,7 @@ fn live_memory_profile_weights_held_bytes_and_closes_churn_across_workers() {
         app.join("main.hirsel"),
         r#"
 const MIB: u64 = 1048576
+const RESERVATION: u64 = 16 * MIB
 const HELD: u64 = 64
 const CHURN_BYTES: u64 = 131072
 const CHURN_ROUNDS: u64 = 2048
@@ -721,16 +723,24 @@ fn filled(seed: u64) -> Bytes {
     b
 }
 
+fn one_page() -> Bytes {
+    let mut buffer: Bytes = list.with_capacity(RESERVATION)
+    list.push(mut buffer, 42u8)
+    buffer
+}
+
 fn hold(take h: Holder) -> u64 waits {
     let Holder(hello: hello, held: held) = take h
     let (c, release): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
     result.unwrap(conn.send(hello, take c))
+    let sparse = one_page()
     let mut kept: List[Bytes] = list.with_capacity(HELD)
     for i in 0 .. HELD {
         list.push(mut kept, filled(i))
     }
     result.unwrap(conn.send(held, list.len(kept)))
     let _ = result.unwrap(conn.receive(release))
+    if list.capacity(sparse) != RESERVATION || list.len(sparse) != 1 { return 0 }
     list.len(kept)
 }
 
@@ -752,7 +762,7 @@ fn churn(take c: Churn) -> u64 {
 pub fn main(tasks: Tasks, c: Clock) -> Result[(), Exit] waits {
     let (hello, hello_in): (Client[Client[u64]], Inbox[Client[u64]]) = result.unwrap(conn.new(1, bytes 0))
     let (held, held_in): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
-    let h = result.unwrap(task.spawn_unit(tasks, bytes 80 * MIB, Holder(hello: take hello, held: conn.client(held)), hold))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 96 * MIB, Holder(hello: take hello, held: conn.client(held)), hold))
     let release = result.unwrap(conn.receive(hello_in))
     let w = result.unwrap(task.spawn_unit(tasks, bytes 4 * MIB, Churn(rounds: CHURN_ROUNDS), churn))
     if result.unwrap(conn.receive(held_in)) != HELD { return Error(Exit(status: 2)) }
@@ -807,9 +817,13 @@ pub fn main(tasks: Tasks, c: Clock) -> Result[(), Exit] waits {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let report = hirsel_prof::query(&profile, hirsel_prof::Query::PeakMem, 20).unwrap();
+    let report = hirsel_prof::query(&profile, hirsel_prof::Query::PeakMem, 200).unwrap();
     assert_eq!(report.quality["mem_mode"], "sampled");
     assert_eq!(report.quality["mem_records_lost"], 0);
+    assert_eq!(
+        report.quality["mem_records_emitted"],
+        report.quality["mem_records"]
+    );
     assert_eq!(report.quality["mem_state_lost"], 0);
     assert_eq!(
         report.quality["mem_absent_metrics"],
@@ -854,6 +868,25 @@ pub fn main(tasks: Tasks, c: Clock) -> Result[(), Exit] waits {
         4.0 * (n * s * s * (1.0 - p) / p).sqrt()
     };
     let mib = 1048576.0;
+    let reserved = through("peak_callsite", "live_bytes", "one_page");
+    let resident = through("peak_callsite", "resident_bytes", "one_page");
+    // The fixture checks a 16 MiB reservation with exactly one initialized byte.
+    // A fresh dedicated allocation faults one native page for that byte.
+    assert!(
+        (reserved - 16.0 * mib).abs() <= 4096.0,
+        "allocated {reserved}"
+    );
+    // SAFETY: sysconf reads the host page size without memory operands.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as f64;
+    assert_eq!(resident, page);
+    let retained = &report.result["peak_callsites"];
+    let columns = retained["columns"].as_array().unwrap();
+    let column = |name: &str| columns.iter().position(|value| value == name).unwrap();
+    let (allocated_column, resident_column) = (column("allocated_bytes"), column("resident_bytes"));
+    assert!(retained["rows"].as_array().unwrap().iter().any(|row| {
+        row[allocated_column].as_f64() == Some(reserved)
+            && row[resident_column].as_f64() == Some(resident)
+    }));
     let held = through("peak_callsite", "live_bytes", "filled");
     assert!(
         (held - 64.0 * mib).abs() <= bound(64.0, mib),
@@ -869,5 +902,8 @@ pub fn main(tasks: Tasks, c: Clock) -> Result[(), Exit] waits {
     // At most one churn buffer is live at any instant, and its weight is s/p.
     let p = 1.0 - (1.0 - 1.0 / 524288.0f64).powf(131072.0);
     let churn_live = through("peak_callsite", "live_bytes", "churn");
-    assert!(churn_live <= 131072.0 / p + 1.0, "churn retained {churn_live}");
+    assert!(
+        churn_live <= 131072.0 / p + 1.0,
+        "churn retained {churn_live}"
+    );
 }

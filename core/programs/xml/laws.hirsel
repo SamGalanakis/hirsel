@@ -1,0 +1,92 @@
+@test
+fn xml_contract() -> Result[(), ()] {
+    let limits = xml.defaults()
+    let input = b"<?xml version='1.0'?><?before?><r xmlns='urn:r' xmlns:p='urn:p' a='&quot;&#9;&#10;&#13;&lt;&amp;&apos;'><p:a xmlns='' p:b='x\r\ny'/>x<![CDATA[<&]]>&#13;</r><!--after-->"
+    let doc = result.unwrap(xml.parse(take input, limits))
+    let items = xml.nodes(doc)
+    if xml.root(doc) != 1 || list.len(items) != 7 {
+        fail("document order")
+    }
+    let Tag(element) = items[1].content else {
+        fail("document element")
+    }
+    if element.name.namespace_uri != "urn:r" || element.attributes[2].name.namespace_uri != "" {
+        fail("default namespace on elements only")
+    }
+    let Tag(child) = items[2].content else {
+        fail("child element")
+    }
+    if child.name.namespace_uri != "urn:p" || child.attributes[1].name.namespace_uri != "urn:p" {
+        fail("prefixed element and attribute namespace")
+    }
+    if result.unwrap(xml.write(doc, limits)) != b"<?before?><r xmlns=\"urn:r\" xmlns:p=\"urn:p\" a=\"&quot;&#9;&#10;&#13;&lt;&amp;'\"><p:a xmlns=\"\" p:b=\"x y\"></p:a>x&lt;&amp;&#13;</r><!--after-->" {
+        fail("writer escaping and normalization")
+    }
+    let canon = b"<?before ?><r a=\"&quot;&#9;&#10;&#13;&lt;&amp;'\" xmlns=\"urn:r\" xmlns:p=\"urn:p\"><p:a p:b=\"x y\" xmlns=\"\"></p:a>x&lt;&amp;&#13;</r>"
+    if result.unwrap(xml.canonical(doc, limits)) != canon {
+        fail("canonical document")
+    }
+    let mut pull = result.unwrap(xml.reader(b"<r/>", limits))
+    if let Ok(Some(Start(_))) = xml.next(mut pull) {} else {
+        fail("empty start")
+    }
+    if let Ok(Some(End(name))) = xml.next(mut pull) {
+        if name != "r" {
+            fail("empty end name")
+        }
+    } else {
+        fail("empty end")
+    }
+    if let Ok(None) = xml.next(mut pull) {} else {
+        fail("end of document")
+    }
+    // A reserved .invalid location and a shallow fan-out model both exercise DTD refusal.
+    if let Error(DtdForbidden) = xml.parse(b"<!DOCTYPE r SYSTEM 'https://example.invalid/unused.dtd'><r/>", limits) {} else {
+        fail("external definition bypassed DTD refusal")
+    }
+    if let Error(DtdForbidden) = xml.parse(b"<!DOCTYPE r [<!ENTITY x 'x'><!ENTITY pair '&x;&x;'>]><r/>", limits) {} else {
+        fail("internal entity declarations bypassed DTD refusal")
+    }
+    if let Error(UnknownEntity) = xml.parse(b"<r>&unknown;</r>", limits) {} else {
+        fail("unknown entity")
+    }
+    if let Error(BadNamespace) = xml.parse(b"<r xmlns:a='urn:x' xmlns:b='urn:x' a:z='' b:z=''/>", limits) {} else {
+        fail("duplicate expanded attribute")
+    }
+    let mut caps = limits
+    caps.max_bytes = 3
+    if let Error(ByteLimit) = xml.parse(b"<r/>", caps) {} else {
+        fail("input byte limit")
+    }
+    caps = limits
+    caps.max_depth = 1
+    if let Error(DepthLimit) = xml.parse(b"<r><s/></r>", caps) {} else {
+        fail("depth limit")
+    }
+    caps = limits
+    caps.max_attributes = 1
+    if let Error(AttributeLimit) = xml.parse(b"<r a='' b=''/>", caps) {} else {
+        fail("attribute limit")
+    }
+    caps = limits
+    caps.max_name_bytes = 1
+    if let Error(NameLimit) = xml.parse(b"<\xc3\xa9/>", caps) {} else {
+        fail("UTF-8 name byte limit")
+    }
+    caps = limits
+    caps.max_steps = 4
+    let mut bounded = result.unwrap(xml.reader(b"<r>x</r>", caps))
+    if let Ok(Some(Start(_))) = xml.next(mut bounded) {} else {
+        fail("first bounded event")
+    }
+    if let Ok(Some(Text(_))) = xml.next(mut bounded) {} else {
+        fail("second bounded event")
+    }
+    if let Error(StepLimit) = xml.next(mut bounded) {} else {
+        fail("step budget must persist across pulls")
+    }
+    if let Error(ParserFailed) = xml.next(mut bounded) {} else {
+        fail("reader must stay failed")
+    }
+    Ok(())
+}

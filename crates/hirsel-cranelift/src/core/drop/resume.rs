@@ -103,7 +103,7 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
         ),
         FieldTy::Handle(hirsel_core_layout::Handle::Capability) => Plan::Empty,
         // Cleaned whole by ordinary glue in one step that never yields.
-        FieldTy::Handle(_) | FieldTy::FrozenBytes => Plan::Leaf(t.clone()),
+        FieldTy::Handle(_) | FieldTy::FrozenBytes | FieldTy::Shared(_) => Plan::Leaf(t.clone()),
         // Its environment, when present, is staged from its descriptor.
         FieldTy::OwnFn => Plan::Leaf(t.clone()),
         FieldTy::Text
@@ -114,6 +114,30 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
     })
 }
 impl Glue<'_, '_, '_> {
+    /// Release one holder of an `Rc` or `Arc` node of `t`.
+    pub(super) fn release(&mut self, p: Value, t: TypeRef, atomic: bool) -> Result<()> {
+        let charge = charge::counted(self.tables.layouts[t.index()].logical_size.unwrap()).unwrap();
+        fast::release(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            [self.ctx, p],
+            (
+                charge,
+                (!hirsel_core_layout::terminal(
+                    &self.tables.input.types,
+                    self.tables.layouts,
+                    &if atomic {
+                        FieldTy::Arc(t)
+                    } else {
+                        FieldTy::Rc(t)
+                    },
+                ))
+                .then(|| self.glues.fixed[t.index()].unwrap()[1]),
+            ),
+            atomic,
+        )
+    }
     /// The next suspension point of fixed glue, or 0 in buffer glue.
     fn next_point(&mut self) -> Value {
         let cursor = self.rank.map(|r| r + 1);
@@ -416,8 +440,9 @@ impl Glue<'_, '_, '_> {
                         self.b.ins().brif(staged, handed, &[], skip, &[]);
                         self.b.switch_to_block(handed);
                     }
-                    // A handle is released whole in place.
-                    FieldTy::Handle(_) | FieldTy::FrozenBytes => {
+                    // A handle is released whole in place, and so is a Shared
+                    // holder: its last release drains the payload in the runtime.
+                    FieldTy::Handle(_) | FieldTy::FrozenBytes | FieldTy::Shared(_) => {
                         self.field(base, field)?;
                         yields = false;
                     }

@@ -1,0 +1,57 @@
+// A tape's 4 bytes and 32-byte cell stay charged after its last copy is
+// dropped. A second cell still sees no room in the same 36-byte bound.
+fn random_tape_retains_charge() -> bool {
+    let result = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 36 {
+            let source = b"four"
+            let tape = provide.random_tape(take source)
+            let alias = tape
+            drop(take tape)
+            drop(take alias)
+            let seeded = provide.random(0)
+            true
+        }
+    })
+    match result {
+        Ok(Error(causes)) => {
+            for cause in causes {
+                return match cause.kind {
+                    Capacity(c) => c.requested == 32 && c.available == 0,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+// An oversized draw faults before writing bytes or changing the cursor.
+// A surviving copy draws the remaining three bytes from the same cell.
+// The evaluator also checks that run teardown refunded all admissions.
+// expect: run random_tape_whole_draws_and_charge() = true
+fn random_tape_whole_draws_and_charge() -> bool {
+    let source = b"four"
+    let tape = provide.random_tape(take source)
+    let mut first: Bytes = list.with_capacity(1)
+    host.random(tape, mut first)
+    let failed = isolate(fn() -> () {
+        let mut too_long: Bytes = list.with_capacity(4)
+        host.random(tape, mut too_long)
+    })
+    let bounds = match failed {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Bounds => true,
+                    _ => false
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+    let mut rest: Bytes = list.with_capacity(3)
+    host.random(tape, mut rest)
+    random_tape_retains_charge() && bounds && list.len(first) == 1 && first[0] == 0x66 && list.len(rest) == 3 && rest[0] == 0x6f && rest[1] == 0x75 && rest[2] == 0x72
+}

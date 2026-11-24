@@ -1,0 +1,27 @@
+// OWN-7 / OWN-16: for a view parameter the first arm fixes whether the join owns, so
+// an `if` mixing an owned arm and a view arm is refused in either order, as it is
+// when bound by `let` (LANG-11). Accepting either would clean the view or keep a view
+// of an owned arm's dead value.
+// expect: refuse LANG-11 at 17:9
+// expect: compared LANG-11 at 17:9 | View[core@1/core/List[u8]] | core@1/core/List[u8]
+// expect: refuse LANG-11 at 25:9
+// expect: compared LANG-11 at 25:9 | core@1/core/List[u8] | View[core@1/core/List[u8]]
+fn width(b: Bytes) -> u64 {
+    list.len(b)
+}
+
+fn owned_first(c: bool, s: String) -> u64 {
+    width(if c {
+        string.into_bytes(string.from(s))
+    } else {
+        string.as_bytes(s)
+    })
+}
+
+fn view_first(c: bool, s: String) -> u64 {
+    width(if c {
+        string.as_bytes(s)
+    } else {
+        string.into_bytes(string.from(s))
+    })
+}

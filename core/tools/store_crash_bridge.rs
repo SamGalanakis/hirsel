@@ -12,6 +12,9 @@ const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
 const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
 const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
+#[path = "store_crash_window.rs"]
+mod window;
+use window::{WINDOW_SYNC_FAILURE, WindowObservation};
 
 #[repr(C)]
 #[derive(Default)]
@@ -41,6 +44,8 @@ struct Bridge {
     next_file: u64,
     phase: u64,
     cut: u64,
+    damage_seed: Option<u64>,
+    trace_cuts: bool,
     events: u64,
     crashed: bool,
     acked: bool,
@@ -60,6 +65,49 @@ struct Bridge {
     checkpoint_reopen: bool,
     fork_observation: Option<ForkObservation>,
     read_only: Option<Snapshot>,
+    staged: Option<StagedCommit>,
+    window: Option<WindowObservation>,
+}
+
+/// A writer COMMIT the live read law stages through stdout ("STAGE").
+/// It lands during the recovery stat. A follower takes one earlier stat
+/// for its witness.
+struct StagedCommit {
+    segment: String,
+    at: usize,
+    frame: Vec<u8>,
+    /// With an END image: write and sync both after the stat's size is
+    /// taken. Without: write the frame unsynced before the stat returns.
+    end: Option<Vec<u8>>,
+    stats_until_commit: u8,
+}
+
+impl StagedCommit {
+    fn parse(raw: &[u8]) -> Self {
+        let (boundary, stats_until_commit) = match raw[0] {
+            0 => (false, 2),
+            1 => (true, 2),
+            2 => (false, 1),
+            _ => panic!("unknown STAGE scenario"),
+        };
+        let at = u64::from_le_bytes(raw[1..9].try_into().unwrap()) as usize;
+        let name_len = raw[9] as usize;
+        let segment = std::str::from_utf8(&raw[10..10 + name_len])
+            .unwrap()
+            .to_owned();
+        let rest = &raw[10 + name_len..];
+        let frame_len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+        let frame = rest[4..4 + frame_len].to_vec();
+        let end = rest[4 + frame_len..].to_vec();
+        assert_eq!(boundary, !end.is_empty(), "STAGE END image");
+        StagedCommit {
+            segment,
+            at,
+            frame,
+            end: boundary.then_some(end),
+            stats_until_commit,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -79,7 +127,13 @@ fn fork_frame_start(frames: &[u8]) -> Option<usize> {
         let payload = frames.get(16..16 + len)?;
         if kind == 0x0013 {
             assert_eq!(frames[2..4], [1, 0]);
-            assert_eq!(payload, b"\x01\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\0\x04\0beta");
+            // AP19 and §13.1: id 1, parent 0, version 2, name "beta",
+            // then the LE watermark. The fixture uses 2 schema stamps,
+            // reserves 7 for the pack-list edit and 14 for the first put.
+            assert_eq!(
+                payload,
+                b"\x01\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\0\x04\0beta\x18\0\0\0\0\0\0\0"
+            );
             return Some(offset);
         }
         offset += 16 + len;
@@ -89,15 +143,38 @@ fn fork_frame_start(frames: &[u8]) -> Option<usize> {
 
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
-        self.fs.snapshot().names.contains_key(name)
+        self.fs.inode(name).is_some()
     }
     fn apply(&mut self, op: Op<'_>) -> bool {
-        assert!(self.read_only.is_none(), "read-only open issued {op:?}");
+        assert!(
+            self.read_only.is_none() || matches!(op, Op::Sync(name) if is_segment(name)),
+            "read-only open issued {op:?}"
+        );
         if self.phase == 1 && self.events == self.cut {
             self.crashed = true;
         }
         if self.crashed {
             return false;
+        }
+        if self.phase == 1 && self.trace_cuts {
+            let kind = match &op {
+                Op::Create(_) => "create",
+                Op::Write(name, bytes)
+                    if self
+                        .fs
+                        .read(name)
+                        .is_some_and(|old| old.iter().zip(*bytes).any(|(old, new)| old != new)) =>
+                {
+                    "overwrite"
+                }
+                Op::Write(..) => "write",
+                Op::Append(..) => "append",
+                Op::Sync(_) => "sync",
+                Op::Rename(..) => "rename",
+                Op::Remove(_) => "unlink",
+                Op::SyncDir => "sync-dir",
+            };
+            eprintln!("w2-cut {} {kind}", self.events + 1);
         }
         self.fs.issue(&op);
         if self.phase == 1 {
@@ -142,6 +219,9 @@ impl Bridge {
             if self.phase == 1 {
                 if &data[..len] == b"DONE" {
                     self.acked = true;
+                } else if let Some(raw) = data[..len].strip_prefix(b"STAGE") {
+                    assert!(self.staged.is_none(), "one staged COMMIT");
+                    self.staged = Some(StagedCommit::parse(raw));
                 } else if &data[..len] == b"ARM" {
                     self.armed = true;
                 } else if &data[..len] == b"CHILD RETURNED" {
@@ -257,14 +337,44 @@ impl Bridge {
                 }
             }
             47 => {
-                let file = self.files.get(&handle).expect("live stat descriptor");
+                let name = self
+                    .files
+                    .get(&handle)
+                    .expect("live stat descriptor")
+                    .name
+                    .clone();
+                let due = self.staged.as_mut().is_some_and(|staged| {
+                    if staged.segment != name || staged.stats_until_commit == 0 {
+                        return false;
+                    }
+                    staged.stats_until_commit -= 1;
+                    staged.stats_until_commit == 0
+                });
+                let mut size = self.fs.read(&name).unwrap_or(&[]).len() as u64;
+                if due {
+                    let staged = self.staged.as_ref().unwrap();
+                    let (at, frame, end) = (staged.at, staged.frame.clone(), staged.end.clone());
+                    let mut bytes = self.fs.read(&name).unwrap().to_vec();
+                    assert_eq!(bytes.len(), at, "staged COMMIT starts at the recovered end");
+                    bytes.extend_from_slice(&frame);
+                    assert!(self.apply(Op::Write(&name, &bytes)));
+                    if let Some(end) = end {
+                        let end_name = format!("{name}.end");
+                        assert!(self.apply(Op::Sync(&name)));
+                        assert!(self.apply(Op::Write(&end_name, &end)));
+                        assert!(self.apply(Op::Sync(&end_name)));
+                    } else {
+                        size = bytes.len() as u64;
+                    }
+                }
                 Outcome {
-                    value: self.fs.read(&file.name).unwrap_or(&[]).len() as u64,
+                    value: size,
                     ..Outcome::default()
                 }
             }
             2 | 38 => {
                 let file = self.files.get(&handle).expect("live provider descriptor");
+                let mode = file.mode;
                 let name = file.name.clone();
                 let cursor = if op == 38 {
                     let position = u64::from_le_bytes(path.try_into().expect("WriteAt offset"));
@@ -272,6 +382,13 @@ impl Bridge {
                 } else {
                     file.cursor
                 };
+                if self.phase == 1
+                    && is_segment(&name)
+                    && cursor >= 72
+                    && let Some(outcome) = self.window_write(cursor, &data[..len])
+                {
+                    return outcome;
+                }
                 if self.phase == 1 && is_segment(&name) {
                     if let Some(fork) = &self.fork_observation {
                         if fork.image == 5
@@ -327,7 +444,12 @@ impl Bridge {
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
-                let append = op == 2 && file.mode == 2;
+                let append = op == 2 && mode == 2
+                    || cursor != 0
+                        && self
+                            .fs
+                            .read(&name)
+                            .is_some_and(|bytes| cursor == bytes.len());
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..written]))
                 } else {
@@ -434,7 +556,12 @@ impl Bridge {
                     assert_eq!(self.failed_syncs, 0, "store synced after a short write");
                     self.segment_syncs += 1;
                 }
+                let window_sync = self.phase == 1 && is_segment(&name);
                 let matches = match self.sync_failure {
+                    WINDOW_SYNC_FAILURE if window_sync => self
+                        .window
+                        .as_ref()
+                        .is_some_and(WindowObservation::syncs_zeros),
                     1 => name.starts_with("j-") && !name.ends_with(".end"),
                     2 => name.starts_with("j-") && name.ends_with(".end"),
                     3 => name.starts_with("p-"),
@@ -452,7 +579,10 @@ impl Bridge {
                     }
                     _ => false,
                 };
-                if self.phase == 1 && self.armed && matches {
+                if self.phase == 1
+                    && (self.armed || self.sync_failure == WINDOW_SYNC_FAILURE)
+                    && matches
+                {
                     self.failed_syncs += 1;
                     if self.sync_failure == 5 {
                         // Only the first seven bytes of B reached storage.
@@ -506,6 +636,9 @@ impl Bridge {
                     }
                 }
                 if self.apply(Op::Sync(&name)) {
+                    if window_sync && let Some(window) = self.window.as_mut() {
+                        window.synced();
+                    }
                     if fork_start.is_some() {
                         let fork = self.fork_observation.as_mut().unwrap();
                         fork.synced = true;
@@ -548,6 +681,10 @@ impl Bridge {
                     Self::error(5)
                 }
             }
+            124 => Outcome {
+                value: 1,
+                ..Outcome::default()
+            },
             18 => {
                 for byte in &mut data[len..] {
                     *byte = self.random;
@@ -576,6 +713,8 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         next_file: 1,
         phase: 0,
         cut,
+        damage_seed: None,
+        trace_cuts: cut == u64::MAX && std::env::var_os("HIRSEL_W2_TRACE_CUTS").is_some(),
         events: 0,
         crashed: false,
         acked: false,
@@ -593,8 +732,30 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         checkpoint_reopen: false,
         fork_observation: None,
         read_only: None,
+        staged: None,
+        window: None,
     }))
     .cast()
+}
+
+/// # Safety
+/// `p` is the live pointer from `store_crash_new` before any provider calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_damage_seed(p: *mut c_void, seed: u64) {
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    assert!(bridge.cut != u64::MAX);
+    bridge.damage_seed = Some(seed);
+}
+
+/// # Safety
+/// `p` is the live, exclusively accessed pointer from `store_crash_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_manifest_inode(p: *mut c_void) -> u64 {
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    bridge
+        .fs
+        .inode("MANIFEST")
+        .expect("read-only fixture has a MANIFEST")
 }
 
 /// # Safety
@@ -619,7 +780,10 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
     if phase >= 2 {
         // The first crash in L25(b) is process-only. The next opener sees
         // the pending rename and must make it durable before any removal.
-        if phase != 3 || !bridge.checkpoint_reopen {
+        if let Some(seed) = bridge.damage_seed.take() {
+            assert_eq!(bridge.events, bridge.cut, "damage cut was not reached");
+            bridge.fs.restart_damaged(bridge.cut, seed);
+        } else if phase != 3 || !bridge.checkpoint_reopen {
             bridge.fs.restart();
         }
         bridge.locks.clear();
@@ -716,6 +880,12 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
         bridge.files.is_empty(),
         "final run leaked provider file handles"
     );
+    if let Some(staged) = &bridge.staged {
+        assert_eq!(
+            staged.stats_until_commit, 0,
+            "the staged COMMIT was never applied"
+        );
+    }
     if let Some(before) = &bridge.read_only {
         assert_eq!(*before, bridge.fs.snapshot(), "read-only directory changed");
     }
@@ -733,10 +903,11 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// # Safety
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
 /// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
-/// 7 (second segment sync), 8 (O1 open barrier), or 9 (second segment short write).
+/// 7 (second segment sync), 8 (O1 open barrier), 9 (second segment short write),
+/// 10 (window chunk), or 11 (window sync).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= SECOND_SEGMENT_SHORT_WRITE);
+    assert!(kind <= WINDOW_SYNC_FAILURE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

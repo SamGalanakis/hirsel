@@ -1,0 +1,419 @@
+type WireOrder: send = LostReply | Overtaken | FencedAfterRead
+
+type OrderedWriter: send {
+    tasks: Tasks,
+    r: Random,
+    clock: Clock,
+    endpoint: std.sim.s3.Endpoint,
+    ordering: WireOrder,
+    read_done: Sender[()],
+    retry: Receiver[()]
+}
+
+fn bucket_order_options(create: bool) -> Options {
+    let mut options = bucket_law_options(create)
+    options.group_bytes = 65536
+    options.group_commits = 1
+    options.head_poll_ms = 600000
+    take options
+}
+
+fn bucket_order_open(tasks: Tasks, r: Random, clock: Clock, endpoint: std.sim.s3.Endpoint, seed: u64, create: bool) -> Result[Db, Error] waits {
+    let client = bucket_endpoint_client(endpoint, std.sim.s3.endpoint_network(endpoint), clock, tasks, "s3.test", seed, true, 0)?
+    let authority = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    Ok(open_authority(tasks, take authority, clock, r, bucket_order_options(create)) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+// An empty commit still advances the main version. This keeps schema changes
+// and their automatic cuts out of the head request schedule.
+fn bucket_order_commit(mut db: Db) -> Result[Ticket, Error] waits {
+    let written = run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), Error] { Ok(()) })?
+    let Committed(done) = written else { fail("the ordered test commit was refused") }
+    Ok(done.ticket)
+}
+
+fn bucket_order_fresh(take writer: OrderedWriter) -> Result[(), Error] waits {
+    let mut db = bucket_order_open(writer.tasks, writer.r, writer.clock, writer.endpoint, 1, true)?
+    for _ in 0u64 .. 2 {
+        let receipt = bucket_order_commit(mut db)?
+        durable(mut db, receipt)?
+    }
+    let third = bucket_order_commit(mut db)?
+    let until = clock.deadline_after_ms(host.mono_ns(writer.clock), BUCKET_LAW_OP_MS)
+    let observed = fresh_snapshot(mut db, until)
+    if let Overtaken = writer.ordering {
+        match observed {
+            Error(Fenced(1)) => (),
+            _ => fail("L57-a: an overtaken fresh read did not report Fenced"),
+        }
+        if let Ok(()) = durable(mut db, third) {
+            fail("L57-a: an unapplied commit was acknowledged")
+        }
+        return Ok(())
+    }
+    if version(observed?) != 3 { fail("L57-a: fresh missed the applied position 5") }
+    durable(mut db, third)?
+    if let FencedAfterRead = writer.ordering {
+        let _ = channel.send(writer.read_done, ())
+        let _ = channel.receive(writer.retry)
+        match fresh_snapshot(mut db, until) {
+            Error(Fenced(1)) => (),
+            _ => fail("L57-a: fresh did not see the later claim"),
+        }
+        durable(mut db, third)?
+    }
+    Ok(())
+}
+
+fn bucket_order_history(report: std.sim.s3.Report) -> bool {
+    let mut found = 0u64
+    let request_id = report.head_writes[4].request
+    // Successful PUT (reply lost), conditional retry, Q5 witness, fresh probe.
+    for req in report.requests {
+        if req.key != "head" { continue }
+        if req.request == request_id { found = 1; continue }
+        match found {
+            0 => (),
+            1 if req.method == "PUT" && req.status == 412 && !req.applied => { found += 1 },
+            2 if req.method == "GET" && req.status == 200 => { found += 1 },
+            3 if req.method == "GET" && req.status == 304 => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, ordering: WireOrder) -> Result[(), Error] waits {
+    let hold: std.sim.s3.Hold = match ordering {
+        Overtaken => std.sim.s3.Hold(method: "PUT", key: "head", from: 5, count: 1, until: Applied("PUT", "head", 6), then: Apply),
+        _ => std.sim.s3.Hold(method: "PUT", key: "head", from: 5, count: 1, until: At(50000000), then: ApplyLoseReply),
+    }
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, take hold)
+    let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let (first_done, complete): (Sender[()], Receiver[()]) = channel.new(1)
+    let (go, retry): (Sender[()], Receiver[()]) = channel.new(1)
+    let writer = OrderedWriter(tasks, r, clock: sim.time, endpoint: sim.endpoint, ordering, read_done: take first_done, retry: take retry)
+    let running = task.spawn(tasks, bytes 33554432, take writer, bucket_order_fresh)
+    match ordering {
+        LostReply => (),
+        Overtaken => {
+            result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", 5))
+            let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
+            if version(snapshot(successor)) != 2 { fail("L57-a: the successor recovered the unapplied commit") }
+            close(take successor)?
+        },
+        FencedAfterRead => {
+            result.unwrap(channel.receive(complete))
+            let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
+            if version(snapshot(successor)) != 3 { fail("L57-a: the successor lost the applied commit") }
+            close(take successor)?
+            result.unwrap(channel.send(go, ()))
+        },
+    }
+    let tested = result.unwrap(task.join(take running))
+    let report = bucket_law_finish(take sim)
+    tested?
+    match ordering {
+        Overtaken => {
+            for write in report.head_writes {
+                if read_le(write.data, 88, 8) == 1 && read_le(write.data, 120, 8) >= 5 {
+                    fail("L57-a: the overtaken holder advanced its prefix")
+                }
+            }
+        },
+        _ => {
+            if list.len(report.head_writes) < 5 || read_le(report.head_writes[4].data, 120, 8) != 5 ||
+                !bucket_order_history(report) {
+                fail("L57-a: head requests did not follow the reply-loss and fresh sequence")
+            }
+        },
+    }
+    Ok(())
+}
+
+fn bucket_ack_fixture(tasks: Tasks, c: Clock, seed: u64) -> BucketSim {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(4)
+    list.push(mut faults, Clean)
+    list.push(mut faults, ResetAfterBody)
+    list.push(mut faults, Conflict)
+    list.push(mut faults, SlowDown)
+    let mut choices = std.sim.world.plan(seed)
+    let mut words: List[u64] = list.with_capacity(512)
+    for i in 0u64 .. 256 {
+        // Keep one clean connection after each seeded fault so the law
+        // reaches every commit without exhausting a retry budget.
+        let fault = if i % 2 == 0 { 0u64 } else { std.sim.world.pick(mut choices, 4) }
+        list.push(mut words, fault << 62)
+        list.push(mut words, seed + i)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let tape = std.sim.world.Script(tail_seed: seed, streams: take streams)
+    bucket_law_sim_plan(tasks, c, seed, None, take faults, std.sim.world.plan_from(tape, 0))
+}
+
+fn bucket_ack_marker(i: u64) -> String {
+    let mut marker = string.from("mark-")
+    string.push_u64(mut marker, i)
+    take marker
+}
+
+fn bucket_ack_commits(tasks: Tasks, r: Random, sim: BucketSim, replaced: bool) -> Result[(), Error] waits {
+    let mut primary = bucket_order_open(tasks, r, sim.time, sim.endpoint, 1, true)?
+    let mut marker_client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
+    for i in 1u64 .. 9 {
+        let committed = bucket_order_commit(mut primary)
+        let acked = match committed {
+            Ok(receipt) => durable(mut primary, receipt),
+            Error(take problem) => Error(take problem),
+        }
+        if replaced && i > 4 {
+            if let Error(Fenced(1)) = acked {} else { fail("VP1: the deposed holder acknowledged a commit") }
+            continue
+        }
+        acked?
+        let due = std.object.deadline_after_ms(marker_client, BUCKET_LAW_OP_MS)
+        let (seen, _) = std.object.fetch(mut marker_client, bucket_ack_marker(i), list.new(), due)
+        if let Error(NotFound) = seen {} else { fail("VP1: the acknowledgement marker must be absent") }
+        if replaced && i == 4 {
+            let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
+            if version(snapshot(successor)) != 4 { fail("VP1: the successor did not inherit four acknowledged commits") }
+            close(take successor)?
+        }
+    }
+    Ok(())
+}
+
+fn bucket_ack_history(report: std.sim.s3.Report, expected: u64) -> Result[(), Error] {
+    let mut seen_mark = 0u64
+    let mut position_at = 0u64
+    let mut written: Map[u64, u64] = map.new()
+    for event in report.head_writes {
+        if read_le(event.data, 88, 8) == 1 {
+            map.insert(mut written, event.request, read_le(event.data, 120, 8))
+        }
+    }
+    for req in report.requests {
+        if let Some(applied_position) = map.get(written, req.request) {
+            position_at = applied_position
+        }
+        if req.method == "GET" && req.key == bucket_ack_marker(seen_mark + 1) {
+            seen_mark += 1
+            if position_at < 2 + seen_mark {
+                fail("VP1: the acknowledgement preceded its exact head advance")
+            }
+        }
+    }
+    if seen_mark != expected || position_at != 2 + expected {
+        fail("VP1: the register and successful acknowledgements disagree")
+    }
+    Ok(())
+}
+
+// Validate in application order. Connection numbers identify requests but
+// can be out of order when connections deliver their final bytes concurrently.
+fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
+    let mut last_head: Map[String, u64] = map.new()
+    let mut requests: Map[u64, ()] = map.new()
+    for i in 0u64 .. list.len(report.head_writes) {
+        let event = view report.head_writes[i]
+        if event.request == 0 || event.request > report.attempts || map.contains(requests, event.request) {
+            fail("VP1: duplicate or invalid applied HEAD request id")
+        }
+        map.insert(mut requests, event.request, ())
+        let captured = history_decode_head(event.data)?
+        let current = captured.head
+        if let Some(previous_index) = map.get(last_head, event.key) {
+            let prior = view report.head_writes[previous_index]
+            let prior_capture = history_decode_head(prior.data)?
+            let previous = prior_capture.head
+            let Some(precondition) = event.if_match else { fail("VP1: HEAD replaced without an If-Match") }
+            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || list.slice(prior.data, 240, list.len(prior.data)) != list.slice(event.data, 240, list.len(event.data)) {
+                fail("VP1: HEAD did not condition on its predecessor or changed the authority")
+            }
+            if current.pair.epoch == previous.pair.epoch {
+                if !same(current.pair.holder, previous.pair.holder) || current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
+                    fail("VP1: HEAD did not advance the incumbent's prefix")
+                }
+                if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
+                    fail("VP1: HEAD did not publish the checkpoint at its new entry")
+                }
+                // Reclaim can erase earlier entries. Where an entry remains,
+                // the bucket's bytes must link to the previous applied tip.
+                let offset = string.byte_len(event.key) - 4
+                let mut entry_key = string.from(string.slice(event.key, 0, offset))
+                string.push(mut entry_key, history_key("e-", current.entry))
+                if let Some(stored_entry) = map.get(report.objects, entry_key) {
+                    let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
+                    if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
+                        fail("VP1: the applied advance omitted its predecessor")
+                    }
+                }
+            } else if current.pair.epoch != previous.pair.epoch + 1 || !history_ref_matches(current.entry, previous.entry) || !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+                fail("VP1: a claim reused an epoch, applied from a stale epoch, or changed the inherited prefix")
+            }
+        } else if event.if_match != None || event.if_none_match != Some("*") || current.pair.epoch != 1 || current.entry.seq != 1 || !history_ref_matches(current.entry, current.checkpoint) {
+            fail("VP1: genesis was not a create-only checkpoint")
+        }
+        map.insert(mut last_head, string.from(event.key), i)
+    }
+    for (key, at) in last_head {
+        let event = view report.head_writes[at]
+        let Some(present) = map.get(report.objects, key) else { fail("VP1: the applied HEAD disappeared") }
+        if event.etag != present.etag || event.data != present.data {
+            fail("VP1: the last applied HEAD differs from the stored HEAD")
+        }
+    }
+    Ok(())
+}
+
+type WitnessCut {
+    head: HistoryHead,
+    manifest: HistoryRef,
+    manifest_bytes: Bytes,
+    entry_bytes: Bytes
+}
+
+fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
+    let mut manifest = page_manifest_empty()
+    manifest.generation = generation
+    manifest.first_live = pos
+    manifest.prev_first = pos
+    manifest.branches[0u64].version = rows_version
+    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
+    bucket_m2_object_header(mut raw_manifest, id, 1, generation)?
+    let reference = history_new_ref(generation, pair.epoch, raw_manifest)
+    let mut raw_entry: Bytes = list.with_capacity(1024)
+    let retained = HistoryRetention(floor: pos, earlier: list.new())
+    let locate = HistoryLocateRoot(depth: 0, rows: list.new())
+    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
+    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding: [0; 32])
+    Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
+}
+
+fn witness_create(mut client: std.object.Client, key: String, data: Bytes, due: u64) -> Result[std.object.ETag, Error] waits {
+    let (created, _) = std.object.store_if(mut client, key, Absent, clone(data), due)
+    let Applied(meta) = created ?=> Remote else { fail("L52-W: a fixture key already existed") }
+    Ok(meta.etag)
+}
+
+fn witness_publish(mut client: std.object.Client, selected: HistoryHead, declaration: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
+    let mut data: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_head(mut data, selected, declaration)?
+    let (result, _) = std.object.store_if(mut client, "head", precondition, take data, due)
+    let Applied(meta) = result ?=> Remote else { fail("L52-W: a fixture head lost its precondition") }
+    Ok(meta.etag)
+}
+
+fn witness_install_cut(mut client: std.object.Client, cut: WitnessCut, metadata: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
+    let _ = witness_create(mut client, history_key("m-", cut.manifest), cut.manifest_bytes, due)?
+    let _ = witness_create(mut client, history_key("e-", cut.head.entry), cut.entry_bytes, due)?
+    witness_publish(mut client, cut.head, metadata, precondition, due)
+}
+
+type WitnessClaimant: send {
+    tasks: Tasks,
+    r: Random,
+    clock: Clock,
+    endpoint: std.sim.s3.Endpoint
+}
+
+fn witness_claim(take actor: WitnessClaimant) -> Result[(), Error] waits {
+    let mut client = bucket_endpoint_client(actor.endpoint, std.sim.s3.endpoint_network(actor.endpoint), actor.clock, actor.tasks, "s3.test", 22, true, 0)?
+    let mut opts = bucket_order_options(false)
+    opts.claim_ms = BUCKET_LAW_OP_MS
+    opts.retain = 1
+    let grant = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    match open_authority(actor.tasks, take grant, actor.clock, actor.r, opts) {
+        Ok(take unexpected) => { let _ = take unexpected; fail("L52-W: B opened after the pair changed") },
+        Error(Refusal(error: take reason, ..)) => Error(take reason),
+    }
+}
+
+fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u64, blocked_entry: String) -> Result[(), Error] {
+    let mut missing = false
+    let mut head_reads = 0u64
+    for event in report.requests {
+        if event.method != "GET" { continue }
+        if missing {
+            if event.key == "head" && event.status == 200 { head_reads += 1 }
+            if blocked_entry != "" && event.key == blocked_entry {
+                fail("L52-W: B read a checkpoint after observing another pair")
+            }
+        }
+        if event.key == removed && event.status == 404 { missing = true }
+    }
+    if !missing || head_reads != 1 { fail("L52-W: a missing checkpoint did not cause exactly one fresh head GET") }
+    if list.len(report.head_writes) != (if next_cut == 22 { 5 } else { 7 }) {
+        fail("L52-W: B wrote a head or C missed an advance")
+    }
+    let last_write = report.head_writes[list.len(report.head_writes) - 1]
+    if read_le(last_write.data, 88, 8) != 2 || read_le(last_write.data, 120, 8) != next_cut + 1 {
+        fail("L52-W: the successor did not advance after reclaim")
+    }
+    Ok(())
+}
+
+fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool) -> Result[(), Error] waits {
+    let id = StoreId(hi: 9, lo: 10)
+    let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12))
+    let previous = HistoryRef(seq: 19, epoch: 1, len: 112, digest: 0)
+    let first = witness_cut(id, pair, 20, previous, 1, 0)?
+    let manifest_key = history_key("m-", first.manifest)
+    let mut group: Bytes = list.with_capacity(1024)
+    bucket_m2_law_commit_packet(mut group, first.head, 1)?
+    let group_ref = history_new_ref(21, 1, group)
+    let later = witness_cut(id, pair, 22, group_ref, 2, 1)?
+    let entry_key = history_key("e-", later.head.entry)
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(manifest_key), from: 1, count: 1, until: Applied("DELETE", clone(manifest_key), 1), then: Apply))
+    if lost_marker {
+        list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(entry_key), from: 1, count: 1, until: Applied("DELETE", clone(entry_key), 1), then: Apply))
+    }
+    let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let mut publisher = bucket_law_client_with(sim, tasks, "s3.test", 19, true)?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(publisher), "bucket"))?
+    let due = std.object.deadline_after_ms(publisher, BUCKET_LAW_OP_MS)
+    let first_tag = witness_install_cut(mut publisher, first, metadata, Absent, due)?
+    let claimant = WitnessClaimant(tasks, r, clock: sim.time, endpoint: sim.endpoint)
+    let pending_claim = task.spawn(tasks, bytes 33554432, take claimant, witness_claim)
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", manifest_key, 1))
+    if lost_marker {
+        let _ = witness_create(mut publisher, history_key("e-", group_ref), group, due)?
+        let mut head21 = first.head
+        head21.entry = group_ref
+        let group_tag = witness_publish(mut publisher, head21, metadata, Match(first_tag), due)?
+        let _ = witness_install_cut(mut publisher, later, metadata, Match(group_tag), due)?
+        // A's previous checkpoint is below its new floor.
+        std.object.erase(mut publisher, manifest_key, due) ?=> Remote
+        result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", entry_key, 1))
+    }
+
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 23, true)?
+    let mut opts = bucket_order_options(false)
+    opts.retain = 1
+    let grant = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    let mut successor = open_authority(tasks, take grant, sim.time, r, opts) ?=> |Refusal(error: take reason, ..)| take reason
+    bucket_law_checkpoint(mut successor)?
+    reclaim_barrier(successor)?
+    if let Error(Lost) = result.unwrap(task.join(take pending_claim)) {} else {
+        fail("L52-W: B did not return Lost")
+    }
+    let successor_ticket = bucket_order_commit(mut successor)?
+    durable(mut successor, successor_ticket)?
+    close(take successor)?
+    let _ = take publisher
+    let report = bucket_law_report(take sim)
+    if lost_marker {
+        witness_ceiling_check(report, entry_key, 24, "")
+    } else {
+        // C has already read its checkpoint when its sweep removes C20.
+        if list.len(report.head_writes) != 5 { fail("L52-W: the successor's head writes were missing") }
+        let body = view report.head_writes[3].data
+        let reference = HistoryRef(seq: read_le(body, 120, 8), epoch: read_le(body, 128, 8),
+            len: read_le(body, 136, 8), digest: read_le(body, 144, 8))
+        let claimed_entry = history_key("e-", reference)
+        witness_ceiling_check(report, manifest_key, 22, claimed_entry)
+    }
+}

@@ -1,0 +1,134 @@
+type TieredIndexRequest: send {
+    pack: u64,
+    offset: u64,
+    listed: TieredPagerPack,
+    deadline: u64
+}
+
+fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request: TieredIndexRequest) -> Result[Arc[Bytes], Error] waits {
+    let path = paged_pack_path(request.pack)?
+    let pack = request.listed.inventory
+    let at = request.offset
+    if (pack.class != 3 && pack.class != 4) || at < pack.index || at >= pack.payload_bytes || pack.payload_bytes - at < 16 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    let width = order.min(PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
+    let mut wire = match input {
+        PagerLocal(d) => {
+            let mut opened = match host.open(d, path, Read) {
+                Ok(take fd) => take fd,
+                Error(NotFound) => return Error(disk_fault(path, at, Absent)),
+                Error(problem) => return Error(Io(problem)),
+            }
+            let obtained = read_disk_bytes(mut opened, path, at, width)
+            disk_io(host.close(take opened))?
+            obtained?
+        },
+        PagerObjects(mut client, op_ms) => {
+            let Some(item) = request.listed.object else {
+                return Error(disk_fault(path, at, Absent))
+            }
+            if item.seq != request.pack || item.len != pack.payload_bytes {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            let deadline = if request.deadline == 0 {
+                std.object.deadline_after_ms(client, op_ms)
+            } else {
+                request.deadline
+            }
+            read_tiered_bucket_window(mut client, item, TieredRange(lo: at, hi: at + width), deadline)?
+        },
+    }
+    let head = disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
+    if head.kind != PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    let end = 16 + head.size
+    let context = DiskContext(store: owner, role: 3, seq: request.pack)
+    if capacity(disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end)))? != head.checksum {
+        return Error(disk_fault(path, at, Checksum))
+    }
+    list.truncate(mut wire, end)
+    let mut pin_bytes_owner = disk_allocation(fn() -> Result[Arc[Bytes], Error] { Ok(arc.new(list.new())) })?
+    let installed = arc.with_unique(mut pin_bytes_owner, scoped fn(mut payload: Bytes) {
+        payload = replace(mut wire, list.new())
+    })
+    let _ = option.unwrap(installed)
+    Ok(take pin_bytes_owner)
+}
+
+fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: TieredPagerPack) -> Result[Arc[Bytes], Error] waits {
+    let request = TieredIndexRequest(pack: pack, offset: offset, listed: clone(listed), deadline: cut.deadline)
+    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[Arc[Bytes], Error]], Receiver[Result[Arc[Bytes], Error]]), Error] {
+        Ok(channel.new(1))
+    })?
+    channel.send(cut.pager, PagerIndex(take request, take answer)) ?=> |_| Io(Closed)
+    channel.receive(delivered) ?=> |_| Io(Closed)
+}
+
+// The cursor retains positions and the front-coded predecessor key. A cut
+// brings its own visitor and installs the advanced cursor only on publication.
+type TieredProbeCursor {
+    index_at: u64,
+    previous_index: u64,
+    inside: Option[PackIndexCursor],
+    next_data: u64,
+    rows: u64
+}
+
+fn start_tiered_probe(pack: PagePack) -> TieredProbeCursor {
+    TieredProbeCursor(index_at: pack.index, previous_index: 0, inside: None, next_data: 72, rows: 0)
+}
+
+fn probe_tiered_index(cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, visit: scoped fn(PackIndexRow) -> Result[(), Error] waits) -> Result[bool, Error] waits {
+    let path = paged_pack_path(seq)?
+    let Some(listed) = std.omap.get(cut.packs, seq) else {
+        return Error(disk_fault(path, cursor.index_at, Absent))
+    }
+    let pack = listed.inventory
+    let mut work = 0u64
+    while work < budget && cursor.index_at < pack.payload_bytes {
+        let at = cursor.index_at
+        let raw = pin_tiered_index(cut, seq, at, listed)?
+        let payload = list.slice(raw, 16, list.len(raw))
+        let mut inside = match replace(mut cursor.inside, None) {
+            Some(take saved) => take saved,
+            None => {
+                let (prev, take first) = start_pack_index(path, at, payload, 0)?
+                if prev != cursor.previous_index {
+                    return Error(disk_fault(path, at, Order))
+                }
+                take first
+            },
+        }
+        while work < budget {
+            let Some(take row) = next_pack_index(path, at, payload, mut inside)? else {
+                break
+            }
+            let width: u64 = int.widen(row.len)
+            let expected_kind = if pack.class == 3 { 0x21u8 } else { 0x22u8 }
+            if row.kind != expected_kind || row.offset != cursor.next_data || row.stamp >= cut.next_stamp ||
+                row.offset >= pack.index || 16 + width > pack.index - row.offset || cursor.rows >= int.widen(pack.frames) {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            let _ = probe_routing_key(seq, row)?
+            visit(row)?
+            cursor.next_data += 16 + width
+            cursor.rows += 1
+            work += 1
+        }
+        if inside.remaining != 0 {
+            cursor.inside = Some(take inside)
+            return Ok(false)
+        }
+        cursor.previous_index = at
+        cursor.index_at += list.len(raw)
+    }
+    if cursor.index_at == pack.payload_bytes {
+        if cursor.next_data != pack.index || cursor.rows != int.widen(pack.frames) {
+            return Error(disk_fault(path, cursor.index_at, Malformed))
+        }
+        return Ok(true)
+    }
+    Ok(false)
+}

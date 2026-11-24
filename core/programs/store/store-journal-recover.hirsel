@@ -1,0 +1,131 @@
+type JournalRecovered {
+    replay: JournalReplay,
+    seq: u64,
+    end: u64,
+    uncovered: u64
+}
+
+// How a recovery pass reads the journal (§3.2, §3.4, §12.5). `Locked` is the
+// opener's, under LOCK: no writer runs, so a boundary past the stat size is
+// damage. `Live` (a read-only open or a log@1 follower) may run beside a
+// writer: a boundary newer than the stat refreshes the size on the same handle
+// first. Both sync each segment before its stat; `Live` also syncs the terminal
+// segment again after reading it, so every frame it applies is durable before
+// it returns.
+type JournalRead = Locked | Live
+
+fn journal_read_live(read: JournalRead) -> bool {
+    match read {
+        Locked => false,
+        Live => true,
+    }
+}
+
+// A live reader may stat before the writer extends the file and then read a
+// newer END or successor. The boundary names bytes the writer synced, so the
+// handle's current size covers it unless the file is damaged.
+fn journal_refresh_size(mut input: JournalInput, read: JournalRead, boundary: Option[u64]) -> Result[(), Error] waits {
+    if let Some(d) = boundary {
+        if d > input.size && journal_read_live(read) {
+            input.size = disk_io(host.stat_file(mut input.file))?.size
+        }
+    }
+    Ok(())
+}
+
+fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
+    let mut replay = take initial
+    let mut seq = first
+    let mut uncovered = 0u64
+    loop {
+        let path = journal_path(seq, "")?
+        let file = match host.open(d, path, Read) {
+            Ok(take handle) => take handle,
+            Error(NotFound) => return Error(disk_fault(path, 0, Header)),
+            Error(e) => return Error(Io(e))
+        }
+        let mut source = journal_input(take file, true)?
+        let following = journal_following(d, id, seq, true)?
+        let boundary = match following {
+            Some(h) => Some(h.prev_end),
+            None => disk_end(d, id, seq)?
+        }
+        let final_item = match following {
+            None => true,
+            Some(_) => false
+        }
+        journal_refresh_size(mut source, read, boundary)?
+        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+            journal_apply(path, mut recovered_state, take event)
+        })
+        let JournalInput(file: take consumed_file, ..) = take source
+        let mut consumed = take consumed_file
+        if final_item && journal_read_live(read) {
+            if let Ok(_) = scanned {
+                // §3.2: the writer may have written frames inside the stat
+                // size after this pass's sync, before their group sync ran.
+                disk_io(host.sync(mut consumed))?
+            }
+        }
+        disk_io(host.close(take consumed))?
+        let (end, segment_bytes) = match take scanned {
+            Ok(segment) => segment,
+            Error(Corrupt(take fault)) => {
+                // A bad last HEADER without a good END is an incomplete
+                // segment creation. Valid headers with bad frames follow d.
+                let no_end = match boundary {
+                    None => true,
+                    Some(_) => false
+                }
+                if final_item && no_end && seq == first {
+                    if let Error(Corrupt(_)) = journal_header(d, id, seq, false) {
+                        return Ok(JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
+                    }
+                }
+                return Error(Corrupt(take fault))
+            },
+            Error(take e) => return Error(take e)
+        }
+        uncovered = int.saturating_add(uncovered, segment_bytes)
+        if let None = following {
+            return Ok(JournalRecovered(replay: take replay, seq: seq, end: end, uncovered: uncovered))
+        }
+        seq += 1
+    }
+}
+
+fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
+    let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
+    if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    let (take roots, at, take key) = disk_allocation(scoped fn() -> Result[(Roots, u64, String), Error] {
+        for source in replay.state.tips {
+            if source.id != parent {
+                continue
+            }
+            if source.head != forked_at {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+            let mut roots = share_roots(source.roots)
+            if let Some(layer) = view source.roots.collections.replay {
+                roots.collections.replay = Some(arc.new(ReplayBranch(collections: clone(layer.collections), fork_time: Some(clone(layer.collections)), ids: layer.ids, charged: layer.charged)))
+            }
+            return Ok((take roots, source.at, string.from(name)))
+        }
+        Error(disk_fault(file, 0, Malformed))
+    })?
+    let charge = branch_root_bytes(name, roots)
+    if charge > META_LIMIT - replay.record_bytes { return Error(disk_fault(file, 0, Malformed)) }
+    capacity(list.try_reserve(mut replay.state.tips, 1))?
+    capacity(list.try_reserve(mut replay.forked, 1))?
+    capacity(map.try_reserve(mut replay.names, 1))?
+    map.insert(mut replay.names, take key, id)
+    list.push(mut replay.state.tips, Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
+    replay.record_bytes += charge
+    list.push(mut replay.forked, LineageFork(child: id, parent: parent, watermark: watermark, adopted: false))
+    replay.state.next_branch = id + 1
+    replay.next_node = order.max(replay.next_node, watermark - 1)
+    replay.tiered.exact = false
+    Ok(())
+}

@@ -131,6 +131,36 @@ class Walker(unittest.TestCase):
         for stderr in ['Bounds at 3\n', 'ééBounds at 3\n', 'xBounds at 3\n', 'éOverflow at 3\n']:
             self.assertIsNotNone(test_observation(fail, result([dict(failed, stderr=stderr)], 1), entry)[1])
 
+    def test_replay_requires_a_successful_playback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'law.hirsel').write_text(
+                '// expect: run positive() = true\nfn positive()->bool {true}\n'
+                '// expect: run negative() = fail Bounds\nfn negative()->u64 {1}')
+            cases = discover(root, [])
+            commands = []
+
+            def compiler(command, **kwargs):
+                commands.append(command)
+                adapted = Path(command[command.index('--inputs') + 1]).parent / 'law.hirsel'
+                failed = 'let _ = negative()' in adapted.read_text()
+                test = dict(definition='std@1/tests/law/native_contract', passed=not failed,
+                            status=101 if failed else 0, stdout='', stderr='Bounds at 3\n' if failed else '')
+                return subprocess.CompletedProcess(command, int(failed), json.dumps(dict(tests=[test])).encode(), b'')
+
+            with patch('std_native.Case.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+                ordinary = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
+                replay = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [], replay=True)
+
+            self.assertTrue(all(row['passed'] for row in ordinary))
+            self.assertEqual(len(commands), 4)
+            self.assertTrue(all('--replay' in command for command in commands[2:]))
+            self.assertEqual([(row['passed'], row.get('replay')) for row in replay],
+                             [(True, 'Sealed'), (False, None)])
+
     def test_native_walker_uses_driver_tests_for_every_law_on_both_engines(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

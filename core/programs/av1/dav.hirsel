@@ -1,0 +1,21 @@
+pub fn probe(f: Foreign[av1.DecoderCodec], max_pixels: u32, data: Bytes) -> i32
+
+pub fn probe_waiting(f: Foreign[av1.DecoderCodec], max_pixels: u32, data: Bytes) -> i32 waits
+
+pub fn create(f: Foreign[av1.DecoderCodec], max_pixels: u32) -> Option[foreign.Ptr[av1.DecoderHandle]] waits
+
+pub fn destroy(f: Foreign[av1.DecoderCodec], take d: foreign.Ptr[av1.DecoderHandle]) waits
+
+pub fn send_pixels(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle], data: Bytes) -> u64
+
+pub fn sequence_pixels(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle]) -> u64
+
+pub fn send(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle], data: Bytes) -> i32
+
+pub fn send_waiting(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle], data: Bytes) -> i32 waits
+
+pub fn receive(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle], mut pixels: Bytes) -> i64
+
+pub fn receive_waiting(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle], mut pixels: Bytes) -> i64 waits
+
+pub fn reset(f: Foreign[av1.DecoderCodec], d: foreign.Ptr[av1.DecoderHandle]) waits

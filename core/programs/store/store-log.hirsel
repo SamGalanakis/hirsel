@@ -1,0 +1,487 @@
+pub opaque type Log[V]: shareable + send {
+    binding: ValueCollection[V]
+}
+
+pub type LogBounds: shareable + send {
+    first: u64,
+    next: u64
+}
+
+pub fn log_identity[V](l: Log[V]) -> (StoreId, u32) {
+    (l.binding.store, l.binding.id)
+}
+
+pub fn log_schemas[V](l: Log[V]) -> Arc[RowSchemas] {
+    arc.share(l.binding.readers.schemas)
+}
+
+pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Log[V], Error] {
+    let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
+    Ok(Log(binding: declare_value_collection(mut d, name, 4, schema, take value)?))
+}
+
+fn log_key(id: u32, seq: u64) -> Result[Bytes, Error] {
+    let mut key = prefixed(id, 8, false)?
+    list.put_word_be(mut key, seq)
+    Ok(take key)
+}
+
+fn descriptor_bounds(descriptor: Bytes) -> LogBounds {
+    LogBounds(first: list.word_le(descriptor, 64), next: list.word_le(descriptor, 56))
+}
+
+fn committed_log_bounds(tree: PageTree, id: u32) -> Result[LogBounds, Error] {
+    let key = prefix(id)?
+    let Some(descriptor) = std.page.lookup(tree.root, key) else { return Error(Stale(id)) }
+    Ok(descriptor_bounds(descriptor))
+}
+
+type LogState: shareable + send {
+    head: LogBounds,
+    limits: LogBounds,
+    height: u64
+}
+
+fn transaction_log_state(tx: Tx, id: u32) -> Result[LogState, Error] {
+    if let Some(existing) = staged_log_state(tx, id) {
+        return Ok(existing)
+    }
+    let tree = view tx.roots.collections
+    let key = prefix(id)?
+    let Some(descriptor) = std.page.lookup(tree.root, key) else { return Error(Stale(id)) }
+    let head = descriptor_bounds(descriptor)
+    let height = if descriptor[53u64] == 1 {
+        transaction_write_height(tx, log_key(id, head.next)?)?
+    } else {
+        collection_write_height(tree, key)
+    }
+    Ok(LogState(head: head, limits: head, height: height))
+}
+
+fn staged_log_state(tx: Tx, id: u32) -> Option[LogState] {
+    if let Some(existing) = map.get(tx.ops.logs, id) {
+        return Some(existing)
+    }
+    let mut layer = list.len(tx.below)
+    while layer > 0 {
+        layer -= 1
+        if let Some(existing) = map.get(tx.below[layer].ops.logs, id) {
+            return Some(existing)
+        }
+    }
+    None
+}
+
+fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
+    if let Some(existing) = staged_log_state(tx, id) {
+        return Ok(existing.limits)
+    }
+    committed_log_bounds(tx.roots.collections, id)
+}
+
+pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
+    check_write_attempt(tx)?
+    readable_value(tx.store, tx.roots, l.binding)?
+    let id = l.binding.id
+    let mut current = transaction_log_state(tx, id)?
+    let seq = current.limits.next
+    let Some(following) = int.checked_add(seq, 1) else { return Error(Limit(Ids)) }
+    let mut raw: Bytes = list.new()
+    list.put_word_le(mut raw, l.binding.readers.current)
+    std.codec.encode(l.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+    if list.len(raw) > VALUE_LIMIT {
+        return Error(Limit(Value))
+    }
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(before) => {
+            let after = before + 25 + list.len(raw)
+            if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    let key = log_key(id, seq)?
+    let _ = reserve_ids(mut tx, current.height)?
+    let charge = memory_data_charge(tx, key, raw)
+    let staged = stage_value(take raw, tx.roots.collections.inline)
+    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged))
+    current.limits.next = following
+    map.insert(mut tx.ops.logs, id, current)
+    tx.frame_bytes = frame
+    tx.resident = int.saturating_add(tx.resident, charge)
+    tx.wrote = true
+    Ok(seq)
+}
+
+pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
+    readable_value(tx.store, tx.roots, l.binding)?
+    note_read(tx, Point(prefix(l.binding.id)?))?
+    transaction_log_bounds(tx, l.binding.id)
+}
+
+pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error] {
+    readable_value(tx.store, tx.roots, l.binding)?
+    let key = log_key(l.binding.id, seq)?
+    let current = transaction_log_bounds(tx, l.binding.id)?
+    if seq < current.first || seq >= current.next {
+        note_read(tx, Point(take key))?
+        return Ok(None)
+    }
+    let row = transaction_row(tx, key)?
+    note_read(tx, Point(take key))?
+    decode_log_row(l, row)
+}
+
+fn decode_log_row[V](l: Log[V], raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
+    match raw {
+        Some(stored) => Ok(Some(row_value(l.binding.readers, l.binding.id, stored)?)),
+        None => Ok(None),
+    }
+}
+
+fn decode_log_last[V](l: Log[V], seq: u64, raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
+    match raw {
+        Some(stored) => Ok(Some((seq, row_value(l.binding.readers, l.binding.id, stored)?))),
+        None => Ok(None),
+    }
+}
+
+pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
+    readable_value(tx.store, tx.roots, l.binding)?
+    let id = l.binding.id
+    let current = transaction_log_bounds(tx, id)?
+    if current.first == current.next {
+        note_read(tx, Span(prefix(id)?, prefix(id + 1)?))?
+        return Ok(None)
+    }
+    let seq = current.next - 1
+    let key = log_key(id, seq)?
+    let row = transaction_row(tx, key)?
+    note_read(tx, Span(take key, prefix(id + 1)?))?
+    decode_log_last(l, seq, row)
+}
+
+pub fn log_bounds[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[LogBounds, Error] waits {
+    read_access(r, s)?
+    disk_allocation(scoped fn() -> Result[LogBounds, Error] {
+        readable_value(s.store, s.roots, l.binding)?
+        committed_log_bounds(s.roots.collections, l.binding.id)
+    })
+}
+
+pub fn log_get[V](r: Reader, s: Snapshot, l: Log[V], seq: u64) -> Result[Option[V], Error] waits {
+    read_access(r, s)?
+    readable_value(s.store, s.roots, l.binding)?
+    let key = log_key(l.binding.id, seq)?
+    snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
+        decode_log_row(l, raw)
+    })
+}
+
+pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)], Error] waits {
+    let current = log_bounds(r, s, l)?
+    if current.first == current.next {
+        return Ok(None)
+    }
+    let seq = current.next - 1
+    let key = log_key(l.binding.id, seq)?
+    snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
+        decode_log_last(l, seq, raw)
+    })
+}
+
+fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {
+    RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), unique: false, skip: None)
+}
+
+pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error] waits {
+    read_access(r, s)?
+    readable_value(s.store, s.roots, l.binding)?
+    let id = l.binding.id
+    let codec = std.codec.key_u64()
+    let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
+    let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
+    let capture: Snapshot = clone(s)
+    Ok(Rows(capture: take capture, source: id, catalog_key: arc.share(l.binding.catalog_key), catalog_page: arc.share(l.binding.catalog_page), low: take low, high: take high, last: None, reverse: false, done: false, decoder: log_decoder(l)))
+}
+
+type LogRangeTail {
+    id: u32,
+    seq: u64,
+    end: u64
+}
+
+fn log_endpoint(limit: Bound[u64], high: bool) -> u64 {
+    match limit {
+        Unbounded => if high { 18446744073709551615u64 } else { 0u64 },
+        Included(n) => if high { int.saturating_add(n, 1) } else { n },
+        Excluded(n) => if high { n } else { int.saturating_add(n, 1) },
+    }
+}
+
+pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[TxRows[u64, V], Error] in tx {
+    readable_value(tx.store, tx.roots, l.binding)?
+    let id = l.binding.id
+    let head = committed_log_bounds(tx.roots.collections, id)?
+    let current = transaction_log_bounds(tx, id)?
+    let lower = order.max(log_endpoint(lo, false), current.first)
+    let upper = order.min(log_endpoint(hi, true), current.next)
+    let cursor = byte_cursor(tx.roots.collections, Included(log_key(id, lower)?), log_key(id, order.min(upper, head.next))?)?
+    let tail = LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
+    let codec = std.codec.key_u64()
+    let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
+    let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
+    let rows = PageRows(cursor: take cursor, data: share_page_tree(tx.roots.collections), decoder: log_decoder(l))
+    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: false, log_tail: Some(tail)))
+}
+
+fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    if tail.seq >= tail.end {
+        return Ok(None)
+    }
+    let key = log_key(tail.id, tail.seq)?
+    let Some(raw) = transaction_row(tx, key)? else { return Error(malformed(0)) }
+    let body = arc.new(copied(raw)?)
+    tail.seq += 1
+    Ok(Some((take key, take body)))
+}
+
+fn apply_log_append(mut tree: PageTree, key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
+    let collection = list.slice(key, 0, 4)
+    let suffix = list.slice(key, 4, list.len(key))
+    let inline = tree.inline
+    page_result(std.page.edit_collection(mut tree.root, collection, first, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.append_row(mut root, suffix, value, shared, inline, first, mut stamps)
+    }))
+}
+
+pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
+    check_write_attempt(tx)?
+    readable_value(tx.store, tx.roots, l.binding)?
+    let id = l.binding.id
+    let mut current = transaction_log_state(tx, id)?
+    let floor = order.min(order.max(seq, current.limits.first), current.limits.next)
+    if floor == current.limits.first {
+        return Ok(())
+    }
+    let mut masked_charge = 0u64
+    let mut masked_wire = 0u64
+    for old_seq in order.max(current.head.next, current.limits.first) .. floor {
+        let key = log_key(id, old_seq)?
+        let Some(raw) = transaction_row(tx, key)? else { fail("store: missing staged Log append") }
+        masked_charge += memory_data_charge(tx, key, raw)
+        if let Some(_) = tx.frame_bytes {
+            masked_wire += 25 + list.len(raw)
+        }
+    }
+    let first_trim = current.limits.first == current.head.first
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(before) => {
+            let added = if first_trim { 21u64 } else { 0u64 }
+            let after = before - masked_wire + added
+            if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    let _ = reserve_ids(mut tx, current.height)?
+    current.limits.first = floor
+    map.insert(mut tx.ops.logs, id, current)
+    if first_trim {
+        tx.trim_rows += 1
+    }
+    tx.frame_bytes = frame
+    tx.resident = int.saturating_sub(tx.resident, masked_charge)
+    Ok(())
+}
+
+fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u64], first: u64, mut ids: u64) -> Result[u64, Error] {
+    let (take kept, next_seq, dropped) = {
+        let Some((old, descriptor)) = std.page.collection_entry(tree.root, key) else { return Error(malformed(0)) }
+        if descriptor[52] != 4 || descriptor[53] != 0 {
+            return Error(malformed(0))
+        }
+        let limits = descriptor_bounds(descriptor)
+        let previous: u64 = list.word_le(descriptor, 44)
+        if floor < limits.first {
+            return Error(malformed(0))
+        }
+        if let Some(amount) = expected {
+            if amount > previous {
+                return Error(malformed(0))
+            }
+        }
+        let candidate = if floor >= limits.next {
+            let Some(empty) = view tree.empty_collection else { fail("store: missing empty collection page") }
+            arc.share(empty)
+        } else {
+            let suffix = key_word(floor)
+            page_result(std.page.cut_before(old, suffix, mut ids))?
+        }
+        let (rows, charge) = std.page.totals(candidate)
+        let removed = order.min(floor, limits.next) - limits.first
+        if rows != limits.next - limits.first - removed || charge > previous {
+            return Error(malformed(0))
+        }
+        (take candidate, order.max(floor, limits.next), previous - charge)
+    }
+    if let Some(amount) = expected {
+        if dropped != amount {
+            return Error(malformed(0))
+        }
+    }
+    let descriptor = log_record(kept, floor, next_seq, 0)?
+    page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids))?
+    Ok(dropped)
+}
+
+fn masked_log_append(states: Map[u32, LogState], key: Bytes) -> bool {
+    if list.len(key) != 12 {
+        return false
+    }
+    let id: u32 = list.word_be(key, 0)
+    let Some(state) = map.get(states, id) else { return false }
+    let seq: u64 = list.word_be(key, 4)
+    seq < state.limits.first
+}
+
+fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
+    let mut operations = new_data_rows()
+    let first = draw
+    let states = replace(mut tx.ops.logs, map.new())
+    for (id, state) in states {
+        if state.limits.first == state.head.first {
+            continue
+        }
+        let key = prefix(id)?
+        // A Tiered Log's floor is staged by the Tiered write plan, whose
+        // `TieredDropped` figure the frame carries (§13.3).
+        let dropped = if tiered_data_key(tx.roots.collections, key) {
+            0u64
+        } else {
+            let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
+            if !tx.retain_old {
+                tx.resident = int.saturating_sub(tx.resident, removed)
+            }
+            removed
+        }
+        push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped))))
+    }
+    if operations.count == 0 {
+        return Ok(replace(mut tx.ops.rows, new_data_rows()))
+    }
+    tx.frame_tail = NO_FRAME_TAIL
+    for slot in 0u64 .. tx.ops.rows.count {
+        let op = data_row(tx.ops.rows, slot)
+        if !masked_log_append(states, op.key) {
+            push_data_row(mut operations, clone(op))
+        }
+    }
+    Ok(take operations)
+}
+
+pub fn published_log[V](l: Log[V], change: Change) -> Result[Option[Bytes], Error] {
+    if list.len(change.tree_key) != 12 || list.slice(change.tree_key, 0, 4) != prefix(l.binding.id)? {
+        return Error(Missing("log"))
+    }
+    publish_row(l.binding.id, l.binding.readers, change)
+}
+
+pub fn tail_window[V](r: Reader, s: Snapshot, l: Log[V], t: u64) -> Result[LogBounds, Error] waits {
+    if t == 0 { return Error(Missing("n")) }
+    let ends = log_bounds(r, s, l)?
+    Ok(LogBounds(first: ends.next - order.min(t, ends.next - ends.first), next: ends.next))
+}
+
+fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
+    for seq in lo .. hi {
+        list.push(mut out.rows, Change(tree_key: log_key(id, seq)?, value: None))
+    }
+    Ok(())
+}
+
+fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32, lo: u64, hi: u64) -> Result[(), Error] waits {
+    if lo >= hi { return Ok(()) }
+    let low = log_key(id, lo)?
+    let high = log_key(id, hi)?
+    let tree = view after.roots.collections
+    if let Some(inventory) = view tree.paging {
+        let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
+        if descriptor[53u64] == 1 {
+            let rows = snapshot_tiered_span(r, after, inventory, low, high)?
+            capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+            for take row in take rows { list.push(mut out.rows, take row) }
+            return Ok(())
+        }
+    }
+    let mut rows = byte_cursor(tree, Included(take low), high)?
+    while let Some((take key, take value)) = next_bytes(mut rows)? {
+        list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
+    }
+    Ok(())
+}
+
+// With a shared Cold Log root, only the retained suffix can differ. Dense
+// sequence bounds make the two overlay cursors advance in lockstep.
+fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
+    let key = prefix(id)?
+    let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else { return Ok(false) }
+    let Some((ColdPage(right), _)) = std.page.collection_slot(after.root, key) else { return Ok(false) }
+    if left != right { return Ok(false) }
+    let (Some(old_branch), Some(new_branch)) = (view before.replay, view after.replay) else { return Ok(true) }
+    let (Some(old_log), Some(new_log)) = (std.omap.get(old_branch.collections, id), std.omap.get(new_branch.collections, id)) else { return Ok(true) }
+    let path = paged_pack_path(left.pack)?
+    let Some(cold_next) = old_log.cold_next else { return Error(disk_fault(path, left.offset, Malformed)) }
+    if new_log.cold_next != Some(cold_next) { return Error(disk_fault(path, left.offset, Malformed)) }
+    let start = order.max(lo, cold_next)
+    if start >= hi { return Ok(true) }
+    let rows = disk_allocation(scoped fn() -> Result[List[Change], Error] {
+        let mut old = std.omap.range(old_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
+        let mut new = std.omap.range(new_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
+        let mut changed: List[Change] = list.new()
+        for seq in start .. hi {
+            let Some((take old_key, ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            let Some((take new_key, ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            if old_key != new_key || list.word_be(new_key, 4) != seq {
+                return Error(disk_fault(path, left.offset, Malformed))
+            }
+            if old_value != new_value {
+                list.push(mut changed, Change(tree_key: take new_key, value: Some(take new_value)))
+            }
+        }
+        Ok(take changed)
+    })?
+    capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+    for take row in take rows { list.push(mut out.rows, take row) }
+    Ok(true)
+}
+
+pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64) -> Result[List[Change], Error] waits {
+    let old = tail_window(r, a, l, t)?
+    let new = tail_window(r, b, l, t)?
+    let id = l.binding.id
+    let mut out = change_output(None)
+    let overlap_first = order.max(old.first, new.first)
+    let overlap_next = order.min(old.next, new.next)
+    window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
+    window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
+    if a.branch != b.branch && overlap_first < overlap_next &&
+        !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
+        let key = prefix(id)?
+        let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(key_word(overlap_first)))
+        let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(key_word(overlap_first)))
+        let _ = page_change_rows(mut out, id, mut previous, mut current, Some(key_word(overlap_next)))?
+    }
+    window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
+    window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?
+    let ChangeOutput(rows: take items, ..) = take out
+    Ok(take items)
+}

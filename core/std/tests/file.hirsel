@@ -285,3 +285,67 @@ fn peer_replies_during_fifo(d: Dir, clock: Clock, tasks: Tasks, out: Stdout) -> 
     result.unwrap(task.join(take peer))
     n == 1 && ok && last_reply < start + 40000000
 }
+
+// Each scripted failure leaves the old file, except directory sync after rename.
+// The write fault commits a prefix, and one rename fault is paired with a failed remove.
+// host: replace_faults
+// expect: run replace_faults_preserve_complete_target(dir) = true
+fn replace_faults_preserve_complete_target(d: Dir) -> bool waits {
+    if let Error(NotReplaced(Denied)) = file.replace(d, "sub/target", string.as_bytes("new payload")) {} else {
+        return false
+    }
+    for attempt in 0u64 .. 8 {
+        result.unwrap(file.write(d, "target", string.as_bytes("old body")))
+        let outcome = file.replace(d, "target", string.as_bytes("new payload"))
+        let published = attempt == 5 || attempt == 7
+        match outcome {
+            Error(NotReplaced(Other(5))) => if published {
+                return false
+            },
+            Error(Unsynced(Other(5))) => if attempt != 5 {
+                return false
+            },
+            Ok(()) => if attempt != 7 {
+                return false
+            },
+            _ => return false,
+        }
+        let visible = result.unwrap(file.read_string(d, "target"))
+        let expected = if published {
+            "new payload"
+        } else {
+            "old body"
+        }
+        if visible != expected {
+            return false
+        }
+        let entries = result.unwrap(dir.list(d, None))
+        if attempt == 6 {
+            if list.len(entries) != 2 || !string.starts_with(entries[0].name, ".hirsel-tmp-") || entries[1].name != "target" {
+                return false
+            }
+            let stranded = result.unwrap(file.read_string(d, entries[0].name))
+            if stranded != "new payload" {
+                return false
+            }
+            result.unwrap(file.remove(d, entries[0].name))
+        } else if list.len(entries) != 1 || entries[0].name != "target" {
+            return false
+        }
+    }
+    let raw_collision = ".hirsel-tmp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    let tagged_collision = ".hirsel-tmp-0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    for target in[raw_collision, string.from(tagged_collision)] {
+        // The host also observes absence after create and after its partial write.
+        match file.replace(d, target, string.as_bytes("new payload")) {
+            Error(NotReplaced(Other(5))) => {},
+            _ => return false,
+        }
+        match dir.stat(d, target) {
+            Error(NotFound) => {},
+            _ => return false,
+        }
+    }
+    result.unwrap(file.replace(d, tagged_collision, string.as_bytes("new payload")))
+    result.unwrap(file.read_string(d, tagged_collision)) == "new payload"
+}

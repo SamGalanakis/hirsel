@@ -90,6 +90,8 @@ void hirsel_core_map_hash_add_bytes(void *, const uint8_t *, uint64_t);
 uint64_t hirsel_core_map_hash_finish(const void *);
 /* rt.sha1_blocks: RFC 3174 compression of the byte span and its padding. */
 void hirsel_core_sha1_blocks(uint32_t *state, const uint8_t *data, uint64_t len);
+/* rt.sha1_compress: RFC 3174 compression of complete blocks without padding. */
+void hirsel_core_sha1_compress(uint32_t *state, const uint8_t *data, uint64_t blocks);
 /* rt.zero_bytes: zero len bytes at at, inside the storage block that starts at
    block; pages the kernel never backed are already zero and stay untouched. */
 void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
@@ -98,6 +100,9 @@ void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
    eight state words, with the CPU's SHA-256 instructions when it has them; no
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
+
+/* rt.sha512_blocks: FIPS 180-4 compression of 128-byte blocks. */
+void hirsel_core_sha512_blocks(uint64_t *state, const uint8_t *data, uint64_t blocks);
 
 /* Extend a finalized CRC. Zero length reads nothing. */
 uint32_t hirsel_core_crc32c(uint32_t crc, const uint8_t *data, uint64_t len);
@@ -118,6 +123,29 @@ uint64_t hirsel_core_p256_verify(const uint8_t *key, uint64_t key_len,
 uint64_t hirsel_core_p256_verify_der(const uint8_t *key, uint64_t key_len,
                                     const uint8_t *msg, uint64_t msg_len,
                                     const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p384_verify(const uint8_t *key, uint64_t key_len,
+                                const uint8_t *msg, uint64_t msg_len,
+                                const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p384_verify_der(const uint8_t *key, uint64_t key_len,
+                                    const uint8_t *msg, uint64_t msg_len,
+                                    const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_rsa_verify_pkcs1_sha256(const uint8_t *n, uint64_t n_len,
+                                            const uint8_t *e, uint64_t e_len,
+                                            const uint8_t *msg, uint64_t msg_len,
+                                            const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_rsa_verify_pss_sha256(const uint8_t *n, uint64_t n_len,
+                                          const uint8_t *e, uint64_t e_len,
+                                          const uint8_t *msg, uint64_t msg_len,
+                                          const uint8_t *sig, uint64_t sig_len);
+
+/* Argon2id uses the current step and byte limits and appends into out's spare.
+   Error: 0 success, 1 Params, 2 Capacity. Status 1 means OutOfTime. */
+typedef struct { uint64_t requested, available; uint8_t error, status; } HirselCoreArgon2Outcome;
+HirselCoreArgon2Outcome hirsel_core_argon2id(
+    HirselCoreContext *, const uint8_t *password, uint64_t password_len,
+    const uint8_t *salt, uint64_t salt_len, const uint8_t *key, uint64_t key_len,
+    const uint8_t *data, uint64_t data_len, uint32_t memory_kib, uint32_t passes,
+    uint32_t lanes, uint64_t len, void *out, uint64_t site);
 
 /* XXH3-64 seed zero for a span of at most 240 bytes. */
 uint64_t hirsel_core_xxh3_short(const uint8_t *data, uint64_t len);
@@ -220,11 +248,11 @@ void hirsel_core_refunds_drain(const HirselCoreContext *);
 void hirsel_core_task_bind(const HirselCoreContext *);
 void *hirsel_core_region_refill(HirselCoreRegion *, size_t bytes, size_t alignment);
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
-/* Context-aware refund: compare raw payer word with current, direct when equal;
-   otherwise use original-payer lookup. No status/admission/allocation. */
-void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
-/* Admission without allocation, for storage the caller holds (frame bytes). */
-HirselCoreAllocation hirsel_core_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
+/* Admission without allocation, for storage the caller holds (frame bytes).
+   Frame charges move only the current record's available bytes. */
+HirselCoreAllocation hirsel_core_frame_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
+/* Return a frame charge to the current limit. No status/admission/allocation. */
+void hirsel_core_frame_refund(const HirselCoreContext *, uint64_t bytes);
 HirselCoreAllocation hirsel_core_admit_lent_frame(const HirselCoreContext *, uint8_t *frame, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_head(const HirselCoreContext *, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_tail(const HirselCoreContext *, uint8_t *head, size_t bytes, uint64_t charge, bool charge_overflow);

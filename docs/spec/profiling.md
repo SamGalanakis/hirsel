@@ -55,7 +55,7 @@ the mapping and relative PC when neither source is available.
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =
-0x48505246` and `user_version = 3`. Readers open the current version
+0x48505246` and `user_version = 4`. Readers open the current version
 read-only and refuse other versions.
 Source snippets and symbol names are recorded in the database so it can travel
 without the source tree, executable or debug files.
@@ -75,8 +75,8 @@ The database has the following tables, views and columns.
 | `fn_cpu_summary` | `function_id, event, self_total, inclusive_total, sample_count` |
 | `line_cpu_summary` | `file, line, function_id, event, self_total, sample_count` |
 | `codegen_remark` | `function_id, file, line, col, kind, outcome, evidence_level, count` |
-| `peak_snapshot` | `id, metric, scope_id, ts_ns, total_bytes` |
-| `peak_callsite` | `snapshot_id, callsite_id, live_bytes, live_count` |
+| `peak_snapshot` | `id, metric, scope_id, ts_ns, total_bytes, resident_bytes` |
+| `peak_callsite` | `snapshot_id, callsite_id, live_bytes, live_count, resident_bytes` |
 | `mem_alloc_agg` | `callsite_id, allocation_kind, observed_count, observed_bytes, estimated_count, estimated_bytes, freed_count, lifetime_ns` |
 | `budget_scope_summary` | `scope_id, parent_id, scope_kind, task_id, callsite_id, enter_ts, exit_ts, limit_val, peak_val, refused` |
 | `task` | `id, unit_id, runtime_id, parent_id, start_ns, end_ns` |
@@ -199,24 +199,30 @@ concurrently, and forcing them to run serially would change scheduling.
 
 `prof run --mem` profiles a live process with sampling only; `--mem=exact`
 refuses and names replay. Each worker has its own sampler with the same
-512 KiB mean byte interval and records stack snapshots in its own chunks. No
-order is imposed between workers. A free on any worker closes the sampled
-allocation at that address, using a lock-free table of sampled addresses
-sized from `HIRSEL_PROFILE_MEM_ENTRIES`, at twice that many entries. A
-sampled allocation that does not fit within its probe window, or a free on a
-thread without a runtime stream, counts toward `mem_state_lost`.
+512 KiB mean byte interval and records stack snapshots in its own chunks.
+A sampled allocation marks its address bucket so a free on any worker can
+skip the live sample lookup when that bucket is empty. More than
+`HIRSEL_PROFILE_MEM_ENTRIES` simultaneous samples or a free on a thread
+without a runtime stream counts toward `mem_state_lost`.
 
-The profiler reads the process RSS every 10 ms. `run_meta` records the
-highest read as `rss_peak_ns` and `rss_peak_bytes`, and the last read before
-exit as `rss_last_ns` and `rss_last_bytes`. A `retained_bytes` snapshot is
-taken at each of those two instants. Its
-callsite members are the sampled allocations live at that instant, each
-weighted by the inverse of its inclusion probability. The instants do not
-depend on the sampler. `mem_alloc_agg` gives weighted allocated bytes, and
-`prof peak-mem` divides them by the run time to report `bytes_per_s`.
-`run_meta` lists `charged_bytes`, `slack_bytes` and `budget_near_misses` in
-`mem_absent_metrics`. Those metrics are absent from a live profile, not zero,
-and `prof peak-mem` reports null budgets.
+The drain thread reads process RSS from `/proc/self/statm` every 10 ms while
+the runtime is active. At each read it uses Linux `mincore` to count the
+bytes of each sampled allocation that overlap resident pages. It keeps the
+highest RSS read and the last read before exit, with their backing
+residency. `run_meta` records them as `rss_peak_ns`, `rss_peak_bytes`,
+`rss_last_ns` and `rss_last_bytes`. In live `prof peak-mem` output the
+`retained_bytes` snapshots and callsites give `allocated_bytes` and
+`resident_bytes` side by side. Both estimates weight each sampled backing
+by the inverse of its inclusion probability. Backings that share a page
+count only the bytes they occupy on that page. An unavailable residency
+reading leaves the callsite and snapshot resident total null. The weighted
+resident totals cover sampled backing classes and can differ from the
+process RSS.
+
+`mem_alloc_agg` gives weighted allocation traffic, and `prof peak-mem`
+divides it by the run time to report `bytes_per_s`. `run_meta` lists
+`charged_bytes`, `slack_bytes` and `budget_near_misses` in
+`mem_absent_metrics`. `prof peak-mem` reports null budgets for live runs.
 
 `prof attach --mem` refuses. Retained bytes can only be attributed to
 allocations that were sampled when they were made, so an attached capture
@@ -279,14 +285,16 @@ wakes end the measured chain. Latest reads and publishes do not park.
 
 Each worker appends to two preallocated host chunks outside the program's
 memory budget. `HIRSEL_PROFILE_CHUNK_BYTES` sets each chunk's size in
-bytes for all runtime streams, from 65,536 bytes (the default) to 67,108,864
-bytes. A drain thread writes sealed chunks. A full buffer drops the
-new record and the profile reports the per-worker total as
-`runtime_events_lost`. An incomplete stream reports that its final loss count
-may be missing. Observations take no scheduler turn and add no tape event.
+bytes for all runtime streams, from 65,536 bytes to 67,108,864 bytes.
+Live memory defaults to 524,288 bytes. Other streams default to 65,536 bytes.
+A drain thread writes sealed chunks. A full buffer drops the new record and the profile reports the per-worker total as
+`runtime_events_lost`. For a complete memory stream, `mem_records_emitted`
+counts producer attempts, `mem_records` counts received records, and
+`mem_records_lost` is their difference. An incomplete stream may lack its
+final loss count. Observations take no scheduler turn and add no tape event.
 
-The runtime stream starts with the magic `HIRSOBS1`. Its assigned record
-kinds are 1–12 for task, I/O and mapping observations, 16–21 for memory
+The runtime stream starts with the magic `HIRSOBS2`. Its assigned record
+kinds are 1–12 for task, I/O and mapping observations, 16–23 for memory
 observations, 65 534 for END, and 65 535 for LOSS. Import refuses every
 unassigned kind. A new required record kind needs a new stream version.
 

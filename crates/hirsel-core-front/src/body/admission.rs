@@ -268,3 +268,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(p)
     }
 }
+
+/// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
+/// local, a field, an element, a copy), or with `logical` what it counts in a
+/// portable size (FORM #116). A resource's or a region value's holder is its block
+/// pointer, and a region holder counts as a `RegionRef` field, 16 (MEM-24); only
+/// allocating the value takes its block. The emitter and the generic materialiser
+/// both ask here, so a rigid `T` and its instance cannot disagree.
+pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u64, &'static str> {
+    if logical {
+        return hirsel_core_layout::charge::held(repr, recipe)
+            .ok_or("logical size of a compact generic value is not built");
+    }
+    Ok(match repr {
+        LRepr::Resource => hirsel_core_layout::POINTER,
+        LRepr::Region => hirsel_core_layout::POINTER,
+        _ => match &recipe.layout {
+            Layout::Fixed(f) => f.size,
+            Layout::Compact(_) => return Err("copying a compact generic value is not built"),
+        },
+    })
+}

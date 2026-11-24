@@ -146,8 +146,7 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
 pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field: u64) -> u64 {
     #[cfg(feature = "record")]
     {
-        let _commit = crate::sequencer::enter();
-        // SAFETY: the run pins Files and the sequencer serializes handle transfers.
+        // SAFETY: the run pins Files, and its one worker serializes handle transfers.
         let managed = unsafe { &mut (*(*context).host_files).managed_control };
         if managed.1 != 0 {
             return match field {
@@ -162,7 +161,6 @@ pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field:
     };
     match field {
         0 => {
-            let _commit = crate::sequencer::enter();
             let control = host.control.lock().unwrap().take();
             control
                 .and_then(|fd| unsafe {
@@ -246,6 +244,7 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
         if hirsel_core_launch_word(context, 5, 0) == 0
             && hirsel_core_launch_word(context, 12, 0) == 0
             && hirsel_core_launch_word(context, 15, 0) == 0
+            && hirsel_core_launch_word(context, 20, 0) == 0
         {
             return false;
         }
@@ -329,10 +328,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
 
 type RunMain<'a> = dyn FnMut(&mut Context) -> (u8, i32) + 'a;
 
-pub(crate) fn run_plain(
-    context: &mut Context,
-    main: &mut RunMain<'_>,
-) -> std::io::Result<(u8, i32)> {
+fn run_plain(context: &mut Context, main: &mut RunMain<'_>) -> std::io::Result<(u8, i32)> {
     Ok(main(context))
 }
 
@@ -369,32 +365,6 @@ unsafe fn with_foreign(
     Ok(result)
 }
 
-// Instantiate startup for each runner so the linker can discard unused
-// foreign setup from executables that use the ordinary entry.
-unsafe fn run_config(
-    config: &Config,
-    entry: Entry,
-    run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
-) -> u8 {
-    // SAFETY: the driver pins configuration and the generated entry thunk.
-    unsafe {
-        let key = match map_hash_key() {
-            Ok(key) => key,
-            Err(error) => {
-                diagnostic(
-                    config,
-                    format!("not started: map hash entropy: {error}\n").as_bytes(),
-                );
-                if let Some(close) = config.close_grants {
-                    close(config.state);
-                }
-                return NOT_STARTED;
-            }
-        };
-        run_with_map_hash_key(config, entry, key, run)
-    }
-}
-
 fn map_hash_key() -> std::io::Result<[u8; 16]> {
     let mut key = [0; 16];
     let mut remaining = &mut key[..];
@@ -418,15 +388,28 @@ fn map_hash_key() -> std::io::Result<[u8; 16]> {
     Ok(key)
 }
 
-/// Enter with the key restored from a checked Run header.
-pub(crate) unsafe fn run_with_map_hash_key(
+// Instantiate startup for each runner so the linker can discard unused
+// foreign setup from executables that use the ordinary entry.
+unsafe fn run_config(
     config: &Config,
     entry: Entry,
-    key: [u8; 16],
     run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
 ) -> u8 {
-    // SAFETY: the caller pins the same operands as hirsel_core_run.
+    // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
+        let key = match map_hash_key() {
+            Ok(key) => key,
+            Err(error) => {
+                diagnostic(
+                    config,
+                    format!("not started: map hash entropy: {error}\n").as_bytes(),
+                );
+                if let Some(close) = config.close_grants {
+                    close(config.state);
+                }
+                return NOT_STARTED;
+            }
+        };
         let _pipe_policy = PipePolicy::enter();
         #[cfg(feature = "prof")]
         let _worker_profile = crate::prof::Worker::enter();
@@ -555,6 +538,16 @@ unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
         (config.diagnostic)(config.state, bytes.as_ptr(), bytes.len());
     }
 }
+/// Return the original byte limit of the current task.
+///
+/// # Safety
+/// The generated call supplies a live context for the running task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_root_limit(context: *const Context) -> u64 {
+    // SAFETY: the generated call runs with its own live context.
+    unsafe { (*context).root_limit }
+}
+
 /// # Safety
 /// Args is the run's live configuration; the returned view stays pinned by it.
 #[unsafe(no_mangle)]

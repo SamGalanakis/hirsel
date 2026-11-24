@@ -81,7 +81,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
         let bytes = count
             .checked_mul(item.bytes)
             .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let id = tasks::identity();
         let channel = Box::into_raw(Box::new(Channel {
             holder: std::mem::MaybeUninit::uninit(),
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
 pub unsafe extern "C" fn hirsel_core_channel_sender(channel: *mut Channel) -> *mut Channel {
     // SAFETY: the live sender pins the exact counter through its event.
     unsafe {
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         (*channel).senders = (*channel)
             .senders
             .checked_add(1)
@@ -182,56 +182,6 @@ unsafe fn store(channel: *mut Channel, value: *mut u8) {
         (*channel).len += 1;
     }
 }
-/// A holder completes a waiting sender's publish when it has room and needs
-/// no cancellation, fold or poll turn; otherwise the sender takes the token.
-/// # Safety
-/// Called by the sequencer under the token for a blocked requester.
-unsafe fn serve_send(request: *mut tasks::Delegated) -> bool {
-    // SAFETY: the requester pins its sender, value and task until signalled.
-    unsafe {
-        let request = &*request;
-        let channel = request.channel.cast::<Channel>();
-        if (*channel).receiver != Receiver::Open
-            || (*channel).len == (*channel).capacity
-            || !tasks::delegable(request)
-        {
-            return false;
-        }
-        store(channel, request.value);
-        tasks::event_wake_waiters_for(
-            request.task,
-            tasks::PUBLISH,
-            (*channel).id,
-            0,
-            &raw mut (*channel).receive_waiters,
-            false,
-        );
-        true
-    }
-}
-/// The receiving counterpart of `serve_send`.
-/// # Safety
-/// As for `serve_send`.
-unsafe fn serve_receive(request: *mut tasks::Delegated) -> bool {
-    // SAFETY: the requester pins its receiver, destination and task until signalled.
-    unsafe {
-        let request = &*request;
-        let channel = request.channel.cast::<Channel>();
-        if (*channel).len == 0 || !tasks::delegable(request) {
-            return false;
-        }
-        load(channel, request.value);
-        tasks::event_wake_waiters_for(
-            request.task,
-            tasks::RECEIVE,
-            (*channel).id,
-            0,
-            &raw mut (*channel).send_waiters,
-            false,
-        );
-        true
-    }
-}
 /// # Safety
 /// Borrowed live sender and initialized T. Result 0 transfers it, 1 Full and 2
 /// Closed preserve it. No cancellation point, including when the queue is full.
@@ -239,9 +189,9 @@ unsafe fn serve_receive(request: *mut tasks::Delegated) -> bool {
 pub unsafe extern "C" fn hirsel_core_try_send(channel: *mut Channel, value: *mut u8) -> u8 {
     // SAFETY: no suspension or outside access between deciding and committing.
     unsafe {
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let result = publish(channel, value);
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         tasks::event(tasks::TRY_SEND, (*channel).id, result as u64);
         result
     }
@@ -258,17 +208,8 @@ pub unsafe extern "C" fn hirsel_core_send(
 ) -> Transfer {
     // SAFETY: sender and pending input are pinned by the suspended caller.
     unsafe {
-        let Some(_held) =
-            tasks::delegate(context, tasks::PUBLISH, channel.cast(), value, serve_send)
-        else {
-            return Transfer {
-                transferred: true,
-                status: 0,
-            };
-        };
-        let mut _resumed = None;
         loop {
-            let _commit = tasks::before_commit();
+            tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
                 return Transfer {
                     transferred: false,
@@ -293,13 +234,11 @@ pub unsafe extern "C" fn hirsel_core_send(
                         status: 0,
                     };
                 }
-                _ => {
-                    _resumed = Some(tasks::park(
-                        &raw mut (*channel).send_waiters,
-                        #[cfg(feature = "prof")]
-                        (crate::prof::Reason::ChannelSend, (*channel).id),
-                    ))
-                }
+                _ => tasks::park(
+                    &raw mut (*channel).send_waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::ChannelSend, (*channel).id),
+                ),
             }
         }
     }
@@ -396,28 +335,12 @@ unsafe fn receive<const REC: bool>(
 ) -> Transfer {
     // SAFETY: receiver keeps the queue alive across each suspension.
     unsafe {
-        let _held = if REC && *word != 0 {
+        if REC {
             *word = 0;
-            None
-        } else {
-            let Some(held) = tasks::delegate(
-                context,
-                tasks::RECEIVE,
-                channel.cast(),
-                destination,
-                serve_receive,
-            ) else {
-                return Transfer {
-                    transferred: true,
-                    status: 0,
-                };
-            };
-            Some(held)
-        };
+        }
         let returnable = REC && tasks::returnable_waits();
-        let mut _resumed = None;
         loop {
-            let _commit = tasks::before_commit();
+            tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
                 return Transfer {
                     transferred: false,
@@ -454,50 +377,13 @@ unsafe fn receive<const REC: bool>(
                     status: 0,
                 };
             }
-            _resumed = Some(tasks::park(
+            tasks::park(
                 &raw mut (*channel).receive_waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::ChannelRecv, (*channel).id),
-            ));
+            );
         }
     }
-}
-
-/// Receive at a source call in a bounded loop of private work. An empty or
-/// cancelled call releases the acquisition before the ordinary scalar recheck.
-///
-/// # Safety
-/// As for hirsel_core_receive. The caller ends the receive run before any
-/// shared operation (except this receive on the same channel), cleanup,
-/// callback, suspension or exit.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_receive_in_loop(
-    context: *mut Context,
-    channel: *mut Channel,
-    destination: *mut u8,
-    site: u64,
-) -> Transfer {
-    // SAFETY: the caller pins the channel and its one result place. There
-    // is no copy, credit fold or event for any later source call.
-    unsafe {
-        if (*channel).capacity > 1 && tasks::can_fuse_receives() {
-            let commit = crate::sequencer::enter();
-            if !tasks::cancel_pending(context) && take(channel, destination) {
-                commit.receive_succeeded((*channel).len != 0);
-                return Transfer {
-                    transferred: true,
-                    status: 0,
-                };
-            }
-        }
-        hirsel_core_receive(context, channel, destination, site)
-    }
-}
-
-/// End the active fiber's bounded receive run at a lowering boundary.
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_receive_loop_end() {
-    crate::sequencer::end_receive_run();
 }
 
 /// # Safety
@@ -510,7 +396,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
 ) -> u8 {
     // SAFETY: receiver pins the channel and destination for this call.
     unsafe {
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let status = if take(channel, destination) {
             0
         } else if (*channel).senders == 0 {
@@ -518,7 +404,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
         } else {
             1
         };
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         tasks::event(tasks::TRY_RECEIVE, (*channel).id, status as u64);
         status
     }
@@ -529,13 +415,13 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
 pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
     // SAFETY: exact live sender count, with receiver retaining storage during cleanup.
     unsafe {
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         (*channel).senders -= 1;
         let last = (*channel).senders == 0;
         (*channel).closing_sender = last;
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         if last {
-            let _commit = tasks::before_commit();
+            tasks::before_commit();
             tasks::event_wake_waiters(
                 tasks::CLOSE,
                 (*channel).id,
@@ -555,7 +441,7 @@ unsafe fn receiver_begin(context: *mut Context, channel: *mut Channel) -> *mut H
     // SAFETY: the caller transfers the sole receiver.
     unsafe {
         (*context).cancel_shield += 1;
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         (*channel).receiver = Receiver::Cleaning;
         tasks::event_wake_waiters(
             tasks::CLOSE,
@@ -595,7 +481,6 @@ unsafe fn receiver_step(context: *mut Context, holder: *mut Holder, list: *mut W
             (*channel).len = newest;
         }
         (*channel).head = 0;
-        let _commit = crate::sequencer::enter();
         (*channel).receiver = Receiver::Gone;
         if (*channel).senders == 0 && !(*channel).closing_sender {
             drop(Box::from_raw(channel));

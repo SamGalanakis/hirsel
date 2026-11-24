@@ -1,0 +1,254 @@
+type RuleDay: key = Julian(u16) | Ordinal(u16) | MonthWeek(month: u8, week: u8, weekday: u8)
+
+type Rule: key {
+    day: RuleDay,
+    clock: i64
+}
+
+type Season: key {
+    daylight: LocalType,
+    start: Rule,
+    end: Rule
+}
+
+type Footer: key {
+    standard: LocalType,
+    season: Option[Season]
+}
+
+const MAX_FOOTER: u64 = 255
+
+fn next_is(raw: Bytes, at: u64, byte: u8) -> bool {
+    at < list.len(raw) && raw[at] == byte
+}
+
+fn expect(raw: Bytes, mut at: u64, byte: u8) -> Result[(), Error] {
+    if !next_is(raw, at, byte) {
+        return Error(Invalid(at))
+    }
+    at += 1
+    Ok(())
+}
+
+fn designation(raw: Bytes, mut at: u64) -> Result[bool, Error] {
+    let quoted = next_is(raw, at, b'<')
+    if quoted {
+        at += 1
+    }
+    let start = at
+    while at < list.len(raw) {
+        let c = raw[at]
+        if !int.is_ascii_alpha(c) && !(quoted && (int.is_ascii_digit(c) || c == b'+' || c == b'-')) {
+            break
+        }
+        at += 1
+    }
+    if at - start < 3 {
+        return Error(Invalid(start))
+    }
+    let known = list.slice(raw, start, at) != b"-00"
+    if quoted {
+        expect(raw, mut at, b'>')?
+    }
+    Ok(known)
+}
+
+fn digits(raw: Bytes, mut at: u64, high: u64) -> Result[u64, Error] {
+    let start = at
+    let mut value = 0u64
+    while at < list.len(raw) && int.is_ascii_digit(raw[at]) {
+        let digit: u64 = int.widen(raw[at] - b'0')
+        value = value * 10 + digit
+        if value > high {
+            return Error(Invalid(start))
+        }
+        at += 1
+    }
+    if at == start {
+        return Error(Invalid(start))
+    }
+    Ok(value)
+}
+
+fn minutes_or_seconds(raw: Bytes, mut at: u64) -> Result[i64, Error] {
+    expect(raw, mut at, b':')?
+    let start = at
+    let value = digits(raw, mut at, 59)?
+    if at - start != 2 {
+        return Error(Invalid(start))
+    }
+    Ok(int.narrow(value))
+}
+
+fn hms(raw: Bytes, mut at: u64, max_hour: u64, signed: bool) -> Result[i64, Error] {
+    let negative = signed && next_is(raw, at, b'-')
+    if negative || signed && next_is(raw, at, b'+') {
+        at += 1
+    }
+    let hour: i64 = int.narrow(digits(raw, mut at, max_hour)?)
+    let mut seconds = hour * 3600
+    if next_is(raw, at, b':') {
+        seconds += minutes_or_seconds(raw, mut at)? * 60
+        if next_is(raw, at, b':') {
+            seconds += minutes_or_seconds(raw, mut at)?
+        }
+    }
+    if negative {
+        Ok(-seconds)
+    } else {
+        Ok(seconds)
+    }
+}
+
+fn read_rule(raw: Bytes, mut at: u64, extended: bool) -> Result[Rule, Error] {
+    let from = at
+    let day = if next_is(raw, at, b'M') {
+        at += 1
+        let month = digits(raw, mut at, 12)?
+        expect(raw, mut at, b'.')?
+        let week = digits(raw, mut at, 5)?
+        expect(raw, mut at, b'.')?
+        let weekday = digits(raw, mut at, 6)?
+        if month == 0 || week == 0 {
+            return Error(Invalid(from))
+        }
+        MonthWeek(month: int.narrow(month), week: int.narrow(week), weekday: int.narrow(weekday))
+    } else if next_is(raw, at, b'J') {
+        at += 1
+        let n = digits(raw, mut at, 365)?
+        if n == 0 {
+            return Error(Invalid(from))
+        }
+        Julian(int.narrow(n))
+    } else {
+        Ordinal(int.narrow(digits(raw, mut at, 365)?))
+    }
+    let clock = if next_is(raw, at, b'/') {
+        at += 1
+        hms(raw, mut at, if extended {
+            167
+        } else {
+            24
+        }, extended)?
+    } else {
+        7200
+    }
+    Ok(Rule(day, clock))
+}
+
+fn parse_footer(raw: Bytes, start: u64, wire_version: u8) -> Result[Option[Footer], Error] {
+    let end = list.len(raw)
+    if end - start < 2 || raw[start] != b'\n' || raw[end - 1] != b'\n' {
+        return Error(Invalid(start))
+    }
+    if end - start - 2 > MAX_FOOTER {
+        return Error(Limit)
+    }
+    if end - start == 2 {
+        return Ok(None)
+    }
+    match parse_tz_string(list.slice(raw, start + 1, end - 1), wire_version == b'3') {
+        Ok(parsed) => Ok(Some(parsed)),
+        Error(Invalid(at)) => Error(Invalid(start + 1 + at)),
+        Error(e) => Error(e),
+    }
+}
+
+fn parse_tz_string(raw: Bytes, extended: bool) -> Result[Footer, Error] {
+    let end = list.len(raw)
+    let mut at = 0u64
+    let standard_known = designation(raw, mut at)?
+    let west = hms(raw, mut at, 24, true)?
+    let standard = LocalType(offset: int.narrow(-west), daylight: false, known: standard_known)
+    if at == end {
+        return Ok(Footer(standard, season: None))
+    }
+    let daylight_known = designation(raw, mut at)?
+    let dst_west = if at == end || next_is(raw, at, b',') {
+        west - 3600
+    } else {
+        hms(raw, mut at, 24, true)?
+    }
+    if at == end {
+        return Error(MissingRules)
+    }
+    let daylight = LocalType(offset: int.narrow(-dst_west), daylight: true, known: daylight_known)
+    expect(raw, mut at, b',')?
+    let start = read_rule(raw, mut at, extended)?
+    expect(raw, mut at, b',')?
+    let end_rule = read_rule(raw, mut at, extended)?
+    if at != end {
+        return Error(Invalid(at))
+    }
+    Ok(Footer(standard, season: Some(Season(daylight, start, end: end_rule))))
+}
+
+fn first_day(year: u16, month: u8) -> i64 {
+    std.time.days(option.unwrap(std.time.date(year, month, 1)))
+}
+
+fn rule_days(year: u16, day: RuleDay) -> i64 {
+    match day {
+        Julian(n) => {
+            let ordinal: i64 = int.widen(n)
+            let leap_day: i64 = if ordinal >= 60 && std.time.date(year, 2, 29) != None {
+                1
+            } else {
+                0
+            }
+            first_day(year, 1) + ordinal - 1 + leap_day
+        },
+        Ordinal(n) => first_day(year, 1) + int.widen(n),
+        MonthWeek(month, week, weekday) => {
+            let first = first_day(year, month)
+            let after = if month == 12 {
+                first_day(year + 1, 1)
+            } else {
+                first_day(year, month + 1)
+            }
+            let wanted: i64 = int.widen(weekday)
+            let week_number: i64 = int.widen(week)
+            let picked = first + floor_mod(wanted - (first + 4), 7) + 7 * (week_number - 1)
+            if picked >= after {
+                picked - 7
+            } else {
+                picked
+            }
+        },
+    }
+}
+
+// Use a representative year in 2000..2399 even for outlying TZif timestamps.
+// A Gregorian cycle has an integral number of weeks.
+fn calendar_second(seconds: i64) -> i64 {
+    let cycle = 12622780800i64
+    let anchor = 946684800i64
+    anchor + floor_mod(seconds % cycle - anchor, cycle)
+}
+
+fn footer_type(footer: Footer, seconds: i64) -> LocalType {
+    let Some(season) = footer.season else {
+        return footer.standard
+    }
+    let at = calendar_second(seconds)
+    let year = std.time.year(option.unwrap(std.time.from_days(at / DAY_SECONDS)))
+    let standard_offset: i64 = int.widen(footer.standard.offset)
+    let daylight_offset: i64 = int.widen(season.daylight.offset)
+    let mut last_start = 0i64
+    let mut last_end = 0i64
+    for y in year - 2 .. year + 2 {
+        let start = rule_days(y, season.start.day) * DAY_SECONDS + season.start.clock - standard_offset
+        let end = rule_days(y, season.end.day) * DAY_SECONDS + season.end.clock - daylight_offset
+        if start <= at {
+            last_start = start
+        }
+        if end <= at {
+            last_end = end
+        }
+    }
+    if last_start >= last_end {
+        season.daylight
+    } else {
+        footer.standard
+    }
+}

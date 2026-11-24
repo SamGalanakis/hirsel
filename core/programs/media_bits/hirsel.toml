@@ -1,0 +1,27 @@
+[package]
+name = "media_bits"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"aac.hirsel" = "aac"
+"av1.hirsel" = "av1"
+"codec.hirsel" = "codec"
+"dependency.hirsel" = "dependency"
+"h264.hirsel" = "h264"
+"hevc.hirsel" = "hevc"
+"opus.hirsel" = "opus"
+"vp9.hirsel" = "vp9"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"hevc-aac-laws.hirsel" = "hevc_aac_laws"
+"av1-laws.hirsel" = "av1_laws"
+"h264-laws.hirsel" = "h264_laws"
+"opus-laws.hirsel" = "opus_laws"
+"vp9-laws.hirsel" = "vp9_laws"

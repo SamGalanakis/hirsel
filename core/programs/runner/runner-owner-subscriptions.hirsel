@@ -1,0 +1,273 @@
+// An Ended the owner makes itself passes unchecked; a publisher-made one is content (§3).
+fn wire_end[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome) {
+    wire_end_checked(mut s, mut output, sub, take outcome, None)
+}
+
+fn wire_end_checked[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome, check: Option[u64]) {
+    let mut generations: List[(u32, u64)] = list.new()
+    if let Some(generation) = sub_generation(s.subs, sub) {
+        stamp_rows(mut generations, sub, generation)
+    }
+    wire_stop_sub(mut s, mut output, sub)
+    wire_queue_checked(mut output, Ended(sub, take outcome), list.new(), take generations, check)
+}
+
+type DeferredSub: send {
+    sub: u32,
+    generation: u64,
+    input: SubscriptionInput
+}
+
+fn wire_has_leaving[G: send, B: send](s: WireSession[G, B]) -> bool {
+    for sub in s.pub_subs {
+        if let None = sub_generation(s.subs, sub) {
+            return true
+        }
+    }
+    false
+}
+
+fn wire_subscribed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) {
+    let who = option.unwrap(s.joined)
+    s.sub_generation += 1u64
+    let generation = s.sub_generation
+    list.reserve(mut s.subs, 1u64)
+    if wire_has_leaving(s) {
+        list.push(mut s.deferred_subs, DeferredSub(sub: sub, generation: generation, input: take input))
+    } else {
+        list.reserve(mut s.pub_subs, 1u64)
+        let sent = channel.try_send(wire_publisher(s), PubIn(e: WireSubscribed(who, sub, generation, take input)))
+        if let Error(_) = take sent {
+            wire_end(mut s, mut work.output, sub, Refused(Overloaded));
+            return
+        }
+        list.push(mut s.pub_subs, sub)
+    }
+    list.push(mut s.subs, (sub, generation))
+}
+
+fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], sub: u32, wire_slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
+    if s.phase != 3u8 {
+        return Error(1008u16)
+    }
+    let fresh: u64 = int.widen(sub)
+    if fresh < s.next_sub {
+        return Error(1002u16)
+    }
+    s.next_sub = fresh + 1u64
+    if let Some(_) = resume {
+        return Ok(ResumeReset)
+    }
+    let index: u64 = int.widen(wire_slot)
+    if index >= list.len(s.entries) {
+        return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
+    }
+    let cloned: Bytes = clone(s.entries[index])
+    let key = take cloned
+    if !map.contains(r.slots, key) {
+        let outcome: Outcome = if map.contains(r.gone, key) {
+            Failed(Gone)
+        } else {
+            Refused(NoEntry)
+        }
+        return Ok(SubscriptionRefusal(sub, take outcome))
+    }
+    let is_query = match map.get(r.slots, key) {
+        Some(Query(_, _, _)) => true,
+        _ => false
+    }
+    if !is_query {
+        return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
+    }
+    if list.len(s.subs) >= s.config.max_subs {
+        return Ok(SubscriptionRefusal(sub, Refused(NotAllowed)))
+    }
+    let refused = match map.get(r.checks, key) {
+        Some(check) => (check.validate)(arg, 18446744073709551615u64),
+        _ => {
+            let no_refusal: Option[Refusal] = None;
+            no_refusal
+        }
+    }
+    if let Some(take why) = take refused {
+        return Ok(SubscriptionRefusal(sub, Refused(take why)))
+    }
+    if let None = s.subscription_room {
+        let limit = int.saturating_sub(WIRE_SESSION_CEILING, wire_variable_peak(s.config) + s.config.n_granted)
+        match subscription_room(limit, s.config.max_subs, s.config.budget, int.saturating_sub(s.config.socket.max_frame, wire_outcome_reserve(s.config))) {
+            Ok(take quota) => {
+                s.subscription_room = Some(take quota)
+            },
+            Error(_) => return Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
+        }
+    }
+    let caller: Caller = match s.caller {
+        Some(held) => clone(held),
+        None => return Error(1008u16),
+    }
+    let mut quota = option.unwrap(replace(mut s.subscription_room, None))
+    let held = subscription_hold(mut quota, take caller, take key, take arg)
+    s.subscription_room = Some(take quota)
+    match take held {
+        Ok(take input) => Ok(PlannedSubscribe(sub, take input)),
+        Error(_) => Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
+    }
+}
+
+fn wire_apply_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) -> Result[(), u16] {
+    if wire_admission_closed(work, s.clock) {
+        wire_end(mut s, mut work.output, sub, Refused(Overloaded))
+        return Ok(())
+    }
+    if let Some(_) = s.joined {
+        wire_subscribed(mut s, mut work, sub, take input);
+        return Ok(())
+    }
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    // v2.19: the session's fence root, at {0, 0}; the publisher gets a handle in the Join.
+    let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
+    let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
+    if let None = work.head {
+        match head_lease(copy_wire_head(s.head)) {
+            Ok(take h) => {
+                work.head = Some(take h)
+            },
+            Error(_) => {
+                wire_end(mut s, mut work.output, sub, Refused(Overloaded));
+                return Ok(())
+            },
+        }
+    }
+    let identity = match work.head {
+        Some(h) => latest.handle(h.identity),
+        None => fail("runner: missing head lease")
+    }
+    // v2.22: the first Subscribe rides in the Join, so its room is reserved now.
+    list.reserve(mut s.subs, 1u64)
+    list.reserve(mut s.pub_subs, 1u64)
+    let taken = latest.new(arc.new(Taken(n: 0u64)))
+    s.sub_generation += 1u64
+    let generation = s.sub_generation
+    let first = Some(JoinSubscribe(sub: sub, generation: generation, input: take input))
+    let join = if s.marked {
+        s.mark = Some(take closing)
+        Join(to: wire_me(s), told: take told, mark: Some(take closed), closed: None, identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first, http_credit: None)
+    } else {
+        list.reserve(mut s.leaving, 1u64)
+        let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) {
+            Ok(take l) => take l,
+            Error(_) => {
+                wire_end(mut s, mut work.output, sub, Refused(Overloaded));
+                return Ok(())
+            }
+        }
+        s.join_lease = Some(take lease)
+        Join(to: wire_me(s), told: take told, mark: None, closed: Some(take closed), identity: Some(take identity), fence: Some(latest.handle(fence)), progress: Some(take progress), taken: Some(latest.handle(taken)), first: take first, http_credit: None)
+    }
+    // v2.22: the owner's loop sends the Join with a waiting send (§3); it holds no sub yet.
+    work.join = Some(PubIn(e: Joined(take join)))
+    work.fence = Some(take fence)
+    s.progress = Some(take token)
+    s.taken = Some(take taken)
+    s.completes = 0u64
+    s.told_taken = 0u64
+    // A fresh join can wait for its id while an old terminal frame is queued.
+    wire_prune_output(mut s, mut work.output, Some(sub))
+    s.joining = Some(take hear)
+    s.subscription = Some((sub, generation))
+    Ok(())
+}
+
+fn wire_remove_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
+    let mut i = 0u64
+    while i < list.len(s.subs) {
+        if s.subs[i].0 == sub {
+            let _ = list.remove(mut s.subs, i)
+        } else {
+            i += 1u64
+        }
+    }
+    wire_prune_output(mut s, mut output, Some(sub))
+}
+
+fn wire_forget_sub[G: send, B: send](mut s: WireSession[G, B], sub: u32) {
+    let mut i = 0u64
+    while i < list.len(s.pub_subs) {
+        if s.pub_subs[i] == sub {
+            let _ = list.remove(mut s.pub_subs, i)
+        } else {
+            i += 1u64
+        }
+    }
+}
+
+fn wire_stop_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
+    wire_remove_sub(mut s, mut output, sub)
+    let mut at = 0u64
+    while at < list.len(s.deferred_subs) {
+        if s.deferred_subs[at].sub == sub {
+            let _ = list.remove(mut s.deferred_subs, at)
+        } else {
+            at += 1u64
+        }
+    }
+}
+
+// A reset drops the join, after the writer retires a unit that can still use
+// that join's read set.
+fn wire_leave[G: send, B: send](mut s: WireSession[G, B]) {
+    while let Some(_) = list.pop(mut s.deferred_subs) {}
+    if let Some(take lease) = replace(mut s.join_lease, None) {
+        if s.holding {
+            list.push(mut s.leaving, take lease)
+        }
+    }
+}
+
+fn wire_flush_subscriptions[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) waits {
+    if let Some(_) = work.check {
+        return
+    }
+    s.holding = false
+    while let Some(_) = list.pop(mut s.leaving) {}
+    let Some(who) = s.joined else {
+        return
+    }
+    let to_pub = wire_publisher(s)
+    let mut at = 0u64
+    while at < list.len(s.pub_subs) {
+        let sub = s.pub_subs[at]
+        if let None = sub_generation(s.subs, sub) {
+            if let Error(_) = channel.send(to_pub, PubIn(e: Unsubscribed(who, sub))) {
+                return
+            }
+            let _ = list.remove(mut s.pub_subs, at)
+        } else {
+            at += 1u64
+        }
+    }
+    while list.len(s.deferred_subs) != 0u64 {
+        let DeferredSub(sub: sub, generation: generation, input: take input) = list.remove(mut s.deferred_subs, 0u64)
+        list.reserve(mut s.pub_subs, 1u64)
+        if let Error(_) = channel.send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take input))) {
+            return
+        }
+        list.push(mut s.pub_subs, sub)
+    }
+    if list.len(s.subs) == 0u64 {
+        wire_leave(mut s)
+        s.joined = None
+    }
+}
+
+fn wire_check_room_input[G: send, B: send](s: WireSession[G, B], sub: u32) -> Result[(), u16] {
+    let named: u64 = int.widen(sub)
+    if named >= s.next_sub {
+        return Error(1002u16)
+    }
+    if let Some(_) = sub_generation(s.subs, sub) {
+        return Error(1002u16)
+    }
+    Ok(())
+}

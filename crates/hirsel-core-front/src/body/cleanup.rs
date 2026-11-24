@@ -19,6 +19,12 @@ pub(super) enum Owner {
         end: ValueId,
         elem: TypeId,
     },
+    /// A destructured resource's block, freed with its charge once its omitted
+    /// fields are cleaned (T3.7).
+    Free {
+        block: ValueId,
+        charge: ValueId,
+    },
 }
 /// A statement temporary: an own value no consumer has taken yet.
 #[derive(Clone, Copy)]
@@ -34,16 +40,24 @@ pub(super) struct Temp {
 }
 /// What the cleanup being emitted has already done on its edge, for the failure block
 /// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
-/// except those the edge keeps (the value `keep`, and slots when `temps`); the scopes
-/// from `scopes` on are closed; `pending` is the edge's pending result.
+/// except those the edge keeps (the value `keep`, owners skipped by `cleanup`,
+/// and `retained`). The scopes from `scopes` on are closed. `pending` is the
+/// edge's pending result.
 #[derive(Clone, Copy)]
 pub(super) struct Edge {
     pub from: usize,
     pub keep: Option<ValueId>,
-    pub temps: bool,
+    cleanup: EdgeCleanup,
     pub scopes: usize,
     pub pending: Option<(AddressBase, TypeId)>,
     pub retained: PoolRange<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum EdgeCleanup {
+    Unwind,
+    EndOwners { temps: bool },
+    Temporaries,
 }
 
 /// An old value moved aside to be finalized after an install (T3.2), and the value of
@@ -61,14 +75,6 @@ pub(super) struct Own {
     pub address: AddressId,
     pub id: TypeId,
     pub flag: AddressId,
-}
-
-/// An owner whose storage sits in its body's frame.
-#[derive(Clone, Copy)]
-enum Frame {
-    List(frame_lists::FrameList),
-    /// A log node (frame_logs.rs), with its entry type.
-    Log(TyId),
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -354,10 +360,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Slot(s) => {
                 let v = self.var(s);
                 let Some(own) = v.own else { return };
-                frame = self
-                    .frame_list_at(own.address)
-                    .map(Frame::List)
-                    .or_else(|| self.frame_log_owners.get(&s).map(|&item| Frame::Log(item)));
+                frame = self.frame_list_at(own.address);
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -372,6 +375,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 t.avail,
                 t.flag,
             ),
+
             Owner::Drain {
                 data,
                 next,
@@ -381,19 +385,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.clean_drain(data, next, end, elem, n);
                 return;
             }
+            Owner::Free { block, charge } => {
+                self.inst(Inst::Free { block, charge }, n);
+                return;
+            }
         };
         match (avail, flag) {
             (Avail::Live, _) => self.drop_owner(base, id, frame, n),
             (Avail::Maybe, Some(flag)) => {
-                let on = self.value(Ty::Scalar(Scalar::Bool));
-                self.inst(
-                    Inst::Read {
-                        result: on,
-                        address: flag,
-                        mode: ReadMode::Bits,
-                    },
-                    n,
-                );
+                let on = self.read_bits(flag, Ty::Scalar(Scalar::Bool), n);
                 let yes = self.new_block(&[]);
                 let next = self.new_block(&[]);
                 let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
@@ -414,6 +414,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.start(next);
             }
             _ => {}
+        }
+    }
+    /// When `ty` is a resource destructured from `value`, its block (its storage,
+    /// unused cell and grant) is an owner, freed and refunded when cleaned (T3.7); its
+    /// fields went on with their blocks.
+    pub(super) fn free_owner(&mut self, value: Option<ValueId>, ty: TyId, n: NodeId) {
+        if let (Some(value), Ok(Rep::Place(id))) = (value, self.rep(ty))
+            && self.e.is_resource(id)
+            && self.live()
+        {
+            let holder = self.address(AddressBase::Value(value), &[], PlaceTy::Value(Ty::Ptr), n);
+            let block = self.read_bits(holder, Ty::Ptr, n);
+            if let Some(charge) = self.e.resource_charge(id)
+                && let Some(charge) = self.konst(Ty::Scalar(Scalar::U64), charge, n)
+            {
+                self.owners.push(Owner::Free { block, charge });
+                self.changed();
+            }
         }
     }
     pub(super) fn drain_owner(&mut self, data: ValueId, next: AddressId, end: ValueId, elem: TyId) {
@@ -493,18 +511,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(head, &[], n);
         self.start(out);
     }
-    fn drop_owner(&mut self, base: AddressBase, id: TypeId, frame: Option<Frame>, n: NodeId) {
+    fn drop_owner(
+        &mut self,
+        base: AddressBase,
+        id: TypeId,
+        frame: Option<frame_lists::FrameList>,
+        n: NodeId,
+    ) {
         match (frame, base) {
-            (Some(Frame::List(f)), AddressBase::Address(address)) => {
-                let _ = self.drop_frame_list(f, address, id, n);
-            }
-            (Some(Frame::Log(item)), AddressBase::Address(address)) => {
-                let _ = self.drop_frame_log(address, item, n);
+            (Some(f), AddressBase::Address(address)) => {
+                self.drop_frame_list(f, address, id, n);
             }
             _ => self.emit_drop(base, id, n),
         }
     }
     pub(super) fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
+        self.emit_drop_with_refund(base, id, None, n);
+    }
+
+    pub(super) fn emit_drop_with_refund(
+        &mut self,
+        base: AddressBase,
+        id: TypeId,
+        refund: Option<AddressId>,
+        n: NodeId,
+    ) {
         crate::cost_scope!("phase", "cleanup emission");
         let address = match base {
             AddressBase::Address(a) => a,
@@ -519,6 +550,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
+            if let Some(storage) = refund {
+                self.inst(Inst::FrameRefund { storage }, n);
+            }
             return;
         }
         // FAIL-12: a failed drop has cleaned its value's fields. During failure
@@ -527,7 +561,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let fail = if self.failing {
             self.new_block(&[])
         } else {
-            self.drop_failure(n)
+            self.drop_failure(refund, n)
         };
         self.inst(
             Inst::Drop {
@@ -541,14 +575,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.jump(fail, &[], n);
             self.start(fail);
         }
+        if let Some(storage) = refund {
+            self.inst(Inst::FrameRefund { storage }, n);
+        }
     }
     /// The failure block of a drop on a normal edge: the edge's pending result, then
     /// every owner and scope the edge has not cleaned, innermost first, then propagate.
-    fn drop_failure(&mut self, n: NodeId) -> BlockId {
+    fn drop_failure(&mut self, refund: Option<AddressId>, n: NodeId) -> BlockId {
         let edge = self.edge.unwrap_or(Edge {
             from: self.owners.len(),
             keep: None,
-            temps: false,
+            cleanup: EdgeCleanup::Unwind,
             scopes: self.patterns_len(),
             pending: None,
             retained: PoolRange::EMPTY,
@@ -559,15 +596,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let saved = std::mem::replace(&mut self.failing, true);
         let blk = self.new_block(&[]);
         self.start(blk);
+        if let Some(storage) = refund {
+            self.inst(Inst::FrameRefund { storage }, n);
+        }
         if let Some((base, id)) = edge.pending {
             self.emit_drop(base, id, n);
         }
+        let (skip_slots, held_temps) = match edge.cleanup {
+            EdgeCleanup::Unwind => (false, None),
+            EdgeCleanup::EndOwners { temps } => (temps, Some(temps)),
+            EdgeCleanup::Temporaries => (true, None),
+        };
         let done = |cx: &Self, i: usize| match cx.owners[i] {
             // A drain resumes where it stopped, and ends at once when it finished.
             Owner::Drain { .. } => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
-            Owner::Slot(_) if edge.temps => false,
-            Owner::Temp(t) if cx.temporary_held(t, edge.temps) => false,
+            Owner::Slot(_) if skip_slots => false,
+            Owner::Temp(t) if held_temps.is_some_and(|temps| cx.temporary_held(t, temps)) => false,
             _ if edge.retained.get(&cx.retained_owners).unwrap().contains(&i) => false,
             _ => i >= edge.from,
         };
@@ -668,7 +713,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.edge = Some(Edge {
                         from: i,
                         keep,
-                        temps,
+                        cleanup: EdgeCleanup::EndOwners { temps },
                         scopes: self.patterns_len(),
                         pending,
                         retained,
@@ -690,6 +735,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `owners` and the region and limit scopes opened since `scopes`, innermost
     /// first, each scope closing after its owners are cleaned (FAIL-8, T5.3).
     pub(super) fn unwind(&mut self, owners: usize, scopes: usize, n: NodeId) {
+        self.unwind_keeping(owners, scopes, PoolRange::EMPTY, n);
+    }
+    /// As `unwind`, leaving the owners at the `retained` indexes of `retained_owners`
+    /// uncleaned: a `break` value's reached temporaries, carried to its frame's exit.
+    pub(super) fn unwind_keeping(
+        &mut self,
+        owners: usize,
+        scopes: usize,
+        retained: PoolRange<usize>,
+        n: NodeId,
+    ) {
         crate::cost_scope!("phase", "cleanup emission");
         if !self.live() {
             return;
@@ -700,13 +756,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for s in (scopes..self.patterns_len()).rev() {
             let at = self.scope_owners(s).max(owners).min(top);
             for i in (at..top).rev() {
+                if retained.get(&self.retained_owners).unwrap().contains(&i) {
+                    continue;
+                }
                 self.edge = Some(Edge {
                     from: i,
                     keep: None,
-                    temps: false,
+                    cleanup: EdgeCleanup::Unwind,
                     scopes: s + 1,
                     pending,
-                    retained: PoolRange::EMPTY,
+                    retained,
                 });
                 self.clean(self.owners[i], n);
             }
@@ -714,13 +773,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.pattern_scope_exits_one(s, n);
         }
         for i in (owners..top).rev() {
+            if retained.get(&self.retained_owners).unwrap().contains(&i) {
+                continue;
+            }
             self.edge = Some(Edge {
                 from: i,
                 keep: None,
-                temps: false,
+                cleanup: EdgeCleanup::Unwind,
                 scopes,
                 pending,
-                retained: PoolRange::EMPTY,
+                retained,
             });
             self.clean(self.owners[i], n);
         }
@@ -743,7 +805,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let any = self.owners.iter().any(|&o| match o {
             Owner::Slot(s) => matches!(self.var(s).avail, Avail::Live | Avail::Maybe),
             Owner::Temp(t) => matches!(t.avail, Avail::Live | Avail::Maybe),
-            Owner::Drain { .. } => true,
+            Owner::Drain { .. } | Owner::Free { .. } => true,
         });
         if !any && !self.open_scopes() {
             return None;
@@ -791,7 +853,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.edge = Some(Edge {
                     from: i,
                     keep: None,
-                    temps: true,
+                    cleanup: EdgeCleanup::Temporaries,
                     scopes: self.patterns_len(),
                     pending: None,
                     retained: PoolRange::EMPTY,

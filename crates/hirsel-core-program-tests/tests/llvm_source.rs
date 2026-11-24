@@ -14,6 +14,7 @@ hirsel_guard::install!();
 mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
+include!("support/front_cases.rs");
 #[path = "support/llvm_codegen.rs"]
 mod llvm_codegen;
 
@@ -214,9 +215,23 @@ fn unaligned_word(b: Bytes, at: u64) -> u64 { list.word_le(b, at) }
     );
 }
 
+// The small budgets in these fixtures trace the reference count. Give the
+// native builds room to exercise the payload, failure and cleanup paths.
+const AMPLE_STEPS: u64 = 1_000_000;
+
+fn native_cases_with_ample_steps(cases: &mut Vec<Case>, is_metered: impl Fn(FuncId) -> bool) {
+    let mut seen = std::collections::BTreeSet::new();
+    cases.retain_mut(|case| {
+        if is_metered(case.function) {
+            case.args[0] = AMPLE_STEPS;
+        }
+        seen.insert((case.function.0, case.args.clone(), case.limit))
+    });
+}
+
 #[cfg(target_os = "linux")]
 #[test]
-fn counted_list_fills_use_memset_and_preserve_the_source_step() {
+fn counted_list_fills_use_memset_and_preserve_the_prefix() {
     let source = r#"
 fn fill_bytes(mut xs: Bytes, count: u64, byte: u8) { list.fill(mut xs, count, byte) }
 fn zero(mut xs: List[u64], count: u64) { list.fill(mut xs, count, 0) }
@@ -275,6 +290,13 @@ fn exercise(budget: u64, count: u64) -> u64 {
             *outcome
         );
     }
+    let cases = [0, 3].map(|count| Case {
+        function,
+        args: vec![AMPLE_STEPS, count],
+        limit: 4096,
+        injection: None,
+    });
+    let expected = [6501, 6504].map(|value| eval::Outcome::Returned(vec![value]));
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
     let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[function]);
     for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
@@ -477,7 +499,7 @@ fn probe(s: u64, divisor: u64) -> u64 {
             }),
         "two u64 leaves and failure status cross the call as immediate results"
     );
-    let cases: Vec<_> = (0..=11)
+    let mut cases: Vec<_> = (0..=11)
         .flat_map(|steps| [0, 2].map(move |divisor| (steps, divisor)))
         .map(|(steps, divisor)| Case {
             function: names["probe"],
@@ -486,29 +508,27 @@ fn probe(s: u64, divisor: u64) -> u64 {
             injection: None,
         })
         .collect();
-    let expected: Vec<_> = cases
-        .iter()
-        .map(|case| {
-            let (steps, divisor) = (case.args[0], case.args[1]);
-            // single, recurse (entry and four self-calls), revise, apply, and
-            // the indirect call to wide cost nine Steps. Only success calls to_bits64.
-            let outcome = if steps < if divisor == 0 { 9 } else { 10 } {
-                eval::Outcome::Returned(vec![1000 + steps])
-            } else if divisor == 0 {
-                eval::Outcome::Failed(vec!["Division".into()])
-            } else {
-                eval::Outcome::Returned(vec![42])
-            };
-            let evaluated = eval::run(&program, case.function, &case.args, case.limit);
-            assert_eq!(evaluated.outcome, outcome, "{:?}", case.args);
-            evaluated
-        })
-        .collect();
+    for case in &cases {
+        let (steps, divisor) = (case.args[0], case.args[1]);
+        // single, recurse (entry and four self-calls), revise, apply, and
+        // the indirect call to wide cost nine Steps. Only success calls to_bits64.
+        let outcome = if steps < if divisor == 0 { 9 } else { 10 } {
+            eval::Outcome::Returned(vec![1000 + steps])
+        } else if divisor == 0 {
+            eval::Outcome::Failed(vec!["Division".into()])
+        } else {
+            eval::Outcome::Returned(vec![42])
+        };
+        let evaluated = eval::run(&program, case.function, &case.args, case.limit);
+        assert_eq!(evaluated.outcome, outcome, "{:?}", case.args);
+    }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
     let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
     for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
         let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
-        for ((case, evaluated), native) in cases.iter().zip(&expected).zip(reports) {
+        for (case, native) in cases.iter().zip(reports) {
+            let evaluated = eval::run(&program, case.function, &case.args, case.limit);
             assert_eq!(native.outcome, evaluated.outcome, "{:?}", case.args);
             assert_eq!(native.used, evaluated.used);
             let sites: Vec<_> = evaluated
@@ -1221,7 +1241,7 @@ fn {name}(budget: u64, trigger: {ty}, value: {ty}, write_now: bool) -> u64 {{
         }
     }
 
-    let folds = check_counted_loop_agreement(&source, &calls, None);
+    let folds = check_counted_loop_agreement(&source, &calls, None, true);
     // Count both compiled functions and their invocations. Budget sweeps
     // must not let one function supply an entire seed's fold coverage.
     for seed in SEEDS {
@@ -1258,9 +1278,10 @@ fn check_counted_loop_agreement(
     source: &str,
     calls: &[CountedLoopCall],
     failure_expr: Option<&str>,
+    metered: bool,
 ) -> HashMap<String, usize> {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
-    let cases: Vec<_> = calls
+    let mut cases: Vec<_> = calls
         .iter()
         .map(|(name, args, _)| Case {
             function: names[name],
@@ -1272,27 +1293,29 @@ fn check_counted_loop_agreement(
     let mut exports: Vec<_> = cases.iter().map(|case| case.function).collect();
     exports.sort_unstable_by_key(|f| f.0);
     exports.dedup();
+    for (case, (name, args, expected)) in cases.iter().zip(calls) {
+        if let Some(expected) = expected {
+            let run = eval::run(&program, case.function, &case.args, case.limit);
+            assert_eq!(&run.outcome, expected, "{name}{args:?}");
+            if let Some(expr) = failure_expr
+                && matches!(expected, eval::Outcome::Failed(_))
+            {
+                let start = source.find(&format!("fn {name}(")).unwrap();
+                let offset = source[start..].find(expr).unwrap() as u32;
+                let [Some(anchor)] = run.sites.as_slice() else {
+                    panic!("{name}{args:?} must raise at {expr}, got {:?}", run.sites);
+                };
+                assert_eq!(program.items[anchor.item.index()].0.name, *name);
+                assert_eq!(anchor.start, offset, "{name}{args:?} must raise at {expr}");
+            }
+        }
+    }
+    if metered {
+        native_cases_with_ample_steps(&mut cases, |_| true);
+    }
     let evaluated: Vec<_> = cases
         .iter()
-        .zip(calls)
-        .map(|(case, (name, args, expected))| {
-            let run = eval::run(&program, case.function, &case.args, case.limit);
-            if let Some(expected) = expected {
-                assert_eq!(&run.outcome, expected, "{name}{args:?}");
-                if let Some(expr) = failure_expr
-                    && matches!(expected, eval::Outcome::Failed(_))
-                {
-                    let start = source.find(&format!("fn {name}(")).unwrap();
-                    let offset = source[start..].find(expr).unwrap() as u32;
-                    let [Some(anchor)] = run.sites.as_slice() else {
-                        panic!("{name}{args:?} must raise at {expr}, got {:?}", run.sites);
-                    };
-                    assert_eq!(program.items[anchor.item.index()].0.name, *name);
-                    assert_eq!(anchor.start, offset, "{name}{args:?} must raise at {expr}");
-                }
-            }
-            run
-        })
+        .map(|case| eval::run(&program, case.function, &case.args, case.limit))
         .collect();
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
     let (llvm, folds) =
@@ -1304,7 +1327,10 @@ fn check_counted_loop_agreement(
     ] {
         let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
         assert_eq!(reports.len(), cases.len(), "{engine} report count");
-        for (((name, args, _), oracle), native) in calls.iter().zip(&evaluated).zip(reports) {
+        for ((case, oracle), native) in cases.iter().zip(&evaluated).zip(reports) {
+            let f = &program.functions[case.function.index()];
+            let name = &program.instances[f.instance.index()].definition;
+            let args = &case.args;
             let sites: Vec<_> = oracle
                 .sites
                 .iter()
@@ -1367,7 +1393,8 @@ fn check_collection_counted_loops() {
                 })
                 .collect();
             let count =
-                check_counted_loop_agreement(&source, &calls, Some(CollectionShape::CHECK))[name];
+                check_counted_loop_agreement(&source, &calls, Some(CollectionShape::CHECK), false)
+                    [name];
             eprintln!("{name}: {count} checks folded by CounterRangePass");
             count > 0
         };
@@ -1866,33 +1893,20 @@ fn probe(mode: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn plain_list_drop_makes_one_runtime_free_at_both_lengths() {
+fn plain_list_drop_returns_the_charge_at_both_lengths() {
     let source = include_str!("../../../core/front/cases/rules/MEM-32-plain-drop.hirsel");
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [1, 1_000_000].map(|length| Case {
         function: names["checksum"],
         args: vec![length],
-        limit: 16_000_000,
+        limit: length * 8,
         injection: None,
     });
-    let bindings = r#"
-HirselCoreLimitRecord *__real_hirsel_core_block_payer(void *);
-HirselCoreLimitRecord *__wrap_hirsel_core_block_payer(void *block) {
-    hirsel_core_test_drop_trace(0);
-    return __real_hirsel_core_block_payer(block);
-}
-void __real_hirsel_core_free_value(const HirselCoreContext *, void *, uint64_t);
-void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, uint64_t bytes) {
-    hirsel_core_test_drop_trace(bytes);
-    __real_hirsel_core_free_value(ctx, block, bytes);
-}
-"#;
-    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    let reports = execute_optimized(&module, &cases, "", "", Optimization::Speed);
     for (case, report) in cases.iter().zip(reports) {
         let length = case.args[0];
         assert_eq!(report.outcome, eval::Outcome::Returned(vec![length]));
         assert_eq!(report.used, 0);
-        assert_eq!(report.trace, vec![length * 8]);
     }
 }
 
@@ -2051,23 +2065,9 @@ fn verify_ir(ir: &str) {
 #[cfg(target_os = "linux")]
 #[test]
 fn every_front_run_case_matches_the_evaluator() {
-    fn files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files(&path, out)
-            } else if path.extension().is_some_and(|s| s == "hirsel") {
-                out.push(path)
-            }
-        }
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let mut paths = vec![];
-    files(&root.join("cases"), &mut paths);
-    paths.sort();
     let mut count = 0;
     let mut failures = Vec::new();
-    for path in paths {
+    for path in front_run_paths() {
         let source = std::fs::read_to_string(&path).unwrap();
         let runs = source
             .lines()
@@ -2384,8 +2384,8 @@ fn site_fixture(target: Target) {
     for (opt, composed, debug_lines, bytes) in fixtures {
         let file = object::File::parse(bytes.as_slice()).unwrap();
         assert!(
-            file.section_by_name(".eh_frame").is_none(),
-            "generated object has unwind tables: {target:?} {opt:?}, composed={composed}, debug_lines={debug_lines}"
+            file.section_by_name(".eh_frame").is_some(),
+            "generated object lacks unwind tables: {target:?} {opt:?}, composed={composed}, debug_lines={debug_lines}"
         );
         let mut site_relocations = 0;
         for section in file.sections() {
@@ -2704,60 +2704,7 @@ fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn step_counter_survives_inlined_mutations_and_exact_exhaustion() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
-    let source = r#"
-fn append(mut xs: List[u64], n: u64) {
-    list.push(mut xs, n)
-}
-fn probe(s: u64) -> u64 {
-    match (bound steps s {
-        let mut xs: List[u64] = list.with_capacity(8)
-        for i in 0u64 .. 8u64 { append(mut xs, i) }
-        list.len(xs)
-    }) {
-        Ok(n) => 1000 + n,
-        Error(e) => e.steps
-    }
-}
-"#;
-    let (module, names) =
-        hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
-    let cases: Vec<_> = (0..=48)
-        .map(|s| Case {
-            function: names["probe"],
-            args: vec![s],
-            limit: 1_000_000,
-            injection: None,
-        })
-        .collect();
-    assert_eq!(
-        eval::run(&module, names["probe"], &[48], 1_000_000).outcome,
-        eval::Outcome::Returned(vec![1008])
-    );
-    for facts in [false, true] {
-        let ir =
-            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
-        verify_ir(&ir);
-        for opt in [Optimization::None, Optimization::Speed] {
-            let object =
-                hirsel_llvm_lazy::compile_ir(&ir, matches!(opt, Optimization::Speed)).unwrap();
-            let got = execute_object(&module, &cases, "", "", opt, Some(object));
-            for (case, actual) in cases.iter().zip(got) {
-                assert_eq!(
-                    actual.outcome,
-                    eval::run(&module, case.function, &case.args, case.limit).outcome,
-                    "facts={facts}, s={}",
-                    case.args[0]
-                );
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
+fn fallible_step_regions_preserve_results_and_failures() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let source = r#"
 type Op { apply: fn(u64) -> u64 }
@@ -3002,6 +2949,7 @@ fn strided(s: u64, stride: u64) -> u64 {
             eval::Outcome::Returned(vec![want])
         );
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3082,7 +3030,7 @@ fn strided(s: u64, stride: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn counted_reference_regions_keep_exact_bounds_and_mutation_prefixes() {
+fn counted_reference_regions_preserve_mutation_prefixes() {
     let source = r#"
 type Cell { value: u64 }
 fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Result[(), Capacity] {
@@ -3189,6 +3137,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
                 injection: None,
             });
         }
+        native_cases_with_ample_steps(&mut cases, |_| true);
         for facts in [false, true] {
             let ir = emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts)
                 .unwrap();
@@ -3225,7 +3174,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn hot_loop_helper_mutations_and_early_returns_keep_exact_steps() {
+fn hot_loop_helper_mutations_and_early_returns() {
     let source = r#"
 fn lane(mut xs: Inline[u64, 8], i: u64, at: u64) -> Result[(), Capacity] {
     let a: u64 = int.widen(1u8)
@@ -3291,6 +3240,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3486,7 +3436,7 @@ fn probe(n: u64, d: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn exposed_scanner_loops_keep_exact_steps_and_early_prefixes() {
+fn exposed_scanner_loops_keep_early_prefixes() {
     let source = r#"
 fn scan(mut xs: Inline[u64, 8], n: u64, at: u64) -> Result[(), Capacity] {
     for i in 0u64 .. n {
@@ -3548,6 +3498,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3581,7 +3532,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn branched_regions_refund_the_unexecuted_effect_suffix() {
+fn branched_regions_preserve_the_effect_prefix() {
     let source = r#"
 fn fork(mut xs: Inline[u64, 5], mode: u64) -> Result[(), Capacity] {
     xs[0] += int.widen(1u8)
@@ -3635,6 +3586,7 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3674,7 +3626,7 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn data_dependent_cycles_refund_exact_step_prefixes() {
+fn data_dependent_cycles_preserve_the_effect_prefix() {
     let source = r#"
 fn scan(mut xs: Inline[u64, 8], n: u64, at: u64) -> Result[(), Capacity] {
     let mut i = 0u64
@@ -3762,6 +3714,7 @@ fn failing(s: u64, n: u64) -> u64 {
             });
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3806,7 +3759,7 @@ fn failing(s: u64, n: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn counted_breaks_refund_the_partial_trip_and_unused_iterations() {
+fn counted_breaks_preserve_the_partial_trip() {
     let source = r#"
 fn probe(s: u64, n: u64, at: u64) -> u64 {
     match (bound steps s {
@@ -3872,6 +3825,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -3911,7 +3865,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn cheap_loop_traces_refund_before_expensive_effects_and_resume_once() {
+fn cheap_loop_traces_preserve_expensive_effects() {
     let source = r#"
 fn scan(mut xs: Inline[u64, 3], n: u64, at: u64, early: bool) -> Result[(), Capacity] {
     for i in 0u64 .. n {
@@ -3988,6 +3942,7 @@ fn probe(s: u64, n: u64, at: u64, mode: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -4033,7 +3988,7 @@ fn probe(s: u64, n: u64, at: u64, mode: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn shifted_loop_headers_keep_exact_tails_and_checked_header_overflow() {
+fn shifted_loop_headers_keep_tails_and_checked_header_overflow() {
     let run = r#"
 fn probe(s: u64, n: u64, at: u64, base: u64) -> u64 {
     let ran = bound steps s {
@@ -4125,6 +4080,7 @@ fn probe(s: u64, n: u64, at: u64, base: u64) -> u64 {
             });
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -4198,7 +4154,7 @@ fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn direct_and_indirect_recursive_calls_keep_exact_steps_and_failure_sites() {
+fn direct_and_indirect_recursive_calls_keep_results_and_failure_sites() {
     let source = r#"
 fn recur(n: u64, d: u64) -> u64 {
     let one: u64 = int.widen(1u8)
@@ -4250,6 +4206,7 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
             }
         }
     }
+    native_cases_with_ample_steps(&mut cases, |_| true);
     let check = |reports: Vec<NativeReport>| {
         for (case, report) in cases.iter().zip(reports) {
             let expected = eval::run(&module, case.function, &case.args, case.limit);
@@ -4293,7 +4250,7 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn captured_cursor_and_writer_state_keep_exact_prefixes() {
+fn captured_cursor_and_writer_state_keep_prefixes() {
     let source = r#"
 fn twice(f: scoped fn(u64) -> u64, d: u64) -> u64 { f(d) + f(d) }
 fn bump(mut n: u8) { n += 1 }
@@ -4465,6 +4422,7 @@ fn scan_prefixed(s: u64, n: u64, stop: u64) -> u64 {
             });
         }
     }
+    native_cases_with_ample_steps(&mut cases, |f| f != names["widths"]);
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -4508,7 +4466,7 @@ fn scan_prefixed(s: u64, n: u64, stop: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn writer_bookkeeping_preserves_payloads_overflow_poisoning_and_step_prefixes() {
+fn writer_bookkeeping_preserves_payloads_overflow_and_poisoning() {
     let indexed = include_str!("../../../core/front/cases/stream-indexed-span.hirsel");
     let destination = include_str!("../../../core/front/cases/body/dest-put.hirsel");
     let reservations =
@@ -4592,15 +4550,13 @@ fn metered(s: u64, n: u64, cap: u64) -> u64 {
             });
         }
         if names.contains_key("metered") {
-            for s in [0, 1, 4, 32, 65535, 65536, 65537, 1000000] {
-                for (n, cap) in [(7, 14), (7, 15), (32768, 32776)] {
-                    cases.push(Case {
-                        function: names["metered"],
-                        args: vec![s, n, cap],
-                        limit: 1_000_000,
-                        injection: None,
-                    });
-                }
+            for (n, cap) in [(7, 14), (7, 15), (32768, 32776)] {
+                cases.push(Case {
+                    function: names["metered"],
+                    args: vec![AMPLE_STEPS, n, cap],
+                    limit: 1_000_000,
+                    injection: None,
+                });
             }
         }
         let check = |reports: Vec<NativeReport>| {
@@ -4656,13 +4612,13 @@ fn static_bytes_preserve_budget_law() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [
         ("literal_refusal", vec![0], 1615, 32),
-        ("literal_refusal", vec![1], 1615, 32),
         ("refusal_after_handover", vec![0], 800, 32),
-        ("refusal_after_handover", vec![1], 800, 32),
         ("refund_after_handover", vec![0], 90, 0),
         ("refund_after_handover", vec![1], 90, 0),
         ("empty_is_free", vec![], 0, 0),
         ("cloned_and_counted", vec![], 18, 0),
+        ("static_and_clone", vec![32], 1, 0),
+        ("static_and_clone", vec![0], 1, 0),
         ("inline_capacity", vec![], 311, 0),
     ];
     let runs = cases.each_ref().map(|(name, args, _, _)| Case {

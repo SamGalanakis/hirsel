@@ -1,0 +1,48 @@
+// The constructed branch has two leaves. Print observations from the public map API.
+fn lean_diff_leaf(stamp: u64, count: u64, first_key: u64) -> Arc[std.omap.Node[u64, u64]] {
+    let mut kv: List[u64] = list.new()
+    for offset in 0u64..count { list.push(mut kv, first_key + offset) }
+    std.omap.leaf(stamp, kv, kv)
+}
+
+fn lean_diff_omap_row(mut text_out: String, version: std.omap.OMap[u64, u64]) {
+    string.push_u64(mut text_out, std.omap.len(version))
+    match std.omap.root(version) {
+        Some(n) => {
+            string.push(mut text_out, " ")
+            string.push_u64(mut text_out, std.omap.node_id(n))
+            string.push(mut text_out, " ")
+            string.push_u64(mut text_out, std.omap.node_level(n))
+            string.push(mut text_out, " ")
+            string.push_u64(mut text_out, std.omap.node_count(n))
+            string.push(mut text_out, " ")
+            string.push_u64(mut text_out, std.omap.node_len(n))
+        },
+        None => (),
+    }
+    string.push(mut text_out, "\n")
+}
+
+pub fn lean_diff_omap(out: Stdout) -> Result[(), ()] waits {
+    let mut text_out = string.new()
+    let empty: std.omap.OMap[u64, u64] = std.omap.new()
+    lean_diff_omap_row(mut text_out, std.omap.snapshot(empty))
+    for i in 0u64..32u64 {
+        let left = lean_diff_leaf(10u64, i + 1u64, 0u64)
+        let right = lean_diff_leaf(20u64, 32u64 - i, 32u64)
+        let first = std.omap.from_root(Some(arc.share(left)))
+        let mut children: List[Arc[std.omap.Node[u64, u64]]] = list.new()
+        list.push(mut children, take left)
+        list.push(mut children, take right)
+        let mut lows: List[u64] = list.new()
+        list.push(mut lows, 32u64)
+        let branch = std.omap.branch(30u64, lows, children)
+        let new_version = std.omap.from_root(Some(take branch))
+        lean_diff_omap_row(mut text_out, std.omap.snapshot(new_version))
+        lean_diff_omap_row(mut text_out, std.omap.snapshot(first))
+    }
+    match stdout.write(out, text_out) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(()),
+    }
+}

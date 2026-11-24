@@ -21,6 +21,30 @@ fn select() -> Compress {
     portable
 }
 
+fn compressor() -> Compress {
+    static COMPRESS: std::sync::OnceLock<Compress> = std::sync::OnceLock::new();
+    *COMPRESS.get_or_init(select)
+}
+
+/// Compress complete RFC 3174 blocks without padding.
+///
+/// # Safety
+/// `state` points to five aligned writable words. When `blocks` is nonzero,
+/// `data` points to that many 64-byte blocks disjoint from `state`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_sha1_compress(state: *mut u32, data: *const u8, blocks: u64) {
+    if blocks == 0 {
+        return;
+    }
+    // SAFETY: both spans meet the caller preconditions. The selected kernel
+    // only uses CPU features that are present.
+    unsafe {
+        let state = &mut *state.cast::<[u32; 5]>();
+        let blocks = std::slice::from_raw_parts(data.cast::<[u8; 64]>(), blocks as usize);
+        compressor()(state, blocks);
+    }
+}
+
 /// Compress a byte span and its RFC 3174 padding.
 ///
 /// # Safety
@@ -28,7 +52,6 @@ fn select() -> Compress {
 /// `data` points to `len` readable bytes disjoint from `state`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_sha1_blocks(state: *mut u32, data: *const u8, len: u64) {
-    static COMPRESS: std::sync::OnceLock<Compress> = std::sync::OnceLock::new();
     // SAFETY: both spans meet the caller preconditions. Empty Bytes may
     // have a null data pointer.
     let state = unsafe { &mut *state.cast::<[u32; 5]>() };
@@ -39,7 +62,7 @@ pub unsafe extern "C" fn hirsel_core_sha1_blocks(state: *mut u32, data: *const u
         unsafe { std::slice::from_raw_parts(data, len as usize) }
     };
     let (blocks, tail) = input.as_chunks::<64>();
-    let compress = *COMPRESS.get_or_init(select);
+    let compress = compressor();
 
     // SAFETY: select only chooses a kernel when its CPU features are present.
     if !blocks.is_empty() {

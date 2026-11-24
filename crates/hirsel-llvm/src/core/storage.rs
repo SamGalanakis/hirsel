@@ -93,7 +93,7 @@ impl FunctionEmitter<'_> {
         match t {
             FieldTy::Inline(t) => self.kind_of(TypeId(t.0)),
             FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
-            FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
+            FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => At::Counted(TypeId(t.0)),
             FieldTy::Array(e, n) => At::Array(e.clone(), *n),
             FieldTy::Seq(e) => At::Seq(e.clone()),
             _ => At::Other,
@@ -213,10 +213,8 @@ impl FunctionEmitter<'_> {
         let steps = info.steps.get(&self.body.pools.steps).unwrap();
         let (last, before) = steps.split_last()?;
         let scalar = |t: &FieldTy| {
-            matches!(
-                t,
-                FieldTy::Scalar(_) | FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_)
-            )
+            matches!(t, FieldTy::Scalar(_) | FieldTy::Box(_) | FieldTy::Rc(_))
+                || matches!(t, FieldTy::Arc(_) | FieldTy::Shared(_))
         };
         let data = match *last {
             Step::Seq(_) => return Some(alias::SEQ_WORD_ACCESS),
@@ -664,9 +662,9 @@ impl FunctionEmitter<'_> {
                 edge: FieldTy::FrozenBytes
             }
         ) {
-            return self.allocation(
-                "hirsel_core_admit_frozen_bytes",
-                &[ptr(CONTEXT), word(charge.clone())],
+            return (
+                Value::IntToPtr(hirsel_core_layout::FROZEN_STATIC_UNCHARGED),
+                int(0),
             );
         }
         // The prefix follows the block's cleanup class (crate docs,
@@ -843,17 +841,13 @@ impl FunctionEmitter<'_> {
                 let payer = match place {
                     AllocPlace::Current
                     | AllocPlace::Like(_)
-                    | AllocPlace::Frame(_)
                     | AllocPlace::LentFrame(_)
                     | AllocPlace::ByteHead
                     | AllocPlace::ByteTail(_) => Payer::Current,
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
-                let (block, room) = if let AllocPlace::Frame(frame) = place {
-                    let frame = self.numeric(frame);
-                    self.frame_admit(&frame, &charge, overflow)
-                } else if let AllocPlace::LentFrame(frame) = place {
+                let (block, room) = if let AllocPlace::LentFrame(frame) = place {
                     let frame = self.numeric(frame);
                     let overflow = overflow.map_or(FALSE, |v| {
                         let flag = self.numeric(v);
@@ -1032,13 +1026,8 @@ impl FunctionEmitter<'_> {
                     self.store_native(&at, 0, Type::Ptr, &promoted);
                 }
             }
-            Inst::FrameRefund { charge } => {
-                let n = self.numeric(charge);
-                let payer = self.current_payer();
-                self.runtime_void(
-                    "hirsel_core_refund_in",
-                    &[ptr(CONTEXT), ptr(payer), word(n)],
-                );
+            Inst::FrameAdmit { .. } | Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {
+                self.frame(inst);
             }
             Inst::Copy { to, from, bytes } => {
                 let pieces = match self.body.addresses[to.index()].ty {

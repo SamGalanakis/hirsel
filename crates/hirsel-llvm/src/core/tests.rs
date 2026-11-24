@@ -1,6 +1,8 @@
 // Most helpers serve the Linux-only native tests.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 use super::*;
+mod host_abi;
+
 use hirsel_core_ir::{eval, text, wf};
 use std::fs;
 use std::path::PathBuf;
@@ -1970,71 +1972,19 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
 fn hash_read_facts_observe_intervening_writes() {
     let module = text::parse(include_str!("../../tests/core_runtime/hash-writes.core")).unwrap();
     wf::module(&module).unwrap();
-    let mut cases = [(0, 1), (1, 0), (u64::MAX, 0), (1 << 63, u64::MAX)]
-        .map(|(a, b)| Case {
-            function: FuncId(0),
-            args: vec![a, b],
-            limit: 0,
-            injection: None,
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    let word = |bits| Case {
-        function: FuncId(1),
-        args: vec![bits],
+    let cases = [(0, 1), (1, 0), (u64::MAX, 0), (1 << 63, u64::MAX)].map(|(a, b)| Case {
+        function: FuncId(0),
+        args: vec![a, b],
         limit: 0,
         injection: None,
-    };
-    let fixed = cases.len();
-    cases.push(word(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7])));
-    let fixed_key = std::array::from_fn(|i| i as u8);
-    let mut vectors = vec![
-        ([0; 16], vec![word(0)], Some((0, 0xbd60acb658c79e45))),
-        (fixed_key, cases, Some((fixed, 0x369095118d299a8e))),
-    ];
-    for seed in [0x1584_u64, 0x9e3779b97f4a7c15] {
-        let mut state = seed;
-        let mut random_word = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let mut key = [0; 16];
-        for half in key.chunks_exact_mut(8) {
-            half.copy_from_slice(&random_word().to_le_bytes());
-        }
-        vectors.push((key, (0..64).map(|_| word(random_word())).collect(), None));
-    }
+    });
     for facts in [false, true] {
         let ir = emit_ir_with_facts(&module, false, facts).unwrap();
         for speed in [false, true] {
             let object = hirsel_llvm_lazy::compile_ir(&ir, speed).unwrap();
-            for (key, cases, fixed) in &vectors {
-                // Supply CAP-8 entropy to the linked test process so the evaluator
-                // and native program see the same key.
-                let got = execute_object(
-                    &module,
-                    cases,
-                    &map_entropy_binding(key),
-                    "",
-                    Optimization::None,
-                    Some(object.clone()),
-                );
-                if let Some((index, expected)) = fixed {
-                    // Independent siphasher vector, also pinned by the runtime suite.
-                    assert_eq!(
-                        got[*index].outcome,
-                        eval::Outcome::Returned(vec![*expected, 1])
-                    );
-                }
-                for (case, actual) in cases.iter().zip(got) {
-                    let (expected, _) =
-                        eval::run_map_hash(&module, case.function, &case.args, case.limit, *key);
-                    assert_eq!(actual.outcome, expected.outcome);
-                    assert_eq!(actual.used, 0);
-                    assert_eq!(actual.admissions, 0);
-                }
+            for actual in execute_object(&module, &cases, "", "", Optimization::None, Some(object))
+            {
+                assert_eq!(actual.outcome, eval::Outcome::Returned(vec![1, 1]));
             }
         }
     }
@@ -2042,12 +1992,12 @@ fn hash_read_facts_observe_intervening_writes() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn map_placement_operations_match_prog_11() {
+fn map_placement_operations_match_fixed_key_vectors() {
     mod vectors {
-        include!("../../../hirsel-core-ir/samples/map-placement-vectors.rs");
+        include!("../../../hirsel-cranelift/tests/support/map-placement-vectors.rs");
     }
     let module = text::parse(include_str!(
-        "../../../hirsel-core-ir/samples/map-placement.core"
+        "../../../hirsel-cranelift/tests/support/map-placement.core"
     ))
     .unwrap();
     wf::module(&module).unwrap();
@@ -2064,7 +2014,8 @@ fn map_placement_operations_match_prog_11() {
     let reports = execute_object(
         &module,
         &cases,
-        &map_entropy_binding(&key),
+        "extern void hirsel_core_test_set_map_vectors_key(HirselCoreContext *);\n\
+         #define SETUP_CASE(ctx) hirsel_core_test_set_map_vectors_key(ctx)\n",
         "",
         Optimization::Speed,
         None,
@@ -2505,76 +2456,12 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
         assert!(expected.stderr.is_empty());
     }
     for &op in HostOp::ALL {
-        let params: &[&str] = match op {
-            HostOp::ExecSpawn => &["u64", "ptr", "ptr", "ptr", "ptr", "ptr", "u8", "u8", "u8"],
-            HostOp::ExecWait => &["u64", "u8", "u64", "u64"],
-            HostOp::ExecSignal => &["u64", "u8"],
-            HostOp::ExecNarrow => &["u64", "u32", "ptr", "ptr"],
-            HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "u8", "u64", "u64"],
-            HostOp::Listen => &["u64", "u8", "u64", "u64", "u16", "u16"],
-            HostOp::Accept => &["u64", "u8", "u64", "u64"],
-            HostOp::RecvBounded => &["u64", "ptr", "u64", "u8", "u64", "u64"],
-            HostOp::SendPair => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
-            HostOp::TlsConnect => &["u64", "u64", "ptr", "u8", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::NetNarrowTls => &["u64", "ptr", "u16", "u16", "u8", "ptr"],
-            HostOp::NetNarrowResolve => &["u64", "ptr"],
-            HostOp::UnixConnect => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::UnixListen => &["u64", "ptr", "ptr", "u16"],
-            HostOp::UnixAccept | HostOp::RecvReady => &["u64", "u8", "u64", "u64"],
-            HostOp::DatagramOpen => &["u64"],
-            HostOp::DatagramBind => &["u64", "ptr", "ptr"],
-            HostOp::DatagramConnect => &["u64", "ptr", "ptr"],
-            HostOp::DatagramSend => &["u64", "ptr", "u8", "u64", "u64"],
-            HostOp::DatagramSendTo => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::DatagramRecv => &["u64", "ptr", "u8", "u64", "u64"],
-            HostOp::NetNarrowUnix => &["u64", "u8", "ptr", "ptr"],
-            HostOp::Resolve | HostOp::CredFetch => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::SendSecret => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::ScramSha256 => &["u64", "u64", "ptr", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
-            HostOp::ScramFinalLen => &["u64", "ptr", "ptr"],
-            HostOp::ScramVerify => &["u64", "ptr"],
-            HostOp::SecretSeal => &["ptr", "ptr"],
-            HostOp::SecretNarrow => &["u64", "ptr"],
-            HostOp::SecretDeriveHmac => &["u64", "ptr", "ptr", "ptr"],
-            HostOp::NetSplit
-            | HostOp::Stopped
-            | HostOp::EnvLen
-            | HostOp::ProvideRandom
-            | HostOp::ClockIdle
-            | HostOp::ProcessTrigger => &["u64"],
-            HostOp::ProvideProcess => &[],
-            HostOp::ProvideDir | HostOp::ProvideNet | HostOp::ProvideExec | HostOp::PortNext => {
-                &["u64"]
-            }
-            HostOp::ProvideStdout | HostOp::ProvideStderr => &["u64", "bool"],
-            HostOp::StreamTerminal => &["u64", "u8"],
-            HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => &["u64", "u64"],
-            HostOp::CallPayload => &["u64", "u64", "ptr"],
-            HostOp::PortReply => &["u64"; 9],
-            HostOp::PortFill => &["u64", "u64", "ptr"],
-            HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
-            HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
-            HostOp::EnvName => &["u64", "u64"],
-            HostOp::Open => &["u64", "ptr", "u8"],
-            HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
-                &["u64"]
-            }
-            HostOp::Rename | HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
-                &["u64", "ptr", "ptr"]
-            }
-            HostOp::ReadAt | HostOp::WriteAt | HostOp::SecretWrap => &["u64", "u64", "ptr"],
-            HostOp::SecretUnwrap => &["u64", "ptr", "ptr"],
-            HostOp::SecretSign => &["u64", "u64", "ptr", "ptr"],
-            HostOp::SleepUntil | HostOp::SleepUntilWall => &["u64", "u64"],
-            HostOp::Sync | HostOp::SyncDir | HostOp::Entries | HostOp::StatFile => &["u64"],
-            _ => &["u64", "ptr"],
-        };
+        let params = host_abi::parameters(op);
         let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
             &["ptr", "u8", "u32", "u64"]
         } else if matches!(op, HostOp::Random | HostOp::Stopped) {
             &[]
-        } else if matches!(op, HostOp::Listen | HostOp::Accept) {
+        } else if op.address_outcome() {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
         } else if op == HostOp::TlsConnect {
             &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
@@ -2637,7 +2524,14 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .verify()
             .unwrap();
         // HirselCoreSpawnOutcome is a 32-byte HirselCoreHostOutcome and three u64 pipes.
-        let storage = if matches!(op, HostOp::Listen | HostOp::Accept | HostOp::ExecSpawn) {
+        let storage = if matches!(
+            op,
+            HostOp::Listen
+                | HostOp::Accept
+                | HostOp::LocalAddr
+                | HostOp::PeerAddr
+                | HostOp::ExecSpawn
+        ) {
             "sret([56 x i8])"
         } else if op == HostOp::TlsConnect {
             "sret([64 x i8])"

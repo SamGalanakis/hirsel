@@ -1,0 +1,112 @@
+// AR2. phc-winner-argon2 src/test.c, f57e61e19229e23c4445b85494dbf7c07de721cb.
+fn phc_case(password: Bytes, m: u32, t: u32, p: u32, expected: String) -> bool {
+    let cost = Argon2Cost(memory_kib: m, passes: t, lanes: p)
+    let Ok(encoded) = argon2.hash(password, b"somesalt", cost) else {
+        return false
+    }
+    let phc = string.as_bytes(expected)
+    let n = list.len(phc)
+    let mut changed: Bytes = list.with_capacity(n)
+    list.append(mut changed, phc)
+    // Both replacement characters have zero pad bits for a 32-byte tag.
+    changed[n - 1] = if changed[n - 1] == b'A' {
+        b'E'
+    } else {
+        b'A'
+    }
+    match (argon2.verify(password, phc), argon2.verify(password, changed)) {
+        (Ok(true), Ok(false)) => encoded == expected,
+        _ => false,
+    }
+}
+
+// test-native-only: AR2 runs the larger libargon2 costs on native engines.
+// test-limit: 68157440
+// expect: run ar2_libargon2_1() = true
+fn ar2_libargon2_1() -> bool {
+    phc_case(b"password", 65536, 2, 1, "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc")
+}
+
+// test-native-only: AR2 runs the larger libargon2 costs on native engines.
+// test-limit: 269484032
+// expect: run ar2_libargon2_2() = true
+fn ar2_libargon2_2() -> bool {
+    phc_case(b"password", 262144, 2, 1, "$argon2id$v=19$m=262144,t=2,p=1$c29tZXNhbHQ$eP4eyR+zqlZX1y5xCFTkw9m5GYx0L5YWwvCFvtlbLow")
+}
+
+// expect: run ar2_libargon2_3() = true
+fn ar2_libargon2_3() -> bool {
+    phc_case(b"password", 256, 2, 1, "$argon2id$v=19$m=256,t=2,p=1$c29tZXNhbHQ$nf65EOgLrQMR/uIPnA4rEsF5h7TKyQwu9U1bMCHGi/4")
+}
+
+// expect: run ar2_libargon2_4() = true
+fn ar2_libargon2_4() -> bool {
+    phc_case(b"password", 256, 2, 2, "$argon2id$v=19$m=256,t=2,p=2$c29tZXNhbHQ$bQk8UB/VmZZF4Oo79iDXuL5/0ttZwg2f/5U52iv1cDc")
+}
+
+// test-native-only: AR2 runs the larger libargon2 costs on native engines.
+// test-limit: 68157440
+// expect: run ar2_libargon2_5() = true
+fn ar2_libargon2_5() -> bool {
+    phc_case(b"password", 65536, 1, 1, "$argon2id$v=19$m=65536,t=1,p=1$c29tZXNhbHQ$9qWtwbpyPd3vm1rB1GThgPzZ3/ydHL92zKL+15XZypg")
+}
+
+// test-native-only: AR2 runs the larger libargon2 costs on native engines.
+// test-limit: 68157440
+// expect: run ar2_libargon2_6() = true
+fn ar2_libargon2_6() -> bool {
+    phc_case(b"password", 65536, 4, 1, "$argon2id$v=19$m=65536,t=4,p=1$c29tZXNhbHQ$kCXUjmjvc5XMqQedpMTsOv+zyJEf5PhtGiUghW9jFyw")
+}
+
+// test-native-only: AR2 runs the larger libargon2 costs on native engines.
+// test-limit: 68157440
+// expect: run ar2_libargon2_7() = true
+fn ar2_libargon2_7() -> bool {
+    phc_case(b"differentpassword", 65536, 2, 1, "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$C4TWUs9rDEvq7w3+J4umqA32aWKB1+DSiRuBfYxFj94")
+}
+
+fn block_steps(memory_kib: u32) -> bool {
+    let password = b"password"
+    let salt = b"somesalt"
+    let empty = b""
+    let cost = Argon2Cost(memory_kib: memory_kib, passes: 2, lanes: 2)
+    let len: u64 = 32
+    let out: Bytes = list.with_capacity(32)
+    let exact = bound steps 513 {
+        let mut tag = take out
+        let answer = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+        (answer, take tag)
+    }
+    let too_short: Bytes = list.with_capacity(32)
+    let refused = bound bytes 0 {
+        bound steps 512 {
+            let mut tag = take too_short
+            let answer = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+            (answer, take tag)
+        }
+    }
+    match (take exact, take refused) {
+        (Ok((Ok(()), take tag)), Ok(Error(e))) => list.len(tag) == 32 && e.steps == 512,
+        _ => false,
+    }
+}
+
+// AR4. The std caller emits the source call step. Both memory costs use 256 blocks.
+// The one-step-short case has zero bytes to check that OutOfTime wins.
+// expect: run ar4_block_steps() = true
+fn ar4_block_steps() -> bool {
+    block_steps(256) && block_steps(259)
+}
+
+fn malformed(phc: Bytes) -> bool {
+    match argon2.verify(b"password", phc) {
+        Error(Malformed) => true,
+        _ => false,
+    }
+}
+
+// AR6. Variants of libargon2's first PHC that must be refused without hashing.
+// expect: run ar6_phc_strictness() = true
+fn ar6_phc_strictness() -> bool {
+    malformed(b"$argon2i$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=16$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=19$t=2,m=65536,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=19$m=065536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ=$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=19$m=65536,t=2,p=1,keyid=AAAA$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc") && malformed(b"$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$AAAA") && malformed(b"$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHR$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc")
+}

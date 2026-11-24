@@ -41,6 +41,7 @@ pub enum Fault {
     OutOfBytes(Room),
     OutOfTime(u64),
     Gone,
+    Conflict(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -58,10 +59,27 @@ pub struct Done {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
-    pub sub: u32,
+    pub slot: u16,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub sub: u32,
+    pub value: Vec<u8>,
+    pub rows: Vec<Row>,
+}
+
+impl Group {
+    pub fn board(sub: u32, rows: Vec<Row>) -> Self {
+        Self {
+            sub,
+            value: Vec::new(),
+            rows,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {
     pub issuer: u8,
@@ -75,7 +93,7 @@ pub enum Frame {
     Unsubscribe(u32),
     Welcome(Caller, u32, u64, Vec<u8>, String, u64),
     Placed(Entry),
-    Batch(u64, Vec<u32>, Vec<Row>, Vec<Done>),
+    Batch(u64, Vec<u32>, Vec<Group>, Vec<Done>),
     Ended(u32, Outcome),
     Reset(u64, Vec<Done>),
 }
@@ -111,6 +129,7 @@ macro_rules! integer {
     };
 }
 integer!(u8, 1);
+integer!(u16, 2);
 integer!(u32, 4);
 integer!(u64, 8);
 impl<T: Wire> Wire for Vec<T> {
@@ -177,7 +196,8 @@ record!(Room {
 });
 record!(Caller { issuer, subject });
 record!(Bad { kind, at });
-record!(Row { sub, key, value });
+record!(Row { slot, key, value });
+record!(Group { sub, value, rows });
 record!(Done { stream, p, outcome });
 macro_rules! sum {
     ($t:ident { $($tag:literal => $variant:ident $(($($field:ident),+))?),* $(,)? }) => { impl Wire for $t {
@@ -187,13 +207,13 @@ macro_rules! sum {
 }
 sum!(Entry { 0 => Ready(slot), 1 => Resolve(slot, args), 2 => Gone });
 sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline, 4 => Budget(room), 5 => NotAllowed, 6 => RequestMismatch, 7 => HistoryUnavailable });
-sum!(Fault { 0 => Raised(kind), 1 => OutOfBytes(room), 2 => OutOfTime(ticks), 3 => Gone });
+sum!(Fault { 0 => Raised(kind), 1 => OutOfBytes(room), 2 => OutOfTime(ticks), 3 => Gone, 4 => Conflict(index) });
 sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 3 => Abandoned, 4 => InDoubt });
 sum!(Frame {
     0 => Hello(credential, wants), 1 => Call(stream, p, slot, deadline, arg),
     2 => Subscribe(sub, slot, arg, resume), 3 => Unsubscribe(sub),
     4 => Welcome(caller, q, budget, executable, target, n_place), 5 => Placed(entry),
-    6 => Batch(version, complete, rows, done), 7 => Ended(sub, outcome), 8 => Reset(version, done),
+    6 => Batch(version, complete, groups, done), 7 => Ended(sub, outcome), 8 => Reset(version, done),
 });
 
 pub fn encode(frame: &Frame) -> Vec<u8> {
@@ -247,7 +267,7 @@ pub fn checkbox_wants() -> Vec<Want> {
     ]
 }
 
-pub fn chunk_row(sub: u32, chunk: u32, bitmap: &[u8]) -> Row {
+pub fn chunk_row(chunk: u32, bitmap: &[u8]) -> Row {
     let mut key = 0u32.to_be_bytes().to_vec();
     key.extend(chunk.to_be_bytes());
     let mut value = 64u32.to_le_bytes().to_vec();
@@ -256,7 +276,7 @@ pub fn chunk_row(sub: u32, chunk: u32, bitmap: &[u8]) -> Row {
     value.extend(&bitmap[at..end]);
     value.resize(68, 0);
     Row {
-        sub,
+        slot: 0,
         key,
         value: Some(value),
     }
@@ -264,7 +284,7 @@ pub fn chunk_row(sub: u32, chunk: u32, bitmap: &[u8]) -> Row {
 
 /// The table id is assigned by the place; clients only need its chunk key suffix.
 pub fn apply_row(image: &mut [u8], row: &Row) -> Result<u32> {
-    if row.key.len() != 8 {
+    if row.slot != 0 || row.key.len() != 8 {
         return Err("checkbox row key must be table-id + u32-BE".into());
     }
     let chunk = u32::from_be_bytes(row.key[4..].try_into()?);

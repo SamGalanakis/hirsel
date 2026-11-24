@@ -1,6 +1,6 @@
 // T2 fixture. Its argument identifies the client request without a product tap.
 pub type Request: codec + send { stream: Bytes, p: u64, arg: Bytes }
-pub type Handles: send { ran: store.Table[Bytes, Request] }
+pub type Handles: shareable + send { ran: store.Table[Bytes, Request] }
 pub type Recorded: codec + send { request: Request, version: u64 }
 
 pub fn entry() -> Bytes {
@@ -52,18 +52,10 @@ pub fn record(mut tx: store.Tx, h: Handles, author: runner.Caller, take a: Reque
     }
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[Request] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("ran", std.codec.key_bytes(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-pub fn handles(catalog: store.Schema) -> Result[Handles, store.Error] {
+pub fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
     let ca: std.codec.Codec[Request] = std.codec.of()
-    let t = store.schema_table(catalog, "ran", std.codec.key_bytes(), ca)?
+    let table = store.declare_table(mut d, "ran", std.codec.key_bytes(), ca)?
+    let t = store.finish(mut d, take table)?
     Ok(Handles(ran: t))
 }
 
@@ -75,18 +67,17 @@ pub fn k_record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[u64, st
 }
 
 pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
-    let ca: std.codec.Codec[Request] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
-    let t = result.unwrap(store.table(mut db, "ran", std.codec.key_bytes(), ca))
-    let h = Handles(ran: t)
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let h = result.unwrap(schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     let a = Request(stream: list.new(), p: 0u64, arg: list.new())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        k_record(mut tx, h, observe.own(a))
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(a)), fn(mut tx, call_env) -> Result[u64, store.Error] {
+        k_record(mut tx, call_env.0, observe.own(call_env.1))
     })
     match ran { Ok(Committed(_)) => (), _ => return false }
     let held = store.snapshot(db)
-    match store.get(held, store.shape(h.ran), observe.key(0u64, a.stream, a.p)) {
+    match store.get(result.unwrap(store.reader(db, 0u64)), held, h.ran, observe.key(0u64, a.stream, a.p)) {
         Ok(Some(saved)) => {
             let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: digest(entry(), encoded(saved)), version: store.version(held)))
             let co: std.codec.Codec[observe.Obs] = std.codec.of()

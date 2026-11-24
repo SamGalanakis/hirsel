@@ -1,0 +1,138 @@
+fn load_path(path: String) -> String {
+    result.unwrap(string.from_utf8(load(path)))
+}
+
+fn pixel_error(sample: u8, expected: u8) -> u64 {
+    int.widen(order.max(sample, expected) - order.min(sample, expected))
+}
+
+// The fixture generator decodes each source with Pillow and resizes with
+// Pillow Lanczos. Bound both worst-channel and mean absolute error across
+// every RGB sample. The output round trip adds the negotiated codec loss.
+fn check_pixels(raster: image_core.image.Raster, rgb: Bytes, max_error: u64, mean_error: u64) {
+    let count = list.len(rgb) / 3
+    if raster.width != 96 || raster.height != 64 || count != 96 * 64 {
+        fail("thumbnail size differs from Pillow")
+    }
+    let mut total = 0u64
+    for pixel in 0u64 .. count {
+        if raster.rgba[4 * pixel + 3] != 255 {
+            fail("opaque source acquired transparency")
+        }
+        for channel in 0u64 .. 3 {
+            let delta = pixel_error(raster.rgba[4 * pixel + channel], rgb[3 * pixel + channel])
+            if delta > max_error {
+                fail("thumbnail channel differs from Pillow")
+            }
+            total += delta
+        }
+    }
+    if total > 3 * count * mean_error {
+        fail("thumbnail mean channel error exceeds tolerance")
+    }
+}
+
+fn check_case(codecs: pipeline.Codecs, name: String, raw: String, accept: Bytes, format: pipeline.OutputFormat, limits: image_core.image.Limits, target: image_core.image.Size, transform: pipeline.Transform) waits {
+    let rgb = load(raw)
+    let decoded = result.unwrap(pipeline.decode(codecs, load(name), target, limits, 8388608))
+    let resized = result.unwrap(image_core.image.resize(decoded.raster, target.width, target.height, Lanczos3, limits))
+    check_pixels(resized, rgb, 12, 3)
+    let output = result.unwrap(pipeline.render(codecs, load(name), transform, accept, limits, 8388608))
+    if output.format != format || output.width != 96 || output.height != 64 || output.thumbhash_len < 5 || output.thumbhash_len > 25 {
+        fail("wrong negotiated result or ThumbHash length")
+    }
+    let pipeline.ResultImage(content: take packet, ..) = take output
+    let pipeline.DecodedImage(raster: take pixels, ..) = result.unwrap(pipeline.decode(codecs, take packet, target, limits, 8388608))
+    check_pixels(pixels, rgb, 18, 5)
+}
+
+fn check_accept() {
+    let jpeg: Option[pipeline.OutputFormat] = Some(OutputJpeg)
+    let avif: Option[pipeline.OutputFormat] = Some(OutputAvif)
+    let webp: Option[pipeline.OutputFormat] = Some(OutputWebp)
+    if pipeline.negotiate(b"") != jpeg || pipeline.negotiate(b"image/jpeg, image/webp, image/avif") != avif || pipeline.negotiate(b"IMAGE/WEBP, image/jpeg") != webp || pipeline.negotiate(b"image/jpeg;q=0.8, image/avif;q=0.1") != jpeg || pipeline.negotiate(b"image/*, image/avif;q=0") != webp || pipeline.negotiate(b"*/*;q=0.8, image/*;q=0, image/jpeg;q=0.1") != jpeg || pipeline.negotiate(b"image/png, image/jpeg;q=0") != None {
+        fail("Accept preference differs from the hand-derived table")
+    }
+}
+
+fn check_signatures(codecs: pipeline.Codecs, transform: pipeline.Transform, limits: image_core.image.Limits) waits {
+    let key = result.unwrap(secret.seal(string.into_bytes("fixture-key"), "mac"))
+    let digest = std.sha256.hash(load("jpeg.image"))
+    let signed = load_path("signed.path")
+    if result.unwrap(pipeline.sign_url(key, digest, transform)) != signed {
+        fail("signed URL differs from Python HMAC-SHA256")
+    }
+    let _ = result.unwrap(pipeline.verify_url(key, signed))
+    let Error(PipelineSignature) = pipeline.verify_url(key, load_path("tampered.path")) else {
+        fail("accepted a tampered transform")
+    }
+    let Error(PipelineSignature) = pipeline.verify_url(key, load_path("unsigned.path")) else {
+        fail("accepted an unsigned transform")
+    }
+    let Error(PipelineSignature) = pipeline.render_signed(codecs, key, signed, load("webp.image"), b"image/jpeg", limits, 8388608) else {
+        fail("accepted a different source for the signed transform")
+    }
+}
+
+fn check_thumbnails(codecs: pipeline.Codecs, target: image_core.image.Size, limits: image_core.image.Limits) waits {
+    let fitting = result.unwrap(pipeline.decode(codecs, load("exif.jpg"), target, limits, 8388608))
+    if let EmbeddedThumbnail = fitting.source {} else {
+        fail("ignored the fitting EXIF thumbnail")
+    }
+    check_pixels(fitting.raster, load("jpeg.rgb"), 12, 3)
+    let bigger = image_core.image.Size(width: 97, height: 64)
+    let declined = result.unwrap(pipeline.decode(codecs, load("exif.jpg"), bigger, limits, 8388608))
+    if let OriginalImage = declined.source {} else {
+        fail("selected a thumbnail narrower than the target")
+    }
+    let small = image_core.image.Size(width: 48, height: 32)
+    let jfxx = result.unwrap(pipeline.decode(codecs, load("jfxx.jpg"), small, limits, 8388608))
+    if let EmbeddedThumbnail = jfxx.source {} else {
+        fail("ignored the fitting JFXX thumbnail")
+    }
+}
+
+fn check_geometry(codecs: pipeline.Codecs, limits: image_core.image.Limits) waits {
+    // QOI RGBA literal followed by a run. The eight source pixels have
+    // alpha 128. An unmodified interior pixel stays at 128 through the
+    // resize and lossless WebP alpha plane. The new border has alpha 0.
+    let qoi = b"qoif\x00\x00\x00\x04\x00\x00\x00\x02\x04\x00\xff\x46\x8c\x30\x80\xc6\x00\x00\x00\x00\x00\x00\x00\x01"
+    let crop = image_core.image.Rect(x: 2, y: 1, width: 4, height: 2)
+    let pad = pipeline.Padding(width: 8, height: 6, x: 1, y: 3, rgba: 0)
+    let transform = pipeline.Transform(width: 8, height: 4, crop: Some(crop), pad: Some(pad))
+    let pipeline.ResultImage(content: take webp, ..) = result.unwrap(pipeline.render(codecs, take qoi, transform, b"image/webp", limits, 8388608))
+    let size = image_core.image.Size(width: 8, height: 6)
+    let decoded = result.unwrap(pipeline.decode(codecs, take webp, size, limits, 8388608))
+    if decoded.raster.width != 8 || decoded.raster.height != 6 {
+        fail("crop and pad changed the requested extent")
+    }
+    for y in 0u64 .. 6 {
+        for x in 0u64 .. 8 {
+            let expected: u8 = if y >= 3 && y < 5 && x >= 1 && x < 5 {
+                128
+            } else {
+                0
+            }
+            if decoded.raster.rgba[4 * (8 * y + x) + 3] != expected {
+                fail("resize, crop or pad moved the alpha mask")
+            }
+        }
+    }
+}
+
+@test
+fn pipeline_oracles(jpeg: Foreign[image_jpeg.Jpeg], webp: Foreign[image_webp.webp.Webp], av1_decode: Foreign[av1.DecoderCodec], av1_encode: Foreign[av1.EncoderCodec], yuv: Foreign[video_yuv.Yuv]) -> Result[(), ()] waits {
+    let codecs = pipeline.Codecs(jpeg: jpeg, webp: webp, av1_decode: av1_decode, av1_encode: av1_encode, yuv: yuv)
+    let limits = image_core.image.Limits(max_bytes: 1048576, max_header_bytes: 131072, max_pixels: 100000, max_frames: 1, max_steps: 33554432)
+    let target = image_core.image.Size(width: 96, height: 64)
+    let transform = pipeline.Transform(width: 96, height: 64, crop: None, pad: None)
+    check_accept()
+    check_signatures(codecs, transform, limits)
+    check_thumbnails(codecs, target, limits)
+    check_geometry(codecs, limits)
+    check_case(codecs, "jpeg.image", "jpeg.rgb", b"image/jpeg", OutputJpeg, limits, target, transform)
+    check_case(codecs, "webp.image", "webp.rgb", b"image/webp", OutputWebp, limits, target, transform)
+    check_case(codecs, "avif.image", "avif.rgb", b"image/avif", OutputAvif, limits, target, transform)
+    check_case(codecs, "avif-full.image", "avif-full.rgb", b"image/avif", OutputAvif, limits, target, transform)
+    Ok(())
+}

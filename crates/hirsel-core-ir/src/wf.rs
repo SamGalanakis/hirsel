@@ -9,6 +9,11 @@
 
 use crate::*;
 
+mod frame;
+mod own;
+mod places;
+mod simd;
+
 type R = Result<(), String>;
 
 fn need(ok: bool, msg: impl FnOnce() -> String) -> R {
@@ -60,12 +65,7 @@ pub fn module(m: &Module) -> R {
                 .functions
                 .get(f.0 as usize)
                 .and_then(|f| m.signatures.get(f.signature.index()));
-            let want = Signature {
-                params: vec![Param::Value(Ty::Ptr)],
-                results: vec![],
-                dest: None,
-                never: false,
-            };
+            let want = Signature::new(vec![Param::Value(Ty::Ptr)], vec![], None);
             need(sig == Some(&want), || {
                 format!("t{i}: finalizer is not (ptr) -> ()")
             })?;
@@ -92,12 +92,11 @@ pub fn module(m: &Module) -> R {
                 .functions
                 .get(f.0 as usize)
                 .and_then(|f| m.signatures.get(f.signature.index()));
-            let want = Signature {
-                params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-                results: vec![],
-                dest: None,
-                never: false,
-            };
+            let want = Signature::new(
+                vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+                vec![],
+                None,
+            );
             need(sig == Some(&want), || {
                 format!("t{i}: clone body is not (ptr, ptr) -> ()")
             })?;
@@ -106,7 +105,7 @@ pub fn module(m: &Module) -> R {
                 || format!("t{i}: only core declares a clone body, on an own row"),
             )?;
         }
-        if let Some(f) = t.codec {
+        for f in [t.codec, t.key_codec].into_iter().flatten() {
             // A codec type's maker (SEM-10): `() -> Codec[T]`, its result a declared row.
             let sig = m
                 .functions
@@ -116,7 +115,7 @@ pub fn module(m: &Module) -> R {
                 sig.is_some_and(|s| {
                     s.params.is_empty() && s.results.is_empty() && s.dest.is_some()
                 }),
-                || format!("t{i}: codec maker is not () -> Codec[T]"),
+                || format!("t{i}: codec maker must return its codec and take no arguments"),
             )?;
         }
     }
@@ -134,6 +133,7 @@ pub fn module(m: &Module) -> R {
             !s.never || (s.results.is_empty() && s.dest.is_none()),
             || format!("g{i}: a never signature has results"),
         )?;
+        own::anchors(s).map_err(|e| format!("g{i}: {e}"))?;
     }
     for (i, f) in m.functions.iter().enumerate() {
         need(f.instance.index() < m.instances.len(), || {
@@ -433,6 +433,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             need(t.index() < m.types.len(), || "slot of unknown type".into())?;
         }
     }
+    let mut ats = Vec::with_capacity(b.addresses.len());
     for (i, a) in b.addresses.iter().enumerate() {
         match a.base {
             AddressBase::Slot(s) => {
@@ -445,22 +446,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                 format!("a{i}: base address must come first")
             })?,
         }
-        let steps = a.steps.get(&b.pools.steps).ok_or("steps out of pool")?;
-        for (k, s) in steps.iter().enumerate() {
-            match *s {
-                Step::Index(v) | Step::Element(v) | Step::Byte(v) => {
-                    need(c.ty(v)?.int().is_some(), || {
-                        format!("a{i}: index is not an integer")
-                    })?
-                }
-                // FORM #113: a carrier word is a leaf of its word's type.
-                Step::Seq(w) => need(
-                    k + 1 == steps.len() && a.ty == PlaceTy::Value(w.ty()),
-                    || format!("a{i}: a seq word must be the last step, typed as the word"),
-                )?,
-                _ => {}
-            }
-        }
+        places::address(&c, &mut ats, i, a)?;
     }
     // Entry parameters follow the signature.
     let entry: Vec<Ty> = c
@@ -568,7 +554,9 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     }
     no_catch(b)?;
     available(b)?;
+    frame::obligations(m, b)?;
     written(m, b)?;
+    own::check(m, sig, b)?;
     ended(b)
 }
 
@@ -827,41 +815,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             first,
             second,
             fail,
-        } => {
-            c.def(result)?;
-            c.fail(fail, op.can_fail())?;
-            let (from, to) = (c.ty(first)?, c.ty(result)?);
-            let second = second.map(|v| c.ty(v)).transpose()?;
-            let vector = |t| match t {
-                Ty::Vector(v) => Some(v),
-                _ => None,
-            };
-            use SimdOp::*;
-            let ok = match op {
-                WrappingAdd | WrappingSub | SaturatingAdd | SaturatingSub | Eq | Lt | BitAnd
-                | BitOr | BitXor => vector(to).is_some() && from == to && second == Some(to),
-                BitNot => vector(to).is_some() && from == to,
-                Shl | Shr => {
-                    vector(to).is_some_and(|v| second == Some(Ty::Scalar(v.lane()))) && from == to
-                }
-                Splat => vector(to).is_some_and(|v| from == Ty::Scalar(v.lane())),
-                From => from == Ty::Ptr && vector(to).is_some(),
-                Lanes => from == Ty::Ptr && vector(to).is_some_and(|v| v.lane() == Scalar::U8),
-                Cast => vector(from)
-                    .zip(vector(to))
-                    .is_some_and(|(a, b)| a.size() == b.size()),
-                Swizzle => vector(from).zip(vector(to)).is_some_and(|(a, b)| {
-                    matches!(a.lane(), Scalar::U8 | Scalar::I8)
-                        && a.lane() == b.lane()
-                        && second == Vector::new(Scalar::U8, b.lanes()).map(Ty::Vector)
-                }),
-                Any => vector(from).is_some() && to == bool_ty,
-                Bitmask => vector(from).is_some() && to == Ty::Scalar(Scalar::U64),
-            };
-            need(ok && op.binary() == second.is_some(), || {
-                "vector operand types".into()
-            })
-        }
+        } => simd::simd(c, result, op, first, second, fail),
         Inst::PutLanes { to, vector, count } => {
             c.writes(to)?;
             c.is(count, Ty::Scalar(Scalar::U64))?;
@@ -1184,30 +1138,20 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             }
             if let AllocPlace::Like(v)
             | AllocPlace::Region(v)
-            | AllocPlace::Frame(v)
             | AllocPlace::LentFrame(v)
             | AllocPlace::ByteTail(v) = place
             {
                 c.is(v, Ty::Ptr)?;
             }
-            if matches!(place, AllocPlace::Frame(_) | AllocPlace::LentFrame(_)) {
-                use hirsel_core_layout::FieldTy;
+            if matches!(place, AllocPlace::LentFrame(_)) {
                 need(
                     matches!(
-                        (kind, place),
-                        (
-                            AllocKind::Own {
-                                edge: FieldTy::Seq(_)
-                            },
-                            _
-                        ) | (
-                            AllocKind::Own {
-                                edge: FieldTy::Box(_)
-                            },
-                            AllocPlace::Frame(_)
-                        )
+                        kind,
+                        AllocKind::Own {
+                            edge: hirsel_core_layout::FieldTy::Seq(_)
+                        }
                     ),
-                    || "frame bytes back only sequence storage and log nodes".into(),
+                    || "lent frame bytes back only sequence storage".into(),
                 )?;
             }
             if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
@@ -1302,7 +1246,9 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(block, Ty::Ptr)?;
             c.is(charge, Ty::Scalar(Scalar::U64))
         }
-        Inst::FrameRefund { charge } => c.is(charge, Ty::Scalar(Scalar::U64)),
+        Inst::FrameAdmit { .. } | Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {
+            frame::inst(c, inst)
+        }
         Inst::PromoteFrame { carrier } => {
             c.writes(carrier)?;
             c.place(carrier).map(|_| ())
@@ -1536,7 +1482,6 @@ fn place_of(b: &Body, a: AddressId, reads: &mut Vec<Place>) -> Option<Place> {
     }
     at
 }
-
 /// Whether a place of this type has no bytes (`()`, a record of such fields): a
 /// read of it reads nothing, so it needs no write.
 fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
@@ -1559,7 +1504,6 @@ fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
         PlaceTy::Value(_) => false,
     }
 }
-
 fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
     let mut t = Touch::default();
     let read = |t: &mut Touch, a: AddressId| {
@@ -1639,7 +1583,6 @@ fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
     }
     t
 }
-
 /// Every reachable read of a slot's contents follows, on every path to it from the
 /// entry, a write that overlaps the place read (crate docs, "Values, slots and
 /// addresses"). Writes are a store, copy, `set_case`, `grow`, a call's destination
@@ -1813,7 +1756,10 @@ fn written(m: &Module, b: &Body) -> R {
                     }
                     _ => {
                         for p in &touches[bi][k].writes {
-                            if p.1.is_empty() && guards.get(p.0).is_some() && is_flag_slot(b, p.0) {
+                            if p.1.is_empty()
+                                && guards.get(p.0).is_some()
+                                && own::is_flag_slot(b, p.0)
+                            {
                                 meet(p.0, vec![0; words]);
                             }
                         }
@@ -1874,14 +1820,6 @@ fn written(m: &Module, b: &Body) -> R {
         }
     }
     Ok(())
-}
-
-/// Whether slot `s` is a `bool` value place (a drop flag's shape).
-fn is_flag_slot(b: &Body, s: usize) -> bool {
-    b.slots.get(s)
-        == Some(&PlaceTy::Value(Ty::Scalar(
-            hirsel_core_layout::Scalar::Bool,
-        )))
 }
 
 /// The blocks `bi`'s terminator continues to.

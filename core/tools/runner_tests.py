@@ -12,13 +12,9 @@ generated p19 and L12 modules, the calls laws that link an event observer
 through --cc or need the scheduled runtime, retained bytes, crash cuts, the
 socket cases and the host laws.
 
-The crash adapter runs the W2 filesystem cuts and one failed journal sync.
-RC1's L31 checks that the disk store never writes the plaintext Hello credential.
 """
 import argparse
 import base64
-import ctypes
-import ctypes.util
 import fcntl
 from contextlib import contextmanager
 import hashlib
@@ -38,6 +34,7 @@ from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
+from runner_host import BUCKET_HOST_LAWS, cutover_survives_host_loss, runner_idle_stop, unpinned
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
 
@@ -59,24 +56,9 @@ CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply',
 NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window', 'local_one_head', 'local_route_during_unload', 'local_idle_unload', 'local_reopen_keeps'}
 PERSISTENT_PLACE_CALLS = {'atomic_migration', 'ready_after_activation', 'calls_recorded'}
 
-# L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
-# TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs. calls_runs_once
-# reaches tally once and receives four answers. The session sends one retirement
-# wake to the head, so the total is 1 + 4 + 1. The evaluator's count comes from
-# its event log; natively, core/tools/runner_count.c is linked into the case's test
-# executable as its event sink and fails the run on any other count.
-# L7 adds the source-derived sends from hung and one marker by the other session's
-# compute body. RUNNER-SPEC.md §8, L6+L7 orders the compute before the hung
-# call's stop, observed at its first publisher offer. MEM-30 makes the slice
-# a scheduling point. The three answers to s0 go to one inbox.
-# The body's prelude inside its 65,536-step bound is 158 steps: the 165 counted at
-# 3a3ccdc8, less the seven calls STORE v2.30 AN1 deleted from that path
-# (current_authority, share_authority, arc.share and full_scope's call and
-# list.new in draft_body's Tx; clone of the granted scope in stage_reply; and
-# check_key in put).
-HUNG_BODY_SENDS = (65536 - 158 + 1) // 2
-HUNG_TOLDS = 3
-COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, HUNG_BODY_SENDS + HUNG_TOLDS + 2)}
+# L3 counts the body, four publisher answers, and the retirement wake.
+HUNG_STEPS, HUNG_TOLDS = 65538, 3
+COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, None)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 
 # Wire floods retain all 10,000 frames. The evaluator's generic 1B test envelope
@@ -92,7 +74,7 @@ WIRE_TEST_INSTRUCTIONS = {
 WIDE_WINDOW_LAWS = {'runner@1/runner_calls/law_calls_session_charge'}
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'range_reruns', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released')
+SUBS = ('subs_main', 'range_reruns', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released', 'slot_images')
 
 
 def counted(name, report):
@@ -115,56 +97,64 @@ def counted(name, report):
         wakes_head = site == 'runner@1/runner/try_head' and e[1] in retirement
         if e[0] != kind or site in observed or wakes_head:
             attributed.append((e, site))
-    if sum(1 for e, _ in attributed if e[0] == kind) != want:
-        return False
-    if name == 'calls_deadline_hung':
-        sends = {}
-        for at, (e, site) in enumerate(attributed):
-            if e[0] == kind:
-                sends.setdefault(e[2], []).append((at, e[1], site))
-        if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, HUNG_BODY_SENDS]:
-            return False
-        told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
-        marker = next((v[0] for v in sends.values() if len(v) == 1
-                       and v[0][2] == 'runner@1/runner_calls/answer'), None)
-        retirement = next((v[0] for v in sends.values() if len(v) == 1
-                           and v[0][2] == 'runner@1/runner/try_head'), None)
-        body = next(v for v in sends.values() if len(v) == HUNG_BODY_SENDS)
-        slices = [(at, e[1]) for at, (e, _) in enumerate(attributed) if e[0] == 21]
-        return (marker is not None and retirement is not None and len(slices) == 1
-                and marker[0] < told[0][0]
-                and slices[0][0] < told[0][0] < retirement[0]
-                and marker[1] != slices[0][1] == body[0][1]
-                and all(t != slices[0][1] and site == 'runner@1/runner/offer' for _, t, site in told))
-    return True
+    if name != 'calls_deadline_hung':
+        return sum(1 for e, _ in attributed if e[0] == kind) == want
+    counts, group = [], []
+    for event, site in attributed:
+        group.append((event, site))
+        if event[0] == kind and site == 'runner@1/runner/try_head':
+            count = hung_count(group, HUNG_STEPS + 2 * len(counts))
+            if count is None:
+                return False
+            counts.append(count)
+            group.clear()
+    return len(counts) == 2 and counts[1] == counts[0] + 1 and not any(
+        e[0] in (kind, 21) for e, _ in group)
 
 
-# L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend against
-# the charge-observation runtime and run in two modes, one valid call (0) and 10,000
-# malformed frames before it (1). Both exit 0 and their --logical-charge-report
-# peak_retained_bytes (the runtime's exact peak of live backing requests) are equal: a
-# refused frame that leaves any bytes behind raises mode 1's peak. ru_maxrss, the
-# earlier figure, moves by 256 KB steps from run to run and cannot see a small leak.
-def charged(args, root, work, engine, module, modes, figure, cc=None):
-    """Build programs/runner/<module>.hirsel on the charge-observation runtime and run it in
+def hung_count(events, steps):
+    sends = {}
+    slices = []
+    for at, (e, site) in enumerate(events):
+        if e[0] == 7:
+            sends.setdefault(e[2], []).append((at, e[1], site.rsplit('/', 1)[-1]))
+        elif e[0] == 21:
+            slices.append((at, e[1]))
+    by_site = {seq[0][2]: seq for seq in sends.values()}
+    if len(sends) != 4 or set(by_site) != {'hung', 'answer', 'offer', 'try_head'} or len(slices) != 1:
+        return None
+    body, marker, told, retirement = (by_site[site] for site in ('hung', 'answer', 'offer', 'try_head'))
+    cut, head = slices[0]
+    if (len(marker) == len(retirement) == 1 and len(told) == HUNG_TOLDS
+            and 1 <= len(body) <= (steps + 1) // 2
+            and marker[0][0] < told[0][0] and cut < told[0][0] < retirement[0][0]
+            and marker[0][1] != head and all(t == head and site == 'hung' for _, t, site in body)
+            and all(t != head and site == 'offer' for _, t, site in told)):
+        return len(body)
+    return None
+
+
+# L4 compares the exact retained peak for 10 and 10,000 malformed calls on one build.
+def charged(args, root, work, engine, module, modes, figure, cc=None, entry=None):
+    """Build an entry on the charge-observation runtime and run it in
     each (argv, label) mode: {label: (exit status, figure(charge report))}, or None and the
     build's error."""
-    name = module
-    inputs_path = manifest(root, work, name, extra=[(root / f'core/programs/runner/{module}.hirsel', module)])
-    binary = work / f'{name}_{engine}'
-    charges = work / f'{name}_{engine}.json'
+    extra = () if entry else [(root / f'core/programs/runner/{module}.hirsel', module)]
+    inputs_path = manifest(root, work, module, extra=extra)
+    binary = work / f'{module}_{engine}'
+    charges = work / f'{module}_{engine}.json'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(args.observed.resolve()),
-               '--store', str(work / f'store-{name}-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
-               '--grant', 'Random', '--entry', f'runner@1/{module}/main',
+               '--store', str(work / f'store-{module}-{engine}'), '--grant', 'Clock',
+               '--grant', 'Random', '--entry', f"runner@1/{entry or module + '/main'}",
                '--logical-charge-report', str(charges), '-o', str(binary)]
     if module in ('runner_rss', 'runner_cover'):
-        command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
-        if engine == 'llvm':
-            command.append('--release')
+        command += ['--grant', 'Tasks', '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+    if engine == 'llvm':
+        command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
-    built = run_case(f'{name}:build', engine, command, capture_output=True, text=True)
+    built = run_case(f'{module}:build', engine, command, capture_output=True, text=True)
     if built.returncode != 0:
         return None, built.stderr[-2000:]
     figures = {}
@@ -173,9 +163,9 @@ def charged(args, root, work, engine, module, modes, figure, cc=None):
         charges.unlink(missing_ok=True)
         command = [str(binary), mode]
         if module == 'runner_rss':
-            peak = work / f'{name}_{engine}_{label}.rss'
+            peak = work / f'{module}_{engine}_{label}.rss'
             command = ['/usr/bin/time', '-f', '%M', '-o', str(peak), *command]
-        run = run_case(f'{name}:{label}', engine, command, capture_output=True)
+        run = run_case(f'{module}:{label}', engine, command, capture_output=True)
         figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
         if run.returncode:
             figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
@@ -187,28 +177,25 @@ def charged(args, root, work, engine, module, modes, figure, cc=None):
 
 
 def l4_retained(args, root, work, engine):
-    figures, error = charged(args, root, work, engine, 'runner_rss', (('0', 'valid'), ('1', 'flood')),
+    figures, error = charged(args, root, work, engine, 'runner_rss', (('10', 'ten'), ('10000', 'flood')),
                              lambda r: r['peak_retained_bytes'])
     if figures is None:
         return False, {'build': error}
-    held = (figures['valid'][0] == 0 and figures['flood'][0] == 0 and figures['valid'][1] is not None
-            and figures['flood'][1] == figures['valid'][1])
+    held = (figures['ten'][0] == 0 and figures['flood'][0] == 0 and figures['ten'][1] is not None
+            and figures['flood'][1] == figures['ten'][1])
     return held, figures
 
 
-# L20 (RUNNER-SPEC v2.11 §8, cover_only_retention): runner_cover.hirsel's program, linked
-# with core/tools/runner_mark.c, which records the checkpoint "subscribed" when the client
-# has dropped its initial Batch. The program stores 1,954 rows and holds one subscription,
-# whose Cover spans 10 rows (mode 0) or all 1,954 (mode 1). Both exit 0 and the
-# checkpoint's retained_bytes (live backing requests at that moment) are equal: a
-# subscription that keeps a copy of its covered rows raises mode 1's.
+# L20 uses runner_mark.c to observe retained bytes after dropping the initial Batch.
+# The Table covers span 10 or all 1,954 rows. The Log covers select windows of 10
+# over Logs of 100 and 100,000 rows, or a window of 100 over the larger Log.
 def subscribed_bytes(report):
     marks = [p for p in report['phases'] if p['name'] == 'subscribed']
     return marks[0]['retained_bytes'] if len(marks) == 1 else None
 
 
-def l20_retained(args, root, work, engine):
-    name = 'runner_cover'
+def l20_retained(args, root, work, engine, modes=(('0', 'ten'), ('1', 'all')), entry=None):
+    name = 'slot_image_retention' if entry else 'runner_cover'
     cc = c_compiler(args)
     support = work / f'{name}_mark_{engine}.o'
     run_case(f'{name}:observer', engine, [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
@@ -217,12 +204,11 @@ def l20_retained(args, root, work, engine):
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
                        + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
     wrapper.chmod(0o755)
-    figures, error = charged(args, root, work, engine, 'runner_cover', (('0', 'ten'), ('1', 'all')),
-                             subscribed_bytes, wrapper)
+    figures, error = charged(args, root, work, engine, name, modes, subscribed_bytes, wrapper, entry)
     if figures is None:
         return None, {'build': error}
-    ran = figures['ten'][0] == 0 and figures['all'][0] == 0 and figures['ten'][1] is not None and figures['all'][1] is not None
-    return ran and figures['ten'][1] == figures['all'][1], figures if ran else {'run': figures}
+    samples = [figures[label] for _, label in modes]
+    return all(status == 0 and size is not None and size == samples[0][1] for status, size in samples), figures
 
 
 def p19_module(path):
@@ -353,7 +339,8 @@ CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
-             'missing_store_mount', 'install_child', 'install_child_crash')
+             'missing_store_mount', 'install_child', 'install_child_crash', 'cutover_survives_host_loss',
+             *BUCKET_HOST_LAWS)
 
 
 def host_law(args, root, work, engine, name):
@@ -369,6 +356,8 @@ def host_law(args, root, work, engine, name):
     manifest_path.write_text(json.dumps(sources))
 
     compiler = str(args.compiler.resolve())
+    if name in BUCKET_HOST_LAWS:
+        return BUCKET_HOST_LAWS[name](work, engine, compiler, args.runtime, args.cc, manifest_path, 268435456)
     publish_store = work / 'published'
     launch_store = work / 'place'
     (launch_store / 'live').mkdir(parents=True)
@@ -376,11 +365,14 @@ def host_law(args, root, work, engine, name):
     state.mkdir(mode=0o700)
     operator = state / 'operator.sock'
 
-    def publish(n_place):
+    recovery_law = name == 'cutover_survives_host_loss'
+
+    def publish(n_place, root_limit=268435456):
         command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
-                   '--entry', 'store_crash@1/runner_crash/host_main', '--backend', engine,
+                   '--entry', 'store_crash@1/runner_crash/' + ('identity_main' if recovery_law else 'host_main'),
+                   '--backend', engine,
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
-                   '--limit', '268435456', '--n-place', str(n_place), '--dir', 'live',
+                   '--limit', str(root_limit), '--n-place', str(n_place), '--dir', 'live',
                    '--grant', 'Net=Listen 127.0.0.0/8 0-65535']
         for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr'):
             command += ['--grant', capability]
@@ -388,9 +380,9 @@ def host_law(args, root, work, engine, name):
 
     old_n_place, new_n_place = 1048576, 2097152
     old_recipe = publish(old_n_place)
-    new_recipe = publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
+    new_recipe = publish(old_n_place, 269484032) if recovery_law else publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
     if name not in ('missing_store_mount', 'install_child'):
-        assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
+        assert old_recipe != new_recipe, 'OLD and NEW must have distinct recipes'
 
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -420,7 +412,7 @@ def host_law(args, root, work, engine, name):
             with peer.makefile('rb') as stream:
                 peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
                               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
-                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.2\r\n'
+                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.4\r\n'
                               'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
                 assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
                 for line in stream:
@@ -432,10 +424,11 @@ def host_law(args, root, work, engine, name):
                 masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
                 peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
                 opcode, length = stream.read(2)
-                assert opcode == 0x82 and 12 <= length < 126, f'unexpected Welcome frame header {opcode:#x} {length}'
+                length = int.from_bytes(stream.read(2), 'big') if length == 126 else length
+                assert opcode == 0x82 and length >= 28, f'unexpected Welcome frame header {opcode:#x} {length}'
                 frame = stream.read(length)
                 assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
-                return int.from_bytes(frame[-8:], 'little')
+                return int.from_bytes(frame[-24:-16], 'little')
 
     def listening():
         with socket.socket(socket.AF_UNIX) as peer:
@@ -476,19 +469,9 @@ def host_law(args, root, work, engine, name):
         assert request, f'{case} did not name its request first: {result.stderr}'
         return request.group(1), json.loads(result.stdout.strip().splitlines()[-1])
 
-    def unpinned(tape, copy):
-        # The tape's header block with a fresh tape id, which no catalog has pinned.
-        recorded = tape.read_bytes()
-        length = int.from_bytes(recorded[12:16], 'little')
-        head, payload = recorded[:16], bytearray(recorded[16:16 + length])
-        tape_id = os.urandom(16)
-        payload[3:19] = tape_id
-        xxh3 = ctypes.CDLL(ctypes.util.find_library('xxhash')).XXH3_64bits
-        xxh3.argtypes, xxh3.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_uint64
-        checked_bytes = tape_id + head + bytes(payload)
-        check = xxh3(checked_bytes, len(checked_bytes))
-        copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
-        return copy
+    if recovery_law:
+        return cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register,
+                                          deploy, running_host, outcome, ready, welcome_n_place)
 
     if name in ('install_child', 'install_child_crash'):
         with running_host():
@@ -696,7 +679,7 @@ def install_child_law(compiler, state, work, old, new):
 
     def probe(assembly, gen, activation, found):
         identity = child(1, gen)
-        start(assembly, identity, pack('<QQII', activation, 60_000, 0, 0))
+        start(assembly, identity, pack('<QQIII', activation, 60_000, 0, 0, 0))
         frame = receive()
         prefix = pack('<I', 9) + identity + pack('<I', 0 if activation == found else 1)
         assert frame.startswith(prefix) and frame[len(prefix):len(prefix) + 8] == pack('<Q', found), frame
@@ -735,7 +718,7 @@ def install_child_law(compiler, state, work, old, new):
                     assert receive() == pack('<I', 3) + genesis + exited
                     # The result is replayable until the host acknowledges the end.
                     send(0)
-                    assert receive() == pack('<II', 0, 1) + genesis + pack('<I', 1) + exited + bytes(8)
+                    assert receive() == pack('<II', 0, 1) + genesis + pack('<I', 1) + exited + bytes(16)
                     placed(genesis, installed)
                     send(6, genesis)
                     if new is None:
@@ -845,7 +828,7 @@ fn old_handles(_schema: legacy.store.Schema) -> Result[(), legacy.store.Error] {
 }
 
 fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> () waits {
-    let mut opt = legacy.store.defaults()
+    let mut opt = result.unwrap(legacy.store.sized(Directory, 2147483648u64))
     opt.checkpoint_task_bytes = 1048576u64
     opt.resident_limit = 1048576u64
     opt.pack_bytes = 512u64
@@ -914,7 +897,7 @@ def manifest(root, work, name, runner=None, extra=(), crash=False):
 
 # The evaluator records CONC-10 events only for the laws that read them (counted,
 # children_joined): a wire flood makes about 7,500 per frame.
-EVENT_LAWS = {*(f'runner@1/runner_calls/law_{name}' for name in COUNTS), 'runner@1/runner/law_children_joined_on_close'}
+EVENT_LAWS = {*(f'runner@1/runner_calls/law_{name}' for name in COUNTS), 'runner@1/runner/law_children_joined_on_close', 'runner@1/runner/law_shared_view_once'}
 
 
 def simulation_entry(inputs_path, definition, scratch, window):
@@ -923,10 +906,14 @@ def simulation_entry(inputs_path, definition, scratch, window):
     package_name, version = package.split('@')
     sources = next(p['sources'] for p in inputs['packages']
                    if p['package'] == {'name': package_name, 'version': version})
-    module = next(source for source in sources if source['modules'] == modules)
-    source = Path(module['file']).read_text()
-    signature = re.search(rf'^pub fn {re.escape(name)}\(([^)]*)\)\s*->\s*([a-zA-Z0-9_]+)\s+waits\s*{{', source, re.M)
-    if signature is None or not re.search(r':\s*Net\b', signature[1]):
+    pattern = re.compile(rf'^pub fn {re.escape(name)}\(([^)]*)\)\s*->\s*([a-zA-Z0-9_]+)\s+waits\s*{{', re.M)
+    for module in sources:
+        if module['modules'] != modules:
+            continue
+        source = Path(module['file']).read_text()
+        if (signature := pattern.search(source)) is not None and re.search(r':\s*Net\b', signature[1]):
+            break
+    else:
         return inputs_path, definition
     parameters = [tuple(part.strip() for part in pair.split(':')) for pair in signature[1].split(',') if pair.strip()]
     task_name = next((name for name, ty in parameters if ty == 'Tasks'), None)
@@ -1019,7 +1006,7 @@ def frame_module(root):
     lines = ['// Generated from frame-vectors.json by core/tools/runner_tests.py, then',
              '// formatted; the r0 frame_vectors part refuses a stale copy.', helpers, '',
              'pub fn law_frame_vectors() -> bool {',
-             '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64, 0u64).socket, None))']
+             '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64).socket, None))']
     for v in vectors:
         payload = bytes.fromhex(v['hex'])
         if 'wire_bytes' in v:
@@ -1069,7 +1056,7 @@ def children_joined(report):
 
 
 READER_CANCELLATION = 'pool_releases_cancelled_reader'
-SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'writer_one_frame',
+SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'write_spawned_on_block', 'write_capacity_ends',
                 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
 
 
@@ -1118,11 +1105,10 @@ def admission_laws(args, root, work, engines, row):
             value, report = evaluate(args.evaluator.resolve(), selected, 'runner@1/runner/law_' + name)
             row(engine='evaluator', law=name, passed=value == 1, result=report)
 
-
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'request_mismatch_wire', 'resend_same_p', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget',
-             'cli_call_exact_value', 'cli_call_fingerprint_mismatch'}
+             'cli_call_exact_value', 'cli_call_fingerprint_mismatch', 'supplied_id_never_rotates', 'welcome_samples_store_stream_time'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),
@@ -1192,10 +1178,11 @@ def counting_cc(args, root, inputs_path, name):
     work = inputs_path.parent.absolute()
     support = work / f'count_{name}.o'
     run_case(f'{name}:observer', 'cc', [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
-                    '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want or 0}',
                     f'-DSOURCE_MANIFEST_DIR={json.dumps(str(work), ensure_ascii=False)}',
                     *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
-                    *([f'-DHUNG_BODY_SENDS={HUNG_BODY_SENDS}', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
+                    *(['-DSHARED_VIEW_ONCE'] if name == 'shared_view_once' else []),
+                    *([f'-DHUNG_STEPS={HUNG_STEPS}', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
@@ -1233,62 +1220,6 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None, 
     return result.returncode, report
 
 
-def runner_idle_stop(args, root, work, engines, row):
-    """P1 laws. Only the child runs here. Host wake rows are covered in P3."""
-    base = manifest(root, work, 'idle-stop')
-    for engine in engines:
-        if engine == 'evaluator':
-            continue
-        store = work / f'idle-stop-store-{engine}'
-        for law in ('idle_keeps_runs', 'stop_unstarted'):
-            definition = f'runner@1/runner_calls/test_{law}'
-            code, report = native_run(args, engine, base, store, definition)
-            tests = report.get('tests', [])
-            row(engine=engine, law=law,
-                passed=code == 0 and [test['definition'] for test in tests] == [definition]
-                and all(test.get('passed') for test in tests), result=report)
-        child = work / f'wake-report-{engine}'
-        command = [str(args.compiler.resolve()), 'build', '--inputs', str(base), '--source-core',
-                   '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
-                   '--store', str(store), '--entry', 'runner@1/runner_calls/wake_report_main',
-                   '--limit', str(64 * 1024 * 1024), '--dir', str(dir_for(store)),
-                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535', '-o', str(child)]
-        for capability in ('Clock', 'Tasks', 'Random', 'Process', 'Stderr'):
-            command += ['--grant', capability]
-        if engine == 'llvm':
-            command.append('--release')
-        if args.cc:
-            command += ['--cc', str(args.cc.resolve())]
-        result = run_case('wake-report:build', engine, command, capture_output=True, text=True)
-        if result.returncode:
-            row(engine=engine, law='wake_report', passed=False, result=result.stderr)
-            continue
-        for mode, exit_code, expected in (
-            ('clean', 0, struct.pack('<I', 0)),
-            ('due', 0, struct.pack('<IQ', 1, 123456)),
-            ('forced', 1, b''),
-            ('unstarted', 0, b''),
-            ('error', 1, b''),
-        ):
-            launch = [str(child), '--hirsel-wake', '--hirsel-idle=30', mode]
-            with tempfile.TemporaryFile() as report, tempfile.TemporaryFile() as errors:
-                pid = os.posix_spawn(str(child), launch, os.environ, file_actions=[
-                    (os.POSIX_SPAWN_DUP2, report.fileno(), 5),
-                    (os.POSIX_SPAWN_DUP2, errors.fileno(), 2),
-                ])
-                _, status = os.waitpid(pid, 0)
-                report.seek(0)
-                output = report.read()
-                errors.seek(0)
-                diagnostic = errors.read().decode(errors='replace')
-            actual = os.waitstatus_to_exitcode(status)
-            line = ('place: forced at the drain deadline, 2 sends abandoned\n' if mode == 'forced'
-                    else 'place: missing or invalid test\n' if mode == 'error' else '')
-            row(engine=engine, law=f'wake_report_{mode}',
-                passed=(actual, output, diagnostic) == (exit_code, expected, line),
-                result={'status': actual, 'bytes': output.hex(), 'stderr': diagnostic})
-
-
 def matched_launch(args, root, work, engine, inputs, name, label):
     """Return the selected compiled test's image and its own native outcome."""
     output = work / f'launch-{engine}-{label}'
@@ -1324,7 +1255,7 @@ def main():
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host', 'idle-stop'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host', 'idle-stop', 'shared-views'])
     args = p.parse_args()
     if args.part == 'host':
         if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
@@ -1359,13 +1290,35 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if r0 or args.part == 'shared-views':
+            inputs = manifest(root, work, 'shared-views')
+            for engine in engines:
+                if engine == 'evaluator':
+                    value, report = evaluate(evaluator, inputs, 'runner@1/runner/law_shared_view_once')
+                    sites = report.get('event_sources', [])
+                    events = report.get('events', [])
+                    runs = sum(e[0] == 7 and site == 'runner@1/runner/shared_count_query'
+                               for e, site in zip(events, sites))
+                    passed = value == 1 and len(sites) == len(events) and runs == 2
+                    row(engine=engine, law='shared_view_once', passed=passed, result={'value': value, 'runs': runs, 'error': report.get('error')})
+                else:
+                    cc = counting_cc(args, root, inputs, 'shared_view_once')
+                    code, report = native_run(args, engine, inputs, work / 'shared-view-store',
+                                              'runner@1/runner/test_shared_view_once', cc)
+                    tests = report.get('tests', [])
+                    passed = (code == 0 and len(tests) == 1 and tests[0]['passed'])
+                    row(engine=engine, law='shared_view_once', passed=passed, result=report)
+            if args.part == 'shared-views':
+                if args.report:
+                    args.report.write_text(json.dumps(rows, indent=2) + '\n')
+                return int(any(not result['passed'] for result in rows))
         if args.part in (None, 'r1', 'idle-stop'):
             if args.part == 'idle-stop' and engines == ['evaluator']:
                 p.error('idle-stop requires a native backend')
             if any(engine != 'evaluator' for engine in engines):
                 if not args.compiler or not args.runtime:
                     p.error('native backends require --compiler and --runtime')
-                runner_idle_stop(args, root, work, engines, row)
+                runner_idle_stop(args, work, engines, row, manifest(root, work, 'idle-stop'), native_run, dir_for)
             if args.part == 'idle-stop':
                 if args.report:
                     args.report.write_text(json.dumps(rows, indent=2) + '\n')
@@ -1505,6 +1458,8 @@ def main():
                     row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
                     held, figures = l20_retained(args, root, work, engine)
                     row(engine=engine, law='l20_cover_only_retention', passed=bool(held), result=figures)
+                    held, figures = l20_retained(args, root, work, engine, (('0', 'short'), ('1', 'long'), ('2', 'wide')), 'runner/slot_image_retention')
+                    row(engine=engine, law='l20_tail_retention', passed=bool(held), result=figures)
                     try:
                         row(engine=engine, law='l1_crash', passed=True,
                             result=crashes(args, root, work, engine, engine))

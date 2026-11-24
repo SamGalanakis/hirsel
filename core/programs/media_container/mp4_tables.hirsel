@@ -1,0 +1,308 @@
+fn table_header(input: Bytes, b: BoxHeader, max_version: u32) -> Result[bool, VodError] {
+    if b.next - b.body < 8 {
+        return Error(BadTable)
+    }
+    let flags: u32 = list.word_be(input, b.body)
+    if flags > max_version << 24 || (flags & 0xffffff) != 0 {
+        return Error(BadTable)
+    }
+    Ok(flags != 0)
+}
+
+fn run_totals(input: Bytes, t: Table, samples: u64, accumulate_time: bool) -> Result[u64, VodError] {
+    let mut total = 0u64
+    let mut ticks = 0u64
+    for i in 0u64 .. t.count {
+        let entry = t.at + 8 * i
+        let count: u32 = list.word_be(input, entry)
+        let n: u64 = int.widen(count)
+        if n == 0 || n > samples - total {
+            return Error(BadTable)
+        }
+        total += n
+        if accumulate_time {
+            let delta: u32 = list.word_be(input, entry + 4)
+            let step: u64 = int.widen(delta)
+            ticks += n * step
+        }
+    }
+    if total != samples {
+        return Error(BadTable)
+    }
+    Ok(ticks)
+}
+
+fn check_mapping(input: Bytes, t: Table, chunks: u64, samples: u64) -> Result[(), VodError] {
+    let mut sample_total = 0u64
+    let mut first = 1u64
+    for i in 0u64 .. t.count {
+        let at = t.at + 12 * i
+        let start: u32 = list.word_be(input, at)
+        let n: u32 = list.word_be(input, at + 4)
+        let desc: u32 = list.word_be(input, at + 8)
+        let first_chunk: u64 = int.widen(start)
+        if first_chunk != first || first > chunks || n == 0 {
+            return Error(BadTable)
+        }
+        if desc != 1 {
+            return Error(UnsupportedVod)
+        }
+        let end: u64 = if i + 1 == t.count {
+            chunks + 1
+        } else {
+            let next: u32 = list.word_be(input, at + 12)
+            int.widen(next)
+        }
+        if end <= first || end > chunks + 1 {
+            return Error(BadTable)
+        }
+        let samples_per_chunk: u64 = int.widen(n)
+        let count = (end - first) * samples_per_chunk
+        if count > samples - sample_total {
+            return Error(BadTable)
+        }
+        sample_total += count
+        first = end
+    }
+    if sample_total != samples || first != chunks + 1 {
+        return Error(BadTable)
+    }
+    Ok(())
+}
+
+fn read_tables(input: Bytes, stbl: BoxHeader) -> Result[(SampleTables, u32, u64), VodError] {
+    let mut times: Option[Table] = None
+    let mut composition: Option[Table] = None
+    let mut signed_composition = false
+    let mut sync: Option[Table] = None
+    let mut mapping: Option[Table] = None
+    let mut sizes: Option[Table] = None
+    let mut fixed_size = 0u32
+    let mut chunks: Option[Table] = None
+    let mut chunk_width = 4u64
+    let mut at = stbl.body
+    while at < stbl.next {
+        let b = vod_box(input, at, stbl.next)?
+        match b.kind {
+            0x73747473 => {
+                if let Some(_) = times {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                times = Some(entries(input, b, 8, 8)?)
+            },
+            0x63747473 => {
+                if let Some(_) = composition {
+                    return Error(BadTable)
+                }
+                signed_composition = table_header(input, b, 1)?
+                composition = Some(entries(input, b, 8, 8)?)
+            },
+            0x73747373 => {
+                if let Some(_) = sync {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                sync = Some(entries(input, b, 8, 4)?)
+            },
+            0x73747363 => {
+                if let Some(_) = mapping {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                mapping = Some(entries(input, b, 8, 12)?)
+            },
+            0x7374737a => {
+                if let Some(_) = sizes {
+                    return Error(BadTable)
+                }
+                if b.next - b.body < 12 {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                fixed_size = list.word_be(input, b.body + 4)
+                sizes = Some(entries(input, b, 12, if fixed_size == 0 {
+                    4
+                } else {
+                    0
+                })?)
+            },
+            0x7374636f => {
+                if let Some(_) = chunks {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                chunk_width = 4
+                chunks = Some(entries(input, b, 8, chunk_width)?)
+            },
+            0x636f3634 => {
+                if let Some(_) = chunks {
+                    return Error(BadTable)
+                }
+                let _ = table_header(input, b, 0)?
+                chunk_width = 8
+                chunks = Some(entries(input, b, 8, chunk_width)?)
+            },
+            _ => {},
+        }
+        at = b.next
+    }
+    let (Some(timing), Some(maps), Some(lengths), Some(offsets)) = (times, mapping, sizes, chunks) else {
+        return Error(BadTable)
+    }
+    let duration = run_totals(input, timing, lengths.count, true)?
+    let mut ctts = Table(at: 0, count: 0)
+    if let Some(c) = composition {
+        let _ = run_totals(input, c, lengths.count, false)?
+        ctts = c
+    }
+    if let Some(keys) = sync {
+        let mut last = 0u32
+        for i in 0u64 .. keys.count {
+            let key: u32 = list.word_be(input, keys.at + i * 4)
+            let sample_number: u64 = int.widen(key)
+            if key <= last || sample_number > lengths.count {
+                return Error(BadTable)
+            }
+            last = key
+        }
+    }
+    check_mapping(input, maps, offsets.count, lengths.count)?
+    Ok((SampleTables(times: timing, composition: ctts, signed_composition: signed_composition, sync: sync, mapping: maps, sizes: lengths, fixed_size: fixed_size, chunks: offsets, chunk_width: chunk_width), int.narrow(lengths.count), duration))
+}
+
+pub type VodSample {
+    offset: u64,
+    size: u32,
+    decode_time: u64,
+    duration: u32,
+    composition_offset: i64,
+    sync: bool
+}
+
+type Runs {
+    row: u64,
+    left: u32,
+    value: u32
+}
+
+fn run_value(input: Bytes, table: Table, mut runs: Runs) -> u32 {
+    if runs.left == 0 {
+        let at = table.at + 8 * runs.row
+        runs.left = list.word_be(input, at)
+        runs.value = list.word_be(input, at + 4)
+        runs.row += 1
+    }
+    runs.left -= 1
+    runs.value
+}
+
+fn chunk_offset(input: Bytes, t: SampleTables, chunk: u64) -> u64 {
+    let pos = t.chunks.at + (chunk - 1) * t.chunk_width
+    if t.chunk_width == 8 {
+        return list.word_be(input, pos)
+    }
+    let narrow: u32 = list.word_be(input, pos)
+    int.widen(narrow)
+}
+
+fn media_range(media: List[FileRange], offset: u64) -> Result[FileRange, VodError] {
+    let mut lo = 0u64
+    let mut hi = list.len(media)
+    while lo < hi {
+        let m = lo + (hi - lo) / 2
+        let range = media[m]
+        if offset < range.start {
+            hi = m
+        } else if offset >= range.end {
+            lo = m + 1
+        } else {
+            return Ok(range)
+        }
+    }
+    Error(BadTable)
+}
+
+// Visits a track's samples in decode order. The callback receives file
+// positions only after their full byte ranges have been checked against mdat.
+pub fn vod_samples(vod: Vod, track: u64, max_samples: u64, receive: scoped fn(VodSample) -> Result[(), VodError]) -> Result[(), VodError] {
+    visit_samples(vod, track, max_samples, false, receive)
+}
+
+fn visit_samples(vod: Vod, track: u64, max_samples: u64, sync_only: bool, receive: scoped fn(VodSample) -> Result[(), VodError]) -> Result[(), VodError] {
+    if track >= list.len(vod.tracks) {
+        return Error(BadMovie)
+    }
+    let t = vod.tracks[track].tables
+    if t.sizes.count > max_samples {
+        return Error(ResourceLimit)
+    }
+    let input = view vod.metadata
+    let mut timing = Runs(row: 0, left: 0, value: 0)
+    let mut composition = Runs(row: 0, left: 0, value: 0)
+    let mut dts = 0u64
+    let mut key_index = 0u64
+    let mut sample = 0u64
+    let mut map = 0u64
+    let mut per_chunk = 0u32
+    let mut change = 1u64
+    for chunk in 1u64 .. t.chunks.count + 1 {
+        if chunk == change {
+            let pos = t.mapping.at + map * 12
+            per_chunk = list.word_be(input, pos + 4)
+            map += 1
+            change = if map < t.mapping.count {
+                let next: u32 = list.word_be(input, pos + 12)
+                int.widen(next)
+            } else {
+                t.chunks.count + 1
+            }
+        }
+        let mut offset = chunk_offset(input, t, chunk)
+        let data = media_range(vod.media, offset)?
+        let chunk_samples: u64 = int.widen(per_chunk)
+        for _ in 0u64 .. chunk_samples {
+            let size: u32 = if t.fixed_size == 0 {
+                list.word_be(input, t.sizes.at + sample * 4)
+            } else {
+                t.fixed_size
+            }
+            let n: u64 = int.widen(size)
+            if n > data.end - offset {
+                return Error(BadTable)
+            }
+            let duration = run_value(input, t.times, mut timing)
+            let mut cto = 0i64
+            if t.composition.count != 0 {
+                let raw = run_value(input, t.composition, mut composition)
+                cto = if t.signed_composition {
+                    let signed: i32 = int.truncate(raw)
+                    int.widen(signed)
+                } else {
+                    let wide: u64 = int.widen(raw)
+                    int.truncate(wide)
+                }
+            }
+            let mut sync = true
+            if let Some(keys) = t.sync {
+                sync = false
+                if key_index < keys.count {
+                    let key: u32 = list.word_be(input, keys.at + key_index * 4)
+                    let sync_sample: u64 = int.widen(key)
+                    if sync_sample == sample + 1 {
+                        sync = true
+                        key_index += 1
+                    }
+                }
+            }
+            if !sync_only || sync {
+                receive(VodSample(offset: offset, size: size, decode_time: dts, duration: duration, composition_offset: cto, sync: sync))?
+            }
+            let step: u64 = int.widen(duration)
+            dts += step
+            offset += n
+            sample += 1
+        }
+    }
+    Ok(())
+}

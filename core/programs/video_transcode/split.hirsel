@@ -1,0 +1,402 @@
+// Probe, IDR split and job plan. Pure Hirsel: no foreign reach.
+
+pub type Codec = H264 | Av1
+
+/// Peak luminance of the mastering display in cd/m², for PQ sources.
+pub type Range = Sdr | Pq(u32)
+
+/// Clockwise quarter turns that display the stored picture upright.
+pub type Turn = Upright | Quarter | Half | ThreeQuarter
+
+pub type Error = Probe(media_container.mp4.VodError) | Read | NoVideo | UnsupportedVideo(u32) | UnsupportedAudio(u32) | UnsupportedRotation(i32) | UnsupportedTransfer(u16) | Config | NotIdr(u64) | NoSamples | Timing
+
+pub type Audio = Keep | Drop
+
+pub type Limits {
+    metadata_bytes: u64,
+    samples: u64
+}
+
+/// One sample in decode order. `pts` is relative to the stream's first
+/// presentation time.
+pub type Row {
+    offset: u64,
+    size: u32,
+    pts: u64,
+    duration: u32
+}
+
+/// A run of whole closed GOPs, `first .. first + count` in decode order.
+pub type Span {
+    first: u64,
+    count: u64,
+    start: u64,
+    end: u64
+}
+
+pub type Track {
+    timescale: u32,
+    entry: Bytes,
+    rows: List[Row]
+}
+
+pub type Plan {
+    codec: Codec,
+    width: u32,
+    height: u32,
+    turn: Turn,
+    range: Range,
+    // H.264: SPS and PPS as Annex B units, and the NAL length size.
+    parameter_sets: Bytes,
+    length_size: u64,
+    video: Track,
+    jobs: List[Span],
+    audio: Option[Track]
+}
+
+const VIDE: u32 = 0x76696465
+const SOUN: u32 = 0x736f756e
+const AVC1: u32 = 0x61766331
+const AV01: u32 = 0x61763031
+const OPUS: u32 = 0x4f707573
+
+fn word(b: Bytes, at: u64) -> u32 {
+    list.word_be(b, at)
+}
+
+fn half(b: Bytes, at: u64) -> u64 {
+    let hi: u64 = int.widen(b[at])
+    let lo: u64 = int.widen(b[at + 1])
+    hi << 8 | lo
+}
+
+/// Finds the child box `kind` of a sample entry, after its fixed fields.
+pub fn child(entry: Bytes, fixed: u64, kind: u32) -> Option[(u64, u64)] {
+    let mut at = 8 + fixed
+    let end = list.len(entry)
+    while at + 8 <= end {
+        let size: u64 = int.widen(word(entry, at))
+        if size < 8 || at + size > end {
+            return None
+        }
+        if word(entry, at + 4) == kind {
+            return Some((at + 8, at + size))
+        }
+        at += size
+    }
+    None
+}
+
+// avcC (ISO/IEC 14496-15 §5.3.3.1): SPS and PPS become Annex B units.
+fn avc_config(entry: Bytes) -> Result[(Bytes, u64), Error] {
+    let Some((start, end)) = child(entry, 78, 0x61766343) else {
+        return Error(Config)
+    }
+    if end - start < 7 {
+        return Error(Config)
+    }
+    let length_size: u64 = int.widen((entry[start + 4] & 3) + 1)
+    let mut out: Bytes = list.with_capacity(end - start + 32)
+    let mut at = start + 5
+    for set in 0u64 .. 2 {
+        if at >= end {
+            return Error(Config)
+        }
+        let count: u64 = int.widen(if set == 0 {
+            entry[at] & 31
+        } else {
+            entry[at]
+        })
+        at += 1
+        for _ in 0u64 .. count {
+            if at + 2 > end {
+                return Error(Config)
+            }
+            let n = half(entry, at)
+            at += 2
+            if at + n > end {
+                return Error(Config)
+            }
+            list.push(mut out, 0)
+            list.push(mut out, 0)
+            list.push(mut out, 0)
+            list.push(mut out, 1)
+            list.append(mut out, list.slice(entry, at, at + n))
+            at += n
+        }
+    }
+    if length_size == 3 {
+        return Error(Config)
+    }
+    Ok((take out, length_size))
+}
+
+fn turn(rotation: Option[i32]) -> Result[Turn, Error] {
+    match rotation {
+        None => Ok(Upright),
+        Some(0) => Ok(Upright),
+        Some(-90) => Ok(Quarter),
+        Some(270) => Ok(Quarter),
+        Some(180) => Ok(Half),
+        Some(-180) => Ok(Half),
+        Some(90) => Ok(ThreeQuarter),
+        Some(-270) => Ok(ThreeQuarter),
+        Some(other) => Error(UnsupportedRotation(other)),
+    }
+}
+
+fn range(hdr: media_container.mp4.Hdr) -> Result[Range, Error] {
+    let Some(colour) = hdr.colour else {
+        return Ok(Sdr)
+    }
+    if colour.transfer != 16 {
+        if colour.transfer == 18 || colour.transfer == 17 {
+            return Error(UnsupportedTransfer(colour.transfer))
+        }
+        return Ok(Sdr)
+    }
+    if let Some(display) = hdr.mastering_display {
+        // mdcv carries 0.0001 cd/m² units.
+        let peak = display.max_luminance / 10000
+        if peak > 0 {
+            return Ok(Pq(peak))
+        }
+    }
+    if let Some(light) = hdr.content_light {
+        if light.max_content > 0 {
+            return Ok(Pq(int.widen(light.max_content)))
+        }
+    }
+    Ok(Pq(1000))
+}
+
+// True when an AVC sample holds an IDR slice (nal_unit_type 5).
+fn has_idr(sample: Bytes, length_size: u64) -> bool {
+    let mut at = 0u64
+    let end = list.len(sample)
+    while at + length_size < end {
+        let mut n = 0u64
+        for i in 0u64 .. length_size {
+            let b: u64 = int.widen(sample[at + i])
+            n = n << 8 | b
+        }
+        at += length_size
+        if n == 0 || at + n > end {
+            return false
+        }
+        if sample[at] & 31 == 5 {
+            return true
+        }
+        at += n
+    }
+    false
+}
+
+// True when an AV1 temporal unit opens with a sequence header and a key frame.
+fn av1_key(unit: Bytes) -> bool {
+    let mut at = 0u64
+    let mut sequence = false
+    let mut reduced = false
+    while at < list.len(unit) {
+        let Ok(obu) = media_bits.av1.parse_obu(unit, at) else {
+            return false
+        }
+        if obu.kind == 1 {
+            let Ok(r) = media_bits.av1.reduced_still_picture(list.slice(unit, obu.payload_start, obu.end)) else {
+                return false
+            }
+            sequence = true
+            reduced = r
+        } else if obu.kind == 3 || obu.kind == 6 {
+            if !sequence {
+                return false
+            }
+            let Ok(key) = media_bits.av1.is_keyframe(list.slice(unit, obu.payload_start, obu.end), reduced) else {
+                return false
+            }
+            return key
+        }
+        at = obu.end
+    }
+    false
+}
+
+type Raw {
+    offset: u64,
+    size: u32,
+    decode_time: u64,
+    duration: u32,
+    composition_offset: i64,
+    sync: bool
+}
+
+fn raw_samples(vod: media_container.mp4.Vod, track: u64, limit: u64) -> Result[List[Raw], Error] {
+    let mut rows: List[Raw] = list.new()
+    let walked = media_container.mp4.vod_samples(vod, track, limit, scoped fn(s: media_container.mp4.VodSample) -> Result[(), media_container.mp4.VodError] {
+        list.push(mut rows, Raw(offset: s.offset, size: s.size, decode_time: s.decode_time, duration: s.duration, composition_offset: s.composition_offset, sync: s.sync))
+        Ok(())
+    })
+    if let Error(e) = walked {
+        return Error(Probe(e))
+    }
+    if list.len(rows) == 0 {
+        return Error(NoSamples)
+    }
+    Ok(take rows)
+}
+
+fn presentation(r: Raw) -> Result[i64, Error] {
+    let narrowed: Option[i64] = int.try_narrow(r.decode_time)
+    let Some(base) = narrowed else {
+        return Error(Timing)
+    }
+    let Some(t) = int.checked_add(base, r.composition_offset) else {
+        return Error(Timing)
+    }
+    Ok(t)
+}
+
+fn rebase(raw: List[Raw]) -> Result[List[Row], Error] {
+    let mut first = presentation(raw[0])?
+    for r in raw {
+        let t = presentation(r)?
+        if t < first {
+            first = t
+        }
+    }
+    let mut rows: List[Row] = list.with_capacity(list.len(raw))
+    for r in raw {
+        let t = presentation(r)?
+        list.push(mut rows, Row(offset: r.offset, size: r.size, pts: int.narrow(t - first), duration: r.duration))
+    }
+    Ok(take rows)
+}
+
+fn entry_of(vod: media_container.mp4.Vod, track: u64) -> Result[Bytes, Error] {
+    let mut entry: Bytes = list.new()
+    let got = media_container.mp4.vod_sample_entry(vod, track, scoped fn(b: Bytes) {
+        list.append(mut entry, b)
+    })
+    if let Error(e) = got {
+        return Error(Probe(e))
+    }
+    Ok(take entry)
+}
+
+/// Splits the video into jobs of whole closed GOPs, each at least
+/// `segment` ticks long except the last. Every job starts at an IDR or an
+/// AV1 key frame, checked in the sample bytes. `read(at, n)` returns
+/// exactly n bytes of the source.
+pub fn plan(file_size: u64, limits: Limits, segment_ms: u64, audio: Audio, read: scoped fn(u64, u64) -> Result[Bytes, Error] waits) -> Result[Plan, Error] waits {
+    let mut failed = false
+    let vod_limits = media_container.mp4.VodLimits(metadata_bytes: limits.metadata_bytes, top_boxes: 4096, tracks: 16)
+    let probed = media_container.mp4.video_probe(file_size, vod_limits, scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.mp4.VodError] waits {
+        match read(at, n) {
+            Ok(take b) => Ok(take b),
+            Error(_) => {
+                failed = true
+                Error(ReadFailed)
+            },
+        }
+    })
+    if failed {
+        return Error(Read)
+    }
+    let vod = match take probed {
+        Ok(take v) => take v,
+        Error(e) => return Error(Probe(e)),
+    }
+    let mut video: Option[u64] = None
+    let mut sound: Option[u64] = None
+    for t in 0u64 .. media_container.mp4.vod_tracks(vod) {
+        let (info, _) = media_container.mp4.vod_track(vod, t) ?=> |e| Probe(e)
+        if info.handler == VIDE {
+            if let None = video {
+                video = Some(t)
+            }
+        } else if info.handler == SOUN {
+            if let None = sound {
+                sound = Some(t)
+            }
+        }
+    }
+    let Some(v) = video else {
+        return Error(NoVideo)
+    }
+    let (info, hdr) = media_container.mp4.vod_track(vod, v) ?=> |e| Probe(e)
+    let codec = if info.codec == AVC1 {
+        H264
+    } else if info.codec == AV01 {
+        Av1
+    } else {
+        return Error(UnsupportedVideo(info.codec))
+    }
+    let entry = entry_of(vod, v)?
+    let (parameter_sets, length_size) = match codec {
+        H264 => avc_config(entry)?,
+        Av1 => (list.new(), 0u64),
+    }
+    let raw = raw_samples(vod, v, limits.samples)?
+    let rows = rebase(raw)?
+    let timescale = info.timescale
+    let target: u64 = segment_ms * int.widen(timescale) / 1000
+    let mut jobs: List[Span] = list.new()
+    let mut first = 0u64
+    let mut start = 0u64
+    let mut end = 0u64
+    let mut i = 0u64
+    while i < list.len(raw) {
+        let r = raw[i]
+        let row = rows[i]
+        if r.sync && i > first && end - start >= target {
+            let sample = read(r.offset, int.widen(r.size))?
+            let key = match codec {
+                H264 => has_idr(sample, length_size),
+                Av1 => av1_key(sample),
+            }
+            if key {
+                list.push(mut jobs, Span(first: first, count: i - first, start: start, end: end))
+                first = i
+                start = row.pts
+                end = row.pts
+            }
+        }
+        if i == 0 {
+            let sample = read(r.offset, int.widen(r.size))?
+            let key = match codec {
+                H264 => has_idr(sample, length_size),
+                Av1 => av1_key(sample),
+            }
+            if !key {
+                return Error(NotIdr(0))
+            }
+            start = row.pts
+            end = row.pts
+        }
+        let duration: u64 = int.widen(row.duration)
+        if row.pts < start {
+            start = row.pts
+        }
+        if row.pts + duration > end {
+            end = row.pts + duration
+        }
+        i += 1
+    }
+    list.push(mut jobs, Span(first: first, count: list.len(raw) - first, start: start, end: end))
+    let audio_track: Option[Track] = match audio {
+        Drop => None,
+        Keep => match sound {
+            None => None,
+            Some(s) => {
+                let (a, _) = media_container.mp4.vod_track(vod, s) ?=> |e| Probe(e)
+                if a.codec != OPUS {
+                    return Error(UnsupportedAudio(a.codec))
+                }
+                let a_raw = raw_samples(vod, s, limits.samples)?
+                let a_rows = rebase(a_raw)?
+                Some(Track(timescale: a.timescale, entry: entry_of(vod, s)?, rows: take a_rows))
+            },
+        },
+    }
+    Ok(Plan(codec: codec, width: int.widen(info.width), height: int.widen(info.height), turn: turn(info.rotation)?, range: range(hdr)?, parameter_sets: take parameter_sets, length_size: length_size, video: Track(timescale: timescale, entry: take entry, rows: take rows), jobs: take jobs, audio: take audio_track))
+}

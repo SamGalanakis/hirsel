@@ -1,0 +1,487 @@
+// Format 5 bounds the pins of one cut step (§13.8, v2.74).
+const CUT_HEIGHT_MAX: u64 = 65
+
+const CUT_PIN_BYTES: u64 = 4 * CUT_HEIGHT_MAX * (PAGE_LIMIT + 16) + (1048576 + 16) + (BLOB_LIMIT + 16)
+
+fn fold_frame(source: TieredPageSource, target: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let fetched = fold_frame_at(source, target)
+    match take fetched {
+        Error(Corrupt(take fault)) => {
+            let mut malformed_fault = take fault
+            malformed_fault.why = Malformed
+            Error(Corrupt(take malformed_fault))
+        },
+        Ok(take frame) => {
+            if let TieredImage(page) = view frame.payload {
+                let height: u64 = int.widen(std.page.level(std.page.image_of(page)))
+                if height >= CUT_HEIGHT_MAX {
+                    return Error(disk_fault(paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed))
+                }
+            }
+            Ok(take frame)
+        },
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn fold_frame_at(source: TieredPageSource, target: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let request = tiered_pager_target(source.packs, source.next_stamp, source.deadline, TieredPoint, target)?
+    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[Arc[TieredFrame], Error]], Receiver[Result[Arc[TieredFrame], Error]]), Error] {
+        Ok(channel.new(1))
+    })?
+    channel.send(source.pager, PagerRead(take request, take answer)) ?=> |_| Io(Closed)
+    channel.receive(delivered) ?=> |_| Io(Closed)
+}
+
+fn fold_cold_path(cut: TieredPageSource, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
+    let mut path: List[Arc[TieredFrame]] = list.new()
+    if base.stamp == 0 { return Ok(take path) }
+    let mut target = TieredPage(base)
+    let mut expected_level: Option[u8] = None
+    let mut charged = 0u64
+    loop {
+        let wanted = tiered_frame_id(target)
+        charged += 16 + wanted.len
+        if wanted.len > PAGE_LIMIT || charged > CUT_PIN_BYTES {
+            return Error(disk_fault(paged_pack_path(wanted.pack)?, wanted.offset, Malformed))
+        }
+        capacity(list.try_reserve(mut path, 1))?
+        let frame = fold_frame(cut, target)?
+        let child = tiered_point_continuation(frame, key, TieredPoint, expected_level)?
+        list.push(mut path, take frame)
+        let Some((take following, height)) = take child else { return Ok(take path) }
+        target = take following
+        expected_level = Some(height)
+    }
+}
+
+fn fold_page(frame: TieredFrame) -> View[Arc[std.page.Page]] in frame {
+    let TieredImage(page) = view frame.payload else {
+        fail("store: expected a PAGE on the fold's path")
+    }
+    page
+}
+
+fn fold_base_prior(cut: TieredPageSource, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
+    let sought = list.slice(logical, 4, list.len(logical))
+    let path = fold_cold_path(cut, base, sought)?
+    if list.len(path) == 0 {
+        return Ok(0u32)
+    }
+    let leaf = fold_page(path[list.len(path) - 1])
+    Ok(tiered_leaf_prior(leaf, sought))
+}
+
+// Sum the strict prefixes encountered while descending one boundary path.
+// Interior entries carry the charges for every subtree the path passes.
+fn fold_prefix_charge(cut: TieredPageSource, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
+    let key = key_word(sequence_limit)
+    let path = fold_cold_path(cut, base, key)?
+    let mut total = 0u64
+    for frame in path {
+        let image = std.page.image_of(fold_page(frame))
+        let end = match std.page.descend(image, key) {
+            Some(slot) => slot,
+            None => {
+                let (slot, _) = std.page.search(image, key)
+                slot
+            },
+        }
+        let path_name = paged_pack_path(frame.identity.pack)?
+        total = disk_allocation(scoped fn() -> Result[u64, Error] {
+            let mut charge = total
+            for slot in 0u64 .. end {
+                let row = option.unwrap(std.page.entry(image, slot))
+                if std.page.level(image) == 0 && list.len(row.key) != 8 {
+                    return Error(disk_fault(path_name, frame.identity.offset, Malformed))
+                }
+                let width = match row.cell {
+                    Child(child_entry) => child_entry.charge,
+                    InlineValue(value) => 62 + 16 + round8(list.len(value)),
+                    BlobValue(reference) => 62 + 16 + round8(reference.len),
+                }
+                let Some(following) = int.checked_add(charge, width) else {
+                    return Error(disk_fault(path_name, frame.identity.offset, Malformed))
+                }
+                charge = following
+            }
+            Ok(charge)
+        })?
+    }
+    Ok(total)
+}
+
+// Borrow the evidence directly from the immutable overlay. No cursor
+// allocation or key copy is needed between pager calls.
+fn visit_fold_records[K: ordered + shareable + send, V: shareable + send, S](node: Arc[std.omap.Node[K, V]], mut state: S, visit: scoped[view] fn(mut S, K, V) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    for slot in 0u64 .. std.omap.node_count(node) {
+        if let Some(child) = std.omap.node_child(node, slot) {
+            visit_fold_records(child, mut state, visit)?
+        } else {
+            let key = option.unwrap(std.omap.node_key(node, slot))
+            let row = option.unwrap(std.omap.node_value(node, slot))
+            visit(mut state, key, row)?
+        }
+    }
+    Ok(())
+}
+
+fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+    let pack_file = paged_pack_path(base.pack)?
+    let mut checked = ()
+    if let Some(root) = std.omap.root(overlay.trims) {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), _index: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
+            if evidence.lo < evidence.hi {
+                let low = fold_prefix_charge(cut, base, evidence.lo)?
+                let high = fold_prefix_charge(cut, base, evidence.hi)?
+                if int.checked_sub(high, low) != Some(evidence.cold_charge) {
+                    return Error(disk_fault(pack_file, base.offset, Malformed))
+                }
+            }
+            Ok(())
+        })?
+    }
+    if let Some(root) = std.omap.root(overlay.entries) {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+            if fold_base_prior(cut, base, key)? != row.base {
+                return Error(disk_fault(pack_file, base.offset, Malformed))
+            }
+            Ok(())
+        })?
+    }
+    Ok(())
+}
+
+// The paused writer runs one verified edit at a time. These pins are
+// released before it hands the changed path to the pack writer.
+fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let mut pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    loop {
+        let attempt = tiered_attempt(CUT_PIN_BYTES, 0)
+        let isolated = disk_allocation(scoped fn() -> Result[Result[R, Error], Error] {
+            Ok(edit(attempt, pins))
+        })
+        let TieredTouchSet(stopped: take stop, ..) = tiered_finish(take attempt)
+        match take stop {
+            Some(AttemptMiss(take target)) => {
+                capacity(map.try_reserve(mut pins, 1))?
+                let frame = fold_frame(cut, target)?
+                map.insert(mut pins, tiered_cache_key(frame.identity), take frame)
+            },
+            Some(AttemptPinLimit(_)) => return Error(malformed(0)),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: a cut cannot wait for itself"),
+            None => {
+                let result = (take isolated)?
+                return take result
+            },
+        }
+    }
+}
+
+fn restore_fold_slots(take root: Arc[std.page.Page], first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> std.page.Slot {
+    std.page.restore_cold_slots(take root, first_stamp, scoped fn(stamp: u64) -> Option[std.page.PagePtr] {
+        for (_, frame) in visible {
+            let facts = frame.identity
+            if facts.stamp == stamp && facts.kind == 0x0021 {
+                return Some(std.page.PagePtr(pack: facts.pack, offset: facts.offset, len: int.truncate(facts.len), checksum: facts.checksum, stamp: stamp))
+            }
+        }
+        None
+    })
+}
+
+type TieredFoldEffect: send = FoldReplaced(ReplacedFrame) | FoldDropped(TieredTarget)
+
+// The result frontier marks every unchanged subtree and each Cold body
+// retained by this edit. Only pages drawn by the current edit have new edges.
+fn fold_effect_frontier(root: std.page.Slot, first_stamp: u64, mut kept: Map[u64, ()]) -> Result[(), Error] {
+    let stamp = fold_slot_stamp(root)
+    capacity(map.try_reserve(mut kept, 1))?
+    map.insert(mut kept, stamp, ())
+    let HotPage(page) = view root else { return Ok(()) }
+    if stamp < first_stamp {
+        return Ok(())
+    }
+    let image = std.page.image_of(page)
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(child) = std.page.child_slot(page, slot) {
+            fold_effect_frontier(child, first_stamp, mut kept)?
+        } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+            if let Some(ColdBlob(body)) = std.page.blob_slot(page, reference.body) {
+                capacity(map.try_reserve(mut kept, 1))?
+                map.insert(mut kept, body.stamp, ())
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fold_slot_stamp(root: std.page.Slot) -> u64 {
+    match root {
+        HotPage(page) => std.page.stamp(std.page.image_of(page)),
+        ColdPage(ptr) => ptr.stamp,
+    }
+}
+
+fn fold_record_lost(root: std.page.Slot, retained: Map[u64, ()], visible: Map[TieredCacheKey, Arc[TieredFrame]], trimmed: bool, mut effects: List[TieredFoldEffect]) -> Result[(), Error] {
+    if map.contains(retained, fold_slot_stamp(root)) {
+        return Ok(())
+    }
+    let page = match root {
+        HotPage(old) => arc.share(old),
+        ColdPage(ptr) => {
+            let target = TieredPage(ptr)
+            let found = map.get(visible, tiered_cache_key(tiered_frame_id(target)))
+            capacity(list.try_reserve(mut effects, 1))?
+            let Some(frame) = found else {
+                list.push(mut effects, FoldDropped(target))
+                return Ok(())
+            }
+            list.push(mut effects, FoldReplaced(replaced_page(ptr)))
+            arc.share(fold_page(frame))
+        },
+    }
+    let image = std.page.image_of(page)
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(child) = std.page.child_slot(page, slot) {
+            fold_record_lost(child, retained, visible, trimmed, mut effects)?
+        } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+            if let Some(ColdBlob(body)) = std.page.blob_slot(page, reference.body) {
+                if !map.contains(retained, body.stamp) {
+                    let effect = if trimmed {
+                        FoldDropped(TieredBlob(body))
+                    } else {
+                        FoldReplaced(replaced_blob(body))
+                    }
+                    capacity(list.try_reserve(mut effects, 1))?
+                    list.push(mut effects, take effect)
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn folded_step_effects(before: std.page.Slot, after: std.page.Slot, first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]], trimmed: bool) -> Result[List[TieredFoldEffect], Error] {
+    let mut effects: List[TieredFoldEffect] = list.new()
+    if fold_slot_stamp(before) != fold_slot_stamp(after) {
+        let mut retained: Map[u64, ()] = map.new()
+        fold_effect_frontier(after, first_stamp, mut retained)?
+        fold_record_lost(before, retained, visible, trimmed, mut effects)?
+    }
+    Ok(take effects)
+}
+
+
+fn append_fold_effects(mut effects: Option[List[TieredFoldEffect]], take added: List[TieredFoldEffect]) -> Result[(), Error] {
+    if let Some(mut collected) = effects {
+        capacity(list.try_reserve(mut collected, list.len(added)))?
+        for take effect in take added {
+            list.push(mut collected, take effect)
+        }
+    }
+    Ok(())
+}
+
+fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: ReplayRow,
+    inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+    let record = match effects {
+        Some(_) => true,
+        None => false,
+    }
+    let (take ready, following_stamp, take replaced) = retry_fold_edit(cut, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64, List[TieredFoldEffect]), Error] {
+        let mut draw = next_stamp
+        let key = list.slice(logical, 4, list.len(logical))
+        let page = stage_tiered_row(attempt, visible, current, empty_root, key, row.now, inline, log_rows, private_from, mut draw)?
+        let restored = restore_fold_slots(take page, next_stamp, visible)
+        let removed: List[TieredFoldEffect] = if record {
+            folded_step_effects(current, restored, next_stamp, visible, false)?
+        } else {
+            list.new()
+        }
+        Ok((take restored, draw, take removed))
+    })?
+    next_stamp = following_stamp
+    append_fold_effects(mut effects, take replaced)?
+    Ok(take ready)
+}
+
+fn fold_materialize_trim(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64,
+    floor: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+    let record = match effects {
+        Some(_) => true,
+        None => false,
+    }
+    let (take ready, following_stamp, take replaced) = retry_fold_edit(cut, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64, List[TieredFoldEffect]), Error] {
+        let mut draw = next_stamp
+        let (take page, _) = stage_tiered_trim(attempt, visible, current, empty_root, limits, before, floor, mut draw)?
+        let restored = restore_fold_slots(take page, next_stamp, visible)
+        let removed: List[TieredFoldEffect] = if record {
+            folded_step_effects(current, restored, next_stamp, visible, true)?
+        } else {
+            list.new()
+        }
+        Ok((take restored, draw, take removed))
+    })?
+    next_stamp = following_stamp
+    append_fold_effects(mut effects, take replaced)?
+    Ok(take ready)
+}
+
+type FoldCollection {
+    current: std.page.Slot,
+    next_stamp: u64,
+    effects: Option[List[TieredFoldEffect]]
+}
+
+fn fold_log_before(cut: TieredPageSource, current: std.page.Slot, overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], floor: u64) -> Result[(LogBounds, u64), Error] waits {
+    let (_, first_trim) = option.unwrap(std.omap.first(overlay.trims))
+    let cold_end = option.unwrap(overlay.cold_next)
+    let mut first = first_trim.lo
+    let mut end_seq = cold_end
+    if let Some(previous) = inherited {
+        if let Some(previous_floor) = previous.floor {
+            first = previous_floor
+            end_seq = order.max(end_seq, previous_floor)
+        }
+        if let Some((last_key, _)) = std.omap.last(previous.entries) {
+            let seq: u64 = list.word_be(last_key, 4)
+            end_seq = order.max(end_seq, stamp_after(seq)?)
+        }
+    }
+    let before = if floor >= end_seq {
+        0u64
+    } else {
+        match current {
+            HotPage(page) => {
+                let (_, charged) = std.page.totals(page)
+                charged
+            },
+            ColdPage(ptr) => {
+                let frame = fold_frame(cut, TieredPage(ptr))?
+                let (_, charged) = std.page.totals(fold_page(frame))
+                charged
+            },
+        }
+    }
+    Ok((LogBounds(first: first, next: end_seq), before))
+}
+
+fn inherited_fold_value(inherited: Option[View[Arc[ReplayOverlay]]], key: Bytes, now: ReplayValue) -> bool {
+    let Some(previous) = inherited else {
+        return false
+    }
+    let Some(row) = replay_overlay_at(previous, key) else {
+        return false
+    }
+    match now {
+        ReplayAbsent => match row.now {
+            ReplayAbsent => true,
+            ReplayPut(_) => false,
+        },
+        ReplayPut(after) => match row.now {
+            ReplayAbsent => false,
+            ReplayPut(before) => list.compare_bytes(before, after) == Equal,
+        },
+    }
+}
+
+fn fold_apply_overlay(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+    let previous_floor = match inherited {
+        Some(previous) => previous.floor,
+        None => None,
+    }
+    let mut current: std.page.Slot = clone(base)
+    if let Some(floor) = overlay.floor {
+        if previous_floor != Some(floor) {
+            let (limits, before) = fold_log_before(cut, current, overlay, inherited, floor)?
+            current = fold_materialize_trim(cut, current, empty_root, limits, before, floor, mut next_stamp, mut effects)?
+        }
+    }
+    let private_from = next_stamp
+    let log_rows = overlay.cold_next != None
+    let mut folded = FoldCollection(current: take current, next_stamp: next_stamp, effects: replace(mut effects, None))
+    let materialized = if let Some(rows) = std.omap.root(overlay.entries) {
+        visit_fold_records(rows, mut folded, scoped fn(mut working: FoldCollection, key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+            if !inherited_fold_value(inherited, key, row.now) {
+                working.current = fold_materialize_row(cut, working.current, empty_root, key, row, inline, log_rows, private_from, mut working.next_stamp, mut working.effects)?
+            }
+            Ok(())
+        })
+    } else {
+        Ok(())
+    }
+    let FoldCollection(current: take ready, next_stamp: following_stamp, effects: take fold_effects) = take folded
+    effects = take fold_effects
+    next_stamp = following_stamp
+    materialized?
+    Ok(take ready)
+}
+
+fn fold_collection(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+    let location = match base {
+        ColdPage(ptr) => ptr,
+        HotPage(_) => std.page.unlocated(0),
+    }
+    verify_tiered_fold(cut, location, overlay)?
+    let mut starting: std.page.Slot = clone(base)
+    if let Some(previous) = inherited {
+        let mut ignored: Option[List[TieredFoldEffect]] = None
+        verify_tiered_fold(cut, location, previous)?
+        starting = fold_apply_overlay(cut, base, empty_root, previous, None, inline, mut next_stamp, mut ignored)?
+    }
+    fold_apply_overlay(cut, starting, empty_root, overlay, inherited, inline, mut next_stamp, mut effects)
+}
+
+type FoldMap {
+    root: Arc[std.page.Page],
+    next_stamp: u64,
+    effects: Option[List[TieredFoldEffect]]
+}
+
+fn fold_page_tree(cut: TieredPageSource, mut tree: PageTree, mut next_stamp: u64) -> Result[List[TieredFoldEffect], Error] waits {
+    let replayed: Option[Arc[ReplayBranch]] = clone(tree.replay)
+    let Some(take overlay) = take replayed else {
+        return Ok(list.new())
+    }
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let inline = tree.inline
+    let mut folded = FoldMap(root: arc.share(tree.root), next_stamp: next_stamp, effects: Some(list.new()))
+    let materialized = if let Some(collections) = std.omap.root(overlay.collections) {
+        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+            let inherited = match overlay.fork_time {
+                Some(forked) => std.omap.get(forked, id),
+                None => None,
+            }
+            working.root = fold_collection_in_map(cut, working.root, empty_root, id, edits, inherited, inline, mut working.next_stamp, mut working.effects)?
+            Ok(())
+        })
+    } else {
+        Ok(())
+    }
+    let FoldMap(root: take ready, next_stamp: following_stamp, effects: take fold_effects) = take folded
+    next_stamp = following_stamp
+    materialized?
+    tree.root = take ready
+    tree.replay = None
+    Ok(option.unwrap(take fold_effects))
+}
+
+fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[Arc[std.page.Page], Error] waits {
+    let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        prefix(id)
+    })?
+    let (base, _) = option.unwrap(std.page.collection_slot(root, key))
+    let folded = fold_collection(cut, base, empty_root, edits, inherited, inline, mut next_stamp, mut effects)?
+    let (take mapped, following_stamp) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+        let mut candidate = arc.share(root)
+        let mut draw = next_stamp
+        page_result(std.page.install_tiered_root(mut candidate, key, folded, mut draw))?
+        Ok((take candidate, draw))
+    })?
+    next_stamp = following_stamp
+    Ok(take mapped)
+}

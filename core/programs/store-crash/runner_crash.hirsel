@@ -22,7 +22,7 @@
 // - poison-segment (poison): the cross calls, each sent once the previous is answered, with
 //   the sync of the first call's effect frame failing.
 // The adapter gives one cut per run, so runner-order has one crash where the model has two.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
@@ -35,14 +35,26 @@ fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     }
 }
 
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
 }
 
+fn open_data(db: store.Db) -> Result[Hd, store.Error] {
+    let mut declaration = store.declare(db, Open)?
+    schema(mut declaration)
+}
+
+fn install_data(mut db: store.Db) -> Result[store.Ticket, store.Error] waits {
+    let mut declaration = store.declare(db, Migrate)?
+    let _ = schema(mut declaration)?
+    store.seal(mut db, take declaration)
+}
+
 fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
-    match store.fetch(tx, store.shape(h.t), 0u64) {
+    match store.fetch(tx, h.t, 0u64) {
         Ok(Some(n)) => Ok(n),
         Ok(None) => Ok(0u64),
         Error(_) => Error(1u32),
@@ -111,7 +123,7 @@ fn hold_install(mut phase: store.Migration) -> Result[(), store.Error] {
 // H4 uses the same registry and durable counter as the W2 crash scenarios.
 pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-        let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+        let mut wire = runner.wire_defaults(131072u64)
         wire.n_pool = 4194304u64
         wire.socket.max_frame = 131072u64
         let mut disk = options()
@@ -121,15 +133,37 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
             _ => code.describe(migrate),
         }
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
-            backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
-            migrate: migration, handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms),
+                cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
+            on_migrate: Some(migration), schema: code.describe(schema), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-        let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+        let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
-    runner.main(argv, process, errors, tasks, code.describe(place), serve)
+    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
+}
+
+// T1's executable uses a smaller configured allowance than its hosted recipe.
+pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let n_place = 524288u64
+        let mut wire = runner.wire_defaults(65536u64)
+        wire.n_pool = 4194304u64
+        let mut disk = options()
+        disk.lock_wait_ms = 10000u64
+        let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
+            backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms),
+                cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place,
+            on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
+            proxies: list.new(), n_publisher: 3145728u64,
+            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+        let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
+        Ok(ended)
+    }
+    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
 }
 
 // A client verdict: empty when every call was answered as expected.
@@ -209,7 +243,7 @@ fn resends(scenario: View[String]) -> (List[Pos], u64) {
 }
 
 fn options() -> store.Options {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
 
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64
@@ -240,9 +274,9 @@ fn secret_client(take d: SecretClient) -> String waits {
     let _ = take head
     let mut answered = true
     for p in 0u64 .. 2u64 {
-        runner.wire_client.send_frame(wire, Call(7u32, p, 0u32, 5000u32, u64_bytes(p)))
+        runner.wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 7u64), p, 0u32, 5000u32, u64_bytes(p)))
         let ok = match runner.wire_client.next(wire) {
-            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == 7u32 &&
+            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == store.StreamId(t: 0u64, n: 7u64) &&
                 ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
             _ => false,
         }
@@ -259,19 +293,18 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let encoded = option.unwrap(args.get(argv, 0u64))
     let token = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    result.unwrap(install_data(mut db))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), token: take token)
     let driving = task.spawn(tasks, bytes 33554432u64, take seed, secret_client)
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
     let mut o = options()
     o.create = false
     let mut again = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(store.with_schema(again, code.describe(handles)))
-    let total = result.unwrap(store.get(store.snapshot(again), store.shape(h.t), 0u64))
+    let h = result.unwrap(open_data(again))
+    let total = result.unwrap(store.get(result.unwrap(store.reader(again, 0u64)), store.snapshot(again), h.t, 0u64))
     want(total == Some(2u64), "L31: two effects must be durable")
     let ticket = result.unwrap(store.checkpoint(mut again))
     result.unwrap(store.durable(mut again, ticket))
@@ -286,8 +319,8 @@ fn ack(out: Stdout, v: u64) waits {
     result.unwrap(stdout.write(out, line))
 }
 
-// The client: each session's answers, each checked against its expected Outcome by
-// (stream, p). A frame that reports a commit raises the floor it reports. Refused(HistoryUnavailable)
+// The client consumes one pending send per answer, matched by session, stream and position.
+// A frame that reports a commit raises the floor. Refused(HistoryUnavailable)
 // is a valid answer only to a position with a later one on its stream: the later one is
 // admitted only once this one is replied. The client never fails: a failed task would
 // leave its sessions open and the head waiting, so it hangs up every session, drains
@@ -297,9 +330,18 @@ fn ack(out: Stdout, v: u64) waits {
 // `armed` is the poison run. It arms the named sync failure once both sessions are up, then
 // sends each call only after the previous one is answered, so a call's commits are the only
 // frames the head has handed the journal when it gates them (see main's poison note).
-type Client { connections: List[runner.wire_client.Conn], calls: List[Pos], out: Stdout, armed: bool }
+type Client {
+    connections: List[runner.wire_client.Conn],
+    calls: List[Pos],
+    out: Stdout,
+    armed: bool
+}
 
-type Tally { floor: u64, answered: u64, bad: String }
+type Tally {
+    floor: u64,
+    pending: List[Pos],
+    bad: String
+}
 
 fn later(calls: List[Pos], x: Pos) -> bool {
     for y in calls {
@@ -310,45 +352,61 @@ fn later(calls: List[Pos], x: Pos) -> bool {
     false
 }
 
-fn send_call(cn: runner.wire_client.Conn, x: Pos) waits {
+fn send_call(cn: runner.wire_client.Conn, x: Pos, mut t: Tally) waits {
     let stream: u32 = int.narrow(x.stream)
     let slot: u32 = int.narrow(x.body)
-    let request: runner.Frame = Call(stream, x.p, slot, 4294967295u32, u64_bytes(x.k))
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: int.widen(stream)), x.p, slot, 4294967295u32, u64_bytes(x.k))
+    list.push(mut t.pending, clone(x))
     runner.wire_client.send_frame(cn, take request)
 }
 
-// One Batch from session i, each of its answers checked and counted; the number of
-// answers, or None once the session ends or sends another frame.
-fn heard(cn: runner.wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut t: Tally) -> Option[u64] waits {
-    let b = match runner.wire_client.next(cn) {
-        Ok(Batch(version, take complete, take rows, take done)) => runner.KeyedBatch(version: version, complete: take complete, rows: take rows, outcomes: keyed(take done)),
+fn accept_answer(mut pending: List[Pos], calls: List[Pos], session: u64, answer: runner.Done) -> bool {
+    for at in 0u64 .. list.len(pending) {
+        let x = pending[at]
+        if x.from == session && x.stream == answer.stream.n && x.p == answer.p {
+            let below = match answer.outcome {
+                Refused(HistoryUnavailable) => later(calls, x),
+                _ => false,
+            }
+            if !below && !same(answer.outcome, expected(x)) {
+                return false
+            }
+            let _ = list.swap_remove(mut pending, at)
+            return true
+        }
+    }
+    false
+}
+
+fn runner_crash_answer_oracle() {
+    let calls = positions("runner-cross")
+    let mut pending: List[Pos] = list.new()
+    list.push(mut pending, clone(calls[0u64]))
+    list.push(mut pending, clone(calls[1u64]))
+    list.push(mut pending, clone(calls[3u64]))
+    let both = runner.Done(stream: store.StreamId(t: 0u64, n: 0u64), p: 0u64, outcome: returned(Ok(1u64)))
+    want(accept_answer(mut pending, calls, 0u64, both), "oracle: first session's p0 was rejected")
+    want(accept_answer(mut pending, calls, 1u64, both), "oracle: second session's p0 was rejected")
+    want(!accept_answer(mut pending, calls, 0u64, both), "oracle: a repeated p0 answered p1")
+    let next = runner.Done(stream: store.StreamId(t: 0u64, n: 0u64), p: 1u64, outcome: returned(Ok(3u64)))
+    want(accept_answer(mut pending, calls, 0u64, next) && list.len(pending) == 0u64, "oracle: p1 did not clear the remaining send")
+}
+
+// One Batch from session i, or false once it ends or sends another frame.
+fn heard(cn: runner.wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut t: Tally) -> bool waits {
+    let (v, done) = match runner.wire_client.next(cn) {
+        Ok(Batch(version, _, _, take done)) => (version, take done),
         Ok(_) => {
             t.bad = "runner_crash: a frame other than a Batch"
-            return None
+            return false
         },
-        Error(_) => return None,
+        Error(_) => return false,
     }
-    let v = b.version
-    let mut n = 0u64
-    for f in b.outcomes {
-        n += 1u64
-        t.answered += 1u64
-        let mut matched = false
-        for x in calls {
-            if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
-                let below = match f.outcome {
-                    Refused(r) => match r { HistoryUnavailable => later(calls, x), _ => false },
-                    _ => false,
-                }
-                if below || same(f.outcome, expected(x)) {
-                    matched = true
-                }
-            }
+    for answer in done {
+        if !accept_answer(mut t.pending, calls, i, answer) {
+            t.bad = "runner_crash: an answer did not match a pending call's expected Outcome"
         }
-        if !matched {
-            t.bad = "runner_crash: an answer is not its call's expected Outcome"
-        }
-        let reports = match f.outcome {
+        let reports = match answer.outcome {
             Returned(_) => true,
             Failed(_) => true,
             _ => false,
@@ -358,78 +416,75 @@ fn heard(cn: runner.wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut
             ack(out, t.floor)
         }
     }
-    Some(n)
+    true
+}
+
+fn owes(pending: List[Pos], session: u64) -> bool {
+    for x in pending {
+        if x.from == session {
+            return true
+        }
+    }
+    false
 }
 
 fn client(take c: Client) -> String waits {
     let Client(connections: take connections, calls: take calls, out: out, armed: armed) = take c
-    let mut t = Tally(floor: 0u64, answered: 0u64, bad: "")
+    let mut t = Tally(floor: 0u64, pending: list.with_capacity(list.len(calls)), bad: "")
     if armed {
         result.unwrap(stdout.write(out, "ARM"))
         for x in calls {
-            send_call(connections[x.from], x)
-            let mut owed = 1u64
-            let mut ended = false
-            while owed > 0u64 && t.bad == "" {
-                match heard(connections[x.from], x.from, calls, out, mut t) {
-                    Some(n) => { owed -= n },
-                    None => {
-                        ended = true
-                        break
-                    },
+            send_call(connections[x.from], x, mut t)
+            while owes(t.pending, x.from) && t.bad == "" {
+                if !heard(connections[x.from], x.from, calls, out, mut t) {
+                    break
                 }
             }
-            if ended || t.bad != "" { break }
+            if list.len(t.pending) != 0u64 || t.bad != "" {
+                break
+            }
         }
     } else {
-        for x in calls { send_call(connections[x.from], x) }
+        for x in calls {
+            send_call(connections[x.from], x, mut t)
+        }
         for i in 0u64 .. list.len(connections) {
-            let mut owed = 0u64
-            for x in calls {
-                if x.from == i {
-                    owed += 1u64
-                }
-            }
-            while owed > 0u64 && t.bad == "" {
-                match heard(connections[i], i, calls, out, mut t) {
-                    Some(n) => { owed -= n },
-                    None => break,
+            while owes(t.pending, i) && t.bad == "" {
+                if !heard(connections[i], i, calls, out, mut t) {
+                    break
                 }
             }
         }
     }
-    for cn in connections { let _ = channel.send(cn.to, Close) }
+    for cn in connections {
+        let _ = channel.send(cn.to, Close)
+    }
     for cn in connections {
         loop {
             match runner.wire_client.next(cn) {
-                Ok(_) => if t.bad == "" { t.bad = "runner_crash: an answer after the last" },
+                Ok(_) => if t.bad == "" {
+                    t.bad = "runner_crash: an answer after the last"
+                },
                 Error(_) => break,
             }
         }
     }
-    for take cn in connections { let _ = runner.wire_client.close(take cn) }
-    if t.bad == "" && t.answered != list.len(calls) {
+    for take cn in connections {
+        let _ = runner.wire_client.close(take cn)
+    }
+    if t.bad == "" && list.len(t.pending) != 0u64 {
         t.bad = "unanswered"
     }
-    let Tally(floor: _, answered: _, bad: take bad) = take t
+    let Tally(bad: take bad, ..) = take t
     bad
 }
 
-fn keyed(take done: List[runner.Done]) -> List[runner.KeyedDone] {
-    let mut out: List[runner.KeyedDone] = list.new()
-    for take d in done {
-        let runner.Done(stream: stream, p: p, outcome: take outcome) = take d
-        list.push(mut out, runner.KeyedDone(stream: u64_bytes(int.widen(stream)), p: p, outcome: take outcome))
-    }
-    out
-}
-
-type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.HeadInput], post: Sender[runner.PubIn], sessions: u64 }
+type Accept: send { listener: Listener, input: Stdin, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.HeadInput], post: Sender[runner.PubIn], sessions: u64 }
 
 fn accept(take seed: Accept) -> () waits {
-    let Accept(listener: take listener, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
+    let Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
     let mut l = take listener
-    let mut config = runner.wire_defaults(65536u64, N_PLACE)
+    let mut config = runner.wire_defaults(65536u64)
     // The replay sends up to three calls per owner. Reserve those outcomes
     // within the fixture's 32 KiB frame limit.
     config.q = 2u64
@@ -437,53 +492,59 @@ fn accept(take seed: Accept) -> () waits {
     let pool = result.unwrap(std.wsock.pending(config.socket))
     let mut owners: List[Task[Result[(), std.wsock.Error]]] = list.new()
     for _ in 0u64 .. sessions {
-        let (socket, peer) = result.unwrap(host.accept(mut l, Never))
+        let mut port: Bytes = list.with_capacity(2u64)
+        while list.len(port) < 2u64 {
+            want(result.unwrap(stdin.read(input, mut port, Never)) != 0, "runner_crash: missing client port")
+        }
+        let low: u16 = int.widen(port[0])
+        let high: u16 = int.widen(port[1])
+        let peer = Addr(ip: V4(0x7f000001u32), port: low | (high << 8))
+        let socket = result.unwrap(std.net.accept_from(mut l, peer, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
-        let service = runner.wire_place_target(code.describe(place), random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
-        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, post, config, c))
+        let service = runner.wire_target_service(random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
+        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), N_PLACE)), post, config, c))
         list.push(mut owners, take owner)
     }
     for take owner in owners { let _ = task.join(take owner) }
 }
 
-fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
+fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, input: Stdin, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
     let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
     let mut port = string.from("PORT ")
     string.push_u64(mut port, int.widen(address.port))
     result.unwrap(stdout.write(out, port))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let seed = Accept(listener: take listener, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
+    let seed = Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
     let mut driving = task.spawn(tasks, bytes 33554432u64, take seed, accept)
-    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     take opened
 }
 
-fn nibble(x: u8) -> u8 { if x <= b'9' { x - b'0' } else { x - b'a' + 10u8 } }
 fn decode_fixture_token(text: View[String]) -> Option[Bytes] {
-    if text == "-" { return None }
+    if text == "-" {
+        return None
+    }
     let raw = string.as_bytes(text)
     want(list.len(raw) == 32u64, "runner_crash: invalid saved credential")
-    let mut out: Bytes = list.new()
-    for i in 0u64 .. 16u64 { list.push(mut out, nibble(raw[i * 2u64]) * 16u8 + nibble(raw[i * 2u64 + 1u64])) }
-    Some(take out)
+    for byte in raw {
+        want(byte < b'A' || byte > b'F', "runner_crash: invalid saved credential")
+    }
+    let Some(take decoded) = std.hex.decode(raw) else {
+        fail("runner_crash: invalid saved credential")
+    }
+    Some(take decoded)
 }
 
 fn remember(out: Stdout, principal: Bytes) waits {
-    let mut digits: Inline[u8, 64] = [0; 64]
-    let mut b: Bytes = list.new()
-    list.append(mut b, string.as_bytes("TOKEN "))
-    for byte in principal {
-        digits[62] = b'0'
-        let value: u64 = int.widen(byte)
-        let _ = int.radix_digits(value, 16, mut digits)
-        list.push(mut b, digits[62])
-        list.push(mut b, digits[63])
-    }
-    result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take b))))
+    let mut line = string.into_bytes("TOKEN ")
+    std.hex.append_from(mut line, list.len(principal), scoped fn(i: u64) -> u8 {
+        principal[i]
+    })
+    result.unwrap(stdout.write(out, result.unwrap(string.from_utf8(take line))))
 }
 
 fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sessions: u64, take calls: List[Pos], take principal: Option[Bytes], armed: bool) -> String waits {
@@ -492,7 +553,14 @@ fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sess
     for _ in 0u64 .. sessions {
         let mut keys: List[Bytes] = list.new()
         for body in 0u64 .. 3u64 { list.push(mut keys, body_key(body)) }
-        let cn = result.unwrap(runner.wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(clone(credential)), std.wsock.defaults()))
+        let until: Until = At(c, int.saturating_add(host.mono_ns(c), 5000000000u64))
+        let socket = result.unwrap(host.connect(n, Addr(ip: V4(0x7f000001u32), port: port), until))
+        let source = result.unwrap(net.local_addr(socket))
+        let mut message = string.from("PEER ")
+        string.push_u64(mut message, int.widen(source.port))
+        result.unwrap(stdout.write(out, message))
+        let cn = result.unwrap(runner.wire_client.connect_socket(tasks, take socket, c, r, keys,
+            Some(clone(credential)), std.wsock.defaults(), until, 5000u64))
         remember(out, credential)
         list.push(mut connections, take cn)
     }
@@ -511,9 +579,9 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
     let mut o = options()
     o.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(store.with_schema(db, code.describe(handles)))
+    let h = result.unwrap(open_data(db))
     let v = store.version(store.snapshot(db))
-    let n = match result.unwrap(store.get(store.snapshot(db), store.shape(h.t), 0u64)) {
+    let n = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.t, 0u64)) {
         Some(n) => n,
         None => 0u64,
     }
@@ -541,15 +609,14 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         if genesis { result.unwrap(store.close(take db)); return }
-        let value: std.codec.Codec[u64] = std.codec.of()
-        let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        let _ = result.unwrap(install_data(mut db))
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
         let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.releases", std.codec.key_u64(), release_codec)))
         let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
-        let written = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-            store.put(mut tx, table, 0u8, old_current)?
-            store.put(mut tx, table, 1u8, old_previous)
+        let written = result.unwrap(store.run(mut db, None, (store.copy_env(old_previous), store.copy_env(old_current), store.copy_env(table)), fn(mut tx, call_env) -> Result[(), store.Error] {
+            store.put(mut tx, call_env.2, 0u8, call_env.1)?
+            store.put(mut tx, call_env.2, 1u8, call_env.0)
         }))
         if let Committed(done) = written { result.unwrap(store.durable(mut db, done.ticket)) } else { fail("activation: failed to seed both rows") }
         result.unwrap(store.close(take db))
@@ -569,10 +636,10 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
             (!activated && !uncut && version == base && store.fence_level(db) == 0), "activation and fence disagree")
         if activated || !genesis {
             let table = result.unwrap(store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), codec))
-            let current = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 0u8)))
-            let previous = result.unwrap(store.get(snap, store.shape(table), 1u8))
+            let current = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table, 0u8)))
+            let previous = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table, 1u8))
             let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
-            let history = result.unwrap(store.get(snap, store.shape(releases), base + 1u64))
+            let history = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, releases, base + 1u64))
             if activated {
                 if genesis {
                     if let Some(_) = previous { fail("genesis: unexpected previous release") }
@@ -595,7 +662,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
                 chosen = Current(0u64)
             }
         } else {
-            match store.with_schema(db, code.describe(handles)) {
+            match open_data(db) {
                 Error(Missing(_)) => (),
                 _ => fail("activation: genesis catalog committed without activation")
             }
@@ -612,14 +679,16 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
-    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, clone(existing)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms),
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: chosen, place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    let allowance = deadline_disk_bytes(settings)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
-    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
+    let running = task.spawn(tasks, bytes allowance, take seed, deadline_place)
     // A standalone install completes durably without publishing a serving phase.
     if let Install = chosen {
         if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("activation: install did not finish") }
@@ -641,7 +710,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
 }
 
-fn unreachable_handles(_catalog: store.Schema) -> Result[Hd, store.Error] {
+fn unreachable_schema(mut _catalog: store.Declare) -> Result[Hd, store.Error] {
     fail("a refused opener called handles")
 }
 
@@ -649,11 +718,11 @@ fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Sele
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
     let (_sender, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
     let mail = result.unwrap(runner.mailbox(1u64))
-    let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, code.describe(migrate),
-        code.describe(unreachable_handles), take from, take mail, tasks, 1048576u64)
+    let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, None,
+        code.describe(unreachable_schema), take from, take mail, tasks, 1048576u64)
     match take tried {
         Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
-        Error(NotCurrent(Active(found, _))) => want(!legacy && found == v, "activation: wrong active version"),
+        Error(NotCurrent(Active(found, _, _))) => want(!legacy && found == v, "activation: wrong active version"),
         _ => fail("activation: unexpected selection result")
     }
     let reopened = result.unwrap(store.open(tasks, d, c, r, options()))
@@ -671,8 +740,8 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     if phase == "write" {
         let chosen: runner.Selection = if grow { Install } else { Current(0u64) }
         let (_sender, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
-        let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, code.describe(migrate),
-            code.describe(unreachable_handles), take inbox, result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
+        let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, None,
+            code.describe(unreachable_schema), take inbox, result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
         match take attempted {
             Error(IdentityUnknown) => result.unwrap(stdout.write(out, "DONE")),
             _ => fail("disk install accepted an unavailable identity"),
@@ -683,18 +752,26 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     }
 }
 
+fn deadline_disk_bytes(config: runner.PlaceConfig[(), Hd, (), ()]) -> u64 {
+    let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, config.sizes))
+    // Runner's 1 MiB keep and 1 MiB for the fixture.
+    result.unwrap(runner.operate_bytes(config)) + 2 * 1048576u64 + store.planned_bytes(plan)
+}
+
 fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> runner.Ended waits {
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
-    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    let allowance = deadline_disk_bytes(config)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
-    let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
+    let running = task.spawn(tasks, bytes allowance, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("runner-deadline: no Ready") }
@@ -705,7 +782,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let connection = result.unwrap(runner.wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(clone(credential)), wire.socket))
     remember(out, credential)
     result.unwrap(stdout.write(out, "FREEZE"))
-    runner.wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
+    runner.wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, u64_bytes(9u64)))
     let watchdog = host.mono_ns(c) + 5000000000u64
     while let Error(_) = stdout.write(out, "FROZEN?") {
         let now = host.mono_ns(c)
@@ -737,10 +814,11 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let mut existing = options()
     existing.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
-    let data = result.unwrap(store.with_schema(db, code.describe(handles)))
+    let data = result.unwrap(open_data(db))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
-    let stream = runner.wire_client.stream(result.unwrap(runner.ingress.caller((), named)), 0u32)
-    want(match result.unwrap(store.get(store.snapshot(db), store.shape(data.t), 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
+    let given = result.unwrap(runner.ingress.caller((), named))
+    let stream = store.StreamKey(caller: clone(given.caller), id: store.StreamId(t: store.keyed_time(db), n: 0u64))
+    want(match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), data.t, 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
     let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
     match result.unwrap(store.admit(mut db, stream, 0u64, digest)) {
         Admitted(_) => (),
@@ -759,22 +837,22 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         result.unwrap(stdout.write(out, "EARLY"))
         host.stopped(process)
         let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-            let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+            let mut wire = runner.wire_defaults(131072u64)
             wire.n_pool = 4194304u64
-            let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
-                migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+            let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None,
+                cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
+                on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64,
                 proxies: list.new(), n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
                 stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-            let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+            let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
             Ok(ended)
         }
-        return runner.main(argv, process, errors, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-        let value: std.codec.Codec[u64] = std.codec.of()
-        let created = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        let created = result.unwrap(install_data(mut db))
         result.unwrap(store.durable(mut db, created))
         result.unwrap(store.close(take db))
     } else if phase == "write" {
@@ -782,12 +860,12 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
             Ok(freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice))
         }
-        return runner.main(argv, process, errors, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
     } else { deadline_reopen(d, c, r, tasks, argv) }
     Ok(())
 }
 
-pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
+pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, input: Stdin) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
     if scenario == "runner-activation" || scenario == "runner-activation-genesis" {
@@ -803,6 +881,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         let port: u16 = int.narrow(arg_u64(option.unwrap(args.get(argv, 3u64))))
         let principal = decode_fixture_token(option.unwrap(args.get(argv, 4u64)))
         if mode == "init" {
+            runner_crash_answer_oracle()
             clean(drive(c, r, tasks, n, out, port, 1u64, list.new(), take principal, false))
         } else if mode == "write" {
             let verdict = drive(c, r, tasks, n, out, port, 2u64, positions(scenario), take principal, scenario == "poison-segment")
@@ -817,9 +896,8 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-        let cv: std.codec.Codec[u64] = std.codec.of()
-        result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-        let opened = served(take db, Current(0u64), c, r, tasks, n, out, 1u64)
+        result.unwrap(install_data(mut db))
+        let opened = served(take db, Current(0u64), c, r, tasks, n, input, out, 1u64)
         want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the first head failed")
         return Ok(())
     }
@@ -834,7 +912,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         if scenario == "poison-segment" { o.group_commits = 1u32 }
         let db = match store.open(tasks, d, c, r, o) { Ok(take x) => take x, Error(_) => return Ok(()) }
         // The data table is version 1 and the initial activation is version 2.
-        let opened = served(take db, Current(2u64), c, r, tasks, n, out, 2u64)
+        let opened = served(take db, Current(2u64), c, r, tasks, n, input, out, 2u64)
         match opened {
             Ok(()) => want(scenario != "poison-segment", "runner_crash: a failed journal sync did not stop the head"),
             Error(_) => (),
@@ -848,7 +926,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     let mut o = options()
     o.create = false
     let db = result.unwrap(store.open(tasks, d, c, r, o))
-    let opened = served(take db, Current(2u64), c, r, tasks, n, out, 1u64)
+    let opened = served(take db, Current(2u64), c, r, tasks, n, input, out, 1u64)
     want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the re-send head failed")
     let (_, total) = resends(scenario)
     let (after, value) = count(d, c, r, tasks)

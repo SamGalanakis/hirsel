@@ -1,0 +1,53 @@
+fn check_codec_strings() {
+    // 14496-15 AVC writes the three profile, compatibility and level octets.
+    let high = result.unwrap(media_bits.codec.codec_string(Avc1(b"\x01\x64\x00\x28\xff\xe0\x00")))
+    // HEVC Main: profile 1, flags 1 and 2, main tier, level 3.1, constraint B0.
+    let main = result.unwrap(media_bits.codec.codec_string(Hvc1(b"\x01\x01\x60\x00\x00\x00\xb0\x00\x00\x00\x00\x00\x5d\xf0\x00\xfc\xfd\xf8\xf8\x00\x00\x0f\x00")))
+    // AV1 ISOBMFF §5: profile 0, level index 0, main tier, 8-bit.
+    let av1 = result.unwrap(media_bits.codec.codec_string(Av01(b"\x81\x00\x0c\x00")))
+    // RFC 6381: MPEG-4 Audio 0x40, AAC-LC Audio Object Type 2.
+    let aac = result.unwrap(media_bits.codec.codec_string(Mp4a(0x40, b"\x11\x90")))
+    if high != "avc1.640028" || main != "hvc1.1.6.L93.B0" || av1 != "av01.0.00M.08" || aac != "mp4a.40.2" {
+        fail("codec strings differ from RFC 6381 and codec configuration fields")
+    }
+}
+
+@test
+fn hls_cmaf() -> Result[(), ()] {
+    check_codec_strings()
+    let mut prefix: Bytes = list.with_capacity(128)
+    let limit = packager.ManifestLimit(octets: 8192, steps: 20000)
+    let first = write_vod_example(mut prefix, limit)
+    let second = fixture(mut prefix, 2, 90000, 320)
+    let segment = first.segments[1]
+    result.unwrap(packager.write_iframe(mut prefix, segment))
+    let size: u32 = list.word_be(prefix, 104)
+    let decode_time: u64 = list.word_be(prefix, 60)
+    let sample_count: u32 = list.word_be(prefix, 80)
+    let duration: u32 = list.word_be(prefix, 88)
+    if packager.iframe_payload_bytes(segment) != 3 || decode_time != 1500 || sample_count != 1 || duration != 1500 || size != 11 {
+        fail("I-frame fragment must contain only the three-byte sync sample at 1.5 s")
+    }
+    let iframe = result.unwrap(packager.hls_media(first, true, limit))
+    if iframe != "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-I-FRAMES-ONLY\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1.500000000,\niframe-7.m4s\n#EXTINF:1.500000000,\niframe-8.m4s\n#EXT-X-ENDLIST\n" {
+        fail("I-frame playlist has incorrect timing or paths")
+    }
+    let mut ladder: List[packager.Rendition] = list.with_capacity(2)
+    list.push(mut ladder, take first)
+    list.push(mut ladder, take second)
+    let master = result.unwrap(packager.hls_master(ladder, limit))
+    if master != "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-STREAM-INF:BANDWIDTH=726,CODECS=\"avc1.42c01e\",RESOLUTION=160x90\nr1/media.m3u8\n#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=614,CODECS=\"avc1.42c01e\",RESOLUTION=160x90,URI=\"r1/iframe.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=726,CODECS=\"avc1.42c01e\",RESOLUTION=320x90\nr2/media.m3u8\n#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=614,CODECS=\"avc1.42c01e\",RESOLUTION=320x90,URI=\"r2/iframe.m3u8\"\n" {
+        fail("master paths or rates differ from the fixture")
+    }
+    if let Error(BudgetExceeded) = packager.hls_master(ladder, packager.ManifestLimit(octets: 8192, steps: 1)) {} else {
+        fail("master ignored its step limit")
+    }
+    if let Error(BudgetExceeded) = packager.hls_master(ladder, packager.ManifestLimit(octets: 1073741824, steps: 20000)) {} else {
+        fail("master ignored refused budget admission")
+    }
+    let track = ladder[0].track
+    if let Error(UnsupportedEncryption) = packager.write_init(mut prefix, track, b"", Cbcs) {} else {
+        fail("CBCS mode must refuse")
+    }
+    Ok(())
+}

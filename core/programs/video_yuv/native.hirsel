@@ -1,0 +1,7 @@
+pub fn to_rgb(f: Foreign[video_yuv.Yuv], format: u32, order: u32, matrix: u32, width: u32, height: u32, src: Bytes, mut dst: Bytes) -> i32
+
+pub fn from_rgb(f: Foreign[video_yuv.Yuv], format: u32, order: u32, matrix: u32, width: u32, height: u32, src: Bytes, mut dst: Bytes, mut scratch: Bytes) -> i32
+
+pub fn scale(f: Foreign[video_yuv.Yuv], format: u32, filter: u32, width: u32, height: u32, out_width: u32, out_height: u32, src: Bytes, mut dst: Bytes, mut scratch: Bytes) -> i32
+
+pub fn rotate(f: Foreign[video_yuv.Yuv], format: u32, rotation: u32, width: u32, height: u32, src: Bytes, mut dst: Bytes, mut scratch: Bytes) -> i32

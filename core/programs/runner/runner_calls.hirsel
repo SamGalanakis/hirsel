@@ -9,21 +9,13 @@
 //   its run, its aborted run's frame or its reply-only commit is the next; a refusal, a
 //   Duplicate, a Refused(HistoryUnavailable) and a Refused(RequestMismatch) commit nothing.
 //   A write returns its own commit's version.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64], triggers: Option[triggers.Tables] }
 
 type Calls = runner.Registry[(), Hd]
 
 fn digest_matches(exported: List[runner.Exported], expected: String) -> bool {
     let digest = result.unwrap(runner.release_digest(exported))
-    let digits = string.as_bytes("0123456789abcdef")
-    let encoded = string.as_bytes(expected)
-    if list.len(digest) != 32u64 { return false }
-    for index in 0u64 .. 32u64 {
-        let byte = digest[index]
-        if digits[int.widen(byte >> 4)] != encoded[index * 2u64] { return false }
-        if digits[int.widen(byte & 15u8)] != encoded[index * 2u64 + 1u64] { return false }
-    }
-    true
+    list.len(digest) == 32u64 && std.hex.encode(digest) == expected
 }
 
 fn digest_bytes(text: String) -> Bytes {
@@ -35,8 +27,8 @@ fn digest_bytes(text: String) -> Bytes {
 pub fn law_release_digest() -> bool {
     let no_exports: List[runner.Exported] = list.new()
     if !digest_matches(no_exports, "eab2586620e88429ab011d50b6feaa03da24133743c844bbb7f35208df7c5c35") { return false }
-    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
-    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
+    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), slots: list.new(), value: list.new())
+    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), slots: list.new(), value: list.new())
     let mut exported: List[runner.Exported] = list.with_capacity(2u64)
     list.push(mut exported, take left)
     list.push(mut exported, take right)
@@ -55,21 +47,20 @@ fn test_release_digest() -> Result[(), ()] {
     if law_release_digest() { Ok(()) } else { Error(()) }
 }
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
+    Ok(Hd(t: t, triggers: None))
 }
 
+
+fn open_data(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let mut declaration = store.declare(db, Open)?
+    let handles = schema(mut declaration)?
+    let _ = store.seal(mut db, take declaration)?
+    Ok(take handles)
+}
 
 // The body writes k and returns its commit's version.
 fn write(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
@@ -118,12 +109,7 @@ fn flood(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[
     Ok(k)
 }
 
-// L7/MEM-30. The 65,536-step entry bound spends 165 before the loop:
-// draft setup 23, entry adapters and scope clone 8, argument decode 8,
-// put 124, and channel creation and unwrap 2. The put is its entry
-// (1), writable catalog check (18), encoded key (6), scope and index
-// checks (2), and put_impl (97). The data and operation trees start empty.
-// Send k is step 165 + 2*k - 1, so the body attempts exactly 32,686 sends.
+// L7/MEM-30 counts sends across this loop's call and back edge.
 fn hung(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     // Keep the receiver alive so the hung body's sends can poll a full channel.
@@ -139,36 +125,40 @@ fn answer(take k: u64) -> Result[u64, Capacity] {
 // The place's one `place` function (rule 10): the head, the publisher and every session
 // run it.
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    place_with_hung_steps(mut r, HUNG_STEPS)
+}
+
+fn place_with_hung_steps(mut r: Calls, steps: u64) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(refuse), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(crash), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(tally), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
-    runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
+    runner.transact(mut r, code.describe(hung), 65536u64, steps)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut r, code.describe(everything), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(everything), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
 // subs_wired's query: keys 0 to 1,000 of "data".
-fn everything(tx: store.Tx, h: Hd, take _arg: u32) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.t), Included(0u64), Included(1000u64))
+fn everything(tx: store.Tx, h: Hd, take _arg: u32) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.t, Included(0u64), Included(1000u64))
 }
 
 // query_as_caller's query, caller-dependent: keys from the Caller's first subject byte to
 // 1,000. It reads key 0 first, so a write to key 0 re-runs it (G2).
-fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[runner.Cover, Capacity] {
-    let _ = store.fetch(tx, store.shape(h.t), 0u64)
+fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[runner.Answer[()], Capacity] {
+    let _ = store.fetch(tx, h.t, 0u64)
     let low: u64 = int.widen(caller.subject[0])
-    runner.cover(store.shape(h.t), Included(low), Included(1000u64))
+    runner.table_answer("data", h.t, Included(low), Included(1000u64))
 }
 
 fn query_key(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u32())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
 }
@@ -368,7 +358,7 @@ fn wsock_text(take prefix: String, e: std.wsock.Error) -> String {
 fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes, after: u64) -> () waits {
     let stream: u32 = int.narrow(s)
     let ms: u32 = int.narrow(after / 1000000u64)
-    let request: runner.Frame = Call(stream, p, wire_client.slot(client_keys(), key), ms, take arg)
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: int.widen(stream)), p, wire_client.slot(client_keys(), key), ms, take arg)
     match cn { Socket(wire, _) => wire_client.send_frame(wire, take request), _ => fail("calls: synthetic owner cannot call") }
 }
 
@@ -403,7 +393,7 @@ const LATER: u64 = 10000000000u64
 // One place: a fresh memory store with "data", place_head on this task, and the case's
 // client driver as a task that ends by dropping its head sender.
 fn served(c: Clock, r: Random, tasks: Tasks, n: Net, f: fn(take Drive) -> () waits) -> bool waits {
-    served_in(c, r, tasks, n, store.defaults(), f)
+    served_in(c, r, tasks, n, result.unwrap(store.sized(Directory, 2147483648u64)), f)
 }
 
 fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
@@ -412,11 +402,19 @@ fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(
 }
 
 fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
+    served_on_with_place(take fresh, c, tasks, n, r, mut token, grouped, f, code.describe(place))
+}
+
+fn calls_inbox() -> (Sender[runner.HeadInput], Receiver[runner.HeadInput]) {
+    channel.new(64u64)
+}
+
+fn served_on_with_place(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits, register: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]]) -> bool waits {
     let db = take fresh
     // The disk fixture drives one connection. Leave room in its existing root
     // budget for the journal worker and the activation cut's buffer.
     let driving_bytes = if store.is_disk(db) { 25165824u64 } else { 33554432u64 }
-    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (head, inbox) = calls_inbox()
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
     list.append(mut token, credential)
@@ -430,7 +428,7 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
     } else { (take head, None) }
     let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
     let driving = task.spawn(tasks, bytes driving_bytes, take d, f)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, register, N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
     match opened {
@@ -442,21 +440,6 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
         Error(Failed(take cs)) => fail(cause_text("calls: the driver failed: ", cs)),
         Error(Cancelled(take cs)) => fail(cause_text("calls: the driver was cancelled: ", cs)),
     }
-}
-
-// The head's refusal, named for stderr.
-fn opened_text(e: runner.OpenError) -> String {
-    string.from(match e {
-        Store(_) => "calls: place_head: store error",
-        StoreMismatch(_, _) => "calls: place_head: store mismatch",
-        Place(_) => "calls: place_head: place registration failed",
-        Migrate(_) => "calls: place_head: migration failed",
-        NotCurrent(_) => "calls: place_head: activation is not current",
-        IdentityUnknown => "calls: place_head: image identity is unavailable",
-        PublisherStopped => "calls: place_head: publisher stopped",
-        InstallVersion(_) => "calls: place_head: wrong install activation",
-        InstallUncertain(_) => "calls: place_head: install outcome unknown",
-    })
 }
 
 // A failed task's primary cause, carried to the law's own failure so stderr names it.
@@ -617,9 +600,9 @@ pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> bo
 
 pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut plain_token: Bytes = list.new()
-    let plain = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut plain_token, 2u64, drive_group)
+    let plain = served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut plain_token, 2u64, drive_group)
     let mut subscribed_token: Bytes = list.new()
-    let subscribed = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut subscribed_token, 2u64, drive_group_subscribed)
+    let subscribed = served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut subscribed_token, 2u64, drive_group_subscribed)
     plain && subscribed
 }
 
@@ -652,7 +635,7 @@ fn drive_joiners(take d: Drive) -> () waits {
 
 pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
-    served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 3u64, drive_joiners)
+    served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 3u64, drive_joiners)
 }
 
 // L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
@@ -717,18 +700,16 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wa
     served(c, r, tasks, n, drive_duplicate)
 }
 
-// The same credential, stream, position and argument must run fresh in the
-// second anonymous session. Each admission and reply commits, so write
-// returns 3 on the first call and 5 on the second.
-fn anonymous_reply(d: Drive) -> Option[u64] waits {
+// A fresh anonymous session runs the same call. Retirement can add an intervening commit.
+fn anonymous_reply(d: Drive, birth: u64) -> Option[u64] waits {
     let requested = client_keys()
     let unbound: Option[runner.Wire[(), ()]] = None
     let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
         code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
-    wire_client.send_frame(wire, Call(7u32, 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
+    wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
         Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 =>
-            if done[0u64].stream == 7u32 && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
+            if done[0u64].stream == store.StreamId(t: birth, n: 7u64) && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
         _ => None,
     }
     let _ = wire_client.close(take wire)
@@ -737,8 +718,10 @@ fn anonymous_reply(d: Drive) -> Option[u64] waits {
 }
 
 fn drive_anonymous_fresh(take d: Drive) -> () waits {
-    want(anonymous_reply(d) == Some(3u64), "anonymous sessions: first call commits")
-    want(anonymous_reply(d) == Some(5u64), "anonymous sessions: second call runs fresh")
+    let birth = host.wall_ms(d.clock)
+    want(anonymous_reply(d, birth) == Some(3u64), "anonymous sessions: first call commits")
+    let second = anonymous_reply(d, birth)
+    want(second == Some(5u64) || second == Some(6u64), "anonymous sessions: second call runs fresh")
 }
 
 pub fn law_anonymous_fresh(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
@@ -765,7 +748,7 @@ fn stamp_place(mut registry: runner.Registry[WireStamp, Hd]) -> Result[(), runne
 fn drive_granted_copies(take d: Drive) -> () waits {
     let mut requested: List[Bytes] = list.new()
     list.push(mut requested, key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64()))
-    let mut config = runner.wire_defaults(524288u64, 65536u64)
+    let mut config = runner.wire_defaults(524288u64)
     config.q = 0u64
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
@@ -775,7 +758,7 @@ fn drive_granted_copies(take d: Drive) -> () waits {
         code.describe(stamp_place), requested, None, config, 2097152u64))
     // The supplied offset is 40. Each call independently returns offset + input.
     for p in 0u64 .. 2u64 {
-        wire_client.send_frame(wire, Call(0u32, p, 0u32, 10000u32, u64_arg(p + 1u64)))
+        wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), p, 0u32, 10000u32, u64_arg(p + 1u64)))
         let returned = match wire_client.next(wire) {
             Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == p =>
                 match done[0u64].outcome {
@@ -816,12 +799,12 @@ fn held_body(grant: HeldGrant, caller: runner.Caller, take value: u64) -> Result
 
 fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(held_body), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.Caller, ()] {
+fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, ()] {
     if list.len(credential) != 1u64 { return Error(()) }
-    Ok(subject_caller(credential[0]))
+    Ok(runner.BoundCaller(caller: subject_caller(credential[0]), expires_at_ms: None))
 }
 
 fn drive_bind_only(take d: Drive) -> () waits {
@@ -843,7 +826,7 @@ fn drive_bind_only(take d: Drive) -> () waits {
     let cn: Conn = Socket(take wire, take session)
     let mut image = Image(rows: map.new(), at: 0u64, completes: 0u64)
     image_at(cn, mut image, 5u64, 1u64, key_list(Some(2u64), None), string.from("bind_only: mine runs as the bound Caller"))
-    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(0u32, 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
+    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
     want(is(frame(cn).outcome, Refused(NotAllowed)), "bind_only: a Granted call is refused")
     hang(take cn)
     hang(take w)
@@ -924,15 +907,15 @@ fn keyed(take outcomes: List[runner.Done]) -> List[runner.KeyedDone] {
     let mut out: List[runner.KeyedDone] = list.new()
     for take d in outcomes {
         let runner.Done(stream: stream, p: p, outcome: take o) = take d
-        list.push(mut out, runner.KeyedDone(stream: sid(int.widen(stream)), p: p, outcome: take o))
+        list.push(mut out, runner.KeyedDone(stream: sid(stream.n), p: p, outcome: take o))
     }
     take out
 }
 
 fn projected(take f: runner.Frame) -> runner.Down {
     match take f {
-        Batch(v, take complete, take rows, take outcomes) =>
-            Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: keyed(take outcomes))),
+        Batch(v, take complete, take groups, take outcomes) =>
+            Batched(runner.KeyedBatch(version: v, complete: take complete, rows: runner.publication_rows(take groups), outcomes: keyed(take outcomes))),
         Ended(sub, take o) => Ended(sub, take o),
         Reset(v, take outcomes) => KeyedReset(v, keyed(take outcomes)),
         _ => fail("calls: unexpected wire frame"),
@@ -1085,7 +1068,7 @@ fn apply(mut c: Cache, take d: runner.Down) {
             }
             for take row in rows {
                 want(row.sub == 1u32, "repair: A's rows are sub 1's")
-                let runner.Row(sub: _, key: take key, value: take value) = take row
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
                 match take value {
                     Some(take v) => map.insert(mut c.rows, take key, take v),
                     None => { let _ = map.remove(mut c.rows, key) },
@@ -1244,7 +1227,7 @@ fn follow(mut i: Image, take d: runner.Down, who: String) {
             }
             for take row in rows {
                 want(row.sub == 1u32, clone(who))
-                let runner.Row(sub: _, key: take key, value: take value) = take row
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
                 match take value {
                     Some(take v) => map.insert(mut i.rows, take key, take v),
                     None => { let _ = map.remove(mut i.rows, key) },
@@ -1384,7 +1367,7 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
 
 fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
     match got {
-        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && c.record.stream == wire_client.stream(result.unwrap(ingress.caller((), token)), 0u32) && if entry == 0u64 {
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)).caller, 0u32) && if entry == 0u64 {
             revision_is(c.record.revision, code.describe(write))
         } else if entry == 1u64 {
             revision_is(c.record.revision, code.describe(refuse))
@@ -1396,7 +1379,7 @@ fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, toke
 }
 
 fn disk_options() -> store.Options {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
 
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64
@@ -1405,45 +1388,29 @@ fn disk_options() -> store.Options {
     o
 }
 
-fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
-    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(2u64)
-    let req = runner.head_request(store.Caller(issuer: 1, subject: list.new()), digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
-    result.unwrap(channel.send(to, RunRequest(take req)))
-    take reply_from
-}
-
-fn drain_answer(from: Receiver[runner.WireEvent], stream: String, position: u64) -> runner.Outcome {
-    let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
-    let received = option.unwrap(runner.head_outcome(take event))
-    want(received.stream == digest_bytes(stream) && received.p == position, "drain: answer to wrong send")
-    if let Ok(_) = channel.try_receive(from) { fail("drain: send answered twice") }
-    let runner.KeyedDone(outcome: take outcome, ..) = take received
-    take outcome
-}
-
-fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
+fn drained(take fresh: store.Db, tasks: Tasks, birth: u64) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8u64)
-    let first = drain_send(to, "held", 0u64, 40u64)
-    let fifo = drain_send(to, "held", 1u64, 41u64)
+    let first = drain_send(to, "held", birth, 0u64, 40u64)
+    let fifo = drain_send(to, "held", birth, 1u64, 41u64)
     result.unwrap(channel.send(to, HeadClose))
-    let join = drain_send(to, "held", 0u64, 40u64)
-    let fresh_request = drain_send(to, "new", 0u64, 42u64)
+    let join = drain_send(to, "held", birth, 0u64, 40u64)
+    let fresh_request = drain_send(to, "new", birth, 0u64, 42u64)
     let _ = take to
     let mail = result.unwrap(runner.mailbox(4u64))
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take from, take mail, tasks, 1048576u64))
-    let admitted = drain_answer(first, "held", 0u64)
-    let joined = drain_answer(join, "held", 0u64)
-    match (admitted, joined, drain_answer(fifo, "held", 1u64), drain_answer(fresh_request, "new", 0u64)) {
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take from, take mail, tasks, 1048576u64))
+    let admitted = drain_answer(first, "held", birth, 0u64)
+    let joined = drain_answer(join, "held", birth, 0u64)
+    match (admitted, joined, drain_answer(fifo, "held", birth, 1u64), drain_answer(fresh_request, "new", birth, 0u64)) {
         (Returned(original), Returned(same), Refused(Overloaded), Refused(Overloaded)) => original == same,
         _ => false,
     }
 }
 
 pub fn law_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    drained(store.memory(c, r, disk_options()), tasks)
+    drained(store.memory(c, r, disk_options()), tasks, host.wall_ms(c))
 }
 
 @test
@@ -1455,18 +1422,18 @@ fn test_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks) { return Error(()) }
+    let birth = host.wall_ms(c)
+    if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks, birth) { return Error(()) }
     let mut options = disk_options()
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
-    let table = result.unwrap(store.with_schema(db, code.describe(handles)))
+    let table = result.unwrap(open_data(mut db))
     let snap = store.snapshot(db)
-    want(result.unwrap(store.get(snap, store.shape(table.t), 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
-    want(result.unwrap(store.get(snap, store.shape(table.t), 41u64)) == None, "drain: FIFO refusal wrote data")
-    want(result.unwrap(store.get(snap, store.shape(table.t), 42u64)) == None, "drain: closed admission wrote data")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
     let key = k_write()
-    let held = digest_bytes("held")
-    let fresh_stream = digest_bytes("new")
+    let (take held, take fresh_stream) = (drain_stream("held", birth), drain_stream("new", birth))
     if let Duplicate(_) = result.unwrap(store.admit(mut db, held, 0u64, store.request_digest(key, u64_arg(40u64)))) {} else { fail("drain: admitted reply did not survive reopen") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, held, 1u64, store.request_digest(key, u64_arg(41u64)))) {} else { fail("drain: refused FIFO position left a row") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, fresh_stream, 0u64, store.request_digest(key, u64_arg(42u64)))) {} else { fail("drain: refused fresh position left a row") }
@@ -1475,38 +1442,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     Ok(())
 }
 
-type ManagedRun[G: send, S: send, B: send]: send {
-    settings: runner.PlaceConfig[G, Hd, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
-}
-
-fn run_managed[G: send, S: send, B: send](take job: ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits {
-    let ManagedRun(settings: take settings, stop: take stop, status: take status, watch: take watch) = take job
-    runner.operate(take settings, take stop, status, Some(take watch))
-}
-
-fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
-
-fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
-    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
-    wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
-        migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
-        proxies: list.new(), n_publisher: 1048576u64, listen: listen,
-        net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
-}
-
-fn start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
-    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    if stop_pending { result.unwrap(channel.send(stop_to, ())) }
-    let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
-    let status = result.unwrap(runner.status_root())
-    let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
-    let run: fn(take ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits = run_managed
-    let running = task.spawn(tasks, bytes 50331648u64, take request, run)
-    (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
-}
-
-fn no_trigger_grant(seed: (), take unused: runner.TriggerContext) -> Result[(), Capacity] {
+fn no_trigger_grant(seed: (), unused_handles: Hd, take unused: runner.TriggerContext) -> Result[(), Capacity] {
     fail("an empty trigger list cannot start a trigger")
 }
 
@@ -1537,11 +1473,11 @@ fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 }
 
 fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[(), ()]]) -> runner.PlaceConfig[(), Hd, (), ()] {
-    let mut session = runner.wire_defaults(65536u64, N_PLACE)
+    let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
-    runner.PlaceConfig(backing: Memory, selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
-        migrate: code.describe(migrate), handles: code.describe(handles), session: session, max_sessions: 2u64,
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
+        on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)
 }
@@ -1606,7 +1542,11 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let (blocking, rebound) = result.unwrap(host.listen(net, address, 1u16))
     want(rebound.port == port, "ready: place left listener bound")
     let (failed_bind, held_stop, failed_phases, _) = start_managed(tasks, take restarted_settings, false)
-    if let Ok(Error(Listen(InUse))) = task.join(take failed_bind) {} else { fail("ready: occupied address not reported") }
+    match task.join(take failed_bind) {
+        Ok(Error(Listen(InUse))) => (),
+        Ok(Error(problem)) => fail(runner.start_text(problem)),
+        _ => fail("ready: occupied address not reported"),
+    }
     while let Ok(phase) = channel.try_receive(failed_phases) {
         if let Ready = phase { fail("ready: published despite listen failure") }
     }
@@ -1621,11 +1561,11 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let mut reopened = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
     let table = result.unwrap(store.table(mut reopened, "hirsel.runner.activation", std.codec.key_u8(), codec))
-    let stored = result.unwrap(store.get(store.snapshot(reopened), store.shape(table), 0u8))
+    let stored = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), table, 0u8))
     let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut reopened, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
     let snap = store.snapshot(reopened)
     let version = store.version(snap)
-    let installed = result.unwrap(store.get(snap, store.shape(releases), version))
+    let installed = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), snap, releases, version))
     result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     if let Some(raw) = stored {
@@ -1674,9 +1614,9 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let installed = serve_until_ready(tasks, take first)
     // One application commit between the starts: genesis is version 1, this row is version 2.
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let h = result.unwrap(store.with_schema(db, code.describe(handles)))
-    let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.t, 7u64, 70u64)
+    let h = result.unwrap(open_data(mut db))
+    let seeded = result.unwrap(store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.t, 7u64, 70u64)
     }))
     if let Committed(done) = seeded { result.unwrap(store.durable(mut db, done.ticket)) } else { fail("restart: seed row did not commit") }
     result.unwrap(store.close(take db))
@@ -1688,13 +1628,13 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     other.place = code.describe(fixture_place)
     let (refusing, _held, _phases, _) = start_managed(tasks, take other, false)
     let refused = match task.join(take refusing) {
-        Ok(Error(Open(NotCurrent(Active(version, _))))) => version == installed,
+        Ok(Error(Open(NotCurrent(Active(version, _, _))))) => version == installed,
         _ => false,
     }
-    let check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let read = result.unwrap(store.with_schema(check, code.describe(handles)))
+    let mut check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let read = result.unwrap(open_data(mut check))
     let snap = store.snapshot(check)
-    let survived = result.unwrap(store.get(snap, store.shape(read.t), 7u64)) == Some(70u64)
+    let survived = result.unwrap(store.get(result.unwrap(store.reader(check, 0u64)), snap, read.t, 7u64)) == Some(70u64)
     let unwritten = store.version(snap) == 2u64
     result.unwrap(store.close(take check))
     let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
@@ -1707,9 +1647,9 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     after.selection = Reopen
     after.place = code.describe(fixture_place)
     let resumed = serve_until_ready(tasks, take after)
-    let last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
-    let rows = result.unwrap(store.with_schema(last, code.describe(handles)))
-    let carried = result.unwrap(store.get(store.snapshot(last), store.shape(rows.t), 7u64)) == Some(70u64)
+    let mut last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let rows = result.unwrap(open_data(mut last))
+    let carried = result.unwrap(store.get(result.unwrap(store.reader(last, 0u64)), store.snapshot(last), rows.t, 7u64)) == Some(70u64)
     result.unwrap(store.close(take last))
     result.unwrap(std.dir.remove_all(parent, name))
     want(resumed == 3u64, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
@@ -1724,48 +1664,6 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
 @test
 fn test_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_restart_reopens(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
-}
-
-// Start refusals name what to change. Oracles: the checkbox place serves at 1 MiB with
-// wire_defaults(65536, n), and a session holds n_place twice within its 16 MiB ceiling, so
-// 4 MiB cannot fit and the bound lies between them; a wire configuration whose n_place is not
-// PlaceConfig.n_place is refused with both values (RUNNER-SPEC §6 "One n_place").
-fn refused_start(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, wire_n_place: u64, n_place: u64) -> runner.StartError waits {
-    let mut name = string.with_capacity(32u64)
-    let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
-    let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
-    settings.session.n_place = wire_n_place
-    settings.n_place = n_place
-    let (_held, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let joined = runner.operate(take settings, take stop, result.unwrap(runner.status_root()), None)
-    result.unwrap(std.dir.remove_all(parent, name))
-    let Error(take problem) = take joined else { fail("start refusal: the place started") }
-    take problem
-}
-
-pub fn law_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let oversized = refused_start(parent, clock, random, tasks, net, 4194304u64, 4194304u64)
-    let bounded = match oversized {
-        Exceeds(over) => over.name == "n_place" && over.value == 4194304u64 && over.limit >= 1048576u64 && over.limit < 4194304u64,
-        _ => false,
-    }
-    want(bounded, "start refusal: 4 MiB n_place is not Exceeds naming n_place with a bound between 1 MiB and 4 MiB")
-    want(std.string.find(runner.start_text(take oversized), 0u64, "n_place is 4194304") != None, "start refusal: the n_place message does not name its value")
-    let split = refused_start(parent, clock, random, tasks, net, 2097152u64, N_PLACE)
-    let both = match split {
-        Disagrees(differ) => differ.name == "session.n_place" && differ.given == 2097152u64 && differ.used == N_PLACE,
-        _ => false,
-    }
-    want(both, "start refusal: a wire n_place unlike PlaceConfig.n_place is not refused with both values")
-    let text = runner.start_text(take split)
-    want(std.string.find(text, 0u64, "2097152") != None && std.string.find(text, 0u64, "1048576") != None, "start refusal: the disagreement message does not name both values")
-    true
-}
-
-@test
-fn test_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_start_refusals(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 @test
@@ -1793,7 +1691,7 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
         Ok(take connected) => take connected,
         Error(_) => fail("lag: connection refused inside the lag window"),
     }
-    wire_client.send_frame(connection, Call(0u32, 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
+    wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
     match wire_client.next(connection) {
         Ok(Batch(_, _, _, done)) => {
             want(list.len(done) == 1u64 && done[0u64].p == 0u64, "lag: wrong outcome count")
@@ -1843,7 +1741,7 @@ fn ping_entries() -> (triggers.Entries, triggers.Entry[u64]) {
 
 // Schedules one ping run after this commit and returns that commit's version.
 fn schedule_ping(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
-    let Ok(t) = triggers.tables(store.tx_schema(tx)) else { return Error(1u32) }
+    let Some(t) = view h.triggers else { return Error(1u32) }
     let (entries, target) = ping_entries()
     match triggers.write(mut tx, t, entries, target, k, AfterCommit) {
         Ok(id) => Ok(id.version),
@@ -1853,7 +1751,7 @@ fn schedule_ping(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) ->
 
 // Returns the ping's result once the run scheduled at `version` has its terminal row, else 0.
 fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u64) -> Result[u64, u32] {
-    let Ok(t) = triggers.tables(store.tx_schema(tx)) else { return Error(1u32) }
+    let Some(t) = view h.triggers else { return Error(1u32) }
     let info = store.info(mut tx)
     let id = triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
     match triggers.fetch_outcome(tx, t, id) {
@@ -1863,24 +1761,29 @@ fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u6
     }
 }
 
-fn ping_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    triggers.migrate(mut phase)?
-    migrate(mut phase)
+fn ping_schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let tables = triggers.declare_tables(mut d)?
+    let mut h = schema(mut d)?
+    h.triggers = Some(take tables)
+    Ok(take h)
 }
 
+fn ping_tables(h: Hd) -> triggers.Tables { option.unwrap(clone(h.triggers)) }
+
 fn ping_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables { ping_tables(h) })
     runner.transact(mut r, code.describe(schedule_ping), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(ping_outcome), 65536u64, runner.DEFAULT_STEPS)?
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn unit_grant(seed: (), take context: runner.TriggerContext) -> Result[(), Capacity] {
+fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext) -> Result[(), Capacity] {
     let _ = take context
     Ok(())
 }
 
 fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
-    wire_client.send_frame(client, Call(0u32, position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
     loop {
         match wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {
@@ -1900,7 +1803,7 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut settings = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
     settings.place = code.describe(ping_place)
-    settings.migrate = code.describe(ping_migrate)
+    settings.schema = code.describe(ping_schema)
     let (entries, _) = ping_entries()
     settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: (), grant: unit_grant, grant_bytes: 65536u64))
@@ -1943,22 +1846,6 @@ fn test_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks:
     if law_stop_after_trigger_run(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-@test
-fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    let mut name = string.with_capacity(32u64)
-    let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let config = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16),
-        runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
-    let (running, stop_to, phases, _) = start_managed(tasks, take config, true)
-    if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("stop: expected Unstarted") }
-    if let Ok(Starting(Recovering)) = channel.try_receive(phases) {} else { fail("stop: expected Recovering") }
-    if let Ok(Draining) = channel.try_receive(phases) {} else { fail("stop: expected Draining") }
-    if let Error(Closed) = channel.try_receive(phases) {} else { fail("stop: place continued after Draining") }
-    let _ = take stop_to
-    result.unwrap(std.dir.remove_all(parent, name))
-    Ok(())
-}
-
 pub fn wake_report_main(a: Args, process: Process, err: Stderr, d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), Exit] waits {
     let run = scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         match args.get(a, 0u64) {
@@ -1974,7 +1861,7 @@ pub fn wake_report_main(a: Args, process: Process, err: Stderr, d: Dir, c: Clock
             _ => Error(Usage(Exit(status: 2u8))),
         }
     }
-    runner.main(a, process, err, tasks, code.describe(place), run)
+    runner.main(a, process, err, tasks, c, code.describe(place), code.describe(schema), run)
 }
 
 pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
@@ -2062,7 +1949,7 @@ fn drive_store_refusal(take d: Drive) -> () waits {
 const FLOOD: u64 = 512u64
 
 pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
     o.resident_limit = 32768u64
     served_in(c, r, tasks, n, o, drive_store_refusal)
 }
@@ -2183,7 +2070,7 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool wa
     let mail = result.unwrap(runner.mailbox(1u64))
     let post = runner.post(mail)
     let credential = ingress.credential(r)
-    let db = store.memory(c, r, store.defaults())
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: None)
     let s0 = conn(d, 0u64)
     ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
@@ -2307,44 +2194,6 @@ fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(),
     if law_calls_runs_once(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
-// A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
-// its writes absent. The second session's compute call also receives its answer.
-fn drive_deadline_hung(take d: Drive) -> () waits {
-    let s0 = conn(d, 1u64)
-    let s1 = conn(d, 1u64)
-    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
-    let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
-    ask(s0, d.clock, 0u64, 0u64, clone(kh), u64_arg(5u64), LATER)
-    ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
-    let computed = frame(s1)
-    match computed.outcome {
-        Returned(b) => {
-            let c: std.codec.Codec[u64] = std.codec.of()
-            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
-        },
-        _ => fail("hung: compute faulted"),
-    }
-    let stopped = frame(s0)
-    want(is(stopped.outcome, Failed(OutOfTime(65536))), "hung: wrong stop")
-    want(stopped.version == 3u64, "hung: stop is not a reply-only commit")
-    ask(s0, d.clock, 0u64, 0u64, take kh, u64_arg(5u64), LATER)
-    want(is(frame(s0).outcome, stopped.outcome), "hung: duplicate reran")
-    // The next admitted position still runs after the reply-only stop.
-    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(5u64), LATER)
-    want(ok_value(frame(s0).outcome) == Some(5u64), "hung: next position did not run")
-    hang(take s0)
-    hang(take s1)
-}
-
-pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    served(c, r, tasks, n, drive_deadline_hung)
-}
-
-@test
-fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
-}
-
 fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Error] {
     store.migration_create_table(mut phase, store.spec("first", std.codec.key_u64(), std.codec.of_u64()))?
     let second = store.spec("second", std.codec.key_u64(), std.codec.of_u64())
@@ -2357,30 +2206,20 @@ fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Erro
     }
 }
 
-fn migration_tables_absent(catalog: store.Schema) -> Result[bool, store.Error] {
-    match store.schema_table(catalog, "first", std.codec.key_u64(), std.codec.of_u64()) {
-        Error(Missing(_)) => (),
-        _ => return Ok(false),
-    }
-    Ok(match store.schema_table(catalog, "second", std.codec.key_u64(), std.codec.of_u64()) {
-        Error(Missing(_)) => true,
-        _ => false,
-    })
-}
-
 // L33. The second operation refuses. Reopen the backing store and look for
-// both tables through the same open-only API the runner gives to handles.
+// both table names in the recovered catalog.
 pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = disk_options()
     let db = result.unwrap(store.open(tasks, d, c, r, options))
     let (_, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1)
     let mail = result.unwrap(runner.mailbox(1))
     let opened = runner.place_head(take db, code.describe(place), N_PLACE,
-        code.describe(migration_second_refuses), code.describe(handles), take inbox, take mail, tasks, 1048576)
+        Some(code.describe(migration_second_refuses)), code.describe(schema), take inbox, take mail, tasks, 1048576)
     if let Error(Migrate(Full(_))) = opened {} else { return false }
     let reopened = result.unwrap(store.open(tasks, d, c, r, options))
-    let unchanged = store.version(store.snapshot(reopened)) == 0 &&
-        result.unwrap(store.with_schema(reopened, code.describe(migration_tables_absent)))
+    let snapshot = store.snapshot(reopened)
+    let unchanged = store.version(snapshot) == 0 &&
+        !result.unwrap(store.has_table(snapshot, "first")) && !result.unwrap(store.has_table(snapshot, "second"))
     result.unwrap(store.close(take reopened))
     unchanged
 }
@@ -2397,24 +2236,21 @@ fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 // L32 (RUNNER-SPEC v2.19.1, `duplicate_own_reply`). note_write refuses a Caller
 // with no membership row and otherwise counts that Caller's writes, so a re-run
 // or a re-check of a duplicate answers differently from the saved reply.
-type NoteHandles: send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
+type NoteHandles: shareable + send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
 type NoteRegistry = runner.Registry[(), NoteHandles]
 
-fn note_handles(schema: store.Schema) -> Result[NoteHandles, store.Error] {
-    let notes = store.schema_table(schema, "notes", std.codec.key_u64(), std.codec.of_u64())?
-    let members = store.schema_table(schema, "members", std.codec.key_u64(), std.codec.of_u64())?
-    Ok(NoteHandles(notes: take notes, members: take members))
-}
-
-fn note_migrate(mut plan: store.Migration) -> Result[(), store.Error] {
-    store.migration_create_table(mut plan, store.spec("notes", std.codec.key_u64(), std.codec.of_u64()))?
-    store.migration_create_table(mut plan, store.spec("members", std.codec.key_u64(), std.codec.of_u64()))
+fn note_schema(mut d: store.Declare) -> Result[NoteHandles, store.Error] {
+    let notes = store.declare_table(mut d, "notes", std.codec.key_u64(), std.codec.of_u64())?
+    let note_table = store.finish(mut d, take notes)?
+    let members = store.declare_table(mut d, "members", std.codec.key_u64(), std.codec.of_u64())?
+    let member_table = store.finish(mut d, take members)?
+    Ok(NoteHandles(notes: take note_table, members: take member_table))
 }
 
 fn note_write(mut tx: store.Tx, hd: NoteHandles, caller: runner.Caller, take unused: u64) -> Result[u64, u32] {
     let owner: u64 = int.widen(caller.subject[0])
-    if result.unwrap(store.fetch(tx, store.shape(hd.members), owner)) != Some(1u64) { return Error(17u32) }
-    let count = match result.unwrap(store.fetch(tx, store.shape(hd.notes), owner)) {
+    if result.unwrap(store.fetch(tx, hd.members, owner)) != Some(1u64) { return Error(17u32) }
+    let count = match result.unwrap(store.fetch(tx, hd.notes, owner)) {
         Some(previous) => previous + 1u64,
         None => 1u64,
     }
@@ -2438,10 +2274,10 @@ fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut s
     let mut subject: Bytes = list.new()
     list.push(mut subject, owner)
     let caller = store.Caller(issuer: 1u8, subject: take subject)
-    let name = result.unwrap(runner.stream_key(caller, stream))
+    let name = store.StreamId(t: 0u64, n: int.widen(stream))
     let key = key_of(code.identity(f), std.codec.of_u64(), reply())
     let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1u64)
-    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, take name, p, take key, u64_arg(arg), take to))))
+    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, name, p, take key, u64_arg(arg), take to))))
     let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
     let runner.KeyedDone(outcome: take outcome, ..) = take delivery
     take outcome
@@ -2460,23 +2296,23 @@ fn drive_notes(take d: NoteDriver) -> () waits {
 }
 
 pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(note_migrate)))
-    let hd = result.unwrap(store.with_schema(db, code.describe(note_handles)))
-    let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, hd.members, 1u64, 1u64)?
-        store.put(mut tx, hd.members, 2u64, 1u64)
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let hd = result.unwrap(note_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
+    let seeded = result.unwrap(store.run(mut db, None, hd, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.members, 1u64, 1u64)?
+        store.put(mut tx, call_env.members, 2u64, 1u64)
     }))
     if let Committed(_) = seeded {} else { return false }
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(4u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let driving = task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes)
-    let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, code.describe(already_migrated), code.describe(note_handles), take inbox, take mail, tasks, 1048576u64)
+    let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, None, code.describe(note_schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     match (take ended, take drove) { (Ok(()), Ok(())) => true, _ => false }
 }
 
-fn already_migrated(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
 
 @test
 fn test_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {

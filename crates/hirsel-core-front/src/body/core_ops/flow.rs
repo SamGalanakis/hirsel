@@ -69,12 +69,11 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let arguments = [Ty::Ptr, Ty::Ptr, WORD, Ty::Ptr, Ty::Ptr, Ty::Ptr];
-        let sig = Signature {
-            params: arguments.iter().copied().map(Param::Value).collect(),
-            results: Vec::new(),
-            dest: None,
-            never: false,
-        };
+        let sig = Signature::new(
+            arguments.iter().copied().map(Param::Value).collect(),
+            Vec::new(),
+            None,
+        );
         let mut fd = self.fd.as_ref().clone();
         fd.path.0.name = self.generated_name(GeneratedKind::FlowTransform, n);
         fd.params.clear();

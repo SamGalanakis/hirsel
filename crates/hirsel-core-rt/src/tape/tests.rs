@@ -4,23 +4,12 @@ use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
 use std::{cell::Cell as Shared, io::Read};
-
-/// The code revision the tests open tapes as.
-pub(super) const REVISION: [u8; 32] = {
-    let mut b = [0; 32];
-    let mut i = 0;
-    while i < 32 {
-        b[i] = 0x20 + i as u8;
-        i += 1;
-    }
-    b
-};
-const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
-const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
-
-// ---------- providers ----------
-
+#[path = "aead_tests.rs"]
+mod aead;
+#[path = "kdf_tests.rs"]
+mod kdf;
+#[path = "rl2_tests.rs"]
+mod rl2;
 /// Counts every callback that reaches it. `inner: None` refuses everything:
 /// the refuse-all host of the bypass law.
 struct Counted {
@@ -365,8 +354,8 @@ fn spare(sub: (Provider, u64), op: u8, prefix: &[u8], capacity: usize) -> Ob {
 #[derive(Clone, Copy, PartialEq)]
 enum Variant {
     Same,
-    /// The first stdout write sends other bytes: an issue the tape never saw.
     OtherWrite,
+    KeepFile,
 }
 
 /// The run vectors.py encodes. Stops at the first refused on_tape (there is
@@ -412,7 +401,9 @@ fn scripted_run(
     obs.push(opened);
     obs.push(spare(file, READ, &[], read));
     obs.push(spare(file, READ, &[], 10));
-    obs.push(plain(file, CLOSE, 0, &[]));
+    if variant != Variant::KeepFile {
+        obs.push(plain(file, CLOSE, 0, &[]));
+    }
     obs.push(input(clock, SLEEP_UNTIL, &9_000u64.to_le_bytes()));
     obs.push(plain(dir, RENAME, 0, b"a\0b"));
     let made = spare(dir, MKDTEMP, b"t.", 64);
@@ -446,7 +437,6 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         secret_grants: vec![],
         cred_grants: vec![],
         env: None,
-        map_hash_key: Default::default(),
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -565,10 +555,10 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is vectors.py's format-5 derivation from REPLAY-SPEC §5,
+/// The oracle is vectors.py's format-12 derivation from REPLAY-SPEC §5,
 /// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
-fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_12_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         tape_id: std::array::from_fn(|i| i as u8),
@@ -583,7 +573,6 @@ fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
         secret_grants: vec![],
         cred_grants: vec![],
         env: None,
-        map_hash_key: Default::default(),
     };
     let mono = |v: u64| Frame::Op {
         task: 0,
@@ -669,7 +658,7 @@ fn network_outcomes_decode_with_exact_payloads() {
 
     let mut encoded_header = header.encode(header.revision).unwrap();
     assert_eq!(Header::decode(&encoded_header).unwrap(), header);
-    let rules_end = encoded_header.len() - size_of_val(&header.map_hash_key.0);
+    let rules_end = encoded_header.len();
     let mut reversed = encoded_header.clone();
     reversed[rules_end - 4..rules_end].copy_from_slice(&[1, 0, 0, 0]);
     assert!(Header::decode(&reversed).is_err(), "reversed range");
@@ -771,7 +760,7 @@ fn socket_deadline_final_receive_records_its_success() {
                 until: None,
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 1,
                 os: &crate::os_net::OPERATIONS,
                 tls: ptr::null_mut(),
@@ -859,7 +848,7 @@ fn replay_reads_and_allocates_by_block() {
         task: 0,
         op: READ,
         object: 2,
-        args: Args::of(&(input.len() as u64).to_le_bytes()),
+        args: Args::of(&[]).buffered([input.len() as u64, 0]),
         out: Out {
             value: input.len() as u64,
             payload: input.clone(),
@@ -988,10 +977,10 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 8 has 72 fixed bytes plus the 16-byte Map hash key,
+    // Format 12 has 72 fixed bytes,
     // 14 identity bytes + 1 length byte, a 3-byte argument length,
     // and a 1-byte empty grants length.
-    const HEADER_BYTES: usize = 72 + 16 + 14 + 1 + 3 + 1;
+    const HEADER_BYTES: usize = 72 + 14 + 1 + 3 + 1;
     h.arg = vec![0; MAX_LEN - HEADER_BYTES];
     let mut store = Box::<Store>::default();
     let (tape, _) =
@@ -1075,7 +1064,6 @@ fn every_one_byte_change_is_refused() {
     for i in 0..t.len() {
         let k = at.iter().rposition(|&b| b <= i).unwrap();
         let in_len = (at[k] + 12..at[k] + 16).contains(&i);
-        let in_format = (BLOCK_HEAD..BLOCK_HEAD + 2).contains(&i);
         for x in [0x01u8, 0x80, 0xff] {
             let mut m = t.clone();
             m[i] ^= x;
@@ -1085,11 +1073,7 @@ fn every_one_byte_change_is_refused() {
                 Err(e) => panic!("byte {i}: {e:?}"),
                 Ok((_, _, verdict)) => verdict.unwrap_err(),
             };
-            let ok = if in_format {
-                r == Fault::Corrupt
-            } else {
-                r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)))
-            };
+            let ok = r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)));
             assert!(ok, "byte {i} ^ {x:#x}: {r:?}");
         }
     }
@@ -1209,10 +1193,10 @@ fn launcher_reports_the_first_tampered_argument() {
             diagnose: false,
         });
         scripted_run(&tape, host.provider(), 100, Variant::Same);
-        panic!("the launcher should stop at the tampered read");
+        panic!("the launcher should stop at the tampered send");
     }
 
-    // Four grants, four clock reads, two writes and two opens precede READ.
+    // Four grants and four clock reads precede the first STDOUT.
     let (store, _) = record(100);
     let tape = store.file();
     let at = boundaries(&tape);
@@ -1224,15 +1208,15 @@ fn launcher_reports_the_first_tampered_argument() {
         )
         .unwrap();
     let Frame::Op {
-        op: READ,
+        op: STDOUT,
         args: Args::Literal(bytes),
         ..
-    } = &mut frames[12]
+    } = &mut frames[8]
     else {
-        panic!("expected the first READ at frame 13");
+        panic!("expected the first STDOUT at frame 9");
     };
-    assert_eq!(bytes[0], 100);
-    bytes[0] = 101;
+    assert_eq!(bytes, b"hello");
+    bytes[4] = b'X';
     let mut encoder = Encoder::default();
     let payload: Vec<u8> = frames.iter().flat_map(|f| encoder.frame(f).0).collect();
     let changed = [
@@ -1255,12 +1239,10 @@ fn launcher_reports_the_first_tampered_argument() {
         .unwrap();
     let diagnostic = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(1), "{diagnostic}");
-    // The four grants reserve ordinals 1 through 4. The successful open
-    // supplies file 5. Eight synchronous operations precede the READ issue.
     assert_eq!(
         diagnostic,
         format!(
-            "replay: Diverged(Arg) at 13 [event 17: frame OP; expected task=0 op={READ} object=5 capacity=101; observed task=0 op={READ} object=5 capacity=100]\n"
+            "replay: Diverged(Arg) at 9 [event 9: frame OP; expected task=0 op={STDOUT} object=2 args=redacted; observed task=0 op={STDOUT} object=2 args=redacted]\n"
         )
     );
 }
@@ -1516,41 +1498,6 @@ fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
     assert_eq!(verdict, Err(Fault::Diverged(at)));
 }
 
-/// Runs `body` as the root task of a scheduler run; Record under the
-/// recording schedule script, as the S2 cases do.
-fn in_task(record: bool, body: &mut dyn FnMut(*mut crate::Context)) {
-    type Body<'a> = &'a mut dyn FnMut(*mut crate::Context);
-    unsafe extern "C" fn root(context: *mut crate::Context, _: *mut u8, input: *mut u8) -> u8 {
-        // SAFETY: `in_task` pins the body until the run returns.
-        unsafe { (**input.cast::<*mut Body<'_>>())(context) };
-        0
-    }
-    let mut context = crate::Context::new(1 << 20);
-    let mut files = crate::host_file::Files::default();
-    context.host_files = &mut files;
-    crate::causes::task_start(&mut context).unwrap();
-    let mut body: Body<'_> = body;
-    let mut input: *mut Body<'_> = &mut body;
-    // SAFETY: the body and its borrows are pinned for the cooperative run.
-    let mut execute = || unsafe {
-        crate::tasks::run_root(
-            &mut context,
-            root,
-            (&mut input as *mut *mut Body<'_>).cast(),
-            ptr::null_mut(),
-            size_of::<*mut Body<'_>>(),
-            0,
-            crate::tasks::SchedulerProvider::default(),
-        )
-    };
-    let status = if record {
-        std::sync::Arc::new(crate::schedule_script::ScheduleScript::last()).install(execute)
-    } else {
-        execute()
-    };
-    assert_eq!(status, 0);
-}
-
 /// A task that takes one tape frame of its own: a clock read.
 #[derive(Clone, Copy)]
 struct Other {
@@ -1635,16 +1582,6 @@ impl SyncHost {
             deliver,
         }
     }
-}
-
-fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
-    let (mut blocks, _) = Blocks::open(|buf| bytes.read(buf)).unwrap();
-    let mut decoder = Decoder::default();
-    let mut frames = Vec::new();
-    while let Some((flags, payload)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
-        frames.extend(decoder.block(payload, flags & format::END != 0).unwrap());
-    }
-    frames
 }
 
 /// The bypass law on the real host, every S1 operation kind, each issued by
@@ -1904,6 +1841,34 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
     let store = root.join("store");
     std::fs::create_dir_all(world.join("child")).unwrap();
     std::fs::create_dir_all(&store).unwrap();
+    let child = world.join("child");
+    let child_fd = std::fs::File::open(&child).unwrap();
+    let candidates = [17_u128, 23_u128];
+    let collision = child.join(format!("trial-{:032x}", candidates[0]));
+    std::fs::write(&collision, b"existing file").unwrap();
+    let mut entropy = candidates.into_iter();
+    let (created, suffix) = crate::os::temp::create_temp_file(
+        std::os::fd::AsRawFd::as_raw_fd(&child_fd),
+        b"trial-",
+        || Ok(entropy.next().expect("exactly one retry after collision")),
+    )
+    .unwrap();
+    assert_eq!(suffix, format!("{:032x}", candidates[1]));
+    let created = std::fs::File::from(created);
+    assert_eq!(created.metadata().unwrap().len(), 0);
+    assert_eq!(std::fs::read(&collision).unwrap(), b"existing file");
+    drop(created);
+    drop(child_fd);
+    std::fs::remove_file(&collision).unwrap();
+    std::fs::remove_file(child.join(format!("trial-{suffix}"))).unwrap();
+
+    let child_fds = || {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .flatten()
+            .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|path| path == child))
+            .count()
+    };
     let file_path = world.join("child/data");
     let data = std::fs::File::create(&file_path).unwrap();
     let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(2);
@@ -1917,6 +1882,15 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
     let (wd, sd) = (os.grant(&world).unwrap(), os.grant(&store).unwrap());
     let (store, real) = (os.provider(), os.provider());
 
+    let listed = |dir, path: &[u8]| {
+        let opened = plain(dir, ENTRIES, 0, path);
+        assert_eq!(opened.error, IoError::OK);
+        let listing = (dir.0, handle_like(dir.1, opened.value));
+        let first = spare(listing, NEXT_ENTRIES, &[], 258);
+        let last = spare(listing, NEXT_ENTRIES, &[], 258);
+        assert_eq!(plain(listing, CLOSE_ENTRIES, 0, &[]).error, IoError::OK);
+        [first, last]
+    };
     let taped = |mode: Mode, host: Provider, wd: u64| {
         let mut observations = Vec::new();
         in_task(mode == Mode::Record, &mut |context| {
@@ -1927,18 +1901,23 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
             let (tape, _) =
                 unsafe { Tape::open(REVISION, (store, sd), b"t", mode, &h, &expect()) }.unwrap();
             let root = tape.on_tape(crate::entry::DIR, (host, wd)).unwrap();
+            let before = child_fds();
+            let [first, last] = listed(root, b"child");
+            assert_eq!(
+                child_fds(),
+                before,
+                "listing retained a directory descriptor"
+            );
             let open_dir = plain(root, OPEN_DIR, 0, b"child");
             let dir = (root.0, handle_like(root.1, open_dir.value));
-            let open_entries = plain(dir, ENTRIES, 0, &[]);
-            let listing = (dir.0, handle_like(dir.1, open_entries.value));
+            let [from_narrow, end_narrow] = listed(dir, b"");
+            assert_eq!((&first, &last), (&from_narrow, &end_narrow));
             let open_file = plain(dir, OPEN, 4, b"data");
             let file = (dir.0, handle_like(dir.1, open_file.value));
             observations = vec![
                 open_dir,
-                open_entries,
-                spare(listing, NEXT_ENTRIES, &[], 258),
-                spare(listing, NEXT_ENTRIES, &[], 258),
-                plain(listing, CLOSE_ENTRIES, 0, &[]),
+                first,
+                last,
                 plain(dir, STAT, 0, b"data"),
                 open_file,
                 call(
@@ -1960,6 +1939,11 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
                 plain(file, STAT_FILE, 0, &[]),
                 plain(file, CLOSE, 0, &[]),
             ];
+            let temp = spare(dir, MKSTEMP, b"temp-", 37);
+            let key = (dir.0, handle_like(dir.1, temp.value));
+            observations.push(temp);
+            observations.push(input(key, WRITE, b"new file"));
+            observations.push(plain(key, CLOSE, 0, &[]));
             tape.end(&ending()).unwrap();
             TASK.set(ptr::null_mut());
         });
@@ -1972,21 +1956,41 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
             .iter()
             .all(|o| o.status == 0 && o.error == IoError::OK)
     );
-    assert_eq!(recorded[2].value, 2);
-    assert_eq!(recorded[3].value, 0);
+    assert_eq!(recorded[1].value, 2);
+    assert_eq!(recorded[2].value, 0);
     assert_eq!(
         (
-            recorded[5].kind,
-            recorded[5].value,
-            recorded[5].written as i64
+            recorded[3].kind,
+            recorded[3].value,
+            recorded[3].written as i64
         ),
         (0, 0, -2_000_000_000)
     );
     assert_eq!(
-        (recorded[7].written, recorded[8].bytes.as_slice()),
+        (recorded[5].written, recorded[6].bytes.as_slice()),
         (1, &[0, 0, b'Z'][..])
     );
-    assert_eq!((recorded[9].kind, recorded[9].value), (0, 5));
+    assert_eq!((recorded[7].kind, recorded[7].value), (0, 5));
+    let temp = &recorded[9].bytes;
+    let suffix = temp.strip_prefix(b"temp-").unwrap();
+    assert!((1..=32).contains(&suffix.len()) && suffix.iter().all(u8::is_ascii_alphanumeric));
+    assert_eq!(
+        std::fs::read(child.join(std::str::from_utf8(temp).unwrap())).unwrap(),
+        b"new file"
+    );
+    super::writer::flush();
+    let frames = tape_frames(&std::fs::read(root.join("store/t")).unwrap());
+    assert!(frames.iter().any(|f| matches!(
+        f,
+        Frame::Op { op: ENTRIES, object: 1, args, .. } if *args == Args::Literal(b"child".to_vec())
+    )));
+    assert!(frames.iter().any(|f| matches!(
+        f,
+        Frame::Op { op: MKSTEMP, object: 3, args, out, .. }
+            if args.operands() == &Args::Literal(b"temp-".to_vec())
+                && args.recorded_spare() == Some([32, 0])
+                && out.payload == suffix
+    )));
 
     std::fs::remove_dir_all(&world).unwrap();
     let blocked = Counted::new(None);
@@ -2051,7 +2055,7 @@ fn a_repeat_the_format_forbids_is_corrupt() {
 
 /// The hand-built rows put stdin and Proc release between distinct issues.
 #[test]
-fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
+fn exec_close_rows_match_by_part_and_impossible_spawn_issues_no_handles() {
     use crate::{
         Context,
         exec_runtime::{hirsel_core_exec_spawn, hirsel_core_exec_wait},
@@ -2066,7 +2070,11 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
             task: 0,
             op,
             object,
-            args: Args::of(args),
+            args: if op == RECV_BOUNDED {
+                Args::of(args).buffered([4, 0])
+            } else {
+                Args::of(args)
+            },
             out: Out {
                 value,
                 payload: payload.to_vec(),
@@ -2089,8 +2097,6 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
     snapshot.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00");
     snapshot.extend_from_slice(b"\x01\x00\x00\x00\x04\x00\x00\x00work");
     let launch = b"\x04\x00\x00\x00tool\x04\x00\x00\x00work\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00";
-    let mut recv_args = [0; 9];
-    recv_args[0] = 4; // little-endian spare room, followed by Never
     let normal = vec![
         Frame::Grant {
             gap: 0,
@@ -2100,12 +2106,12 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
         row(EXEC_SPAWN, 1, launch, 2, &[3, 4, 0]),
         row(SEND_PAIR, 3, &[0, 1, b'x', 0], 1, &[]),
         row(CLOSE, 3, &[2], 0, &[]),
-        row(RECV_BOUNDED, 4, &recv_args, 1, b"x"),
+        row(RECV_BOUNDED, 4, &[0], 1, b"x"),
         row(EXEC_WAIT, 2, &[0], 23, &[]),
         row(CLOSE, 2, &[0], 0, &[]),
         row(CLOSE, 4, &[1], 0, &[]),
         Frame::End {
-            gap: 2, // last CLOSE issue and its synchronous delivery
+            gap: 2, // last ordered operation and its synchronous delivery
             ending: ending(),
         },
     ];
@@ -2116,17 +2122,11 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
             0 => Ok(()),
             1 => {
                 frames.swap(3, 4);
-                Err(Fault::Diverged(Divergence {
-                    at: 4,
-                    kind: Mismatch::Op,
-                }))
+                Ok(())
             }
             2 => {
                 frames.swap(6, 7);
-                Err(Fault::Diverged(Divergence {
-                    at: 7,
-                    kind: Mismatch::Object,
-                }))
+                Ok(())
             }
             3 => {
                 frames[1] = row(EXEC_SPAWN, 1, launch, 2, &[3, 3, 0]);
@@ -2165,9 +2165,9 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
             let (provider, key) = tape.on_tape_exec((no_host.provider(), 0)).unwrap();
             let mut files = crate::host_file::Files::default();
             let mut context = Context::new(1 << 20);
-            context.host_files = &mut files;
             files.net_tape = Some(SocketTape::new(provider, key));
             let grant = files.registry.grant(provider, key);
+            context.host_files = &mut files;
             let spawned = hirsel_core_exec_spawn(
                 &mut context,
                 grant,
@@ -2227,17 +2227,12 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
                 let read =
                     hirsel_core_host_recv_bounded(&mut context, output, &mut b, 4, 0, 0, 0, 803);
                 let proc = spawned.outcome.value;
-                if case == 1 {
-                    assert_eq!(read.status, STATUS_REFUSED);
-                    assert_eq!((b.len, bytes), (0, [0xcc; 4]));
-                } else {
-                    assert_eq!(read.value, 1);
-                    assert_eq!((b.len, bytes), (1, [b'x', 0xcc, 0xcc, 0xcc]));
-                    assert_eq!(
-                        hirsel_core_exec_wait(&mut context, proc, 0, 0, 0, 804).value,
-                        23
-                    );
-                }
+                assert_eq!(read.value, 1);
+                assert_eq!((b.len, bytes), (1, [b'x', 0xcc, 0xcc, 0xcc]));
+                assert_eq!(
+                    hirsel_core_exec_wait(&mut context, proc, 0, 0, 0, 804).value,
+                    23
+                );
                 hirsel_core_socket_drop(&mut context, proc);
                 hirsel_core_socket_drop(&mut context, output);
             }
@@ -2415,7 +2410,7 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 task: 0,
                 op: DATAGRAM_RECV,
                 object: 2,
-                args: Args::of(&[0, 2, 0, 0, 0, 0, 0, 0, 0]),
+                args: Args::of(&[0]).buffered([2, 0]),
                 out: packet,
             },
             Frame::Op {
@@ -2426,7 +2421,7 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 out: Out::default(),
             },
             Frame::End {
-                gap: 2, // last CLOSE issue and its synchronous delivery
+                gap: 2, // last ordered operation and its synchronous delivery
                 ending: ending(),
             },
         ];
@@ -2464,18 +2459,18 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
             bind.path = (&raw mut unix).cast();
             let result = hirsel_core_host(&mut context, &provider, &mut bind);
             assert_eq!(ordinal_of(result.value), 2);
-            let mut storage = [b'!', 0xcc, 0xcc];
+            let mut storage = [b'!', 0xcc, 0xcc, 0xcc];
             let buffer = Buffer {
                 data: storage.as_mut_ptr(),
                 len: 1,
-                capacity: 3,
+                capacity: storage.len(),
             };
             let mut recv = request(DATAGRAM_RECV, 0, result.value, &[], buffer);
             recv.path = (&raw mut unix).cast();
             let got = hirsel_core_host(&mut context, &provider, &mut recv);
             if is_valid {
                 assert_eq!((got.value, got.written, got.kind), (3, 2, 1));
-                assert_eq!((recv.buffer.len, storage), (3, *b"!ab"));
+                assert_eq!((recv.buffer.len, storage), (3, [b'!', b'a', b'b', 0xcc]));
                 let mut close = request(
                     CLOSE,
                     crate::net::SOCKET_CLOSE,
@@ -2490,10 +2485,24 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 assert_eq!(tape.end(&ending()), Ok(()));
             } else {
                 assert_eq!(got.status, STATUS_REFUSED);
-                assert_eq!((recv.buffer.len, storage), (1, [b'!', 0xcc, 0xcc]));
+                assert_eq!((recv.buffer.len, storage), (1, [b'!', 0xcc, 0xcc, 0xcc]));
                 assert_eq!(tape.end(&ending()), Err(Fault::Corrupt));
             }
         }
         assert_eq!(no_host.calls.get(), 0);
     }
 }
+
+#[path = "test_frames.rs"]
+mod test_frames;
+pub(super) use test_frames::REVISION;
+use test_frames::{HAND, MODEL, XXH3, in_task, tape_frames};
+
+#[path = "registry_tests.rs"]
+mod registry_tests;
+
+#[path = "p256_tests.rs"]
+mod p256_tests;
+
+#[path = "key_share_tests.rs"]
+mod key_share_tests;

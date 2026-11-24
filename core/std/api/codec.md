@@ -26,9 +26,33 @@ Avro's 256-entry Rabin table and allocates nothing. `resolve(c, writer)` resolve
 an older writer's schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
 and `read` and `read_at` decode under it. Resolution and both reads return
 `DecodeError` for data or schema errors. `key_make`, `encode_key` and `decode_key`
-use the order-preserving key format for u8..i64, bool, Bytes, String and tuples
-of them. `encode_key` returns unit and `decode_key` returns
+are the hand-written key codec protocol. `encode_key` returns unit and `decode_key` returns
 `Result[T, DecodeError]`.
+
+**Ordered keys (`key_of`, DX Q1).** `key_of[K]()` is how a program names an
+ordered key codec, and the checker resolves it per instance, as it does `of`. Its
+admitted set is its own; it is not the `key` (equality) bound, which `List`, `Option`
+and `Arc` also satisfy:
+
+| K | `key_of[K]()` |
+|---|---|
+| u8..u64, i8..i64 | big-endian at the width; signed with the sign bit flipped |
+| bool | one byte, 0 or 1 |
+| String, Bytes | the bytes, each 0x00 written 0x00 0xff, then 0x00 0x00 |
+| `()` | nothing (so `Table[(), V]` has one row) |
+| a tuple of admitted types | the components' bytes concatenated |
+| a nominal record declared `key` whose fields are admitted | its fields in declaration order, as a tuple |
+| `Desc[T]`, T admitted | T's key bytes with every byte inverted (`b ^ 0xff`) |
+
+Any other K is LANG-12 at the call (`key_of` of a type outside the set). A record with
+a defaulted or removed field is refused at the call: a key has no reader, so any edit
+to a key type is a `migrate_table` rewrite. The format is prefix-free (no key's bytes
+are a proper prefix of another's), so bytewise order is value order, a tuple's order is
+lexicographic, and inversion reverses the order. `Desc[T]` is `ordered` in reverse, so
+the program's `<` agrees with the store's order (law `key_order`: for random values of
+each admitted shape, `a < b` iff `encode(a) < encode(b)` bytewise, with the language's
+`ordered` comparison as the oracle). `Desc(value: x)` wraps and `.value` unwraps. In
+a value codec, `Desc[T]` is written as T.
 
 **Format.** Integers at their width, a float as its IEEE bits and a char as a u32, all
 little-endian; bool one byte; `()` nothing. String, Bytes, List and Map: a u32 count, then the
@@ -37,8 +61,10 @@ sum: a u32 tag (None 0, Some 1; Ok 0, Error 1; a sum's declared index), then the
 A record or tuple: its fields in order. LEAST is 4 for String, Bytes, List and Map and 4 for
 Option and Result. A value schema is version 03; a key schema is version 04. Definitions, fields,
 variants, tuple arities, type arguments, definition indices and UTF-8 names use u32
-counts or lengths, all four bytes little-endian. The root type uses opcodes 0-20.
-Opcode 20 is Never, which has no valid encoding. A tag whose payload requires
+counts or lengths, all four bytes little-endian. The root type uses opcodes 0-21.
+Opcode 20 is Never, which has no valid encoding. Opcode 21, in key schemas only, is
+`Desc` followed by its component type (v2.57; a key schema without `Desc` has the same
+bytes and fingerprint as before, so the version stays 04). A tag whose payload requires
 a Never fails with Invalid at the start of the tag.
 The full format is in `codec.hirsel`. Counts above u32::MAX return
 `Error(CountOverflow(count))` before writing the count.

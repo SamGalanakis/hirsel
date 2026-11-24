@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Cold and warm checks and an unchanged build issue no sync calls.
 
-The driver's build cache (store.rs) never syncs. A torn or missing cache
-record is a miss. Every sync in a fresh build belongs to a new code object:
-one successful file fsync per object, followed by fsyncs of its kind directory
-and the code-store root. Host admission owes staged objects the same barriers.
-See "Durable publication" in docs/spec/launch.md.
+The driver's build cache (store.rs) and a build's own code cache (one
+unsynced pack per publication) never sync. A torn or missing cache record or
+pack row is a miss. Host admission syncs each received code object once,
+followed by fsyncs of its kind directory and the code-store root. See "Durable
+publication" in docs/spec/launch.md.
 
 The preload shim traces fsync, fdatasync, syncfs, sync and sync_file_range in
 the compiler and its subprocesses.
 """
 
 import argparse
+import json
 import os
 import shlex
 import socketserver
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from concurrent.futures import Future
@@ -106,6 +108,10 @@ def syncs(args, shim, log):
     log.unlink(missing_ok=True)
     env = dict(os.environ, LD_PRELOAD=str(shim), SYNC_LOG=str(log))
     run = subprocess.run(args, capture_output=True, text=True, env=env, check=False)
+    return run, read_syncs(log)
+
+
+def read_syncs(log):
     calls = []
     if log.exists():
         records = log.read_bytes().split(b"\0")
@@ -122,7 +128,7 @@ def syncs(args, shim, log):
                     Path(os.fsdecode(path)) if path else None,
                 )
             )
-    return run, calls
+    return calls
 
 
 def tree(root, allowed=()):
@@ -315,6 +321,7 @@ class StoreNoSync(unittest.TestCase):
                          (42, "*", "*hirsel: main returned an error, exit status 42\n"))
         self.assertEqual(len(received), 1)
         sealed = tape.read_bytes()
+        # Offline replay opens the tape through the host's confined OS Dir provider.
         replayed = cli("replay", *common, "--store", root / "replay-store",
                        "-o", root / "replay-program", "--tape", tape)
         # Sealed exits 0 and guarantees the recorded outcome. The observer
@@ -444,55 +451,97 @@ class StoreNoSync(unittest.TestCase):
                 store,
                 "-o",
                 binary,
+                "--json",
             ]
             run, calls = syncs(build, shim, scratch / "build.log")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            published = self.assert_publication_syncs(calls, code)
+            self.assertEqual(calls, [], "cold build")
+            recipe = bytes(json.loads(run.stdout)["native"]["recipe"]).hex()
 
             run, calls = syncs(build, shim, scratch / "build.log")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(calls, [], "unchanged build")
             self.assertEqual(subprocess.run([binary], check=False).returncode, 7)
 
-            # The uninstalled compiler admits and publishes the initial release,
-            # then stops when host assembly requires an installed toolchain.
-            (recipe,) = [
-                path.name for path in published if path.parent == code / "recipes"
-            ]
+            # A supplied code store reads the build's packs.
+            replayed = scratch / "recipe-program"
+            run = subprocess.run(
+                [self.compiler, "build", "--recipe", recipe, "--code-store", code,
+                 "--cc", cc, "--runtime", archive, "--store", scratch / "recipe-store",
+                 "-o", replayed],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(subprocess.run([replayed], check=False).returncode, 7)
+
+            # The installed host takes the first release through registration.
+            installed = Path(os.environ["HIRSEL_TOOLCHAIN_BUNDLE"]).resolve() / "hirsel"
             state = scratch / "host"
             host_code = state / "code"
-            host = [
-                self.compiler,
-                "host",
+            operator = state / "operator.sock"
+            host_log = scratch / "host.log"
+            env = dict(os.environ, LD_PRELOAD=str(shim), SYNC_LOG=str(host_log))
+            register = [
+                installed,
+                "register",
                 recipe,
                 "--state",
                 state,
+                "--group",
+                "app",
                 "--code-store",
                 code,
-                "--control",
-                scratch / "control",
                 "--listen",
                 "127.0.0.1:0",
+                "--store",
+                scratch / "group-store",
+                "--workdir",
+                scratch,
+                "--uncontained",
+                "--trusted",
             ]
-            run, calls = syncs(host, shim, scratch / "host.log")
-            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
-            self.assertIn("host assembly requires an installed toolchain", run.stderr)
-            # Startup also syncs the records and child PID directories.
-            setup_dirs = {state, state / "children"}
+            with tempfile.TemporaryFile(mode="w+") as output, subprocess.Popen(
+                [installed, "host", "--state", state], stdout=output, stderr=output, env=env,
+            ) as host:
+                try:
+                    deadline = time.monotonic() + 120
+                    while (not operator.is_socket() and host.poll() is None
+                           and time.monotonic() < deadline):
+                        time.sleep(0.025)
+                    self.assertTrue(operator.is_socket(), "host did not open its operator socket")
+                    run = subprocess.run(register, capture_output=True, text=True, check=False)
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                    self.assertEqual(json.loads(run.stdout.splitlines()[-1])["phase"], "installed")
+                except Exception as error:
+                    output.seek(0)
+                    error.add_note(output.read())
+                    raise
+                finally:
+                    if host.poll() is None:
+                        comm = subprocess.check_output(
+                            ["ps", "-o", "comm=", "-p", str(host.pid)], text=True
+                        )
+                        self.assertEqual(comm.strip(), "hirsel")
+                        host.kill()
+            # The launcher also persists assembly records and images, and the
+            # platform host syncs its own catalog. Keep all code-store calls.
+            other_stores = (state / "objects", state / "catalog")
             publication = [
                 call
-                for call in calls
+                for call in read_syncs(host_log)
                 if not (
-                    (call.operation, call.result, call.kind) == ("fsync", 0, "d")
-                    and call.path in setup_dirs
+                    call.operation in ("fsync", "fdatasync")
+                    and call.result == 0
+                    and call.path
+                    and any(call.path.is_relative_to(root) for root in other_stores)
                 )
             ]
             received = self.assert_publication_syncs(
                 publication, host_code, staging=host_code / "staging"
             )
-            self.assertEqual(
+            self.assertIn(
+                Path("recipes") / recipe,
                 {path.relative_to(host_code) for path in received},
-                {path.relative_to(code) for path in published},
             )
 
 

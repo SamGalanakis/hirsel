@@ -1,0 +1,25 @@
+@test
+fn find_document(clock: Clock, random: Random) -> Result[(), store.Error] waits {
+    let options = result.unwrap(store.sized(Memory, 1074790400u64))
+    let mut db = store.memory(clock, random, options)
+    let mut declaration = store.declare(db, Migrate)?
+    let layout: search.Spec[bool] = search.spec("recipes")
+    let index = search.declare(mut declaration, layout, search.tokenizer(list.new()))?
+    let _ = store.seal(mut db, take declaration)?
+    let saved = store.run(mut db, None, index, fn(mut tx, recipes) -> Result[(), store.Error] {
+        search.upsert(mut tx, recipes, 1, "lemon cake", true)?
+        search.upsert(mut tx, recipes, 2, "lemon ice cream", false)
+    })?
+    let Committed(_) = saved else {
+        fail("expected recipes to commit")
+    }
+    let reader = store.reader(db, 0u64)?
+    let published = scoped fn(_id: u64, visible: bool) -> bool {
+        visible
+    }
+    let hits = search.query(reader, store.snapshot(db), index, "lemon", 10, search.defaults(), published)?
+    if list.len(hits) != 1 || hits[0].id != 1 {
+        fail("only the lemon cake recipe is published")
+    }
+    store.close(take db)
+}

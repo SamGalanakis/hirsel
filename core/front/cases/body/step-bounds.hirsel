@@ -1,5 +1,5 @@
 // MEM-30: the three specification examples, typed before execution lowering.
-// Step-bound execution is checked in the evaluator cases.
+// The reference evaluator checks exact fuel counts in the runtime fixture.
 // expect: refuse MEM-30 at 15:22
 fn spin(n: u64) -> Result[u64, OutOfTime] {
     bound steps 1000 {

@@ -1,5 +1,7 @@
 //! Recovery, significant-token cursor, precedence climbing and item-local arena/origin
 //! mechanics adapted from hirsel-parser. Every grammar visitor is for the new language.
+mod budget;
+
 use crate::{grammar::*, *};
 type Nodes = smallvec::SmallVec<[NodeId; 24]>;
 use smallvec::smallvec;
@@ -1168,18 +1170,6 @@ impl Parser<'_> {
             &[e],
         ))
     }
-    fn step_argument_starts(&self) -> bool {
-        matches!(
-            self.token(1).kind,
-            TokenKind::Ident
-                | TokenKind::Integer
-                | TokenKind::KwIf
-                | TokenKind::KwMatch
-                | TokenKind::KwTrue
-                | TokenKind::KwFalse
-        )
-    }
-
     fn expr(&mut self, minimum: u8) -> Parsed<NodeId> {
         self.nested(|p| p.expr_inner(minimum))
     }
@@ -1221,28 +1211,7 @@ impl Parser<'_> {
                 Continuation::Call if minimum <= 12 => {
                     self.bump();
                     let mut c: Nodes = smallvec![left];
-                    self.list_into(sym::RPAREN, &mut c, |p| {
-                        let st = p.pos;
-                        let mut token = None;
-                        let kind = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON
-                        {
-                            token = Some(p.bump());
-                            p.expect(sym::COLON)?;
-                            if p.at(sym::BYTES) {
-                                return p.fail("LANG-5", "a bytes argument has no label");
-                            }
-                            NodeKind::LabelledArgument
-                        } else if p.eat(sym::BYTES) {
-                            NodeKind::BytesArgument
-                        } else if p.at(sym::STEPS) && p.step_argument_starts() {
-                            p.bump();
-                            NodeKind::StepsArgument
-                        } else {
-                            return p.expr(0);
-                        };
-                        let v = p.expr(0)?;
-                        Ok(p.node(st, kind, token, &[v]))
-                    })?;
+                    self.list_into(sym::RPAREN, &mut c, Self::call_argument)?;
                     left = self.node(s, NodeKind::Call, None, &c);
                 }
                 Continuation::Index if minimum <= 12 => {
@@ -1346,6 +1315,9 @@ impl Parser<'_> {
     }
     fn compound_primary_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
+        if self.at(sym::BYTES) && self.word(1) == sym::LBRACKET {
+            return self.bytes_of();
+        }
         if PREFIX.contains(&self.word(0)) {
             let op = self.bump();
             let e = self.required(|p| p.expr(11))?;

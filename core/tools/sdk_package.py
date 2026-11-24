@@ -54,20 +54,23 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                 raise ValueError(f'@hirsel/client export {subpath!r} has a missing types target: {declaration}')
 
         inputs = work / 'inputs.json'
-        inputs.write_text(json.dumps(source_manifest(root, 'store', ['packed_consumer'], fixture)))
+        inputs.write_text(json.dumps(source_manifest(root, 'runner', ['packed_consumer'], fixture)))
         executable = work / 'fixture'
-        subprocess.run([compiler, 'build', '--source-core', '--inputs', inputs, '--runtime', runtime,
-                        '--entry', 'store@1/packed_consumer/main', '--grant', 'Stdout',
+        subprocess.run([compiler, 'build', '--source-core', '--source-std', '--inputs', inputs, '--runtime', runtime,
+                        '--entry', 'runner@1/packed_consumer/main', '--grant', 'Stdout',
                         '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
-        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated',
-                        '--runtime', runtime], cwd=work, check=True)
+        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated'],
+                       cwd=work, check=True)
         (consumer / 'payload.bin').write_bytes(subprocess.check_output([executable], cwd=work))
         shutil.copyfile(fixture.with_suffix('.ts'), consumer / 'consumer.ts')
+        example = 'subscription-cache.ts'
+        shutil.copyfile(fixture.with_name(example), consumer / example)
 
         isolated_node = [node, '--permission', f'--allow-fs-read={consumer}']
         subprocess.run([*isolated_node, consumer / 'node_modules/typescript/bin/tsc', '--noEmit',
-                        '--strict', '--module', 'NodeNext', '--target', 'ES2022', 'consumer.ts'],
+                        '--strict', '--module', 'NodeNext', '--target', 'ES2022',
+                        '--allowImportingTsExtensions', 'consumer.ts'],
                        cwd=consumer, env=env, check=True)
         # NodeStorage spawns flock(1) to hold a lease on its private state directory.
         subprocess.run([*isolated_node, f'--allow-fs-write={consumer}', '--allow-child-process', 'consumer.ts'],
@@ -76,6 +79,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         standalone = work / 'standalone'
         standalone.mkdir()
         shutil.copyfile(consumer / 'package.json', standalone / 'package.json')
+        shutil.copyfile(consumer / example, standalone / example)
         shutil.copytree(consumer / 'generated', standalone / 'generated')
         subprocess.run([*install, *tool_tarballs], cwd=standalone, env=npm_env, check=True)
         standalone_source = (consumer / 'consumer.ts').read_text()
@@ -87,7 +91,8 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                            f'--allow-fs-write={standalone}']
         subprocess.run([*standalone_node, standalone / 'node_modules/typescript/bin/tsc',
                         '--strict', '--module', 'NodeNext', '--target', 'ES2022',
-                        '--outDir', compiled, 'consumer.ts', 'generated/browser.ts'],
+                        '--rewriteRelativeImportExtensions', '--outDir', compiled,
+                        'consumer.ts', 'generated/browser.ts'],
                        cwd=standalone, env=env, check=True)
         for module in (standalone / 'generated').glob('*.js'):
             shutil.copyfile(module, compiled / 'generated' / module.name)

@@ -14,15 +14,14 @@
 //! full link of the same objects makes, so a build in an empty store and an
 //! incremental build deliver the same bytes.
 use hirsel_core_ids::ContentHash;
-use std::fs::File;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-/// One object a link reads, in link order: bytes made for this link, or a
-/// checked descriptor with the key its bytes are a function of.
+/// One object a link reads, in link order: bytes made for this link, or
+/// checked bytes with the key they are a function of.
 pub(crate) enum Slot<'a> {
     Bytes(&'a [u8]),
-    Keyed((ContentHash, u64), &'a File),
+    Keyed((ContentHash, u64), &'a Arc<[u8]>),
 }
 
 struct Remembered {
@@ -45,13 +44,23 @@ struct Previous {
 pub(crate) struct Incremental(Option<Previous>);
 
 /// The resident compiler's incremental link.
-pub(crate) static RESIDENT: Mutex<Incremental> = Mutex::new(Incremental(None));
+pub(crate) static RESIDENT: crate::resident::WorkingMemo<(), Arc<Mutex<Incremental>>> =
+    crate::resident::WorkingMemo::new();
 
-/// The bytes of the inode `file` names, read as the linker reads them:
-/// through `/proc/self/fd`, since an object this request wrote is held by
-/// the write-only descriptor its bytes were written through.
-fn read(file: &File) -> io::Result<Arc<[u8]>> {
-    Ok(std::fs::read(crate::package_files::fd_path(file)?)?.into())
+pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Vec<u8>>> {
+    RESIDENT
+        .previous_or_default()
+        .lock()
+        .unwrap()
+        .patch(frame, objects)
+}
+
+pub(crate) fn remember(frame: ContentHash, objects: &[Slot<'_>], image: &[u8]) -> io::Result<()> {
+    RESIDENT
+        .previous_or_default()
+        .lock()
+        .unwrap()
+        .remember(frame, objects, image)
 }
 
 impl Incremental {
@@ -74,7 +83,7 @@ impl Incremental {
                 Slot::Bytes(bytes) if *bytes == &*old.bytes => continue,
                 Slot::Bytes(bytes) => Arc::from(*bytes),
                 Slot::Keyed(key, _) if old.key == Some(*key) => continue,
-                Slot::Keyed(_, file) => read(file)?,
+                Slot::Keyed(_, bytes) => Arc::clone(bytes),
             };
             changed.push((n, new));
         }
@@ -141,9 +150,9 @@ impl Incremental {
                         key: None,
                         bytes: Arc::from(*bytes),
                     },
-                    Slot::Keyed(key, file) => Remembered {
+                    Slot::Keyed(key, bytes) => Remembered {
                         key: Some(*key),
-                        bytes: read(file)?,
+                        bytes: Arc::clone(bytes),
                     },
                 })
             })

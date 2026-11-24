@@ -1,0 +1,15 @@
+// KC1 positive cases for the IR exclusion predicates: each must be refused. kc.sh maps this
+// file into module `triggers` (like diff_traces.hirsel) and runs `hirsel-lean probe` on it.
+fn probe_cancel(take n: u64) -> u64 {
+    task.check_cancel()
+    n
+}
+
+fn probe_child(take n: u64) -> u64 { n }
+
+fn probe_spawn(ts: Tasks) -> u64 waits {
+    let h = task.spawn(ts, bytes 64, 41u64, probe_child)
+    result.unwrap(task.join(take h))
+}
+
+fn probe_add(a: u64, b: u64) -> u64 { a + b }

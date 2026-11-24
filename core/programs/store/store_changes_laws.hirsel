@@ -7,9 +7,9 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
         return false
     }
     let held = snapshot(db)
-    let sh = shape(saved)
+    let sh = view saved
     result.unwrap(drop_table(mut db, take old))
-    match get(snapshot(db), sh, 1) {
+    match get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, 1) {
         Error(Stale(1)) => {},
         _ => return false
     }
@@ -17,50 +17,50 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
         return false
     }
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let fresh = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if fresh.id != 2 {
+    let newer = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if newer.id != 2 {
         return false
     }
-    // K2 / runner p17 step4a: the old H's Shape reads a recreated, empty
+    // K2 / runner p17 step4a: the old H's Table reads a recreated, empty
     // table. The result is Stale(1), never the old S1 result Ok(None).
-    match get(snapshot(db), sh, 1) {
+    match get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, 1) {
         Error(Stale(1)) => {},
         _ => return false
     }
-    let stale = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, saved, 1, 99)
+    let stale = run(mut db, None, saved, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, 99)
     })
     match take stale {
         Ok(Aborted(Undone(value: Stale(1), ticket: None))) => {},
         _ => return false
     }
-    if typed_value(snapshot(db), shape(fresh), 1) != 0 || typed_value(held, sh, 1) != 10 {
+    if typed_value(snapshot(db), newer, 1) != 0 || typed_value(held, sh, 1) != 10 {
         return false
     }
-    if !typed_put(mut db, fresh, 1, 20) {
+    if !typed_put(mut db, newer, 1, 20) {
         return false
     }
     let second_saved = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let second_held = snapshot(db)
-    let second_shape = shape(second_saved)
-    result.unwrap(drop_table(mut db, take fresh))
+    let second_shape = view second_saved
+    result.unwrap(drop_table(mut db, take newer))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let third = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if third.id != 3 {
         return false
     }
-    match get(snapshot(db), second_shape, 1) {
+    match get(result.unwrap(reader(db, 0u64)), snapshot(db), second_shape, 1) {
         Error(Stale(2)) => {},
         _ => return false
     }
-    let stale_second = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, second_saved, 1, 99)
+    let stale_second = run(mut db, None, second_saved, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, 99)
     })
     match take stale_second {
         Ok(Aborted(Undone(value: Stale(2), ticket: None))) => {},
         _ => return false
     }
-    typed_value(second_held, second_shape, 1) == 20 && typed_value(snapshot(db), shape(third), 1) == 0
+    typed_value(second_held, second_shape, 1) == 20 && typed_value(snapshot(db), third, 1) == 0
 }
 
 @test
@@ -86,8 +86,8 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
     if !typed_put(mut db, t, 1, 10) || db.resident != 354 {
         return false
     }
-    let out = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 2, 20)
+    let out = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 2, 20)
     })
     match take out {
         Ok(Refused(Resident(f))) => if f.requested != 448 || f.available != 354 {
@@ -95,8 +95,8 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    let removed = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete(mut tx, t, 1)
+    let removed = run(mut db, None, t, fn(mut tx, call_env) -> Result[bool, Error] {
+        delete(mut tx, call_env, 1)
     })
     match take removed {
         Ok(Committed(done)) => if !done.value {
@@ -139,7 +139,7 @@ fn law_view_geometry(c: Clock, seed: u64) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("views", std.codec.key_bytes(), std.codec.of_bytes())))
     let t = result.unwrap(table(mut db, "views", std.codec.key_bytes(), std.codec.of_bytes()))
-    let sh = shape(t)
+    let sh = view t
     let mut large_key: Bytes = list.with_capacity(4000)
     list.fill(mut large_key, 4000, 122u8)
     let first: Bytes = clone(string.as_bytes("prefix/a"))
@@ -147,14 +147,14 @@ fn law_view_geometry(c: Clock, seed: u64) -> bool waits {
     let third: Bytes = clone(string.as_bytes("prefix/c"))
     let keys =[take first, take second, take third, take large_key]
     let lengths =[31u64, 1018u64, 1019u64, 1018u64]
-    let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+    let written = result.unwrap(run(mut db, None, (copy_env(seed), copy_env(t), copy_env(sh), copy_env(keys), copy_env(lengths)), fn(mut tx, call_env) -> Result[bool, Error] {
         for i in 0u64 .. 4 {
-            let payload = view_law_payload(lengths[i], seed + i)
-            put(mut tx, t, keys[i], payload)?
-            let Some(raw) = fetch_bytes(tx, sh, keys[i])? else {
+            let payload = view_law_payload(call_env.4[i], call_env.0 + i)
+            put(mut tx, call_env.1, call_env.3[i], payload)?
+            let Some(raw) = fetch_bytes(tx, call_env.2, call_env.3[i])? else {
                 return Ok(false)
             }
-            let Some(owned) = fetch(tx, sh, keys[i])? else {
+            let Some(owned) = fetch(tx, call_env.2, call_env.3[i])? else {
                 return Ok(false)
             }
             if raw != view_law_stored(payload) || owned != payload {
@@ -170,36 +170,21 @@ fn law_view_geometry(c: Clock, seed: u64) -> bool waits {
         _ => return false
     }
     let held = snapshot(db)
-    let mut values = result.unwrap(scan_bytes(held, sh, Unbounded, Unbounded))
-    let mut typed = result.unwrap(scan(held, sh, Unbounded, Unbounded))
+    let read_handle = result.unwrap(reader(db, 0))
+    let mut typed = result.unwrap(scan(read_handle, held, sh, Unbounded, Unbounded))
     for i in 0u64 .. 4 {
         let payload = view_law_payload(lengths[i], seed + i)
-        let expected = view_law_stored(payload)
-        let point = match get_bytes(held, sh, keys[i]) {
-            Ok(Some(raw)) => raw == expected,
-            _ => false,
-        }
-        let Some(owned) = result.unwrap(get(held, sh, keys[i])) else {
-            return false
-        }
-        if !point || owned != payload {
-            return false
-        }
-        // The only table has id 1. These keys contain no zero bytes to escape.
-        let mut logical: Bytes = list.with_capacity(6 + list.len(keys[i]))
-        list.put_word_be(mut logical, 1u32)
-        list.append(mut logical, keys[i])
-        list.put_word_le(mut logical, 0u16)
-        if result.unwrap(next_view(mut values)) != Some(logical) || value_view(values) != expected || result.unwrap(next(mut typed)) != Some((clone(keys[i]), take payload)) {
+        if result.unwrap(get(read_handle, held, sh, keys[i])) != Some(clone(payload)) ||
+            result.unwrap(next(read_handle, mut typed)) != Some((clone(keys[i]), take payload)) {
             return false
         }
     }
-    let reads = result.unwrap(look(held, None, fn(tx: Tx) -> Result[bool, Error] {
+    let reads = result.unwrap(look(result.unwrap(reader(db, 0u64)), held, None, (copy_env(seed), copy_env(sh), copy_env(keys), copy_env(lengths)), fn(tx, call_env) -> Result[bool, Error] {
         for i in 0u64 .. 4 {
-            let Some(raw) = fetch_bytes(tx, sh, keys[i])? else {
+            let Some(raw) = fetch_bytes(tx, call_env.1, call_env.2[i])? else {
                 return Ok(false)
             }
-            if raw != view_law_stored(view_law_payload(lengths[i], seed + i)) {
+            if raw != view_law_stored(view_law_payload(call_env.3[i], call_env.0 + i)) {
                 return Ok(false)
             }
         }
@@ -209,8 +194,11 @@ fn law_view_geometry(c: Clock, seed: u64) -> bool waits {
         Seen(Seen(value: Ok(true), ..)) => {},
         _ => return false
     }
-    let mut bounded = result.unwrap(scan_bytes(held, sh, Excluded(clone(keys[0])), Included(clone(keys[1]))))
-    result.unwrap(next_view(mut bounded)) != None && value_view(bounded) == view_law_stored(view_law_payload(lengths[1], seed + 1)) && result.unwrap(next_view(mut bounded)) == None && result.unwrap(next_view(mut bounded)) == None && result.unwrap(next_view(mut values)) == None && result.unwrap(next(mut typed)) == None
+    let mut bounded = result.unwrap(scan(read_handle, held, sh, Excluded(clone(keys[0])), Included(clone(keys[1]))))
+    result.unwrap(next(read_handle, mut bounded)) == Some((clone(keys[1]), view_law_payload(lengths[1], seed + 1))) &&
+        result.unwrap(next(read_handle, mut bounded)) == None &&
+        result.unwrap(next(read_handle, mut bounded)) == None &&
+        result.unwrap(next(read_handle, mut typed)) == None
 }
 
 pub fn law_typed_model(c: Clock) -> bool waits {
@@ -222,13 +210,13 @@ pub fn law_typed_model(c: Clock) -> bool waits {
         result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
         let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
         result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-        let _ = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
-        let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
-        let sh = shape(t)
+        let _ = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
+        let ix = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
+        let sh = view t
         let mut model: List[u64] = list.with_capacity(24)
         list.fill(mut model, 24, 0u64)
-        for step in 0u64 .. 64 {
-            let wall = seed * 64 + step
+        for operation in 0u64 .. 64 {
+            let wall = seed * 64 + operation
             let model_state = splitmix64(wall)
             let k = model_state % 24
             let choice = (model_state >> 8) % 5
@@ -241,13 +229,13 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                     let _ = delete(mut tx, t, key)?
                 } else {
                     put(mut tx, t, key, at + 1)?
-                    if option.unwrap(fetch(tx, shape(t), key)?) != at + 1 {
+                    if option.unwrap(fetch(tx, t, key)?) != at + 1 {
                         return Error(Missing("law"))
                     }
                 }
-                let mut bucket_rows = range(tx, shape(t), Excluded(4), Included(17))?
+                let mut bucket_rows = range(tx, t, Excluded(4), Included(17))?
                 let mut a: u64 = 0
-                while let Some((_, v)) = next_range(mut bucket_rows)? {
+                while let Some((_, v)) = next_in(tx, mut bucket_rows)? {
                     a += v
                 }
                 let mut matches = lookup(tx, ix, Included(2), Included(2))?
@@ -316,8 +304,9 @@ fn test_typed_model(c: Clock) -> Result[(), ()] waits {
 }
 
 type TypedReader: send {
+    read_handle: Reader,
     held: Snapshot,
-    sh: Shape[u64, u64]
+    sh: Table[u64, u64]
 }
 
 @test
@@ -330,34 +319,35 @@ fn test_typed_snapshot_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
             return Error(())
         }
     }
-    let payload = TypedReader(held: snapshot(db), sh: shape(t))
-    let reader = task.spawn(tasks, bytes 1048576, take payload, fn(take p: TypedReader) -> bool {
-        let mut rows = result.unwrap(scan(p.held, p.sh, Unbounded, Unbounded))
+    let payload = TypedReader(read_handle: result.unwrap(reader(db, 0)), held: snapshot(db), sh: clone(t))
+    let read_source = task.spawn(tasks, bytes 1048576, take payload, fn(take p: TypedReader) -> bool waits {
+        let mut rows = result.unwrap(scan(p.read_handle, p.held, p.sh, Unbounded, Unbounded))
         for k in 0u64 .. 24 {
             if typed_value(p.held, p.sh, k) != k + 1 {
                 return false
             }
-            match get_bytes(p.held, p.sh, k) {
-                Ok(Some(raw)) => if raw != schema_zero_bytes(k + 1) {
-                    return false
-                },
-                _ => return false,
-            }
-            match result.unwrap(next(mut rows)) {
+            let viewed = result.unwrap(look(p.read_handle, p.held, None, (copy_env(p.sh), k), fn(tx, call_env) -> Result[bool, Error] {
+                match fetch_bytes(tx, call_env.0, call_env.1)? {
+                    Some(raw) => Ok(raw == schema_zero_bytes(call_env.1 + 1)),
+                    None => Ok(false),
+                }
+            }))
+            if let Seen(Seen(value: Ok(true), ..)) = viewed {} else { return false }
+            match result.unwrap(next(p.read_handle, mut rows)) {
                 Some((key, value)) => if key != k || value != k + 1 {
                     return false
                 },
                 None => return false
             }
         }
-        result.unwrap(next(mut rows)) == None
+        result.unwrap(next(p.read_handle, mut rows)) == None
     })
     for k in 0u64 .. 1000 {
         if !typed_put(mut db, t, k % 24, k + 10000) {
             return Error(())
         }
     }
-    if result.unwrap(task.join(take reader)) {
+    if result.unwrap(task.join(take read_source)) {
         Ok(())
     } else {
         Error(())
@@ -420,7 +410,7 @@ fn test_abort_budget(c: Clock) -> Result[(), ()] {
     }
 }
 
-fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u64, Error] {
+fn look_query(tx: Tx, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()]) -> Result[u64, Error] {
     let a = option.unwrap(fetch(tx, sh, 1)?)
     let absent = fetch(tx, sh, 9)?
     if let Some(_) = absent {
@@ -428,7 +418,7 @@ fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u
     }
     let mut rows = range(tx, sh, Excluded(1), Included(3))?
     let mut sum = a
-    while let Some((_, v)) = next_range(mut rows)? {
+    while let Some((_, v)) = next_in(tx, mut rows)? {
         sum += v
     }
     let mut matches = lookup(tx, ix, Included(2), Included(2))?
@@ -438,24 +428,7 @@ fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u
     Ok(sum)
 }
 
-fn equal_reads(a: List[Read], b: List[Read]) -> bool {
-    if list.len(a) != list.len(b) {
-        return false
-    }
-    for i in 0u64 .. list.len(a) {
-        let equal = match (a[i], b[i]) {
-            (Point(k), Point(j)) => k == j,
-            (Span(l, h), Span(low, high)) => l == low && h == high,
-            _ => false
-        }
-        if !equal {
-            return false
-        }
-    }
-    true
-}
-
-// L22: 10 + (20+30) + (10+30) = 100; two points and two spans.
+// L22: 10 + (20+30) + (10+30) = 100. The complete index read logs its terminal gap.
 // Wrong implementations: look publishes, omits reads or reports another version.
 pub fn law_look(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
@@ -467,15 +440,15 @@ pub fn law_look(c: Clock) -> bool waits {
         }
     }
     result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let sh = shape(t)
+    let ix = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let sh = view t
     let s = snapshot(db)
     let head = db.heads[0].head
-    let live = db.resident
+    let live_bytes = db.resident
     let high_water = db.next_node
     let end = db.file_end
-    let observed = result.unwrap(look(s, None, fn(tx: Tx) -> Result[u64, Error] {
-        look_query(tx, sh, ix)
+    let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
+        look_query(tx, call_env.1, call_env.0)
     }))
     let got = match take observed {
         Seen(take x) => take x,
@@ -485,39 +458,30 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 7 || db.heads[0].head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+    if got.version != head || db.heads[0].head != head || db.resident != live_bytes || db.next_node != high_water || db.file_end != end {
         return false
     }
-    let p1 = match got.reads[0] {
-        Point(k) => k == result.unwrap(logical_key(t.id, key_word(1))),
-        _ => false
-    }
-    let p2 = match got.reads[1] {
-        Point(k) => k == result.unwrap(logical_key(t.id, key_word(9))),
-        _ => false
-    }
+    let mut expected: List[Read] = list.new()
+    list.push(mut expected, Point(law_read_key(t.id, 1, None)))
+    list.push(mut expected, Point(law_read_key(t.id, 9, None)))
     // [table1 || key1 || 00, table1 || key3 || 00) includes precisely 2 and 3.
-    let mut low = result.unwrap(logical_key(t.id, key_word(1)))
+    let mut low = law_read_key(t.id, 1, None)
     list.push(mut low, 0u8)
-    let mut high = result.unwrap(logical_key(t.id, key_word(3)))
+    let mut high = law_read_key(t.id, 3, None)
     list.push(mut high, 0u8)
-    let mut middle = result.unwrap(logical_key(t.id, key_word(2)))
+    let mut middle = law_read_key(t.id, 2, None)
     list.push(mut middle, 0u8)
-    let span = match (got.reads[2], got.reads[3]) {
-        (Span(l, m), Span(n, h)) => l == low && m == middle && n == middle && h == high,
-        _ => false
-    }
-    let ix_low = result.unwrap(logical_key(ix.id, key_word(2)))
-    let ix_high = result.unwrap(logical_key(ix.id, key_word(3)))
-    let index_span = match got.reads[4] {
-        Span(l, h) => l == ix_low && h == ix_high,
-        _ => false
-    }
-    if !p1 || !p2 || !span || !index_span {
+    list.push(mut expected, Span(take low, clone(middle)))
+    list.push(mut expected, Span(take middle, take high))
+    let mut next_low = law_read_key(ix.id, 2, None)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 1)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 3)
+    list.push(mut expected, Span(take next_low, law_read_key(ix.id, 3, None)))
+    if !equal_reads(got.reads, expected) {
         return false
     }
-    let run_result = run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        look_query(tx, sh, ix)
+    let run_result = run(mut db, None, (copy_env(ix), copy_env(sh)), fn(mut tx, call_env) -> Result[u64, Error] {
+        look_query(tx, call_env.1, call_env.0)
     })
     match take run_result {
         Ok(Committed(done)) => if done.value != 100 || !equal_reads(done.reads, got.reads) {
@@ -528,16 +492,15 @@ pub fn law_look(c: Clock) -> bool waits {
     if !typed_put(mut db, t, 1, 14) {
         return false
     }
-    let second = result.unwrap(look(snapshot(db), None, fn(tx: Tx) -> Result[u64, Error] {
-        look_query(tx, sh, ix)
+    let second = result.unwrap(look(result.unwrap(reader(db, 0u64)), snapshot(db), None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
+        look_query(tx, call_env.1, call_env.0)
     }))
-    match take second {
-        Seen(value) => match value.value {
-            Ok(108) => value.version == db.heads[0].head && list.len(value.reads) == 7,
-            _ => false
-        },
-        _ => false
+    let Seen(value) = second else { return false }
+    let Ok(108) = view value.value else { return false }
+    if value.version != db.heads[0].head || !equal_reads(value.reads, expected) {
+        return false
     }
+    law_lookup_top_one(mut db, t, ix)
 }
 
 fn has_failure(cs: Causes, message: String) -> bool {
@@ -552,20 +515,21 @@ fn has_failure(cs: Causes, message: String) -> bool {
 }
 
 // L22: faults and Capacity are contained. info requires mut Tx (v2.4 G2).
-pub fn law_look_faults(c: Clock) -> bool {
+pub fn law_look_faults(c: Clock) -> bool waits {
     let db = test_db(c, 1073741824)
     let s = snapshot(db)
+    let read = result.unwrap(reader(db, 0u64))
     for i in 0u64 .. 2 {
         let message = if i == 0 {
             "look body fault"
         } else {
             "another query fault"
         }
-        let failed = result.unwrap(look(s, None, fn(tx: Tx) -> u64 {
-            fail(string.from(message))
+        let failed = result.unwrap(look(read, s, None, message, fn(tx, call_env) -> u64 {
+            fail(string.from(call_env))
         }))
         match take failed {
-            Failed(take cs) => if !has_failure(cs, message) {
+            Failed(take cs, reads) => if list.len(reads) != 0 || !has_failure(cs, message) {
                 return false
             },
             _ => return false
@@ -575,9 +539,11 @@ pub fn law_look_faults(c: Clock) -> bool {
         } else {
             19u64
         }
-        let observed = result.unwrap(result.unwrap(bound bytes 80 {
-            look(s, None, fn(tx: Tx) -> u64 {
-                expected
+        // The read log's node (24), the issued cell's node (8) and the
+        // isolate's cause cell (32) are 64 bytes; one fewer refuses the cell.
+        let observed = result.unwrap(result.unwrap(bound bytes 64 {
+            look(read, s, None, expected, fn(tx, call_env) -> u64 {
+                call_env
             })
         }))
         match take observed {
@@ -587,19 +553,19 @@ pub fn law_look_faults(c: Clock) -> bool {
             _ => return false
         }
     }
-    let refused_query = result.unwrap(bound bytes 79 {
-        look(s, None, fn(tx: Tx) -> u64 {
+    let refused_query = result.unwrap(bound bytes 63 {
+        look(read, s, None, (), fn(tx, unused_env) -> u64 {
             7u64
         })
     })
     match take refused_query {
-        Ok(Refused(Allocation(cap))) => cap.requested == 32 && cap.available == 31 && db.heads[0].head == 0 && db.resident == 0,
+        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && db.heads[0].head == 0 && db.resident == 0,
         _ => false
     }
 }
 
-fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) -> bool {
-    let delta = result.unwrap(changes(a, b))
+fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) -> bool waits {
+    let delta = result.unwrap(changes(law_reader(a), a, b)).rows
     let mut at: u64 = 0
     for k in 0u64 .. list.len(before) {
         if before[k] != after[k] {
@@ -625,7 +591,7 @@ fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) ->
 // L23: independent 160-slot model, split/merged leaves, added and deleted roots,
 // reverse comparison, branch/open boundaries and unchanged roots under bound0.
 // Wrong implementations: scan equal roots, omit None, confuse branch with open.
-pub fn law_changes(c: Clock) -> bool {
+pub fn law_changes(c: Clock) -> bool waits {
     let mut db = raw_test_db(c, 1073741824)
     let empty = snapshot(db)
     let mut zeros: List[u64] = list.with_capacity(160)
@@ -641,14 +607,14 @@ pub fn law_changes(c: Clock) -> bool {
     let a = snapshot(db)
     let after_copy: List[u64] = clone(before)
     let mut after = take after_copy
-    for step in 0u64 .. 48 {
-        let k = (step * 37) % 160
-        let v = if step % 2 == 0 {
+    for operation in 0u64 .. 48 {
+        let k = (operation * 37) % 160
+        let v = if operation % 2 == 0 {
             0u64
         } else {
-            step + 1000
+            operation + 1000
         }
-        let outcome = execute(mut db, 0, step, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let outcome = execute(mut db, 0, operation, None, fn(mut tx: Tx) -> Result[(), Error] {
             if v == 0 {
                 let _ = delete_bytes(mut tx, 1, key_word(k))?
             } else {
@@ -666,33 +632,34 @@ pub fn law_changes(c: Clock) -> bool {
     if !check_delta(empty, a, zeros, before) || !check_delta(a, empty, before, zeros) || !check_delta(a, b, before, after) || !check_delta(b, a, after, before) {
         return false
     }
+    let read = result.unwrap(reader(db, 0u64))
     let same_root = result.unwrap(bound bytes 0 {
-        changes(b, b)
+        changes(read, b, b)
     })
     match take same_root {
-        Ok(rows) => if list.len(rows) != 0 {
+        Ok(delta) => if list.len(delta.rows) != 0 {
             return false
         },
         _ => return false
     }
-    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots))
+    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots), watermark: 1)
     if !check_delta(a, other_branch, before, after) {
         return false
     }
-    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots))
-    if !is_foreign(changes(a, other_open)) {
+    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots), watermark: 1)
+    if !is_foreign(changes(law_reader(a), a, other_open)) {
         return false
     }
     let foreign = raw_test_db(c, 1073741824)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots))
-    if !is_foreign(changes(a, other_store)) {
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots), watermark: 1)
+    if !is_foreign(changes(law_reader(a), a, other_store)) {
         return false
     }
     // R1: the diff's own allocation is refused under a zero bound and raises
     // Capacity; changes has no refusal value of its own.
-    let no_room = isolate(fn() -> Result[Result[List[Change], Error], Capacity] {
+    let no_room = isolate(fn() -> Result[Result[Changes, Error], Capacity] {
         bound bytes 0 {
-            changes(a, b)
+            compare_page_collections(a.roots.collections, b.roots.collections)
         }
     })
     match take no_room {
@@ -705,7 +672,7 @@ pub fn law_changes(c: Clock) -> bool {
 }
 
 // A change can keep a large value within a budget that cannot copy it.
-pub fn law_shared_changes(c: Clock) -> bool {
+pub fn law_shared_changes(c: Clock) -> bool waits {
     let mut db = raw_test_db(c, 1073741824)
     let before = snapshot(db)
     let outcome = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
@@ -720,10 +687,10 @@ pub fn law_shared_changes(c: Clock) -> bool {
     let low = result.unwrap(prefix(1))
     let high = result.unwrap(prefix(2))
     let delta = result.unwrap(result.unwrap(bound bytes 4096 {
-        changes(before, after)
-    }))
+        changes(result.unwrap(reader(db, 0u64)), before, after)
+    })).rows
     let rows = result.unwrap(result.unwrap(bound bytes 4096 {
-        span_changes(after, low, high)
+        span_changes(result.unwrap(reader(db, 0u64)), after, low, high)
     }))
     if !same_rows(rows, delta, 0, 1) || list.len(delta) != 1 {
         return false
@@ -778,10 +745,10 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     if !typed_put(mut db, t, 1, 41) {
         return Error(())
     }
-    let payload = TypedReader(held: snapshot(db), sh: shape(t))
-    let reader = task.spawn(tasks, bytes 1048576, take payload, fn(take p: TypedReader) -> bool {
-        let seen = result.unwrap(look(p.held, None, fn(tx: Tx) -> Result[Option[u64], Error] {
-            fetch(tx, p.sh, 1)
+    let payload = TypedReader(read_handle: result.unwrap(reader(db, 0)), held: snapshot(db), sh: clone(t))
+    let read_source = task.spawn(tasks, bytes 1048576, take payload, fn(take p: TypedReader) -> bool waits {
+        let seen = result.unwrap(look(p.read_handle, p.held, None, p.sh, fn(tx, call_env) -> Result[Option[u64], Error] {
+            fetch(tx, call_env, 1)
         }))
         match take seen {
             Seen(x) => match x.value {
@@ -795,7 +762,7 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
         return Error(())
     }
     result.unwrap(close(take db))
-    if result.unwrap(task.join(take reader)) {
+    if result.unwrap(task.join(take read_source)) {
         Ok(())
     } else {
         Error(())
@@ -804,16 +771,16 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 
 // L23: identity checks precede the equal-empty-root shortcut. Different branches
 // of one open are allowed; stores and opens are not interchangeable.
-pub fn law_changes_identity(c: Clock) -> bool {
+pub fn law_changes_identity(c: Clock) -> bool waits {
     let db = test_db(c, 1073741824)
     let a = snapshot(db)
-    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots())
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots())
-    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
-    if !is_foreign(changes(a, other_open)) || !is_foreign(changes(a, other_store)) {
+    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots(), watermark: 1)
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots(), watermark: 1)
+    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots(), watermark: 1)
+    if !is_foreign(changes(law_reader(a), a, other_open)) || !is_foreign(changes(law_reader(a), a, other_store)) {
         return false
     }
-    list.len(result.unwrap(changes(a, br))) == 0
+    list.len(result.unwrap(changes(law_reader(a), a, br)).rows) == 0
 }
 
 @test
@@ -834,10 +801,10 @@ pub fn law_info_mut(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     for _ in 0u64 .. 2 {
         let expected = db.heads[0].head + 1
-        let outcome = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, ()] {
+        let outcome = result.unwrap(run(mut db, None, expected, fn(mut tx, call_env) -> Result[bool, ()] {
             let direct = info(mut tx).id.version
             let indirect = info_helper(mut tx)
-            Ok(direct == expected && indirect == expected)
+            Ok(direct == call_env && indirect == call_env)
         }))
         match take outcome {
             Committed(done) => if !done.value {
@@ -876,10 +843,10 @@ fn same_value_pair(c: Clock) -> (Snapshot, Snapshot) {
 
 // L23: k=96 writes, w=0 returned differences. Both full scans contain keys
 // 0..95 and values 1..96, whose hand-derived sum is 96*97/2 = 4656.
-pub fn law_changes_rewritten_equal(c: Clock) -> bool {
+pub fn law_changes_rewritten_equal(c: Clock) -> bool waits {
     let pair = same_value_pair(c)
     let (take a, take b) = take pair
-    let delta = result.unwrap(changes(a, b))
+    let delta = result.unwrap(changes(law_reader(a), a, b)).rows
     if list.len(delta) != 0 {
         return false
     }
@@ -906,11 +873,11 @@ fn test_changes_rewritten_equal(c: Clock) -> Result[(), ()] {
     }
 }
 
-// Spec-derived 97-byte COMMIT vectors from core/tools/store_reference.py and
+// Spec-derived 101-byte COMMIT vectors from core/tools/store_reference.py and
 // external libxxhash, not encode_commit itself. Offsets72,73,1048576 plus
 // contrasting store/branch/version/time/segment values defeat constant fields.
 fn frame_boundary_points() -> bool {
-    let expected: Inline[Inline[u8, 97], 5] =[[17u8, 0u8, 1u8, 0u8, 81u8, 0u8, 0u8, 0u8, 22u8, 231u8, 24u8, 90u8, 230u8, 90u8, 179u8, 95u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 231u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 7u8, 34u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8],[17u8, 0u8, 1u8, 0u8, 81u8, 0u8, 0u8, 0u8, 131u8, 62u8, 23u8, 153u8, 102u8, 103u8, 61u8, 55u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 231u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 7u8, 34u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8],[17u8, 0u8, 1u8, 0u8, 81u8, 0u8, 0u8, 0u8, 242u8, 74u8, 7u8, 159u8, 62u8, 162u8, 244u8, 186u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 231u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 7u8, 34u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8],[17u8, 0u8, 1u8, 0u8, 81u8, 0u8, 0u8, 0u8, 195u8, 158u8, 179u8, 130u8, 221u8, 148u8, 76u8, 174u8, 7u8, 0u8, 0u8, 0u8, 2u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 233u8, 3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 7u8, 34u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8],[17u8, 0u8, 1u8, 0u8, 81u8, 0u8, 0u8, 0u8, 155u8, 194u8, 195u8, 201u8, 143u8, 74u8, 58u8, 20u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 7u8, 34u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8]]
+    let expected: Inline[Inline[u8, 101], 5] = [[17, 0, 1, 0, 85, 0, 0, 0, 224, 218, 201, 79, 101, 211, 225, 137, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], [17, 0, 1, 0, 85, 0, 0, 0, 234, 219, 139, 133, 186, 115, 232, 65, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], [17, 0, 1, 0, 85, 0, 0, 0, 125, 108, 137, 193, 75, 31, 101, 185, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], [17, 0, 1, 0, 85, 0, 0, 0, 164, 25, 64, 48, 189, 190, 101, 37, 7, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 233, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], [17, 0, 1, 0, 85, 0, 0, 0, 130, 27, 203, 252, 129, 147, 18, 165, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]]
     let stores: Inline[StoreId, 5] =[StoreId(hi: 1, lo: 2), StoreId(hi: 1, lo: 2), StoreId(hi: 1, lo: 2), StoreId(hi: 3, lo: 4), StoreId(hi: 1, lo: 9)]
     let branches: Inline[u32, 5] =[0, 0, 0, 7, 1]
     let versions: Inline[u64, 5] =[257, 257, 257, 258, 65536]
@@ -925,14 +892,14 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value))))
+    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, mut ops, segments[i], offsets[i]))
-        if list.len(raw) != 97 {
+        if list.len(raw) != 101 {
             return false
         }
-        for at in 0u64 .. 97 {
+        for at in 0u64 .. 101 {
             if raw[at] != expected[i][at] {
                 return false
             }

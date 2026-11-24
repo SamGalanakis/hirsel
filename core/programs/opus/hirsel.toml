@@ -1,0 +1,14 @@
+[package]
+name = "opus"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"opus.hirsel" = "opus"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hop_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_opus.a", sha256 = "fe81243684e3487d0dddc899f7e2dd220cee5bed381f7c855289af8794d8ff32" },
+]

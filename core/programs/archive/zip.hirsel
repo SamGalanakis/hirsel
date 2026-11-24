@@ -1,0 +1,195 @@
+// PKWARE ZIP APPNOTE sections 4.3 and 4.5.3.
+pub type Method: key = Store | Deflate | Zstd
+
+pub type Member {
+    name: Bytes,
+    kind: limits.Kind,
+    method: Method,
+    size: u64,
+}
+
+pub type Event = ZipEntry(Member) | ZipData(Bytes)
+
+const LOCAL: u32 = 0x04034b50
+
+const CENTRAL: u32 = 0x02014b50
+
+const END: u32 = 0x06054b50
+
+const END64: u32 = 0x06064b50
+
+const LOCATOR64: u32 = 0x07064b50
+
+const DESCRIPTOR: u32 = 0x08074b50
+
+const MAX16: u64 = 0xffff
+
+const MAX32: u64 = 0xffffffff
+
+const CHUNK: u64 = 32768
+
+type Numbers {
+    size: u64,
+    packed: u64,
+    offset: u64,
+    disk: u64,
+}
+
+type Record {
+    name: Bytes,
+    kind: limits.Kind,
+    method: Method,
+    flags: u16,
+    crc: u32,
+    numbers: Numbers,
+    wide: bool,
+}
+
+type Location {
+    body: u64,
+    end: u64,
+}
+
+fn u16_at(input: Bytes, at: u64) -> u64 {
+    let word: u16 = list.word_le(input, at)
+    int.widen(word)
+}
+
+fn u32_at(input: Bytes, at: u64) -> u64 {
+    let word: u32 = list.word_le(input, at)
+    int.widen(word)
+}
+
+fn method_from(code: u64) -> Result[Method, limits.Error] {
+    match code {
+        0 => Ok(Store),
+        8 => Ok(Deflate),
+        93 => Ok(Zstd),
+        _ => Error(Unsupported),
+    }
+}
+
+fn method_code(method: Method) -> u16 {
+    match method {
+        Store => 0,
+        Deflate => 8,
+        Zstd => 93,
+    }
+}
+
+fn check_flags(flags: u16, method: Method) -> Result[(), limits.Error] {
+    // Deflate compression hints, descriptor bit, and UTF-8 names.
+    if (flags & 0xf7f1) != 0 || (method != Deflate && (flags & 6) != 0) {
+        return Error(Unsupported)
+    }
+    Ok(())
+}
+
+fn check_name(name: Bytes, flags: u16, caps: limits.Limits) -> Result[(), limits.Error] {
+    limits.path(name, caps.depth)?
+    if (flags & 0x800) != 0 && !string.is_utf8(name) {
+        return Error(Invalid)
+    }
+    Ok(())
+}
+
+fn slash_end(name: Bytes) -> bool {
+    list.len(name) != 0 && name[list.len(name) - 1] == 47
+}
+
+fn entry_kind(name: Bytes, system: u8, attributes: u64) -> Result[limits.Kind, limits.Error] {
+    let folder = slash_end(name) || (attributes & 16) != 0
+    let unix_type = if system == 3 || system == 19 {
+        attributes >> 28
+    } else {
+        0
+    }
+    if unix_type == 10 {
+        if folder {
+            return Error(Invalid)
+        }
+        return Ok(SymbolicLink)
+    }
+    if unix_type != 0 && unix_type != 4 && unix_type != 8 {
+        return Error(Unsupported)
+    }
+    if folder || unix_type == 4 {
+        return Ok(Folder)
+    }
+    Ok(Regular)
+}
+
+fn sizes64(fixed: Numbers, extra: Bytes, mut budget: limits.Budget) -> Result[Numbers, limits.Error] {
+    let mut values = fixed
+    let mut seen = false
+    let mut at = 0u64
+    while at < list.len(extra) {
+        limits.step(mut budget)?
+        if list.len(extra) - at < 4 {
+            return Error(Invalid)
+        }
+        let tag = u16_at(extra, at)
+        let width = u16_at(extra, at + 2)
+        at += 4
+        if width > list.len(extra) - at {
+            return Error(Invalid)
+        }
+        if tag == 1 {
+            if seen {
+                return Error(Invalid)
+            }
+            seen = true
+            let mut cursor = at
+            let stop = at + width
+            if fixed.size == MAX32 {
+                if stop - cursor < 8 {
+                    return Error(Invalid)
+                }
+                values.size = list.word_le(extra, cursor)
+                cursor += 8
+            }
+            if fixed.packed == MAX32 {
+                if stop - cursor < 8 {
+                    return Error(Invalid)
+                }
+                values.packed = list.word_le(extra, cursor)
+                cursor += 8
+            }
+            if fixed.offset == MAX32 {
+                if stop - cursor < 8 {
+                    return Error(Invalid)
+                }
+                values.offset = list.word_le(extra, cursor)
+                cursor += 8
+            }
+            if fixed.disk == MAX16 {
+                if stop - cursor < 4 {
+                    return Error(Invalid)
+                }
+                values.disk = u32_at(extra, cursor)
+            }
+        }
+        at += width
+    }
+    if !seen && (fixed.size == MAX32 || fixed.packed == MAX32 || fixed.offset == MAX32 || fixed.disk == MAX16) {
+        return Error(Invalid)
+    }
+    if values.disk != 0 {
+        return Error(Unsupported)
+    }
+    Ok(values)
+}
+
+fn verify_entry(rec: Record, caps: limits.Limits, mut budget: limits.Budget) -> Result[(), limits.Error] {
+    if rec.kind == Folder && rec.numbers.size != 0 {
+        return Error(Invalid)
+    }
+    if rec.kind == SymbolicLink && rec.numbers.size > MAX16 {
+        return Error(EntryLimit)
+    }
+    if rec.method == Store && rec.numbers.size != rec.numbers.packed {
+        return Error(Invalid)
+    }
+    limits.entry(mut budget, rec.numbers.size)?
+    limits.ratio(rec.numbers.size, rec.numbers.packed, caps.ratio)
+}

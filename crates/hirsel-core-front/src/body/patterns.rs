@@ -3,6 +3,8 @@
 use super::*;
 use hirsel_core_ir::RtOp;
 
+mod destructure;
+
 /// How a name pattern binds (OWN-15): a view or copy, an owner (`take`), or the
 /// matched place itself, lent for the arm (`mut`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1018,17 +1020,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         );
                     }
                 }
-                let count = if pat.order.len == 0 {
-                    pat.fields.len
-                } else {
-                    pat.order.len
-                };
-                for at in 0..count {
-                    let i = if pat.order.len == 0 {
-                        at
-                    } else {
-                        self.patterns.order[(pat.order.start + at) as usize]
-                    };
+                if subject.owned && !subject.viewed {
+                    self.destructure(pat, case, subject, mutable);
+                    return;
+                }
+                for at in 0..self.pattern_count(pat) {
+                    let i = self.pattern_index(pat, at);
                     let child = self.patterns.fields[(pat.fields.start + i) as usize];
                     if child == 0 {
                         continue;
@@ -1036,9 +1033,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let ty = self.pat(child).ty;
                     let field = self.pattern_at(subject, case, i, ty, pat.site);
                     self.bind_pattern(child, field, mutable);
-                }
-                if subject.owned && !subject.viewed {
-                    self.transfer(pat, case, subject);
                 }
             }
             _ => {}
@@ -1132,42 +1126,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
     /// parts are owners now, so the source is consumed whole and the omitted fields
     /// are dropped in declaration order.
-    fn transfer(&mut self, pat: Pat, case: Option<u32>, subject: Subject) {
-        for i in 0..pat.fields.len {
-            let child = self.patterns.fields[(pat.fields.start + i) as usize];
-            if child != 0 && self.pat_head(child) != Head::Any {
-                continue;
-            }
-            let ty = self.pattern_field_ty(pat.ty, case, i as usize);
-            if self.drop_id(ty).is_none() {
-                continue;
-            }
-            let field = self.pattern_at(subject, case, i, ty, pat.site);
-            self.drop_field(field.value, ty, pat.site);
-        }
-        if subject.place.is_none() {
-            self.consume(subject.value, pat.site);
-        }
-        // T3.7: the destructured resource's block (its storage, unused cell and grant)
-        // is freed and refunded; its fields went on with their blocks.
-        if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(pat.ty))
-            && self.e.is_resource(id)
-            && self.live()
-        {
-            let holder = self.address(
-                AddressBase::Value(value),
-                &[],
-                PlaceTy::Value(Ty::Ptr),
-                pat.site,
-            );
-            let block = self.read_bits(holder, Ty::Ptr, pat.site);
-            if let Some(charge) = self.e.resource_charge(id)
-                && let Some(charge) = self.konst(Ty::Scalar(Scalar::U64), charge, pat.site)
-            {
-                self.inst(Inst::Free { block, charge }, pat.site);
-            }
-        }
-    }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
         if self.pattern_takes(id) && !subject.owned {
             if !subject.viewed
@@ -1367,7 +1325,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
         let escape_mark = self.patterns.escaping.len();
-        let mut ty = want.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
+        // A fixed want types the join; a view want, the first arm not diverging.
+        let mut ty = want
+            .filter(|w| self.fixed_want(*w) && !w.view)
+            .map(|w| w.ty);
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
@@ -1421,7 +1382,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.patterns.rebind = false;
             let taken = temp.is_some_and(|i| !self.temp_live(i));
             let body = *a.last().unwrap();
-            let (at, v) = self.result_expr(body, ty.and_then(expect).or(want));
+            let (at, v) = self.result_expr(body, self.arm_want(want, ty));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
@@ -1754,18 +1715,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(no);
         }
         let (ot, ov) = if let Some(&other) = c.get(2) {
-            self.result_expr(
-                other,
-                want.filter(|w| self.fixed_want(*w))
-                    .or_else(|| {
-                        (yt != NEVER).then_some(Want {
-                            ty: yt,
-                            view: false,
-                            payload: 0,
-                        })
-                    })
-                    .or(want),
-            )
+            self.result_expr(other, self.arm_want(want, (yt != NEVER).then_some(yt)))
         } else {
             (UNIT, None)
         };

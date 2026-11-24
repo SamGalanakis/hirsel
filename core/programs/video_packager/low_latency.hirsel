@@ -1,0 +1,172 @@
+pub opaque type Part {
+    fragment: Segment
+}
+
+pub type LiveSegment {
+    segment: Segment,
+    parts: List[Part]
+}
+
+pub type LiveWindow {
+    track: media_container.mp4.Track,
+    first_number: u32,
+    target_seconds: u32,
+    part_target_ticks: u32,
+    completed: List[LiveSegment],
+    pending: List[Part],
+    ended: bool,
+}
+
+// Append this prefix and the corresponding payload to the parent media
+// object. The fragment number is shared by all fragments of the track.
+pub fn write_part(mut out: Bytes, track: media_container.mp4.Track, fragment_number: u32, decode_start: u64, samples: List[media_container.mp4.Sample], payload_bytes: u64, limit: SegmentLimit) -> Result[Part, Error] {
+    let fragment = write_chunk(mut out, track, fragment_number, decode_start, samples, payload_bytes, limit, false)?
+    Ok(Part(fragment: fragment))
+}
+
+fn contiguous(a: Segment, b: Segment) -> bool {
+    same_track(a.track, b.track) && a.end == b.start && a.decode_end == b.decode_start
+}
+
+fn grouped(parts: List[Part], number: u32) -> Result[Segment, Error] {
+    if list.len(parts) == 0 || number == 0 {
+        return Error(InvalidSegment)
+    }
+    let first = parts[0].fragment
+    if !independent(first.track, first.first) {
+        return Error(InvalidSegment)
+    }
+    let mut previous = first
+    let mut size = first.octets
+    for i in 1u64 .. list.len(parts) {
+        let current = parts[i].fragment
+        if !contiguous(previous, current) || previous.number == 0xffffffff || current.number != previous.number + 1 {
+            return Error(InvalidSegment)
+        }
+        let Some(total) = int.checked_add(size, current.octets) else {
+            return Error(BudgetExceeded)
+        }
+        size = total
+        previous = current
+    }
+    if previous.end - first.start > 0xffffffff {
+        return Error(InvalidSegment)
+    }
+    Ok(Segment(track: first.track, number: number, decode_start: first.decode_start, decode_end: previous.decode_end, start: first.start, end: previous.end, octets: size, first: first.first))
+}
+
+// The returned segment indexes the concatenated part bytes. Use it in a
+// rendition's regular HLS playlist or DASH MPD without rewriting the object.
+pub fn finish_segment(parts: List[Part], number: u32, step_limit: u64) -> Result[Segment, Error] {
+    match (bound steps step_limit {
+        grouped(parts, number)
+    }) {
+        Ok(take outcome) => take outcome,
+        Error(_) => Error(BudgetExceeded),
+    }
+}
+
+pub fn hls_low_latency(window: LiveWindow, limit: ManifestLimit) -> Result[String, Error] {
+    match (bound bytes limit.octets {
+        bound steps limit.steps {
+            live_media(window)
+        }
+    }) {
+        Ok(Ok(take outcome)) => take outcome,
+        _ => Error(BudgetExceeded),
+    }
+}
+
+fn push_parts(mut out: String, number: u64, parts: List[Part], target_ticks: u64, complete: bool) -> Result[(), Error] {
+    let mut offset = 0u64
+    for i in 0u64 .. list.len(parts) {
+        let part = parts[i].fragment
+        let duration = part.end - part.start
+        let sync = independent(part.track, part.first)
+        let final_part = complete && i + 1 == list.len(parts)
+        // RFC 8216bis 4.4.4.9.
+        if duration > target_ticks || (!sync && !final_part && 100 * duration < 85 * target_ticks) {
+            return Error(InvalidSegment)
+        }
+        string.push(mut out, "#EXT-X-PART:DURATION=")
+        push_seconds(mut out, duration, int.widen(part.track.timescale))
+        string.push(mut out, ",URI=\"")
+        string.push_u64(mut out, number)
+        string.push(mut out, ".m4s\",BYTERANGE=\"")
+        string.push_u64(mut out, part.octets)
+        string.push_char(mut out, '@')
+        string.push_u64(mut out, offset)
+        string.push_char(mut out, '"')
+        if sync {
+            string.push(mut out, ",INDEPENDENT=YES")
+        }
+        string.push_char(mut out, '\n')
+        offset += part.octets
+    }
+    Ok(())
+}
+
+fn same_segment(a: Segment, b: Segment) -> bool {
+    same_track(a.track, b.track) && a.number == b.number && a.start == b.start && a.end == b.end && a.decode_start == b.decode_start && a.decode_end == b.decode_end && a.octets == b.octets
+}
+
+fn live_media(window: LiveWindow) -> Result[String, Error] {
+    let scale: u64 = int.widen(window.track.timescale)
+    let target: u64 = int.widen(window.target_seconds)
+    let part_target: u64 = int.widen(window.part_target_ticks)
+    if window.first_number == 0 || scale == 0 || target == 0 || part_target == 0 || part_target > target * scale || (window.ended && list.len(window.pending) != 0) {
+        return Error(InvalidLadder)
+    }
+    let mut out = string.from("#EXTM3U\n#EXT-X-VERSION:9\n#EXT-X-TARGETDURATION:")
+    string.push_u64(mut out, target)
+    string.push(mut out, "\n#EXT-X-MEDIA-SEQUENCE:")
+    string.push_u64(mut out, int.widen(window.first_number))
+    string.push(mut out, "\n#EXT-X-SERVER-CONTROL:PART-HOLD-BACK=")
+    push_seconds(mut out, 3 * part_target, scale)
+    string.push(mut out, "\n#EXT-X-PART-INF:PART-TARGET=")
+    push_seconds(mut out, part_target, scale)
+    string.push(mut out, "\n#EXT-X-MAP:URI=\"init.mp4\"\n")
+    let mut number: u64 = int.widen(window.first_number)
+    let mut previous: Option[Segment] = None
+    for item in window.completed {
+        let s = item.segment
+        let segment_number: u64 = int.widen(s.number)
+        if !same_track(s.track, window.track) || segment_number != number || (s.end - s.start + scale / 2) / scale > target {
+            return Error(InvalidLadder)
+        }
+        if let Some(last) = previous {
+            if !contiguous(last, s) {
+                return Error(InvalidLadder)
+            }
+        }
+        if list.len(item.parts) != 0 {
+            let parent = grouped(item.parts, s.number)?
+            if !same_segment(parent, s) {
+                return Error(InvalidLadder)
+            }
+            push_parts(mut out, number, item.parts, part_target, true)?
+        }
+        push_segment(mut out, s, false)
+        previous = Some(s)
+        number += 1
+    }
+    if list.len(window.pending) != 0 {
+        if number > 0xffffffff {
+            return Error(InvalidLadder)
+        }
+        let pending = grouped(window.pending, int.narrow(number))?
+        if !same_track(pending.track, window.track) || (pending.end - pending.start + scale / 2) / scale > target {
+            return Error(InvalidLadder)
+        }
+        if let Some(last) = previous {
+            if !contiguous(last, pending) {
+                return Error(InvalidLadder)
+            }
+        }
+        push_parts(mut out, number, window.pending, part_target, false)?
+    }
+    if window.ended {
+        string.push(mut out, "#EXT-X-ENDLIST\n")
+    }
+    Ok(take out)
+}

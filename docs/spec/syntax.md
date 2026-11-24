@@ -281,6 +281,7 @@ postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
 mapper      = type-path | "|", pattern, "|", prefix ;
 argument    = [ name, ":" ], expression | ( "bytes" | "steps" ), expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
+            | "bytes", "[", type, "]"
             | "(", expression, ":", type, ")"
             | "(", expression, ",", list(expression), ")"
             | "[", list(expression), "]" | "[", expression, ";", integer, "]"
@@ -328,7 +329,7 @@ Precedence, strongest first:
 | assignment | statement only, no chaining |
 
 The grammar is context-free. Parsing needs no names or types: types appear only after
-`:` and `->`, an **ascription** `(e : T)` included, inside `[ ]` after a type path and on the right of a type definition; expressions never carry type
+`:` and `->`, an **ascription** `(e : T)` included, inside `[ ]` after a type path or after the keyword `bytes` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge); as an argument, `bytes [` always begins that form, so a marked argument that starts with an array literal, such as `[a, b][i]`, is parenthesized) and on the right of a type definition; expressions never carry type
 arguments, so postfix `[ ]` always indexes; a `?=>` ends its postfix chain, so a call, index, field
 or `?` after its mapper is refused, at that token, and is written `(e ?=> m).f`; constructors, variants and calls share call
 syntax and are told apart by name resolution; braces after a condition begin a block,

@@ -1,0 +1,44 @@
+type PointerRow: codec {
+    label: String
+}
+
+fn nested_input(suffix: String) -> String {
+    let mut input = string.from("[[],[],[],[],[],[],[],[],[],[],[")
+    string.push(mut input, suffix)
+    take input
+}
+
+// At /10/0, an invalid escape still points to its field. RFC 6901 encodes
+// the unknown name a~/b as a~0~1b, after decoding the JSON member spelling.
+// expect: run typed_json_error_pointers() = true
+fn typed_json_error_pointers() -> bool {
+    let format: json.Format[List[List[PointerRow]]] = result.unwrap(json.typed())
+    let bad_escape = match json.from_string(format, nested_input("{\"label\":\"\\q\"}]]"), 65536) {
+        Error(Input(43, path, ExpectedValue)) => path == "/10/0/label",
+        _ => false,
+    }
+    let duplicate = match json.from_string(format, nested_input("{\"label\":\"ok\",\"\\u006cabel\":\"again\"}]]"), 65536) {
+        Error(Input(46, path, DuplicateMember)) => path == "/10/0/label",
+        _ => false,
+    }
+    let unknown = match json.from_string(format, nested_input("{\"a~\\u002fb\":null}]]"), 65536) {
+        Error(Input(33, path, UnknownMember)) => path == "/10/0/a~0~1b",
+        _ => false,
+    }
+    bad_escape && duplicate && unknown && duplicate_map_key_precedes_value()
+}
+
+fn duplicate_map_key_precedes_value() -> bool {
+    let format: json.Format[Map[String, u16]] = result.unwrap(json.interop())
+    let invalid = "{\"a~/b\":1,\"a~\\u002fb\":false}"
+    let valid = "{\"a~/b\":1,\"a~\\u002fb\":2}"
+    let earlier = match json.from_string(format, invalid, 65536) {
+        Error(Input(10, path, DuplicateMember)) => path == "/a~0~1b",
+        _ => false,
+    }
+    let repeated = match json.from_string(format, valid, 65536) {
+        Error(Input(10, path, DuplicateMember)) => path == "/a~0~1b",
+        _ => false,
+    }
+    earlier && repeated
+}

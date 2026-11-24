@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
+test_root=
+if [ "${1:-}" = --test ]; then
+    test_root=$(cd "$2" && pwd)
+    shift 2
+fi
 cd "$(dirname "$0")"
 compiler=${HIRSEL:-hirsel}
 llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT
+test_dir=
+trap 'rm -rf "$stage" ${test_dir:+"$test_dir"}' EXIT
 # HIRSEL_TARGET=aarch64-apple-darwin builds the macOS archive beside the Linux one.
 target=${HIRSEL_TARGET:-x86_64-unknown-linux-gnu}
 case "$target" in
@@ -18,7 +24,6 @@ case "$target" in
         ;;
 esac
 "$compiler" inspect . --foreign-header sqlite@1/native "$@" > "$stage/native.h"
-cp hirsel_sqlite.c "$stage"
 (
     cd "$stage"
     curl --fail --silent --show-error --location \
@@ -32,7 +37,23 @@ cp hirsel_sqlite.c "$stage"
         exit 1
     fi
     unzip -q -j amalgamation.zip '*/sqlite3.c' '*/sqlite3.h'
-    for file in sqlite3 hirsel_sqlite; do
+)
+if [ -n "$test_root" ]; then
+    # SQLite's public C API stays local in the shipped archive.
+    "$llvm/bin/llvm-objcopy" \
+        --globalize-symbol=sqlite3_auto_extension --globalize-symbol=sqlite3_db_config \
+        --globalize-symbol=sqlite3_db_status --globalize-symbol=sqlite3_file_control \
+        --globalize-symbol=sqlite3_vfs_find libhirsel_sqlite.a "$stage/test.a"
+    "$llvm/bin/clang" -std=c11 -Wall -Wextra -Werror -I "$stage" native_laws.c \
+        "$stage/test.a" -Wl,--wrap=fcntl -lpthread -lm -o "$stage/native-laws"
+    test_dir=$(mktemp -d "$test_root/sqlite-laws.XXXXXX")
+    (cd "$test_dir" && ulimit -c 0 && "$stage/native-laws")
+    exit
+fi
+cp hirsel_sqlite.c hirsel_sqlite_os.c hirsel_sqlite_os.h "$stage"
+(
+    cd "$stage"
+    for file in sqlite3 hirsel_sqlite hirsel_sqlite_os; do
         # shellcheck disable=SC2086
         "$llvm/bin/clang" $flags -std=c11 -O2 \
             -fno-ident "-ffile-prefix-map=$PWD=." \
@@ -44,11 +65,11 @@ cp hirsel_sqlite.c "$stage"
     case "$target" in
         aarch64-apple-darwin)
             # ld64 keeps only the hsq_ symbols external in the combined object.
-            xcrun ld -r -arch arm64 -exported_symbol '_hsq_*' sqlite3.o hirsel_sqlite.o -o hsq.o
+            xcrun ld -r -arch arm64 -exported_symbol '_hsq_*' sqlite3.o hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o
             "$llvm/bin/llvm-ar" --format=darwin rcs libhirsel_sqlite.a hsq.o
             ;;
         *)
-            "$llvm/bin/ld.lld" -r sqlite3.o hirsel_sqlite.o -o hsq.o
+            "$llvm/bin/ld.lld" -r sqlite3.o hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o
             "$llvm/bin/llvm-objcopy" --wildcard --keep-global-symbol='hsq_*' hsq.o
             "$llvm/bin/llvm-ar" rcs libhirsel_sqlite.a hsq.o
             ;;

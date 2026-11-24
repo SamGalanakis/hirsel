@@ -2,10 +2,6 @@
 //! beneath the real runtime adapters. No provider export is mocked.
 use super::*;
 
-/// The last host operation code providers.c models (file, stdio and sleep
-/// rows). Later rows' request shapes are not modeled by its C world.
-const LAST_MODELED_OP: u8 = 18;
-
 struct Run {
     function: FuncId,
     args: Vec<u64>,
@@ -93,28 +89,40 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::Sync
+                    | HostOp::NextEntries
+                    | HostOp::StatFile
+                    | HostOp::ReadAt
+                    | HostOp::WriteAt
             ) {
-                source.push_str("world.seeding=1; HirselCoreHostRequest seed={.operation=0}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,cfg->provider,&seed); require(!opened.error.tag && !opened.status); world.seeding=0;\n");
+                let operation = if op == HostOp::NextEntries {
+                    HostOp::Entries.code()
+                } else {
+                    HostOp::Open.code()
+                };
+                let mode = if op == HostOp::WriteAt { 1 } else { 0 };
+                writeln!(source,"world.seeding=1; HirselCoreHostRequest seed={{.operation={operation},.mode={mode}}}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,cfg->provider,&seed); require(!opened.error.tag && !opened.status); world.seeding=0;").unwrap();
                 "opened.value"
             } else {
                 "1"
             };
             let mut args = vec![handle.to_owned()];
-            if sig.params.len() >= 2 {
-                if op == HostOp::SleepUntil {
-                    args.push("UINT64_C(3)".into());
-                } else {
-                    source.push_str("HirselCoreBuffer operand={operand_bytes,3,64};\n");
-                    args.push("&operand".into());
-                }
+            if sig.params.contains(&Param::Value(Ty::Ptr)) {
+                let cap = if op == HostOp::NextEntries { 300 } else { 64 };
+                writeln!(
+                    source,
+                    "HirselCoreBuffer operand={{operand_bytes,3,{cap}}};"
+                )
+                .unwrap();
             }
-            if sig.params.len() == 3 {
-                if op == HostOp::Rename {
-                    args.push("&operand".into());
-                } else {
-                    args.push("3".into());
-                }
-            }
+            let extra: &[&str] = match op {
+                HostOp::Open => &["&operand", "3"],
+                HostOp::Rename => &["&operand", "&operand"],
+                HostOp::SleepUntil | HostOp::SleepUntilWall => &["UINT64_C(3)"],
+                HostOp::ReadAt | HostOp::WriteAt => &["UINT64_C(0x0102030405060708)", "&operand"],
+                _ if sig.params.contains(&Param::Value(Ty::Ptr)) => &["&operand"],
+                _ => &[],
+            };
+            args.extend(extra.iter().map(|arg| (*arg).to_owned()));
             args
         } else {
             run.args
@@ -155,15 +163,15 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             source.push_str("}\n");
         }
         if let Some((op, _)) = run.matrix
-            && sig.params.len() >= 2
-            && op != HostOp::SleepUntil
+            && sig.params.contains(&Param::Value(Ty::Ptr))
         {
             let len = if matches!(op, HostOp::Read | HostOp::Mkdtemp) {
                 4
             } else {
                 3
             };
-            writeln!(source, "require(operand.data==operand_bytes && operand.capacity==64 && operand.len=={len});").unwrap();
+            let cap = if op == HostOp::NextEntries { 300 } else { 64 };
+            writeln!(source, "require(operand.data==operand_bytes && operand.capacity=={cap} && operand.len=={len});").unwrap();
         }
         if sig.results.is_empty() {
             writeln!(source, "emit(ctx,status,values,0); return 0; }}").unwrap();
@@ -283,50 +291,46 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
 #[test]
 fn every_host_row_preserves_c_fields_and_status() {
     let mut source = String::from("core v1\n");
-    // Socket entries refuse before issue in W1a; their dedicated adapters are
-    // exercised by wire_net_source and the socket ownership fixtures.
-    for (i, op) in HostOp::ALL
-        .iter()
-        .copied()
-        .filter(|op| {
-            op.code() <= LAST_MODELED_OP
-                && !matches!(
-                    op,
-                    HostOp::Connect
-                        | HostOp::Listen
-                        | HostOp::Accept
-                        | HostOp::RecvBounded
-                        | HostOp::RecvReady
-                        | HostOp::SendPair
-                        | HostOp::NetNarrow
-                        | HostOp::NetNarrowTls
-                        | HostOp::NetNarrowResolve
-                        | HostOp::Resolve
-                        | HostOp::CredFetch
-                        | HostOp::TlsConnect
-                        | HostOp::SendSecret
-                        | HostOp::SecretSeal
-                        | HostOp::SecretNarrow
-                        | HostOp::SecretHmac
-                        | HostOp::SecretDeriveHmac
-                        | HostOp::SecretVerifyHmac
-                        | HostOp::SecretWrap
-                        | HostOp::SecretUnwrap
-                        | HostOp::SecretSign
-                        | HostOp::NetSplit
-                        | HostOp::StdinRead
-                        | HostOp::EnvGet
-                        | HostOp::EnvLen
-                        | HostOp::EnvName
-                        | HostOp::EnvNarrow
-                )
-        })
-        .enumerate()
-    {
+    // FORM #50's file, directory, stream, random and clock C callbacks.
+    // The capability-specific adapters have separate fixtures and cannot be
+    // driven by the mock Dir grant and common request below.
+    const CALLBACK_ROWS: &[HostOp] = &[
+        HostOp::Open,
+        HostOp::Read,
+        HostOp::Write,
+        HostOp::Close,
+        HostOp::TryLock,
+        HostOp::Unlock,
+        HostOp::Mkdir,
+        HostOp::Mkdtemp,
+        HostOp::Mkstemp,
+        HostOp::Remove,
+        HostOp::RemoveTree,
+        HostOp::WallMs,
+        HostOp::MonoNs,
+        HostOp::Stdout,
+        HostOp::Stderr,
+        HostOp::Rename,
+        HostOp::SleepUntil,
+        HostOp::SleepUntilWall,
+        HostOp::Sync,
+        HostOp::SyncDir,
+        HostOp::Random,
+        HostOp::Stopped,
+        HostOp::OpenDir,
+        HostOp::Entries,
+        HostOp::NextEntries,
+        HostOp::Stat,
+        HostOp::StatFile,
+        HostOp::ReadAt,
+        HostOp::WriteAt,
+    ];
+    for (i, op) in CALLBACK_ROWS.iter().copied().enumerate() {
         let s = RtOp::Host(op).signature();
         let ty = |t: Ty| match t {
             Ty::Ptr => "ptr",
             Ty::Scalar(Scalar::U64) => "u64",
+            Ty::Scalar(Scalar::I64) => "i64",
             Ty::Scalar(Scalar::U32) => "u32",
             Ty::Scalar(Scalar::U8) => "u8",
             _ => unreachable!(),
@@ -392,44 +396,7 @@ fn every_host_row_preserves_c_fields_and_status() {
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let mut runs = Vec::new();
-    for (i, op) in HostOp::ALL
-        .iter()
-        .copied()
-        .filter(|op| {
-            op.code() <= LAST_MODELED_OP
-                && !matches!(
-                    op,
-                    HostOp::Connect
-                        | HostOp::Listen
-                        | HostOp::Accept
-                        | HostOp::RecvBounded
-                        | HostOp::RecvReady
-                        | HostOp::SendPair
-                        | HostOp::NetNarrow
-                        | HostOp::NetNarrowTls
-                        | HostOp::NetNarrowResolve
-                        | HostOp::Resolve
-                        | HostOp::CredFetch
-                        | HostOp::TlsConnect
-                        | HostOp::SendSecret
-                        | HostOp::SecretSeal
-                        | HostOp::SecretNarrow
-                        | HostOp::SecretHmac
-                        | HostOp::SecretDeriveHmac
-                        | HostOp::SecretVerifyHmac
-                        | HostOp::SecretWrap
-                        | HostOp::SecretUnwrap
-                        | HostOp::SecretSign
-                        | HostOp::NetSplit
-                        | HostOp::StdinRead
-                        | HostOp::EnvGet
-                        | HostOp::EnvLen
-                        | HostOp::EnvName
-                        | HostOp::EnvNarrow
-                )
-        })
-        .enumerate()
-    {
+    for (i, op) in CALLBACK_ROWS.iter().copied().enumerate() {
         for failing in [false, true] {
             // The dedicated sleep export is a replay-delivered cancellation
             // point; this generic provider matrix injects only host_op rows.
@@ -441,6 +408,8 @@ fn every_host_row_preserves_c_fields_and_status() {
             } else {
                 Outcome::Returned(if matches!(op, HostOp::Random | HostOp::Stopped) {
                     vec![]
+                } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+                    vec![0x1011121314151617, 5, 0x89abcdef, 0xa122232425262728, 0x9a]
                 } else if op.waits() {
                     vec![0x1011121314151617, 5, 0x89abcdef, 0x2122232425262728]
                 } else {

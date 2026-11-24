@@ -1,0 +1,157 @@
+// L56. The read fixture fails after the publisher has consumed one successful
+// page or staged the first row of a cover. Settlement uses the real owner mailbox.
+type FailedRead = ReclaimedBlock | RemoteRead | DeviceRead
+type ReadPhase: key = ChangesPage | ViewRead | SubscribeRead
+
+fn failed_read(problem: FailedRead) -> store.Error {
+    match problem {
+        ReclaimedBlock => Reclaimed(37u64),
+        RemoteRead => Remote(Retriable(Deadline)),
+        DeviceRead => Io(Other(5u32)),
+    }
+}
+
+fn failing_reads(problem: FailedRead, phase: ReadPhase) -> PublisherReads {
+    let pages = fn(reader: store.Reader, a: Option[store.Snapshot], b: store.Snapshot, lo: Bytes, hi: Bytes, limits: store.Limits) -> Result[store.ChangePage, store.Error] waits {
+        if phase == ChangesPage && list.len(lo) != 0u64 { return Error(failed_read(problem)) }
+        store.changes_page(reader, a, b, lo, hi, limits)
+    }
+    let span = fn(reader: store.Reader, mut rows: store.SpanRows, first: bool) -> Result[Option[store.Change], store.Error] waits {
+        if phase != ChangesPage && !first { return Error(failed_read(problem)) }
+        store.next_span_change(reader, mut rows)
+    }
+    PublisherReads(changes: take pages, span: take span)
+}
+
+type FailedReadOwner {
+    from: Receiver[WireEvent],
+    fence: Latest[Fence],
+    to: Sender[WireEvent]
+}
+
+fn failed_read_owner(mut joined: List[Joiner], mut rounds: RoundRegister, who: u64) -> FailedReadOwner {
+    let (to, from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
+    let root = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
+    let identity = latest.new(arc.new(OwnerNumber(number: who)))
+    let fences = result.unwrap(fence_reserve(mut rounds, latest.handle(root)))
+    list.push(mut joined, Joiner(who: who, to: channel.sender(to), closed: None, ended: list.new(),
+        reset: false, read_failed: false, mark: None, identity: Some(take identity),
+        fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    FailedReadOwner(from: take from, fence: take root, to: take to)
+}
+
+fn failed_read_sub() -> SubscriptionInput {
+    SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64))
+}
+
+fn failed_read_reset(owner: FailedReadOwner, at: u64) -> bool {
+    let Ok(WireEvent(e: FromRunner(Notice(e: Updated(received))))) = channel.try_receive(owner.from) else { return false }
+    let Some(content) = view received.content else { return false }
+    if list.len(received.outcomes) != 2u64 { return false }
+    let Abandoned = received.outcomes[0u64].outcome else { return false }
+    let Refused(Overloaded) = received.outcomes[1u64].outcome else { return false }
+    received.version == at && content.reset && list.len(content.complete) == 0u64
+        && list.len(content.rows) == 0u64 && list.len(content.ended) == 0u64
+        && received.outcomes[0u64].p == 17u64 && received.outcomes[1u64].p == 18u64
+}
+
+fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t = view h.t
+    let empty = store.snapshot(db)
+    let mut model: List[Option[u64]] = list.new()
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 11u64)
+    law_set(mut db, mut model, t, 2u64, 22u64)
+    let base = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
+        list.push(mut keys, clone(ch.tree_key))
+    }
+    let a = store.version(base)
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let reader = result.unwrap(store.reader(db, 0u64))
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(),
+        base: take base, newest: None, subs: subscriptions())
+
+    let Mailbox(rounds: take reserved, ..) = result.unwrap(mailbox(8u64))
+    let mut rounds = take reserved
+    let mut joined: List[Joiner] = list.new()
+    let owner = failed_read_owner(mut joined, mut rounds, 1u64)
+    let other = failed_read_owner(mut joined, mut rounds, 2u64)
+    let register = latest.handle(rounds.round)
+    fence_round(mut joined, Fenced(sessions: map.new()), a, mut rounds)
+
+    let first = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
+    if list.len(first.complete) != 1u64 || first.complete[0u64] != 1u32 || list.len(first.rows) != 2u64 || !release_load(register, owner.fence, a) { return false }
+    let mut cl = Client(caches: list.new(), last: list.new())
+    let mut watched: List[Watched] = list.new()
+    list.push(mut watched, Watched(who: 1u64, sub: 1u32, q: Q1))
+    if !apply(mut cl, take first) || !image_matches(cl, keys, model, watched) { return false }
+
+    let mut answers: List[CallAnswer] = list.new()
+    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)),
+        KeyedDone(stream: no_arg(), p: 17u64, outcome: Abandoned)))
+    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)),
+        KeyedDone(stream: no_arg(), p: 18u64, outcome: Refused(Overloaded))))
+    let mut waiting: List[Replies] = list.new()
+    keep_answers(mut waiting, take answers)
+
+    b.reads = failing_reads(problem, phase)
+    let mut owes: List[Owe] = list.new()
+    let at = if phase == SubscribeRead {
+        publish_wire_subscription(mut b, mut joined, mut owes, 1u64, 1u32, 2u64, failed_read_sub())
+        if latest.read(register).at != a || release_load(register, owner.fence, a) { return false }
+        a
+    } else {
+        law_set(mut db, mut model, t, 0u64, 0u64)
+        for k in 1u64 .. 70u64 { law_set(mut db, mut model, t, k, 100u64 + k) }
+        let committed = store.snapshot(db)
+        let version = store.version(committed)
+        b.newest = Some(take committed)
+        let mut fenced = Fenced(sessions: map.new())
+        owes = round(mut b, mut fenced)
+        fence_before_round(mut joined, take fenced, version, mut rounds, scoped fn() {
+            if latest.read(register).at != a || latest.read(owner.fence).latest != version ||
+                latest.read(other.fence).latest != 0u64 {
+                fail("L56: affected fences must publish before R")
+            }
+        })
+        if latest.read(register).at != version || release_load(register, owner.fence, a) { return false }
+        version
+    }
+
+    if !release_load(register, other.fence, a) || !ended_entry(b.subs, SubId(who: 1u64, sub: 1u32, serial: 1u64)) { return false }
+    settle(mut b.subs, mut joined, mut waiting, take owes, at)
+    if !failed_read_reset(owner, at) { return false }
+    // The client takes the reset: it drops every cache of the session.
+    while let Some(j) = first_of(cl, 1u64) {
+        let _ = list.remove(mut cl.caches, j)
+    }
+    settle(mut b.subs, mut joined, mut waiting, list.new(), at)
+    if let Error(Empty) = channel.try_receive(owner.from) {} else { return false }
+    if let Error(Empty) = channel.try_receive(other.from) {} else { return false }
+
+    b.reads = publisher_reads()
+    let restarted = at_base_generation(mut b, 1u64, 1u32, 3u64, failed_read_sub())
+    let expected = if phase == SubscribeRead { 2u64 } else { 0u64 }
+    if restarted.version != at || list.len(restarted.complete) != 1u64 || restarted.complete[0u64] != 1u32 || list.len(restarted.rows) != expected {
+        return false
+    }
+    apply(mut cl, take restarted) && image_matches(cl, keys, model, watched)
+}
+
+@test
+fn test_global_fence_barrier_failed_reads(c: Clock, r: Random) -> Result[(), (u64, u64)] waits {
+    let failures = [ReclaimedBlock, RemoteRead, DeviceRead]
+    let phases = [ChangesPage, ViewRead, SubscribeRead]
+    for i in 0u64 .. 3u64 {
+        for j in 0u64 .. 3u64 {
+            if !read_failure_case(c, r, failures[i], phases[j]) { return Error((i, j)) }
+        }
+    }
+    Ok(())
+}

@@ -1,0 +1,146 @@
+fn jpeg_sof(marker: u8) -> bool {
+    marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc
+}
+
+fn jpeg_header_marker(marker: u8) -> bool {
+    (marker >= 0xc0 && marker <= 0xc2) || marker == 0xc4 || marker == 0xcc || marker == 0xda || marker == 0xdb || marker == 0xdd || (marker >= 0xe0 && marker <= 0xef) || marker == 0xfe
+}
+
+fn jpeg_cutoff(end: u64, size: u64) -> Error {
+    if end < size {
+        HeaderLimit
+    } else {
+        Truncated
+    }
+}
+
+fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    let mut at = 2u64
+    let mut header = info(Jpeg, 0, 0, 0, false)
+    let mut in_scan = false
+    let mut scanned = false
+    let mut exif = false
+    let mut icc_first = 0u64
+    let mut icc_end = 0u64
+    let mut icc_count = 0u8
+    let mut icc_seen = 0u64
+    let mut icc_parts: Inline[bool, 256] =[false; 256]
+    let mut limit = order.min(n, limits.max_header_bytes)
+    while at < limit {
+        if input[at] != 0xff {
+            if !in_scan {
+                return Error(Malformed)
+            }
+            let Some(marker) = list.find_byte(input, at + 1, limit, 0xff) else {
+                return Error(jpeg_cutoff(limit, n))
+            }
+            at = marker
+        }
+        let start = at
+        while at < limit && input[at] == 0xff {
+            at += 1
+        }
+        if at == limit {
+            return Error(jpeg_cutoff(limit, n))
+        }
+        let marker = input[at]
+        at += 1
+        if in_scan && (marker == 0 || (marker >= 0xd0 && marker <= 0xd7)) {
+            continue
+        }
+        in_scan = false
+        if !scanned && !jpeg_header_marker(marker) {
+            return Error(Malformed)
+        }
+        if marker == 0xd9 {
+            if !scanned || at != n {
+                return Error(Malformed)
+            }
+            if icc_seen != int.widen(icc_count) {
+                return Error(Malformed)
+            }
+            if icc_seen > 1 {
+                header.icc_profile = Some(IccProfile(start: icc_first, end: icc_end, storage: JpegSegments))
+                header.color_space = EmbeddedIcc
+            }
+            return Ok(header)
+        }
+        if marker < 0xc0 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd7) {
+            return Error(Malformed)
+        }
+        if limit - at < 2 {
+            return Error(jpeg_cutoff(limit, n))
+        }
+        let length: u64 = int.widen(tiff_short(input, at, false))
+        if length < 2 {
+            return Error(Malformed)
+        }
+        if length > limit - at {
+            return Error(jpeg_cutoff(limit, n))
+        }
+        let body = at + 2
+        let end = at + length
+        if jpeg_sof(marker) {
+            if header.width != 0 || length < 8 {
+                return Error(Malformed)
+            }
+            if marker > 0xc2 {
+                return Error(Unsupported)
+            }
+            let h: u32 = int.widen(tiff_short(input, body + 1, false))
+            let w: u32 = int.widen(tiff_short(input, body + 3, false))
+            check_size(w, h, 1, limits)?
+            let channels: u64 = int.widen(input[body + 5])
+            let depth = input[body]
+            if (channels != 1 && channels != 3) || length != 8 + 3 * channels || depth != 8 {
+                return Error(Malformed)
+            }
+            header.width = w
+            header.height = h
+            header.bit_depth = depth
+        } else if marker == 0xda {
+            if length < 8 || header.width == 0 {
+                return Error(Malformed)
+            }
+            let channels: u64 = int.widen(input[body])
+            if channels == 0 || length != 6 + 2 * channels {
+                return Error(Malformed)
+            }
+            in_scan = true
+            scanned = true
+            limit = n
+        } else if marker == 0xdc || marker == 0xde || marker == 0xdf {
+            return Error(Unsupported)
+        } else if marker == 0xe1 && length >= 8 && exif_signature(input, body) {
+            if exif {
+                return Error(Malformed)
+            }
+            header.orientation = exif_orientation(input, body + 6, end)?
+            exif = true
+        } else if marker == 0xe2 && length >= 14 && jpeg_icc_signature(input, body) {
+            if length <= 16 {
+                return Error(Malformed)
+            }
+            let part = input[body + 12]
+            let count = input[body + 13]
+            let index: u64 = int.widen(part)
+            if part == 0 || part > count || icc_parts[index] || (icc_count != 0 && icc_count != count) {
+                return Error(Malformed)
+            }
+            icc_parts[index] = true
+            if icc_count == 0 {
+                icc_first = start
+                icc_count = count
+            }
+            if count == 1 {
+                header.color_space = raw_icc_color(input, body + 14, end)?
+                header.icc_profile = Some(IccProfile(start: body + 14, end: end, storage: Raw))
+            }
+            icc_end = end
+            icc_seen += 1
+        }
+        at = end
+    }
+    Error(jpeg_cutoff(limit, n))
+}

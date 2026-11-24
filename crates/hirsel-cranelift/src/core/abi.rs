@@ -30,12 +30,11 @@ impl Signature {
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
-            &c::Signature {
-                params: params.iter().copied().map(Param::Value).collect(),
-                results: results.to_vec(),
-                dest: None,
-                never: false,
-            },
+            &c::Signature::new(
+                params.iter().copied().map(Param::Value).collect(),
+                results.to_vec(),
+                None,
+            ),
             None,
             aarch64(object),
             call_conv(object),
@@ -358,4 +357,16 @@ pub(super) fn store_record(
         b.ins()
             .store(MemFlags::trusted(), value, address, offset as i32);
     }
+}
+
+pub(super) fn op_signature(op: HostOp) -> Vec<Ty> {
+    hirsel_core_ir::RtOp::Host(op)
+        .signature()
+        .params
+        .into_iter()
+        .map(|p| match p {
+            hirsel_core_ir::Param::Value(t) => t,
+            _ => unreachable!(),
+        })
+        .collect()
 }

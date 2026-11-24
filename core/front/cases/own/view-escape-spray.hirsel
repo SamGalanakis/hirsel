@@ -1,0 +1,142 @@
+// LANG-6, OWN-8: the native leg of the view-join matrix. Each carrier family escapes
+// a view of a heap-backed temporary out of its construct, then 64 strings of the
+// anchor's size are allocated before the view is read. A carrier whose anchor was
+// freed at the escape reads a sprayed block, so the value changes natively as well
+// as tripping the evaluator's freed-block check. Hand-derived values: the anchor is
+// the 36 bytes "a".."z","0".."9", so its last byte '9' (57) plus its length is 93;
+// a read of the spray ('Z', 90) would give 126. Named temporaries are finalized
+// once, after the view's last read: trace 3.
+// expect: run bytes_break(1) = 93
+// expect: run bytes_label(1) = 93
+// expect: run bytes_if(1) = 93
+// expect: run bytes_match(1) = 93
+// expect: run bytes_tail(1) = 93
+// expect: run named_break(1) = 93 trace 3
+// expect: run option_break(1) = 93
+// expect: run pair_break(1) = 98
+// expect: run holder_break(1) = 93
+resource type Named {
+    id: u64,
+    s: String
+} drop(n) {
+    let _ = n.id
+}
+
+scoped type Holder {
+    b: View[Bytes]
+}
+
+fn nm(n: Named) -> View[Named] in n {
+    view n
+}
+
+fn mkn(i: u64) -> Named {
+    result.unwrap(Named(id: i, s: made("abcdefghijklmnopqrstuvwxyz0123456789")))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn anchor() -> String {
+    made("abcdefghijklmnopqrstuvwxyz0123456789")
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn score(b: Bytes) -> u64 {
+    last_byte(b) + list.len(b)
+}
+
+fn spray(n: u64) -> List[String] {
+    let mut s: List[String] = list.new()
+    let mut i = 0u64
+    while i < n {
+        list.push(mut s, made("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"))
+        i = i + 1
+    }
+    s
+}
+
+fn bytes_break(c: u64) -> u64 {
+    let v = loop {
+        break string.as_bytes(anchor())
+    }
+    let s = spray(64 * c)
+    score(v)
+}
+
+fn bytes_label(c: u64) -> u64 {
+    let v = 'out: {
+        loop {
+            break 'out string.as_bytes(anchor())
+        }
+    }
+    let s = spray(64 * c)
+    score(v)
+}
+
+fn bytes_if(c: u64) -> u64 {
+    let v = if c == 1 {
+        string.as_bytes(anchor())
+    } else {
+        string.as_bytes(made("0"))
+    }
+    let s = spray(64 * c)
+    score(v)
+}
+
+fn bytes_match(c: u64) -> u64 {
+    let v = match c {
+        1 => string.as_bytes(anchor()),
+        _ => string.as_bytes(made("0"))
+    }
+    let s = spray(64 * c)
+    score(v)
+}
+
+fn bytes_tail(c: u64) -> u64 {
+    let v = {
+        let k = c
+        string.as_bytes(anchor())
+    }
+    let s = spray(64 * c)
+    score(v)
+}
+
+fn named_break(c: u64) -> u64 {
+    let v = loop {
+        break nm(mkn(3))
+    }
+    let s = spray(64 * c)
+    score(string.as_bytes(v.s))
+}
+
+fn option_break(c: u64) -> u64 {
+    let o = loop {
+        break Some(string.as_bytes(anchor()))
+    }
+    let s = spray(64 * c)
+    match o {
+        Some(b) => score(b),
+        None => 0
+    }
+}
+
+fn pair_break(c: u64) -> u64 {
+    let t = loop {
+        break (string.as_bytes(anchor()), 5u64)
+    }
+    let s = spray(64 * c)
+    score(t.0) + t.1
+}
+
+fn holder_break(c: u64) -> u64 {
+    let h = Holder(b: loop {
+        break string.as_bytes(anchor())
+    })
+    let s = spray(64 * c)
+    score(h.b)
+}

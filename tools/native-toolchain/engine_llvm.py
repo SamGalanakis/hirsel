@@ -56,9 +56,8 @@ CC = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
 CPU = os.environ.get('HIRSEL_MEASURE_CPU', '16')
 
 
-def training(out):
-    """(tag, build arguments) for each training program; inputs are written under OUT."""
-    jobs = []
+def arena(out):
+    """Write LangArena's suite inputs and return its build arguments."""
     host = out / 'arena-host'
     host.mkdir()
     shutil.copyfile(ROOT / 'core/langarena/rust/run.js', host / 'config.json')
@@ -68,8 +67,13 @@ def training(out):
     spec['packages'][-1]['sources'] = [s for s in spec['packages'][-1]['sources'] if len(s['modules']) == 1]
     spec['packages'][-1]['sources'].append({'file': str(suite), 'modules': ['suite'], 'signatures': False})
     (out / 'arena.json').write_text(json.dumps(spec))
-    jobs.append(('arena', ['--inputs', str(out / 'arena.json'), '--entry', 'langarena@1/suite/main', '--dir', str(host),
-                           '--grant', 'Stdout', '--grant', 'Tasks', '--limit', '1073741824']))
+    return ['--inputs', str(out / 'arena.json'), '--entry', 'langarena@1/suite/main', '--dir', str(host),
+            '--grant', 'Stdout', '--grant', 'Tasks', '--limit', '1073741824']
+
+
+def training(out):
+    """(tag, build arguments) for each training program; inputs are written under OUT."""
+    jobs = [('arena', arena(out))]
     manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     for e in manifest['entries']:
         tag = f"{e['workload']}-{e['variant']}"
@@ -125,13 +129,19 @@ def shadow(library, compiler, out):
     return copy
 
 
+def shadow_engine(compiler):
+    return compiler.parents[6] / 'tools/buck2/toolchains/llvm-files/engine/libLLVM.so.23.1'
+
+
+def shadow_environment(compiler):
+    notes = subprocess.check_output(['readelf', '-n', shadow_engine(compiler)], text=True)
+    [build_id] = [line.split()[-1] for line in notes.splitlines() if 'Build ID:' in line]
+    return dict(os.environ, LD_LIBRARY_PATH=str(PIN), HIRSEL_LLVM_EXPERIMENT_BUILD_ID=build_id)
+
+
 def build(compiler, runtime, args, out, xdg, sample, memory_limit='2G', capture_rss=False):
     out.mkdir(parents=True)
-    engine = compiler.parents[6] / 'tools/buck2/toolchains/llvm-files/engine/libLLVM.so.23.1'
-    notes = subprocess.check_output(['readelf', '-n', engine], text=True)
-    [build_id] = [line.split()[-1] for line in notes.splitlines() if 'Build ID:' in line]
-    env = os.environ | dict(HIRSEL_MEMORY_LIMIT=memory_limit, HIRSEL_JOBS='1', LD_LIBRARY_PATH=str(PIN),
-                            HIRSEL_LLVM_EXPERIMENT_BUILD_ID=build_id,
+    env = shadow_environment(compiler) | dict(HIRSEL_MEMORY_LIMIT=memory_limit, HIRSEL_JOBS='1',
                             XDG_CACHE_HOME=str(xdg / 'cache'), XDG_DATA_HOME=str(xdg / 'data'))
     pre = ['taskset', '-c', CPU, 'perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', str(out / 'perf'), '--'] if sample else []
     executable = out / 'exe'

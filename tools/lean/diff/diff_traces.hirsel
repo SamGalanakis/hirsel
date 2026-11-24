@@ -1,0 +1,403 @@
+// KC4 differential trace driver. It is a test source mapped into module `triggers`, so it may
+// build the module's private records, and it calls the unmodified definitions of
+// core/programs/runner/triggers.hirsel. Each seed opens a fresh memory store and runs a
+// deterministic sequence of trigger operations, one store transaction per operation. It prints
+// the call environment the store hands that transaction (`env`), then the operation's reply
+// or typed error and whether it committed, then every committed row and outcome. The `env`
+// lines are inputs to proofs/DiffRunner.lean; every other line must match it byte for byte.
+
+type DiffGen { s: u64 }
+
+// The shared LCG (Knuth MMIX constants); DiffRunner.lean uses the same one.
+fn diff_next(mut g: DiffGen, n: u64) -> u64 {
+    g.s = int.wrapping_add(int.wrapping_mul(g.s, 6364136223846793005u64), 1442695040888963407u64)
+    (g.s >> 33u64) % n
+}
+
+type DiffOp = DWrite(u64, u64, Due, bool) | DStart(Id, Bytes) | DHold(Attempt, u64, Bytes, Bytes) | DRelease(Id, Option[Bytes]) | DCancel(Id) | DFinish(Attempt, Terminal) | DFinishCancel(Id) | DFinishTransact(Id, Terminal) | DFence(Attempt)
+
+type DiffReply = DWrote(Id) | DBegan(Attempt) | DHeld | DFenced(bool) | DApplied
+
+type DiffCall {
+    tables: Tables,
+    entries: Entries,
+    target: Entry[u64],
+    op: DiffOp,
+}
+
+fn diff_bytes(n: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    if n != 0u64 { list.push(mut b, int.truncate(n)) }
+    b
+}
+
+// Entry 0 and 1 share a path and differ in schema; entry 2 has its own path and no grants.
+fn diff_entry(k: u64) -> Entry[u64] {
+    let p = if k == 2u64 { diff_bytes(5u64) } else { diff_bytes(1u64) }
+    let sc = if k == 1u64 { diff_bytes(4u64) } else { diff_bytes(3u64) }
+    Entry(ref: EntryRef(path: take p, schema: take sc, granted: k != 2u64), codec: std.codec.of())
+}
+
+// start, finish_cancel and finish_transact read only the Pending id.
+fn diff_pending(id: Id) -> Pending {
+    Pending(id: id, row: SubRow(path: list.new(), schema: list.new(), arg: list.new(), due: 0u64, granted: false,
+        attempt: 0u64, revision: list.new(), state: Waiting, cancel: false))
+}
+
+fn diff_apply(mut tx: store.Tx, call: DiffCall) -> Result[DiffReply, Error] {
+    match call.op {
+        DWrite(_, arg, when, twice) => {
+            if twice { let _ = write(mut tx, call.tables, call.entries, call.target, arg, when)? }
+            Ok(DWrote(write(mut tx, call.tables, call.entries, call.target, arg, when)?))
+        },
+        DStart(id, revision) => match start(mut tx, call.tables, diff_pending(id), revision)? {
+            Body(a) => Ok(DBegan(a)),
+            Held => Ok(DHeld),
+        },
+        DHold(a, step, expected, actual) => {
+            hold(mut tx, call.tables, a, step, expected, actual)?
+            Ok(DApplied)
+        },
+        DRelease(id, revision) => {
+            release(mut tx, call.tables, id, revision)?
+            Ok(DApplied)
+        },
+        DCancel(id) => {
+            request_cancel(mut tx, call.tables, id)?
+            Ok(DApplied)
+        },
+        DFinish(a, terminal) => {
+            finish(mut tx, call.tables, a, terminal)?
+            Ok(DApplied)
+        },
+        DFinishCancel(id) => {
+            finish_cancel(mut tx, call.tables, diff_pending(id))?
+            Ok(DApplied)
+        },
+        DFinishTransact(id, terminal) => {
+            finish_transact(mut tx, call.tables, diff_pending(id), terminal)?
+            Ok(DApplied)
+        },
+        DFence(a) => Ok(DFenced(fence(tx, call.tables, a)?)),
+    }
+}
+
+fn diff_push_bytes(mut s: String, b: Bytes) {
+    string.push(mut s, "[")
+    let mut lead = true
+    for x in b {
+        if !lead { string.push(mut s, ",") }
+        lead = false
+        string.push_u64(mut s, int.widen(x))
+    }
+    string.push(mut s, "]")
+}
+
+fn diff_push_id(mut s: String, id: Id) {
+    string.push_u64(mut s, id.store_hi)
+    string.push(mut s, ":")
+    string.push_u64(mut s, id.store_lo)
+    string.push(mut s, ":")
+    string.push_u64(mut s, int.widen(id.branch))
+    string.push(mut s, ":")
+    string.push_u64(mut s, id.version)
+    string.push(mut s, ":")
+    string.push_u64(mut s, id.index)
+}
+
+fn diff_push_bool(mut s: String, b: bool) {
+    if b { string.push(mut s, "true") } else { string.push(mut s, "false") }
+}
+
+fn diff_push_terminal(mut s: String, t: Terminal) {
+    match t {
+        Returned(b) => {
+            string.push(mut s, "Returned ")
+            diff_push_bytes(mut s, b)
+        },
+        Raised(k) => {
+            string.push(mut s, "Raised ")
+            string.push_u64(mut s, int.widen(k))
+        },
+        OutOfTime(n) => {
+            string.push(mut s, "OutOfTime ")
+            string.push_u64(mut s, n)
+        },
+        OutOfBytes(a, b) => {
+            string.push(mut s, "OutOfBytes ")
+            string.push_u64(mut s, a)
+            string.push(mut s, " ")
+            string.push_u64(mut s, b)
+        },
+        Gone => string.push(mut s, "Gone"),
+        Cancelled => string.push(mut s, "Cancelled"),
+        Cap => string.push(mut s, "Cap"),
+    }
+}
+
+fn diff_push_error(mut s: String, e: Error) {
+    match e {
+        Store(_) => string.push(mut s, "Store"),
+        StaleAttempt => string.push(mut s, "StaleAttempt"),
+        MissingEntry => string.push(mut s, "MissingEntry"),
+        AlreadyTriggerable => string.push(mut s, "AlreadyTriggerable"),
+        AttemptLimit => string.push(mut s, "AttemptLimit"),
+        IndexLimit => string.push(mut s, "IndexLimit"),
+        NotHeld => string.push(mut s, "NotHeld"),
+        CancelRequested => string.push(mut s, "CancelRequested"),
+        NotDue => string.push(mut s, "NotDue"),
+    }
+}
+
+// Every field but `arg`, whose bytes are the opaque codec encoding of the argument.
+fn diff_push_row(mut s: String, row: SubRow) {
+    string.push(mut s, "path=")
+    diff_push_bytes(mut s, row.path)
+    string.push(mut s, " schema=")
+    diff_push_bytes(mut s, row.schema)
+    string.push(mut s, " due=")
+    string.push_u64(mut s, row.due)
+    string.push(mut s, " granted=")
+    diff_push_bool(mut s, row.granted)
+    string.push(mut s, " attempt=")
+    string.push_u64(mut s, row.attempt)
+    string.push(mut s, " revision=")
+    diff_push_bytes(mut s, row.revision)
+    string.push(mut s, " state=")
+    match row.state {
+        Waiting => string.push(mut s, "Waiting"),
+        Running => string.push(mut s, "Running"),
+        Parked(Request(a, st, x, y)) => {
+            string.push(mut s, "Request ")
+            string.push_u64(mut s, a)
+            string.push(mut s, " ")
+            string.push_u64(mut s, st)
+            string.push(mut s, " ")
+            diff_push_bytes(mut s, x)
+            string.push(mut s, " ")
+            diff_push_bytes(mut s, y)
+        },
+        Parked(Revision(x, y)) => {
+            string.push(mut s, "Revision ")
+            diff_push_bytes(mut s, x)
+            string.push(mut s, " ")
+            diff_push_bytes(mut s, y)
+        },
+    }
+    string.push(mut s, " cancel=")
+    diff_push_bool(mut s, row.cancel)
+}
+
+fn diff_slot_id(ids: List[Id], i: u64) -> Id { ids[i] }
+
+// An attempt handle for slot i: the last issued number (5 in 8), one off it, or zero.
+fn diff_attempt(mut g: DiffGen, ids: List[Id], numbers: List[u64], i: u64) -> Attempt {
+    let n = numbers[i]
+    let pick = diff_next(mut g, 8u64)
+    let num = if pick == 0u64 { int.wrapping_sub(n, 1u64) } else if pick == 1u64 { int.wrapping_add(n, 1u64) } else if pick == 2u64 { 0u64 } else { n }
+    Attempt(id: ids[i], number: num)
+}
+
+fn diff_terminal(mut g: DiffGen) -> Terminal {
+    let pick = diff_next(mut g, 7u64)
+    if pick == 0u64 { return Returned(diff_bytes(4u64)) }
+    if pick == 1u64 { return Raised(3u32) }
+    if pick == 2u64 { return OutOfTime(9u64) }
+    if pick == 3u64 { return OutOfBytes(1u64, 2u64) }
+    if pick == 4u64 { return Gone }
+    if pick == 5u64 { return Cancelled }
+    Cap
+}
+
+fn diff_maybe_bytes(mut g: DiffGen, base: u64) -> Bytes {
+    let pick = diff_next(mut g, 3u64)
+    if pick == 0u64 { list.new() } else { diff_bytes(base + pick) }
+}
+
+fn diff_choose_op(mut g: DiffGen, kind: u64, i: u64, ids: List[Id], numbers: List[u64]) -> DiffOp {
+    let id = ids[i]
+    if kind == 0u64 {
+        let k = diff_next(mut g, 3u64)
+        let w = diff_next(mut g, 3u64)
+        let when = if w == 0u64 { AfterCommit } else { At(w - 1u64) }
+        let arg = diff_next(mut g, 1000u64)
+        return DWrite(k, arg, when, diff_next(mut g, 4u64) == 0u64)
+    }
+    if kind == 1u64 { return DStart(id, diff_maybe_bytes(mut g, 5u64)) }
+    if kind == 2u64 {
+        let a = diff_attempt(mut g, ids, numbers, i)
+        let step = diff_next(mut g, 4u64)
+        let expected = diff_maybe_bytes(mut g, 10u64)
+        return DHold(a, step, expected, diff_maybe_bytes(mut g, 20u64))
+    }
+    if kind == 3u64 {
+        if diff_next(mut g, 2u64) == 0u64 { return DRelease(id, None) }
+        return DRelease(id, Some(diff_maybe_bytes(mut g, 5u64)))
+    }
+    if kind == 4u64 { return DCancel(id) }
+    if kind == 5u64 {
+        let a = diff_attempt(mut g, ids, numbers, i)
+        return DFinish(a, diff_terminal(mut g))
+    }
+    if kind == 6u64 { return DFinishCancel(id) }
+    if kind == 7u64 { return DFinishTransact(id, diff_terminal(mut g)) }
+    DFence(diff_attempt(mut g, ids, numbers, i))
+}
+
+// Operation codes: 0 write, 1 start, 2 hold, 3 release, 4 cancel, 5 finish, 6 finish_cancel,
+// 7 finish_transact, 8 fence, 9 allow, 10 listed; writes and starts are drawn most often.
+fn diff_kind(r: u64) -> u64 {
+    if r < 4u64 { return 0u64 }
+    if r < 6u64 { return 1u64 }
+    if r < 9u64 { return r - 4u64 }
+    if r < 11u64 { return 5u64 }
+    if r < 15u64 { return r - 5u64 }
+    10u64
+}
+
+fn diff_trace(tasks: Tasks, mut s: String, seed: u64, steps: u64) waits {
+    let (c, hand) = provide.clock(0u64, 0u64)
+    let mut db = store.memory(c, provide.random(seed), result.unwrap(store.sized(Memory, 1074790400u64)))
+    let tabs = result.unwrap(store.bind_declaration(mut db, Migrate, declare_tables))
+    let reader = result.unwrap(store.reader(db, store.VALUE_LIMIT + 1048576u64))
+    let mut g = DiffGen(s: seed)
+    let mut entries = empty_entries()
+    // Slot ids start as ids no write can issue (version 0), so early operations meet no row.
+    let mut ids: List[Id] = list.new()
+    let mut numbers: List[u64] = list.new()
+    for j in 0u64..3u64 {
+        list.push(mut ids, Id(store_hi: 0u64, store_lo: 0u64, branch: 0u32, version: 0u64, index: j))
+        list.push(mut numbers, 0u64)
+    }
+    string.push(mut s, "trace ")
+    string.push_u64(mut s, seed)
+    string.push(mut s, "\n")
+    // Every trace allows one listed entry first, through `allow` like any later allow.
+    let opening = seed % 3u64
+    string.push(mut s, "allow ")
+    string.push_u64(mut s, opening)
+    match allow(mut entries, diff_entry(opening)) {
+        Ok(()) => string.push(mut s, " ok\n"),
+        Error(_) => fail("diff: the opening allow is refused"),
+    }
+    for _ in 0u64..steps {
+        let kind = diff_kind(diff_next(mut g, 16u64))
+        let i = diff_next(mut g, 3u64)
+        if kind == 9u64 {
+            let k = diff_next(mut g, 3u64)
+            string.push(mut s, "allow ")
+            string.push_u64(mut s, k)
+            match allow(mut entries, diff_entry(k)) {
+                Ok(()) => string.push(mut s, " ok\n"),
+                Error(e) => {
+                    string.push(mut s, " err ")
+                    diff_push_error(mut s, e)
+                    string.push(mut s, "\n")
+                },
+            }
+        } else if kind == 10u64 {
+            let k = diff_next(mut g, 3u64)
+            let flip = diff_next(mut g, 2u64) == 0u64
+            let e = diff_entry(k)
+            string.push(mut s, "listed ")
+            string.push_u64(mut s, k)
+            string.push(mut s, " ")
+            diff_push_bool(mut s, flip)
+            string.push(mut s, " ")
+            diff_push_bool(mut s, listed(entries, e.ref.path, e.ref.schema, e.ref.granted != flip))
+            string.push(mut s, "\n")
+        } else {
+            let op = diff_choose_op(mut g, kind, i, ids, numbers)
+            let target = match op {
+                DWrite(k, _, _, _) => diff_entry(k),
+                _ => diff_entry(0u64),
+            }
+            let info = store.next_call_info(db)
+            string.push(mut s, "env ")
+            string.push_u64(mut s, info.id.store.hi)
+            string.push(mut s, " ")
+            string.push_u64(mut s, info.id.store.lo)
+            string.push(mut s, " ")
+            string.push_u64(mut s, int.widen(info.id.branch))
+            string.push(mut s, " ")
+            string.push_u64(mut s, info.id.version)
+            string.push(mut s, " ")
+            string.push_u64(mut s, info.at)
+            string.push(mut s, "\n")
+            string.push(mut s, "op ")
+            string.push_u64(mut s, kind)
+            string.push(mut s, " slot ")
+            string.push_u64(mut s, i)
+            let call = DiffCall(tables: store.copy_env(tabs), entries: store.copy_env(entries), target: take target, op: take op)
+            match result.unwrap(store.run(mut db, None, take call, diff_apply)) {
+                Committed(store.Done(value: take value, ticket: ticket, ..)) => {
+                    string.push(mut s, " commit ")
+                    match take value {
+                        DWrote(new) => {
+                            string.push(mut s, "wrote ")
+                            diff_push_id(mut s, new)
+                            ids[i] = new
+                            numbers[i] = 0u64
+                        },
+                        DBegan(a) => {
+                            string.push(mut s, "began ")
+                            diff_push_id(mut s, a.id)
+                            string.push(mut s, " ")
+                            string.push_u64(mut s, a.number)
+                            numbers[i] = a.number
+                        },
+                        DHeld => string.push(mut s, "held"),
+                        DFenced(b) => {
+                            string.push(mut s, "fenced ")
+                            diff_push_bool(mut s, b)
+                        },
+                        DApplied => string.push(mut s, "applied"),
+                    }
+                    result.unwrap(store.durable(mut db, ticket))
+                },
+                Aborted(store.Undone(value: take e, ..)) => {
+                    string.push(mut s, " abort ")
+                    diff_push_error(mut s, e)
+                },
+                _ => fail("diff: unexpected store result"),
+            }
+            string.push(mut s, "\n")
+            let snapshot = store.snapshot(db)
+            let mut rows = result.unwrap(store.scan(reader, snapshot, tabs.rows, Unbounded, Unbounded))
+            while let Some((id, row)) = result.unwrap(store.next(reader, mut rows)) {
+                string.push(mut s, "  row ")
+                diff_push_id(mut s, id)
+                string.push(mut s, " ")
+                diff_push_row(mut s, row)
+                string.push(mut s, "\n")
+            }
+            let mut ends = result.unwrap(store.scan(reader, snapshot, tabs.outcomes, Unbounded, Unbounded))
+            while let Some((id, t)) = result.unwrap(store.next(reader, mut ends)) {
+                string.push(mut s, "  outcome ")
+                diff_push_id(mut s, id)
+                string.push(mut s, " ")
+                diff_push_terminal(mut s, t)
+                string.push(mut s, "\n")
+            }
+        }
+    }
+    let _ = hand
+    result.unwrap(store.close(take db))
+}
+
+// Entry for hirsel-core-contract-eval: traces `lo .. lo + count`, `steps` operations each.
+fn diff_run(tasks: Tasks, out: Stdout, lo: u64, count: u64, steps: u64) -> Result[(), ()] waits {
+    for seed in lo..lo + count {
+        let mut s = string.new()
+        diff_trace(tasks, mut s, seed, steps)
+        match stdout.write(out, s) {
+            Ok(()) => (),
+            Error(_) => return Error(()),
+        }
+    }
+    Ok(())
+}
+
+pub fn diff_main(tasks: Tasks, out: Stdout) -> Result[(), ()] waits {
+    diff_run(tasks, out, 1u64, 240u64, 60u64)
+}

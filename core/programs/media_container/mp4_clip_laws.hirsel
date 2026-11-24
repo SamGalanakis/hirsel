@@ -1,0 +1,45 @@
+/// bug: Cut at a sync-marked non-IDR access unit or copy the wrong byte ranges.
+/// oracle: AVC NAL unit types and ISO BMFF timing, using Mozilla's two-byte avcC configuration.
+@test
+fn clip_vod_uses_preceding_idr() -> Result[(), ()] waits {
+    let mut track = mux_test_track(0)
+    list.clear(mut track.samples)
+    track.timescale = 1000
+    track.movie_duration = 500
+    for i in 0u64 .. 5 {
+        list.push(mut track.samples, mp4.VodSample(offset: 4 * i, size: 4, decode_time: 100 * i, duration: 100, composition_offset: 0, sync: i != 4))
+    }
+    let mut tracks: List[mp4.MuxTrack] = list.with_capacity(1)
+    list.push(mut tracks, take track)
+    let mux = mp4.MuxLimits(metadata_bytes: 65536, sample_count: 5)
+    let headers = result.unwrap(mp4.write_vod(1000, 500, tracks, 20, mux))
+    let payload = b"\x00\x02\x65\xa0\x00\x02\x41\xa1\x00\x02\x65\xa2\x00\x02\x41\xa3\x00\x02\x41\xa4"
+    let mut source: Bytes = list.with_capacity(list.len(headers.prefix) + list.len(headers.suffix) + list.len(payload))
+    list.append(mut source, headers.prefix)
+    list.append(mut source, payload)
+    list.append(mut source, headers.suffix)
+    let size = list.len(source)
+    let vod = result.unwrap(mp4.video_probe(size, mp4.VodLimits(metadata_bytes: 65536, top_boxes: 3, tracks: 1), scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(n)
+        list.append(mut raw, list.slice(source, at, at + n))
+        Ok(take raw)
+    }))
+    let mut headers_read = 0u64
+    let clip = result.unwrap(mp4.clip_vod(vod, 350, 450, mp4.ClipLimits(mux: mux, nal_headers: 4), scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        if n != 3 || at != 36 + 4 * headers_read {
+            fail("clip requested more than the candidate NAL headers")
+        }
+        headers_read += 1
+        let mut raw: Bytes = list.with_capacity(n)
+        list.append(mut raw, list.slice(source, at, at + n))
+        Ok(take raw)
+    }))
+    if clip.source_start != 200 || clip.duration != 250 || clip.timescale != 1000 || headers_read != 4 || list.len(clip.payload) != 1 || clip.payload[0].start != 44 || clip.payload[0].end != 56 {
+        fail("clip start/end or three source access units")
+    }
+    let full = result.unwrap(mp4.remux_vod(vod, mux))
+    if full.source_start != 0 || full.duration != 500 || list.len(full.payload) != 1 || full.payload[0].start != 36 || full.payload[0].end != 56 {
+        fail("full remux omitted a packet")
+    }
+    Ok(())
+}

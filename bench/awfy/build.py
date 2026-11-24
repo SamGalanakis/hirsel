@@ -63,17 +63,16 @@ def native_provenance(command, manifest, *, cwd=None):
         cwd = Path.cwd()
     flags = list(map(str, command[2:]))
     path_roles = {"--inputs": "manifest", "--image": "library", "--store": "store", "--runtime": "runtime",
-                  "--dir": "workload directory", "-o": "image"}
+                  "--dir": "workload directory", "--cc": "clang", "-o": "image"}
     for index, flag in enumerate(flags[:-1]):
         if flag in path_roles:
             flags[index + 1] = path_roles[flag]
-        elif flag == "--cc":
-            flags[index + 1] = sha256(cwd / flags[index + 1])
     return {
         "flags": flags,
         **manifest_digests(manifest),
         "compiler_sha256": sha256(cwd / command[0]),
         "runtime_archive_sha256": sha256(cwd / command[command.index("--runtime") + 1]),
+        "clang_sha256": sha256(cwd / command[command.index("--cc") + 1]),
     }
 
 

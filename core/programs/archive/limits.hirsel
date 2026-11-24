@@ -1,0 +1,160 @@
+pub type Error: key = Truncated | Invalid | Unsupported | UnsafePath | UnsafeLink | Checksum | Overlap | InputLimit | EntryLimit | TotalLimit | CountLimit | RatioLimit | DepthLimit | StepLimit | WindowLimit
+
+pub type Limits {
+    input_bytes: u64,
+    entry_bytes: u64,
+    total_bytes: u64,
+    entries: u64,
+    ratio: u64,
+    depth: u64,
+    steps: u64,
+    zstd_window_bytes: u64,
+}
+
+pub type Kind: key = Regular | Folder | SymbolicLink
+
+pub fn defaults() -> Limits {
+    Limits(input_bytes: 67108864, entry_bytes: 16777216, total_bytes: 67108864, entries: 4096, ratio: 256, depth: 32, steps: 262144, zstd_window_bytes: 33554432)
+}
+
+pub opaque type Budget {
+    limits: Limits,
+    bytes_left: u64,
+    entries_left: u64,
+    steps_left: u64,
+}
+
+pub fn new_budget(limits: Limits, size: u64, depth: u64) -> Result[Budget, Error] {
+    if depth >= limits.depth {
+        return Error(DepthLimit)
+    }
+    if size > limits.input_bytes {
+        return Error(InputLimit)
+    }
+    Ok(Budget(limits: limits, bytes_left: limits.total_bytes, entries_left: limits.entries, steps_left: limits.steps))
+}
+
+pub fn step(mut budget: Budget) -> Result[(), Error] {
+    if budget.steps_left == 0 {
+        return Error(StepLimit)
+    }
+    budget.steps_left -= 1
+    Ok(())
+}
+
+pub fn entry(mut budget: Budget, size: u64) -> Result[(), Error] {
+    if budget.entries_left == 0 {
+        return Error(CountLimit)
+    }
+    if size > budget.limits.entry_bytes {
+        return Error(EntryLimit)
+    }
+    if size > budget.bytes_left {
+        return Error(TotalLimit)
+    }
+    budget.entries_left -= 1
+    budget.bytes_left -= size
+    Ok(())
+}
+
+pub fn ratio(size: u64, packed: u64, max: u64) -> Result[(), Error] {
+    if size != 0 && (packed == 0 || (size - 1) / packed >= max) {
+        return Error(RatioLimit)
+    }
+    Ok(())
+}
+
+/// Path components are byte-exact. Reject drive and stream specifiers as
+/// well as components Win32 would turn into parent-directory references.
+pub fn path(name: Bytes, max_depth: u64) -> Result[(), Error] {
+    let n = list.len(name)
+    if n == 0 || name[0] == 47 {
+        return Error(UnsafePath)
+    }
+    let mut start = 0u64
+    let mut depth = 0u64
+    for at in 0u64 .. n {
+        let b = name[at]
+        if b == 0 || b == 92 || b == 58 {
+            return Error(UnsafePath)
+        }
+        if b == 47 || at == n - 1 {
+            let end = if b == 47 {
+                at
+            } else {
+                at + 1
+            }
+            if start == end || name[end - 1] == 46 || name[end - 1] == 32 {
+                return Error(UnsafePath)
+            }
+            depth += 1
+            if depth > max_depth {
+                return Error(DepthLimit)
+            }
+            start = end + 1
+        }
+    }
+    Ok(())
+}
+
+pub fn link(target: Bytes, max_depth: u64) -> Result[(), Error] {
+    if list.len(target) != 0 && target[list.len(target) - 1] == 47 {
+        return Error(UnsafeLink)
+    }
+    match path(target, max_depth) {
+        Error(UnsafePath) => Error(UnsafeLink),
+        answer => answer,
+    }
+}
+
+/// Fetch exactly n bytes, after checking the range and charging one step.
+pub fn fetch(mut budget: Budget, end: u64, at: u64, n: u64, source: scoped fn(u64, u64) -> Result[Bytes, Error] waits) -> Result[Bytes, Error] waits {
+    if at > end || n > end - at {
+        return Error(Truncated)
+    }
+    step(mut budget)?
+    let data = source(at, n)?
+    if list.len(data) != n {
+        return Error(Truncated)
+    }
+    Ok(take data)
+}
+
+/// Select the tightest remaining output bound for an entry whose size is
+/// unavailable until its compressed stream ends.
+pub fn output_bound(budget: Budget, packed_bound: u64) -> Result[(u64, Error), Error] {
+    if budget.entries_left == 0 {
+        return Error(CountLimit)
+    }
+    let ratio_bytes = match int.checked_mul(packed_bound, budget.limits.ratio) {
+        Some(cap) => cap,
+        None() => 0xffffffffffffffff,
+    }
+    if ratio_bytes < budget.limits.entry_bytes && ratio_bytes < budget.bytes_left {
+        return Ok((ratio_bytes, RatioLimit))
+    }
+    if budget.bytes_left < budget.limits.entry_bytes {
+        return Ok((budget.bytes_left, TotalLimit))
+    }
+    Ok((budget.limits.entry_bytes, EntryLimit))
+}
+
+/// Check a record start against the previous record end and directory start.
+pub fn record_start(at: u64, previous_end: u64, directory: u64) -> Result[(), Error] {
+    if at < previous_end || at >= directory {
+        return Error(Overlap)
+    }
+    Ok(())
+}
+
+/// Emit a chunk only after checking the wire length and work budget.
+pub fn emit(mut written: u64, mut budget: Budget, cap: u64, data: Bytes, sink: scoped fn(Bytes) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let n = list.len(data)
+    if n > cap - written {
+        return Error(InputLimit)
+    }
+    step(mut budget)?
+    sink(data)?
+    written += n
+    Ok(())
+}

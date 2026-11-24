@@ -99,7 +99,7 @@ impl Helpers {
     ) -> Outcome {
         // SAFETY: cancel flag belongs to the current task. It stays pinned
         // across the park and is read only atomically from the helper.
-        let _commit = tasks::before_provider_entry();
+        tasks::before_provider_entry();
         let cancel = if cancellable {
             unsafe { tasks::foreign_cancel_flag(context) }
         } else {

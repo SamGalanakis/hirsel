@@ -1,0 +1,67 @@
+// Two ASCII digits, with upper case available for formats that require it.
+pub fn encode_byte(b: u8, upper: bool) -> (u8, u8) {
+    let digits = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    }
+    (digits[int.widen(b >> 4)], digits[int.widen(b & 15)])
+}
+
+/// Encodes bytes as lower-case RFC 4648 base16. Fails: Capacity. Cost: O(n).
+pub fn encode(b: Bytes) -> String {
+    let mut out: Bytes = list.with_capacity(2 * list.len(b))
+    for x in b {
+        let (hi, lo) = encode_byte(x, false)
+        list.push(mut out, hi)
+        list.push(mut out, lo)
+    }
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn digit(b: u8) -> u8 {
+    if int.is_ascii_digit(b) {
+        return b - b'0'
+    }
+    let lower = b | 32
+    if lower >= b'a' && lower <= b'f' {
+        return lower - b'a' + 10
+    }
+    255
+}
+
+/// Decodes RFC 4648 base16 in either case. None means malformed input.
+/// Fails: Capacity. Validates before allocating. Cost: O(n).
+pub fn decode(b: Bytes) -> Option[Bytes] {
+    let n = list.len(b)
+    if n % 2 != 0 {
+        return None
+    }
+    for x in b {
+        if digit(x) == 255 {
+            return None
+        }
+    }
+    let mut out: Bytes = list.with_capacity(n / 2)
+    for i in 0 .. n / 2 {
+        list.push(mut out, digit(b[2 * i]) << 4 | digit(b[2 * i + 1]))
+    }
+    Some(take out)
+}
+
+/// Appends two lower-case digits for each of n bytes from read, in index order.
+/// Reserves the entire output before reading any input. Fails: Capacity.
+pub fn append_from(mut out: Bytes, n: u64, read: scoped fn(u64) -> u8) {
+    let start = list.len(out)
+    list.fill(mut out, 2 * n, 0)
+    for i in 0 .. n {
+        let (hi, lo) = encode_byte(read(i), false)
+        out[start + 2 * i] = hi
+        out[start + 2 * i + 1] = lo
+    }
+}
+
+/// Appends the sixteen lower-case digits of a u64, including leading zeros.
+pub fn push_u64(mut out: String, n: u64) {
+    string.push_uint(mut out, n, 16, 16, '0')
+}

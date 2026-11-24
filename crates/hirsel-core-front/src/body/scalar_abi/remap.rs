@@ -143,7 +143,6 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             match place {
                 AllocPlace::Like(v)
                 | AllocPlace::Region(v)
-                | AllocPlace::Frame(v)
                 | AllocPlace::LentFrame(v)
                 | AllocPlace::ByteTail(v) => f(v),
                 _ => {}
@@ -153,7 +152,22 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             f(block);
             f(charge)
         }
-        Inst::FrameRefund { charge } => f(charge),
+        Inst::FrameAdmit {
+            admitted,
+            available,
+            charge,
+            overflow,
+            ..
+        } => {
+            f(admitted);
+            f(available);
+            f(charge);
+            if let Some(v) = overflow {
+                f(v);
+            }
+        }
+        Inst::FrameActive { result, .. } => f(result),
+        Inst::FrameRefund { .. } => {}
         Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => f(bytes),
         Inst::Grow {
             result,
@@ -391,13 +405,21 @@ pub(super) fn compact(
         }
     }
     // A rigid scalar's slot acquires scalar-typed addresses at each former
-    // by-address use. Reuse the address established with its StorageLive, just
-    // as lowering a closed scalar local does. Other projections stay distinct.
+    // by-address use. Reuse one address, established with the slot's
+    // StorageLive just as lowering a closed scalar local does: the first such
+    // use need not lie on the path to the others (an early return's result
+    // read beside the join's). Other projections stay distinct.
     let mut address_alias = Vec::new();
+    let mut canonical = vec![None; body.slots.len()];
     if body.slots.iter().enumerate().any(|(i, t)| {
         !promoted[i] && matches!(t, PlaceTy::Declared(_)) && place_scalar(module, *t).is_some()
     }) {
-        let mut canonical = vec![None; body.slots.len()];
+        let mut begun = vec![false; body.slots.len()];
+        for inst in &body.insts {
+            if let Inst::StorageLive { slot } = inst {
+                begun[slot.index()] = true;
+            }
+        }
         address_alias = (0..body.addresses.len())
             .map(|i| AddressId(i as u32))
             .collect::<Vec<_>>();
@@ -410,6 +432,7 @@ pub(super) fn compact(
                 let info = &body.addresses[address.index()];
                 if info.steps.len == 0
                     && let AddressBase::Slot(slot) = info.base
+                    && begun[slot.index()]
                     && matches!(body.slots[slot.index()], PlaceTy::Declared(_))
                     && place_scalar(module, body.slots[slot.index()])
                         .is_some_and(|ty| info.ty == PlaceTy::Value(ty))
@@ -535,6 +558,10 @@ pub(super) fn compact(
         value_map[i] = value_map[alias(aliases, ValueId(i as u32)).index()];
     }
     let map = |v: &mut ValueId| *v = value_map[v.index()];
+    let mut established = vec![false; live.len()];
+    for a in canonical.iter().flatten() {
+        established[a.index()] = true;
+    }
     let len = body.insts.len();
     let old = std::mem::replace(&mut body.insts, Vec::with_capacity(len));
     let anchors = std::mem::replace(&mut body.inst_anchors, Vec::with_capacity(len));
@@ -543,7 +570,21 @@ pub(super) fn compact(
         for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
             if matches!(old[i], Inst::Address {address,..} if !live[address.index()])
                 || matches!(old[i], Inst::Const {result,..} | Inst::LayoutConst {result,..} | Inst::Read {result,mode:ReadMode::Bits,..} if dead[result.index()])
+                || matches!(old[i], Inst::Address {address,..} if established[address.index()])
             {
+                continue;
+            }
+            if let Inst::StorageLive { slot } = old[i]
+                && let Some(address) = canonical[slot.index()]
+                && live[address.index()]
+            {
+                body.insts.push(old[i].clone());
+                body.inst_anchors.push(anchors[i]);
+                body.insts.push(Inst::Address {
+                    address: address_map[address.index()],
+                    fail: None,
+                });
+                body.inst_anchors.push(anchors[i]);
                 continue;
             }
             let mut inst = old[i].clone();

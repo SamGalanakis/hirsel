@@ -12,6 +12,7 @@ reservation on the route. `raw(handler)` creates an ordinary response route.
 Set `steps` to bound the handler's source steps. Exhaustion closes that
 connection and releases the request region and responder.
 
+`request_segments` splits a raw request path at slashes, then percent-decodes each segment.
 Patterns match decoded path segments. A literal can contain percent escapes.
 `{name}` captures a single nonempty segment. Final `{name...}` captures
 the remaining segments after the preceding slash. Use `http.capture` and
@@ -19,7 +20,9 @@ the remaining segments after the preceding slash. Use `http.capture` and
 
 `build(take builder)` refuses overlapping patterns for the same method
 unless one matches a strict subset of the other's paths. The final table
-is immutable. The most specific matching route wins regardless of order.
+is immutable. It indexes literal paths by method and decoded segments.
+A literal hit takes precedence over parameter routes for that method. The
+most specific matching parameter route wins regardless of order.
 
 HEAD selects an explicit HEAD route if one matches, then falls back to GET.
 Both responses omit the body. An unrouted path gives 404. A path with routes

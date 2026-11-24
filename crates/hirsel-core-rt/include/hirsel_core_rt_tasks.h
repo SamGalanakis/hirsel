@@ -39,8 +39,6 @@ HirselCoreTransfer hirsel_core_send(HirselCoreContext *, HirselCoreChannel *, vo
    The decision is fixed before scheduling, including if a peer drains it. */
 uint8_t hirsel_core_try_send(HirselCoreChannel *, void *input);
 HirselCoreTransfer hirsel_core_receive(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
-HirselCoreTransfer hirsel_core_receive_in_loop(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
-void hirsel_core_receive_loop_end(void);
 /* Empty is a poll (scheduler choice, no cancellation); Closed is terminal. */
 uint8_t hirsel_core_try_receive(HirselCoreChannel *, void *destination);
 void hirsel_core_sender_drop(HirselCoreChannel *);
@@ -60,6 +58,15 @@ void hirsel_core_latest_publish(HirselCoreContext *, HirselCoreLatest *, void *n
 void *hirsel_core_latest_read(HirselCoreLatest *);
 void hirsel_core_latest_drop(HirselCoreContext *, HirselCoreLatest *);
 bool hirsel_core_latest_release(HirselCoreLatest *, HirselCoreWorklist *, uint64_t point);
+/* Shared nodes (CONC-15): node points at the atomic count, the payload at +8.
+   new admits charge and moves the cross value at x, described by cross
+   (bytes, owner rows, row count), into a node homed in the running unit (null
+   node: Capacity). share and release are not events; the last release cleans
+   and refunds at home. */
+typedef struct { void *node; uint64_t available; } HirselCoreSharedNew;
+HirselCoreSharedNew hirsel_core_shared_new(HirselCoreContext *, const void *x, const void *cross, uint64_t charge);
+void *hirsel_core_shared_share(void *node);
+void hirsel_core_shared_release(HirselCoreContext *, void *node);
 /* Scheduler events include REFUND (foreign refund or hand-over), CHECK_CANCEL
    (no request) and CAPACITY (requested, available). Only Full, Empty, no-request
    check, failed Arc unwrap and Capacity count as polls. */

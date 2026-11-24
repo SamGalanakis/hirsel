@@ -1,0 +1,20 @@
+[package]
+name = "video_transcode"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+av1 = { major = 1, path = "../av1" }
+h264 = { major = 1, path = "../h264" }
+media_bits = { major = 1, path = "../media_bits" }
+media_container = { major = 1, path = "../media_container" }
+video_packager = { major = 1, path = "../video_packager" }
+video_yuv = { major = 1, path = "../video_yuv" }
+
+[sources]
+"split.hirsel" = "split"
+"stitch.hirsel" = "stitch"
+"tone.hirsel" = "tone"
+"transcode.hirsel" = "transcode"
+

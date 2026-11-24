@@ -1,0 +1,297 @@
+type HistoryRetention {
+    floor: u64,
+    earlier: List[HistoryRef]
+}
+
+fn history_retain(previous: HistoryMark, prior: HistoryRef, current_seq: u64, retain: u8) -> Result[HistoryRetention, Error] {
+    if retain == 0 {
+        return Error(Missing("retain"))
+    }
+    if retain == 1 {
+        return Ok(HistoryRetention(floor: current_seq, earlier: list.new()))
+    }
+    let preceding = list.len(previous.retained)
+    let room: u64 = int.widen(retain - 1)
+    let kept = order.min(room, preceding + 1)
+    disk_allocation(scoped fn() -> Result[HistoryRetention, Error] {
+        let mut earlier: List[HistoryRef] = list.with_capacity(kept)
+        for i in preceding + 1 - kept .. preceding {
+            list.push(mut earlier, previous.retained[i])
+        }
+        list.push(mut earlier, prior)
+        let floor = earlier[0].seq
+        Ok(HistoryRetention(floor, earlier: take earlier))
+    })
+}
+
+type HistoryName {
+    kind: u8,
+    seq: u64,
+    epoch: u64,
+    digest: u64
+}
+
+fn history_parse_name(key: String) -> Option[HistoryName] {
+    let raw = string.as_bytes(key)
+    if list.len(raw) != 60 || raw[1] != b'-' || raw[22] != b'-' || raw[43] != b'-' {
+        return None
+    }
+    let kind = raw[0]
+    if kind != b'e' && kind != b'm' && kind != b'p' && kind != b'l' {
+        return None
+    }
+    let Ok(seq) = int.parse_decimal_span(raw, 2, 22, 18446744073709551615u64) else {
+        return None
+    }
+    let Ok(epoch) = int.parse_decimal_span(raw, 23, 43, 18446744073709551615u64) else {
+        return None
+    }
+    if epoch == 0 || seq == 0 {
+        return None
+    }
+    let mut digest = 0u64
+    for i in 44u64 .. 60 {
+        let digit = raw[i]
+        if digit >= b'0' && digit <= b'9' {
+            digest = (digest << 4) | int.widen(digit - b'0')
+        } else if digit >= b'a' && digit <= b'f' {
+            digest = (digest << 4) | int.widen(10 + digit - b'a')
+        } else {
+            return None
+        }
+    }
+    Some(HistoryName(kind, seq, epoch, digest))
+}
+
+type ReclaimPass {
+    epoch: u64,
+    recovered_checkpoint: u64,
+    position: u64,
+    checkpoint: u64,
+    floor: u64,
+    generation: u64,
+    next_pack: u64,
+    chain: List[HistoryLink],
+    live: Map[String, ()],
+    leased: Map[String, ()]
+}
+
+fn history_dead_key(pass: ReclaimPass, key: String) -> bool {
+    let Some(name) = history_parse_name(key) else {
+        return false
+    }
+    if name.epoch > pass.epoch || map.contains(pass.leased, key) {
+        return false
+    }
+    if name.kind == b'e' {
+        if name.seq > pass.position {
+            return false
+        }
+        if name.seq < pass.floor {
+            return true
+        }
+        if name.seq <= pass.recovered_checkpoint {
+            return false
+        }
+        let offset = name.seq - pass.recovered_checkpoint - 1
+        let expected = pass.chain[offset]
+        return expected.epoch != name.epoch || expected.digest != name.digest
+    }
+    if map.contains(pass.live, key) {
+        return false
+    }
+    if name.epoch < pass.epoch {
+        return true
+    }
+    match name.kind {
+        b'm' => name.seq < pass.generation,
+        b'p' => name.seq < pass.next_pack,
+        b'l' => name.seq < pass.checkpoint,
+        _ => false,
+    }
+}
+
+fn history_dead_upload(pass: ReclaimPass, key: String) -> bool {
+    let Some(name) = history_parse_name(key) else {
+        return false
+    }
+    name.kind == b'p' && name.epoch < pass.epoch
+}
+type ObjectReclaimCapture: send {
+    head: HistoryHead,
+    recovered: HistoryRef,
+    generation: u64,
+    next_pack: u64
+}
+
+fn live_reclaim_name(mut live_bytes: Map[String, ()], lead: String, item: HistoryRef) -> Result[(), Error] {
+    let name = history_key(lead, item)
+    capacity(map.try_reserve(mut live_bytes, 1))?
+    map.insert(mut live_bytes, take name, ())
+    Ok(())
+}
+
+fn live_reclaim_checkpoint(mut client: std.object.Client, captured: HistoryHead, reference: HistoryRef, mark: HistoryMark, raw: Bytes, mut live_bytes: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
+    let mut at = captured
+    at.checkpoint = reference
+    let located = history_locator(mut client, at, mark, raw, deadline)?
+    live_reclaim_name(mut live_bytes, "m-", mark.manifest)?
+    for item in located.chunks {
+        live_reclaim_name(mut live_bytes, "l-", item)?
+    }
+    for (_, item) in located.rows {
+        live_reclaim_name(mut live_bytes, "p-", item)?
+    }
+    Ok(())
+}
+
+fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mark: HistoryMark, deadline: u64) -> Result[(u64, List[HistoryLink]), Error] waits {
+    let at = fixed.head
+    if at.floor <= fixed.recovered.seq {
+        let chain = history_suffix(mut client, at, fixed.recovered, deadline)?
+        return Ok((fixed.recovered.seq, take chain))
+    }
+    let first = if list.len(mark.retained) == 0 { at.checkpoint } else { mark.retained[0] }
+    let suffix = history_suffix(mut client, at, first, deadline)?
+    let chain = disk_allocation(scoped fn() -> Result[List[HistoryLink], Error] {
+        let mut refs: List[HistoryLink] = list.with_capacity(1 + list.len(suffix))
+        list.push(mut refs, HistoryLink(epoch: first.epoch, len: first.len, digest: first.digest))
+        for item in suffix { list.push(mut refs, item) }
+        Ok(take refs)
+    })?
+    Ok((first.seq - 1, take chain))
+}
+
+fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, deadline: u64) -> Result[ReclaimPass, Error] waits {
+    let at = fixed.head
+    let (take selected_mark, take selected_bytes) = history_checkpoint(mut client, at, deadline)?
+    let manifest = history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline)?
+    if manifest.archive_on != 0 || manifest.archive.stamp != 0 {
+        return Error(Unsupported(1))
+    }
+    let (after, take exact_names) = reclaim_chain(mut client, fixed, selected_mark, deadline)?
+    let mut keep: Map[String, ()] = map.new()
+    live_reclaim_checkpoint(mut client, at, at.checkpoint, selected_mark, selected_bytes, mut keep, deadline)?
+    for item in selected_mark.retained {
+        let path = history_key("e-", item)
+        let raw = history_read_object(mut client, path, item, deadline)?
+        let mark = disk_allocation(scoped fn() -> Result[HistoryMark, Error] { history_read_mark(path, at.store, item, raw) })?
+        live_reclaim_checkpoint(mut client, at, item, mark, raw, mut keep, deadline)?
+    }
+    Ok(ReclaimPass(epoch: at.pair.epoch, recovered_checkpoint: after, position: at.entry.seq,
+        checkpoint: at.checkpoint.seq, floor: at.floor, generation: fixed.generation, next_pack: fixed.next_pack,
+        chain: take exact_names, live: take keep, leased: map.new()))
+}
+
+fn history_abort_reclaimed_uploads(mut lane: ObjectJournalSession, pass: ReclaimPass, deadline: u64) -> Result[(), Error] waits {
+    let mut after: Option[std.object.UploadCursor] = None
+    loop {
+        let mut uploads: List[std.object.PendingUpload] = list.new()
+        let page = match std.object.pending_uploads_page(mut lane.client, "p-", after, mut uploads, deadline) {
+            Ok(take marker) => take marker,
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+        history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+        for take upload in take uploads {
+            let std.object.PendingUpload(key: take name, handle: take handle) = take upload
+            if history_dead_upload(pass, name) {
+                if let Error(take problem) = std.object.abort(mut lane.client, take handle, deadline) {
+                    return Error(Remote(take problem))
+                }
+            }
+        }
+        after = take page
+        if let None = after { return Ok(()) }
+    }
+}
+
+const HISTORY_LIST_PAGE: u64 = 1000
+
+fn reclaim_page_bytes() -> u64 {
+    option.unwrap(charge.seq(bytes[std.object.Entry], HISTORY_LIST_PAGE))
+}
+
+fn sweep_start() -> SweepCursor {
+    SweepCursor(position: 0, epoch: 0, digest: 0)
+}
+
+fn history_entry_cursor(mark: SweepCursor) -> String {
+    history_key("e-", HistoryRef(seq: mark.position, epoch: mark.epoch, len: 0, digest: mark.digest))
+}
+
+fn history_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, mut members: List[std.object.Entry], deadline: u64) -> Result[(), Error] waits {
+    let after = if lane.sweep.position == 0 { string.new() } else { history_entry_cursor(lane.sweep) }
+    let page = std.object.list(mut lane.client, "e-", after, mut members, deadline) ?=> Remote
+    history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+    for member in members {
+        let name = std.object.key_text(member.key)
+        let Some(parsed_name) = history_parse_name(name) else {
+            return Error(disk_fault(name, 0, Malformed))
+        }
+        if parsed_name.seq >= pass.floor {
+            lane.sweep = sweep_start()
+            return Ok(())
+        }
+        if history_dead_key(pass, name) {
+            std.object.erase(mut lane.client, name, deadline) ?=> Remote
+        }
+        lane.sweep = SweepCursor(position: parsed_name.seq, epoch: parsed_name.epoch, digest: parsed_name.digest)
+    }
+    if !page.truncated { lane.sweep = sweep_start() }
+    Ok(())
+}
+
+fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lead: String, take start: String, mut members: List[std.object.Entry], deadline: u64) -> Result[(), Error] waits {
+    let mut after = take start
+    loop {
+        list.clear(mut members)
+        let page = std.object.list(mut lane.client, lead, after, mut members, deadline) ?=> Remote
+        history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+        for member in members {
+            let name = std.object.key_text(member.key)
+            if lead == "e-" {
+                let Some(parsed_name) = history_parse_name(name) else { continue }
+                if parsed_name.seq > pass.position { return Ok(()) }
+                if parsed_name.seq < pass.floor { continue }
+            }
+            if history_dead_key(pass, name) {
+                std.object.erase(mut lane.client, name, deadline) ?=> Remote
+            }
+        }
+        if !page.truncated { return Ok(()) }
+        let following = std.object.key_text(page.after)
+        if order.compare(following, after) != Greater {
+            return Error(disk_fault("authority", 0, Malformed))
+        }
+        after = take following
+    }
+}
+
+fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture) -> Result[(), Error] waits {
+    let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+    let mut pass = reclaim_capture(mut lane.client, fixed, deadline)?
+    let released = match lane.export_lease {
+        Some(leased) => {
+            if let Error(Empty) = channel.try_receive(leased.lifetime) {
+                capacity(map.try_reserve(mut pass.leased, map.len(leased.names)))?
+                for (name, _) in leased.names {
+                    map.insert(mut pass.leased, string.from(name), ())
+                }
+                false
+            } else {
+                true
+            }
+        },
+        None => false,
+    }
+    if released { lane.export_lease = None }
+    let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] { Ok(list.with_capacity(HISTORY_LIST_PAGE)) })?
+    history_sweep_entries(mut lane, pass, mut members, deadline)?
+    let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))
+    history_reclaim_prefix(mut lane, pass, "e-", take start_live, mut members, deadline)?
+    for lead in ["m-", "l-", "p-"] {
+        history_reclaim_prefix(mut lane, pass, lead, string.new(), mut members, deadline)?
+    }
+    history_abort_reclaimed_uploads(mut lane, pass, deadline)
+}

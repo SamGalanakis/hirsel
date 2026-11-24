@@ -40,7 +40,7 @@ fn snapshot(context: &Context) -> Vec<String> {
         d.reap_inboxes
             .get()
             .map(|p| unsafe { p.as_ref().debug_state() }),
-        d.remote.lock().unwrap().debug_state()
+        d.remote_for_test().debug_state()
     ));
     rows
 }
@@ -393,4 +393,36 @@ fn flow_stage_refuses_an_item_that_cannot_enter_the_copied_bound() {
             halt: Halt::OutOfTime
         })
     );
+}
+
+#[test]
+fn a_frame_charge_returns_to_its_limit_after_a_scope_outranks_the_body_record() {
+    // A body admits frame bytes, then an isolate cell merges into a bound
+    // scope (rank 1) whose result survives it, so that scope's exit makes its
+    // record lead the body's limit (MEM-20, union by rank). Frame bytes have no block naming a
+    // record, so the refund goes to that limit and no record keeps or owes
+    // any of them: each record holds exactly what its live blocks hold.
+    let mut ctx = Context::new(8192);
+    let full = ctx.available();
+    let body = ctx.current.payer.get();
+    let held = unsafe { (*body.local()).outstanding };
+    // SAFETY: the fixture owns its live context.
+    let admitted = unsafe { crate::abi::hirsel_core_frame_admit(&ctx, 48, false) };
+    assert!(!admitted.pointer.is_null());
+    ctx.limit_enter(4096).unwrap();
+    let scope = ctx.current.payer.get();
+    let result = Block::new(&ctx, Some(16), 16, 8).unwrap();
+    ctx.current.isolate_reserve(32).unwrap().finish_reserved(32);
+    ctx.limit_exit();
+    assert!(ctx.current.payer.get() == scope, "the scope's record leads");
+    // SAFETY: the same body returns the 48 bytes it admitted.
+    unsafe { crate::abi::hirsel_core_frame_refund(&ctx, 48) };
+    drop(result);
+    assert_eq!(ctx.available(), full);
+    let f = body.forest();
+    for slot in f.slots() {
+        let p = Payer(NonNull::from(slot));
+        let expected = if p == body { held } else { 0 };
+        assert_eq!(unsafe { (*p.local()).outstanding }, expected);
+    }
 }

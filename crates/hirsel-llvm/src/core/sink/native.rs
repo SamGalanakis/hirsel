@@ -787,12 +787,6 @@ impl Sink for NativeSink<'_> {
                     self.scopes(call, &attrs.scopes);
                     call
                 }
-                Operation::AtomicRmw(op, p, ty, v, o) => {
-                    let p = self.value(p, &Type::Ptr);
-                    let v = self.value(v, ty);
-                    (api.atomic_rmw)(u, op as u32, p, v, o as u32)
-                }
-                Operation::Fence(o) => (api.fence)(u, o as u32),
                 Operation::Branch(target) => {
                     let target = self.block_ref(target);
                     (api.branch)(u, target)

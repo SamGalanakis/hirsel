@@ -1,0 +1,14 @@
+// expect: refuse LANG-7 at 10:9
+// expect: message LANG-7 at 10:9 | `config` shadows a visible name
+// expect: cause LANG-7 at 10:9 from 5:4
+
+fn config() -> u64 { 0 }
+
+fn accept(take value: u64) {}
+
+fn refused() {
+    let config = 1u64
+    accept(take config)
+}
+
+// expect: compared LANG-7 at 10:9 | config | a name not already visible in this namespace

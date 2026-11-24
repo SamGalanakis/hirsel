@@ -3,7 +3,7 @@ fn challenge() -> Bytes {
 }
 
 fn request_bytes() -> Bytes {
-    b"GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    b"GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n"
 }
 
 fn response_bytes() -> Bytes {
@@ -13,7 +13,7 @@ fn response_bytes() -> Bytes {
 fn status(b: Bytes) -> u16 {
     match websocket.server(b) {
         Waiting => 0,
-        Upgraded(_, _) => 101,
+        Upgraded(_, _, _) => 101,
         Refused(s) => s
     }
 }
@@ -58,7 +58,8 @@ fn rfc6455_accept() -> bool {
 fn server_response() -> bool {
     let b = request_bytes()
     match websocket.server(b) {
-        Upgraded(end, out) => end == list.len(b) && out == response_bytes(),
+        Upgraded(end, Current, out) => end == list.len(b) &&
+            out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
         _ => false
     }
 }
@@ -72,10 +73,10 @@ fn upgrade_checks() -> bool {
 // Mutant: protocol_case_fold, accept_duplicate_key, interpret_body_as_frames.
 // expect: run protocol_and_ambiguity() = true
 fn protocol_and_ambiguity() -> bool {
-    if status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: hirsel.1\r\n")) != 400 {
+    if status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: hirsel.1\r\n")) != 101 {
         return false
     }
-    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.2\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.2\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
+    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.4\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.3\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
 }
 
 // Mutant: drop_tail. The masked binary frame is hand-derived with zero mask.
@@ -86,7 +87,7 @@ fn upgrade_tail_kept() -> bool {
     let tail = b"\x82\x83\x00\x00\x00\x00abc"
     list.append(mut b, tail)
     match websocket.server(b) {
-        Upgraded(at, _) => at == end && list.slice(b, at, list.len(b)) == tail,
+        Upgraded(at, Current, _) => at == end && list.slice(b, at, list.len(b)) == tail,
         _ => false
     }
 }
@@ -113,7 +114,7 @@ fn client_negotiation_tail() -> bool {
     let mut protocol_response: Bytes = list.new()
     let response = response_bytes()
     list.append(mut protocol_response, list.slice(response, 0, list.len(response) - 2))
-    list.append(mut protocol_response, b"Sec-WebSocket-Protocol: hirsel.2\r\n\r\n")
+    list.append(mut protocol_response, b"Sec-WebSocket-Protocol: hirsel.4\r\n\r\n")
     let offered = match websocket.client(protocol_response, challenge(), true) {
         Ready(_, selected) => selected,
         _ => false
@@ -224,7 +225,7 @@ fn served_upgraded(take a: ServedReader) -> wsock.Upgraded waits {
 
 fn served_reader(take a: ServedReader) -> bool waits {
     let upgraded = served_upgraded(take a)
-    let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
+    let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease, ..) = take upgraded
     let mut r = take input
     let got = match wsock.read(mut r, Never) {
         Ok(Message(take payload)) => payload == string.as_bytes("hi"),
@@ -386,7 +387,7 @@ pub fn idle_reader_stacks(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
             fail("WebSocket upgrade failed")
         }
         let upgraded = result.unwrap(task.join(take upgrading))
-        let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
+        let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease, ..) = take upgraded
         wsock.hello_accepted(take lease)
         let reader = task.spawn(tasks, bytes 65536, take input, refill_reader)
         let Some(take ready) = provide.next(mut port) else {

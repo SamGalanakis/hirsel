@@ -1,0 +1,583 @@
+// JWS, JWK and JWT. The oracles are the published RFC 7515 Appendix A.1-A.3,
+// RFC 8037 Appendix A and RFC 7517 Appendix A values, copied from the RFC
+// text, and RFC 7515/7519's acceptance rules for the attack tokens, which are
+// built here with std.hmac and std.base64 rather than with jwt itself.
+// A nonzero result names the first case that failed.
+fn nibble(c: u8) -> u8 {
+    if c <= b'9' {
+        c - b'0'
+    } else {
+        c - b'a' + 10
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let h = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(h) / 2)
+    for i in 0u64 .. list.len(h) / 2 {
+        list.push(mut out, nibble(h[2 * i]) * 16u8 + nibble(h[2 * i + 1]))
+    }
+    out
+}
+
+fn b64(s: String) -> Bytes {
+    option.unwrap(base64.decode_url(string.as_bytes(s), false))
+}
+
+fn seal(take b: Bytes, uses: String) -> Secret {
+    result.unwrap(secret.seal(take b, uses))
+}
+
+// RFC 7515 A.1: header {"typ":"JWT",CRLF "alg":"HS256"}, the JWT payload and its HMAC.
+const A1: String = "eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+const A1_PAYLOAD: String = "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ"
+
+const A1_K: String = "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow"
+
+const A1_EXP: u64 = 1300819380
+
+// RFC 7515 A.2.
+const A2: String = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdbF9CUAr7t1dnZcAcQjbKBYNX4BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K0GarZRmB_eSN9383LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqvhJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrBp0igcN_IoypGlUPQGe77Rw"
+
+const A2_N: String = "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddxHmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMsD1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSHSXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ"
+
+// The A.2 private key as PKCS#8 (core/core/tests/provide.hirsel's encoding).
+const A2_PKCS8: String = "308204bd020100300d06092a864886f70d0101010500048204a7308204a30201000282010100a1f8160ae2e3c9b465ce8d2d656263362b927dbe29e1f02477fc1625cc90a136e38bd93497c5b6ea63dd7711e67c7429f956b0fb8a8f089adc4b69893cc1333f53edd019b87784252fec914fe4857769594bea4280d32c0f55bf62944f130396bc6e9bdf6ebdd2bda3678eeca0c668f701b38dbffb38c8342ce2fe6d27fade4a5a4874979dd4b9cf9adec4c75b05852c2c0f5ef8a5c1750392f944e8ed64c110c6b647609aa4783aeb9c6c9ad755313050638b83665c6f6f7a82a396702a1f641b82d3ebf2392219491fb686872c5716f50af8358d9a8b9d17c340728f7f87d89a18d8fcab67ad84590c2ecf759339363c07034d6f606f9e21e05456cae5e9a102030100010282010012ae71a469cd0a2bc37e526c4500571f1d61751d64e949707b62590f9d0ba57c963c401e3fcf2f2cd3bdec88e503bfc6439b0b28c82f7d3797671f5213eed8c15a25d8d5cea0025ee3ab2e8b7f79216fc63bea562753b40644c6a15127d9b2954540a0bbe1a30556982d4e9fde5f6425f14d4b713441b55dc73b9b4aedcc92ace3927e37f57d0cfd5e7581fa512c8f4961a9eb0b80f8a80746728a55ff46471f3425063b9d53642f5ede1e84d613081afa5c22d051285bd63b943b565d898a05685413e53c3c6c6525ff1fe34e3ddc70f0d56450fda48ba12e104e9deb9fb81881e1c4bdf25d9247f450c865927968e77334f4414f75a750e139546e3a8a739d02818100e01cc410eb48a6655d54464d0aa4bb6da0b872b774a6a9d11ffe480778f0ddb7311a7e902ef9c4b5f75476262ba8176cb35979f014372a1a2829e4136bd001d07c3f3f2e4f25d4c934f63c7109fba2e67628a0dc9a73c6058e6def22dcd50950e711ddc16d5586f2a7fa75ea8494c18083e0b65742f8a0d5e73fb2d970f0194702818100b903c47e0995b632f4532cb1f3c199145d5f3ae9c7dfeedc7a92a6b47e29c61b42a07aa95a64fc600999c5a7b01e01c08cb62ca756527bbcc56078fb0baba5ed38de2d07990ff6300faeadeb6c039a97bf1e507e4e7040fa78db8257c8b112ed5e59c3cd092fe5d4e5b51275d41281072a5e785ebaf3dae3709203133f5159d702818007029f577024ab9fcc1590c56429d6fb0ce5f820a8f375a866f9cb430093783bfcbb396e4529e6ef52374022dd86ba84d9ef58931beec5d05fa53fcf23b633f8538a9eed51e87b097830a39f5d92937be6024b55db36f7e0c09dcbb72975387f615afbb6cb36bbabe7793c2b03ceab66dbb931baf50b55ec9af9311d001d628d0281810087ff7afa62b547fee0961b2e9bcd5d6718d39d8ca73db6691f38998de78771762c5da68cc243a5383b166bb23dc570e84706ca801ef5f6bae6236a0aafa3770e8f54d1a8da1c5f8d2899f082331ddb0f5c8f3dfffa4c8d97102bdafe082a118da6633988880e4b55599ce67af26ebfa5b2c14a9de7b2c4dd96abddd2d2224c7502818021877b0c73a1ad6bf19303d0b11336b4e82b8db72b7efb50262a5df8395cc7256eb8cf6c40b7608d5936a32dba174126a527062ead8ca305fb7e177f409437c9dcb9718ed82018bcef0f7720a2c475f9db26da0e3cb516d084eb25178e828d5cabd49bb3161ac0181fa7f821e80e7ad37936f9943054ad092921ee2c592e4375"
+
+// The A.2 public key as an RFC 7468 SubjectPublicKeyInfo PEM, the bytes a
+// key-confusion attacker uses as an HMAC secret.
+const A2_PEM: String = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAofgWCuLjybRlzo0tZWJj\nNiuSfb4p4fAkd/wWJcyQoTbji9k0l8W26mPddxHmfHQp+Vaw+4qPCJrcS2mJPMEz\nP1Pt0Bm4d4QlL+yRT+SFd2lZS+pCgNMsD1W/YpRPEwOWvG6b32690r2jZ47soMZo\n9wGzjb/7OMg0LOL+bSf63kpaSHSXndS5z5rexMdbBYUsLA9e+KXBdQOS+UTo7WTB\nEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6/I5IhlJH7aGhyxX\nFvUK+DWNmoudF8NAco9/h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXp\noQIDAQAB\n-----END PUBLIC KEY-----\n"
+
+// RFC 7515 A.3.
+const A3: String = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q"
+
+// RFC 8037 A.4, and its A.1 private and A.2 public key.
+const ED: String = "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc.hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg"
+
+const ED_JWK: String = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\n\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}"
+
+const ED_PRIVATE_JWK: String = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\n\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\n\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}"
+
+// RFC 8410 section 7's PKCS#8 v1 prefix, then RFC 8037 A.1's d.
+const ED_PKCS8: String = "302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+
+// RFC 7517 A.1, A.2 (its private members) and A.3.
+const SET_PUBLIC: String = "{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4\",\"y\":\"4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM\",\"use\":\"enc\",\"kid\":\"1\"},{\"kty\":\"RSA\",\"n\": \"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw\",\"e\":\"AQAB\",\"alg\":\"RS256\",\"kid\":\"2011-04-29\"}]}"
+
+const SET_PRIVATE_RSA: String = "{\"keys\":[{\"kty\":\"RSA\",\"n\":\"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw\",\"e\":\"AQAB\",\"d\":\"X4cTteJY_gn4FYPsXB8rdXix5vwsg1FLN5E3EaG6RJoVH-HLLKD9M7dx5oo7GURknchnrRweUkC7hT5fJLM0WbFAKNLWY2vv7B6NqXSzUvxT0_YSfqijwp3RTzlBaCxWp4doFk5N2o8Gy_nHNKroADIkJ46pRUohsXywbReAdYaMwFs9tv8d_cPVY3i07a3t8MN6TNwm0dSawm9v47UiCl3Sk5ZiG7xojPLu4sbg1U2jx4IBTNBznbJSzFHK66jT8bgkuqsk0GjskDJk19Z4qwjwbsnn4j2WBii3RL-Us2lGVkY8fkFzme1z0HbIkfz0Y6mqnOYtqc0X4jfcKoAC8Q\",\"alg\":\"RS256\",\"kid\":\"2011-04-29\"}]}"
+
+const SET_SYMMETRIC: String = "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"A128KW\",\"k\":\"GawgguFyGrWKav7AX4VKUg\"},{\"kty\":\"oct\",\"k\":\"AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow\",\"kid\":\"HMAC key used in JWS spec Appendix A.1 example\"}]}"
+
+fn hs_key() -> jwt.Key {
+    jwt.hmac_key(seal(b64(A1_K), "mac"))
+}
+
+fn a2_key() -> jwt.Key {
+    result.unwrap(jwt.rsa_key(b64(A2_N), b64("AQAB")))
+}
+
+fn rules(now: u64, leeway: u64, take iss: Option[String], take aud: Option[String]) -> jwt.Rules {
+    jwt.Rules(allow: jwt.allow(Hs256), now_secs: now, leeway_secs: leeway, iss: take iss, aud: take aud, require_exp: true)
+}
+
+// A token whose header and payload are header_json and payload_json, and
+// whose signature is HMAC-SHA256 under mac_key: what an attacker can make.
+fn forged(header_json: String, payload_json: String, mac_key: Bytes) -> String {
+    let mut t = base64.encode_url(string.as_bytes(header_json), false)
+    string.push(mut t, ".")
+    string.push(mut t, base64.encode_url(string.as_bytes(payload_json), false))
+    let tag = hmac.sha256(mac_key, string.as_bytes(t))
+    let mut sig: Bytes = list.with_capacity(32)
+    for x in tag {
+        list.push(mut sig, x)
+    }
+    string.push(mut t, ".")
+    string.push(mut t, base64.encode_url(sig, false))
+    t
+}
+
+fn signed(take r: Result[String, jwt.Error], want: String) -> bool {
+    match take r {
+        Ok(t) => t == want,
+        Error(_) => false,
+    }
+}
+
+fn jws_error(take r: Result[jwt.Jws, jwt.Error]) -> Option[jwt.Error] {
+    match take r {
+        Ok(_) => None,
+        Error(take e) => Some(take e),
+    }
+}
+
+fn jwt_error(take r: Result[jwt.Jwt, jwt.Error]) -> Option[jwt.Error] {
+    match take r {
+        Ok(_) => None,
+        Error(take e) => Some(take e),
+    }
+}
+
+// HS384 and HS512 over {"exp":2000}, each with a key at its RFC 7518 minimum.
+// Independent oracle:
+// python3 - <<'PY'
+// import base64, hmac
+// b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b'=')
+// for bits in (384, 512):
+//     header = ('{"alg":"HS%d","typ":"JWT"}' % bits).encode()
+//     signed = b64(header) + b'.' + b64(b'{"exp":2000}')
+//     print((signed + b'.' + b64(hmac.digest(bytes(range(bits // 8)), signed, 'sha%d' % bits))).decode())
+// PY
+const HS384_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+
+const HS384_JWT: String = "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDB9.syYs9ytrLz3Y-29iRttjdH2fkdjqeF0983ZXZiDtCT-TwS5h7M4Y6aIS1t44T4F-"
+
+const HS384_SHORT_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4"
+
+const HS512_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw"
+
+const HS512_JWT: String = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDB9.hXzHG-kmm4Bl_KCDOK8wD-wcEf0CS5R7l43gGO6fhq0Wo45XRLQ4q5Jv5pSpzmW8oEITTfYvY6E880ayKlK--w"
+
+const HS512_SHORT_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-"
+
+fn hs2_roundtrip(alg: jwt.Alg, key: String, short_key: String, expected: String) -> bool {
+    let signer = jwt.signer(alg, provide.random(0), seal(b64(key), "mac"))
+    if !signed(jwt.sign_jwt(signer, "{\"exp\":2000}"), expected) {
+        return false
+    }
+    let verifier = jwt.hmac_key(seal(b64(key), "verify"))
+    let policy = jwt.Rules(allow: jwt.allow(alg), now_secs: 1000, leeway_secs: 0, iss: None, aud: None, require_exp: true)
+    let Ok(value) = jwt.verify_jwt(expected, policy, verifier) else {
+        return false
+    }
+    if value.header.alg != alg || value.claims.exp != Some(2000u64) {
+        return false
+    }
+    let Error(BadKey) = jwt.sign_jwt(jwt.signer(alg, provide.random(0), seal(b64(short_key), "mac")), "{\"exp\":2000}") else {
+        return false
+    }
+    let Error(BadKey) = jwt.verify_jws(expected, jwt.allow(alg), jwt.hmac_key(seal(b64(short_key), "verify"))) else {
+        return false
+    }
+    let mut jwk = string.from("{\"kty\":\"oct\",\"alg\":\"")
+    string.push(mut jwk, jwt.alg_name(alg))
+    string.push(mut jwk, "\",\"k\":\"")
+    string.push(mut jwk, key)
+    string.push(mut jwk, "\"}")
+    let Ok(from_jwk) = jwt.jwk(jwk) else {
+        return false
+    }
+    let Ok(_) = jwt.verify_jws(expected, jwt.allow(alg), from_jwk) else {
+        return false
+    }
+    true
+}
+
+// expect: run jwt_law() = 0
+fn jwt_law() -> u64 {
+    // 1. RFC 7515 A.1 verifies as a JWS and as a JWT one second before exp.
+    let Ok(jws) = jwt.verify_jws(A1, jwt.allow(Hs256), hs_key()) else {
+        return 1
+    }
+    if jws.payload != b64(A1_PAYLOAD) || jws.header.typ != Some(string.from("JWT")) {
+        return 1
+    }
+    let Ok(token) = jwt.verify_jwt(A1, rules(A1_EXP - 1, 0, Some(string.from("joe")), None), hs_key()) else {
+        return 2
+    }
+    if token.claims.exp != Some(A1_EXP) || token.claims.iss != Some(string.from("joe")) {
+        return 2
+    }
+    // 3. Signing A.1's header text and payload reproduces A.1 byte for byte.
+    let header = "{\"typ\":\"JWT\",\r\n \"alg\":\"HS256\"}"
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
+    if !signed(jwt.sign_jws(hs, header, b64(A1_PAYLOAD)), A1) {
+        return 3
+    }
+    // 4. RFC 7515 A.2 (RS256) verifies, and PKCS#1 v1.5 signing reproduces it.
+    let Ok(_) = jwt.verify_jws(A2, jwt.allow(Rs256), a2_key()) else {
+        return 4
+    }
+    let rs = jwt.signer(Rs256, provide.random(0), seal(unhex(A2_PKCS8), "sign(rs256)"))
+    if !signed(jwt.sign_jws(rs, "{\"alg\":\"RS256\"}", b64(A1_PAYLOAD)), A2) {
+        return 5
+    }
+    // 6. RFC 7515 A.3 (ES256, P1363 r || s) verifies; one flipped bit does not.
+    let es_key = result.unwrap(jwt.p256_key(b64("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU"), b64("x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0")))
+    let Ok(_) = jwt.verify_jws(A3, jwt.allow(Es256), es_key) else {
+        return 6
+    }
+    let mut a3_bad = string.from(string.slice(A3, 0, string.byte_len(A3) - 2))
+    string.push(mut a3_bad, "2Q")
+    match jws_error(jwt.verify_jws(a3_bad, jwt.allow(Es256), es_key)) {
+        Some(BadSignature) => {},
+        _ => return 6,
+    }
+    // 7. RFC 8037 A.4/A.5: the A.2 JWK verifies; signing with A.1's d reproduces it.
+    let ed_key = result.unwrap(jwt.jwk(ED_JWK))
+    let Ok(ed) = jwt.verify_jws(ED, jwt.allow(EdDsa), ed_key) else {
+        return 7
+    }
+    if ed.payload != string.as_bytes("Example of Ed25519 signing") {
+        return 7
+    }
+    let eds = jwt.signer(EdDsa, provide.random(0), seal(unhex(ED_PKCS8), "sign(ed25519)"))
+    if !signed(jwt.sign_jws(eds, "{\"alg\":\"EdDSA\"}", string.as_bytes("Example of Ed25519 signing")), ED) {
+        return 8
+    }
+    match jwt.jwk(ED_PRIVATE_JWK) {
+        Error(PrivateKey) => {},
+        _ => return 8,
+    }
+    // 9. RFC 7517 A.1: the "use":"enc" EC key is left out, the RS256 key is
+    // found by its kid. A.2's private RSA key is refused. A.3: the A128KW key
+    // is left out and the HMAC key verifies RFC 7515 A.1 with no kid.
+    let Ok(public) = jwt.jwks(SET_PUBLIC) else {
+        return 9
+    }
+    if jwt.len(public) != 1 {
+        return 9
+    }
+    let Ok(_) = jwt.find(public, Some(string.from("2011-04-29"))) else {
+        return 9
+    }
+    match jwt.find(public, Some(string.from("1"))) {
+        Error(NoKey) => {},
+        _ => return 9,
+    }
+    match jwt.jwks(SET_PRIVATE_RSA) {
+        Error(PrivateKey) => {},
+        _ => return 10,
+    }
+    let Ok(symmetric) = jwt.jwks(SET_SYMMETRIC) else {
+        return 11
+    }
+    let Ok(_) = jwt.verify_jws_in(A1, jwt.allow(Hs256), symmetric) else {
+        return 11
+    }
+    // 12. Two keys with one kid, or no kid and two keys: never a guess.
+    let twins = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"a\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"},{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"a\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}]}"
+    let pair = result.unwrap(jwt.jwks(twins))
+    match jwt.find(pair, Some(string.from("a"))) {
+        Error(AmbiguousKey) => {},
+        _ => return 12,
+    }
+    match jws_error(jwt.verify_jws_in(ED, jwt.allow(EdDsa), pair)) {
+        Some(AmbiguousKey) => {},
+        _ => return 12,
+    }
+    // 13. alg "none" with an empty signature: no Alg names it.
+    let mut none = base64.encode_url(string.as_bytes("{\"alg\":\"none\"}"), false)
+    string.push(mut none, ".")
+    string.push(mut none, A1_PAYLOAD)
+    string.push(mut none, ".")
+    let rs_alg: jwt.Alg = Rs256
+    let ed_alg: jwt.Alg = EdDsa
+    let es_alg: jwt.Alg = Es256
+    let mut others: List[jwt.Alg] = list.new()
+    list.push(mut others, rs_alg)
+    list.push(mut others, ed_alg)
+    list.push(mut others, es_alg)
+    match jws_error(jwt.verify_jws(none, jwt.Allow(first: Hs256, rest: take others), hs_key())) {
+        Some(UnsupportedAlg) => {},
+        _ => return 13,
+    }
+    // 14. Key confusion: HS256 under the RS256 key's public PEM bytes, against
+    // that RSA key with both algorithms allowed.
+    let confused = forged("{\"alg\":\"HS256\"}", "{\"iss\":\"joe\",\"exp\":1300819380}", string.as_bytes(A2_PEM))
+    let hs_alg: jwt.Alg = Hs256
+    let mut hs_too: List[jwt.Alg] = list.new()
+    list.push(mut hs_too, hs_alg)
+    match jws_error(jwt.verify_jws(confused, jwt.Allow(first: Rs256, rest: take hs_too), a2_key())) {
+        Some(WrongKey) => {},
+        _ => return 14,
+    }
+    // 15. exp with leeway 60: valid at exp + 59, expired at exp + 60.
+    let Ok(_) = jwt.verify_jwt(A1, rules(A1_EXP + 59, 60, None, None), hs_key()) else {
+        return 15
+    }
+    match jwt_error(jwt.verify_jwt(A1, rules(A1_EXP + 60, 60, None, None), hs_key())) {
+        Some(Expired) => {},
+        _ => return 15,
+    }
+    // 16. aud as an array: a listed audience passes, another is refused, and
+    // a present aud with no audience required is refused (RFC 7519 4.1.3).
+    let k = b64(A1_K)
+    let aud = forged("{\"alg\":\"HS256\"}", "{\"aud\":[\"a\",\"b\"],\"exp\":1300819380}", k)
+    let Ok(_) = jwt.verify_jwt(aud, rules(A1_EXP - 1, 0, None, Some(string.from("b"))), hs_key()) else {
+        return 16
+    }
+    match jwt_error(jwt.verify_jwt(aud, rules(A1_EXP - 1, 0, None, Some(string.from("c"))), hs_key())) {
+        Some(Mismatch(Aud)) => {},
+        _ => return 16,
+    }
+    match jwt_error(jwt.verify_jwt(aud, rules(A1_EXP - 1, 0, None, None), hs_key())) {
+        Some(Mismatch(Aud)) => {},
+        _ => return 16,
+    }
+    // 17. A correctly signed token with a crit header this module does not
+    // understand (RFC 7515 4.1.11).
+    let crit = forged("{\"alg\":\"HS256\",\"crit\":[\"exp\"],\"exp\":1}", "{}", k)
+    match jws_error(jwt.verify_jws(crit, jwt.allow(Hs256), hs_key())) {
+        Some(UnsupportedCrit) => {},
+        _ => return 17,
+    }
+    // 18. Strict parsing: nonzero pad bits in the last digit, a fourth
+    // segment, a duplicate header name, a non-object header.
+    let mut padded = string.from(string.slice(A1, 0, string.byte_len(A1) - 1))
+    string.push(mut padded, "l")
+    match jws_error(jwt.verify_jws(padded, jwt.allow(Hs256), hs_key())) {
+        Some(Malformed(Encoding)) => {},
+        _ => return 18,
+    }
+    let mut four = string.from(A1)
+    string.push(mut four, ".")
+    match jws_error(jwt.verify_jws(four, jwt.allow(Hs256), hs_key())) {
+        Some(Malformed(Segments)) => {},
+        _ => return 18,
+    }
+    let dup = forged("{\"alg\":\"HS256\",\"alg\":\"HS256\"}", "{}", k)
+    match jws_error(jwt.verify_jws(dup, jwt.allow(Hs256), hs_key())) {
+        Some(Malformed(Duplicate)) => {},
+        _ => return 18,
+    }
+    let array = forged("[\"HS256\"]", "{}", k)
+    match jws_error(jwt.verify_jws(array, jwt.allow(Hs256), hs_key())) {
+        Some(Malformed(NotObject)) => {},
+        _ => return 18,
+    }
+    if !hs2_roundtrip(Hs384, HS384_KEY, HS384_SHORT_KEY, HS384_JWT) {
+        return 19
+    }
+    if !hs2_roundtrip(Hs512, HS512_KEY, HS512_SHORT_KEY, HS512_JWT) {
+        return 20
+    }
+    0
+}
+
+// RFC 8032 section 5.1.5 encodes y with the parity of x in the high bit.
+// These are the eight cofactor-torsion encodings, including Wycheproof tcId 152.
+fn small_order_key(x: Bytes) -> bool {
+    match jwt.ed25519_key(clone(x)) {
+        Error(BadKey) => {},
+        _ => return false,
+    }
+    let mut text = string.from("{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"")
+    string.push(mut text, base64.encode_url(x, false))
+    string.push(mut text, "\"}")
+    match jwt.jwk(text) {
+        Error(BadKey) => true,
+        _ => false,
+    }
+}
+
+// expect: run jwt_ed25519_key_law() = 0
+fn jwt_ed25519_key_law() -> u64 {
+    if !small_order_key(unhex("0100000000000000000000000000000000000000000000000000000000000000")) {
+        return 1
+    }
+    if !small_order_key(unhex("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")) {
+        return 2
+    }
+    for y in["0000000000000000000000000000000000000000000000000000000000000000", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"] {
+        let mut x = unhex(y)
+        if !small_order_key(x) {
+            return 3
+        }
+        x[31] = x[31] | 128u8
+        if !small_order_key(x) {
+            return 4
+        }
+    }
+    0
+}
+
+// expect: run jwt_audience_presence_law() = 0
+fn jwt_audience_presence_law() -> u64 {
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
+    let Ok(token) = jwt.sign_jwt(hs, "{\"aud\":[],\"exp\":1300819380}") else {
+        return 1
+    }
+    match jwt_error(jwt.verify_jwt(token, rules(A1_EXP - 1, 0, None, None), hs_key())) {
+        Some(Mismatch(Aud)) => 0,
+        _ => 2,
+    }
+}
+
+// expect: run jwt_rsa_modulus_law() = 0
+fn jwt_rsa_modulus_law() -> u64 {
+    let mut n = b64(A2_N)
+    n[0] = 127u8
+    match jwt.rsa_key(take n, b64("AQAB")) {
+        Error(BadKey) => 0,
+        _ => 1,
+    }
+}
+
+// expect: run jwt_private_jwk_law() = 0
+fn jwt_private_jwk_law() -> u64 {
+    match jwt.jwks("{\"keys\":[{\"kty\":\"RSA\",\"use\":\"enc\",\"d\":\"AQ\"}]}") {
+        Error(PrivateKey) => 0,
+        _ => 1,
+    }
+}
+
+fn rsa_jwk(e: String) -> String {
+    let mut text = string.from("{\"kty\":\"RSA\",\"n\":\"")
+    string.push(mut text, A2_N)
+    string.push(mut text, "\",\"e\":\"")
+    string.push(mut text, e)
+    string.push(mut text, "\"}")
+    text
+}
+
+// expect: run jwt_rsa_exponent_law() = 0
+fn jwt_rsa_exponent_law() -> u64 {
+    for e in["AQ", "BA"] {
+        match jwt.jwk(rsa_jwk(e)) {
+            Error(BadKey) => {},
+            _ => return 1,
+        }
+    }
+    0
+}
+
+fn jwk_with_metadata(fields: String) -> String {
+    let mut text = string.from(fields)
+    string.push(mut text, string.slice(ED_JWK, 1, string.byte_len(ED_JWK)))
+    text
+}
+
+// expect: run jwt_jwk_key_ops_law() = 0
+fn jwt_jwk_key_ops_law() -> u64 {
+    for fields in["{\"key_ops\":[\"verify\",\"verify\"],", "{\"use\":\"sig\",\"key_ops\":[\"verify\",\"decrypt\"],", "{\"use\":\"enc\",\"key_ops\":[\"verify\"],"] {
+        match jwt.jwk(jwk_with_metadata(fields)) {
+            Error(BadKey) => {},
+            _ => return 1,
+        }
+    }
+    let Ok(_) = jwt.jwk(jwk_with_metadata("{\"use\":\"sig\",\"key_ops\":[\"verify\"],")) else {
+        return 2
+    }
+    0
+}
+
+fn nested_value(mut text: String, depth: u64) {
+    for _i in 0u64 .. depth {
+        string.push(mut text, "[")
+    }
+    string.push(mut text, "null")
+    for _i in 0u64 .. depth {
+        string.push(mut text, "]")
+    }
+}
+
+fn nested_header(depth: u64) -> String {
+    let mut text = string.from("{\"alg\":\"HS256\",\"extra\":")
+    nested_value(mut text, depth)
+    string.push(mut text, "}")
+    text
+}
+
+fn nested_set(depth: u64) -> String {
+    let mut set_text = string.from("{\"keys\":[{\"extra\":")
+    nested_value(mut set_text, depth)
+    string.push(mut set_text, ",")
+    string.push(mut set_text, string.slice(ED_JWK, 1, string.byte_len(ED_JWK)))
+    string.push(mut set_text, "]}")
+    set_text
+}
+
+// expect: run jwt_json_depth_law() = 0
+fn jwt_json_depth_law() -> u64 {
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
+    let Ok(_) = jwt.sign_jws(hs, nested_header(127), b"") else {
+        return 1
+    }
+    let Ok(_) = jwt.jwks(nested_set(125)) else {
+        return 2
+    }
+    match jwt.sign_jws(hs, nested_header(128), b"") {
+        Error(Malformed(Json)) => {},
+        _ => return 3,
+    }
+    match jwt.jwks(nested_set(126)) {
+        Error(Malformed(Json)) => 0,
+        _ => 4,
+    }
+}
+
+// expect: run jwt_sign_size_law() = 0
+fn jwt_sign_size_law() -> u64 {
+    let mut text = string.from("{\"extra\":\"")
+    for _i in 0u64 .. 50000 {
+        string.push(mut text, "x")
+    }
+    string.push(mut text, "\"}")
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
+    match (bound bytes 4096 {
+        jwt.sign_jws(hs, "{\"alg\":\"HS256\"}", string.as_bytes(text))
+    }) {
+        Ok(Error(Malformed(Size))) => {},
+        _ => return 1,
+    }
+    match (bound bytes 4096 {
+        jwt.sign_jwt(hs, text)
+    }) {
+        Ok(Error(Malformed(Size))) => 0,
+        _ => 2,
+    }
+}
+
+// expect: run jwt_b64_header_law() = 0
+fn jwt_b64_header_law() -> u64 {
+    let hs = jwt.signer(Hs256, provide.random(0), seal(b64(A1_K), "mac"))
+    match jwt.sign_jws(hs, "{\"alg\":\"HS256\",\"b64\":false}", b"sample") {
+        Error(UnsupportedCrit) => {},
+        _ => return 1,
+    }
+    let Ok(_) = jwt.sign_jws(hs, "{\"alg\":\"HS256\",\"b64\":true}", b"sample") else {
+        return 2
+    }
+    0
+}
+
+// expect: run jwt_set_allowlist_law() = 0
+fn jwt_set_allowlist_law() -> u64 {
+    let empty = result.unwrap(jwt.jwks("{\"keys\":[]}"))
+    match jws_error(jwt.verify_jws_in(A1, jwt.allow(Rs256), empty)) {
+        Some(UnsupportedAlg) => 0,
+        _ => 1,
+    }
+}
+
+fn hmac_minimum(alg: jwt.Alg, minimum: u64) -> u64 {
+    let raw = b64(A1_K)
+    let hs = jwt.signer(alg, provide.random(0), seal(clone(list.slice(raw, 0, minimum)), "mac"))
+    let Ok(token) = jwt.sign_jwt(hs, "{}") else {
+        return 1
+    }
+    let accept = jwt.allow(alg)
+    let key = jwt.hmac_key(seal(clone(list.slice(raw, 0, minimum)), "verify"))
+    let Ok(_) = jwt.verify_jws(token, accept, key) else {
+        return 2
+    }
+    for n in[0u64, minimum - 1] {
+        let short_signer = jwt.signer(alg, provide.random(0), seal(clone(list.slice(raw, 0, n)), "mac"))
+        match jwt.sign_jwt(short_signer, "{}") {
+            Error(BadKey) => {},
+            _ => return 3,
+        }
+        let short_key = jwt.hmac_key(seal(clone(list.slice(raw, 0, n)), "verify"))
+        match jws_error(jwt.verify_jws(token, accept, short_key)) {
+            Some(BadKey) => {},
+            _ => return 4,
+        }
+    }
+    0
+}
+
+// expect: run jwt_hmac_key_law() = 0
+fn jwt_hmac_key_law() -> u64 {
+    hmac_minimum(Hs256, 32) + 10 * hmac_minimum(Hs384, 48) + 100 * hmac_minimum(Hs512, 64)
+}

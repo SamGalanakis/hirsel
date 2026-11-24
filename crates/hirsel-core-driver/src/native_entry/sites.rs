@@ -4,11 +4,7 @@ use object::{Object as _, ObjectSymbol as _};
 
 use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs::File,
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
     match section.flags() {
@@ -37,13 +33,13 @@ fn unmangled(format: object::BinaryFormat, name: &[u8]) -> &[u8] {
 pub(crate) fn runtime_sources(
     sources: &SourceMap,
     map: Option<hirsel_core_ids::ContentHash>,
-    inputs: &[PathBuf],
+    members: &[std::sync::Arc<[u8]>],
     keys: &[(hirsel_core_ids::ContentHash, u64)],
 ) -> std::io::Result<(std::sync::Arc<SourceMap>, bool)> {
-    let scans = inputs
+    let scans = keys
         .iter()
-        .zip(keys)
-        .map(|(input, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(input)))
+        .enumerate()
+        .map(|(n, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(&members[n])))
         .collect::<std::io::Result<Vec<_>>>()?;
     let digests: Vec<_> = scans.iter().map(|scan| scan.digest).collect();
     let key = map.map(|map| (map, digests.clone()));
@@ -220,11 +216,10 @@ pub(crate) struct Referenced {
     digest: hirsel_core_ids::ContentHash,
 }
 
-fn referenced(input: &PathBuf) -> std::io::Result<Referenced> {
+fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let mut items = HashSet::new();
     let mut spawns_units = false;
-    let cache = object::read::ReadCache::new(File::open(input)?);
-    let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
+    let object = object::File::parse(input).map_err(std::io::Error::other)?;
     for section in object.sections() {
         if !allocatable(&section) {
             continue;

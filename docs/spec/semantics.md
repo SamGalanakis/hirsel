@@ -482,9 +482,31 @@ depends on the engine, the build or the CPU.
   one count of type `T`, which fails with `Overflow` once, at the operator, when it is
   negative or at least `T`'s width ([LANG-21](language.md#lang-21-operators)).
 - **Arithmetic** is named and never fails: `simd.wrapping_add`, `simd.wrapping_sub`,
-  `simd.saturating_add` and `simd.saturating_sub` take two vectors of one type and apply
-  their `int` namesakes to each lane. `+`, `-`, `*`, `/`, `%`, unary `-` and the comparison
-  operators are refused on vectors.
+  `simd.wrapping_mul`, `simd.saturating_add` and `simd.saturating_sub` take two vectors of
+  one type and apply their `int` namesakes to each lane. `+`, `-`, `*`, `/`, `%`, unary `-`
+  and the comparison operators are refused on vectors.
+- **Widening and narrowing.** Each product below is exact: an `i16` times an `i16` always
+  fits in an `i32`.
+  - `simd.mulhi_i16(a, b)` takes two `Simd[i16, n]` and returns a `Simd[i16, n]` whose
+    lane i is the top 16 bits of the 32-bit product of lane i of `a` and lane i of `b`,
+    that is the product shifted right by 16 with its sign kept (rounding toward negative
+    infinity). Its low 16 bits are lane i of `simd.wrapping_mul(a, b)`.
+  - `simd.madd_i16(a, b)` takes two `Simd[i16, n]` and returns a `Simd[i32, n/2]` whose
+    lane i is `a[2i] × b[2i] + a[2i+1] × b[2i+1]` modulo 2^32 as an `i32`. The sum
+    leaves the `i32` range only when all four lanes are −32768, and gives −2^31 there.
+  - `simd.pack_saturating(a, b)` takes two `Simd[S, n]` and returns a `Simd[T, 2n]`, `T`
+    taken from the expected type: `T` is `i8` or `u8` with `S` = `i16`, or `i16` or `u16`
+    with `S` = `i32`, and any other `T` is refused. Lane i comes from lane i of `a` when
+    i < n and from lane i − n of `b` otherwise, across the whole vector, and is clamped to
+    `T`'s range: a negative lane packs to 0 when `T` is unsigned.
+
+  On x86-64 these are `pmulhw`, `pmaddwd`, `packsswb`, `packuswb`, `packssdw` and
+  `packusdw`; at v3 the 32-byte forms are the `v` forms, whose results lie in two 16-byte
+  halves, so a pack's lanes are put in order by a `vpermq` after it. On ARM64 `mulhi_i16`
+  is `smull` and `smull2` followed by `uzp2` of their 16-bit halves (not `sqdmulh`, which
+  doubles and saturates), `madd_i16` is `smull` and `smull2` followed by `addp`, which
+  adds modulo 2^32, and the packs are `sqxtn` and `sqxtn2` for a signed `T` and `sqxtun`
+  and `sqxtun2` for an unsigned one.
 - **Masks.** `simd.eq(a, b)` and `simd.lt(a, b)` take two vectors of one type and return a
   **mask** of that type, whose lanes are all ones where the lanes compare true and 0 where
   they do not; `lt` compares as `T`, signed or unsigned.

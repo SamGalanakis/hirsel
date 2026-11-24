@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import crash_inputs
-from store_crash_tests import checked, run_crashes
+from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
@@ -33,8 +33,6 @@ LAW_GROUPS = {
     'runner': ('trigger_transact', 'trigger_granted', 'trigger_snapshot', 'trigger_cancel'),
     'steps': STEP_LAWS,
 }
-SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split', 'journal-place-idle',
-             'journal-fork')
 FORK_IMAGES = ('journal-fork-ack-cut', 'journal-fork-complete', 'journal-fork-torn', 'journal-fork-bad-end',
                'journal-fork-child-unwritten')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',
@@ -138,7 +136,7 @@ def main():
                 # the immutable binary once at every W2 mutation cut.
                 cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
                                    manifest, work, engine, entry='store@1/store/journal_crash_main',
-                                   scenarios=SCENARIOS, environment=env, count_only=('orphan-end', *FORK_IMAGES))
+                                   scenarios=(*SCENARIOS, 'journal-keyed'), environment=env, count_only=('orphan-end', *FORK_IMAGES))
                 rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 checks = provider_checks(work / (engine + '-crash') / 'store', engine, env)
                 rows.append(dict(engine=engine, passed=True, providers=checks))

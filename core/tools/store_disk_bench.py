@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """S2 R6-R8 and S3 R4/R5 with private open, frozen sources and gated CPU16 phase counters."""
 import argparse
+from contextlib import ExitStack, nullcontext
 import fcntl
 import json
+from math import ceil
 import os
 from pathlib import Path
 import re
+import shutil
 from struct import error as StructError
+import subprocess
 
 from measurement_artifacts import allocation_linker, check, phase_allocations
 from omap_bench import command, measure
 from std_native import ROOT
 from store_r6 import Manifest, check_r6
 from store_tests import inputs
+from timing_shield import BOARD, REGIMES, hold
 
 
 def r6_result(row, output, before):
@@ -31,6 +36,61 @@ def r6_result(row, output, before):
         raise ValueError(', '.join(row['r6_violations']))
 
 
+def burst_sample(binary, host, out, env, width, burst, stores):
+    before = set(host.glob('store-law-*'))
+    tag = f'{binary.name}-RB-{width}-b{burst}-s{stores}'
+    with ExitStack() as stack:
+        jobs = []
+        gates = []
+        for slot in range(stores):
+            gate_path = host / f'gate-RB-{slot}'
+            gate_path.unlink(missing_ok=True)
+            os.mkfifo(gate_path)
+            stack.callback(gate_path.unlink)
+            gate = os.open(gate_path, os.O_RDWR)
+            stack.callback(os.close, gate)
+            gates.append(gate)
+            stderr = stack.enter_context((out / f'{tag}-{slot}.stderr').open('w'))
+            argv = [ROOT / 'tools/capped', 'taskset', '-c', '16', binary, 'RB',
+                    str(width), str(burst), gate_path.name]
+            jobs.append(subprocess.Popen(list(map(str, argv)), env=env | {'HIRSEL_JOBS': '1'},
+                                         stdout=subprocess.PIPE, stderr=stderr, text=True))
+        ready = [job.stdout.readline() == 'READY\n' for job in jobs]
+        for gate, waiting in zip(gates, ready):
+            if waiting:
+                os.write(gate, b's')
+        output = [job.communicate()[0].split() for job in jobs]
+    if not all(ready) or any(job.returncode for job in jobs):
+        raise ValueError(f'{tag} did not finish; see stderr logs')
+    if any(len(tokens) != 3 + 2000 * burst or tokens[0] != 'BURST' for tokens in output):
+        raise ValueError(f'{tag} sample is incomplete')
+    latencies = sorted(int(value) for tokens in output for value in tokens[3:])
+    engagement = [int(tokens[1]) / 2000 for tokens in output]
+    terminal_ends = {int(tokens[2]) for tokens in output}
+    directories = set(host.glob('store-law-*')) - before
+    if len(directories) != stores or len(terminal_ends) != 1:
+        raise ValueError(f'{tag} stores did not finish at the same frame end')
+    terminal_end, = terminal_ends
+    for directory in directories:
+        segments = sorted((p for p in directory.glob('j-*') if p.name[2:].isdecimal()),
+                          key=lambda p: int(p.name[2:]))
+        ends = []
+        for successor in segments[1:]:
+            with successor.open('rb') as file:
+                file.seek(64)
+                ends.append(int.from_bytes(file.read(8), 'little'))
+        ends.append(terminal_end)
+        if not segments or any(not 0 <= segment.stat().st_size - end <= min(4194304, (end - 72) // 4096 * 4096)
+                               for segment, end in zip(segments, ends)):
+            raise ValueError(f'{tag} segment exceeds the window bound: {directory}')
+        shutil.rmtree(directory)
+    return dict(tag=tag, complete=True, workload='RB', width=width, burst=burst, stores=stores,
+                samples=len(latencies), engagement=engagement,
+                p50_ns=latencies[ceil(0.50 * len(latencies)) - 1],
+                p99_ns=latencies[ceil(0.99 * len(latencies)) - 1],
+                p999_ns=latencies[ceil(0.999 * len(latencies)) - 1], max_ns=latencies[-1])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--artifacts', type=Path, required=True)
@@ -40,8 +100,9 @@ def main():
     p.add_argument('--allocations', action='store_true',
                    help='prepare or sample the allocation-counting binary instead of the shipping binary')
     p.add_argument('--profile', action='append', choices=['dev', 'release'])
-    p.add_argument('--workload', action='append', choices=['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open', 'migrate'])
+    p.add_argument('--workload', action='append', choices=['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open', 'migrate', 'RB'])
     p.add_argument('--index', action='append', type=int, choices=[0, 1])
+    p.add_argument('--timing-hold', action='store_true', help='shield CPU 16 for each measured sample')
     args = p.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -100,6 +161,16 @@ def main():
             fcntl.flock(shared_lock, fcntl.LOCK_EX)
             for profile in profiles:
                 for mode in args.workload or ['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open']:
+                    if mode == 'RB':
+                        for width in (97, 4096):
+                            for burst in (1, 8, 64):
+                                for stores in (1, 4):
+                                    with hold(REGIMES, BOARD):
+                                        row = burst_sample(out / (profile + suffix), host, out, env, width, burst, stores)
+                                    rows.append(row)
+                                    (out / (row['tag'] + '-sample.json')).write_text(json.dumps(row, indent=2) + '\n')
+                                    print(row['tag'], json.dumps(row), flush=True)
+                        continue
                     indexes = args.index or ([0, 1] if mode.startswith('R8') else [0])
                     for index in indexes:
                         # R4's DONE is the sum of c over 64..10064; R5's is its commit count.
@@ -116,9 +187,10 @@ def main():
                             except (ValueError, OSError, KeyError, StructError) as error:
                                 before = error
 
-                        row = measure([out / (profile + suffix), mode, str(index)], out, env, tag, n,
-                                      host_directory=host, events=None if args.allocations else 'instructions:u',
-                                      before_phase=before_phase if mode == 'R6' else None)
+                        with hold(REGIMES, BOARD) if args.timing_hold else nullcontext():
+                            row = measure([out / (profile + suffix), mode, str(index)], out, env, tag, n,
+                                          host_directory=host, events=None if args.allocations else 'instructions:u',
+                                          before_phase=before_phase if mode == 'R6' else None)
                         text = (out / tag / 'stdout').read_text()
                         extra = re.search(r'PACK_BYTES (\d+) NEW_PAGES (\d+) ACCOUNT (\d+)\n', text)
                         journal = re.search(r'COMMITS (\d+) VERSION (\d+)\n', text)

@@ -28,6 +28,15 @@
     "core-packages/*": {
       "contents": "the core and std package images and the Store source archive"
     },
+    "libexec/hirsel/platform_main": {
+      "contents": "the Hirsel platform host, linked with the shipped runtime archive"
+    },
+    "libexec/hirsel/pin_reader": {
+      "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive"
+    },
+    "libexec/hirsel/.hirsel-debug/*.debug": {
+      "contents": "detached debug information for the platform executables"
+    },
     "lib/libLLVM.so.23.1": {
       "native": "engine_llvm",
       "contents": "the compiler's LLVM library (tools/native-toolchain/build-libllvm)"
@@ -47,6 +56,7 @@
     "runtime",
     "link",
     "lib",
+    "libexec",
     "bin"
   ],
   "rust_lock": "tools/buck2/toolchain-lock.json",

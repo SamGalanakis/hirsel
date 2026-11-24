@@ -102,7 +102,7 @@ python3 bench/awfy/awfy_measure.py "$out/build" "$out/pools-before" \
 ```
 
 To test the MEM-32 reopen condition, rebuild the same Hirsel harness with
-the toolchain that implements all MEM-32 obligations. Point the measurement
+the toolchain that meets the MEM-32 targets. Point the measurement
 at its build directory and pass `--pool --sides hirsel`. Reuse the first
 Goose and Rust samples as denominators. Compare Hirsel/Goose for each workload
 against the 1.5× threshold in [MEM-32's reopen rule](../../docs/spec/memory.md#memory-model-settled).
@@ -169,7 +169,10 @@ Use at least two measurement CPUs. The first runs AWFY, LangArena and the
 checkbox server. The second runs the checkbox loader. A measurement CPU
 must have a core to itself within the run's CPU assignment. The board
 reports sibling activity for each sample. The default lock is
-`/run/user/<uid>/hirsel-board.lock` for the current user. The board needs Linux perf user
+`/run/user/<uid>/hirsel-board.lock` for the current user. On the timing host,
+the board and cycle-pairs runner hold both shared timing locks, move into
+transient system scopes, and reserve CPUs 0-3 and 16-19 from `user.slice`
+and `system.slice` until the hold ends. The board needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
 with the captured logs. Add `--baseline PREVIOUS/board.json` to check each
@@ -412,7 +415,9 @@ a fresh request store and checks
 the Spectralnorm result. The receipt carries the compiler's stage metrics
 and a separate breakdown of process-tree PMU instruction stack samples.
 Entries in `other` have no recognized phase frame. The samples estimate
-where instruction work occurs.
+where instruction work occurs. The innermost recognized frame names the
+phase, so the pre-LLVM phases (`std-load`, `code-store`, `request-store`,
+`tool-inputs`) take their hashing and copying away from `reach` and `other`.
 
 Add `--pass-trace --top 10` to count a fresh-store build with the LLVM
 trace off and another with it on. Both builds use the same prebuilt std

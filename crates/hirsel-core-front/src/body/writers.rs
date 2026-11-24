@@ -89,6 +89,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,

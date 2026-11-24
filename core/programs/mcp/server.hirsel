@@ -228,7 +228,6 @@ fn frames(req: std.http.Request, state: Server, directory: Option[Dir], take sou
     let room = std.stream.Bounds(event_max: state.event_max, producer_bytes: state.producer_bytes, producer_steps: state.producer_steps)
     let mut spec = std.stream.spec_owned(req, 200, room, directory, take source)?
     std.stream.header(mut spec, b"Content-Type", b"text/event-stream")?
-    std.stream.header(mut spec, b"X-Accel-Buffering", b"no")?
     Ok(Stream(take spec))
 }
 

@@ -561,55 +561,54 @@ fn next_quote_escape(b: Bytes, start: u64, end: u64) -> u64 {
 // Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
 // between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
 fn push_quoted(mut s: String, value: String) {
-    string.push(mut s, "\"")
-    let b = string.as_bytes(value)
-    let end = list.len(b)
-    let first = next_quote_escape(b, 0, end)
-    if first == end {
-        string.push(mut s, value)
-    } else {
-        push_escaped_runs(mut s, value, b, first, end)
-    }
-    string.push(mut s, "\"")
+    emit_quoted(value, scoped fn(piece: String) {
+        string.push(mut s, piece)
+    })
 }
 
-fn push_escaped_runs(mut s: String, value: String, b: Bytes, first: u64, end: u64) {
-    let mut i = first
-    let mut start: u64 = 0
-    while i < end {
-        string.push(mut s, string.slice(value, start, i))
-        let c = b[i]
-        if c == b'"' {
-            string.push(mut s, "\\\"")
-        } else if c == b'\\' {
-            string.push(mut s, "\\\\")
-        } else if c == 8 {
-            string.push(mut s, "\\b")
-        } else if c == 9 {
-            string.push(mut s, "\\t")
-        } else if c == 10 {
-            string.push(mut s, "\\n")
-        } else if c == 12 {
-            string.push(mut s, "\\f")
-        } else if c == 13 {
-            string.push(mut s, "\\r")
-        } else {
-            // Commit the whole six-byte escape in one append.
-            string.reserve(mut s, 6)
-            let mut hex: Inline[u8, 64] =[b'0'; 64]
-            let control: u64 = int.widen(c)
-            let _ = int.radix_digits(control, 16, mut hex)
-            string.push(mut s, "\\u00")
-            for j in 62u64 .. 64 {
-                let code: u32 = int.widen(hex[j])
-                string.push_char(mut s, option.unwrap(char.from_u32(code)))
-            }
-        }
-        start = i + 1
-        i = next_quote_escape(b, start, end)
-    }
-    string.push(mut s, string.slice(value, start, end))
+/// Appends a JSON string, including quotes, to a byte buffer.
+/// Fails: Capacity. Alloc: GROWTH of out only. Cost: O(bytes written).
+pub fn append_quoted(mut out: Bytes, value: String) {
+    emit_quoted(value, scoped fn(piece: String) {
+        list.append(mut out, string.as_bytes(piece))
+    })
 }
+
+fn emit_quoted(value: String, append: scoped fn(String)) {
+    append("\"")
+    let b = string.as_bytes(value)
+    let end = list.len(b)
+    let mut i = next_quote_escape(b, 0, end)
+    if i == end {
+        append(value)
+    } else {
+        let mut start: u64 = 0
+        while i < end {
+            append(string.slice(value, start, i))
+            let c = b[i]
+            match c {
+                b'"' => append("\\\""),
+                b'\\' => append("\\\\"),
+                8 => append("\\b"),
+                9 => append("\\t"),
+                10 => append("\\n"),
+                12 => append("\\f"),
+                13 => append("\\r"),
+                _ => {
+                    let control: u64 = int.widen(c)
+                    let offset = control * 6
+                    append(string.slice(CONTROL_ESCAPES, offset, offset + 6))
+                },
+            }
+            start = i + 1
+            i = next_quote_escape(b, start, end)
+        }
+        append(string.slice(value, start, end))
+    }
+    append("\"")
+}
+
+const CONTROL_ESCAPES: String = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
 
 /// Finds the last member of ms whose key equals k, as a view of its value.
 /// Returns None when no member matches. Alloc: none. Cost: one pass.
@@ -1030,37 +1029,37 @@ fn string_word_prefix(b: Bytes, i: u64) -> u64 {
     bit >> 3
 }
 
-/// At the opening '"': the decoded UTF-8 length of the string.
-fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
-    i += 1
-    let start = i
+// The input is already a String. Only quote, escape and control bytes stop a run.
+fn string_run(s: String, start: u64) -> u64 {
     let b = string.as_bytes(s)
     let end = list.len(b)
-    // Size short, unescaped strings without entering the escape loop.
-    // The cursor starts at an opening quote and each step stays within b.
-    for _ in 0u32 .. 2 {
-        if int.wrapping_sub(end, i) < 8 {
-            break
-        }
+    let mut i = start
+    while end - i >= 8 {
         let run = string_word_prefix(b, i)
-        i = int.wrapping_add(i, run)
+        i += run
         if run != 8 {
-            if b[i] == b'"' {
-                let n = int.wrapping_sub(i, start)
-                i += 1
-                return Ok(n)
-            }
-            break
+            return i
         }
+        i = scan_string_blocks(b, i)
     }
-    let prefix = int.wrapping_sub(i, start)
-    string_size_rest(s, mut i, prefix)
+    loop {
+        let c = at(s, i)
+        if c < 0x20 || c == b'"' || c == b'\\' {
+            return i
+        }
+        i += 1
+    }
 }
 
-fn string_size_rest(s: String, mut i: u64, prefix: u64) -> Result[u64, Error] {
+/// At the opening '"': the decoded UTF-8 length of the string.
+fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
+    let start = i + 1
+    i = string_run(s, start)
+    string_size_rest(s, i - start, mut i)
+}
+
+fn string_size_rest(s: String, prefix: u64, mut i: u64) -> Result[u64, Error] {
     let mut n = prefix
-    let b = string.as_bytes(s)
-    let end = list.len(b)
     loop {
         let c = at(s, i)
         if c == b'"' {
@@ -1068,27 +1067,12 @@ fn string_size_rest(s: String, mut i: u64, prefix: u64) -> Result[u64, Error] {
             return Ok(n)
         }
         if c < 0x20 {
-            // A control byte, or the end of s, where `at` reads 0.
             return Error(Syntax(i))
         }
         if c != b'\\' {
-            if i + 8 <= end {
-                let run = string_word_prefix(b, i)
-                if run != 8 {
-                    n += run
-                    i += run
-                } else {
-                    let start = i
-                    i += 8
-                    if end - i >= 32 {
-                        i = scan_string_blocks(b, i)
-                    }
-                    n += i - start
-                }
-                continue
-            }
-            n += 1
-            i += 1
+            let start = i
+            i = string_run(s, i)
+            n += i - start
         } else if at(s, i + 1) == b'u' {
             n += char.utf8_len(unicode(s, mut i)?)
         } else if is_escape(at(s, i + 1)) {
@@ -1296,10 +1280,7 @@ fn decoded_string_part(s: String, mut i: u64) -> Result[DecodedStringPart, Error
         return Ok(StringEscape(c))
     }
     let start = i
-    i += 1
-    while at(s, i) != b'"' && at(s, i) != b'\\' {
-        i += 1
-    }
+    i = string_run(s, i)
     Ok(StringRun(start, i))
 }
 
@@ -1353,8 +1334,10 @@ fn at(s: String, i: u64) -> u8 {
 
 /// Skips JSON whitespace: space, tab, line feed, carriage return.
 fn skip(s: String, mut i: u64) {
-    loop {
-        let c = at(s, i)
+    let b = string.as_bytes(s)
+    let end = list.len(b)
+    while i < end {
+        let c = b[i]
         if c != b' ' && c != b'\t' && c != b'\n' && c != b'\r' {
             return
         }
@@ -1381,12 +1364,12 @@ fn ascii(x: u8) -> char {
 
 // Typed JSON uses a prepared graph. Definition indices occupy its initial slots;
 // structural expressions add nodes as the reachable definitions are expanded.
-pub opaque type Format[T] {
+pub opaque type Format[T]: shareable + send {
     binary: codec.Codec[T],
-    plan: JsonPlan
+    plan: Arc[JsonPlan]
 }
 
-type JsonPlan {
+pub type JsonPlan: shareable + send {
     description: codec.Schema,
     root: u64,
     shapes: List[Shape],
@@ -1394,22 +1377,22 @@ type JsonPlan {
     profile: Profile
 }
 
-type Profile: key = Strict | Interop
+pub type Profile: key = Strict | Interop
 
-type Shape = Atom(u8) | Array(u64) | Pairs(u64, u64) | Optional(u64) | Outcome(u64, u64) | Record(List[Field]) | Sum(List[Variant]) | Via(u64)
+pub type Shape: shareable + send = Atom(u8) | Array(u64) | Pairs(u64, u64) | Optional(u64) | Outcome(u64, u64) | Record(List[Field]) | Sum(List[Variant]) | Via(u64)
 
-type Field {
+pub type Field: shareable + send {
     name: String,
     shape: u64
 }
 
-type Variant {
+pub type Variant: shareable + send {
     name: String,
     fields: List[u64],
     live: bool
 }
 
-type ShapeFact {
+pub type ShapeFact: shareable + send {
     // The underlying JSON shape, with all via layers stripped.
     form: u64,
     empty: bool,
@@ -1435,565 +1418,71 @@ pub fn interop[T: codec]() -> Result[Format[T], TypedError] {
 }
 
 /// An annotation must select a schema object by RFC 6901 JSON Pointer.
-pub type SchemaWriteError = UnknownAnnotation(String) | DuplicateAnnotation(String)
-
-type SchemaWriter {
-    text: String,
-    path: String,
-    shared: Bytes,
-    descriptions: Map[String, String]
-}
+pub type SchemaWriteError = json_schema.SchemaWriteError
 
 /// Appends one JSON Schema draft 2020-12 document for the format's wire shape.
 /// An annotation error leaves out intact.
 pub fn schema[T](format: Format[T], annotations: List[(String, String)], mut out: Bytes) -> Result[(), SchemaWriteError] {
-    let plan = view format.plan
-    let mut descriptions: Map[String, String] = map.new()
-    for (path, description) in annotations {
-        if let Some(_) = map.get(descriptions, path) {
-            return Error(DuplicateAnnotation(string.from(path)))
-        }
-        map.insert(mut descriptions, string.from(path), string.from(description))
-    }
-    let root = plan.facts[plan.root].form
-    let mut w = SchemaWriter(text: string.from("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\","), path: string.new(), shared: schema_references(plan, root), descriptions: take descriptions)
-    schema_shape(plan, root, mut w)
-    schema_description(mut w, ",")
-    let mut first = true
-    for id in 0u64 .. list.len(w.shared) {
-        if w.shared[id] == 2 && id != root {
-            string.push(mut w.text, if first {
-                ",\"$defs\":{"
-            } else {
-                ","
-            })
-            first = false
-            let name = schema_index(id)
-            schema_key(mut w.text, name)
-            string.push(mut w.path, "/$defs/")
-            string.push(mut w.path, name)
-            string.push(mut w.text, "{")
-            schema_shape(plan, id, mut w)
-            schema_description(mut w, ",")
-            string.push(mut w.text, "}")
-            string.truncate(mut w.path, 0)
-        }
-    }
-    if !first {
-        string.push(mut w.text, "}")
-    }
-    string.push(mut w.text, "}")
-    for (path, _) in annotations {
-        if let Some(_) = map.get(w.descriptions, path) {
-            return Error(UnknownAnnotation(string.from(path)))
-        }
-    }
-    list.append(mut out, string.as_bytes(w.text))
-    Ok(())
-}
-
-// A repeated composite gets a reference. This also cuts every reachable cycle
-// and avoids expanding shared shapes afresh along each path through the graph.
-fn schema_references(plan: JsonPlan, root: u64) -> Bytes {
-    let mut shared: Bytes = list.new()
-    list.fill(mut shared, list.len(plan.shapes), 0)
-    schema_count(plan, root, mut shared)
-    for shape in plan.shapes {
-        match shape {
-            Array(item) => schema_count(plan, item, mut shared),
-            Optional(item) => schema_count(plan, item, mut shared),
-            Pairs(key, value) => {
-                schema_count(plan, key, mut shared)
-                schema_count(plan, value, mut shared)
-            },
-            Outcome(ok, err) => {
-                schema_count(plan, ok, mut shared)
-                schema_count(plan, err, mut shared)
-            },
-            Record(fields) => for field in fields {
-                schema_count(plan, field.shape, mut shared)
-            },
-            Sum(variants) => for variant in variants {
-                for field in variant.fields {
-                    schema_count(plan, field, mut shared)
-                }
-            },
-            _ => {},
-        }
-    }
-    take shared
-}
-
-fn schema_count(plan: JsonPlan, id: u64, mut shared: Bytes) {
-    let form = plan.facts[id].form
-    if let Atom(_) = plan.shapes[form] {
-        return
-    }
-    if shared[form] < 2 {
-        shared[form] += 1
-    }
-}
-
-fn schema_key(mut text: String, name: String) {
-    push_quoted(mut text, name)
-    string.push(mut text, ":")
-}
-
-fn schema_index(i: u64) -> String {
-    let mut name = string.new()
-    string.push_u64(mut name, i)
-    take name
-}
-
-fn schema_description(mut w: SchemaWriter, separator: String) {
-    if let Some(take description) = map.remove(mut w.descriptions, w.path) {
-        string.push(mut w.text, separator)
-        string.push(mut w.text, "\"description\":")
-        push_quoted(mut w.text, description)
-    }
-}
-
-fn schema_impossible(mut w: SchemaWriter) {
-    let path = string.byte_len(w.path)
-    string.push(mut w.path, "/not")
-    string.push(mut w.text, "\"not\":{")
-    schema_description(mut w, "")
-    string.push(mut w.text, "}")
-    string.truncate(mut w.path, path)
-}
-
-fn schema_child(plan: JsonPlan, id: u64, name: String, mut w: SchemaWriter) {
-    let path = string.byte_len(w.path)
-    push_pointer_token(mut w.path, name)
-    let form = plan.facts[id].form
-    string.push(mut w.text, "{")
-    if w.shared[form] == 2 {
-        string.push(mut w.text, "\"$ref\":\"#")
-        if form != plan.facts[plan.root].form {
-            string.push(mut w.text, "/$defs/")
-            string.push_u64(mut w.text, form)
-        }
-        string.push(mut w.text, "\"")
-    } else {
-        schema_shape(plan, form, mut w)
-    }
-    schema_description(mut w, ",")
-    string.push(mut w.text, "}")
-    string.truncate(mut w.path, path)
-}
-
-fn schema_shape(plan: JsonPlan, id: u64, mut w: SchemaWriter) {
-    match plan.shapes[id] {
-        Atom(op) => schema_atom(plan.profile, op, mut w),
-        Array(item) => if let Atom(3) = plan.shapes[item] {
-            string.push(mut w.text, "\"type\":\"string\",\"contentEncoding\":\"base64\",\"pattern\":\"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?(?![\\\\s\\\\S])\"")
-        } else {
-            string.push(mut w.text, "\"type\":\"array\",\"items\":")
-            schema_child(plan, item, "items", mut w)
-        },
-        Pairs(key, value) => if string_map(plan, key) {
-            string.push(mut w.text, "\"type\":\"object\",\"additionalProperties\":")
-            schema_child(plan, value, "additionalProperties", mut w)
-        } else {
-            string.push(mut w.text, "\"type\":\"array\",\"items\":{")
-            let path = string.byte_len(w.path)
-            string.push(mut w.path, "/items")
-            let mut fields: List[u64] = list.with_capacity(2)
-            list.push(mut fields, key)
-            list.push(mut fields, value)
-            schema_tuple(plan, fields, mut w)
-            schema_description(mut w, ",")
-            string.truncate(mut w.path, path)
-            string.push(mut w.text, "}")
-        },
-        Optional(item) => {
-            string.push(mut w.text, "\"anyOf\":[{\"type\":\"null\"")
-            let path = string.byte_len(w.path)
-            string.push(mut w.path, "/anyOf/0")
-            schema_description(mut w, ",")
-            string.truncate(mut w.path, path)
-            string.push(mut w.path, "/anyOf")
-            string.push(mut w.text, "},")
-            schema_child(plan, item, "1", mut w)
-            string.push(mut w.text, "]")
-            string.truncate(mut w.path, path)
-        },
-        Outcome(ok, err) => {
-            string.push(mut w.text, "\"oneOf\":[")
-            let mut fields: List[u64] = list.with_capacity(1)
-            list.push(mut fields, ok)
-            schema_variant(plan, "ok", fields, 0, mut w)
-            string.push(mut w.text, ",")
-            fields[0] = err
-            schema_variant(plan, "error", fields, 1, mut w)
-            string.push(mut w.text, "]")
-        },
-        Record(fields) => schema_record(plan, id, fields, mut w),
-        Sum(variants) => {
-            let mut i: u64 = 0
-            for variant in variants {
-                if variant.live {
-                    string.push(mut w.text, if i == 0 {
-                        "\"oneOf\":["
-                    } else {
-                        ","
-                    })
-                    schema_variant(plan, variant.name, variant.fields, i, mut w)
-                    i += 1
-                }
-            }
-            if i == 0 {
-                schema_impossible(mut w)
-            } else {
-                string.push(mut w.text, "]")
-            }
-        },
-        Via(_) => fail("prepared JSON form has no via layer"),
-    }
-}
-
-fn schema_record(plan: JsonPlan, id: u64, fields: List[Field], mut w: SchemaWriter) {
-    string.push(mut w.text, "\"type\":\"object\",\"additionalProperties\":false,\"properties\":{")
-    let path = string.byte_len(w.path)
-    string.push(mut w.path, "/properties")
-    for i in 0u64 .. list.len(fields) {
-        let field = fields[i]
-        if i != 0 {
-            string.push(mut w.text, ",")
-        }
-        schema_key(mut w.text, field.name)
-        schema_child(plan, field.shape, field.name, mut w)
-    }
-    string.truncate(mut w.path, path)
-    string.push(mut w.text, "},\"required\":[")
-    let mut first = true
-    for field in fields {
-        if let Optional(_) = plan.shapes[plan.facts[field.shape].form] {
-            continue
-        }
-        if let Some(_) = codec.schema_default(plan.description, id, field.name) {
-            continue
-        }
-        if !first {
-            string.push(mut w.text, ",")
-        }
-        first = false
-        push_quoted(mut w.text, field.name)
-    }
-    string.push(mut w.text, "]")
-}
-
-fn schema_variant(plan: JsonPlan, name: String, fields: List[u64], branch_index: u64, mut w: SchemaWriter) {
-    let path = string.byte_len(w.path)
-    string.push(mut w.path, "/oneOf/")
-    string.push_u64(mut w.path, branch_index)
-    let width = list.len(fields)
-    if width == 0 {
-        string.push(mut w.text, "{\"const\":")
-        push_quoted(mut w.text, name)
-    } else {
-        string.push(mut w.text, "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[")
-        push_quoted(mut w.text, name)
-        string.push(mut w.text, "],\"properties\":{")
-        schema_key(mut w.text, name)
-        let branch = string.byte_len(w.path)
-        string.push(mut w.path, "/properties")
-        if width == 1 {
-            schema_child(plan, fields[0], name, mut w)
-        } else {
-            push_pointer_token(mut w.path, name)
-            string.push(mut w.text, "{")
-            schema_tuple(plan, fields, mut w)
-            schema_description(mut w, ",")
-            string.push(mut w.text, "}")
-        }
-        string.truncate(mut w.path, branch)
-        string.push(mut w.text, "}")
-    }
-    schema_description(mut w, ",")
-    string.push(mut w.text, "}")
-    string.truncate(mut w.path, path)
-}
-
-fn schema_tuple(plan: JsonPlan, fields: List[u64], mut w: SchemaWriter) {
-    string.push(mut w.text, "\"type\":\"array\",\"minItems\":")
-    string.push_u64(mut w.text, list.len(fields))
-    string.push(mut w.text, ",\"maxItems\":")
-    string.push_u64(mut w.text, list.len(fields))
-    string.push(mut w.text, ",\"prefixItems\":[")
-    let path = string.byte_len(w.path)
-    string.push(mut w.path, "/prefixItems")
-    for i in 0u64 .. list.len(fields) {
-        if i != 0 {
-            string.push(mut w.text, ",")
-        }
-        schema_child(plan, fields[i], schema_index(i), mut w)
-    }
-    string.truncate(mut w.path, path)
-    string.push(mut w.text, "]")
-}
-
-fn schema_atom(profile: Profile, op: u8, mut w: SchemaWriter) {
-    if op == 20 {
-        schema_impossible(mut w)
-        return
-    }
-    if profile == Strict && (op == 6 || op == 10) {
-        string.push(mut w.text, "\"type\":\"string\",\"pattern\":")
-        let mut pattern = string.from("^(?:0|")
-        if op == 6 {
-            schema_decimal_patterns("18446744073709551615", mut pattern)
-        } else {
-            schema_decimal_patterns("9223372036854775807", mut pattern)
-            string.push(mut pattern, "|-(?:")
-            schema_decimal_patterns("9223372036854775808", mut pattern)
-            string.push(mut pattern, ")")
-        }
-        string.push(mut pattern, ")(?![\\s\\S])")
-        push_quoted(mut w.text, pattern)
-        return
-    }
-    let keywords = match op {
-        0 => "\"type\":\"null\"",
-        1 => "\"type\":\"boolean\"",
-        2 => "\"type\":\"string\",\"minLength\":1,\"maxLength\":1",
-        3 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":255",
-        4 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":65535",
-        5 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295",
-        6 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":18446744073709551615",
-        7 => "\"type\":\"integer\",\"minimum\":-128,\"maximum\":127",
-        8 => "\"type\":\"integer\",\"minimum\":-32768,\"maximum\":32767",
-        9 => "\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647",
-        10 => "\"type\":\"integer\",\"minimum\":-9223372036854775808,\"maximum\":9223372036854775807",
-        11 => schema_float(profile),
-        12 => schema_float(profile),
-        13 => "\"type\":\"string\"",
-        _ => fail("prepared JSON atom has a codec opcode"),
-    }
-    string.push(mut w.text, keywords)
-}
-
-fn schema_float(profile: Profile) -> String {
-    if profile == Strict {
-        "\"type\":[\"number\",\"string\"],\"pattern\":\"^(?:NaN|-?Infinity)(?![\\\\s\\\\S])\""
-    } else {
-        "\"type\":\"number\""
-    }
-}
-
-// Alternation for positive decimals at most limit. A same-width alternative
-// first diverges at one digit and can then have any digits after it.
-fn schema_decimal_patterns(limit: String, mut pattern: String) {
-    let bound_digits = string.as_bytes(limit)
-    let digits: String = "0123456789"
-    let n = list.len(bound_digits)
-    string.push(mut pattern, "[1-9][0-9]{0,")
-    string.push_u64(mut pattern, n - 2)
-    string.push(mut pattern, "}|")
-    for i in 0u64 .. n {
-        let low: u64 = if i == 0 {
-            1
-        } else {
-            0
-        }
-        let digit: u64 = int.widen(bound_digits[i] - b'0')
-        if digit > low {
-            string.push(mut pattern, string.slice(limit, 0, i))
-            string.push(mut pattern, "[")
-            string.push(mut pattern, string.slice(digits, low, low + 1))
-            string.push(mut pattern, "-")
-            string.push(mut pattern, string.slice(digits, digit - 1, digit))
-            string.push(mut pattern, "][0-9]{")
-            string.push_u64(mut pattern, n - i - 1)
-            string.push(mut pattern, "}|")
-        }
-    }
-    string.push(mut pattern, limit)
+    json_schema.write(format.plan, annotations, mut out)
 }
 
 fn prepare[T: codec](profile: Profile) -> Result[Format[T], TypedError] {
     let binary: codec.Codec[T] = codec.of()
     let description = codec.describe(binary) ?=> CodecFormat
-    let count = codec.schema_definitions(description)
-    let mut shapes: List[Shape] = list.with_capacity(count)
-    let mut pending: List[u64] = list.new()
-    for _ in 0u64 .. count {
-        shape_push(mut shapes, Atom(255))?
-    }
-    let mut seen: Bytes = list.new()
-    list.fill(mut seen, count, 0)
-    let mut pos: u64 = 0
-    let root = compile_shape(codec.schema_root(description), mut pos, mut shapes, mut seen, mut pending)?
-    while let Some(node) = list.pop(mut pending) {
-        let d = codec.schema_definition(description, node)
-        let shape = compile_definition(d, mut shapes, mut seen, mut pending)?
-        let _ = list.set(mut shapes, node, take shape)
-    }
-    let facts = shape_facts(shapes)?
-    Ok(Format(binary, plan: JsonPlan(description: take description, root, shapes: take shapes, facts: take facts, profile)))
+    let plan = prepare_schema(take description, profile)?
+    Ok(Format(binary, plan: arc.new(take plan)))
 }
 
-fn shape_push[T](mut values: List[T], take x: T) -> Result[(), TypedError] {
-    list.push(mut values, take x)
-    Ok(())
-}
-
-fn compile_shape(b: Bytes, mut pos: u64, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[u64, TypedError] {
-    let op = b[pos]
-    pos += 1
-    let shape: Shape = match op {
-        14 => Array(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
-        15 => {
-            let key = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-            Pairs(key, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
-        },
-        16 => Optional(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?),
-        17 => {
-            let ok = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-            Outcome(ok, compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?)
-        },
-        18 => return Error(Schema(18, Tuple)),
-        19 => {
-            let node = codec.schema_word(b, pos)
-            pos += 4
-            if seen[node] == 0 {
-                seen[node] = 1
-                shape_push(mut pending, node)?
-            }
-            return Ok(node)
-        },
-        _ => Atom(op),
+fn uses_codec_key_check(plan: JsonPlan) -> bool {
+    if plan.profile == Strict {
+        return false
     }
-    let node = list.len(shapes)
-    shape_push(mut shapes, take shape)?
-    Ok(node)
-}
-
-fn schema_name(b: Bytes, mut pos: u64) -> Result[String, TypedError] {
-    let n = codec.schema_word(b, pos)
-    pos += 4
-    let mut name: Bytes = list.with_capacity(n)
-    let _ = list.append(mut name, list.slice(b, pos, pos + n))
-    pos += n
-    match string.from_utf8(take name) {
-        Ok(take s) => Ok(take s),
-        Error(_) => fail("codec schema name is UTF-8"),
-    }
-}
-
-fn compile_definition(b: Bytes, mut shapes: List[Shape], mut seen: Bytes, mut pending: List[u64]) -> Result[Shape, TypedError] {
-    let mut pos: u64 = 1
-    if b[0] == 2 {
-        return Ok(Via(compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?))
-    }
-    let n = codec.schema_word(b, pos)
-    pos += 4
-    if b[0] == 0 {
-        let mut fields: List[Field] = list.new()
-        for _ in 0u64 .. n {
-            let live = b[pos] == 0
-            pos += 1
-            let name = schema_name(b, mut pos)?
-            if live {
-                let shape = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, Field(name: take name, shape))?
-            } else {
-                pos = codec.schema_next(b, pos)
-            }
-        }
-        return Ok(Record(take fields))
-    }
-    let mut variants: List[Variant] = list.with_capacity(n)
-    for _ in 0u64 .. n {
-        let live = b[pos] == 0
-        pos += 1
-        let name = schema_name(b, mut pos)?
-        let width = codec.schema_word(b, pos)
-        pos += 4
-        let mut fields: List[u64] = list.new()
-        for _ in 0u64 .. width {
-            if live {
-                let child = compile_shape(b, mut pos, mut shapes, mut seen, mut pending)?
-                shape_push(mut fields, child)?
-            } else {
-                pos = codec.schema_next(b, pos)
-            }
-        }
-        shape_push(mut variants, Variant(name: take name, fields: take fields, live))?
-    }
-    Ok(Sum(take variants))
-}
-
-// Only a record or via can follow a required child before consuming any codec
-// bytes. A DFS over just those edges both checks cycles and finds LEAST == 0.
-fn shape_fact(shapes: List[Shape], mut facts: List[ShapeFact], node: u64) -> Result[(), TypedError] {
-    match facts[node].state {
-        2 => return Ok(()),
-        1 => return Error(Schema(19, NonConsumingCycle)),
-        _ => {},
-    }
-    facts[node].state = 1
-    let mut empty = false
-    let mut form = node
-    match shapes[node] {
-        Atom(op) => {
-            empty = op == 0
-        },
-        Via(child) => {
-            shape_fact(shapes, mut facts, child)?
-            empty = facts[child].empty
-            form = facts[child].form
-        },
-        Record(fields) => {
-            empty = true
-            for field in fields {
-                shape_fact(shapes, mut facts, field.shape)?
-                empty = empty && facts[field.shape].empty
-            }
-        },
-        _ => {},
-    }
-    facts[node] = ShapeFact(form, empty, state: 2)
-    Ok(())
-}
-
-fn shape_facts(shapes: List[Shape]) -> Result[List[ShapeFact], TypedError] {
-    let mut facts: List[ShapeFact] = list.with_capacity(list.len(shapes))
-    for i in 0u64 .. list.len(shapes) {
-        shape_push(mut facts, ShapeFact(form: i, empty: false, state: 0))?
-    }
-    for i in 0u64 .. list.len(shapes) {
-        shape_fact(shapes, mut facts, i)?
-    }
-    for s in shapes {
-        match s {
-            Optional(child) => match shapes[facts[child].form] {
-                Atom(0) => return Error(Schema(16, NullableOption)),
-                Optional(_) => return Error(Schema(16, NullableOption)),
-                _ => {},
-            },
-            Array(child) => if facts[child].empty {
-                return Error(Schema(14, EmptyListElement))
-            },
-            Pairs(key, value) => if facts[key].empty && facts[value].empty {
-                return Error(Schema(15, EmptyMapEntry))
+    let mut found = false
+    for shape in plan.shapes {
+        match shape {
+            // A via decoder can fail before the codec reaches a later duplicate.
+            Via(_) => return false,
+            Pairs(key, _) => {
+                found = found || string_map(plan, key)
             },
             _ => {},
         }
     }
-    Ok(take facts)
+    found
 }
+
+/// Prepares a schema and its encoded defaults for B-4 wire values.
+pub fn prepare_schema(take description: codec.Schema, profile: Profile) -> Result[JsonPlan, TypedError] {
+    json_schema.prepare(take description, profile)
+}
+
+type PointerToken = InputMember(u64) | Index(u64) | Declared(u64)
+
+type ReadMode: key = DecodeInput | DiagnoseInput | EncodeWire
 
 type ReadTyped {
     pos: u64,
-    path: String,
+    path: List[PointerToken],
+    declarations: List[String],
+    mark_tokens: List[PointerToken],
+    marks: List[SourceMark],
+    mode: ReadMode,
+    parts: List[RecordPart],
+    seen_fields: Bytes,
+    reordered: Bytes,
+}
+
+type TypedLocations {
+    declarations: List[String],
+    mark_tokens: List[PointerToken],
     marks: List[SourceMark]
 }
 
 type SourceMark {
     pos: u64,
     source: u64,
-    path: String,
+    path_start: u64,
+    path_end: u64,
     key: bool
 }
 
@@ -2012,8 +1501,18 @@ pub fn decode_typed[T](format: Format[T], take input: Bytes, byte_limit: u64) ->
 
 /// Decodes one JSON value from a borrowed String under the same byte bound.
 pub fn from_string[T](format: Format[T], input: String, byte_limit: u64) -> Result[T, TypedError] {
+    if uses_codec_key_check(format.plan) {
+        let fast = bound bytes byte_limit {
+            decode_profile(format, input, DecodeInput)
+        }
+        if let Ok(Ok(take value)) = take fast {
+            return Ok(take value)
+        }
+    }
+    // Recheck keys in input order before reporting a JSON, codec or byte-bound
+    // error. The successful fast pass uses the codec's map for this check.
     let decoded = bound bytes byte_limit {
-        decode_profile(format, input)
+        decode_profile(format, input, DiagnoseInput)
     }
     match take decoded {
         Ok(take result) => take result,
@@ -2021,25 +1520,35 @@ pub fn from_string[T](format: Format[T], input: String, byte_limit: u64) -> Resu
     }
 }
 
-fn decode_profile[T](format: Format[T], s: String) -> Result[T, TypedError] {
-    let plan = view format.plan
-    let mut d = ReadTyped(pos: 0, path: string.new(), marks: list.new())
+fn decode_profile[T](format: Format[T], s: String, mode: ReadMode) -> Result[T, TypedError] {
+    let (take out, take d, start) = read_wire(format.plan, s, mode)?
+    match codec.decode(format.binary, out) {
+        Ok(take value) => Ok(take value),
+        Error(e) => codec_input_error(s, d, start, e),
+    }
+}
+
+/// Transcodes B-4 JSON into codec bytes without invoking the entry decoder.
+pub fn wire_bytes(plan: JsonPlan, input: String) -> Result[Bytes, TypedError] {
+    let (take out, _, _) = read_wire(plan, input, EncodeWire)?
+    Ok(take out)
+}
+
+fn read_wire(plan: JsonPlan, s: String, mode: ReadMode) -> Result[(Bytes, TypedLocations, u64), TypedError] {
+    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), mode, parts: list.new(), seen_fields: list.new(), reordered: list.new())
     skip(s, mut d.pos)
     let start = d.pos
     let mut out: Bytes = list.new()
     read_shape(plan, plan.root, s, 0, mut d, mut out)?
     skip(s, mut d.pos)
     if d.pos != string.byte_len(s) {
-        let stop = d.pos
-        return input_error(mut d, stop, ExpectedValue)
+        return Error(typed_input_issue(s, d, d.pos, ExpectedValue))
     }
-    match codec.decode(format.binary, out) {
-        Ok(take value) => Ok(take value),
-        Error(e) => codec_input_error(d, start, e),
-    }
+    let ReadTyped(declarations: take declarations, mark_tokens: take mark_tokens, marks: take marks, ..) = take d
+    Ok((take out, TypedLocations(declarations: take declarations, mark_tokens: take mark_tokens, marks: take marks), start))
 }
 
-fn codec_input_error[T](d: ReadTyped, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
+fn codec_input_error[T](s: String, d: TypedLocations, start: u64, e: codec.DecodeError) -> Result[T, TypedError] {
     let (pos, key) = match e {
         Duplicate(p) => (p, true),
         Value(p) => (p, false),
@@ -2047,106 +1556,114 @@ fn codec_input_error[T](d: ReadTyped, start: u64, e: codec.DecodeError) -> Resul
     }
     for mark in d.marks {
         if mark.pos == pos && mark.key == key {
-            let path = string.from(mark.path)
+            let path = render_pointer(s, d.declarations, list.slice(d.mark_tokens, mark.path_start, mark.path_end))
             return Error(Input(mark.source, take path, CodecValue(e)))
         }
     }
     Error(Input(start, string.new(), CodecValue(e)))
 }
 
-fn input_error[T](mut d: ReadTyped, pos: u64, issue: InputIssue) -> Result[T, TypedError] {
-    let path = replace(mut d.path, string.new())
-    Error(Input(pos, take path, issue))
+fn typed_input_issue(s: String, d: ReadTyped, pos: u64, issue: InputIssue) -> TypedError {
+    Input(pos, render_pointer(s, d.declarations, d.path), issue)
 }
 
-fn read_error[T](take r: Result[T, Error], mut d: ReadTyped) -> Result[T, TypedError] {
+fn read_error[T](s: String, take r: Result[T, Error], d: ReadTyped) -> Result[T, TypedError] {
     match take r {
         Ok(take x) => Ok(take x),
-        Error(Syntax(pos)) => input_error(mut d, pos, ExpectedValue),
-        Error(NotFinite(pos)) => input_error(mut d, pos, InvalidNumber),
+        Error(Syntax(pos)) => Error(typed_input_issue(s, d, pos, ExpectedValue)),
+        Error(NotFinite(pos)) => Error(typed_input_issue(s, d, pos, InvalidNumber)),
         _ => fail("typed JSON uses lexical readers"),
     }
 }
 
-fn field_path(mut d: ReadTyped, name: String) -> Result[(), TypedError] {
-    push_pointer_token(mut d.path, name)
-    Ok(())
-}
-
-fn push_pointer_token(mut path: String, name: String) {
-    string.push(mut path, "/")
-    let mut start: u64 = 0
-    let b = string.as_bytes(name)
-    for i in 0u64 .. list.len(b) {
-        if b[i] == b'~' || b[i] == b'/' {
-            string.push(mut path, string.slice(name, start, i))
-            string.push(mut path, if b[i] == b'~' {
-                "~0"
-            } else {
-                "~1"
-            })
-            start = i + 1
+fn render_pointer(s: String, declarations: List[String], tokens: List[PointerToken]) -> String {
+    let mut path = string.new()
+    for token in tokens {
+        match token {
+            InputMember(pos) => {
+                let name = result.unwrap(decode_string(s, pos + 1))
+                json_schema.pointer_token(mut path, name)
+            },
+            Index(n) => {
+                string.push(mut path, "/")
+                string.push_u64(mut path, n)
+            },
+            Declared(i) => json_schema.pointer_token(mut path, declarations[i]),
         }
     }
-    string.push(mut path, string.slice(name, start, list.len(b)))
+    take path
 }
 
-fn index_path(mut d: ReadTyped, n: u64) -> Result[(), TypedError] {
-    string.push(mut d.path, "/")
-    string.push_u64(mut d.path, n)
-    Ok(())
+fn declared_path(mut d: ReadTyped, name: String) {
+    let slot = list.len(d.declarations)
+    list.push(mut d.declarations, string.from(name))
+    list.push(mut d.path, Declared(slot))
 }
 
-fn source_mark(mut d: ReadTyped, pos: u64, key: bool) -> Result[(), TypedError] {
-    let path = string.from(d.path)
-    let source = d.pos
-    shape_push(mut d.marks, SourceMark(pos, source, path: take path, key))
+fn source_mark(mut d: ReadTyped, pos: u64, key: bool) {
+    let path_start = list.len(d.mark_tokens)
+    list.append(mut d.mark_tokens, d.path)
+    list.push(mut d.marks, SourceMark(pos, source: d.pos, path_start, path_end: list.len(d.mark_tokens), key))
 }
 
 const TYPED_DEPTH: u64 = 64
 
+// The caller has skipped any leading whitespace.
 fn open_typed(s: String, depth: u64, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
-    skip(s, mut d.pos)
-    if depth == TYPED_DEPTH && at(s, d.pos) == bracket {
-        let pos = d.pos
-        return input_error(mut d, pos, DepthLimit)
+    if at(s, d.pos) != bracket {
+        return Error(typed_input_issue(s, d, d.pos, ExpectedValue))
     }
-    let opened = opening(s, mut d.pos, bracket)
-    read_error(take opened, mut d)
+    if depth == TYPED_DEPTH {
+        return Error(typed_input_issue(s, d, d.pos, DepthLimit))
+    }
+    d.pos += 1
+    Ok(())
 }
 
 fn after_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[bool, TypedError] {
-    let after = after_item(s, mut d.pos, bracket)
-    read_error(take after, mut d)
+    read_error(s, after_item(s, mut d.pos, bracket), d)
 }
 
 fn close_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
-    let closed = opening(s, mut d.pos, bracket)
-    read_error(take closed, mut d)
+    read_error(s, opening(s, mut d.pos, bracket), d)
 }
 
-fn typed_string(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
-    let start = d.pos + 1
-    let opened = at(s, d.pos) == b'"'
-    if !opened {
-        let pos = d.pos
-        return input_error(mut d, pos, ExpectedValue)
+scoped type TypedInput {
+    source: View[String],
+    decoded: String
+}
+
+fn text_input(s: String) -> TypedInput in s {
+    TypedInput(source: view s, decoded: string.new())
+}
+
+fn typed_string[in a](mut input: TypedInput in a, colon: bool, mut d: ReadTyped) -> Result[View[String], TypedError] in input {
+    if at(input.source, d.pos) != b'"' {
+        return Error(typed_input_issue(input.source, d, d.pos, ExpectedValue))
     }
-    let measured = string_size(s, mut d.pos)
-    let _ = read_error(take measured, mut d)?
-    read_error(decode_string(s, start), mut d)
+    let start = d.pos + 1
+    let end = string_run(input.source, start)
+    let raw = at(input.source, end) == b'"'
+    d.pos = end
+    if raw {
+        d.pos += 1
+    } else {
+        let _ = read_error(input.source, string_size_rest(input.source, end - start, mut d.pos), d)?
+        let decoded = read_error(input.source, decode_string(input.source, start), d)?
+        input.decoded = take decoded
+    }
+    if colon {
+        close_typed(input.source, b':', mut d)?
+    }
+    if raw {
+        return Ok(string.slice(input.source, start, end))
+    }
+    Ok(view input.decoded)
 }
 
-fn typed_name(s: String, mut d: ReadTyped) -> Result[String, TypedError] {
-    skip(s, mut d.pos)
-    let name = typed_string(s, mut d)?
-    close_typed(s, b':', mut d)?
-    Ok(take name)
-}
-
-fn remember_member(mut seen: Map[String, ()], take name: String, pos: u64, mut d: ReadTyped) -> Result[(), TypedError] {
+fn remember_member(s: String, mut seen: Map[String, ()], take name: String, pos: u64, d: ReadTyped) -> Result[(), TypedError] {
     if let Some(_) = map.get(seen, name) {
-        return input_error(mut d, pos, DuplicateMember)
+        return Error(typed_input_issue(s, d, pos, DuplicateMember))
     }
     map.insert(mut seen, take name, ())
     Ok(())
@@ -2155,26 +1672,23 @@ fn remember_member(mut seen: Map[String, ()], take name: String, pos: u64, mut d
 fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError] {
     skip(s, mut d.pos)
     let start = d.pos
-    let head = value_start(s, mut d.pos)
-    let close: u8 = match read_error(take head, mut d)? {
+    let close: u8 = match read_error(s, value_start(s, mut d.pos), d)? {
         JsonArray => b']',
         JsonObject => b'}',
         JsonString => {
-            let measured = string_size(s, mut d.pos)
-            let _ = read_error(take measured, mut d)?
+            let _ = read_error(s, string_size(s, mut d.pos), d)?
             return Ok(())
         },
         JsonNumber => {
-            let measured = number_size(s, mut d.pos)
-            let _ = read_error(take measured, mut d)?
+            let _ = read_error(s, number_size(s, mut d.pos), d)?
             return Ok(())
         },
         _ => return Ok(()),
     }
     if depth == TYPED_DEPTH {
-        return input_error(mut d, start, DepthLimit)
+        return Error(typed_input_issue(s, d, start, DepthLimit))
     }
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     let mut seen: Map[String, ()] = map.new()
     let mut i: u64 = 0
     if !ends(s, mut d.pos, close) {
@@ -2182,15 +1696,16 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
             if close == b'}' {
                 skip(s, mut d.pos)
                 let pos = d.pos
-                let name = typed_name(s, mut d)?
-                field_path(mut d, name)?
-                remember_member(mut seen, take name, pos, mut d)?
+                let mut input = text_input(s)
+                let name = typed_string(mut input, true, mut d)?
+                list.push(mut d.path, InputMember(pos))
+                remember_member(s, mut seen, string.from(name), pos, d)?
             } else {
-                index_path(mut d, i)?
+                list.push(mut d.path, Index(i))
                 i += 1
             }
             skip_typed(s, depth + 1, mut d)?
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if after_typed(s, close, mut d)? {
                 break
             }
@@ -2200,11 +1715,10 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
 }
 
 fn put_typed_count(n: u64, mut out: Bytes) -> Result[(), TypedError] {
-    let narrowed: Option[u32] = int.try_narrow(n)
-    let Some(count) = narrowed else {
+    if n > 4294967295 {
         return Error(LengthOverflow)
     }
-    codec.put_u32(count, mut out)
+    codec.put_u32(int.truncate(n), mut out)
     Ok(())
 }
 
@@ -2212,9 +1726,7 @@ fn patch_typed_count(mut out: Bytes, start: u64, n: u64) -> Result[(), TypedErro
     if n > 4294967295 {
         return Error(LengthOverflow)
     }
-    for i in 0u64 .. 4 {
-        out[start + i] = int.truncate(n >> (8 * i))
-    }
+    list.set_word_le(mut out, start, (int.truncate(n) : u32))
     Ok(())
 }
 
@@ -2222,7 +1734,7 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
     skip(s, mut d.pos)
     let form = plan.facts[shape].form
     if form != shape {
-        source_mark(mut d, list.len(out), false)?
+        source_mark(mut d, list.len(out), false)
     }
     match plan.shapes[form] {
         Atom(op) => read_atom(plan.profile, op, s, mut d, mut out),
@@ -2238,8 +1750,7 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
         },
         Optional(item) => {
             if at(s, d.pos) == b'n' {
-                let parsed = literal(s, mut d.pos, "null")
-                read_error(take parsed, mut d)?
+                read_error(s, literal(s, mut d.pos, "null"), d)?
                 codec.put_tag(0, mut out)
                 Ok(())
             } else {
@@ -2256,9 +1767,10 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
 
 fn read_base64(s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
-    let spelling = typed_string(s, mut d)?
-    let Some(decoded) = base64.decode(string.as_bytes(spelling)) else {
-        return input_error(mut d, start, InvalidBase64)
+    let mut input = text_input(s)
+    let text = typed_string(mut input, false, mut d)?
+    let Some(decoded) = base64.decode(string.as_bytes(text)) else {
+        return Error(typed_input_issue(s, d, start, InvalidBase64))
     }
     put_typed_count(list.len(decoded), mut out)?
     list.append(mut out, decoded)
@@ -2270,27 +1782,42 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
     let start = list.len(out)
     codec.put_u32(0, mut out)
     let mut n: u64 = 0
-    let path = string.byte_len(d.path)
+    let mut keys: Map[Bytes, ()] = map.new()
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b']') {
         loop {
-            index_path(mut d, n)?
+            list.push(mut d.path, Index(n))
             if let Some(child) = value {
-                open_typed(s, depth + 1, b'[', mut d)?
-                let pair = string.byte_len(d.path)
-                index_path(mut d, 0)?
                 skip(s, mut d.pos)
-                source_mark(mut d, list.len(out), true)?
+                open_typed(s, depth + 1, b'[', mut d)?
+                let pair = list.len(d.path)
+                list.push(mut d.path, Index(0))
+                skip(s, mut d.pos)
+                let source = d.pos
+                let key_start = list.len(out)
+                if d.mode != EncodeWire {
+                    source_mark(mut d, key_start, true)
+                }
                 read_shape(plan, item, s, depth + 2, mut d, mut out)?
-                string.truncate(mut d.path, pair)
+                if d.mode == EncodeWire {
+                    let encoded = list.slice(out, key_start, list.len(out))
+                    if map.contains(keys, encoded) {
+                        return Error(typed_input_issue(s, d, source, DuplicateMember))
+                    }
+                    let mut key: Bytes = list.with_capacity(list.len(encoded))
+                    list.append(mut key, encoded)
+                    map.insert(mut keys, take key, ())
+                }
+                list.truncate(mut d.path, pair)
                 close_typed(s, b',', mut d)?
-                index_path(mut d, 1)?
+                list.push(mut d.path, Index(1))
                 read_shape(plan, child, s, depth + 2, mut d, mut out)?
-                string.truncate(mut d.path, pair)
+                list.truncate(mut d.path, pair)
                 close_typed(s, b']', mut d)?
             } else {
                 read_shape(plan, item, s, depth + 1, mut d, mut out)?
             }
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             n += 1
             if after_typed(s, b']', mut d)? {
                 break
@@ -2300,7 +1827,7 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
     patch_typed_count(mut out, start, n)
 }
 
-fn string_map(plan: JsonPlan, key: u64) -> bool {
+pub fn string_map(plan: JsonPlan, key: u64) -> bool {
     plan.profile == Interop && match plan.shapes[key] {
         Atom(13) => true,
         _ => false,
@@ -2311,27 +1838,29 @@ fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: Rea
     open_typed(s, depth, b'{', mut d)?
     let start = list.len(out)
     codec.put_u32(0, mut out)
+    let mut n: u64 = 0
     let mut seen: Map[String, ()] = map.new()
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
         loop {
             skip(s, mut d.pos)
             let pos = d.pos
-            let name = typed_name(s, mut d)?
-            field_path(mut d, name)?
-            if let Some(_) = map.get(seen, name) {
-                return input_error(mut d, pos, DuplicateMember)
+            let mut input = text_input(s)
+            let name = typed_string(mut input, true, mut d)?
+            list.push(mut d.path, InputMember(pos))
+            if d.mode != DecodeInput {
+                remember_member(s, mut seen, string.from(name), pos, d)?
             }
             codec.put_string(name, mut out) ?=> |_| LengthOverflow
-            map.insert(mut seen, take name, ())
             read_shape(plan, value, s, depth + 1, mut d, mut out)?
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
+            n += 1
             if after_typed(s, b'}', mut d)? {
                 break
             }
         }
     }
-    patch_typed_count(mut out, start, map.len(seen))
+    patch_typed_count(mut out, start, n)
 }
 
 fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), TypedError] {
@@ -2340,22 +1869,23 @@ fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), Ty
     }
     skip(s, mut d.pos)
     let start = d.pos
-    let extra = typed_name(s, mut d)?
-    field_path(mut d, extra)?
+    let mut input = text_input(s)
+    let extra = typed_string(mut input, true, mut d)?
+    list.push(mut d.path, InputMember(start))
     if extra == name {
-        input_error(mut d, start, DuplicateMember)
-    } else {
-        input_error(mut d, start, UnknownMember)
+        return Error(typed_input_issue(s, d, start, DuplicateMember))
     }
+    Error(typed_input_issue(s, d, start, UnknownMember))
 }
 
 fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'{', mut d)?
     skip(s, mut d.pos)
     let start = d.pos
-    let name = typed_name(s, mut d)?
-    let path = string.byte_len(d.path)
-    field_path(mut d, name)?
+    let mut input = text_input(s)
+    let name = typed_string(mut input, true, mut d)?
+    let path = list.len(d.path)
+    list.push(mut d.path, InputMember(start))
     if name == "ok" {
         codec.put_tag(0, mut out)
         read_shape(plan, ok, s, depth + 1, mut d, mut out)?
@@ -2363,9 +1893,9 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
         codec.put_tag(1, mut out)
         read_shape(plan, err, s, depth + 1, mut d, mut out)?
     } else {
-        return input_error(mut d, start, UnknownMember)
+        return Error(typed_input_issue(s, d, start, UnknownMember))
     }
-    string.truncate(mut d.path, path)
+    list.truncate(mut d.path, path)
     single_member_end(s, name, mut d)
 }
 
@@ -2385,55 +1915,71 @@ fn field_index(fields: List[Field], name: String) -> Option[u64] {
     None
 }
 
-// Visit in input order for diagnostics. Only a record stages field runs and
-// moves them into declaration order, keeping source marks with their runs.
+// Append field runs in input order. Only records that need reordering or defaults
+// copy their bytes. The scratch slot and bit ranges nest with read_record calls.
 fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, depth: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     open_typed(s, depth, b'{', mut d)?
     let count = list.len(fields)
-    let mut parts: List[Option[RecordPart]] = list.with_capacity(count)
-    for _ in 0u64 .. count {
-        shape_push(mut parts, None)?
-    }
-    let mut staged: Bytes = list.new()
+    let start = list.len(out)
+    let parts = list.len(d.parts)
+    let bits = list.len(d.seen_fields)
+    list.fill(mut d.parts, count, RecordPart(start: 0, end: 0, marks: 0, mark_end: 0))
+    list.fill(mut d.seen_fields, (count + 7) / 8, 0)
+    let mut ordered = true
+    let mut next: u64 = 0
     let mut ignored: Map[String, ()] = map.new()
-    let path = string.byte_len(d.path)
+    let path = list.len(d.path)
     if !ends(s, mut d.pos, b'}') {
         loop {
             skip(s, mut d.pos)
             let member_at = d.pos
-            let name = typed_name(s, mut d)?
-            field_path(mut d, name)?
-            let Some(i) = field_index(fields, name) else {
+            let mut input = text_input(s)
+            let name = typed_string(mut input, true, mut d)?
+            list.push(mut d.path, InputMember(member_at))
+            if let Some(i) = field_index(fields, name) {
+                let byte_at = bits + i / 8
+                let mask = (1u8 << int.truncate(i % 8))
+                if d.seen_fields[byte_at] & mask != 0 {
+                    return Error(typed_input_issue(s, d, member_at, DuplicateMember))
+                }
+                d.seen_fields[byte_at] |= mask
+                ordered = ordered && i == next
+                next += 1
+                let field_start = list.len(out)
+                let marks = list.len(d.marks)
+                read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut out)?
+                d.parts[parts + i] = RecordPart(start: field_start, end: list.len(out), marks, mark_end: list.len(d.marks))
+            } else {
                 if plan.profile == Strict {
-                    return input_error(mut d, member_at, UnknownMember)
+                    return Error(typed_input_issue(s, d, member_at, UnknownMember))
                 }
-                remember_member(mut ignored, take name, member_at, mut d)?
+                remember_member(s, mut ignored, string.from(name), member_at, d)?
                 skip_typed(s, depth + 1, mut d)?
-                string.truncate(mut d.path, path)
-                if after_typed(s, b'}', mut d)? {
-                    break
-                }
-                continue
             }
-            if let Some(_) = parts[i] {
-                return input_error(mut d, member_at, DuplicateMember)
-            }
-            let start = list.len(staged)
-            let marks = list.len(d.marks)
-            read_shape(plan, fields[i].shape, s, depth + 1, mut d, mut staged)?
-            let end = list.len(staged)
-            let mark_end = list.len(d.marks)
-            parts[i] = Some(RecordPart(start, end, marks, mark_end))
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if after_typed(s, b'}', mut d)? {
                 break
             }
         }
     }
-    for i in 0u64 .. count {
-        if let Some(part) = parts[i] {
+    if !ordered || next != count {
+        reorder_record(plan, definition, fields, s, start, parts, bits, mut d, mut out)?
+    }
+    list.truncate(mut d.parts, parts)
+    list.truncate(mut d.seen_fields, bits)
+    Ok(())
+}
+
+fn reorder_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, start: u64, parts: u64, bits: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+    list.clear(mut d.reordered)
+    list.append(mut d.reordered, list.slice(out, start, list.len(out)))
+    list.truncate(mut out, start)
+    let path = list.len(d.path)
+    for i in 0u64 .. list.len(fields) {
+        if d.seen_fields[bits + i / 8] & (1u8 << int.truncate(i % 8)) != 0 {
+            let part = d.parts[parts + i]
             let dest = list.len(out)
-            list.append(mut out, list.slice(staged, part.start, part.end))
+            list.append(mut out, list.slice(d.reordered, part.start - start, part.end - start))
             for mark in part.marks .. part.mark_end {
                 d.marks[mark].pos = dest + (d.marks[mark].pos - part.start)
             }
@@ -2441,15 +1987,14 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             list.append(mut out, value)
         } else if let Optional(_) = plan.shapes[plan.facts[fields[i].shape].form] {
             if fields[i].shape != plan.facts[fields[i].shape].form {
-                field_path(mut d, fields[i].name)?
-                source_mark(mut d, list.len(out), false)?
-                string.truncate(mut d.path, path)
+                declared_path(mut d, fields[i].name)
+                source_mark(mut d, list.len(out), false)
+                list.truncate(mut d.path, path)
             }
             codec.put_tag(0, mut out)
         } else {
-            field_path(mut d, fields[i].name)?
-            let close = d.pos - 1
-            return input_error(mut d, close, MissingMember)
+            declared_path(mut d, fields[i].name)
+            return Error(typed_input_issue(s, d, d.pos - 1, MissingMember))
         }
     }
     Ok(())
@@ -2462,53 +2007,50 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
         skip(s, mut d.pos)
     }
     let start = d.pos
-    let name = if wrapped {
-        typed_name(s, mut d)?
-    } else {
-        typed_string(s, mut d)?
-    }
-    let path = string.byte_len(d.path)
-    field_path(mut d, name)?
+    let mut input = text_input(s)
+    let name = typed_string(mut input, wrapped, mut d)?
+    let path = list.len(d.path)
+    list.push(mut d.path, InputMember(start))
     for tag in 0u64 .. list.len(variants) {
         let v = variants[tag]
         if v.live && v.name == name {
             let fields = v.fields
             let n = list.len(fields)
             if wrapped != (n != 0) {
-                return input_error(mut d, start, ExpectedValue)
+                return Error(typed_input_issue(s, d, start, ExpectedValue))
             }
             put_typed_count(tag, mut out)?
             if n == 1 {
                 read_shape(plan, fields[0], s, depth + 1, mut d, mut out)?
             } else if n > 1 {
+                skip(s, mut d.pos)
                 open_typed(s, depth + 1, b'[', mut d)?
-                let variant = string.byte_len(d.path)
+                let variant = list.len(d.path)
                 for i in 0u64 .. n {
                     if i != 0 {
                         close_typed(s, b',', mut d)?
                     }
-                    index_path(mut d, i)?
+                    list.push(mut d.path, Index(i))
                     read_shape(plan, fields[i], s, depth + 2, mut d, mut out)?
-                    string.truncate(mut d.path, variant)
+                    list.truncate(mut d.path, variant)
                 }
                 close_typed(s, b']', mut d)?
             }
-            string.truncate(mut d.path, path)
+            list.truncate(mut d.path, path)
             if wrapped {
                 single_member_end(s, name, mut d)?
             }
             return Ok(())
         }
     }
-    input_error(mut d, start, UnknownMember)
+    Error(typed_input_issue(s, d, start, UnknownMember))
 }
 
 fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
     match op {
         0 => {
-            let parsed = literal(s, mut d.pos, "null")
-            read_error(take parsed, mut d)
+            read_error(s, literal(s, mut d.pos, "null"), d)
         },
         1 => {
             let yes = at(s, start) == b't'
@@ -2517,17 +2059,18 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
             } else {
                 "false"
             })
-            read_error(take parsed, mut d)?
+            read_error(s, take parsed, d)?
             codec.put_bool(yes, mut out)
             Ok(())
         },
         2 => {
-            let text = typed_string(s, mut d)?
+            let mut input = text_input(s)
+            let text = typed_string(mut input, false, mut d)?
             let Some((scalar, end)) = string.next_scalar(text, 0) else {
-                return input_error(mut d, start, ExpectedValue)
+                return Error(typed_input_issue(s, d, start, ExpectedValue))
             }
             if end != string.byte_len(text) {
-                return input_error(mut d, start, ExpectedValue)
+                return Error(typed_input_issue(s, d, start, ExpectedValue))
             }
             codec.put_char(scalar, mut out)
             Ok(())
@@ -2535,11 +2078,12 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
         11 => read_float(profile, op, s, mut d, mut out),
         12 => read_float(profile, op, s, mut d, mut out),
         13 => {
-            let text = typed_string(s, mut d)?
+            let mut input = text_input(s)
+            let text = typed_string(mut input, false, mut d)?
             codec.put_string(text, mut out) ?=> |_| LengthOverflow
             Ok(())
         },
-        20 => input_error(mut d, start, ExpectedValue),
+        20 => Error(typed_input_issue(s, d, start, ExpectedValue)),
         _ => read_integer(profile, op, s, mut d, mut out),
     }
 }
@@ -2548,7 +2092,7 @@ fn bare_number(s: String, mut d: ReadTyped) -> Result[u64, TypedError] {
     let start = d.pos
     let first = at(s, start)
     if first != b'-' && !int.is_ascii_digit(first) {
-        return input_error(mut d, start, ExpectedValue)
+        return Error(typed_input_issue(s, d, start, ExpectedValue))
     }
     d.pos = number_end(s, start)
     Ok(d.pos)
@@ -2571,80 +2115,75 @@ fn canonical_decimal(s: String) -> bool {
 fn read_integer(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
     if profile == Strict && (op == 6 || op == 10) {
-        let spelling = typed_string(s, mut d)?
-        return put_integer(op, spelling, start, mut d, mut out)
+        let mut input = text_input(s)
+        let text = typed_string(mut input, false, mut d)?
+        return put_integer(s, op, text, start, d, mut out)
     }
     let end = bare_number(s, mut d)?
-    put_integer(op, string.slice(s, start, end), start, mut d, mut out)
+    put_integer(s, op, string.slice(s, start, end), start, d, mut out)
 }
 
-fn put_integer(op: u8, spelling: String, start: u64, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
+fn put_integer(s: String, op: u8, spelling: String, start: u64, d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     if !canonical_decimal(spelling) {
-        return input_error(mut d, start, InvalidNumber)
+        return Error(typed_input_issue(s, d, start, InvalidNumber))
     }
     match op {
         3 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u8, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u8, ParseError]), start, d)?
             codec.put_u8(n, mut out)
-            Ok(())
         },
         4 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u16, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u16, ParseError]), start, d)?
             codec.put_u16(n, mut out)
-            Ok(())
         },
         5 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u32, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u32, ParseError]), start, d)?
             codec.put_u32(n, mut out)
-            Ok(())
         },
         6 => {
-            let n = read_integer_value((int.parse(spelling) : Result[u64, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[u64, ParseError]), start, d)?
             codec.put_u64(n, mut out)
-            Ok(())
         },
         7 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i8, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i8, ParseError]), start, d)?
             codec.put_i8(n, mut out)
-            Ok(())
         },
         8 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i16, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i16, ParseError]), start, d)?
             codec.put_i16(n, mut out)
-            Ok(())
         },
         9 => {
-            let n = read_integer_value((int.parse(spelling) : Result[i32, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i32, ParseError]), start, d)?
             codec.put_i32(n, mut out)
-            Ok(())
         },
         _ => {
-            let n = read_integer_value((int.parse(spelling) : Result[i64, ParseError]), start, mut d)?
+            let n = read_integer_value(s, (int.parse(spelling) : Result[i64, ParseError]), start, d)?
             codec.put_i64(n, mut out)
-            Ok(())
         },
     }
+    Ok(())
 }
 
-fn read_integer_value[T](take parsed: Result[T, ParseError], start: u64, mut d: ReadTyped) -> Result[T, TypedError] {
+fn read_integer_value[T](s: String, take parsed: Result[T, ParseError], start: u64, d: ReadTyped) -> Result[T, TypedError] {
     match take parsed {
         Ok(take n) => Ok(take n),
-        Error(_) => input_error(mut d, start, InvalidNumber),
+        Error(_) => Error(typed_input_issue(s, d, start, InvalidNumber)),
     }
 }
 
 fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     let start = d.pos
     if profile == Strict && at(s, start) == b'"' {
-        let word = typed_string(s, mut d)?
-        let bits: u64 = if word == "NaN" {
+        let mut input = text_input(s)
+        let text = typed_string(mut input, false, mut d)?
+        let bits: u64 = if text == "NaN" {
             0x7ff8000000000000
-        } else if word == "Infinity" {
+        } else if text == "Infinity" {
             0x7ff0000000000000
-        } else if word == "-Infinity" {
+        } else if text == "-Infinity" {
             0xfff0000000000000
         } else {
-            return input_error(mut d, start, InvalidNumber)
+            return Error(typed_input_issue(s, d, start, InvalidNumber))
         }
         if op == 11 {
             let negative: u32 = int.truncate((bits >> 32) & 0x80000000)
@@ -2662,10 +2201,10 @@ fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: By
     if op == 12 {
         let first = at(s, start)
         if first != b'-' && !int.is_ascii_digit(first) {
-            return input_error(mut d, start, ExpectedValue)
+            return Error(typed_input_issue(s, d, start, ExpectedValue))
         }
         let parsed = read_number(s, mut d.pos)
-        let value = read_error(take parsed, mut d)?
+        let value = read_error(s, take parsed, d)?
         codec.put_f64(value, mut out)
         return Ok(())
     }
@@ -2675,8 +2214,8 @@ fn read_float(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: By
             codec.put_f32(v, mut out)
             Ok(())
         },
-        Error(Invalid(i)) => input_error(mut d, start + i, ExpectedValue),
-        Error(_) => input_error(mut d, start, InvalidNumber),
+        Error(Invalid(i)) => Error(typed_input_issue(s, d, start + i, ExpectedValue)),
+        Error(_) => Error(typed_input_issue(s, d, start, InvalidNumber)),
     }
 }
 
@@ -2744,9 +2283,21 @@ pub fn push_typed[T](format: Format[T], value: T, mut out: Bytes, mut scratch: B
     }, WriteMeasured)
 }
 
+/// Encodes one value for the measured wire writer and shares its prepared plan.
+pub fn encode_wire[T](format: Format[T], value: T) -> Result[(Bytes, Arc[JsonPlan]), TypedWriteError] {
+    let mut binary: Bytes = list.new()
+    encode_binary(format, value, mut binary)?
+    Ok((take binary, arc.share(format.plan)))
+}
+
+fn encode_binary[T](format: Format[T], value: T, mut binary: Bytes) -> Result[(), TypedWriteError] {
+    codec.encode(format.binary, value, mut binary) ?=> |_| LengthOverflow
+    Ok(())
+}
+
 fn measure_typed[T](format: Format[T], value: T, mut scratch: Bytes) -> Result[u64, TypedWriteError] {
     list.clear(mut scratch)
-    codec.encode(format.binary, value, mut scratch) ?=> |_| LengthOverflow
+    encode_binary(format, value, mut scratch)?
     typed_length(format, scratch)
 }
 
@@ -2784,19 +2335,6 @@ fn output_literal(w: TypedWriter, mut length: u64, s: String) -> Result[(), Type
     Ok(())
 }
 
-fn emit_open(w: TypedWriter, mut length: u64, mut depth: u64, b: u8) -> Result[(), TypedWriteError] {
-    if depth == TYPED_DEPTH {
-        return Error(DepthLimit)
-    }
-    depth += 1
-    output_byte(w, mut length, b)
-}
-
-fn emit_close(w: TypedWriter, mut length: u64, mut depth: u64, b: u8) -> Result[(), TypedWriteError] {
-    depth -= 1
-    output_byte(w, mut length, b)
-}
-
 const FRAME_ARRAY: u64 = 0
 
 const FRAME_MAP: u64 = 1
@@ -2809,150 +2347,162 @@ const FRAME_VARIANT: u64 = 4
 
 const FRAME_STRING_MAP: u64 = 5
 
-// Frame word 0 holds a shape node and a kind. A resident Shape takes more
-// than eight bytes, so its node fits above the three kind bits. Word 1 holds
-// the progress within that shape. A multi-field variant packs its u32 tag
-// above its u32 field node. A map uses three states per pair. Records use
-// the low bit to track whether any member has been written.
-fn emit_frame(mut frames: Inline[(u64, u64), 64], mut top: u64, node: u64, kind: u64, state: u64) {
-    frames[top] = ((node << 3) | kind, state)
-    top += 1
+type WriteCursor {
+    frames: Inline[(u64, u64), 64],
+    top: u64,
+    depth: u64,
+    pos: u64,
+    pending: Option[u64],
 }
 
-fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, TypedWriteError] {
-    let mut frames: Inline[(u64, u64), 64] =[(0, 0); 64]
-    let mut top: u64 = 0
-    let mut depth: u64 = 0
-    let mut pos: u64 = 0
-    let mut length: u64 = 0
-    let mut pending = Some(plan.root)
+type WritePiece = One(u8) | Two(u8, u8) | NullPiece | OutcomeKey(bool) | Scalar(u8) | InteropKey(bool) | TextBytes(u64, u64) | RecordKey(u64, u64, bool) | VariantKey(u64, u64, u64)
+
+fn write_cursor(root: u64) -> WriteCursor {
+    WriteCursor(frames:[(0, 0); 64], top: 0, depth: 0, pos: 0, pending: Some(root))
+}
+
+fn open_write(mut cursor: WriteCursor) -> Result[(), TypedWriteError] {
+    if cursor.depth == TYPED_DEPTH {
+        return Error(DepthLimit)
+    }
+    cursor.depth += 1
+    Ok(())
+}
+
+// One frame is two words. The first packs the shape and kind. A variant
+// packs its u32 tag and field in the second. Maps use three states per pair.
+fn emit_frame(mut cursor: WriteCursor, node: u64, kind: u64, state: u64) {
+    cursor.frames[cursor.top] = ((node << 3) | kind, state)
+    cursor.top += 1
+}
+
+fn next_piece(plan: JsonPlan, binary: Bytes, mut cursor: WriteCursor) -> Result[Option[WritePiece], TypedWriteError] {
     loop {
-        if let Some(node) = pending {
-            pending = None
+        if let Some(node) = cursor.pending {
+            cursor.pending = None
             let id = plan.facts[node].form
             match plan.shapes[id] {
-                Atom(op) => write_atom(plan.profile, op, binary, mut pos, w, mut length)?,
-                Optional(item) => if binary_read(codec.take_tag(binary, mut pos, 2))? == 0 {
-                    output_literal(w, mut length, "null")?
-                } else {
-                    pending = Some(item)
+                Atom(op) => return Ok(Some(Scalar(op))),
+                Optional(item) => {
+                    if binary_read(codec.take_tag(binary, mut cursor.pos, 2))? == 0 {
+                        return Ok(Some(NullPiece))
+                    }
+                    cursor.pending = Some(item)
                 },
                 Array(item) => {
-                    let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
+                    let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut cursor.pos))?)
                     if let Atom(3) = plan.shapes[item] {
-                        binary_read(codec.need(binary, pos, n))?
-                        write_base64(w, mut length, list.slice(binary, pos, pos + n))?
-                        pos += n
-                    } else {
-                        emit_open(w, mut length, mut depth, b'[')?
-                        if n == 0 {
-                            emit_close(w, mut length, mut depth, b']')?
-                        } else {
-                            emit_frame(mut frames, mut top, id, FRAME_ARRAY, n - 1)
-                            pending = Some(item)
-                        }
+                        let lo = cursor.pos
+                        binary_read(codec.need(binary, lo, n))?
+                        cursor.pos = lo + n
+                        return Ok(Some(TextBytes(lo, lo + n)))
                     }
+                    open_write(mut cursor)?
+                    if n == 0 {
+                        cursor.depth -= 1
+                        return Ok(Some(Two(b'[', b']')))
+                    }
+                    emit_frame(mut cursor, id, FRAME_ARRAY, n - 1)
+                    cursor.pending = Some(item)
+                    return Ok(Some(One(b'[')))
                 },
                 Pairs(key, _) => {
-                    let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
-                    if plan.profile == Interop {
-                        if let Atom(13) = plan.shapes[key] {
-                            emit_open(w, mut length, mut depth, b'{')?
-                            emit_frame(mut frames, mut top, id, FRAME_STRING_MAP, n << 1)
-                            continue
-                        }
+                    let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut cursor.pos))?)
+                    open_write(mut cursor)?
+                    if string_map(plan, key) {
+                        emit_frame(mut cursor, id, FRAME_STRING_MAP, n << 1)
+                        return Ok(Some(One(b'{')))
                     }
-                    emit_open(w, mut length, mut depth, b'[')?
-                    emit_frame(mut frames, mut top, id, FRAME_MAP, n * 3)
+                    emit_frame(mut cursor, id, FRAME_MAP, n * 3)
+                    return Ok(Some(One(b'[')))
                 },
                 Outcome(ok, err) => {
-                    let tag = binary_read(codec.take_tag(binary, mut pos, 2))?
-                    emit_open(w, mut length, mut depth, b'{')?
-                    output_literal(w, mut length, if tag == 0 {
-                        "\"ok\":"
-                    } else {
-                        "\"error\":"
-                    })?
-                    emit_frame(mut frames, mut top, id, FRAME_OBJECT, 0)
-                    pending = Some(if tag == 0 {
+                    let is_ok = binary_read(codec.take_tag(binary, mut cursor.pos, 2))? == 0
+                    open_write(mut cursor)?
+                    emit_frame(mut cursor, id, FRAME_OBJECT, 0)
+                    cursor.pending = Some(if is_ok {
                         ok
                     } else {
                         err
                     })
+                    return Ok(Some(OutcomeKey(is_ok)))
                 },
                 Record(_) => {
-                    emit_open(w, mut length, mut depth, b'{')?
-                    emit_frame(mut frames, mut top, id, FRAME_RECORD, 0)
+                    open_write(mut cursor)?
+                    emit_frame(mut cursor, id, FRAME_RECORD, 0)
+                    return Ok(Some(One(b'{')))
                 },
                 Sum(variants) => {
-                    let start = pos
-                    let tag: u64 = int.widen(binary_read(codec.take_tag(binary, mut pos, int.narrow(list.len(variants))))?)
+                    let tag_at = cursor.pos
+                    let tag: u64 = int.widen(binary_read(codec.take_tag(binary, mut cursor.pos, int.narrow(list.len(variants))))?)
                     let variant = variants[tag]
                     if !variant.live {
-                        return Error(Binary(Invalid(start)))
+                        return Error(Binary(Invalid(tag_at)))
                     }
                     let count = list.len(variant.fields)
-                    if count == 0 {
-                        write_quoted(w, mut length, string.as_bytes(variant.name))?
-                    } else {
-                        emit_open(w, mut length, mut depth, b'{')?
-                        write_key(w, mut length, variant.name)?
+                    if count != 0 {
+                        open_write(mut cursor)?
                         if count == 1 {
-                            emit_frame(mut frames, mut top, id, FRAME_OBJECT, 0)
-                            pending = Some(variant.fields[0])
+                            emit_frame(mut cursor, id, FRAME_OBJECT, 0)
+                            cursor.pending = Some(variant.fields[0])
                         } else {
-                            emit_open(w, mut length, mut depth, b'[')?
-                            emit_frame(mut frames, mut top, id, FRAME_VARIANT, tag << 32)
+                            open_write(mut cursor)?
+                            emit_frame(mut cursor, id, FRAME_VARIANT, tag << 32)
                         }
                     }
+                    return Ok(Some(VariantKey(id, tag, count)))
                 },
                 Via(_) => fail("prepared JSON form has no via layer"),
             }
             continue
         }
-        if top == 0 {
-            break
+        if cursor.top == 0 {
+            if cursor.pos != list.len(binary) {
+                return Error(Binary(Trailing(cursor.pos)))
+            }
+            return Ok(None)
         }
-        let (code, state) = frames[top - 1]
+        let top = cursor.top - 1
+        let (code, state) = cursor.frames[top]
         let id = code >> 3
         match code & 7 {
-            3 => {
-                emit_close(w, mut length, mut depth, b'}')?
-                top -= 1
-            },
-            0 => if state == 0 {
-                emit_close(w, mut length, mut depth, b']')?
-                top -= 1
-            } else {
+            3 => return end_piece(mut cursor, One(b'}'), 1u64),
+            0 => {
+                if state == 0 {
+                    return end_piece(mut cursor, One(b']'), 1u64)
+                }
                 let Array(item) = plan.shapes[id] else {
                     fail("array frame has an array shape")
                 }
-                output_byte(w, mut length, b',')?
-                frames[top - 1] = (code, state - 1)
-                pending = Some(item)
+                cursor.frames[top] = (code, state - 1)
+                cursor.pending = Some(item)
+                return Ok(Some(One(b',')))
             },
-            1 => if state == 0 {
-                emit_close(w, mut length, mut depth, b']')?
-                top -= 1
-            } else {
+            1 => {
+                if state == 0 {
+                    return end_piece(mut cursor, One(b']'), 1u64)
+                }
                 let Pairs(key, value) = plan.shapes[id] else {
                     fail("map frame has a map shape")
                 }
-                frames[top - 1] = (code, state - 1)
+                cursor.frames[top] = (code, state - 1)
                 match state % 3 {
                     0 => {
-                        emit_open(w, mut length, mut depth, b'[')?
-                        pending = Some(key)
+                        open_write(mut cursor)?
+                        cursor.pending = Some(key)
+                        return Ok(Some(One(b'[')))
                     },
                     2 => {
-                        output_byte(w, mut length, b',')?
-                        pending = Some(value)
+                        cursor.pending = Some(value)
+                        return Ok(Some(One(b',')))
                     },
                     _ => {
-                        emit_close(w, mut length, mut depth, b']')?
-                        if state > 1 {
-                            output_byte(w, mut length, b',')?
-                        }
+                        cursor.depth -= 1
+                        return Ok(Some(if state > 1 {
+                            Two(b']', b',')
+                        } else {
+                            One(b']')
+                        }))
                     },
                 }
             },
@@ -2962,44 +2512,33 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
                 }
                 let field = state >> 1
                 if field == list.len(fields) {
-                    emit_close(w, mut length, mut depth, b'}')?
-                    top -= 1
-                } else {
-                    let mut shape = fields[field].shape
-                    if plan.profile == Interop {
-                        if let Optional(child) = plan.shapes[plan.facts[shape].form] {
-                            if binary_read(codec.take_tag(binary, mut pos, 2))? == 0 {
-                                frames[top - 1] = (code, state + 2)
-                                continue
-                            }
-                            shape = child
-                        }
-                    }
-                    if state & 1 != 0 {
-                        output_byte(w, mut length, b',')?
-                    }
-                    write_key(w, mut length, fields[field].name)?
-                    frames[top - 1] = (code, (state + 2) | 1)
-                    pending = Some(shape)
+                    return end_piece(mut cursor, One(b'}'), 1u64)
                 }
+                let mut shape = fields[field].shape
+                if plan.profile == Interop {
+                    if let Optional(child) = plan.shapes[plan.facts[shape].form] {
+                        if binary_read(codec.take_tag(binary, mut cursor.pos, 2))? == 0 {
+                            cursor.frames[top] = (code, state + 2)
+                            continue
+                        }
+                        shape = child
+                    }
+                }
+                cursor.frames[top] = (code, (state + 2) | 1)
+                cursor.pending = Some(shape)
+                return Ok(Some(RecordKey(id, field, state & 1 != 0)))
             },
             5 => {
                 let remaining = state >> 1
                 if remaining == 0 {
-                    emit_close(w, mut length, mut depth, b'}')?
-                    top -= 1
-                } else {
-                    let Pairs(_, value) = plan.shapes[id] else {
-                        fail("string map frame has a map shape")
-                    }
-                    if state & 1 != 0 {
-                        output_byte(w, mut length, b',')?
-                    }
-                    write_atom(plan.profile, 13, binary, mut pos, w, mut length)?
-                    output_byte(w, mut length, b':')?
-                    frames[top - 1] = (code, (state - 2) | 1)
-                    pending = Some(value)
+                    return end_piece(mut cursor, One(b'}'), 1u64)
                 }
+                let Pairs(_, value) = plan.shapes[id] else {
+                    fail("string map frame has a map shape")
+                }
+                cursor.frames[top] = (code, (state - 2) | 1)
+                cursor.pending = Some(value)
+                return Ok(Some(InteropKey(state & 1 != 0)))
             },
             _ => {
                 let Sum(variants) = plan.shapes[id] else {
@@ -3008,23 +2547,85 @@ fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, T
                 let fields = variants[state >> 32].fields
                 let item = state & 0xffffffff
                 if item == list.len(fields) {
-                    emit_close(w, mut length, mut depth, b']')?
-                    emit_close(w, mut length, mut depth, b'}')?
-                    top -= 1
-                } else {
-                    if item > 0 {
-                        output_byte(w, mut length, b',')?
-                    }
-                    frames[top - 1] = (code, state + 1)
-                    pending = Some(fields[item])
+                    return end_piece(mut cursor, Two(b']', b'}'), 2u64)
+                }
+                cursor.frames[top] = (code, state + 1)
+                cursor.pending = Some(fields[item])
+                if item > 0 {
+                    return Ok(Some(One(b',')))
                 }
             },
         }
     }
-    if pos != list.len(binary) {
-        return Error(Binary(Trailing(pos)))
+}
+
+fn end_piece(mut cursor: WriteCursor, piece: WritePiece, levels: u64) -> Result[Option[WritePiece], TypedWriteError] {
+    cursor.top -= 1
+    cursor.depth -= levels
+    Ok(Some(piece))
+}
+
+fn write_profile(plan: JsonPlan, binary: Bytes, w: TypedWriter) -> Result[u64, TypedWriteError] {
+    write_profile_at(plan, plan.root, binary, w)
+}
+
+fn write_profile_at(plan: JsonPlan, root: u64, binary: Bytes, w: TypedWriter) -> Result[u64, TypedWriteError] {
+    let mut cursor = write_cursor(root)
+    let mut length: u64 = 0
+    while let Some(piece) = next_piece(plan, binary, mut cursor)? {
+        render_piece(plan, binary, mut cursor.pos, piece, w, mut length)?
     }
     Ok(length)
+}
+
+fn render_piece(plan: JsonPlan, binary: Bytes, mut pos: u64, piece: WritePiece, w: TypedWriter, mut length: u64) -> Result[(), TypedWriteError] {
+    match piece {
+        One(c) => output_byte(w, mut length, c),
+        Two(a, b) => {
+            output_byte(w, mut length, a)?
+            output_byte(w, mut length, b)
+        },
+        NullPiece => output_literal(w, mut length, "null"),
+        OutcomeKey(ok) => output_literal(w, mut length, if ok {
+            "{\"ok\":"
+        } else {
+            "{\"error\":"
+        }),
+        Scalar(op) => write_atom(plan.profile, op, binary, mut pos, w, mut length),
+        TextBytes(lo, hi) => write_base64(w, mut length, list.slice(binary, lo, hi)),
+        InteropKey(comma) => {
+            if comma {
+                output_byte(w, mut length, b',')?
+            }
+            write_atom(plan.profile, 13u8, binary, mut pos, w, mut length)?
+            output_byte(w, mut length, b':')
+        },
+        RecordKey(id, field, comma) => {
+            let Record(fields) = plan.shapes[id] else {
+                fail("record frame has a record shape")
+            }
+            if comma {
+                output_byte(w, mut length, b',')?
+            }
+            write_key(w, mut length, fields[field].name)
+        },
+        VariantKey(id, tag, count) => {
+            let Sum(variants) = plan.shapes[id] else {
+                fail("variant frame has a sum shape")
+            }
+            if count != 0 {
+                output_byte(w, mut length, b'{')?
+            }
+            write_quoted(w, mut length, string.as_bytes(variants[tag].name))?
+            if count != 0 {
+                output_byte(w, mut length, b':')?
+            }
+            if count > 1 {
+                output_byte(w, mut length, b'[')?
+            }
+            Ok(())
+        },
+    }
 }
 
 fn write_key(w: TypedWriter, mut length: u64, key: String) -> Result[(), TypedWriteError] {
@@ -3042,10 +2643,10 @@ fn write_quoted(w: TypedWriter, mut length: u64, b: Bytes) -> Result[(), TypedWr
 
 fn write_string_byte(w: TypedWriter, mut length: u64, b: u8) -> Result[(), TypedWriteError] {
     if b < 32 {
-        let hex = string.as_bytes("0123456789ABCDEF")
+        let (hi, lo) = hex.encode_byte(b, true)
         output_literal(w, mut length, "\\u00")?
-        output_byte(w, mut length, hex[int.widen(b >> 4)])?
-        output_byte(w, mut length, hex[int.widen(b & 15)])
+        output_byte(w, mut length, hi)?
+        output_byte(w, mut length, lo)
     } else {
         if b == b'"' || b == b'\\' {
             output_byte(w, mut length, b'\\')?
@@ -3083,36 +2684,171 @@ fn write_base64(w: TypedWriter, mut length: u64, b: Bytes) -> Result[(), TypedWr
         return output_count(mut length, ((n + 2) / 3) * 4 + 2)
     }
     output_byte(w, mut length, b'"')?
-    let alphabet = string.as_bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-    let mut i: u64 = 0
-    while i < n {
-        let a: u64 = int.widen(b[i])
-        let more = n - i
-        let mid: u64 = if more >= 2 {
-            int.widen(b[i + 1])
-        } else {
-            0
-        }
-        let low: u64 = if more >= 3 {
-            int.widen(b[i + 2])
-        } else {
-            0
-        }
-        output_byte(w, mut length, alphabet[a >> 2])?
-        output_byte(w, mut length, alphabet[((a & 3) << 4) | (mid >> 4)])?
-        output_byte(w, mut length, if more >= 2 {
-            alphabet[((mid & 15) << 2) | (low >> 6)]
-        } else {
-            b'='
-        })?
-        output_byte(w, mut length, if more >= 3 {
-            alphabet[low & 63]
-        } else {
-            b'='
-        })?
-        i += 3
+    for i in 0u64 .. (n + 2u64) / 3u64 {
+        let (a, mid, low, last) = base64_group(b, i * 3u64)
+        output_byte(w, mut length, a)?
+        output_byte(w, mut length, mid)?
+        output_byte(w, mut length, low)?
+        output_byte(w, mut length, last)?
     }
     output_byte(w, mut length, b'"')
+}
+
+fn base64_group(b: Bytes, offset: u64) -> (u8, u8, u8, u8) {
+    let alphabet = string.as_bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    let a: u64 = int.widen(b[offset])
+    let more = list.len(b) - offset
+    let mid: u64 = if more >= 2 {
+        int.widen(b[offset + 1])
+    } else {
+        0u64
+    }
+    let low: u64 = if more >= 3 {
+        int.widen(b[offset + 2])
+    } else {
+        0u64
+    }
+    (alphabet[a >> 2], alphabet[((a & 3) << 4) | (mid >> 4)], if more >= 2 {
+        alphabet[((mid & 15) << 2) | (low >> 6)]
+    } else {
+        b'='
+    }, if more >= 3 {
+        alphabet[low & 63]
+    } else {
+        b'='
+    })
+}
+
+/// Measures the JSON representation of codec bytes using a prepared schema.
+pub fn wire_length(plan: JsonPlan, root: u64, binary: Bytes) -> Result[u64, TypedWriteError] {
+    write_profile_at(plan, root, binary, TypedWriter(byte: ignore_output_byte, pass: Measure))
+}
+
+/// Writes JSON measured by wire_length, reusing the caller's output buffer.
+/// Stops on the first rejected chunk. The depth stack uses 1024 bytes.
+pub fn write_wire(plan: JsonPlan, root: u64, binary: Bytes, mut chunk: Bytes, flush: scoped fn(Bytes) -> bool waits) -> Result[bool, TypedWriteError] waits {
+    list.clear(mut chunk)
+    if list.capacity(chunk) == 0u64 {
+        return Ok(false)
+    }
+    let mut cursor = write_cursor(root)
+    while let Some(piece) = next_piece(plan, binary, mut cursor)? {
+        if !stream_piece(plan, binary, mut cursor.pos, piece, mut chunk, flush)? {
+            return Ok(false)
+        }
+    }
+    Ok(list.len(chunk) == 0u64 || flush(chunk))
+}
+
+fn stream_piece(plan: JsonPlan, binary: Bytes, mut pos: u64, piece: WritePiece, mut chunk: Bytes, flush: scoped fn(Bytes) -> bool waits) -> Result[bool, TypedWriteError] waits {
+    match piece {
+        TextBytes(lo, hi) => Ok(stream_base64(list.slice(binary, lo, hi), mut chunk, flush)),
+        Scalar(13u8) => {
+            let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
+            let lo = pos
+            binary_read(codec.need(binary, lo, n))?
+            pos += n
+            Ok(stream_quoted(list.slice(binary, lo, lo + n), mut chunk, flush))
+        },
+        InteropKey(comma) => {
+            if comma && !stream_byte(b',', mut chunk, flush) {
+                return Ok(false)
+            }
+            let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
+            let lo = pos
+            binary_read(codec.need(binary, lo, n))?
+            pos += n
+            Ok(stream_quoted(list.slice(binary, lo, lo + n), mut chunk, flush) && stream_byte(b':', mut chunk, flush))
+        },
+        RecordKey(id, field, comma) => {
+            let Record(fields) = plan.shapes[id] else {
+                fail("record frame has a record shape")
+            }
+            if comma && !stream_byte(b',', mut chunk, flush) {
+                return Ok(false)
+            }
+            Ok(stream_quoted(string.as_bytes(fields[field].name), mut chunk, flush) && stream_byte(b':', mut chunk, flush))
+        },
+        VariantKey(id, tag, count) => {
+            let Sum(variants) = plan.shapes[id] else {
+                fail("variant frame has a sum shape")
+            }
+            if count != 0 && !stream_byte(b'{', mut chunk, flush) {
+                return Ok(false)
+            }
+            if !stream_quoted(string.as_bytes(variants[tag].name), mut chunk, flush) {
+                return Ok(false)
+            }
+            if count != 0 && !stream_byte(b':', mut chunk, flush) {
+                return Ok(false)
+            }
+            Ok(count <= 1 || stream_byte(b'[', mut chunk, flush))
+        },
+        _ => {
+            // Only scalars and punctuation reach this arm. Even the longest
+            // finite f64 spelling fits in 25 bytes.
+            let mut glyphs: Inline[u8, 25] =[0; 25]
+            let mut n = 0u64
+            let mut measured = 0u64
+            let writer = TypedWriter(byte: scoped fn(x: u8) {
+                glyphs[n] = x
+                n += 1
+            }, pass: WriteMeasured)
+            render_piece(plan, binary, mut pos, piece, writer, mut measured)?
+            for i in 0u64 .. n {
+                if !stream_byte(glyphs[i], mut chunk, flush) {
+                    return Ok(false)
+                }
+            }
+            Ok(true)
+        },
+    }
+}
+
+fn stream_byte(byte: u8, mut chunk: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+    if list.len(chunk) == list.capacity(chunk) {
+        if !flush(chunk) {
+            return false
+        }
+        list.clear(mut chunk)
+    }
+    list.push(mut chunk, byte)
+    true
+}
+
+fn stream_quoted(text: Bytes, mut chunk: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+    if !stream_byte(b'"', mut chunk, flush) {
+        return false
+    }
+    for byte in text {
+        if byte < 32u8 {
+            let (a, b) = hex.encode_byte(byte, true)
+            if !stream_byte(b'\\', mut chunk, flush) || !stream_byte(b'u', mut chunk, flush) || !stream_byte(b'0', mut chunk, flush) || !stream_byte(b'0', mut chunk, flush) || !stream_byte(a, mut chunk, flush) || !stream_byte(b, mut chunk, flush) {
+                return false
+            }
+        } else {
+            if (byte == b'"' || byte == b'\\') && !stream_byte(b'\\', mut chunk, flush) {
+                return false
+            }
+            if !stream_byte(byte, mut chunk, flush) {
+                return false
+            }
+        }
+    }
+    stream_byte(b'"', mut chunk, flush)
+}
+
+fn stream_base64(binary: Bytes, mut chunk: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+    if !stream_byte(b'"', mut chunk, flush) {
+        return false
+    }
+    for i in 0u64 .. (list.len(binary) + 2u64) / 3u64 {
+        let (a, b, c, d) = base64_group(binary, i * 3u64)
+        if !stream_byte(a, mut chunk, flush) || !stream_byte(b, mut chunk, flush) || !stream_byte(c, mut chunk, flush) || !stream_byte(d, mut chunk, flush) {
+            return false
+        }
+    }
+    stream_byte(b'"', mut chunk, flush)
 }
 
 fn write_atom(profile: Profile, op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u64) -> Result[(), TypedWriteError] {

@@ -1,0 +1,590 @@
+type Anchor {
+    serial: u64,
+    value: Option[Value],
+}
+
+type Reader {
+    at: u64,
+    line: u64,
+    anchors: Map[String, Anchor],
+    handles: Map[String, String],
+    version: bool,
+}
+
+type Mode: key = Block | Flow | Key
+
+fn byte(s: String, at: u64) -> u8 {
+    let b = string.as_bytes(s)
+    if at < list.len(b) {
+        b[at]
+    } else {
+        0
+    }
+}
+
+fn white(b: u8) -> bool {
+    b == b' ' || b == b'\t'
+}
+
+fn line_break(b: u8) -> bool {
+    b == b'\r' || b == b'\n'
+}
+
+fn separated(b: u8) -> bool {
+    b == 0 || white(b) || line_break(b)
+}
+
+fn indicator(s: String, at: u64, b: u8) -> bool {
+    byte(s, at) == b && separated(byte(s, at + 1))
+}
+
+fn marker(s: String, p: Reader, mark: u8) -> bool {
+    p.at == p.line && byte(s, p.at) == mark && byte(s, p.at + 1) == mark && byte(s, p.at + 2) == mark && separated(byte(s, p.at + 3))
+}
+
+fn boundary(s: String, p: Reader) -> bool {
+    marker(s, p, b'-') || marker(s, p, b'.') || (p.at == p.line && is_bom(s, p.at))
+}
+
+fn break_line(s: String, mut p: Reader) {
+    if byte(s, p.at) == b'\r' {
+        p.at += 1
+        if byte(s, p.at) == b'\n' {
+            p.at += 1
+        }
+    } else {
+        p.at += 1
+    }
+    p.line = p.at
+}
+
+fn horizontal(s: String, mut p: Reader) {
+    while white(byte(s, p.at)) {
+        p.at += 1
+    }
+}
+
+fn line_content(s: String, mut p: Reader) -> Result[(), Error] {
+    while !line_break(byte(s, p.at)) && p.at < string.byte_len(s) {
+        if is_bom(s, p.at) {
+            return Error(InvalidCharacter(p.at))
+        }
+        p.at += 1
+    }
+    Ok(())
+}
+
+fn finish(s: String, mut p: Reader) -> Result[(), Error] {
+    let start = p.at
+    horizontal(s, mut p)
+    if byte(s, p.at) == b'#' && (p.at > start || p.at == p.line || separated(byte(s, p.at - 1))) {
+        line_content(s, mut p)?
+    }
+    let b = byte(s, p.at)
+    if line_break(b) {
+        break_line(s, mut p)
+    } else if b != 0 {
+        return Error(Syntax(p.at))
+    }
+    Ok(())
+}
+
+fn lines(s: String, mut p: Reader) -> Result[(), Error] {
+    if p.at != p.line {
+        return Ok(())
+    }
+    loop {
+        while byte(s, p.at) == b' ' {
+            p.at += 1
+        }
+        horizontal(s, mut p)
+        if byte(s, p.at) == b'#' {
+            line_content(s, mut p)?
+        } else if byte(s, p.at) != 0 && !line_break(byte(s, p.at)) {
+            return Ok(())
+        }
+        if !line_break(byte(s, p.at)) {
+            return Ok(())
+        }
+        break_line(s, mut p)
+    }
+}
+
+fn check_characters(s: String) -> Result[(), Error] {
+    let mut at = 0u64
+    while let Some((c, next)) = string.next_scalar(s, at) {
+        let cp = char.to_u32(c)
+        if (cp < 32 && cp != 9 && cp != 10 && cp != 13) || (cp >= 127 && cp <= 159 && cp != 133) || cp == 0xfffe || cp == 0xffff {
+            return Error(InvalidCharacter(at))
+        }
+        at = next
+    }
+    Ok(())
+}
+
+fn is_bom(s: String, at: u64) -> bool {
+    byte(s, at) == 0xef && byte(s, at + 1) == 0xbb && byte(s, at + 2) == 0xbf
+}
+
+fn read_stream(s: String, depth: u64) -> Result[List[Value], Error] {
+    check_characters(s)?
+    let mut p = Reader(at: 0, line: 0, anchors: map.new(), handles: map.new(), version: false)
+    let mut documents: List[Value] = list.new()
+    let mut first = true
+    loop {
+        lines(s, mut p)?
+        if p.at == p.line && is_bom(s, p.at) {
+            p.at += 3
+            p.line = p.at
+            lines(s, mut p)?
+        }
+        if byte(s, p.at) == 0 {
+            break
+        }
+        if marker(s, p, b'.') {
+            p.at += 3
+            finish(s, mut p)?
+            first = true
+            continue
+        }
+        p.anchors = map.new()
+        p.handles = map.new()
+        p.version = false
+        let mut directed = false
+        while first && p.at == p.line && byte(s, p.at) == b'%' {
+            directive(s, mut p)?
+            directed = true
+            lines(s, mut p)?
+        }
+        let explicit = marker(s, p, b'-')
+        if explicit {
+            p.at += 3
+            horizontal(s, mut p)
+            if separated(byte(s, p.at)) || byte(s, p.at) == b'#' {
+                finish(s, mut p)?
+                lines(s, mut p)?
+            } else if indicator(s, p.at, b'-') || block_pair(s, p.at) {
+                return Error(Syntax(p.at))
+            }
+        } else if directed || !first {
+            return Error(Syntax(p.at))
+        }
+        let value = if byte(s, p.at) == 0 || boundary(s, p) {
+            if !explicit {
+                return Error(Syntax(p.at))
+            }
+            Null
+        } else {
+            block_node(s, mut p, depth, 0, false)?
+        }
+        list.push(mut documents, take value)
+        if !line_head(s, p) && byte(s, p.at) != 0 && !boundary(s, p) {
+            finish(s, mut p)?
+        }
+        lines(s, mut p)?
+        first = false
+    }
+    Ok(take documents)
+}
+
+fn block_node(s: String, mut p: Reader, depth: u64, floor: u64, indentless: bool) -> Result[Value, Error] {
+    let start = p.at
+    let start_line = p.line
+    if block_pair(s, start) {
+        collection_depth(depth)?
+        let indent = start - p.line
+        return block_mapping(s, mut p, depth - 1, indent)
+    }
+    let props = properties(s, mut p, Block, floor)?
+    let mut indent = p.at - p.line
+    if p.at != start && (byte(s, p.at) == b'#' || separated(byte(s, p.at))) {
+        finish(s, mut p)?
+        lines(s, mut p)?
+        indent = p.at - p.line
+        let zero_sequence = indentless && indent + 1 == floor && indicator(s, p.at, b'-')
+        if byte(s, p.at) == 0 || boundary(s, p) || (indent < floor && !zero_sequence) {
+            return apply_properties(mut p, props, resolve("", true, props.tag, start)?, start)
+        }
+    }
+    let b = byte(s, p.at)
+    let value = if indicator(s, p.at, b'-') {
+        if props.marked && p.line == start_line {
+            return Error(Syntax(p.at))
+        }
+        collection_depth(depth)?
+        block_sequence(s, mut p, depth - 1, indent)?
+    } else if block_pair(s, p.at) {
+        collection_depth(depth)?
+        block_mapping(s, mut p, depth - 1, indent)?
+    } else if b == b'|' || b == b'>' {
+        let scalar = block_scalar(s, mut p, floor)?
+        resolve(scalar, false, props.tag, start)?
+    } else {
+        inline_body(s, mut p, depth, floor, Block, props)?
+    }
+    apply_properties(mut p, props, take value, start)
+}
+
+fn collection_depth(depth: u64) -> Result[(), Error] {
+    if depth == 0 {
+        Error(DepthLimit)
+    } else {
+        Ok(())
+    }
+}
+
+fn line_head(s: String, p: Reader) -> bool {
+    let mut at = p.line
+    while at < p.at && white(byte(s, at)) {
+        at += 1
+    }
+    at == p.at
+}
+
+fn after_node(s: String, mut p: Reader) -> Result[(), Error] {
+    if !line_head(s, p) && !boundary(s, p) {
+        finish(s, mut p)?
+    }
+    lines(s, mut p)
+}
+
+fn block_sequence(s: String, mut p: Reader, depth: u64, indent: u64) -> Result[Value, Error] {
+    let mut items: List[Value] = list.new()
+    while p.at - p.line == indent && indicator(s, p.at, b'-') && !boundary(s, p) {
+        p.at += 1
+        let value = block_child(s, mut p, depth, indent, false, true)?
+        list.push(mut items, take value)
+        after_node(s, mut p)?
+    }
+    Ok(Sequence(take items))
+}
+
+fn block_child(s: String, mut p: Reader, depth: u64, indent: u64, indentless: bool, compact: bool) -> Result[Value, Error] {
+    let sep = p.at
+    let start_line = p.line
+    horizontal(s, mut p)
+    if byte(s, p.at) == b'#' || separated(byte(s, p.at)) {
+        finish(s, mut p)?
+        lines(s, mut p)?
+        let column = space_indent(s, p.line)
+        if byte(s, p.at) == 0 || boundary(s, p) || column <= indent && !(indentless && column == indent && indicator(s, p.at, b'-')) {
+            return Ok(Null)
+        }
+    }
+    let is_collection = indicator(s, p.at, b'-') || block_pair(s, p.at)
+    if is_collection {
+        if p.line == start_line {
+            if !compact || has_tab(s, sep, p.at) {
+                return Error(Syntax(p.at))
+            }
+        } else if p.at != p.line + space_indent(s, p.line) {
+            return Error(Syntax(p.at))
+        }
+    }
+    block_node(s, mut p, depth, indent + 1, indentless)
+}
+
+fn has_tab(s: String, start: u64, end: u64) -> bool {
+    let mut at = start
+    while at < end {
+        if byte(s, at) == b'\t' {
+            return true
+        }
+        at += 1
+    }
+    false
+}
+
+fn space_indent(s: String, line: u64) -> u64 {
+    let mut at = line
+    while byte(s, at) == b' ' {
+        at += 1
+    }
+    at - line
+}
+
+fn block_mapping(s: String, mut p: Reader, depth: u64, indent: u64) -> Result[Value, Error] {
+    let mut entries: List[Entry] = list.new()
+    let mut seen: Map[String, bool] = map.new()
+    while p.at - p.line == indent && !boundary(s, p) && block_pair(s, p.at) {
+        let at = p.at
+        let explicit = indicator(s, at, b'?')
+        let key = if explicit {
+            p.at += 1
+            let key = block_child(s, mut p, depth, indent, true, true)?
+            after_node(s, mut p)?
+            take key
+        } else if indicator(s, at, b':') {
+            Null
+        } else {
+            let key = inline_node(s, mut p, depth, indent, Key)?
+            horizontal(s, mut p)
+            if !simple_key_width(s, at, p.at) || p.line + indent != at || !indicator(s, p.at, b':') {
+                return Error(Syntax(p.at))
+            }
+            take key
+        }
+        remember_key(mut seen, key, depth, at)?
+        let value = if indicator(s, p.at, b':') && (!explicit || p.at - p.line == indent) {
+            p.at += 1
+            block_child(s, mut p, depth, indent, true, explicit)?
+        } else {
+            Null
+        }
+        list.push(mut entries, Entry(key: take key, value: take value))
+        after_node(s, mut p)?
+    }
+    Ok(Mapping(take entries))
+}
+
+fn remember_key(mut seen: Map[String, bool], key: Value, depth: u64, at: u64) -> Result[(), Error] {
+    let mut encoded = string.new()
+    write_key(mut encoded, key, depth)?
+    if let Some(_) = map.get(seen, encoded) {
+        return Error(DuplicateKey(at))
+    }
+    map.insert(mut seen, take encoded, true)
+    Ok(())
+}
+
+fn block_pair(s: String, start: u64) -> bool {
+    if indicator(s, start, b'?') || indicator(s, start, b':') {
+        return true
+    }
+    if indicator(s, start, b'-') {
+        return false
+    }
+    let mut at = start
+    let mut quote = 0u8
+    let mut nesting = 0u64
+    let mut token_start = true
+    while at < string.byte_len(s) && !line_break(byte(s, at)) {
+        let b = byte(s, at)
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && byte(s, at + 1) == quote {
+                    at += 1
+                } else {
+                    quote = 0
+                }
+            } else if b == b'\\' && quote == b'"' {
+                at += 1
+            }
+        } else if token_start && (b == b'\'' || b == b'"') {
+            quote = b
+            token_start = false
+        } else if token_start && (b == b'&' || b == b'!' || b == b'*') {
+            at += 1
+            if b == b'!' && byte(s, at) == b'<' {
+                at += 1
+                while !separated(byte(s, at)) && byte(s, at) != b'>' {
+                    at += 1
+                }
+                if byte(s, at) == b'>' {
+                    at += 1
+                }
+            } else {
+                while !property_end(byte(s, at)) {
+                    at += 1
+                }
+            }
+            continue
+        } else if (token_start || nesting > 0) && (b == b'[' || b == b'{') {
+            nesting += 1
+            token_start = true
+        } else if nesting > 0 && (b == b']' || b == b'}') {
+            nesting -= 1
+            token_start = false
+        } else if nesting == 0 && b == b':' && separated(byte(s, at + 1)) {
+            return true
+        } else if b == b'#' && (at == start || white(byte(s, at - 1))) {
+            return false
+        } else if !white(b) {
+            token_start = nesting > 0 && (b == b',' || b == b':' || (b == b'?' && separated(byte(s, at + 1))))
+        }
+        at += 1
+    }
+    false
+}
+
+fn inline_node(s: String, mut p: Reader, depth: u64, floor: u64, mode: Mode) -> Result[Value, Error] {
+    let start = p.at
+    let props = properties(s, mut p, mode, floor)?
+    let value = inline_body(s, mut p, depth, floor, mode, props)?
+    apply_properties(mut p, props, take value, start)
+}
+
+fn inline_body(s: String, mut p: Reader, depth: u64, floor: u64, mode: Mode, props: Properties) -> Result[Value, Error] {
+    let start = p.at
+    let b = byte(s, start)
+    let empty_flow = mode == Flow && (b == b',' || b == b']' || b == b'}' || flow_colon(s, start))
+    let empty_key = mode == Key && indicator(s, start, b':')
+    if props.marked && (b == 0 || empty_flow || empty_key) {
+        return resolve("", true, props.tag, start)
+    }
+    if b == b'*' {
+        if props.tag != Default || props.anchor != "" {
+            return Error(Syntax(start))
+        }
+        return alias(s, mut p, depth)
+    }
+    if b == b'[' || b == b'{' {
+        collection_depth(depth)?
+        return flow_collection(s, mut p, depth - 1, floor, b == b'{')
+    }
+    if b == b'\'' || b == b'"' {
+        let text = quoted(s, mut p, floor, mode == Key)?
+        return resolve(text, false, props.tag, start)
+    }
+    let text = plain(s, mut p, floor, mode)?
+    resolve(text, true, props.tag, start)
+}
+
+fn flow_space(s: String, mut p: Reader, floor: u64) -> Result[(), Error] {
+    let mut crossed = false
+    let start = p.at
+    loop {
+        horizontal(s, mut p)
+        if byte(s, p.at) == b'#' && (p.at > start || crossed) {
+            line_content(s, mut p)?
+        }
+        if !line_break(byte(s, p.at)) {
+            break
+        }
+        break_line(s, mut p)
+        crossed = true
+    }
+    if boundary(s, p) || (crossed && space_indent(s, p.line) < floor && byte(s, p.at) != b']' && byte(s, p.at) != b'}') {
+        return Error(Syntax(p.at))
+    }
+    Ok(())
+}
+
+fn flow_collection(s: String, mut p: Reader, depth: u64, floor: u64, mapping: bool) -> Result[Value, Error] {
+    let close = if mapping {
+        b'}'
+    } else {
+        b']'
+    }
+    p.at += 1
+    flow_space(s, mut p, floor)?
+    let mut items: List[Value] = list.new()
+    let mut entries: List[Entry] = list.new()
+    let mut seen: Map[String, bool] = map.new()
+    while byte(s, p.at) != close {
+        let start = p.at
+        let explicit = indicator(s, p.at, b'?')
+        if explicit {
+            p.at += 1
+            flow_space(s, mut p, floor)?
+        }
+        let key_start = p.at
+        let first_line = p.line
+        let b = byte(s, p.at)
+        let empty_key = flow_colon(s, p.at)
+        let first = if empty_key || explicit && (b == close || b == b',') {
+            Null
+        } else {
+            if b == 0 || b == close || b == b',' {
+                return Error(Syntax(p.at))
+            }
+            inline_node(s, mut p, depth, floor, Flow)?
+        }
+        flow_space(s, mut p, floor)?
+        let json_key = b == b'"' || b == b'\'' || b == b'[' || b == b'{'
+        let colon = flow_colon(s, p.at) || json_key && byte(s, p.at) == b':'
+        if colon && !mapping && !explicit && (p.line != first_line || !simple_key_width(s, key_start, p.at)) {
+            return Error(Syntax(p.at))
+        }
+        if mapping || explicit || colon {
+            if !mapping {
+                collection_depth(depth)?
+                check_depth(first, depth - 1)?
+            }
+            let child_depth = if mapping {
+                depth
+            } else {
+                depth - 1
+            }
+            let value = if colon {
+                p.at += 1
+                flow_space(s, mut p, floor)?
+                let next = byte(s, p.at)
+                if next == close || next == b',' {
+                    Null
+                } else {
+                    inline_node(s, mut p, child_depth, floor, Flow)?
+                }
+            } else {
+                Null
+            }
+            if mapping {
+                remember_key(mut seen, first, depth, start)?
+                list.push(mut entries, Entry(key: take first, value: take value))
+            } else {
+                let mut pair: List[Entry] = list.new()
+                list.push(mut pair, Entry(key: take first, value: take value))
+                list.push(mut items, Mapping(take pair))
+            }
+        } else {
+            list.push(mut items, take first)
+        }
+        flow_space(s, mut p, floor)?
+        if byte(s, p.at) == close {
+            break
+        }
+        if byte(s, p.at) != b',' {
+            return Error(Syntax(p.at))
+        }
+        p.at += 1
+        flow_space(s, mut p, floor)?
+    }
+    p.at += 1
+    if mapping {
+        Ok(Mapping(take entries))
+    } else {
+        Ok(Sequence(take items))
+    }
+}
+
+fn simple_key_width(s: String, start: u64, end: u64) -> bool {
+    let mut at = start
+    let mut count = 0u64
+    while at < end {
+        let b = byte(s, at)
+        if b < 0x80 || b >= 0xc0 {
+            count += 1
+        }
+        at += 1
+    }
+    count <= 1024
+}
+
+fn flow_punctuation(b: u8) -> bool {
+    b == b',' || b == b'[' || b == b']' || b == b'{' || b == b'}'
+}
+
+fn flow_colon(s: String, at: u64) -> bool {
+    let next = byte(s, at + 1)
+    byte(s, at) == b':' && (separated(next) || flow_punctuation(next))
+}
+
+fn check_depth(value: Value, depth: u64) -> Result[(), Error] {
+    match value {
+        Sequence(items) => {
+            collection_depth(depth)?
+            for item in items {
+                check_depth(item, depth - 1)?
+            }
+        },
+        Mapping(entries) => {
+            collection_depth(depth)?
+            for entry in entries {
+                check_depth(entry.key, depth - 1)?
+                check_depth(entry.value, depth - 1)?
+            }
+        },
+        _ => (),
+    }
+    Ok(())
+}

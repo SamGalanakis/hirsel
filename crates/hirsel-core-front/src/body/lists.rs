@@ -1,4 +1,5 @@
 //! Fixed-layout List storage, with portable charges independent of native stride.
+mod allocation;
 use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
@@ -22,7 +23,6 @@ enum ListStorage {
 
 enum ListGrowth {
     Raise,
-    LogAppend,
     ReturnCapacity(AddressId, TypeId, Option<ValueId>),
     Call { grow: usize, single: bool },
 }
@@ -502,7 +502,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        self.list_with_capacity_at(item, count, result, AllocPlace::Current, n)
+        self.list_with_capacity_at(item, count, result, AllocPlace::Current, 8, n)
     }
 
     pub(super) fn bytes_from_tail(
@@ -520,7 +520,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let null = self.konst(Ty::Ptr, 0, n)?;
         let owns = self.list_compare(CompareOp::Ne, cap, zero, n);
         let key = self.list_choose(owns, data, null, n);
-        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), n)
+        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), 8, n)
     }
 
     pub(super) fn list_with_capacity_at(
@@ -529,6 +529,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         count: ValueId,
         result: TyId,
         place: AllocPlace,
+        align: u64,
         n: NodeId,
     ) -> Option<ValueId> {
         let list_id = match self.rep(result) {
@@ -572,7 +573,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
         self.start(allocate);
         let plan = self.list_plan(item, count, None, n)?;
-        let (block, available) = self.list_allocate(&plan, place, n);
+        let (block, available) = self.list_allocate_aligned(&plan, place, align, n);
         let admitted = self.list_compare(CompareOp::Ne, block, null, n);
         self.raise_unless(admitted, plan.charge, available, n);
         self.list_allocated(to, list_id, block, count, n);
@@ -729,34 +730,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             stride,
         })
     }
-    pub(super) fn list_allocate(
-        &mut self,
-        plan: &ListPlan,
-        place: AllocPlace,
-        n: NodeId,
-    ) -> (ValueId, ValueId) {
-        let block = self.value(Ty::Ptr);
-        let available = self.value(Ty::Scalar(Scalar::U64));
-        let kind = AllocKind::Own {
-            edge: plan.edge.clone(),
-        };
-        self.inst(
-            Inst::Alloc {
-                result: block,
-                available,
-                region_entry: None,
-                kind,
-                place,
-                charge: plan.charge,
-                overflow: Some(plan.overflow),
-                size: plan.size,
-                align: 8,
-            },
-            n,
-        );
-        (block, available)
-    }
-
     /// Room for `additional` more elements; a refusal raises `Capacity` and leaves
     /// the list unchanged (MEM-21, MEM-24).
     pub(super) fn list_reserve(
@@ -768,21 +741,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<()> {
         self.list_room(item, header, additional, ask, ListGrowth::Raise, n)
-    }
-
-    pub(super) fn log_reserve(
-        &mut self,
-        item: TyId,
-        header: ValueId,
-        one: ValueId,
-        n: NodeId,
-    ) -> Option<()> {
-        let growth = if item == scalar(Scalar::U64) {
-            ListGrowth::LogAppend
-        } else {
-            ListGrowth::Raise
-        };
-        self.list_room(item, header, one, Ask::Bounded, growth, n)
     }
 
     /// `list.reserve`, `list.fill` and `list.append`: [`Self::list_reserve`]
@@ -951,7 +909,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 len_over,
                 hint,
                 [success, refused],
-                matches!(mode, ListGrowth::LogAppend),
                 n,
             )?;
         }
@@ -992,7 +949,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         len_over: ValueId,
         hint: Option<ValueId>,
         [success, refused]: [BlockId; 2],
-        log_append: bool,
         n: NodeId,
     ) -> Option<()> {
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
@@ -1014,7 +970,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 header,
                 carrier,
                 &plan,
-                [old_cap, new_cap, len, moved],
+                [new_cap, len, moved],
                 owned,
                 [like, current],
                 success,
@@ -1026,26 +982,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Capacity 0 owns no storage (empty, or static bytes): allocate in the
         // current limit and copy the elements over.
         self.start(current);
-        if log_append {
-            // Only a frame-eligible log starts empty with a nonnull data word.
-            // The first append always reserves four u64s. Once capacity is
-            // nonzero the ordinary Grow path handles spills and prior payers.
-            let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-            let has_frame = self.list_compare(CompareOp::Ne, data, null, n);
-            let [frame, heap] = [(); 2].map(|_| self.new_block(&[]));
-            self.list_branch(has_frame, frame, heap, n);
-            self.start(frame);
-            let (block, available) = self.list_allocate(&plan, AllocPlace::LentFrame(data), n);
-            let ok = self.list_compare(CompareOp::Ne, block, null, n);
-            let [commit, denied] = [(); 2].map(|_| self.new_block(&[]));
-            self.list_branch(ok, commit, denied, n);
-            self.start(denied);
-            self.jump(refused, &[plan.charge, available], n);
-            self.start(commit);
-            self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
-            self.jump(success, &[], n);
-            self.start(heap);
-        }
         let mut initial = plan.clone();
         if let Some(hint) = hint {
             let limit = self.konst(Ty::Scalar(Scalar::U64), 64, n)?;
@@ -1663,10 +1599,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// `sha256.blocks`: Bounds unless `at + 64 × count ≤ len`, checked before
+    /// SHA block ranges: Bounds unless the full block range fits, checked before
     /// the state changes; no data address is formed for zero blocks.
-    pub(super) fn sha256_blocks(
+    pub(super) fn sha_blocks(
         &mut self,
+        op: hirsel_core_ir::RtOp,
         state: ValueId,
         header: ValueId,
         at: ValueId,
@@ -1676,7 +1613,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64_ = Ty::Scalar(Scalar::U64);
         let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let block = self.konst(u64_, 64, n)?;
+        let block_size = match op {
+            hirsel_core_ir::RtOp::Sha1Compress | hirsel_core_ir::RtOp::Sha256Blocks => 64,
+            hirsel_core_ir::RtOp::Sha512Blocks => 128,
+            _ => unreachable!(),
+        };
+        let block = self.konst(u64_, block_size, n)?;
         let (bytes, overflow) = self.list_arith(ArithOp::Mul, ArithMode::Checked, count, block, n);
         let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
         let within = self.list_compare(CompareOp::Le, at, len, n);
@@ -1696,7 +1638,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let from = self.address(AddressBase::Value(data), &[Step::Byte(at)], byte, n);
         let from = self.pointer(from, n);
         self.runtime_row(
-            hirsel_core_ir::RtOp::Sha256Blocks,
+            op,
             &[Arg::Value(state), Arg::Value(from), Arg::Value(count)],
             n,
         )?;
@@ -1705,16 +1647,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// `sha256.block`: one block from an Inline array; nothing to check.
-    pub(super) fn sha256_block(
+    /// SHA `block`: one block from an Inline array; nothing to check.
+    pub(super) fn sha_block(
         &mut self,
+        op: hirsel_core_ir::RtOp,
         state: ValueId,
         data: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         self.runtime_row(
-            hirsel_core_ir::RtOp::Sha256Blocks,
+            op,
             &[Arg::Value(state), Arg::Value(data), Arg::Value(one)],
             n,
         )?;

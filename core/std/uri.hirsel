@@ -508,12 +508,11 @@ fn decoded_scalar(data: Bytes, start: u64, end: u64) -> Result[(char, u64, u64),
     Ok((scalar, i, octets))
 }
 
-/// Percent-decodes text[s] into out as UTF-8, keeping literal plus signs.
+/// Percent-decodes data[s] into out as UTF-8, keeping literal plus signs.
 /// Fails: as decode, or NotUtf8(i) at the source byte or escape that starts
 /// an invalid UTF-8 sequence. Atomic. Alloc: GROWTH of out. Cost: O(span length).
-/// Ex: `std.uri.decode_text(text, value, mut out)?`.
-pub fn decode_text(text: String, s: http1.Span, mut out: String) -> Result[(), Error] {
-    let data = string.as_bytes(text)
+/// Ex: `std.uri.decode_text(data, value, mut out)?`.
+pub fn decode_text(data: Bytes, s: http1.Span, mut out: String) -> Result[(), Error] {
     let _ = list.slice(data, s.start, s.end)
     let mut size: u64 = 0
     let mut i = s.start
@@ -576,23 +575,23 @@ fn upper_hex(byte: u8) -> char {
     })
 }
 
-/// Walks a raw query from at, initially query.start. Splits at '&' and then
+/// Walks a raw query from at, initially zero. Splits at '&' and then
 /// the first '=' in each nonempty field. ';' is literal. A field without '='
 /// has an empty value span at its end. Returns raw key, value and next offset,
-/// or None at query.end. Alloc: nothing. Cost: O(bytes visited).
-/// Ex: `while let Some((k, v, n)) = std.uri.next_pair(s, q, at) { at = n }`.
-pub fn next_pair(text: String, query: http1.Span, at: u64) -> Option[(http1.Span, http1.Span, u64)] {
-    let data = string.as_bytes(text)
+/// or None at the end. Alloc: nothing. Cost: O(bytes visited).
+/// Ex: `while let Some((k, v, n)) = std.uri.next_pair(query, at) { at = n }`.
+pub fn next_pair(data: Bytes, at: u64) -> Option[(http1.Span, http1.Span, u64)] {
+    let limit = list.len(data)
     let mut start = at
-    while start < query.end && data[start] == b'&' {
+    while start < limit && data[start] == b'&' {
         start += 1
     }
-    if start >= query.end {
+    if start >= limit {
         return None
     }
     let mut end = start
     let mut equals: Option[u64] = None
-    while end < query.end && data[end] != b'&' {
+    while end < limit && data[end] != b'&' {
         if equals == None && data[end] == b'=' {
             equals = Some(end)
         }
@@ -602,7 +601,7 @@ pub fn next_pair(text: String, query: http1.Span, at: u64) -> Option[(http1.Span
         Some(i) => (i, i + 1),
         None => (end, end)
     }
-    let next = if end < query.end {
+    let next = if end < limit {
         end + 1
     } else {
         end

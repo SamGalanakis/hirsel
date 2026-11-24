@@ -672,7 +672,7 @@ fn revision_described() {
     assert_eq!((described_run(&built.executable), built.revision), source, "A8: an imaged core's revisions");
     assert_eq!(hirsel_core_ir::code_revision(built.address), built.revision);
 }
-
+include!("revision_native_generic.rs");
 // Hand-framed v1 singleton group. This oracle assembles the specified bytes
 // directly: one binding per builtin at its version, beside the local body hash.
 fn builtin_group(body: ContentHash, slots: usize) -> ContentHash {

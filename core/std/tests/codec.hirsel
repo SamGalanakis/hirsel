@@ -2609,3 +2609,72 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+type KeyFixture: key + ordered {
+    ready: bool,
+    suffix: codec.Desc[Bytes],
+    tag: u8
+}
+
+fn fixture_key[T]() -> codec.Key[T] {
+    codec.key_of()
+}
+
+fn key_less[T: ordered](a: T, b: T) -> bool {
+    a < b
+}
+
+// expect: run key_of_opcode_21() = true
+fn key_of_opcode_21() -> bool {
+    let value = codec.Desc(value: -2i16)
+    let scalar: codec.Key[codec.Desc[i16]] = fixture_key()
+    let scalar_bytes = unhex("8001")
+    if key_enc(scalar, value) != scalar_bytes || result.unwrap(codec.decode_key(scalar, scalar_bytes)) != value {
+        return false
+    }
+    if result.unwrap(codec.key_schema(scalar)) != unhex("04 00000000 15 08") {
+        return false
+    }
+    let value_codec: codec.Codec[codec.Desc[i16]] = codec.of()
+    if enc(value_codec, value) != unhex("feff") || result.unwrap(codec.schema(value_codec)) != unhex("03 00000000 08") {
+        return false
+    }
+    let nested = codec.Desc(value: codec.Desc(value: 7u8))
+    let double: codec.Key[codec.Desc[codec.Desc[u8]]] = codec.key_of()
+    if key_enc(double, nested) != unhex("07") || result.unwrap(codec.key_schema(double)) != unhex("04 00000000 15 15 03") {
+        return false
+    }
+    let escaped = codec.Desc(value: unhex("61 00 62"))
+    let tuple: codec.Key[(bool, codec.Desc[Bytes], u8)] = codec.key_of()
+    let triple: (bool, codec.Desc[Bytes], u8) = (true, clone(escaped), 7u8)
+    let mixed_bytes = unhex("01 9e ff00 9d ffff 07")
+    if key_enc(tuple, triple) != mixed_bytes || result.unwrap(codec.decode_key(tuple, mixed_bytes)) != triple {
+        return false
+    }
+    if result.unwrap(codec.key_schema(tuple)) != unhex("04 00000000 12 03000000 01 15 0e03 03") {
+        return false
+    }
+    let record: codec.Key[KeyFixture] = codec.key_of()
+    let fixture = KeyFixture(ready: true, suffix: take escaped, tag: 7u8)
+    if key_enc(record, fixture) != mixed_bytes || result.unwrap(codec.decode_key(record, mixed_bytes)) != fixture {
+        return false
+    }
+    if key_outcome(tuple, unhex("01 ff fe")) == 0 || key_outcome(tuple, unhex("01 ff")) == 0 {
+        return false
+    }
+    let unit: codec.Key[()] = codec.key_of()
+    if key_enc(unit, ()) != unhex("") || result.unwrap(codec.key_schema(unit)) != unhex("04 00000000 00") {
+        return false
+    }
+    let mut seed = 0x9e3779b97f4a7c15u64
+    for _ in 0u64 .. 128 {
+        let a = (true, codec.Desc(value: random_bytes(mut seed)), 7u8)
+        let b = (true, codec.Desc(value: random_bytes(mut seed)), 7u8)
+        let store_less = compare(key_enc(tuple, a), key_enc(tuple, b)) < 0
+        let reverse = compare(a.1 .value, b.1 .value) > 0
+        if (a < b) != reverse || key_less(a, b) != reverse || store_less != reverse {
+            return false
+        }
+    }
+    true
+}

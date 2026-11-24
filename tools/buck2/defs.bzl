@@ -41,6 +41,10 @@ BIN_EXE_DIR = "buck-out/tmp/cargo-bin-exe"
 # `-c hirsel.tests=host` explicitly opts into execution on the invoking host;
 # `-c hirsel.tests=focus` uses one CPU unless a target requires an exact count.
 TESTS_ON_HOST = read_root_config("hirsel", "tests", "pool") == "host"
+DIST_BOLT = read_root_config("hirsel", "dist_bolt", "off")
+if DIST_BOLT not in ["off", "link", "use"]:
+    fail("hirsel.dist_bolt must be off, link or use")
+
 def _request(binary):
     return [str(field) for field in test_request(binary)]
 
@@ -205,7 +209,7 @@ def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manif
             "-Clinker-features=-lld",
             "-Clink-arg=-fuse-ld=bfd",
             "-Clink-arg=-Wl,-z,nodynamic-undefined-weak",
-        ],
+        ] + (["-Clink-arg=-Wl,--emit-relocs"] if DIST_BOLT != "off" else []),
         "DEFAULT": [],
     }) if name == "hirsel-core-driver-bin-hirsel" else []
     env = selects.apply(
@@ -551,7 +555,7 @@ def _store_package_impl(ctx):
     scratch = ctx.actions.declare_output("scratch", dir = True)
     script = ctx.actions.write("pack.sh", [
         "set -eu",
-        'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -L "$2"/runner/* "$4/runner/"',
+        'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -RL "$2"/runner/. "$4/runner/"',
         # The copies keep the inputs' read-only mode under remote execution: replace the
         # manifest rather than write through it.
         'rm -f "$4/runner/hirsel.toml"',
@@ -594,6 +598,11 @@ def _toolchain_bundle_impl(ctx):
     prof_recording_runtimes = ctx.attrs.prof_recording_runtimes[DefaultInfo].sub_targets
     observed_runtimes = ctx.attrs.observed_runtimes[DefaultInfo].sub_targets
     observed_recording_runtimes = ctx.attrs.observed_recording_runtimes[DefaultInfo].sub_targets
+    compiler = ctx.attrs.hirsel[DefaultInfo].default_outputs[0]
+    if DIST_BOLT == "use":
+        # Keep the build-tree RPATH valid. Install products with the final
+        # compiler because BOLT changes its GNU build ID.
+        compiler = ctx.actions.copy_file("hirsel", ctx.attrs._bolt_compiler, executable_bit_override = True)
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
@@ -611,7 +620,7 @@ def _toolchain_bundle_impl(ctx):
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     ctx.actions.run(
-        cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
+        cmd_args("/bin/sh", script, compiler,
                  bundle.as_output(), scratch.as_output(),
                  runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  runtimes["aarch64"][DefaultInfo].default_outputs[0],
@@ -651,7 +660,7 @@ hirsel_toolchain_bundle = rule(
         "platform_sources": attrs.list(attrs.source()),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
-    },
+    } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),
 )
 
 def _workspace_build_script_run_impl(ctx):

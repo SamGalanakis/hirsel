@@ -1,0 +1,8 @@
+
+[tests]
+limit = 805306368
+grants = ["Foreign=h264@1/h264/H264", "Foreign=av1@1/av1/DecoderCodec", "Foreign=av1@1/av1/EncoderCodec", "Foreign=video_yuv@1/video_yuv/Yuv", "Foreign=image_webp@1/webp/Webp", "Clock", "Stdout"]
+dirs = ["fixtures"]
+
+[tests.sources]
+"tests.hirsel" = "tests"

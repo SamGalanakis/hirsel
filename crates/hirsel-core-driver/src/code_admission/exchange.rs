@@ -246,11 +246,12 @@ pub fn send_release(
     limits: &AdmissionLimits,
 ) -> Result<(), AdmissionError> {
     let deadline = super::deadline(limits)?;
-    let mut budget = super::budget(limits, Some(deadline));
-    let bytes = read_recipe(store, root, limits.recipe_bytes, &budget)?;
+    let budget = super::budget(limits, Some(deadline));
+    let held = budget.debit();
+    let bytes = read_recipe(store, root, limits.recipe_bytes, &held)?;
     let len = bytes.len() as u64;
-    let mut recipe = Recipe::decode(&bytes, &mut budget)?;
-    let mut listing = listed_objects(&recipe, limits, &mut budget)?;
+    let mut recipe = Recipe::decode(&bytes, &held)?;
+    let mut listing = listed_objects(&recipe, limits, &held)?;
     let mut exchange = Exchange::on(stream, deadline);
     exchange.write_frame(&root.0)?;
     exchange.write_frame(&len.to_le_bytes())?;
@@ -288,12 +289,12 @@ pub fn send_release(
         }]
             .requested
     });
-    let groups = decode_rows(&recipe.groups, &mut budget, |group, budget| {
+    let groups = decode_rows(&recipe.groups, &held, |group, budget| {
         let file = open_object(store, ObjectKind::Group, group.hash)?;
         let bytes = read_verified(file, ObjectKind::Group, group, budget)?;
         Ok(Group::decode(&bytes, budget)?)
     })?;
-    let order = super::closure::send_order(&recipe, &groups, &mut budget)?;
+    let order = super::closure::send_order(&recipe, &groups, &held)?;
     for (&key, row) in &listing {
         if row.requested && key.kind != ObjectKind::Group {
             send_object(&mut exchange, store, key, row.len)?;
@@ -323,7 +324,7 @@ fn send_object(
 ) -> Result<(), AdmissionError> {
     let file = open_object(store, key.kind, key.hash)?;
     let mut remaining = length;
-    if file.metadata().map_err(AdmissionError::Io)?.len() != length {
+    if file.len() != length {
         return Err(AdmissionError::Hash(key.hash));
     }
     let mut file = file.take(length);

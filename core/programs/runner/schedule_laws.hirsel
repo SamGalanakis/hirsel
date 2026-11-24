@@ -1,0 +1,121 @@
+// A pending run spans anchor 2. Its typed refusal commits an outcome, so
+// anchor 3 must dispatch. The next tick and the history survive reopening.
+type ScheduleLaw: shareable + send { triggers: triggers.Tables, schedules: schedule.Tables }
+
+fn schedule_law_schema(mut d: store.Declare) -> Result[ScheduleLaw, store.Error] {
+    let triggers = triggers.declare_tables(mut d)?
+    let schedules = schedule.declare_tables(mut d, clone(triggers))?
+    Ok(ScheduleLaw(triggers: take triggers, schedules: take schedules))
+}
+
+fn schedule_law_wiring() -> (schedule.Wiring, triggers.Entry[schedule.Tick]) {
+    let alarm = result.unwrap(triggers.transact(code.describe(schedule_law_tick)))
+    let work = result.unwrap(triggers.transact(code.describe(schedule_law_run)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, alarm))
+    result.unwrap(triggers.allow(mut entries, work))
+    (schedule.wiring(take entries, take alarm), take work)
+}
+
+fn schedule_law_tick(mut tx: store.Tx, h: ScheduleLaw, _caller: Caller, take arg: schedule.Alarm) -> Result[(), schedule.TickError] {
+    let (take wiring, _) = schedule_law_wiring()
+    schedule.tick(mut tx, h.schedules, wiring, take arg)
+}
+
+fn schedule_law_run(mut _tx: store.Tx, _h: ScheduleLaw, _caller: Caller, take arg: schedule.Tick) -> Result[(), u64] {
+    Error(arg.anchor)
+}
+
+fn schedule_law_commit[R, E](take run: Result[store.Outcome[R, E], store.Error]) -> store.Done[R] {
+    match take run {
+        Ok(Committed(take done)) => take done,
+        _ => fail("schedule law: missing commit"),
+    }
+}
+
+fn schedule_law_first(mut db: store.Db, h: ScheduleLaw, period: u64) -> store.Done[triggers.Id] waits {
+    let made = store.run(mut db, None, (store.copy_env(h), period), fn(mut tx, env) -> Result[triggers.Id, schedule.Error] {
+        let (take wiring, take work) = schedule_law_wiring()
+        schedule.every(mut tx, env.0.schedules, wiring, "job", env.1, work)
+    })
+    let commit = schedule_law_commit(take made)
+    result.unwrap(store.durable(mut db, commit.ticket))
+    take commit
+}
+
+fn schedule_law_status(mut db: store.Db, h: ScheduleLaw) -> schedule.Status waits {
+    let observed = store.run(mut db, None, store.copy_env(h.schedules), fn(mut tx, tables) -> Result[schedule.Status, store.Error] {
+        Ok(option.unwrap(schedule.status(tx, tables, "job")?))
+    })
+    let commit = schedule_law_commit(take observed)
+    let store.Done(value: take status, ..) = take commit
+    take status
+}
+
+fn schedule_law_fire(mut db: store.Db, h: ScheduleLaw, id: triggers.Id, tick: bool) -> () waits {
+    let pend = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers,
+        scoped fn(current: triggers.Id) -> bool { current != id })))
+    let done = store.run(mut db, None, (store.copy_env(h), store.copy_env(pend), tick), fn(mut tx, env) -> Result[(), triggers.Error] {
+        let caller = law_caller(0u64)
+        let mut payload: Bytes = list.new()
+        if env.2 {
+            let codec: std.codec.Codec[schedule.Alarm] = std.codec.of()
+            let arg = result.unwrap(std.codec.decode(codec, triggers.argument(env.1)))
+            result.unwrap(schedule_law_tick(mut tx, env.0, caller, take arg))
+        } else {
+            let codec: std.codec.Codec[schedule.Tick] = std.codec.of()
+            let arg = result.unwrap(std.codec.decode(codec, triggers.argument(env.1)))
+            let reply: std.codec.Codec[Result[(), u64]] = std.codec.of()
+            let outcome = schedule_law_run(mut tx, env.0, caller, take arg)
+            result.unwrap(std.codec.encode(reply, outcome, mut payload))
+        }
+        triggers.finish_transact(mut tx, env.0.triggers, env.1, Returned(take payload))
+    })
+    let commit = result.unwrap(trigger_commit(take done))
+    result.unwrap(store.durable(mut db, commit.ticket))
+}
+
+@test
+fn every_no_double_no_gap(d: Dir, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let base = 1709078400000u64
+    let (c, take control) = provide.clock(0u64, base)
+    let mut time = take control
+    let dir = triggers.law_directory(d)
+    let mut db = result.unwrap(store.open(tasks, dir, c, random, triggers.law_options()))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, schedule_law_schema))
+    let first = schedule_law_first(mut db, h, 1000u64)
+    clock.set_wall(mut time, base + 1000u64)
+    schedule_law_fire(mut db, h, first.value, true)
+    let prior = schedule_law_status(mut db, h)
+    let Some(first_run) = prior.last_run else { return Error(()) }
+    if prior.next != base + 2000u64 { return Error(()) }
+    result.unwrap(store.close(take db))
+
+    let mut reopened = result.unwrap(store.open(tasks, dir, c, random, triggers.law_options()))
+    let h2 = result.unwrap(store.bind_declaration(mut reopened, Open, schedule_law_schema))
+    clock.set_wall(mut time, base + 2000u64)
+    schedule_law_fire(mut reopened, h2, prior.tick, true)
+    let skipped = schedule_law_status(mut reopened, h2)
+    if skipped.next != base + 3000u64 || skipped.last_run != Some(first_run) { return Error(()) }
+    schedule_law_fire(mut reopened, h2, first_run, false)
+    clock.set_wall(mut time, base + 3500u64)
+    schedule_law_fire(mut reopened, h2, skipped.tick, true)
+    let resumed = schedule_law_status(mut reopened, h2)
+    if resumed.next != base + 4000u64 || list.len(resumed.history) != 3u64 { return Error(()) }
+    let Ran(one, id) = resumed.history[0u64] else { return Error(()) }
+    let Skipped(two) = resumed.history[1u64] else { return Error(()) }
+    let Ran(three, next_run) = resumed.history[2u64] else { return Error(()) }
+    if id != first_run || resumed.last_run != Some(next_run) || first_run == next_run { return Error(()) }
+    if one != base + 1000u64 || two != base + 2000u64 || three != base + 3000u64 { return Error(()) }
+    // 2024-02-29 00:15 at UTC+01:00 is 2024-02-28 23:15 UTC.
+    let added = store.run(mut reopened, None, store.copy_env(h2), fn(mut tx, handles) -> Result[triggers.Id, schedule.Error] {
+        let (take wiring, take work) = schedule_law_wiring()
+        schedule.cron(mut tx, handles.schedules, wiring, "job", "15 0 29 2 *", 60, work)
+    })
+    let replacement = schedule_law_commit(take added)
+    result.unwrap(store.durable(mut reopened, replacement.ticket))
+    let cron = schedule_law_status(mut reopened, h2)
+    if cron.next != 1709162100000u64 || cron.tick != replacement.value || cron.last_run != Some(next_run) { return Error(()) }
+    result.unwrap(store.close(take reopened))
+    Ok(())
+}

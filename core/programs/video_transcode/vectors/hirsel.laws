@@ -1,0 +1,2 @@
+hirsel.laws 1
+video_transcode@1/tests/ladder src=21a762d0adb198dc sig=bbdc95ee02e913e7 run=a4fb8ce1bb0bcc74 bug=a67f746d8fafba8f oracle=b92fa9d4f2384653 rows=pending

@@ -1,6 +1,0 @@
-// L38: the cursor's snapshot scope cannot cross a task boundary.
-pub fn rejected(tasks: Tasks, s: store.Snapshot, sh: store.Shape[u64, u64]) -> Result[bool, store.Error] waits {
-    let rows = store.scan_bytes(s, sh, Unbounded, Unbounded)?
-    let worker = task.spawn(tasks, bytes 1048576, take rows, fn(take r: store.ViewRows) -> bool { true })
-    Ok(result.unwrap(task.join(take worker)))
-}

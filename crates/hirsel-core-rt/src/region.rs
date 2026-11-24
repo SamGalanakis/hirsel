@@ -1,5 +1,5 @@
 //! Nonmoving bump pools and one logical charge accumulator per payer run.
-use crate::allocator::{allocate_raw, deallocate_untracked};
+use crate::allocator::{allocate_raw, deallocate_raw};
 use crate::{Capacity, Context, limit::Payer};
 use std::alloc::Layout;
 use std::cell::{OnceCell, RefCell};
@@ -47,7 +47,7 @@ struct Chunk {
 impl Drop for Chunk {
     fn drop(&mut self) {
         // SAFETY: the cached backing owns this disjoint native allocation.
-        unsafe { deallocate_untracked(self.pointer.as_ptr()) };
+        unsafe { deallocate_raw(self.pointer) };
         #[cfg(test)]
         CHUNK_RELEASES.with(|count| count.set(count.get() + 1));
     }

@@ -40,6 +40,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     addresses: Vec<AddressValue>,
     pub blocks: Vec<ir::Block>,
     pub slots: Vec<ir::StackSlot>,
+    pub frame_obligations: std::collections::HashMap<AddressId, ir::StackSlot>,
     pub functions: &'c [cranelift_module::FuncId],
     pub statics: &'c [cranelift_module::DataId],
     pub descriptors: &'c [Option<cranelift_module::DataId>],
@@ -68,7 +69,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub testing: bool,
     pub empty_bound: bool,
     pub observe_charge: bool,
-    receive_loops: c::receive_loops::ReceiveLoops,
+    pub(super) law: Option<c::law::Hooks>,
 }
 
 pub(super) fn emit(
@@ -211,6 +212,14 @@ pub(super) fn emit(
         ));
     }
     b.switch_to_block(blocks[0]);
+    let mut frame_obligations = std::collections::HashMap::new();
+    for address in body.frame_obligations() {
+        let obligation =
+            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        let inactive = b.ins().iconst(types::I8, 0);
+        b.ins().stack_store(types::I8, inactive, obligation, 8);
+        frame_obligations.insert(address, obligation);
+    }
     let params = b.block_params(blocks[0]).to_vec();
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
@@ -259,6 +268,7 @@ pub(super) fn emit(
         addresses,
         blocks,
         slots,
+        frame_obligations,
         functions,
         statics,
         descriptors: tables.descriptors,
@@ -284,7 +294,7 @@ pub(super) fn emit(
         testing: tables.trace_drops,
         empty_bound: !tables.observe_charge && fast::empty_bound(body),
         observe_charge: tables.observe_charge,
-        receive_loops: c::receive_loops::ReceiveLoops::new(body),
+        law: c::law::Hooks::pick(input, function, body, layouts),
         calls: calls::Calls::new(
             &tables.runtimes,
             signatures,
@@ -300,9 +310,7 @@ pub(super) fn emit(
         if i != 0 {
             f.b.switch_to_block(f.blocks[i]);
         }
-        if f.receive_loops.exit(i) {
-            f.c_call("hirsel_core_receive_loop_end", &[], &[], &[])?;
-        }
+        f.law_enter(i)?;
         let fill = fills.get(i).copied().flatten();
         let original_index =
             if let Some(fill) = fill {
@@ -358,6 +366,9 @@ pub(super) fn emit(
         f.at_anchor(block.anchor, body.insts.len() as u32 + i as u32 + 1);
         match &body.terminators[i] {
             Terminator::Return(range) => {
+                if !body.parked_returns.contains(&BlockId(i as u32)) {
+                    f.law_leave(true)?;
+                }
                 let mut results = std::mem::take(&mut f.calls.results);
                 results.clear();
                 results.extend(
@@ -722,10 +733,16 @@ impl Function<'_, '_, '_> {
                 self.set(result, v);
             }
             Inst::Call { call } => {
-                let fused_receive = self.receive_loops.call(call);
                 let call = &self.body.calls[call.index()];
+                if self
+                    .law
+                    .as_ref()
+                    .is_some_and(|law| law.delegates(self.input, call.callee))
+                {
+                    self.law_hook(None, hirsel_core_layout::law::DELEGATE, None)?;
+                }
                 if let Callee::Runtime(op) = call.callee {
-                    return self.runtime_call(op, call, fused_receive);
+                    return self.runtime_call(op, call);
                 }
                 let signature = &self.signatures[call.signature.index()];
                 let storage = signature

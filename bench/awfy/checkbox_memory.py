@@ -79,7 +79,7 @@ def collect(args, work):
     target = args.out / "memory-sweep.json"
     snapshots = work.parent / "snapshots"
     siblings = sibling_cpus(args.measure_cpus[:2])
-    with receipt.measurement_slot(args.lock):
+    with receipt.hold(args.lock):
         try:
             os.sched_setaffinity(0, args.measure_cpus[:2])
             for clients in args.clients:
@@ -116,7 +116,7 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=board.LOCK)
     args = parser.parse_args()
-    validate_cpu_sets(parser, args, width=2)
+    validate_cpu_sets(parser, args, width=2, measure_affinity=receipt.measurement_affinity(args.lock))
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")
     args.clients = sorted(set(args.clients))

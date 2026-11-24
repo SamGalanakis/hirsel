@@ -98,7 +98,6 @@ unsafe fn check_tls(
     key: u64,
     secret: Option<&Secret>,
 ) -> Result<(Binding, bool), Outcome> {
-    let _commit = crate::sequencer::enter();
     unsafe {
         let write = (*files).tls_writes.get(&(key & !3)).ok_or(net::DENIED)?;
         if let Some(secret) = secret
@@ -176,7 +175,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
             Ok(transcript) => transcript,
             Err(error) => return refusal(error as u8),
         };
-        if !crate::steps::scram_iterations(context, transcript.iterations().into(), site) {
+        if !crate::steps::take_many(context, transcript.iterations().into(), site) {
             return CANCELLED;
         }
         let payer = (*context).payer();
@@ -232,7 +231,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
                     until,
                     backlog: 0,
                     connecting: None,
-                    denied: false,
+                    denial: None,
                     direction: 2,
                     os: &crate::os_net::OPERATIONS,
                     tls: &raw mut (*files).tls_sessions,

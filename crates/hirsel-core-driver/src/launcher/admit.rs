@@ -17,7 +17,7 @@ use crate::native::recipe_build::foreign_grant_lines;
 use crate::native::recipe_grants::grant_units;
 use crate::{AssemblyRecord, Link, NativeOptions, Publication};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::decode::DecodeBudget;
+use hirsel_core_ir::decode::Debit;
 use hirsel_core_ir::release_recipe::Recipe;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -60,10 +60,7 @@ pub(crate) fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io
             "stored recipe hash or length",
         ));
     }
-    Ok(Recipe::decode_retained(
-        &bytes,
-        &mut DecodeBudget::unlimited(),
-    )?)
+    Ok(Recipe::decode_retained(&bytes, &Debit::unlimited())?)
 }
 
 /// The authority `new`'s grants give that `old`'s do not, and the authority they drop.

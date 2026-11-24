@@ -1,9 +1,9 @@
 // L41 and L51(l). Read AP3, AP8, AP14 and AP20 directly from the files.
 // The physical index is keyed by pack and offset: dead frames in a listed
 // pack may repeat a live stamp and still count toward that pack's totals.
-type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(String, u8) | LawList(u8)
+type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(PinOwner, String, u8) | LawList(u8)
 
-type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired
+type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired | LawRows
 
 type LawLocationFrame {
     place: std.page.PagePtr,
@@ -42,7 +42,7 @@ fn law_scan_location_pack(mut graph: LawLocationGraph, seq: u64, class: u8, raw:
     } else {
         0x0021u16
     }
-    let mut pack = PagePack(class: class, frames: 0, live: 0, payload_bytes: 0)
+    let mut pack = PagePack(class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
     let mut at = 72u64
     while at < list.len(raw) {
         let width: u32 = list.word_le(raw, at + 4)
@@ -105,10 +105,10 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
         map.insert(mut graph.retired, seq, ())
     } else {
         let value = cell + 3
-        if width != 21 || page[value] > 1 || map.contains(graph.listed, seq) {
+        if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
             fail("location law: listed pack row")
         }
-        let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13))
+        let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
         map.insert(mut graph.listed, seq, pack)
     }
 }
@@ -158,6 +158,8 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
             } else if tree == LawCollections {
                 child_tree = LawData
                 law_read_location_ptr(page, cell + 3)
+            } else if class == 2 && tree == LawRows {
+                continue
             } else if class == 2 {
                 law_read_location_list_row(mut graph, tree, page, row, cell)
                 continue
@@ -187,7 +189,7 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
 }
 
 fn law_same_pack(a: PagePack, b: PagePack) -> bool {
-    a.class == b.class && a.frames == b.frames && a.live == b.live && a.payload_bytes == b.payload_bytes
+    a.class == b.class && a.frames == b.frames && a.live == b.live && a.payload_bytes == b.payload_bytes && a.index == b.index
 }
 
 fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
@@ -197,10 +199,14 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
         fail("location law: MANIFEST frame")
     }
     let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), retired: map.new(), frames: map.new(), incoming: map.new())
-    law_follow_location(d, mut graph, law_read_location_ptr(raw, 160), 2, LawPacks, LawList(0))?
-    law_follow_location(d, mut graph, law_read_location_ptr(raw, 196), 2, LawRetired, LawList(1))?
-    let branches = read_le(raw, 232, 4)
-    let mut at = 236u64
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 324), 2, LawPacks, LawList(0))?
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 360), 2, LawRetired, LawList(1))?
+    // `lineage` at 168 and `deferred_frees` at 204: class-2 trees whose rows
+    // name no pack the inventory counts.
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 168), 2, LawRows, LawList(3))?
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 204), 2, LawRows, LawList(2))?
+    let branches = read_le(raw, 396, 4)
+    let mut at = 400u64
     for _ in 0u64 .. branches {
         let id = read_le(raw, at, 4)
         let name_bytes = read_le(raw, at + 4, 2)
@@ -222,7 +228,12 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let pins = read_le(raw, at, 4)
     at += 4
     for _ in 0u64 .. pins {
-        let name_bytes = read_le(raw, at, 2)
+        let owner = match raw[at] {
+            1 => ApplicationPin,
+            2 => ProjectorPin,
+            _ => fail("location law: pin owner"),
+        }
+        let name_bytes: u64 = int.widen(raw[at + 1])
         let name = result.unwrap(string.from_utf8(copied(list.slice(raw, at + 2, at + 2 + name_bytes))?))
         let roots = at + 14 + name_bytes
         for tree in 0u8 .. 3 {
@@ -232,9 +243,9 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
                 LawCollections
             } else {
                 LawData
-            }, LawPin(clone(name), tree))?
+            }, LawPin(owner, clone(name), tree))?
         }
-        at = roots + 108
+        at = roots + 116
     }
     if at != list.len(raw) {
         fail("location law: trailing MANIFEST bytes")
@@ -264,33 +275,37 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
 
 fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     let disk = disk_state(db)
-    let oracle = law_parse_locations(disk.d)?
+    let oracle = law_parse_locations(log_directory(db)?)?
     let known = view disk.pages.locations
     if disk_index_len(known.frames) != map.len(oracle.frames) || disk_index_len(known.packs) != map.len(oracle.packs) {
         fail("location law: inventory size")
     }
-    let mut pin_names: Map[u64, String] = map.new()
-    let mut seen_names: Map[String, ()] = map.new()
+    let mut pin_names: Map[u64, (PinOwner, String)] = map.new()
+    let mut seen_names: Map[(PinOwner, String), ()] = map.new()
     for held in db.pins {
-        if map.contains(pin_names, held.serial) || map.contains(seen_names, held.name) {
+        let key: (PinOwner, String) = (held.owner, clone(held.name))
+        if map.contains(pin_names, held.serial) || map.contains(seen_names, key) {
             fail("location law: pin names and serials must be one-to-one")
         }
-        map.insert(mut pin_names, held.serial, clone(held.name))
-        map.insert(mut seen_names, clone(held.name), ())
+        map.insert(mut pin_names, held.serial, clone(key))
+        map.insert(mut seen_names, take key, ())
     }
     let mut incoming: Map[(u64, LawLocationSource), u64] = map.new()
     for (stamp, frame) in oracle.frames {
-        let Some(live) = disk_index_get(known.frames, stamp) else {
+        let Some(live_bytes) = disk_index_get(known.frames, stamp) else {
             fail("location law: missing live stamp")
         }
-        if live.place != frame.place || live.class != frame.class || live.outgoing != frame.outgoing {
+        if live_bytes.place != frame.place || live_bytes.class != frame.class || live_bytes.outgoing != frame.outgoing {
             fail("location law: installed location or outgoing edges differ")
         }
-        for owner in live.incoming {
+        for owner in live_bytes.incoming {
             let source = match owner {
                 PageSource(parent) => LawPage(parent),
                 HolderSource(0, id, tree) => LawBranch(id, tree),
-                HolderSource(1, serial, tree) => LawPin(clone(option.unwrap(map.get(pin_names, serial))), tree),
+                HolderSource(1, serial, tree) => {
+                    let (pin_owner, name) = option.unwrap(map.get(pin_names, serial))
+                    LawPin(pin_owner, clone(name), tree)
+                },
                 ListSource(which) => LawList(which),
                 _ => fail("location law: unknown installed holder"),
             }
@@ -309,10 +324,10 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
         }
     }
     for (seq, pack) in oracle.packs {
-        let Some(live) = disk_index_get(known.packs, seq) else {
+        let Some(live_bytes) = disk_index_get(known.packs, seq) else {
             fail("location law: missing pack")
         }
-        if !law_same_pack(live, pack) {
+        if !law_same_pack(live_bytes, pack) {
             fail("location law: installed pack totals differ")
         }
     }
@@ -347,7 +362,7 @@ fn law_location_commit(done: Outcome[(), Error]) -> Result[(), Error] {
 }
 
 fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     // Three 1,100-byte values fit in a BLOB pack, four do not. The
     // unrelated inline page keeps the old data pack dense after P moves.
     options.pack_bytes = 3500
@@ -359,9 +374,9 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let inline = table(mut db, "inline", std.codec.key_u64(), codec)?
     let mut large_value: Bytes = list.with_capacity(1100)
     list.fill(mut large_value, 1100, 31u8)
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(large_value)), fn(mut tx, call_env) -> Result[(), Error] {
         for k in 1u64 .. 7 {
-            put(mut tx, rows, k, large_value)?
+            put(mut tx, call_env.0, k, call_env.1)?
         }
         Ok(())
     })?)?
@@ -371,13 +386,13 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let (spares, _) = fork(mut db, "spares", all)?
     let mut filler: Bytes = list.with_capacity(600)
     list.fill(mut filler, 600, 42u8)
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, rows, 2)?
-        let _ = delete(mut tx, rows, 3)?
-        let _ = delete(mut tx, rows, 5)?
-        let _ = delete(mut tx, rows, 6)?
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(inline), copy_env(filler)), fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env.0, 2)?
+        let _ = delete(mut tx, call_env.0, 3)?
+        let _ = delete(mut tx, call_env.0, 5)?
+        let _ = delete(mut tx, call_env.0, 6)?
         for k in 1u64 .. 4 {
-            put(mut tx, inline, k, filler)?
+            put(mut tx, call_env.1, k, call_env.2)?
         }
         Ok(())
     })?)?
@@ -386,7 +401,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let _ = law_compare_locations(db)?
     let _ = pin(mut db, "a-old", saved)?
     let initial = law_compare_locations(db)?
-    let parent = law_location_collection(initial, LawPin("z-old", 0))
+    let parent = law_location_collection(initial, LawPin(ApplicationPin, "z-old", 0))
     let page = option.unwrap(map.get(initial.frames, parent))
     if list.len(page.outgoing) != 2 {
         fail("location law: expected two surviving blobs")
@@ -400,12 +415,12 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     // The pins now hold P; main and spares have different leaves that
     // still reference the two blobs. Dropping keys 2 and 3 moves only the
     // first blob and rewrites every live parent.
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 7, filler)
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(filler)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 7, call_env.1)
     })?)?
-    law_location_commit(run_on(mut db, spares, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, rows, 2)?
-        let _ = delete(mut tx, rows, 3)?
+    law_location_commit(run_on(mut db, spares, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env, 2)?
+        let _ = delete(mut tx, call_env, 3)?
         Ok(())
     })?)?
     let _ = checkpoint(mut db)?
@@ -425,12 +440,12 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         fail("location law: old parent copy must remain in a listed pack")
     }
     let still_saved = option.unwrap(pinned(db, "a-old"))
-    if list.len(changes(saved, still_saved)?) != 0 {
+    if list.len((changes(result.unwrap(reader(db, 0u64)), saved, still_saved)?).rows) != 0 {
         fail("location law: relocation changed pinned rows")
     }
     let _ = unpin(mut db, "z-old")?
     let remaining = law_compare_locations(db)?
-    if law_location_collection(remaining, LawPin("a-old", 0)) != parent {
+    if law_location_collection(remaining, LawPin(ApplicationPin, "a-old", 0)) != parent {
         fail("location law: remaining pin must retain its ancestor")
     }
     let _ = unpin(mut db, "a-old")?

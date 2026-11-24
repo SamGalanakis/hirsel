@@ -1,0 +1,167 @@
+fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: Arc[H], take read_handle: store.Reader, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister, staging: u64) -> () waits {
+    let mut at = store.version(base)
+    let mut b = Board(r: take r, h: take h, read_handle: take read_handle, reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut joined: List[Joiner] = list.new()
+    let mut waiting: List[Replies] = list.new()
+    let mut relay: List[Option[RelayTell]] = list.new()
+    let mut minted = 0u64
+    // Declared last, so a trap cleans it first (FAIL-8): R = u64::MAX is published before any
+    // owner channel or the inbox closes.
+    let mut rounds = take register
+    fence_round(mut joined, Fenced(sessions: map.new()), at, mut rounds)
+    // A message taken while coalescing Releases, handled next in inbox order.
+    let mut held: Option[PubIn] = None
+    let mut staged: Option[StagedRound] = None
+    loop {
+        let got = match replace(mut held, None) {
+            Some(take x) => take x,
+            None => match channel.receive(from) {
+                Ok(take x) => take x,
+                Error(_) => return,
+            },
+        }
+        let PubIn(e: take e) = take got
+        let previous = replace(mut staged, None)
+        let mut owes: List[Owe] = list.new()
+        match take e {
+            Staged(take candidate) => {
+                let _ = take previous
+                let mut newest = take candidate
+                loop {
+                    match channel.try_receive(from) {
+                        Ok(PubIn(e: Staged(take later))) => {
+                            newest = take later
+                        },
+                        Ok(take other) => {
+                            held = Some(take other);
+                            break
+                        },
+                        Error(_) => break,
+                    }
+                }
+                sweep(mut b.subs, mut joined)
+                staged = stage_round(b, newest, staging)
+                continue
+            },
+            Halt => {
+                round_disarm(take rounds)
+                return
+            },
+            Released(take rel) => {
+                let Release(version: v, snapshot: take snap, answers: take answers) = take rel
+                collect_answers(mut waiting, mut relay, take answers)
+                let mut newest = take snap
+                let mut newest_at = v
+                // G1: drain the Releases queued behind this one, in order, and run one round at
+                // the newest snapshot, so a slow publisher coalesces. Every Release's answers are
+                // kept. A Drained carries nothing but the pass below, so it joins the run; any
+                // other message ends it and is handled next.
+                loop {
+                    match channel.try_receive(from) {
+                        Ok(PubIn(e: Released(take more))) => {
+                            let Release(version: mv, snapshot: take ms, answers: take ma) = take more
+                            collect_answers(mut waiting, mut relay, take ma)
+                            if let Some(take s) = take ms {
+                                newest = Some(take s)
+                                newest_at = mv
+                            }
+                        },
+                        Ok(PubIn(e: Drained)) => (),
+                        Ok(take other) => {
+                            held = Some(take other);
+                            break
+                        },
+                        Error(_) => break,
+                    }
+                }
+                if let Some(take s) = take newest {
+                    at = newest_at
+                    let mut fenced = Fenced(sessions: map.new())
+                    owes = match take previous {
+                        Some(take planned) if planned.version == newest_at && planned.base == store.version(b.base) => install_staged(mut b, mut fenced, take s, take planned),
+                        _ => {
+                            b.newest = Some(take s)
+                            round(mut b, mut fenced)
+                        },
+                    }
+                    // G2 step 3: every fence of the round, then R, before anything is offered.
+                    fence_round(mut joined, take fenced, newest_at, mut rounds)
+                }
+            },
+            RelayJoined(take pending) => { relay = take pending },
+            Joined(take j) => {
+                let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress, taken: take taken, first: take first, http_credit: take http_credit) = take j
+                let wake: Option[Sender[WireEvent]] = match closed {
+                    Some(_) => Some(channel.sender(to)),
+                    _ => None
+                }
+                // A fenced session's Arcs are reserved here (§3 "Admission"); a refusal answers id 0.
+                let reserved: Result[Option[FenceSet], Capacity] = match take fence {
+                    Some(take root) => match fence_reserve(mut rounds, take root) {
+                        Ok(take fences) => Ok(Some(take fences)),
+                        Error(c) => Error(c)
+                    },
+                    None => Ok(None),
+                }
+                match take reserved {
+                    Ok(take fences) => {
+                        minted += 1u64
+                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64, http_credit: take http_credit))
+                        let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
+                        // v2.22: the Subscribe that made the owner join, at this base (G3).
+                        if let Some(take f) = take first {
+                            let JoinSubscribe(sub: sub, generation: generation, input: take input) = take f
+                            publish_wire_subscription(mut b, mut joined, mut owes, minted, sub, generation, take input)
+                        }
+                    },
+                    Error(_) => {
+                        let _ = channel.try_send(told, Admit(who: 0u64, round: latest.handle(rounds.round)))
+                    },
+                }
+                if let Some(sender) = wake {
+                    let _ = channel.try_send(sender, wire_event(JoinReady))
+                }
+            },
+            Subscribed(who, sub, take caller, take key, take arg) => publish_wire_subscription(mut b, mut joined, mut owes, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: take caller)),
+            WireSubscribed(who, sub, generation, take input) => publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, take input),
+            Unsubscribed(who, sub) => {
+                let _ = remove_sub(mut b.subs, who, sub)
+            },
+            Left(who) => forget(mut b.subs, mut joined, who),
+            // An owner made room (v2.13), or a marked session ended (v2.14): the sweep and the
+            // retry below are the whole of it.
+            Drained => (),
+        }
+        sweep(mut b.subs, mut joined)
+        repair(mut b, mut joined, mut owes)
+        http_project_owes(mut b, mut owes)
+        settle(mut b.subs, mut joined, mut waiting, take owes, at)
+        tell_relay(mut relay)
+    }
+}
+
+// Reserve storage at join. Every element consumes a held relay position, so
+// gathering releases needs no more slots than the relay published at startup.
+fn collect_answers(mut waiting: List[Replies], mut relay: List[Option[RelayTell]], take answers: List[CallAnswer]) {
+    for take answer in answers {
+        match take answer {
+            CallAnswer(take recipient, take row) => keep_wire_answer(mut waiting, take recipient, take row),
+            RelayAnswer(take recipient, take outcome, replayed, expires) => {
+                let RelayRecipient(to: take to, position: position, backing: take storage) = take recipient
+                let mut backing = take storage
+                relay_fill(outcome, mut backing)
+                let result = RelayOutcome(payload: take backing, replayed: replayed, expires: expires)
+                list.push(mut relay, Some(RelayTell(to: take to, position: position, result: take result)))
+            },
+        }
+    }
+}
+
+fn tell_relay(mut relay: List[Option[RelayTell]]) {
+    for i in 0u64 .. list.len(relay) {
+        if let Some(RelayTell(to: take to, position: id, result: take answer)) = list.set(mut relay, i, None) {
+            let _ = channel.try_send(to, RelayTold(id, take answer))
+        }
+    }
+    list.clear(mut relay)
+}

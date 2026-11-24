@@ -1,0 +1,469 @@
+const COOKIE: u32 = 0x2112a442
+
+const CRC_MASK: u32 = 0x5354554e
+
+const HEADER: u64 = 20
+
+pub type Transaction: key {
+    high: u32,
+    low: u64
+}
+
+pub type Class: key = Request | Indication | Success | Failure
+
+pub type Role: key = Controlling | Controlled
+
+pub type IceRole {
+    role: Role,
+    tie: u64
+}
+
+pub type Check {
+    role: IceRole,
+    priority: u32,
+    nominate: bool
+}
+
+pub type Integrity: key = NoIntegrity | Sha1 | Sha256 | Both
+
+pub type Error = BadHeader | UnsupportedMethod(u16) | BadAttribute(u16) | UnknownRequired(u16) | BadFingerprint | MissingIntegrity | BadIntegrity | BufferTooSmall(u64) | BadUsername | BadErrorCode
+
+pub type Range {
+    lo: u64,
+    hi: u64
+}
+
+pub type Message {
+    class: Class,
+    transaction: Transaction,
+    username: Option[Range],
+    mapped: Option[Addr],
+    xor_mapped: bool,
+    priority: Option[u32],
+    role: Option[IceRole],
+    nominate: bool,
+    code: Option[u16],
+    fingerprint: bool,
+    integrity: Integrity
+}
+
+type Parsed {
+    message: Message,
+    sha1_at: u64,
+    sha256_at: u64
+}
+
+fn mapped_address(packet: Bytes, at: u64, len: u64, tx: Transaction, xored: bool) -> Result[Addr, Error] {
+    let kind: u16 = if xored {
+        0x0020
+    } else {
+        0x0001
+    }
+    if len != 8 && len != 20 {
+        return Error(BadAttribute(kind))
+    }
+    let port: u16 = list.word_be(packet, at + 2)
+    let port_mask: u16 = if xored {
+        0x2112
+    } else {
+        0
+    }
+    let ip = match packet[at + 1] {
+        1 if len == 8 => {
+            let word: u32 = list.word_be(packet, at + 4)
+            V4(word ^ (if xored {
+                COOKIE
+            } else {
+                0
+            }))
+        },
+        2 if len == 20 => {
+            let high: u64 = list.word_be(packet, at + 4)
+            let low: u64 = list.word_be(packet, at + 12)
+            let high_mask: u64 = if xored {
+                list.word_be(packet, 4)
+            } else {
+                0
+            }
+            V6(high ^ high_mask, low ^ (if xored {
+                tx.low
+            } else {
+                0
+            }))
+        },
+        _ => {
+            return Error(BadAttribute(kind))
+        },
+    }
+    Ok(Addr(ip: ip, port: port ^ port_mask))
+}
+
+fn parse(packet: Bytes) -> Result[Parsed, Error] {
+    let end = list.len(packet)
+    if end < HEADER {
+        return Error(BadHeader)
+    }
+    let kind: u16 = list.word_be(packet, 0)
+    let length: u16 = list.word_be(packet, 2)
+    let cookie: u32 = list.word_be(packet, 4)
+    if (kind & 0xc000) != 0 || (length & 3) != 0 || end != HEADER + int.widen(length) || cookie != COOKIE {
+        return Error(BadHeader)
+    }
+    let class = match kind {
+        0x0001 => Request,
+        0x0011 => Indication,
+        0x0101 => Success,
+        0x0111 => Failure,
+        _ => {
+            return Error(UnsupportedMethod(kind))
+        },
+    }
+    let tx = Transaction(high: list.word_be(packet, 8), low: list.word_be(packet, 12))
+    let mut msg = Message(class: class, transaction: tx, username: None, mapped: None, xor_mapped: false, priority: None, role: None, nominate: false, code: None, fingerprint: false, integrity: NoIntegrity)
+    let mut sha1_at = 0u64
+    let mut sha256_at = 0u64
+    let mut at = HEADER
+    while at < end {
+        let attr: u16 = list.word_be(packet, at)
+        let len16: u16 = list.word_be(packet, at + 2)
+        let len: u64 = int.widen(len16)
+        let data = at + 4
+        let next = data + padded(len)
+        if next > end {
+            return Error(BadAttribute(attr))
+        }
+        if attr == 0x8028 {
+            if len != 4 || next != end {
+                return Error(BadAttribute(attr))
+            }
+            let got: u32 = list.word_be(packet, data)
+            if got != (std.crc32.update(0, packet, 0, at) ^ CRC_MASK) {
+                return Error(BadFingerprint)
+            }
+            msg.fingerprint = true
+        } else if attr == 0x001c {
+            if len != 32 || sha256_at != 0 {
+                return Error(BadAttribute(attr))
+            }
+            sha256_at = at
+        } else if sha1_at == 0 && sha256_at == 0 {
+            match attr {
+                0x0008 => {
+                    if len != 20 {
+                        return Error(BadAttribute(attr))
+                    }
+                    sha1_at = at
+                },
+                0x0006 => {
+                    if len > 763 || !valid_utf8(packet, data, len) {
+                        return Error(BadAttribute(attr))
+                    }
+                    if let None = msg.username {
+                        msg.username = Some(Range(lo: data, hi: data + len))
+                    }
+                },
+                _ if attr == 0x0001 || attr == 0x0020 => {
+                    if !msg.xor_mapped {
+                        let addr = mapped_address(packet, data, len, tx, attr == 0x0020)?
+                        if attr == 0x0020 {
+                            msg.mapped = Some(addr)
+                            msg.xor_mapped = true
+                        } else if let None = msg.mapped {
+                            msg.mapped = Some(addr)
+                        }
+                    }
+                },
+                0x0009 => {
+                    if len < 4 || len > 767 || !valid_utf8(packet, data + 4, len - 4) {
+                        return Error(BadAttribute(attr))
+                    }
+                    let hundreds: u16 = int.widen(packet[data + 2] & 7)
+                    let number: u16 = int.widen(packet[data + 3])
+                    if hundreds < 3 || hundreds > 6 || number > 99 {
+                        return Error(BadAttribute(attr))
+                    }
+                    if let None = msg.code {
+                        msg.code = Some(100 * hundreds + number)
+                    }
+                },
+                0x0024 => {
+                    if len != 4 {
+                        return Error(BadAttribute(attr))
+                    }
+                    if let None = msg.priority {
+                        msg.priority = Some(list.word_be(packet, data))
+                    }
+                },
+                0x0025 => {
+                    if len != 0 {
+                        return Error(BadAttribute(attr))
+                    }
+                    msg.nominate = true
+                },
+                _ if attr == 0x8029 || attr == 0x802a => {
+                    if len != 8 {
+                        return Error(BadAttribute(attr))
+                    }
+                    let role = if attr == 0x802a {
+                        Controlling
+                    } else {
+                        Controlled
+                    }
+                    if let Some(old) = msg.role {
+                        if old.role != role {
+                            return Error(BadAttribute(attr))
+                        }
+                    } else {
+                        msg.role = Some(IceRole(role: role, tie: list.word_be(packet, data)))
+                    }
+                },
+                // Long-term key derivation and challenges belong to the STUN usage.
+                _ if attr == 0x0014 || attr == 0x0015 => {
+                    if len > 763 || !valid_utf8(packet, data, len) {
+                        return Error(BadAttribute(attr))
+                    }
+                },
+                0x001e => {
+                    if len != 32 {
+                        return Error(BadAttribute(attr))
+                    }
+                },
+                _ if attr == 0x000a || attr == 0x001d => (),
+                _ => {
+                    if attr < 0x8000 {
+                        return Error(UnknownRequired(attr))
+                    }
+                },
+            }
+        }
+        at = next
+    }
+    msg.integrity = if sha256_at != 0 {
+        if sha1_at != 0 {
+            Both
+        } else {
+            Sha256
+        }
+    } else if sha1_at != 0 {
+        Sha1
+    } else {
+        NoIntegrity
+    }
+    Ok(Parsed(message: msg, sha1_at: sha1_at, sha256_at: sha256_at))
+}
+
+fn valid_utf8(packet: Bytes, at: u64, len: u64) -> bool {
+    if let Ok(()) = std.utf8.validate(list.slice(packet, at, at + len)) {
+        true
+    } else {
+        false
+    }
+}
+
+/// Parse one Binding datagram and check any FINGERPRINT. Call verify before trusting authenticated fields.
+/// The username range refers to packet; neither function retains the packet.
+pub fn decode(packet: Bytes) -> Result[Message, Error] {
+    Ok(parse(packet)?.message)
+}
+
+/// Authenticate with the usage's prepared key. SHA-256 takes precedence when both tags are present.
+/// SHA-1 needs 64 bytes of scratch plus the prefix before its attribute. Scratch is cleared after use.
+pub fn verify(packet: Bytes, key: Bytes, mut scratch: Bytes) -> Result[Message, Error] {
+    let p = parse(packet)?
+    if p.sha256_at != 0 {
+        let tag = sha256_prefix(key, packet, p.sha256_at)
+        let mut diff = 0u8
+        for i in 0u64 .. 32 {
+            diff |= tag[i] ^ packet[p.sha256_at + 4 + i]
+        }
+        if diff != 0 {
+            return Error(BadIntegrity)
+        }
+    } else if p.sha1_at != 0 {
+        let need = 64 + p.sha1_at
+        if list.len(scratch) < need {
+            return Error(BufferTooSmall(need))
+        }
+        let tag = sha1_prefix(key, packet, p.sha1_at, mut scratch)
+        let mut diff = 0u8
+        for i in 0u64 .. 20 {
+            diff |= tag[i] ^ packet[p.sha1_at + 4 + i]
+        }
+        if diff != 0 {
+            return Error(BadIntegrity)
+        }
+    } else {
+        return Error(MissingIntegrity)
+    }
+    Ok(p.message)
+}
+
+fn padded(n: u64) -> u64 {
+    (n + 3) & 0xfffffffffffffffc
+}
+
+fn trailer_size(integrity: Integrity, fingerprint: bool) -> u64 {
+    (match integrity {
+        NoIntegrity => 0u64,
+        Sha1 => 24,
+        Sha256 => 36,
+        Both => 60,
+    }) + (if fingerprint {
+        8u64
+    } else {
+        0
+    })
+}
+
+fn start(mut out: Bytes, scratch: Bytes, class: Class, tx: Transaction, at: u64, integrity: Integrity, fingerprint: bool) -> Result[u64, Error] {
+    let end = at + trailer_size(integrity, fingerprint)
+    if list.len(out) < end {
+        return Error(BufferTooSmall(end))
+    }
+    if integrity == Sha1 || integrity == Both {
+        let need = at + 64
+        if list.len(scratch) < need {
+            return Error(BufferTooSmall(need))
+        }
+    }
+    let kind: u16 = match class {
+        Request => 0x0001,
+        Indication => 0x0011,
+        Success => 0x0101,
+        Failure => 0x0111,
+    }
+    let length: u16 = int.narrow(end - HEADER)
+    list.set_word_be(mut out, 0, kind)
+    list.set_word_be(mut out, 2, length)
+    list.set_word_be(mut out, 4, COOKIE)
+    list.set_word_be(mut out, 8, tx.high)
+    list.set_word_be(mut out, 12, tx.low)
+    Ok(end)
+}
+
+fn attribute(mut out: Bytes, at: u64, kind: u16, len: u16) {
+    list.set_word_be(mut out, at, kind)
+    list.set_word_be(mut out, at + 2, len)
+}
+
+fn finish(mut out: Bytes, key: Bytes, mut scratch: Bytes, at: u64, integrity: Integrity, fingerprint: bool) {
+    let mut next = at
+    if integrity == Sha1 || integrity == Both {
+        let tag = sha1_prefix(key, out, next, mut scratch)
+        attribute(mut out, next, 0x0008, 20)
+        for i in 0u64 .. 20 {
+            out[next + 4 + i] = tag[i]
+        }
+        next += 24
+    }
+    if integrity == Sha256 || integrity == Both {
+        let tag = sha256_prefix(key, out, next)
+        attribute(mut out, next, 0x001c, 32)
+        for i in 0u64 .. 32 {
+            out[next + 4 + i] = tag[i]
+        }
+        next += 36
+    }
+    if fingerprint {
+        let crc = std.crc32.update(0, out, 0, next) ^ CRC_MASK
+        attribute(mut out, next, 0x8028, 4)
+        list.set_word_be(mut out, next + 4, crc)
+    }
+}
+
+/// Write a Binding request to a caller buffer. Return the number of bytes written.
+/// An empty username omits USERNAME. Omit check for plain STUN or an RFC 7675 consent request.
+pub fn binding_request(tx: Transaction, username: Bytes, check: Option[Check], integrity: Integrity, fingerprint: bool, key: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
+    let n = list.len(username)
+    if n > 508 || !valid_utf8(username, 0, n) {
+        return Error(BadUsername)
+    }
+    let mut at = HEADER
+    if n != 0 {
+        at += 4 + padded(n)
+    }
+    if let Some(c) = check {
+        at += if c.nominate {
+            24
+        } else {
+            20
+        }
+    }
+    let end = start(mut out, scratch, Request, tx, at, integrity, fingerprint)?
+    at = HEADER
+    if n != 0 {
+        attribute(mut out, at, 0x0006, int.narrow(n))
+        list.copy_from_slice(mut out, at + 4, username)
+        list.fill_slice(mut out, at + 4 + n, padded(n) - n, 0)
+        at += 4 + padded(n)
+    }
+    if let Some(c) = check {
+        attribute(mut out, at, 0x0024, 4)
+        list.set_word_be(mut out, at + 4, c.priority)
+        let kind: u16 = if c.role.role == Controlling {
+            0x802a
+        } else {
+            0x8029
+        }
+        attribute(mut out, at + 8, kind, 8)
+        list.set_word_be(mut out, at + 12, c.role.tie)
+        at += 20
+        if c.nominate {
+            attribute(mut out, at, 0x0025, 0)
+            at += 4
+        }
+    }
+    finish(mut out, key, mut scratch, at, integrity, fingerprint)
+    Ok(end)
+}
+
+/// Write a Binding success with the source transport address in XOR-MAPPED-ADDRESS.
+pub fn binding_success(tx: Transaction, mapped: Addr, integrity: Integrity, fingerprint: bool, key: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
+    let len: u16 = match mapped.ip {
+        V4(_) => 8,
+        V6(_, _) => 20,
+    }
+    let at = HEADER + 4 + int.widen(len)
+    let end = start(mut out, scratch, Success, tx, at, integrity, fingerprint)?
+    attribute(mut out, HEADER, 0x0020, len)
+    out[24] = 0
+    list.set_word_be(mut out, 26, mapped.port ^ 0x2112)
+    match mapped.ip {
+        V4(ip) => {
+            out[25] = 1
+            list.set_word_be(mut out, 28, ip ^ COOKIE)
+        },
+        V6(hi, lo) => {
+            out[25] = 2
+            let mask: u64 = list.word_be(out, 4)
+            list.set_word_be(mut out, 28, hi ^ mask)
+            list.set_word_be(mut out, 36, lo ^ tx.low)
+        },
+    }
+    finish(mut out, key, mut scratch, at, integrity, fingerprint)
+    Ok(end)
+}
+
+/// Write a Binding error with an empty diagnostic phrase.
+pub fn binding_error(tx: Transaction, code: u16, integrity: Integrity, fingerprint: bool, key: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
+    if code < 300 || code > 699 {
+        return Error(BadErrorCode)
+    }
+    let end = start(mut out, scratch, Failure, tx, 28, integrity, fingerprint)?
+    attribute(mut out, HEADER, 0x0009, 4)
+    let encoded: u32 = int.widen(((code / 100) << 8) | (code % 100))
+    list.set_word_be(mut out, 24, encoded)
+    finish(mut out, key, mut scratch, 28, integrity, fingerprint)
+    Ok(end)
+}
+
+fn same_address(a: Addr, b: Addr) -> bool {
+    if a.port != b.port {
+        return false
+    }
+    match (a.ip, b.ip) {
+        (V4(x), V4(y)) => x == y,
+        (V6(xh, xl), V6(yh, yl)) => xh == yh && xl == yl,
+        _ => false,
+    }
+}

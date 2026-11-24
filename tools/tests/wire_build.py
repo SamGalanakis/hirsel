@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--cc', type=Path)
     parser.add_argument('--session-only', action='store_true')
     parser.add_argument('--admission-only', action='store_true')
+    parser.add_argument('--migration-only', action='store_true')
     parser.add_argument('--runner', type=Path)
     args = parser.parse_args()
     output = args.output.resolve()
@@ -28,10 +29,11 @@ def main():
     for name, dependencies in [('core', []), ('std', [core])]:
         packages.append({
             'package': {'name':name, 'version':'1'}, 'dependencies':dependencies,
-            'sources':[{'file':str(path), 'modules':[path.stem], 'signatures':name == 'core'}
-                       for path in sorted((ROOT/'core'/name).glob('*.hirsel'))],
+            'sources':[{'file':str(path), 'modules':list(path.relative_to(ROOT/'core'/name).with_suffix('').parts), 'signatures':name == 'core'}
+                       for path in sorted((ROOT/'core'/name).glob('*.hirsel')) + (sorted((ROOT/'core/std/sim').glob('*.hirsel')) if name == 'std' else [])],
         })
-    if args.session_only or args.admission_only:
+    uses_runner = args.session_only or args.admission_only or args.migration_only
+    if uses_runner:
         for directory in (ROOT / 'core/programs/store', ROOT / 'core/programs/runner'):
             with (directory / 'hirsel.toml').open('rb') as file:
                 manifest = tomllib.load(file)
@@ -46,29 +48,36 @@ def main():
                                           for name, dep in manifest['dependencies'].items()],
                 'sources': sources,
             })
+    modules = ['migration'] if args.migration_only else ['admission'] if args.admission_only else ['session'] if args.session_only else ['echo', 'finish']
     packages.append({
-        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}, {'name':'runner', 'version':'1'}] if args.session_only or args.admission_only else []),
+        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}, {'name':'runner', 'version':'1'}] if uses_runner else []),
         'sources':[{'file':str(ROOT/'core/programs/wire'/f'{name}.hirsel'),
-                    'modules':[name], 'signatures':False} for name in (['admission'] if args.admission_only else ['session'] if args.session_only else ['echo','finish'])],
+                    'modules':[name], 'signatures':False} for name in modules],
     })
     inputs = output/'inputs.json'
     inputs.write_text(json.dumps({'core':core, 'packages':packages})+'\n')
     entries = [('session','session/main'), ('session-idle','session/idle')] if args.session_only else [('main','echo/main'), ('client_probe','echo/client_probe'), ('idle_probe','echo/idle_probe'), ('finish','finish/probe')]
     if args.admission_only:
         entries = [('admission', 'admission/main')]
+    if args.migration_only:
+        entries = [('migration', 'migration/main')]
+        (output / 'migration-store').mkdir(exist_ok=True)
     for name, entry in entries:
         stem = f'{name}-{args.backend}'
         command = [str(args.compiler.resolve()), 'build', '--source-core',
                    '--inputs', str(inputs), '--store', str(output/'store'),
                    '--entry', 'wire@1/'+entry, '--backend', args.backend,
-                   '--runtime', str(args.runtime.resolve()), '--limit', '1610612736' if args.admission_only else '67108864' if args.session_only else '268435456',
+                   '--runtime', str(args.runtime.resolve()), '--limit', '1610612736' if args.admission_only or args.migration_only else '67108864' if args.session_only else '268435456',
                    '--grant', 'Clock',
-                   '--grant', 'Net=Listen 127.0.0.0/8 18094-18094' if args.session_only or args.admission_only else 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091',
+                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535' if args.migration_only else 'Net=Listen 127.0.0.0/8 18094-18094' if uses_runner else 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091',
                    '--json', '-o', str(output/stem)]
         if name not in ('client_probe', 'finish'):
             command.extend(['--grant', 'Tasks'])
         if name in ('client_probe', 'admission'):
             command.extend(['--grant', 'Random'])
+        if args.migration_only:
+            command.extend(['--grant', 'Random', '--grant', 'Process', '--grant', 'Stderr',
+                            '--dir', str(output / 'migration-store')])
         if args.backend == 'llvm':
             command.append('--release')
         if args.cc:

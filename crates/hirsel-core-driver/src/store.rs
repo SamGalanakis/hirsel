@@ -9,7 +9,7 @@
 //! Nothing is synced: a torn,
 //! short, zero-filled or missing file after a power loss fails its check or
 //! is absent, so it is a miss and is rebuilt.
-use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::{ContentHash, encoding};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
+
+#[path = "release_cache.rs"]
+pub(crate) mod release_cache;
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
 /// A body record's envelope: `BODY_MAGIC VERSION head_len ir_len head ir_hash
@@ -32,8 +35,8 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-// A syntax-refused body is checked and its record reports its refusals (PROG-8 poison).
-const VERSION: u32 = 41;
+// CoreIR signatures always encode their anchors in a body record, including an empty list.
+const VERSION: u32 = 42;
 pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;
@@ -199,9 +202,7 @@ impl ArchiveWriter {
     pub fn record<T: serde::Serialize>(&mut self, row: &T) -> io::Result<Record> {
         hirsel_core_front::cost_scope!("non-check", "archive binary encoding");
         let start = self.buffer.len() as u64;
-        // serialize_into visits the borrowed tables once. serialize() first counts
-        // their encoded size and would add a complete second traversal.
-        bincode::serialize_into(&mut self.buffer, row).map_err(io::Error::other)?;
+        encoding::write_fixed(&mut self.buffer, row)?;
         Ok(Record {
             start,
             len: self.buffer.len() as u64 - start,
@@ -213,15 +214,11 @@ impl ArchiveWriter {
 pub struct Store {
     root: PathBuf,
     image: bool,
+    release: Option<release_cache::Release>,
 }
 
-/// Own the default compiler store for one test request. Drop it before
-/// `conclude`, since a one-shot request exits without unwinding.
-pub(crate) fn temporary_test_store(needed: bool) -> io::Result<Option<tempfile::TempDir>> {
-    let mut directory = tempfile::Builder::new();
-    needed
-        .then(|| directory.prefix("hirsel-test-store-").tempdir())
-        .transpose()
+pub(crate) fn default_path(directory: &Path) -> PathBuf {
+    directory.join(".hirsel-core")
 }
 
 /// A file in `<store>/tmp`, exclusively locked from its create until it is
@@ -278,6 +275,7 @@ impl Store {
         let store = Self {
             root: root.to_owned(),
             image: false,
+            release: None,
         };
         store.sweep()?;
         Ok(store)
@@ -375,26 +373,42 @@ impl Store {
     /// Write `bytes` to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
     fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.publish_held(path, bytes).map(drop)
+        self.publish_to(|file| {
+            file.write_all(bytes)?;
+            Ok((path, ()))
+        })?;
+        if let Some(release) = &self.release {
+            release.wrote(bytes.len());
+        }
+        Ok(())
     }
-    /// [`Self::publish`], keeping the descriptor the bytes were written
-    /// through: it names the published inode whatever is renamed over `path`.
-    fn publish_held(&self, path: &Path, bytes: &[u8]) -> io::Result<File> {
+    /// Write a cache file to a locked temporary. The writer names the
+    /// destination after it has written the payload.
+    pub(crate) fn publish_to<P: AsRef<Path>, T>(
+        &self,
+        write: impl FnOnce(&mut File) -> io::Result<(P, T)>,
+    ) -> io::Result<T> {
         let mut temporary = self.temporary()?;
+        let written = write(&mut temporary.file);
         #[cfg(test)]
-        if crashed(&self.root) {
-            temporary.file.write_all(bytes)?;
+        if written.is_ok() && crashed(&self.root) {
             return Err(io::Error::other("the test writer crashed"));
         }
-        let result = temporary
-            .file
-            .write_all(bytes)
-            .and_then(|()| fs::rename(&temporary.path, path));
-        if let Err(e) = result {
+        let result = written.and_then(|(path, value)| {
+            let path = path.as_ref();
+            match (&self.release, fs::rename(&temporary.path, path)) {
+                (Some(release), Err(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    release.create_dir(path.parent().expect("a release cache shard"))?;
+                    fs::rename(&temporary.path, path)?;
+                }
+                (_, result) => result?,
+            }
+            Ok(value)
+        });
+        if result.is_err() {
             let _ = fs::remove_file(&temporary.path);
-            return Err(e);
         }
-        Ok(temporary.file)
+        result
     }
     /// Whether `path` names a file of this store.
     /// The store's directory.
@@ -411,8 +425,12 @@ impl Store {
             name[i * 2] = HEX[(byte >> 4) as usize];
             name[i * 2 + 1] = HEX[(byte & 15) as usize];
         }
-        self.root
-            .join(std::str::from_utf8(&name).expect("hex digits are ASCII"))
+        let name = std::str::from_utf8(&name).expect("hex digits are ASCII");
+        if self.release.is_some() {
+            self.root.join(&name[..2]).join(&name[2..])
+        } else {
+            self.root.join(name)
+        }
     }
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
@@ -424,16 +442,15 @@ impl Store {
     /// whose bytes are not the record's fails the read check, a miss.
     /// The bytes always replace the file by a rename: a file already at the
     /// path may be one whose check just failed, and an existing name says
-    /// nothing about its bytes. The descriptor returned is the one the bytes
-    /// were written through.
-    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<(Bare, File)> {
+    /// nothing about its bytes.
+    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<Bare> {
         let bare = Bare {
             address: name,
             check: checksum(bytes),
         };
-        let file = self.publish_held(&self.path(bare.address), bytes)?;
+        self.publish(&self.path(bare.address), bytes)?;
         wrote("bare");
-        Ok((bare, file))
+        Ok(bare)
     }
     pub(crate) fn archive(
         &self,
@@ -643,6 +660,9 @@ impl Store {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
+        if self.release.is_some() && bytes.len() == size {
+            release_cache::touch(&file);
+        }
         if let Some(image) = image {
             image.bytes(bytes.len());
         }
@@ -694,9 +714,8 @@ impl Store {
         }
         Ok(Some((bytes, end)))
     }
-    /// A bare object's bytes when they pass their check, with the descriptor
-    /// they were read and checked through.
-    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<(Vec<u8>, File)>> {
+    /// A bare object's bytes when they pass their check.
+    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
         let mut file = match File::open(self.path(bare.address)) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -706,7 +725,13 @@ impl Store {
         crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        Ok((checksum(&bytes) == bare.check).then_some((bytes, file)))
+        if checksum(&bytes) != bare.check {
+            return Ok(None);
+        }
+        if self.release.is_some() {
+            release_cache::touch(&file);
+        }
+        Ok(Some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
         let bytes = match fs::read(self.root.join(name)) {

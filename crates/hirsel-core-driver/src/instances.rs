@@ -2,7 +2,9 @@
 //! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
 //! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{CodeRow, Identity, address::code_groups_with_external, code_revision};
+use hirsel_core_ir::{
+    CodeRow, FuncId, Identity, address::code_groups_with_external, code_revision,
+};
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
@@ -130,6 +132,7 @@ pub(crate) struct InstanceSet {
     /// The record fields of each materialised instance, for its record.
     pub fields: std::collections::BTreeMap<Identity, Fields>,
     summarize_foreign: bool,
+    compact_recipe: bool,
     pub(crate) foreign: BTreeSet<Identity>,
     pub(crate) foreign_addresses: BTreeMap<Identity, ContentHash>,
 }
@@ -227,7 +230,7 @@ impl Expand<'_> {
 pub(crate) struct InstanceBody {
     /// The published definition; None for a glue instance.
     pub product: Option<Arc<DefinitionProduct>>,
-    module: Option<Arc<Module>>,
+    module: Option<Arc<MaterializedModule>>,
     pub function: hirsel_core_ir::FuncId,
     /// The module's PROG-10 body hash.
     pub body: ContentHash,
@@ -245,25 +248,56 @@ pub(crate) struct InstanceBody {
 impl InstanceBody {
     pub fn ir(&self) -> io::Result<&Module> {
         match (&self.module, &self.product) {
-            (Some(module), _) => Ok(module),
+            (Some(module), _) => Ok(module.ir(&self.code)),
             (None, Some(product)) => product.ir(),
             (None, None) => unreachable!("a glue instance is materialised"),
         }
     }
+    pub(crate) fn anchored_items(&self) -> io::Result<Vec<DefPath>> {
+        match self.module.as_deref() {
+            Some(MaterializedModule::Recipe { sites, .. }) => Ok(sites.anchored_items()),
+            _ => Ok(hirsel_core_ir::source::anchored_items(self.ir()?)),
+        }
+    }
+
+    pub(crate) fn annex(
+        &self,
+        sources: &hirsel_core_ir::source::SourcePositions<'_>,
+    ) -> io::Result<hirsel_core_ir::normal::Annex> {
+        match self.module.as_deref() {
+            Some(MaterializedModule::Recipe { sites, .. }) => Ok(sites.annex(sources)),
+            _ => Ok(hirsel_core_ir::normal::retained_annex(self.ir()?, sources)),
+        }
+    }
+
+    pub(crate) fn prepare_assembly(
+        &self,
+        sources: &hirsel_core_ir::source::SourcePositions<'_>,
+    ) -> io::Result<(hirsel_core_ir::normal::Annex, Module)> {
+        use hirsel_core_ir::normal;
+        match self.module.as_deref() {
+            Some(MaterializedModule::Recipe { sites, .. }) => {
+                Ok((sites.annex(sources), normal::assembly_module(&self.code)))
+            }
+            _ => Ok(normal::prepare_retained_assembly(self.ir()?, sources)),
+        }
+    }
+
     /// A published body's module is hashed in its record; a materialized
     /// one is hashed here, by the same rule, through the caller's `scratch`.
     pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
         match (&self.module, &self.product) {
-            (Some(module), _) => crate::body::ir_hash(module, scratch),
+            (Some(module), _) => crate::body::ir_hash(module.ir(&self.code), scratch),
             (None, Some(product)) => Ok(product.ir_hash()),
             (None, None) => unreachable!("a glue instance is materialised"),
         }
     }
 }
 impl InstanceSet {
-    pub(crate) fn for_reach() -> Self {
+    pub(crate) fn for_reach(compact_recipe: bool) -> Self {
         Self {
             summarize_foreign: true,
+            compact_recipe,
             ..Self::default()
         }
     }
@@ -288,7 +322,13 @@ impl InstanceSet {
     pub fn items(&self, key: &Identity) -> io::Result<&[DefPath]> {
         match self.hits.get(key) {
             Some(record) => Ok(&record.items),
-            None => Ok(&self.get(key).ir()?.items),
+            None => {
+                let body = self.get(key);
+                match body.module.as_deref() {
+                    Some(MaterializedModule::Recipe { sites, .. }) => Ok(sites.items()),
+                    _ => Ok(&body.ir()?.items),
+                }
+            }
         }
     }
     /// `key`'s module's [`Module::link_symbols`]. Its root and every external row
@@ -714,7 +754,13 @@ impl CheckProduct {
             // published record: a resident compiler keeps it across requests.
             let memo_key = (own != Some(ContentHash::default())).then(|| (key.clone(), own));
             let made = crate::resident::MATERIALISED.get_or(memo_key, || {
-                materialise(key, product.as_deref(), &arguments, observe)
+                materialise(
+                    key,
+                    product.as_deref(),
+                    &arguments,
+                    observe,
+                    instances.compact_recipe,
+                )
             })?;
             let Materialised {
                 module,
@@ -787,12 +833,29 @@ impl CheckProduct {
     }
 }
 
+enum MaterializedModule {
+    Decoded(Module),
+    Recipe {
+        sites: hirsel_core_ir::normal::RetainedSites,
+        decoded: std::sync::OnceLock<Module>,
+    },
+}
+
+impl MaterializedModule {
+    fn ir(&self, code: &[u8]) -> &Module {
+        match self {
+            Self::Decoded(module) => module,
+            Self::Recipe { sites, decoded } => decoded.get_or_init(|| sites.restore(code)),
+        }
+    }
+}
+
 /// An instance as the walk materialises it, before its walk-specific
 /// bookkeeping: a function of its identity, its definition's published
 /// record and its arguments' closures, which its identity names by hash.
 #[derive(Clone)]
 pub(crate) struct Materialised {
-    module: Option<Arc<Module>>,
+    module: Option<Arc<MaterializedModule>>,
     function: hirsel_core_ir::FuncId,
     children: Vec<Child>,
     body: ContentHash,
@@ -807,6 +870,7 @@ fn materialise(
     product: Option<&DefinitionProduct>,
     arguments: &[&hirsel_core_ir::Closure],
     observe: &mut impl FnMut(&Identity, &'static str),
+    compact_recipe: bool,
 ) -> Result<Materialised, InstanceStop> {
     let input = |message: String| InstanceStop::Input {
         definition: key.definition.clone(),
@@ -831,26 +895,35 @@ fn materialise(
     let (slots, signatures, adapters) = {
         use hirsel_core_ir::normal::{self, Slot};
         let module = built.module.as_ref().expect("materialized module");
+        let mut hashes = rustc_hash::FxHashMap::default();
+        let mut signature = |function: FuncId| {
+            let row = module.functions[function.index()].signature;
+            *hashes
+                .entry(row)
+                .or_insert_with(|| normal::signature(module, function))
+        };
+        let signatures = CodeSignatures {
+            own: signature(built.function),
+            slots: built
+                .children
+                .iter()
+                .map(|child| (child.identity.clone(), signature(child.function)))
+                .collect(),
+        };
+        let mut children = built.children.iter();
         let slots = built
             .code
             .slots
             .iter()
-            .map(|slot| slot.identity(module))
-            .collect::<Vec<_>>();
-        let signatures = CodeSignatures {
-            own: normal::signature(module, built.function),
-            slots: built
-                .code
-                .slots
-                .iter()
-                .filter_map(|slot| match slot {
-                    Slot::External(function) => {
-                        Some((slot.identity(module), normal::signature(module, *function)))
-                    }
-                    Slot::Builtin(_) => None,
-                })
-                .collect(),
-        };
+            .map(|slot| match slot {
+                Slot::External(_) => children
+                    .next()
+                    .expect("a child for each external slot")
+                    .identity
+                    .clone(),
+                Slot::Builtin(definition) => Identity::plain(definition.clone()),
+            })
+            .collect();
         let adapters = module
             .functions
             .iter()
@@ -877,7 +950,16 @@ fn materialise(
     let body = built.code.hash();
     let described = built.code.described;
     Ok(Materialised {
-        module: built.module.map(Arc::new),
+        module: built.module.map(|module| {
+            Arc::new(if compact_recipe {
+                MaterializedModule::Recipe {
+                    sites: hirsel_core_ir::normal::RetainedSites::take(module),
+                    decoded: std::sync::OnceLock::new(),
+                }
+            } else {
+                MaterializedModule::Decoded(module)
+            })
+        }),
         function: built.function,
         children: built.children,
         body,

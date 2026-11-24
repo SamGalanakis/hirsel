@@ -288,16 +288,7 @@ fn release_compact_width_is_each_blobs_own() {
 #[ignore = "explicit native integration target"]
 fn release_part_alone_is_the_part_beside_other_misses() {
     const P: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn sum(node: Arc[N]) -> u64 {\n    node.value + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\nfn build(last: u64) -> Option[Arc[N]] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. last {\n        let old = replace(mut root, None)\n        root = Some(arc.new(N(value: i, tail: take old)))\n    }\n    root\n}\npub fn main() -> Result[(), Exit] {\n    let a = match build(LAST) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let b = match build(3u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let mut s = string.new()\n    let _ = string.push_u64(mut s, a)\n    let _ = string.push_char(mut s, ' ')\n    let _ = string.push_u64(mut s, b)\n    let n = string.byte_len(s)\n    let mut acc = a + b\n    for i in 0u64 .. n {\n        let parsed: Result[i64, ParseError] = int.parse(string.slice(s, i, n))\n        acc = acc + match parsed {\n            Ok(v) => int.truncate(v),\n            Error(_) => 1u64\n        }\n    }\n    Error(Exit(status: int.truncate(acc)))\n}\n";
-    let objects = |root: &Path| -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
-        std::fs::read_dir(root)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter_map(|p| {
-                let bytes = std::fs::read(&p).ok()?;
-                bytes.starts_with(b"\x7fELF").then(|| (p.file_name().unwrap().to_owned(), bytes))
-            })
-            .collect()
-    };
+    use crate::store::release_cache::cached_objects;
     for debug_lines in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let [first, second] = ["6u64", "7u64"].map(|last| P.replace("LAST", last));
@@ -330,7 +321,7 @@ fn release_part_alone_is_the_part_beside_other_misses() {
             },
         );
         assert_eq!(fresh_build.compiled, cold.compiled, "debug lines {debug_lines}: a fresh build generates every part");
-        let (primed, fresh) = (objects(&options.parts), objects(&fresh_parts));
+        let (primed, fresh) = (cached_objects(&options.parts), cached_objects(&fresh_parts));
         let shared = fresh.keys().filter(|name| primed.contains_key(*name)).count();
         assert!(shared >= 2, "debug lines {debug_lines}: parts in both stores");
         for (name, object) in &fresh {

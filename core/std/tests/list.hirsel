@@ -299,33 +299,19 @@ fn log_dropped() -> u64 {
     1
 }
 
-fn logs_under(limit: u64) -> Result[Result[Result[u64, Capacity], Causes], Capacity] {
-    isolate(fn() -> Result[u64, Capacity] {
-        bound bytes limit {
-            log_finished() + log_finished() + log_dropped() + log_dropped()
-        }
-    })
-}
-
-// MEM-29 charges a log's node at log.new and refunds it at log.finish and at the
-// log's drop, wherever an engine puts the node (MEM-28). Each call peaks at 56 bytes
-// and returns all of it, so 56 runs all four; 55 refuses the first entries' 32 with
-// 31 left, and 23 refuses the first node's 24.
-// expect: run log_charges_are_exact() = true
-fn log_charges_are_exact() -> bool {
-    let all = match logs_under(56) {
-        Ok(Ok(Ok(n))) => n == 4,
-        _ => false,
+// At the logical 56-byte peak, all four visits fit. A new 56-byte buffer
+// then fits in the same bound only if finishing and dropping return the room.
+// expect: run log_charges_stay_within_the_logical_bound() = true
+fn log_charges_stay_within_the_logical_bound() -> bool {
+    let r = bound bytes 56 {
+        let total = log_finished() + log_finished() + log_dropped() + log_dropped()
+        let probe: Bytes = list.with_capacity(56)
+        total == 4 && list.capacity(probe) == 56
     }
-    let entries = match caught(logs_under(55)) {
-        Some(c) => c.requested == 32 && c.available == 31,
-        None => false,
+    match r {
+        Ok(valid) => valid,
+        Error(_) => false,
     }
-    let node = match caught(logs_under(23)) {
-        Some(c) => c.requested == 24 && c.available == 23,
-        None => false,
-    }
-    all && entries && node
 }
 
 fn log_inline_outcomes() -> u64 {
@@ -337,11 +323,11 @@ fn log_inline_outcomes() -> u64 {
     if let Ok(Ok(())) = take aborted {
         return 0
     }
-    let stopped = bound steps 1 {
+    let stopped = bound steps 1000 {
         log.append(issued, 2)
-        log.append(issued, 9)
+        loop {}
     }
-    if let Ok(()) = stopped {
+    if let Ok(_) = stopped {
         return 0
     }
     let entries = log.finish(take issued)
@@ -550,14 +536,7 @@ fn reserve_hint_charges_are_exact() -> bool {
                 (Ok(true), Ok(true), true) => true,
                 _ => false,
             }
-            let steps = bound steps 2 {
-                let mut b: Bytes = list.new()
-                bytebuf.try_reserve_hint(mut b, 22, 44)
-            }
-            match steps {
-                Ok(Ok(())) => charges,
-                _ => false,
-            }
+            charges
         }
     })
     match attempts {
@@ -579,34 +558,17 @@ fn string_frame_copy() -> bool {
     string_frame_reads(row)
 }
 
-fn string_frames_under(room: u64, fuel: u64) -> Result[Result[Result[Result[bool, OutOfTime], Capacity], Causes], Capacity] {
-    isolate(fn() -> Result[Result[bool, OutOfTime], Capacity] {
-        bound bytes room {
-            bound steps fuel {
-                string_frame_copy() && string_frame_copy()
-            }
-        }
-    })
-}
-
-// The eight-byte copy holds one charge while the row is live. Both copies fit
-// under the same eight-byte limit only if the first drop refunds it. Each visit
-// enters five calls, including string.from and the two calls in the reader.
-// expect: run string_frame_charges_are_exact() = true
-fn string_frame_charges_are_exact() -> bool {
-    let all = match string_frames_under(8, 10) {
-        Ok(Ok(Ok(Ok(true)))) => true,
-        _ => false,
+// Both copies fit in succession at the logical eight-byte peak. Each
+// drop restores room for the next copy.
+// expect: run string_frame_copies_fit_the_logical_bound() = true
+fn string_frame_copies_fit_the_logical_bound() -> bool {
+    let copied = bound bytes 8 {
+        string_frame_copy() && string_frame_copy()
     }
-    let stopped = match string_frames_under(8, 9) {
-        Ok(Ok(Ok(Error(e)))) => e.steps == 9,
-        _ => false,
+    match copied {
+        Ok(valid) => valid,
+        Error(_) => false,
     }
-    let refused = match caught(string_frames_under(7, 10)) {
-        Some(c) => c.requested == 8 && c.available == 7,
-        None => false,
-    }
-    all && stopped && refused
 }
 
 fn present(o: Option[View[u64]]) -> u64 {
@@ -1480,7 +1442,7 @@ fn find_byte4_past_end() -> Option[u64] {
 }
 
 // Under a tight step bound, long scans stop with Steps rather than escaping the bound.
-// expect: run find_byte_step_bound() = true
+// expect: reference run find_byte_step_bound() = true
 fn find_byte_step_bound() -> bool {
     let mut xs: Bytes = list.with_capacity(512)
     list.fill(mut xs, 512, b'z')

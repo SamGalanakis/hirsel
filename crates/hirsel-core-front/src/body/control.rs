@@ -130,12 +130,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let to = self
             .returned_local
             .and_then(|(local, to)| (self.binder(pat) == Some(local)).then_some(to));
-        self.frame_log_next = self.frame_log_let(s, pat, value);
         let frame_copies = self.frame_string_copies.len();
         self.frame_string_let(s, pat, value);
         let (t, v) = self.expr_into(value, declared.and_then(expect), to);
         self.frame_string_copies.truncate(frame_copies);
-        self.frame_log_next = None;
         let ty = declared.unwrap_or(t);
         let kind = self.type_kind(ty);
         let anchors = if kind == Kind::Scoped {
@@ -187,9 +185,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.consume(v, pat);
                     (Binding::Value(v), Origin::Let)
                 };
-                if let Some(&item) = v.and_then(|v| self.frame_logs.get(&v)) {
-                    self.frame_log_owners.insert(b, item);
-                }
                 self.declare(b, ty, binding, origin, pat);
                 if let Binding::Slot(Some(address)) = binding
                     && to.is_none()
@@ -509,11 +504,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(no) = no_block {
             self.start(no);
         }
-        // An arm of type Never constrains nothing (LANG-11).
-        let other_want = want
-            .filter(|w| self.fixed_want(*w))
-            .or(if yt == NEVER { None } else { expect(yt) })
-            .or(want);
+        let other_want = self.arm_want(want, (yt != NEVER).then_some(yt));
         let (ot, ov) = self.result_expr(other, other_want);
         let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };
@@ -544,37 +535,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.dead |= was_dead;
     }
 
-    pub(super) fn push_frame(
-        &mut self,
-        label: Option<String>,
-        kind: FrameKind,
-        hint: Option<Want>,
-    ) {
-        let exit = self.new_join();
-        let ty = hint.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
-        self.frames.push(Frame {
-            label,
-            kind,
-            header: None,
-            exit,
-            ty,
-            hint,
-            left: false,
-            mark: self.log.len(),
-            born: self.born,
-            exits: self.exits.len(),
-            scopes: self.pattern_scope_mark(),
-            slots: self.scope_slots.len(),
-            owners: self.owner_mark(),
-        });
-    }
-    /// Pop the innermost frame, joining its exits (OWN-16).
-    pub(super) fn pop_frame(&mut self, n: NodeId) -> Frame {
-        let fi = self.frames.len() - 1;
-        self.merge_exits(fi, n);
-        self.frames.pop().unwrap()
-    }
-
     pub(super) fn loop_(
         &mut self,
         n: NodeId,
@@ -583,6 +543,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> (TyId, Option<ValueId>) {
         let body = self.kids(n)[0];
         self.push_frame(label, FrameKind::Loop, want);
+        self.frames.last_mut().unwrap().body = Some(body);
         if self.live() {
             let header = self.new_block(&[]);
             self.jump(header, &[], n);
@@ -595,8 +556,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.jump(h, &[], body);
         }
         self.back_edge(self.frames.len() - 1, self.close_brace(body));
-        let f = self.pop_frame(n);
-        let v = self.land(f.exit);
+        let mut f = self.pop_frame(n);
+        let v = self.land_frame(&mut f);
         if !f.left {
             return (NEVER, None);
         }
@@ -1162,6 +1123,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::For | NodeKind::ForTake => self.for_(e, label),
             NodeKind::Block => {
                 self.push_frame(label, FrameKind::Block, want);
+                self.frames.last_mut().unwrap().body = Some(e);
                 let (t, v) = self.block(e, want);
                 let exit = self.frames.last().unwrap().exit;
                 let fixed = self.frames.last().unwrap().ty;
@@ -1183,8 +1145,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.goto(exit, ty, v, e);
                 self.exit_edge(self.frames.len() - 1);
-                let f = self.pop_frame(n);
-                let v = self.land(f.exit);
+                let mut f = self.pop_frame(n);
+                let v = self.land_frame(&mut f);
                 if t == NEVER && !f.left {
                     return (NEVER, None);
                 }
@@ -1192,100 +1154,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => unreachable!("the parser labels only blocks and loops"),
         }
-    }
-
-    /// The frame an exit leaves: the labelled one, or the innermost loop.
-    pub(super) fn frame_of(&mut self, n: NodeId) -> Option<usize> {
-        let label = self.item.tree.node(n).token.map(|_| self.token_text(n));
-        let i = self.frames.iter().rposition(|f| match label {
-            Some(l) => f.label.as_deref() == Some(l),
-            None => f.kind != FrameKind::Block,
-        });
-        if i.is_none() {
-            // Refused LANG-15 by the resolver.
-            self.halt();
-        }
-        i
-    }
-
-    pub(super) fn break_(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
-        let value = self.kids(n).first().copied();
-        let Some(i) = self.frame_of(n) else {
-            return (NEVER, None);
-        };
-        if matches!(self.frames[i].kind, FrameKind::While { .. }) && value.is_some() {
-            // Refused LANG-15 by the resolver.
-            self.halt();
-            return (NEVER, None);
-        }
-        let fixed = self.frames[i].ty;
-        let (t, v) = match value {
-            Some(e) => self.expr(e, fixed.and_then(expect).or(self.frames[i].hint)),
-            None => {
-                if let Some(f) = fixed {
-                    self.coerce(
-                        UNIT,
-                        Want {
-                            ty: f,
-                            view: false,
-                            payload: 0,
-                        },
-                        n,
-                    );
-                }
-                (UNIT, None)
-            }
-        };
-        // MEM-7: a carried value whose type names a region opened inside the frame
-        // leaves that region's block.
-        if let Some(e) = value
-            && self.opened_region_in(t, self.frames[i].slots).is_some()
-        {
-            self.refuse(
-                "MEM-7",
-                e,
-                "a value whose type names a region opened in the loop cannot leave it",
-            );
-        }
-        let f = &mut self.frames[i];
-        f.left = true;
-        if f.ty.is_none() && t != NEVER {
-            f.ty = Some(t);
-        }
-        let (exit, ty) = (f.exit, f.ty.unwrap_or(t));
-        // The carried value goes to the exit's join; the rest is cleaned (FAIL-8, 9).
-        self.consume(v, n);
-        if let (Some(v), Ok(Rep::Place(id))) = (v, self.rep(ty))
-            && !self.is_view(ty)
-            && self.e.runs_code(id)
-        {
-            self.pending = Some((AddressBase::Value(v), id));
-        }
-        self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
-        self.goto(exit, ty, v, n);
-        self.exit_edge(i);
-        self.dead = true;
-        (NEVER, None)
-    }
-
-    pub(super) fn continue_(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
-        let Some(i) = self.frame_of(n) else {
-            return (NEVER, None);
-        };
-        if self.frames[i].kind == FrameKind::Block {
-            // Refused LANG-15 by the resolver.
-            self.halt();
-            return (NEVER, None);
-        }
-        self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
-        self.source_step(n);
-        if let Some(h) = self.frames[i].header {
-            self.jump(h, &[], n);
-        }
-        self.cur = None;
-        self.back_edge(i, self.span(n));
-        self.dead = true;
-        (NEVER, None)
     }
 
     pub(super) fn return_(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {

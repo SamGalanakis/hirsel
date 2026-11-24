@@ -19,7 +19,7 @@ fn bit_and_chunk_law_uses_key_codec_and_zero_tail() -> Result<()> {
     assert_eq!(image[63], 128);
     assert_eq!(image[64], 1);
     assert_eq!(image[124999], 128);
-    let row = codec::chunk_row(1, 1953, &image);
+    let row = codec::chunk_row(1953, &image);
     assert_eq!(row.key, [0, 0, 0, 0, 0, 0, 7, 161]);
     assert_eq!(row.value.as_ref().unwrap()[12..], [0; 56]);
     let mut copy = vec![0; IMAGE_BYTES];

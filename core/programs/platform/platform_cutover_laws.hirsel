@@ -1,0 +1,178 @@
+// L44 `cutover_survives_host_loss` (§14.5): the Pending row is durable before the
+// candidate's Start and the cutover, so a host lost at any point resumes the attempt with
+// the identical command and OLD installs once: lost before Start, before forwarding, during
+// the install, and after OLD's answer but before the commit. A launcher lost after OLD
+// installed leaves nothing that proves the install: the row is Undecided and probed. A
+// host lost while the deploy is Preparing sends no cutover and aborts OLD's export first.
+@test
+fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // Before Start: nothing reached the launcher.
+    let (r0, old, go) = cut_case(c, rnd)
+    let _ = take go
+    let mut a = restart(take r0, 4u64)
+    expect(gens(a, "g") == one(2u64) && launcher.forwards(a.f) == 1u64, "L44: before Start, the candidate or the cutover was not sent again")
+    answer(mut a, old, PlaceInstalled(2u64, true))
+    expect(is_dirty(a, "g", 2u64) && committed_once(a), "L44 before Start: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut a, true, true), "L44 before Start: a collection did not keep NEW's root and the retained OLD")
+    // Before forwarding: the Start reached the launcher, the cutover did not.
+    let (r1, old1, go1) = cut_case(c, rnd)
+    let mut b = take r1
+    let mut first: List[launcher.Request] = list.new()
+    list.push(mut first, clone(go1[0u64]))
+    pump(mut b, take first)
+    let mut b2 = restart(take b, 4u64)
+    expect(list.len(gens(b2, "g")) == 0u64 && launcher.forwards(b2.f) == 1u64, "L44: before forwarding, the candidate started again or the cutover was not sent once")
+    answer(mut b2, old1, PlaceInstalled(2u64, true))
+    expect(is_dirty(b2, "g", 2u64) && committed_once(b2), "L44 before forwarding: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut b2, true, true), "L44 before forwarding: a collection did not keep NEW's root and the retained OLD")
+    // During the install: OLD holds the command when the host is lost.
+    let (r2, old2, go2) = cut_case(c, rnd)
+    let mut d = take r2
+    pump(mut d, take go2)
+    let mut d2 = restart(take d, 4u64)
+    expect(launcher.forwards(d2.f) == 1u64 && is_dirty(d2, "g", 1u64), "L44: during the install, the re-send reached OLD again or the row moved")
+    answer(mut d2, old2, PlaceInstalled(2u64, true))
+    expect(is_dirty(d2, "g", 2u64) && committed_once(d2), "L44 during the install: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut d2, true, true), "L44 during the install: a collection did not keep NEW's root and the retained OLD")
+    // On reconnect the inventory carries OLD's end. The launcher queues NEW's cached
+    // Opened before it handles the resumed Cutover and returns the saved result.
+    let (r3, old3, go3) = cut_case(c, rnd)
+    let mut e = take r3
+    pump(mut e, take go3)
+    let new3 = last(e, "g")
+    let attempt = deploy_attempt(e)
+    let _ = launcher.cutover_reply(mut e.f, old3, PlaceInstalled(2u64, true))
+    let _ = launcher.end(mut e.f, old3, Code(0i32), Some(None))
+    let inventory = launcher.handle(mut e.f, Hello)
+    let mut resume = apply(mut e, Got(clone(inventory[0u64])))
+    let cached_open: launcher.Event = Placed(clone(new3), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 1u64, store_lo: 2u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64, read: cutover_read(2u64))))
+    let notice: launcher.Event = Placed(clone(old3), PlaceWriteAck(0u64))
+    let stale: launcher.Event = CutoverResult(clone(old3), launcher.Attempt(hi: attempt.hi ^ 1u64, lo: attempt.lo), PlaceInstalled(2u64, true))
+    for ev in[cached_open, notice, stale] {
+        let more = apply(mut e, Got(clone(ev)))
+        for take req in more {
+            list.push(mut resume, take req)
+        }
+        expect(match deploy_outcome(e.h, "g") {
+            Some(Pending) => true,
+            _ => false
+        }, "L44: decided before the matching result")
+    }
+    for req in resume {
+        match req {
+            CutoverAck(_, _) => fail("L44: acknowledged cutover before the matching result"),
+            Acknowledge(_) => fail("L44: acknowledged end before the matching result"),
+            _ => (),
+        }
+    }
+    list.clear(mut e.asked)
+    pump(mut e, take resume)
+    let mut acks = 0u64
+    for req in e.asked {
+        match req {
+            CutoverAck(_, _) => {
+                expect(acks == 0u64, "L44: repeated or out-of-order cutover ack");
+                acks += 1u64
+            },
+            Acknowledge(child) => {
+                expect(acks == 1u64 && launcher.same_child(child, old3), "L44: wrong end ack");
+                acks += 1u64
+            },
+            _ => (),
+        }
+    }
+    expect(acks == 2u64 && is_dirty(e, "g", 2u64) && committed_once(e), "L44: the matching result must commit and acknowledge exactly once")
+    expect(collection_keeps(mut e, true, true), "L44 after the answer: a collection did not keep NEW's root and the retained OLD")
+    // Both children ended while no host watched, after OLD's answer: their ends wait for
+    // the kept answer, which commits, and NEW's clean stop then writes Clean.
+    let (r5, old5, go5) = cut_case(c, rnd)
+    let mut q = take r5
+    pump(mut q, take go5)
+    let new5 = last(q, "g")
+    let _ = launcher.cutover_reply(mut q.f, old5, PlaceInstalled(2u64, true))
+    let _ = launcher.end(mut q.f, old5, Code(0i32), Some(None))
+    let _ = launcher.end(mut q.f, new5, Code(0i32), Some(None))
+    let q2 = restart(take q, 4u64)
+    expect(is_clean(q2, "g") && committed_once(q2), "L44 ends before the answer: the kept Installed did not commit before the ends applied")
+    // OLD ended unanswered while no host watched: the kept Uncertain is OLD's end, and the
+    // candidate's open at v commits.
+    let (r6, old6, go6) = cut_case(c, rnd)
+    let mut u = take r6
+    pump(mut u, take go6)
+    let new6 = last(u, "g")
+    let _ = launcher.end(mut u.f, old6, Code(1i32), None)
+    let mut u2 = restart(take u, 4u64)
+    expect(is_dirty(u2, "g", 1u64) && launcher.held(u2.f) == 1u64, "L44 Uncertain: decided before the candidate opened")
+    let mut opened: List[launcher.Event] = list.new()
+    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 1u64, store_lo: 2u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64, read: cutover_read(2u64)))))
+    feed(mut u2, take opened)
+    expect(is_dirty(u2, "g", 2u64) && committed_once(u2), "L44 Uncertain: the candidate's open at v did not commit")
+    expect(collection_keeps(mut u2, true, true), "L44 Uncertain: a collection did not keep NEW's root and the retained OLD")
+    // Launcher lost after OLD installed: no child and no held answer survive.
+    let (r4, old4, go4) = cut_case(c, rnd)
+    let mut l = take r4
+    pump(mut l, take go4)
+    let _ = launcher.cutover_reply(mut l.f, old4, PlaceInstalled(2u64, true))
+    let l2 = restart_bare(take l, 4u64)
+    match deploy_outcome(l2.h, "g") {
+        Some(Undecided(_)) => (),
+        _ => fail("L44: after launcher loss the outcome is not Undecided")
+    }
+    expect(launcher.forwards(l2.f) == 0u64 && gens(l2, "g") == one(3u64) && is_dirty(l2, "g", 3u64), "L44: after launcher loss the group was not probed once at a new gen without a cutover")
+    // The store installed v = 2: the probe opens NEW's pair, and that open installs NEW.
+    let mut at_new = take l2
+    expect(collection_keeps(mut at_new, true, true), "L44 launcher loss: an Undecided deploy's collection did not keep both roots")
+    expect(starts_are(at_new, one_pair(3u64, 2u64, image_two())), "L44 launcher loss, store at NEW: the probe did not start NEW's assembly at v")
+    expect(rooted_at(at_new, image(), 1u64) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the root moved before the probe opened")
+    place_answers(mut at_new, 2u64)
+    expect(installed_new(at_new, 2u64) && is_dirty(at_new, "g", 3u64) && starts_are(at_new, one_pair(3u64, 2u64, image_two())) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the probe's open did not install NEW once at Dirty(3)")
+    expect(collection_keeps(mut at_new, true, true), "L44 launcher loss, store at NEW: a collection did not keep NEW's root and the retained OLD")
+    // The launcher was lost with the cutover forwarded and not yet installed: the store is at
+    // OLD's 1. NEW's probe is told so, OLD's pair is probed next, and its open abandons v.
+    let (r7, _, go7) = cut_case(c, rnd)
+    let mut n = take r7
+    pump(mut n, take go7)
+    let mut at_old = restart_bare(take n, 4u64)
+    place_answers(mut at_old, 1u64)
+    expect(rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 3u64), "L44 launcher loss, store at OLD: NEW's refused probe moved the root or the row")
+    let probe = last(at_old, "g")
+    finish(mut at_old, probe, Code(1i32), None)
+    expect(starts_are(at_old, two_pairs(3u64, 2u64, image_two(), 4u64, 1u64, image())), "L44 launcher loss, store at OLD: OLD's pair was not probed next")
+    place_answers(mut at_old, 1u64)
+    let abandoned = match deploy_outcome(at_old.h, "g") {
+        Some(Failed(why)) => why == "not installed after recovery",
+        _ => false
+    }
+    expect(abandoned && rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 4u64) && list.len(status(at_old.h).failing) == 0u64, "L44 launcher loss, store at OLD: OLD's open did not abandon the deploy with OLD's root kept")
+    expect(collection_keeps(mut at_old, false, true), "L44 launcher loss, store at OLD: a collection did not keep OLD's root alone after the abandon")
+    // Lost while preparing: OLD exported and NEW's prepare child runs. The Preparing row
+    // proves no cutover was sent, so the new session starts no candidate and sends no
+    // cutover; it aborts OLD's export, and records the failure only on OLD's answer.
+    let mut pr = rig(c, rnd, 4u64)
+    add(mut pr, "g", "t")
+    op_wake(mut pr, "g")
+    let old8 = last(pr, "g")
+    to_export(mut pr, old8, preview_answer(image_two(), release_two()))
+    old_says(mut pr, old8, PlaceExported(1u64, "export-1"))
+    let mut pr2 = restart(take pr, 4u64)
+    expect(collection_keeps(mut pr2, true, true), "L44 while preparing: a collection did not keep the Preparing deploy's NEW and OLD")
+    expect(list.len(gens(pr2, "g")) == 0u64 && asked_of(pr2, 2u64) == 0u64 && asked_of(pr2, 3u64) == 1u64 && still_preparing(pr2) && is_dirty(pr2, "g", 1u64), "L44 while preparing: the new session started a candidate, sent a cutover, did not abort OLD's export, or decided before OLD answered")
+    old_says(mut pr2, old8, PlaceAborted)
+    expect(failed_with(pr2, "interrupted before the cutover") && rooted_at(pr2, image(), 1u64) && is_dirty(pr2, "g", 1u64), "L44 while preparing: OLD's abort answer did not fail the deploy with OLD's root kept")
+    expect(collection_keeps(mut pr2, false, true), "L44 while preparing: the failed deploy's NEW was still a root")
+    let mut pv = rig(c, rnd, 4u64)
+    add(mut pv, "g", "t")
+    op_wake(mut pv, "g")
+    let old9 = last(pv, "g")
+    to_export(mut pv, old9, preview_answer(image(), release_two()))
+    expect(asked_of(pv, 1u64) == 0u64 && failed_with(pv, "preview does not describe the selected assembly") && gens(pv, "g") == one(1u64), "L44 preview mismatch: OLD was asked to export, or the deploy did not fail")
+    release_recovery_traces(c, rnd)
+    bucket_absent_witness(c, rnd)
+    Ok(())
+}
+
+type Pair {
+    gen: u64,
+    activation: u64,
+    assembly: Bytes
+}

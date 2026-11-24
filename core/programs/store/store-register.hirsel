@@ -1,0 +1,297 @@
+type HistoryWrite = HistoryApplied(std.object.ETag) | HistoryConflict(std.object.ETag) | HistoryRefused(std.object.Error) | HistoryUndecided
+
+fn history_fetch_head(mut client: std.object.Client, mut raw_bytes: Bytes, deadline: u64) -> Result[std.object.ETag, std.object.Error] waits {
+    list.clear(mut raw_bytes)
+    let (take outcome, take buffer) = std.object.fetch(mut client, "head", replace(mut raw_bytes, list.new()), deadline)
+    raw_bytes = take buffer
+    let meta = outcome?
+    if meta.size != list.len(raw_bytes) || meta.etag.len == 0 {
+        return Error(Fatal(Malformed))
+    }
+    Ok(meta.etag)
+}
+
+fn history_write_head(mut client: std.object.Client, precondition: std.object.Precondition, mut raw_bytes: Bytes, mut witness: Bytes, deadline: u64) -> HistoryWrite waits {
+    let (take outcome, take buffer) = std.object.store_if_retry(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline)
+    raw_bytes = take buffer
+    match take outcome {
+        Ok(Applied(meta)) => HistoryApplied(meta.etag),
+        Ok(Mismatch) => {
+            let Ok(tag) = history_fetch_head(mut client, mut witness, deadline) else {
+                return HistoryUndecided
+            }
+            if raw_bytes == witness {
+                HistoryApplied(tag)
+            } else {
+                HistoryConflict(tag)
+            }
+        },
+        Error(Uncertain(_)) => HistoryUndecided,
+        Error(take problem) => HistoryRefused(take problem),
+    }
+}
+
+type HistoryRegister: send {
+    head: HistoryHead,
+    tag: std.object.ETag,
+    terminal: Option[HistoryTerminal]
+}
+
+type HistoryTerminal: send = HistoryFault(Error) | HistoryUnknown
+
+const HISTORY_BUFFER_KEY_BYTES: u64 = 60
+
+type HistoryBuffers: send {
+    body: Bytes,
+    witness: Bytes,
+    packet: Bytes,
+    compare: Bytes,
+    key: String
+}
+
+fn history_buffers(packet_bytes: u64) -> Result[HistoryBuffers, Error] {
+    let room = order.max(packet_bytes, 152 + BINDING_BYTES)
+    disk_allocation(scoped fn() -> Result[HistoryBuffers, Error] {
+        Ok(HistoryBuffers(body: list.with_capacity(HISTORY_HEAD_LIMIT), witness: list.with_capacity(HISTORY_HEAD_LIMIT), packet: list.with_capacity(room), compare: list.with_capacity(room), key: string.with_capacity(HISTORY_BUFFER_KEY_BYTES)))
+    })
+}
+
+fn history_packet_header(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind: u8, predecessor: HistoryRef) -> Result[(), Error] {
+    list.clear(mut raw)
+    capacity(history_append_header(mut raw, ctx, epoch, kind))?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, predecessor.epoch)
+    list.put_word_le(mut raw, predecessor.len)
+    list.put_word_le(mut raw, predecessor.digest)
+    capacity(history_seal(mut raw, ctx, 72, 0x00B0))
+}
+
+fn history_new_ref(seq: u64, epoch: u64, raw: Bytes) -> HistoryRef {
+    HistoryRef(seq, epoch, len: list.len(raw), digest: std.check.xxh3(raw, 0, list.len(raw)))
+}
+
+fn history_fetch(mut client: std.object.Client, key: String, mut raw: Bytes, deadline: u64) -> Result[std.object.Meta, Error] waits {
+    list.clear(mut raw)
+    let (take outcome, take buffer) = std.object.fetch(mut client, key, replace(mut raw, list.new()), deadline)
+    raw = take buffer
+    match take outcome {
+        Ok(meta) => {
+            if meta.size != list.len(raw) {
+                return Error(disk_fault(key, 0, Truncated))
+            }
+            Ok(meta)
+        },
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn history_create(mut client: std.object.Client, key: String, mut raw: Bytes, mut compare: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let (take outcome, take buffer) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+    raw = take buffer
+    match take outcome {
+        Ok(Applied(_)) => Ok(()),
+        Ok(Mismatch) => {
+            let _ = history_fetch(mut client, key, mut compare, deadline)?
+            if raw != compare {
+                return Error(disk_fault(key, 0, Malformed))
+            }
+            Ok(())
+        },
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn history_register_advance(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
+    let mut candidate = register.head
+    let seq = history_next_id(candidate.entry.seq)?
+    candidate.entry = history_new_ref(seq, candidate.pair.epoch, buffers.packet)
+    history_register_publish(mut client, mut register, candidate, authority, mut buffers, deadline, fn(ignored: u64) {})
+}
+
+fn history_register_publish(mut client: std.object.Client, mut register: HistoryRegister, candidate: HistoryHead, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, entry_created: scoped fn(u64)) -> Result[HistoryWrite, Error] waits {
+    if let Some(stopped) = register.terminal {
+        return match stopped {
+            HistoryFault(problem) => Error(clone(problem)),
+            HistoryUnknown => Ok(HistoryUndecided),
+        }
+    }
+    history_fill_key(mut buffers.key, "e-", candidate.entry)
+    history_encode_head(mut buffers.body, candidate, authority)?
+    if let Error(take problem) = history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline) {
+        register.terminal = Some(HistoryFault(clone(problem)))
+        return Error(take problem)
+    }
+    entry_created(candidate.entry.seq)
+    match history_write_head(mut client, Match(register.tag), mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => {
+            register.head = candidate
+            register.tag = tag
+            Ok(HistoryApplied(tag))
+        },
+        HistoryConflict(_) => {
+            let fenced = Fenced(register.head.pair.epoch)
+            register.terminal = Some(HistoryFault(clone(fenced)))
+            Error(fenced)
+        },
+        HistoryRefused(take problem) => {
+            let remote = Remote(take problem)
+            register.terminal = Some(HistoryFault(clone(remote)))
+            Error(take remote)
+        },
+        HistoryUndecided => {
+            register.terminal = Some(HistoryUnknown)
+            Ok(HistoryUndecided)
+        },
+    }
+}
+
+fn history_claim_packet(mut raw: Bytes, head: HistoryHead) -> Result[(), Error] {
+    let seq = history_next_id(head.entry.seq)?
+    let ctx = DiskContext(store: head.store, role: 2, seq)
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, head.pair.epoch)
+    list.put_word_le(mut raw, head.pair.holder.hi)
+    list.put_word_le(mut raw, head.pair.holder.lo)
+    capacity(history_seal(mut raw, ctx, 112, 0x0040))
+}
+
+fn history_manifest_packet(mut raw: Bytes, id: StoreId, kind: u8) -> Result[HistoryRef, Error] {
+    raw = disk_page_manifest_bytes(id, page_manifest_empty())?
+    let ctx = DiskContext(store: id, role: 1, seq: 1)
+    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    capacity(history_append_header(mut header, ctx, 1, kind))?
+    for at in 0u64 .. 72 {
+        raw[at] = header[at]
+    }
+    Ok(history_new_ref(1, 1, raw))
+}
+
+fn history_genesis_packet(mut raw: Bytes, id: StoreId, kind: u8, manifest: HistoryRef, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let none = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
+    let retained = HistoryRetention(floor: 1, earlier: list.new())
+    history_checkpoint_packet(mut raw, ctx, 1, kind, none, manifest, retained, locator)
+}
+
+// The tag no object carries: If-Match with it must fail on every key.
+const HISTORY_PROBE_TAG: String = "\"hirsel-store-condition-probe\""
+
+fn history_probe_tag() -> std.object.ETag {
+    let text = string.as_bytes(HISTORY_PROBE_TAG)
+    let mut tag = std.object.ETag(octets:[0; 64], len: list.len(text))
+    for i in 0u64 .. tag.len {
+        tag.octets[i] = text[i]
+    }
+    tag
+}
+
+// STORE §12.2: an endpoint that applies a PUT whose condition fails lets two
+// writers both win the head. Before genesis writes a head, both conditions
+// are sent with the immutable entry it just created, so an endpoint that
+// ignores them rewrites identical bytes and nothing changes.
+fn history_check_conditions(mut client: std.object.Client, key: String, mut raw: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let (take absent, take returned) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+    raw = take returned
+    match take absent {
+        Ok(Mismatch) => (),
+        Ok(Applied(_)) => return Error(Endpoint(IgnoresIfNoneMatch)),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    let (take stale, take again) = std.object.store_if_retry(mut client, key, Match(history_probe_tag()), replace(mut raw, list.new()), deadline)
+    raw = take again
+    match take stale {
+        Ok(Mismatch) => Ok(()),
+        Ok(Applied(_)) => Error(Endpoint(IgnoresIfMatch)),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
+    let manifest = history_manifest_packet(mut buffers.packet, id, kind)?
+    history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
+    let locator = HistoryLocateRoot(depth: 0, rows: list.new())
+    history_publish_base(mut client, id, holder, kind, authority, manifest, locator, mut buffers, deadline)
+}
+
+fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
+    let bytes_wanted = 189 + 32 * list.len(locator.rows)
+    list.clear(mut buffers.packet)
+    list.clear(mut buffers.compare)
+    capacity(list.try_reserve(mut buffers.packet, bytes_wanted + BINDING_BYTES))?
+    capacity(list.try_reserve(mut buffers.compare, bytes_wanted))?
+    let base = history_genesis_packet(mut buffers.packet, id, kind, manifest, locator)?
+    let base_key = history_key("e-", base)
+    history_create(mut client, base_key, mut buffers.packet, mut buffers.compare, deadline)?
+    history_check_conditions(mut client, base_key, mut buffers.packet, deadline)?
+    let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    history_encode_head(mut buffers.body, head, authority)?
+    match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None)),
+        HistoryConflict(_) => Error(Exists("head")),
+        HistoryRefused(take problem) => Error(Remote(take problem)),
+        HistoryUndecided => Error(Undecided),
+    }
+}
+
+type HistoryClaimResult = HistoryClaimed(HistoryRegister) | HistoryClaimMoved(bool) | HistoryClaimLost | HistoryClaimUncertain
+
+// Keep only the bytes changed by the claim so the final GET can overwrite
+// the admitted buffer. All other bytes must match the prepared replacement.
+fn history_claim_saved(admitted: Bytes) -> Inline[u8, 48] {
+    let mut saved: Inline[u8, 48] =[0; 48]
+    for i in 0u64 .. 8 {
+        saved[i] = admitted[8 + i]
+        saved[8 + i] = admitted[48 + i]
+    }
+    for i in 0u64 .. 32 {
+        saved[16 + i] = admitted[80 + i]
+    }
+    saved
+}
+
+fn history_claim_same(candidate: Bytes, saved: Inline[u8, 48], observed: Bytes) -> bool {
+    if list.len(observed) != list.len(candidate) || list.slice(observed, 0, 8) != list.slice(candidate, 0, 8) || list.slice(observed, 16, 48) != list.slice(candidate, 16, 48) || list.slice(observed, 56, 80) != list.slice(candidate, 56, 80) || list.slice(observed, 112, list.len(observed)) != list.slice(candidate, 112, list.len(candidate)) {
+        return false
+    }
+    for i in 0u64 .. 8 {
+        if saved[i] != observed[8 + i] || saved[8 + i] != observed[48 + i] {
+            return false
+        }
+    }
+    for i in 0u64 .. 32 {
+        if saved[16 + i] != observed[80 + i] {
+            return false
+        }
+    }
+    true
+}
+
+fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> Result[HistoryClaimResult, Error] {
+    let (_, field) = history_head_frame(observed)?
+    if !history_pair_matches(head.pair, history_frame_pair(observed, field)) {
+        return Ok(HistoryClaimLost)
+    }
+    let latest = history_decode_head(observed)?
+    if latest.head.entry.seq <= head.entry.seq {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    Ok(HistoryClaimMoved(backoff))
+}
+
+// The caller has already recovered and admitted the head in witness.
+fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryClaimResult, Error] waits {
+    let candidate = history_claim_head(admitted, holder)?
+    let saved = history_claim_saved(buffers.witness)
+    history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, list.len(buffers.witness)))?
+    let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
+    if !history_claim_same(buffers.body, saved, buffers.witness) {
+        return history_claim_changed(admitted, buffers.witness, false)
+    }
+    match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None))),
+        HistoryConflict(_) => history_claim_changed(admitted, buffers.witness, true),
+        HistoryRefused(take problem) => Error(Remote(take problem)),
+        HistoryUndecided => Ok(HistoryClaimUncertain),
+    }
+}

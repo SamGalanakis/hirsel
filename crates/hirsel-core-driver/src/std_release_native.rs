@@ -128,9 +128,9 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let free_client = result.unwrap(host.connect(n, addr, Never))
-    let (free_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let free_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(free_client)), Never))
     let bounded_client = result.unwrap(host.connect(n, addr, Never))
-    let (bounded_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let bounded_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(bounded_client)), Never))
     let free = task.spawn(tasks, bytes 65536, SpinJob(socket: take free_socket), spin)
     let spawned = bound steps 100 {
         task.spawn(tasks, bytes 65536, SpinJob(socket: take bounded_socket), spin)
@@ -358,9 +358,9 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let drain_client = result.unwrap(host.connect(n, addr, Never))
-    let (drain_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let drain_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(drain_client)), Never))
     let stuck_client = result.unwrap(host.connect(n, addr, Never))
-    let (stuck_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let stuck_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(stuck_client)), Never))
     let (to, from): (Sender[String], Receiver[String]) = channel.new(1)
     let (acks, acked): (Sender[()], Receiver[()]) = channel.new(1)
     let drained = task.spawn(tasks, bytes 65536, Drain(socket: take drain_socket, from: take from, acks: take acks), drain)
@@ -393,7 +393,7 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let _ = take held
     result.unwrap(stdout.write(out, stopped));
     let phase_client = result.unwrap(host.connect(n, addr, Never))
-    let (phase_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let phase_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(phase_client)), Never))
     let (phase_to, phase_from): (Sender[String], Receiver[String]) = channel.new(1)
     let (marks, marked): (Sender[u64], Receiver[u64]) = channel.new(4)
     let phased = task.spawn(tasks, bytes 65536, Phase(socket: take phase_socket, from: take phase_from, marks: take marks), phase)
@@ -416,7 +416,7 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     }
     result.unwrap(stdout.write(out, shown));
     let live_client = result.unwrap(host.connect(n, addr, Never))
-    let (live_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let live_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(live_client)), Never))
     let (live_to, live_from): (Sender[String], Receiver[String]) = channel.new(1)
     let lived = task.spawn(tasks, bytes 65536, Lively(socket: take live_socket, from: take live_from), lively)
     wake(take live_client)
@@ -543,7 +543,7 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(
 
 fn std_of(
     options: &NativeOptions,
-    publication: &crate::native::recipe_build::Publication,
+    publication: &mut crate::native::recipe_build::Publication,
     library: Option<&Path>,
 ) -> Option<crate::native::std_release::StdSide> {
     publication.std_side(options, library).unwrap()
@@ -579,17 +579,20 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
     };
     let options = if matches!(build, StdBuild::Dev) { &dev } else { options };
     let reached = product.reachable(&entry, options.instance_limit).unwrap();
-    let publication = product
+    let mut publication = product
         .publish_release(&entry, &reached, options, &code, 16 * 1024 * 1024)
         .unwrap();
     let std = match build {
         StdBuild::Dev => None,
-        StdBuild::Parts => std_of(options, &publication, None)
-            .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
-        StdBuild::Imported => std_of(options, &publication, None),
+        StdBuild::Parts => std_of(options, &mut publication, None)
+            .map(|std| crate::native::std_release::StdSide {
+                lent: Default::default(),
+                ..std
+            }),
+        StdBuild::Imported => std_of(options, &mut publication, None),
         StdBuild::Prebuilt => {
             let library = product.image.as_ref().map(|image| image.store_root());
-            let std = std_of(options, &publication, library.as_deref());
+            let std = std_of(options, &mut publication, library.as_deref());
             // The prebuilt side holds every plain std root, not only those
             // the program reaches.
             let unreached = hirsel_core_ir::Identity::plain(
@@ -679,10 +682,10 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             reached.instances.as_ref().unwrap().contains(&first_lane),
             "the map probe reaches its plain helper"
         );
-        let publication = product
+        let mut publication = product
             .publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024)
             .unwrap();
-        let std = std_of(&options, &publication, None).expect("an optimised build's std");
+        let std = std_of(&options, &mut publication, None).expect("an optimised build's std");
         assert!(std.roots.contains(&split), "the entry's call uses the side");
         assert!(
             !std.roots.contains(&find),
@@ -697,9 +700,9 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         } else {
             assert_eq!(std.lowered, 0, "a build over the stored side lowers none of it");
         }
-        assert!(!std.lent.is_empty(), "the std lends bodies");
+        assert!(!std.lent.bytes.is_empty(), "the std lends bodies");
         assert!(std.roots.contains(&exp), "the std side optimises the scalar routine");
-        sides.push((std.key, std.codes(), std.lent));
+        sides.push((std.key, std.codes(), std.lent.bytes));
         if cache == "cache-b" {
             // The recipe outlives its inputs: with the program's source and
             // image gone, it assembles over the side its build stored.

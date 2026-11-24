@@ -231,9 +231,11 @@ in the package and runs each execution in its own process. A package whose
 `grants` keys in `[tests]`. Otherwise `--limit BYTES` is
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
 capabilities as for `run`. A test receives only the grants its parameters take.
-`--filter TEXT` selects the tests whose full definition
-path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. An
-earlier failure does not stop later tests, and no matching test exits 2.
+`--filter TEXT` selects tests whose full definition path contains TEXT.
+`--exact DEFINITION` matches a full path such as `app@1/main/smoke`. Repeat
+`--exact` to select multiple paths. The two selectors are mutually exclusive.
+`--test-timeout SECONDS` bounds each test's execution. An earlier failure does
+not stop later tests, and no matching test exits 2.
 A failing row names the outcome (`returned an error, exit status N`, `failed`,
 `stopped`, `did not start` or the terminating signal), then the test's stderr, and
 the lines below it repeat the test's stdout.
@@ -242,6 +244,16 @@ and configuration, and each row says `cached` or `executed`.
 Use `--rerun` to execute every selected test and refresh passing results, `-j N` to
 run tests in parallel, and `--sim` / `--seed` / `--seeds` / `--property-corpus` for
 deterministic simulation and property campaigns.
+
+`hirsel test app --laws` adds a strength column (held, truncated, vacuous, …) beside pass
+and fail ([law table](laws.md)). `--write-laws` rewrites the rows
+of the tests it ran in `hirsel.laws`; `--laws-baseline FILE`
+compares a full run with a lock from main and exits 1 on a weaker
+row. `hirsel laws check app` checks lock currency without running tests, and
+`hirsel laws write app` refreshes its static columns.
+`--locked` keeps its package meaning.
+
+Version note (2026-11-24, verify-observer-2037): adds the law-table and lock commands.
 
 Additional CLI commands cover package workflows (`lock`, `fetch`, `pack`, `publish`,
 `--locked`, `--frozen`; [Packages](spec/packages.md)), inspection and profiling

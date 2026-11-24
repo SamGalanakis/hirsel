@@ -1,11 +1,12 @@
-//! Exact u64 counts and an intrusive dead-node worklist. The event provider
-//! serializes Arc operations before calling these entry points (CONC-10).
+//! Exact u64 counts and an intrusive dead-node worklist. Rc and Arc counts are
+//! plain words: an Arc never leaves its unit (CONC-2), and one worker runs a
+//! unit at a time, so only that thread touches them. The event provider still
+//! orders Arc operations for recording and replay (CONC-10).
 
 use crate::Context;
 use crate::abi_layout::{FIXED_POINT_DONE, FIXED_POINT_NO_INDEX, fixed_point};
 use crate::block::{self, Descriptor, Point};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 /// Generated resumable mechanical glue. Cursor starts at zero in native node
 /// bookkeeping. Clean fields in spec order, scanning nonlast holders locally.
@@ -141,16 +142,15 @@ impl Worklist {
 
 /// # Safety
 /// The emitter initializes a newly allocated PLAIN or GRAPH node, count at 0 and payload at 8.
-pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
+pub unsafe fn initialize(node: NonNull<u8>, arc: bool) {
     // SAFETY: node has fresh aligned storage for one count word.
     unsafe {
-        if atomic {
-            let _commit = crate::tasks::before_commit();
-            let _commit = crate::tasks::before_arc_commit();
-            node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
+        if arc {
+            crate::tasks::before_commit();
+        }
+        node.cast::<u64>().as_ptr().write(1);
+        if arc {
             crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
-        } else {
-            node.cast::<u64>().as_ptr().write(1);
         }
     }
 }
@@ -159,26 +159,20 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
 /// The caller holds a live holder. Rc operations are task-local; Arc operations
 /// occur in the provider's event order. Payload mutation remains forbidden.
 #[inline]
-pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
-    // SAFETY: a live holder keeps the initialized count word alive.
+pub unsafe fn share(node: NonNull<u8>, arc: bool) {
+    // SAFETY: a live holder keeps the initialized count word alive, and only
+    // the thread running its unit touches it (CONC-2: an Arc is not cross).
     unsafe {
-        if atomic {
-            let _commit = crate::tasks::before_arc_commit();
-            // One add, as native code shares: a wrap stops the run before any
-            // holder reads the wrapped word.
-            let old = node
-                .cast::<AtomicU64>()
-                .as_ref()
-                .fetch_add(1, Ordering::Relaxed);
-            if old == u64::MAX {
-                crate::process::stop(b"CountOverflow");
-            }
-            crate::tasks::event_committed(crate::tasks::ARC_SHARE, 0, old + 1);
-        } else {
-            let count = &mut *node.cast::<u64>().as_ptr();
-            *count = count
-                .checked_add(1)
-                .unwrap_or_else(|| crate::process::stop(b"CountOverflow"));
+        if arc {
+            crate::tasks::before_commit();
+        }
+        let count = &mut *node.cast::<u64>().as_ptr();
+        // A wrap stops the run before any holder reads the wrapped word.
+        *count = count
+            .checked_add(1)
+            .unwrap_or_else(|| crate::process::stop(b"CountOverflow"));
+        if arc {
+            crate::tasks::event_committed(crate::tasks::ARC_SHARE, 0, *count);
         }
     }
 }
@@ -188,17 +182,17 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
 /// A true result transfers exclusive payload custody; the caller moves it out
 /// and frees the node. A false result leaves the original holder unchanged.
 #[inline]
-pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
+pub unsafe fn try_unwrap(node: NonNull<u8>, arc: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
-        if atomic {
-            let _commit = crate::tasks::before_arc_commit();
-            let unique = node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1;
-            crate::tasks::event_committed(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
-            unique
-        } else {
-            node.cast::<u64>().as_ptr().read() == 1
+        if arc {
+            crate::tasks::before_commit();
         }
+        let unique = node.cast::<u64>().as_ptr().read() == 1;
+        if arc {
+            crate::tasks::event_committed(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
+        }
+        unique
     }
 }
 
@@ -206,34 +200,19 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
 /// # Safety
 /// A live holder is transferred under the Rc/Arc event discipline.
 #[inline(always)]
-pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
+pub unsafe fn decrement(node: NonNull<u8>, arc: bool) -> bool {
     // SAFETY: the transferred holder keeps this node's initialized count alive.
     unsafe {
-        if atomic {
-            let _commit = crate::tasks::before_arc_commit();
-            let last = arc_decrement(node);
-            if last {
-                fence(Ordering::Acquire);
-            }
-            crate::tasks::event_committed(crate::tasks::ARC_RELEASE, 0, u64::from(last));
-            last
-        } else {
-            let count = &mut *node.cast::<u64>().as_ptr();
-            *count = count.wrapping_sub(1);
-            *count == 0
+        if arc {
+            crate::tasks::before_commit();
         }
-    }
-}
-
-/// # Safety
-/// Consumes one holder pinned under the Arc event discipline.
-pub(crate) unsafe fn arc_decrement(node: NonNull<u8>) -> bool {
-    // SAFETY: the transferred holder keeps the count alive.
-    unsafe {
-        node.cast::<AtomicU64>()
-            .as_ref()
-            .fetch_sub(1, Ordering::Release)
-            == 1
+        let count = &mut *node.cast::<u64>().as_ptr();
+        *count = count.wrapping_sub(1);
+        let last = *count == 0;
+        if arc {
+            crate::tasks::event_committed(crate::tasks::ARC_RELEASE, 0, u64::from(last));
+        }
+        last
     }
 }
 

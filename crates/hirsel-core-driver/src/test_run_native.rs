@@ -675,7 +675,7 @@ hfl_release waits (take ffi_laws@1/laws/Obj) -> i32\n"
 fn foreign_publication_pins_grants_and_walks_only_reached_functions() {
     use crate::code_admission::{admit_local, NativeSemantics};
     use crate::code_store::{CodeStore, ObjectKind};
-    use hirsel_core_ir::decode::DecodeBudget;
+    use hirsel_core_ir::decode::Debit;
     use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
     use sha2::{Digest, Sha256};
 
@@ -729,7 +729,7 @@ pub fn free(f: Foreign[main.I], take p: foreign.Ptr[main.Obj]) waits\n");
         let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Foreign=app@1/main/I"]));
         let root = crate::native::recipe_build::parse_root(root.trim()).unwrap();
         let recipe = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
-        let recipe = Recipe::decode(&recipe, &mut DecodeBudget::unlimited()).unwrap();
+        let recipe = Recipe::decode(&recipe, &Debit::unlimited()).unwrap();
         (root, recipe)
     };
 
@@ -801,7 +801,7 @@ impl PackageLaw {
     fn with_store(&self, arguments: &[&str], store: &str) -> (Option<i32>, String, String) {
         let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
-        if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect") {
+        if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect" | "laws") {
             if !arguments.contains(&"--recipe") {
                 args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
             }
@@ -813,7 +813,8 @@ impl PackageLaw {
         if matches!(arguments[0], "run" | "test" | "build") {
             let options = native_options(Backend::Cranelift, self.dir.path());
             let Link::Driver(cc) = options.link else { unreachable!() };
-            args.extend(["--runtime".into(), options.runtime.canonicalize().unwrap().to_str().unwrap().into()]);
+            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { options.runtime };
+            args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
             args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
         let output = process::tape_request_command(&args, self.dir.path())
@@ -862,6 +863,299 @@ impl PackageLaw {
     fn empty_store(&self) {
         assert!(std::fs::read_dir(self.path("packages")).unwrap().next().is_none());
     }
+}
+
+const PROP_LAW_PACKAGE: &str = r#"
+fn ok(x: u64) -> Result[(), String] { Ok(()) }
+fn never(x: u64) -> bool { false }
+
+@test
+fn exhaustive() -> Result[(), ()] {
+    let _ = std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), ok)
+    Ok(())
+}
+
+@test
+fn catch_all() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 5
+    match std.prop.all(c, std.prop.u64_in(0, 9), ok) {
+        _ => Ok(()),
+    }
+}
+
+@test
+fn discards() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.filter(std.prop.u64_in(0, 3), never), ok) {
+        Held(_, _) => Ok(()),
+        _ => Error(()),
+    }
+}
+
+@test
+fn falsified() -> Result[(), ()] {
+    std.prop.check(std.prop.config(), std.prop.u64_in(0, 9), fn(x: u64) -> Result[(), String] {
+        if x < 5 { Ok(()) } else { Error(string.from("x < 5")) }
+    })
+}
+"#;
+
+fn prop_law_package() -> PackageLaw {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864");
+    law.write("app/main.hirsel", PROP_LAW_PACKAGE);
+    law
+}
+
+#[test]
+fn prop_law_recorder_captures_settled_outcomes() {
+    let law = prop_law_package();
+    let (status, stdout, stderr) = law.run(&["test", "app", "--laws", "--json"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tests = json["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 4);
+    for (test, callee, class, numbers, bound, passed) in [
+        ("catch_all", "all", "truncated", Some([5, 0]), Some("cases=5"), true),
+        ("discards", "all", "vacuous", Some([0, 4]), None, true),
+        ("exhaustive", "all", "held", Some([10, 0]), None, true),
+        ("falsified", "check", "falsified", None, None, false),
+    ] {
+        let row = tests.iter().find(|r| r["definition"] == format!("app@1/main/{test}")).unwrap();
+        assert_eq!(row["passed"], passed, "{row}");
+        let [observed] = row["laws"].as_array().unwrap().as_slice() else { panic!("expected one observed law: {row}") };
+        assert_eq!(observed["callee"], callee);
+        assert_eq!(observed["site"], format!("app@1/main/{test}#1"));
+        assert_eq!(observed["class"], class);
+        assert_eq!(observed["bound"], serde_json::json!(bound));
+        if let Some(numbers) = numbers {
+            assert_eq!(observed["numbers"], serde_json::json!(numbers));
+        }
+    }
+}
+
+#[test]
+fn prop_law_table_reports_and_reuses_rows() {
+    let law = prop_law_package();
+    law.write("app/main.hirsel", format!("{PROP_LAW_PACKAGE}{}", r#"
+fn second_site(first: bool) {
+    if first {
+        let _ = std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), ok)
+    }
+    let mut c = std.prop.config()
+    c.cases = 10
+    let _ = std.prop.all(c, std.prop.u64_in(0, 9), ok)
+}
+
+@test
+fn exact_limit() -> Result[(), ()] {
+    second_site(false)
+    Ok(())
+}
+
+@test
+fn step_bound() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.gen_steps = 0
+    let _ = std.prop.all(c, std.prop.u64_in(0, 9), ok)
+    Ok(())
+}
+"#));
+    let (status, text, stderr) = law.run(&["test", "app", "--laws"]);
+    assert_eq!(status, Some(1), "{text}\n{stderr}");
+    for line in [
+        "all  catch_all#1  truncated (run 5, discarded 0; cases=5)",
+        "all  discards#1  vacuous (run 0, discarded 4)",
+        "all  exhaustive#1  held (run 10, discarded 0)",
+        "all  second_site#2  held (run 10, discarded 0)",
+        "all  step_bound#1  truncated (run 0, discarded 0; max_choices/gen_steps) (per build)",
+    ] {
+        assert!(text.lines().any(|actual| actual.trim() == line), "missing {line}:\n{text}");
+    }
+    let json_run = |extra: &[&str]| {
+        let mut args = vec!["test", "app", "--laws", "--json", "--filter", "exact_limit"];
+        args.extend_from_slice(extra);
+        let stdout = PackageLaw::pass(law.run(&args));
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        json["tests"][0].clone()
+    };
+    let executed = json_run(&["--rerun"]);
+    let reused = json_run(&[]);
+    assert_eq!(executed["source"], "executed");
+    assert_eq!(reused["source"], "cached");
+    assert_eq!(reused["laws"], executed["laws"]);
+    assert_eq!(reused["laws"], serde_json::json!([{
+        "callee": "all", "site": "app@1/main/second_site#2", "class": "held",
+        "numbers": [10, 0], "bound": null, "per_build": false, "witnessed": {}
+    }]));
+}
+
+#[test]
+fn law_lock_checks_static_columns_and_preserves_unselected_lines() {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.write("app/laws.hirsel", PROP_LAW_PACKAGE);
+    PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    let initial = std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap();
+    assert!(initial.lines().any(|line| line.starts_with("app@1/main/catch_all ")));
+    assert!(!law.path("app/hirsel.lock").exists());
+    PackageLaw::pass(law.run(&["laws", "check", "app"]));
+    law.write("app/laws.hirsel", PROP_LAW_PACKAGE.replace("c.cases = 5", "c.cases = 6"));
+    let (status, stdout, stderr) = law.run(&["laws", "check", "app"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert!(lines[0].starts_with("app@1/main/catch_all: src "), "{stdout}");
+    PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    PackageLaw::pass(law.run(&["laws", "check", "app"]));
+
+    const OTHERS: &str = "app@1/main/discards src=0000000000000001 sig=0000000000000002 run=0000000000000003 bug=- oracle=- rows=all#1:vacuous:0/4\n";
+    const SELECTED: &str = "app@1/main/catch_all src=0000000000000004 sig=0000000000000005 run=0000000000000006 bug=- oracle=-";
+    let path = "app/hirsel.laws";
+    law.write(path, format!("hirsel.laws 1\n{SELECTED} rows=pending\n{OTHERS}"));
+    PackageLaw::pass(law.run(&["test", "app", "--laws", "--write-laws", "--filter", "catch_all"]));
+    assert_eq!(std::fs::read_to_string(law.path(path)).unwrap(),
+        format!("hirsel.laws 1\n{SELECTED} rows=all#1:truncated:6/0\n{OTHERS}"));
+}
+
+#[test]
+fn law_baseline_compares_full_runs_and_keeps_test_results() {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864");
+    law.write("app/main.hirsel", r#"
+fn property(x: u64) -> Result[(), String] {
+    let _ = std.prop.sometimes("big", x > 100)
+    Ok(())
+}
+
+@test
+fn range() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.u64_in(0, 4), property) {
+        Held(5, 0) => Ok(()),
+        _ => Error(()),
+    }
+}
+"#);
+    let columns = "src=0000000000000001 sig=0000000000000002 run=0000000000000003 bug=- oracle=-";
+    law.write("base.laws", format!("hirsel.laws 1\napp@1/main/range {columns} rows=all#1:held:10/0;sometimes:big\n"));
+    let (status, stdout, stderr) = law.run(&["test", "app", "--laws-baseline", "base.laws", "--json"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["tests"][0]["passed"], true);
+    assert_eq!(report["law_regressions"], serde_json::json!([
+        "app@1/main/range all#1: held 5/0 below held 10/0",
+        "app@1/main/range sometimes:big: witnessed 0, baseline witnessed"
+    ]));
+    law.write("base.laws", format!("hirsel.laws 1\napp@1/main/range {columns} rows=all#1:held:5/0\n"));
+    PackageLaw::pass(law.run(&["test", "app", "--laws-baseline", "base.laws"]));
+
+    for (option, value) in [
+        ("--filter", Some("range")),
+        ("--seed", Some("1")),
+        ("--sim", None),
+        ("--seeds", Some("2")),
+        ("--property-corpus", Some("corpus")),
+        ("--replay", None),
+    ] {
+        let mut args = vec!["test", "app", "--laws-baseline", "base.laws", option];
+        args.extend(value);
+        PackageLaw::refuse(law.run(&args),
+            &format!("test: --laws-baseline compares a full run; drop {option}"));
+    }
+}
+
+#[test]
+fn prop_witness_counts_include_zero_and_spawned_tasks() {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\ngrants = [\"Tasks\"]");
+    law.write("app/main.hirsel", r#"
+fn sometimes_big(x: u64) -> Result[(), String] {
+    if std.prop.sometimes("big", x > 100) { Error(string.from("outside range")) } else { Ok(()) }
+}
+
+@test
+fn no_big_numbers() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), sometimes_big) {
+        Held(10, 0) => Ok(()),
+        _ => Error(()),
+    }
+}
+
+fn observe_child(take input: u64) -> Result[(), String] {
+    if std.prop.sometimes("t", true) { Ok(()) } else { Error(string.from("lost condition")) }
+}
+
+fn spawn_witness(take sample: std.prop.Case[u64]) -> Result[(), String] waits {
+    let input = sample.value
+    let child = task.spawn(sample.tasks, bytes 65536, take input, observe_child)
+    match task.join(take child) {
+        Ok(Ok(())) => Ok(()),
+        _ => Error(string.from("child failed")),
+    }
+}
+
+@test
+fn across_tasks(tasks: Tasks) -> Result[(), ()] waits {
+    let mut c = std.prop.config()
+    c.cases = 4
+    std.prop.check_tasks(tasks, c, std.prop.u64_in(0, 9), spawn_witness)
+}
+"#);
+    for jobs in ["1", "2", "4"] {
+        let stdout = PackageLaw::pass(law.run(&["test", "app", "--laws", "-j", jobs]));
+        assert_eq!(stdout.lines().filter(|line| line.trim_start().starts_with("sometimes ")).map(str::trim).collect::<Vec<_>>(), ["sometimes t 4", "sometimes big 0"], "-j {jobs}: {stdout}");
+    }
+}
+
+#[test]
+fn package_run_uses_explicit_checkout_std_source() {
+    let mut law = PackageLaw::new();
+    law.write("core/std/source_probe.hirsel", r#"
+pub type Token { amount: u64 }
+pub fn token() -> Token { Token(amount: 271) }
+"#);
+    std::os::unix::fs::symlink(law.libraries.join("core"), law.path("core/core")).unwrap();
+    law.libraries = law.path("core");
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n");
+    law.write("app/main.hirsel", r#"
+fn main() -> Result[(), ()] {
+    let answer: std.source_probe.Token = std.source_probe.token()
+    if answer.amount == 271 { Ok(()) } else { Error(()) }
+}
+"#);
+    PackageLaw::pass(law.run(&["run", "app", "--source-core", "--source-std"]));
+}
+
+#[test]
+fn package_run_imports_generic_core_instances_from_checkout_libraries() {
+    let mut law = PackageLaw::new();
+    law.write(
+        "core/core/source_probe.hirsel",
+        "pub fn value() -> u64 { 271u64 }\n",
+    );
+    for entry in std::fs::read_dir(law.libraries.join("core")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some_and(|ext| ext == "hirsel") {
+            std::os::unix::fs::symlink(entry.path(), law.path("core/core").join(entry.file_name()))
+                .unwrap();
+        }
+    }
+    std::os::unix::fs::symlink(law.libraries.join("std"), law.path("core/std")).unwrap();
+    law.libraries = law.path("core");
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n");
+    law.write(
+        "app/main.hirsel",
+        r#"
+fn main() -> Result[(), ()] {
+    let mut values: Map[(u64, u64), u64] = map.new()
+    map.insert(mut values, (2u64, 3u64), source_probe.value())
+    let value = option.unwrap(map.get(values, (2u64, 3u64)))
+    if value == 271u64 { Ok(()) } else { Error(()) }
+}
+"#,
+    );
+    PackageLaw::pass(law.run(&["run", "app"]));
 }
 
 #[test]
@@ -938,7 +1232,7 @@ fn package_archive_outside_root_explains_workspace() {
 #[test]
 fn foreign_recipe_build_uses_only_selected_sealed_archive() {
     use crate::code_store::{CodeStore, ObjectKind};
-    use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};
+    use hirsel_core_ir::{decode::Debit, release_recipe::Recipe};
 
     // The host's archive is selected; the ARM Linux row is the other target.
     let (host, host_archive) = if cfg!(target_os = "macos") {
@@ -1000,7 +1294,7 @@ pub fn main() -> Result[(), Exit] {
         assert!(run.stderr.is_empty(), "{run:?}");
         let root = crate::native::recipe_build::parse_root(&second).unwrap();
         let bytes = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
-        let mut recipe = Recipe::decode(&bytes, &mut DecodeBudget::unlimited()).unwrap();
+        let mut recipe = Recipe::decode(&bytes, &Debit::unlimited()).unwrap();
         let [selected] = recipe.foreign_archives.as_slice() else { panic!("one selected target") };
         let selected = *selected;
         recipe.foreign_archives.clear();
@@ -1682,7 +1976,7 @@ fn same_site() -> Result[(), ()] {
         let resolved = crate::package_resolve::Resolution::resolve(workspace,
             crate::package_store::PackageStore::new(Some(law.path("packages"))), false).unwrap();
         let app = crate::package_dir::PackageDir::from_resolution(&resolved, &selected, true).unwrap();
-        let mut request = CheckRequest::from_app(app, Some(&law.libraries), &law.path("address-store"), true).unwrap();
+        let mut request = CheckRequest::from_app(app, Some(&law.libraries), &law.path("address-store")).unwrap();
         request.entry = None;
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let path = DefPath::from_full("app@1/tests/same_site").unwrap();

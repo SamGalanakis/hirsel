@@ -111,10 +111,30 @@ pub(crate) struct Registry {
 pub(crate) struct RunGrants {
     designations: Mutex<Designations>,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) udp_rules: Mutex<BTreeMap<u64, Arc<hirsel_core_net::udp::UdpRules>>>,
+    pub(crate) udp_allowance: Arc<crate::udp_net::Allowance>,
+    pub(crate) udp_waiters: Arc<crate::udp_net::Waiters>,
     pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
+    pub(crate) media_charges: Arc<crate::media::Charges>,
+    pub(crate) agreements:
+        Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Arc<crate::secret::ChargeCell>>>,
     pub(crate) cells: crate::provide::Cells,
+}
+
+impl RunGrants {
+    pub(crate) fn hand_over(&self, payer: crate::limit::Payer) -> crate::secret::HandedOver {
+        let (mut charges, refunds) = self.secrets.lock().unwrap().hand_over(payer);
+        drop(refunds);
+        let (udp, refunds) = self.udp_allowance.hand_over(payer);
+        charges.extend(udp);
+        drop(refunds);
+        let (media, refunds) = self.media_charges.hand_over(payer);
+        charges.extend(media);
+        drop(refunds);
+        charges
+    }
 }
 
 // SAFETY: the tables use mutexes and pin the storage behind each designation.
@@ -128,6 +148,7 @@ pub(crate) type TlsSessions = BTreeMap<u64, Box<dyn crate::net::SecureStream>>;
 
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
+    pub(crate) udp_sockets: BTreeMap<u64, crate::udp_net::Resource>,
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
     pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
@@ -275,6 +296,7 @@ impl Files {
     pub(crate) fn with_registry(registry: Registry) -> Self {
         Self {
             sockets: Default::default(),
+            udp_sockets: BTreeMap::new(),
             datagrams: BTreeMap::new(),
             exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),
@@ -294,6 +316,7 @@ impl Files {
 
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         self.sockets = hirsel_core_net::Sockets::default();
+        self.udp_sockets.clear();
         self.tls_sessions.clear();
         self.connected.clear();
         self.datagrams.clear();
@@ -352,7 +375,7 @@ unsafe fn close(context: *mut Context, file: File) {
 /// Open a mechanical file or listing through the selected provider.
 /// No logical admission; registry storage is provider bookkeeping (MEM-24).
 /// # Safety
-/// Live run context, provider and OPEN or ENTRIES request; callbacks obey CAP-8 and retain
+/// Live run context, provider and OPEN, MKSTEMP or ENTRIES request; callbacks obey CAP-8 and retain
 /// their state until the run closes its grants. Success transfers sole ownership.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_file_open(

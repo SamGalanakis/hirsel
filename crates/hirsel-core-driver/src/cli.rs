@@ -1,5 +1,5 @@
 //! One command/option catalogue drives parsing and user help.
-use std::path::Path;
+pub use crate::cli_tools::scaffold;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
@@ -16,6 +16,9 @@ pub enum OptionId {
     Record,
     Tape,
     Replay,
+    Laws,
+    WriteLaws,
+    LawsBaseline,
     ExpectVerdict,
     IncludeCredentials,
     Diagnose,
@@ -26,6 +29,7 @@ pub enum OptionId {
     Dir,
     Grant,
     Filter,
+    TestExact,
     TestJobs,
     Interface,
     ForeignHeader,
@@ -57,6 +61,7 @@ pub enum OptionId {
     Entry,
     Libraries,
     Store,
+    DryRunExe,
     Inputs,
     PackageStore,
     Locked,
@@ -92,6 +97,7 @@ pub enum OptionId {
     NPlace,
     Url,
     CallTimeout,
+    CallStream,
     Control,
     HostState,
     CgroupRoot,
@@ -141,6 +147,13 @@ commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
+    "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";
+    "lean extract", "lean extract MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions from checked Hirsel source.";
+    "lean status", "lean status MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Report whether a saved extraction is stale.";
+    "lean probe", "lean probe DEFINITION --inputs MANIFEST --store DIRECTORY", "Report instructions the Lean extractor excludes.";
+    "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
+    "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
+    "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
@@ -150,8 +163,10 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
+    "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
+    "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
-    "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
+    "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build, run and test requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
@@ -193,8 +208,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--package-store"],
         Some("DIR"),
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Select the verified library store."
     ),
@@ -203,8 +229,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--locked"],
         None,
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Require a current workspace lock."
     ),
@@ -213,8 +250,19 @@ static OPTIONS: &[OptionSpec] = &[
         ["--frozen"],
         None,
         [
-            "check", "build", "publish", "run", "test", "inspect", "replay", "sdk", "lock",
-            "fetch", "pack"
+            "check",
+            "build",
+            "publish",
+            "run",
+            "test",
+            "inspect",
+            "replay",
+            "sdk",
+            "lock",
+            "fetch",
+            "pack",
+            "laws check",
+            "laws write"
         ],
         "Require a current workspace lock and use only the package store."
     ),
@@ -422,6 +470,13 @@ static OPTIONS: &[OptionSpec] = &[
         "Connection and call deadline; default 10 seconds."
     ),
     option!(
+        CallStream,
+        ["--stream"],
+        Some("32-HEX"),
+        ["call"],
+        "Send once at position zero on this saved stream ID."
+    ),
+    option!(
         Recording,
         ["--recording"],
         None,
@@ -562,6 +617,27 @@ static OPTIONS: &[OptionSpec] = &[
         "With --replay, require each selected test's replay to end with VERDICT."
     ),
     option!(
+        Laws,
+        ["--laws"],
+        None,
+        ["test"],
+        "Observe settled law verdicts in the recording build."
+    ),
+    option!(
+        WriteLaws,
+        ["--write-laws"],
+        None,
+        ["test"],
+        "Observe laws and update the executed tests' rows in hirsel.laws."
+    ),
+    option!(
+        LawsBaseline,
+        ["--laws-baseline"],
+        Some("FILE"),
+        ["test"],
+        "Compare a full observed test run with the law lock at FILE."
+    ),
+    option!(
         IncludeCredentials,
         ["--include-credentials"],
         None,
@@ -622,7 +698,7 @@ static OPTIONS: &[OptionSpec] = &[
         Resident,
         ["--resident"],
         None,
-        ["build", "run"],
+        ["build", "run", "test"],
         "Serve the request from the package's resident compiler, starting one if none serves it."
     ),
     option!(
@@ -630,7 +706,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--max-memory"],
         Some("BYTES"),
         ["serve"],
-        "Exit once the resident compiler's memory exceeds BYTES after a request (default 1 GiB)."
+        "Evict least recently used working sets above BYTES after a request (default 1.75 GiB)."
     ),
     option!(
         Stop,
@@ -832,7 +908,7 @@ static OPTIONS: &[OptionSpec] = &[
         [
             "build", "publish", "run", "replay", "test", "register", "deploy"
         ],
-        "Grant a capability kind. Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
+        "Grant a capability kind. Net takes explicit Connect, Listen, UdpBind, UdpSend, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
     ),
     option!(
         Filter,
@@ -840,6 +916,13 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TEXT"),
         ["test"],
         "Select test definition paths containing TEXT."
+    ),
+    option!(
+        TestExact,
+        ["--exact"],
+        Some("DEFINITION"),
+        ["test"],
+        "Select a full test definition path (package@version/module/name). Repeat to select more tests. Conflicts with --filter."
     ),
     option!(
         TestJobs,
@@ -923,8 +1006,7 @@ static OPTIONS: &[OptionSpec] = &[
             "env",
             "core-product",
             "std-product",
-            "sdk",
-            "call"
+            "sdk"
         ],
         "Select the core runtime archive for the requested recording mode."
     ),
@@ -939,7 +1021,7 @@ static OPTIONS: &[OptionSpec] = &[
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        ["build", "run", "replay", "test", "sdk", "call"],
+        ["build", "run", "replay", "test", "sdk"],
         "Select the C linker driver for this request."
     ),
     option!(
@@ -984,7 +1066,16 @@ static OPTIONS: &[OptionSpec] = &[
         Output,
         ["-o", "--output"],
         Some("PATH"),
-        ["build", "run", "replay", "test", "pack", "sdk"],
+        [
+            "build",
+            "run",
+            "replay",
+            "test",
+            "pack",
+            "sdk",
+            "lean extract",
+            "lean status"
+        ],
         "Write the command output to this path."
     ),
     option!(
@@ -999,7 +1090,17 @@ static OPTIONS: &[OptionSpec] = &[
         ["--libraries"],
         Some("ROOT"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "inspect", "sdk"
+            "check",
+            "image",
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "inspect",
+            "sdk",
+            "laws check",
+            "laws write"
         ],
         "Select a root containing core/ and std/."
     ),
@@ -1019,16 +1120,39 @@ static OPTIONS: &[OptionSpec] = &[
             "core-product",
             "std-product",
             "sdk",
-            "serve"
+            "serve",
+            "dry-run",
+            "laws check",
+            "laws write",
+            "lean extract",
+            "lean status",
+            "lean probe"
         ],
-        "Select the request or product store."
+        "Select the database for dry-run, or the request or product store."
+    ),
+    option!(
+        DryRunExe,
+        ["--exe"],
+        Some("NEW"),
+        ["dry-run"],
+        "The built candidate executable."
     ),
     option!(
         Inputs,
         ["--inputs"],
         Some("MANIFEST"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+            "check",
+            "image",
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "sdk",
+            "lean extract",
+            "lean status",
+            "lean probe"
         ],
         "Read an explicit CorpusManifest JSON file."
     ),
@@ -1092,246 +1216,10 @@ pub enum Action {
     Version,
     Invoke(Invocation),
 }
-pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
-    COMMANDS
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| format!("unknown command `{name}`; use help"))
-}
-fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
-    option.commands.is_empty()
-        || option.commands.contains(&command.name)
-        || (option.id == OptionId::Json
-            && command.name.starts_with("prof ")
-            && !matches!(
-                command.name,
-                "prof run" | "prof replay" | "prof attach" | "prof export"
-            ))
-        || (command.name == "prof replay"
-            && option.commands.contains(&"replay")
-            && !matches!(
-                option.id,
-                OptionId::HostState
-                    | OptionId::Diagnose
-                    | OptionId::Emulator
-                    | OptionId::Sysroot
-                    | OptionId::Json
-            ))
-        || (command.name == "prof run"
-            && option.id != OptionId::Output
-            && option.commands.contains(&"run"))
-}
-pub fn help(command: Option<&CommandSpec>) -> String {
-    if let Some(command) = command {
-        let mut result = format!(
-            "Usage: hirsel {}\n\n{}\n\nOptions:\n",
-            command.usage, command.description
-        );
-        if command.name == "prof" {
-            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with("prof ")) {
-                result.push_str(&format!(
-                    "  {}\n    {}\n",
-                    subcommand.usage, subcommand.description
-                ));
-            }
-            return result;
-        }
-        for option in OPTIONS.iter().filter(|o| applies(o, command)) {
-            let label = format!(
-                "{}{}",
-                option.names.join(", "),
-                option.value.map_or(String::new(), |v| format!(" {v}"))
-            );
-            result.push_str(&format!("  {label:<34} {}\n", option.description));
-        }
-        result
-    } else {
-        let mut result =
-            "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
-        for command in COMMANDS.iter().filter(|c| !c.name.starts_with("prof ")) {
-            result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
-        }
-        result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");
-        result
-    }
-}
-fn is_help(name: &str) -> bool {
-    OPTIONS
-        .iter()
-        .any(|option| option.id == OptionId::Help && option.names.contains(&name))
-}
-pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
-    let mut arguments = arguments.into_iter().peekable();
-    let Some(mut name) = arguments.next() else {
-        return Ok(Action::Help(help(None)));
-    };
-    if is_help(&name) {
-        return Ok(Action::Help(help(None)));
-    }
-    if name == "--version" {
-        return if arguments.next().is_none() {
-            Ok(Action::Version)
-        } else {
-            Err("--version takes no arguments".into())
-        };
-    }
-    if name == "prof" {
-        match arguments.next() {
-            None => return Ok(Action::Help(help(Some(named("prof")?)))),
-            Some(subcommand) if is_help(&subcommand) => {
-                return Ok(Action::Help(help(Some(named("prof")?))));
-            }
-            Some(subcommand) => name.push_str(&format!(" {subcommand}")),
-        }
-    }
-    let command = named(&name)?;
-    if name == "sdk" {
-        match arguments.next().as_deref() {
-            Some("ts") => {}
-            Some("--help" | "-h") | None => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err("sdk requires the ts generator".into()),
-        }
-    }
-    if name == "help" {
-        let target = arguments
-            .next()
-            .map(|mut name| {
-                if is_help(&name) {
-                    Ok(command)
-                } else {
-                    if name == "prof"
-                        && let Some(subcommand) = arguments.next()
-                    {
-                        name.push_str(&format!(" {subcommand}"));
-                    }
-                    named(&name)
-                }
-            })
-            .transpose()?;
-        if arguments.next().is_some() {
-            return Err("help takes at most one command".into());
-        }
-        return Ok(Action::Help(help(target)));
-    }
-    if matches!(name.as_str(), "tape" | "manifest") {
-        match arguments.next().as_deref() {
-            Some("show") => {}
-            Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err(format!("expected: hirsel {}", command.usage)),
-        }
-    }
-    let mut invocation = Invocation {
-        command,
-        options: Vec::new(),
-        positional: None,
-        arguments: Vec::new(),
-    };
-    while let Some(argument) = arguments.next() {
-        if name == "prof attach" && (argument == "--mem" || argument.starts_with("--mem=")) {
-            return Err(
-                "attach cannot see earlier allocations; use 'hirsel prof run --mem'".into(),
-            );
-        }
-        if matches!(name.as_str(), "prof run" | "prof replay")
-            && (argument == "--mem" || argument.starts_with("--mem="))
-        {
-            let value = if let Some((_, value)) = argument.split_once('=') {
-                value.to_owned()
-            } else if arguments
-                .peek()
-                .is_some_and(|v| matches!(v.as_str(), "exact" | "sampled"))
-            {
-                arguments.next().unwrap()
-            } else {
-                "sampled".to_owned()
-            };
-            if !matches!(value.as_str(), "exact" | "sampled") {
-                return Err("--mem requires exact or sampled".into());
-            }
-            invocation.options.push((OptionId::ProfMem, Some(value)));
-            continue;
-        }
-        if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "register") {
-            invocation.arguments.extend(arguments);
-            break;
-        }
-        if argument.starts_with('-')
-            && !(name == "prof sql"
-                && argument.starts_with("--")
-                && argument.chars().any(char::is_whitespace)
-                && invocation.positional.is_some()
-                && invocation.arguments.is_empty())
-        {
-            let option = OPTIONS
-                .iter()
-                .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
-                .ok_or_else(|| {
-                    format!("unknown option `{argument}` for {name}; use help {name}")
-                })?;
-            if option.id == OptionId::Help {
-                return Ok(Action::Help(help(Some(command))));
-            }
-            let value = option
-                .value
-                .map(|value| {
-                    arguments
-                        .next()
-                        .ok_or_else(|| format!("{argument} requires {value}"))
-                })
-                .transpose()?;
-            invocation.options.push((option.id, value));
-        } else if invocation.positional.is_none()
-            && !matches!(name.as_str(), "core-product" | "std-product" | "env")
-        {
-            invocation.positional = Some(argument);
-        } else if invocation.arguments.is_empty()
-            && matches!(
-                name.as_str(),
-                "prof annotate" | "prof callers" | "prof callees" | "prof diff" | "prof sql"
-            )
-        {
-            invocation.arguments.push(argument);
-        } else {
-            return Err(format!("unexpected argument `{argument}` for {name}"));
-        }
-    }
-    Ok(Action::Invoke(invocation))
-}
-/// Refuse to replace an existing directory, even when it contains no sources.
-pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::create_dir(directory)?;
-    let main = if library {
-        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
-    } else {
-        "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n\npub fn twice(n: u64) -> u64 {\n    n + n\n}\n"
-    };
-    let lib = "pub fn answer() -> u64 {\n    42\n}\n";
-    let test = if library {
-        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
-    } else {
-        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
-    };
-    let sources = ["main.hirsel"]
-        .into_iter()
-        .chain(library.then_some("lib.hirsel"));
-    let manifest = crate::package_dir::scaffold_manifest(sources);
-    for (name, source) in [
-        ("main.hirsel", main),
-        ("tests.hirsel", test),
-        (crate::package_dir::MANIFEST, &manifest),
-    ]
-    .into_iter()
-    .chain(library.then_some(("lib.hirsel", lib)))
-    {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(directory.join(name))?
-            .write_all(source.as_bytes())?;
-    }
-    Ok(())
-}
+#[path = "cli_help.rs"]
+mod help_text;
+pub use help_text::help;
+pub(crate) use help_text::named;
+#[path = "cli_parse.rs"]
+mod parsing;
+pub use parsing::parse;

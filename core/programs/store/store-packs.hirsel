@@ -72,11 +72,11 @@ fn layout_packs(take frames: List[PackFrame], class: u8, first_pack: u64, cap: u
 }
 
 fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Error] {
-    for planned in layout.packs {
+    for pack_plan in layout.packs {
         let mut offset = 72u64
-        for slot in planned.first .. planned.end {
+        for slot in pack_plan.first .. pack_plan.end {
             let frame = layout.frames[slot]
-            let place = std.page.PagePtr(pack: planned.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
+            let place = std.page.PagePtr(pack: pack_plan.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
             let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
                 replace(mut location.place, place)
             }))?)
@@ -87,17 +87,26 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
                     pack.live -= width
                 }))?
             }
-            capacity(disk_index_put(mut known.members, (planned.seq, frame.stamp), (), member_charge))?
+            capacity(disk_index_put(mut known.members, (pack_plan.seq, frame.stamp), (), member_charge))?
             offset += 16 + frame.size
         }
-        let frame_count: u32 = int.truncate(planned.end - planned.first)
-        let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes)
-        capacity(disk_index_put(mut known.packs, planned.seq, record, pack_edge_charge))?
+        let frame_count: u32 = int.truncate(pack_plan.end - pack_plan.first)
+        let record = PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
+        capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge))?
     }
     Ok(())
 }
 
 fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known: PageLocations) -> Result[std.page.PagePtr, Error] {
+    emit_located_frame(mut out, context, frame, scoped fn(stamp: u64) -> std.page.PagePtr {
+        let Some(location) = disk_index_get(known.frames, stamp) else {
+            fail("store: missing emitted child")
+        }
+        location.place
+    })
+}
+
+fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[std.page.PagePtr, Error] {
     let offset = list.len(out)
     let kind: u16 = match frame.body {
         BlobBody(_) => 0x0022,
@@ -116,12 +125,9 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
         },
         PageBody(page) => {
             // The pack buffer already has room for the planned PAGE.
-            page_result(std.page.seal_located(mut out, page, scoped fn(stamp: u64) -> std.page.PagePtr {
-                let Some(location) = disk_index_get(known.frames, stamp) else {
-                    fail("store: missing emitted child")
-                }
-                location.place
-            }))?
+            page_result(std.page.seal_located(mut out, page, locate))?
+            // The PAGE stamp follows the first eight bytes of its payload.
+            list.set_word_le(mut out, offset + 24, frame.stamp)
             std.check.xxh3(out, offset + 16, list.len(out))
         },
     }
@@ -144,14 +150,14 @@ fn install_emitted_place(mut known: PageLocations, located: std.page.PagePtr) ->
     Ok(())
 }
 
-fn encode_pack(id: StoreId, layout: PackRun, planned: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
+fn encode_pack(id: StoreId, layout: PackRun, pack: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
     list.clear(mut out)
-    let context = DiskContext(store: id, role: 3, seq: planned.seq)
+    let context = DiskContext(store: id, role: 3, seq: pack.seq)
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         capacity(disk_header_bytes(context, 0, 0))
     })?
     list.append(mut out, header)
-    for slot in planned.first .. planned.end {
+    for slot in pack.first .. pack.end {
         let located = emit_pack_frame(mut out, context, layout.frames[slot], known)?
         install_emitted_place(mut known, located)?
     }
@@ -184,11 +190,11 @@ fn cut_output_buffers(cut: PagedCutLayout, manifest_bytes: u64, limit: u64) -> R
 }
 
 fn write_pack_run(d: Dir, id: StoreId, layout: PackRun, mut known: PageLocations, mut buffers: PackBuffers) -> Result[(), Error] waits {
-    for planned in layout.packs {
-        encode_pack(id, layout, planned, mut known, mut buffers.out)?
+    for pack in layout.packs {
+        encode_pack(id, layout, pack, mut known, mut buffers.out)?
         string.truncate(mut buffers.destination, 0)
         string.push(mut buffers.destination, "p-")
-        string.push_u64(mut buffers.destination, planned.seq)
+        string.push_u64(mut buffers.destination, pack.seq)
         string.truncate(mut buffers.temporary, 0)
         string.push(mut buffers.temporary, buffers.destination)
         string.push(mut buffers.temporary, ".tmp")
@@ -206,7 +212,7 @@ fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
     let mut moved: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
-        if (pack.class == 2) == lists && sparse_pack(pack) {
+        if pack.class < 3 && (pack.class == 2) == lists && sparse_pack(pack) {
             let mut members = std.omap.range(known.members.values, Included((seq, 0u64)), Included((seq, 18446744073709551615u64)))
             while let Some(((_, stamp), _)) = std.omap.next(mut members) {
                 list.push(mut moved, stamp)
@@ -214,35 +220,38 @@ fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
         }
     }
     // The previous stamp-ordered walk seeded the closure in this order.
-    list.sort(mut moved, fn(a: u64, b: u64) -> Order { order.compare(a, b) })
+    list.sort(mut moved, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
     take moved
 }
 
 fn encode_pack_row(pack: PagePack) -> Bytes {
-    let mut out: Bytes = list.with_capacity(21)
+    let mut out: Bytes = list.with_capacity(29)
     list.push(mut out, pack.class)
     list.put_word_le(mut out, pack.frames)
     list.put_word_le(mut out, pack.live)
     list.put_word_le(mut out, pack.payload_bytes)
+    list.put_word_le(mut out, pack.index)
     take out
 }
 
-// Apply final class-0 and class-1 counts to the installed pack-list tree.
+// Apply final data-pack counts to the installed pack-list tree.
 // The list is edited in place only on paths private to this candidate.
-fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: Log[u64]) -> Result[u64, Error] {
+fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Cell[u64]) -> Result[u64, Error] {
     let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
     // Per level an edit can copy the path page, replace two siblings during
     // a rotation, and split into three pieces. The final root needs one stamp.
     let Some(end) = int.checked_add(next_stamp, 6 * (height + 1) + 1) else {
         return Error(Limit(Ids))
     }
-    log.append(issued, end)
+    let _ = cell.replace(issued, end)
     let first = next_stamp
     next_stamp = end
     Ok(first)
 }
 
-fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: Log[u64]) -> Result[List[u64], Error] {
+fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[List[u64], Error] {
     let mut retired: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -250,7 +259,8 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_fr
             continue
         }
         let key = key_word(seq)
-        if pack.live == 0 {
+        // A Tiered pack stays in the inventory until a probe retires it.
+        if pack.class < 3 && pack.live == 0 {
             let listed = match std.page.lookup(root, key) {
                 Some(_) => true,
                 None => false
@@ -290,7 +300,47 @@ fn build_retirement_list(retired: List[u64], mut next_stamp: u64) -> Result[Arc[
 
 type PagedLists: shareable + send {
     packs: Arc[std.page.Page],
-    retired: Arc[std.page.Page]
+    retired: Arc[std.page.Page],
+    // The deferred-free queue (§13.6), keyed by its sequence below `deferred_next`.
+    deferred: Arc[std.page.Page],
+    deferred_next: u64,
+    // The `lineage` tree (§13.6) and the rows it holds.
+    lineage: Arc[std.page.Page],
+    rows: Lineage
+}
+
+// An empty queue shares the empty retirement root; list edits copy it.
+fn empty_paged_lists() -> PagedLists {
+    let retired = std.page.empty(0, 0, Unprefixed)
+    let deferred = arc.share(retired)
+    let lineage = arc.share(retired)
+    PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: take retired, deferred: take deferred, deferred_next: 0, lineage: take lineage, rows: empty_lineage())
+}
+
+// T8 step 3: the rows this cut adds to the queue, each at `deferred_next`.
+fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, queued: List[DeferredFree], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[(), Error] {
+    for row in queued {
+        let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
+        page_result(std.page.insert(mut root, key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        deferred_next = stamp_after(deferred_next)?
+    }
+    Ok(())
+}
+
+// The rows are rebuilt into a fresh tree only when they change. A bulk
+// build of n rows issues fewer than 2n + 2 page stamps.
+fn plan_lineage_root(installed: PagedLists, rows: Lineage, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[Arc[std.page.Page], Error] {
+    if same_lineage(rows, installed.rows) {
+        return Ok(arc.share(installed.lineage))
+    }
+    let row_count = map.len(rows.forks) + map.len(rows.cells)
+    let Some(end) = int.checked_add(next_stamp, 2 * row_count + 2) else {
+        return Error(Limit(Ids))
+    }
+    let _ = cell.replace(issued, end)
+    let mut draw = next_stamp
+    next_stamp = end
+    build_lineage_tree(rows, mut draw)
 }
 
 type ListLayout: send {
@@ -324,11 +374,23 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
     }
 }
 
-fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, mut next_stamp: u64, issued: Log[u64], relocated: Option[View[Log[bool]]]) -> Result[ListLayout, Error] {
+fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQueue, rows: Lineage, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
     let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
     change_list_root(mut known, installed.packs, pack_root, 0)?
+    let mut deferred_root = arc.share(installed.deferred)
+    let mut deferred_next = installed.deferred_next
+    transfer_deferred_rows(mut deferred_root, mut deferred_next, queue.added, private_from, mut next_stamp, issued)?
+    for seq in queue.drained {
+        let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
+        if !page_result(std.page.remove(mut deferred_root, key_word(seq), private_from, mut draw))? {
+            fail("store: the drain consumed a row the queue lacks")
+        }
+    }
+    change_list_root(mut known, installed.deferred, deferred_root, 2)?
+    let lineage_root = plan_lineage_root(installed, rows, mut next_stamp, issued)?
+    change_list_root(mut known, installed.lineage, lineage_root, 3)?
     // The old retirement tree contributes no edges to the new generation.
     remove_page_source(mut known, std.page.stamp(std.page.image_of(installed.retired)), ListSource(1))?
     let moves = if let Some(observed) = relocated {
@@ -350,11 +412,19 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Li
     }
     let mut emission = empty_cut_frames()
     plan_tree_frames(known, moves, pack_root, mut emission)
+    plan_tree_frames(known, moves, deferred_root, mut emission)
+    plan_tree_frames(known, moves, lineage_root, mut emission)
+    let Some(carried_files) = carried else {
+        let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
+        apply_pack_layout(mut known, pack_plan)?
+        let roots = PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed), deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows))
+        return Ok(ListLayout(roots: take roots, run_packs: take pack_plan, removals: take data_retired))
+    }
     let mut retiring: Map[u64, ()] = map.new()
     for seq in data_retired {
         map.insert(mut retiring, seq, ())
     }
-    for seq in carried {
+    for seq in carried_files {
         map.insert(mut retiring, seq, ())
     }
     retiring_list_packs(known, emission, mut retiring)
@@ -372,7 +442,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Li
         let Some(end) = int.checked_add(next_stamp, span + 1) else {
             return Error(Limit(Ids))
         }
-        log.append(issued, end)
+        let _ = cell.replace(issued, end)
     }
     let retired = build_retirement_list(removals, mut next_stamp)?
     record_fresh_tree(mut known, retired, 2)?
@@ -380,7 +450,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Li
     plan_tree_frames(known, moves, retired, mut emission)
     let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
     apply_pack_layout(mut known, pack_plan)?
-    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: take retired), run_packs: take pack_plan, removals: take removals))
+    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: take retired, deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows)), run_packs: take pack_plan, removals: take removals))
 }
 
 type PageRetryBase: send {
@@ -403,11 +473,11 @@ type PagedCutLayout: send {
     lists: ListLayout
 }
 
-fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
-    let issued = disk_allocation(fn() -> Result[Log[u64], Error] {
-        Ok(log.new())
-    })?
+fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, queue: CutQueue, rows: Lineage, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
     let first_stamp = next_stamp
+    let issued = disk_allocation(fn() -> Result[core.Cell[u64], Error] {
+        Ok(cell.new(first_stamp))
+    })?
     let proposed = disk_allocation(scoped fn() -> Result[PagedCutLayout, Error] {
         let mut emission = empty_cut_frames()
         for held in holders {
@@ -419,13 +489,10 @@ fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedL
         apply_pack_layout(mut candidate, blobs)?
         apply_pack_layout(mut candidate, data_pages)?
         let mut draw = first_stamp
-        let lists = plan_paged_lists(mut candidate, installed, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
+        let lists = plan_paged_lists(mut candidate, installed, queue, rows, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
         Ok(PagedCutLayout(locations: take candidate, blobs: take blobs, data_pages: take data_pages, lists: take lists))
     })
-    let draws = log.finish(take issued)
-    for end in draws {
-        next_stamp = end
-    }
+    next_stamp = cell.into_inner(take issued)
     take proposed
 }
 
@@ -438,8 +505,7 @@ fn write_page_cut(d: Dir, id: StoreId, take cut: PagedCutLayout, mut buffers: Pa
     Ok(PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists))
 }
 
-fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
-    attempt: scoped fn(Map[u64, ()], Option[View[Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
+fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: scoped fn(Map[u64, ()], Option[View[core.Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
     let selected = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
         Ok(relocation_ancestors(base, moved_frames(base, false)))
     })
@@ -448,7 +514,7 @@ fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
         Error(Full(Allocation(_))) => map.new(),
         Error(take problem) => return Error(take problem),
     }
-    let observer = disk_allocation(fn() -> Result[Log[bool], Error] {
+    let observer = disk_allocation(fn() -> Result[core.Log[bool], Error] {
         Ok(log.new())
     })
     if let Ok(take observed) = take observer {

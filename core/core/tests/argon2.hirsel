@@ -1,0 +1,103 @@
+// AR1. RFC 9106 section 5.3.
+// expect: run ar1_rfc9106() = true
+fn ar1_rfc9106() -> bool {
+    let mut password: Bytes = list.with_capacity(32)
+    let mut salt: Bytes = list.with_capacity(16)
+    let mut key: Bytes = list.with_capacity(8)
+    let mut data: Bytes = list.with_capacity(12)
+    list.fill(mut password, 32, 1)
+    list.fill(mut salt, 16, 2)
+    list.fill(mut key, 8, 3)
+    list.fill(mut data, 12, 4)
+    let mut out: Bytes = list.with_capacity(33)
+    list.push(mut out, 0x42)
+    let cost = Argon2Cost(memory_kib: 32, passes: 3, lanes: 4)
+    let Ok(()) = argon2.id(password, salt, key, data, cost, 32, mut out) else {
+        return false
+    }
+    out == b"\x42\x0d\x64\x0d\xf5\x8d\x78\x76\x6c\x08\xc0\x37\xa3\x4a\x8b\x53\xc9\xd0\x1e\xf0\x45\x2d\x75\xb6\x5e\xb5\x25\x20\xe9\x6b\x01\xe6\x59"
+}
+
+fn params_refused(cost: Argon2Cost, salt: Bytes, data: Bytes, len: u64) -> bool {
+    let password = b"password"
+    let key = b""
+    let mut out: Bytes = list.with_capacity(33)
+    list.push(mut out, 0x42)
+    let result = bound bytes 0 {
+        bound steps 1 {
+            let mut tag = take out
+            let answer = argon2.id(password, salt, key, data, cost, len, mut tag)
+            (answer, take tag)
+        }
+    }
+    match take result {
+        Ok(Ok((Error(Params), take tag))) => tag == b"B",
+        _ => false,
+    }
+}
+
+// AR3. Every invalid argument is rejected in one step with zero bytes available.
+// expect: run ar3_params() = true
+fn ar3_params() -> bool {
+    let cost = Argon2Cost(memory_kib: 256, passes: 2, lanes: 2)
+    params_refused(Argon2Cost(memory_kib: 15, passes: 2, lanes: 2), b"somesalt", b"", 32) && params_refused(Argon2Cost(memory_kib: 256, passes: 0, lanes: 2), b"somesalt", b"", 32) && params_refused(Argon2Cost(memory_kib: 256, passes: 2, lanes: 0), b"somesalt", b"", 32) && params_refused(Argon2Cost(memory_kib: 256, passes: 2, lanes: 16777216), b"somesalt", b"", 32) && params_refused(cost, b"toosmal", b"", 32) && params_refused(cost, b"somesalt", b"", 3) && params_refused(cost, b"somesalt", b"123456789012345678901234567890123", 32)
+}
+
+// A full output refuses before charging block steps or working memory.
+// expect: run ar3_spare_before_work() = true
+fn ar3_spare_before_work() -> bool {
+    let password = b"password"
+    let salt = b"somesalt"
+    let empty = b""
+    let cost = Argon2Cost(memory_kib: 256, passes: 2, lanes: 2)
+    let len: u64 = 32
+    let mut out: Bytes = list.with_capacity(32)
+    list.push(mut out, 0x42)
+    let checked = bound bytes 0 {
+        bound steps 1 {
+            let mut tag = take out
+            let answer = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+            (answer, take tag)
+        }
+    }
+    match take checked {
+        Ok(Ok((Error(Capacity(c)), take tag))) => c.requested == 32 && c.available == 31 && tag == b"B",
+        _ => false,
+    }
+}
+
+// AR5. Both hashes share one exact working-memory budget, so the second
+// requires the first's refund. The output is allocated outside the bounds.
+// expect: run ar5_working_memory() = true
+fn ar5_working_memory() -> bool {
+    let password = b"password"
+    let salt = b"somesalt"
+    let empty = b""
+    let cost = Argon2Cost(memory_kib: 256, passes: 2, lanes: 2)
+    let len: u64 = 32
+    let out: Bytes = list.with_capacity(64)
+    let refused = bound bytes 262143 {
+        let mut tag = take out
+        let answer = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+        (answer, take tag)
+    }
+    let Ok((Error(Capacity(c)), take returned)) = take refused else {
+        return false
+    }
+    if c.requested != 262144 || c.available != 262143 || list.len(returned) != 0 {
+        return false
+    }
+    let exact = bound bytes 262144 {
+        let mut tag = take returned
+        let first = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+        let second = argon2.id(password, salt, empty, empty, cost, len, mut tag)
+        match (first, second) {
+            (Ok(()), Ok(())) => list.len(tag) == 64,
+            _ => false,
+        }
+    }
+    match exact {
+        Ok(true) => true,
+        _ => false,
+    }
+}

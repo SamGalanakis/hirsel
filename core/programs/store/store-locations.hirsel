@@ -40,7 +40,9 @@ fn frame_charge(location: FrameLocation) -> u64 {
 
 fn image_width(image: std.page.Image) -> u16 {
     let width = list.capacity(std.page.payload(image))
-    if width > 65535 { fail("store: page image above 65,535 bytes") }
+    if width > 65535 {
+        fail("store: page image above 65,535 bytes")
+    }
     int.truncate(width)
 }
 
@@ -50,7 +52,7 @@ fn resident_location_charge(known: PageLocations) -> u64 {
 
 fn location_storage_charge(known: PageLocations) -> u64 {
     let records = std.omap.storage_charge(known.frames.values, 8, 87)
-    let packs = std.omap.storage_charge(known.packs.values, 8, 21)
+    let packs = std.omap.storage_charge(known.packs.values, 8, 29)
     let members = std.omap.storage_charge(known.members.values, 16, 0)
     int.saturating_add(int.saturating_add(records, packs), int.saturating_add(members, known.frames.payload))
 }
@@ -97,7 +99,9 @@ fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std
 }
 
 fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots {
-    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog))
+    let mut keyed: List[std.page.PagePtr] = list.with_capacity(list.len(roots.keyed))
+    for tree in roots.keyed { list.push(mut keyed, published_page_pointer(known, tree)) }
+    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
 }
 
 fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
@@ -130,7 +134,11 @@ fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, imag
 fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
     add_page_source(mut known, roots.collections.stamp, HolderSource(kind, holder, 0))?
     add_page_source(mut known, roots.streams.stamp, HolderSource(kind, holder, 1))?
-    add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))
+    add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))?
+    for slot in 0u64 .. list.len(roots.keyed) {
+        add_page_source(mut known, roots.keyed[slot].stamp, HolderSource(kind, holder, int.narrow(3 + slot)))?
+    }
+    Ok(())
 }
 
 // Rebuild the installed generation's metadata from the validated postorder.
@@ -139,7 +147,9 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
     let mut known = new_page_locations()
     for (seq, pack) in validated.inventory {
         let mut loaded: PagePack = clone(pack)
-        loaded.live = 0
+        if loaded.class < 3 {
+            loaded.live = 0
+        }
         capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge))?
     }
     for stamp in validated.graph.postorder {
@@ -176,6 +186,8 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
     }
     add_page_source(mut known, validated.manifest.pack_root.stamp, ListSource(0))?
     add_page_source(mut known, validated.manifest.retirement_root.stamp, ListSource(1))?
+    add_page_source(mut known, validated.manifest.deferred_frees.stamp, ListSource(2))?
+    add_page_source(mut known, validated.manifest.lineage.stamp, ListSource(3))?
     Ok(take known)
 }
 
@@ -244,7 +256,7 @@ fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: 
     for slot in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
-                if child.stamp != 0 {
+                if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {
                     let descendant = option.unwrap(std.page.child(root, slot))
                     record_fresh_tree(mut known, descendant, class)?
                     list.push(mut outgoing, child.stamp)
@@ -346,7 +358,7 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
     for slot in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
-                if child.stamp != 0 {
+                if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {
                     let body = option.unwrap(std.page.child(root, slot))
                     plan_tree_frames(known, marked, body, mut output)
                 }

@@ -1,0 +1,12 @@
+
+[dependencies]
+std = { major = 1 }
+
+[tests]
+limit = 268435456
+grants = ["Foreign=opus@1/opus/Opus", "Stdout"]
+dirs = ["fixtures"]
+
+[tests.sources]
+"tests.hirsel" = "tests"
+"example.hirsel" = "tests"

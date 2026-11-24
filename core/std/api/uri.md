@@ -12,6 +12,11 @@ absent component is distinct from an empty one. Query strings follow HTTP B-4
 percent-decoding only, with `+` a literal plus. Operations allocate nothing except the
 appenders, which grow a caller-owned `String` or `Bytes`.
 
+`next_pair(query, at)` scans raw `Bytes` from offset zero and returns key
+and value spans relative to those bytes. For a parsed `Uri`, pass a slice of
+the query component. `decode_text(data, span, mut out)` percent-decodes a byte
+span into UTF-8 and leaves the output unchanged on lexical errors.
+
 ## Types
 
 ```

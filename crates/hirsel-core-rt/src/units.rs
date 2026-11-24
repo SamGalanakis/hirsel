@@ -32,16 +32,25 @@ pub(crate) use memory::{Memory, SharedMemory};
 mod check;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+#[path = "units_reply.rs"]
+mod reply;
+#[cfg(target_os = "linux")]
+pub(crate) use reply::file_request;
+pub(crate) use reply::{Reply, uses_file_ring};
+#[path = "units_report.rs"]
+mod report;
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
+#[path = "units_sync_cells.rs"]
+mod sync_cells;
 use std::{
     cell::Cell,
     collections::VecDeque,
     ptr,
     sync::{Arc, OnceLock, atomic::Ordering},
-    time::Duration,
 };
 use sync::{AtomicU64, Mutex};
+pub(crate) use sync_cells::{track_sync, untrack_sync};
 
 /// The running pool unit's id, or NONE outside the pool.
 #[inline(never)]
@@ -138,13 +147,19 @@ impl<K: MovedKey<T: Default>> Moved<K> {
     }
 }
 macro_rules! moved_tls {
-    ($vis:vis static $name:ident: $t:ty = $init:expr;) => {
+    (pub(crate) static $name:ident: $t:ty = $init:expr;) => {
+        $crate::units::moved_tls!(@ (pub(crate)) (pub(crate)) $name: $t = $init);
+    };
+    (static $name:ident: $t:ty = $init:expr;) => {
+        $crate::units::moved_tls!(@ () (pub(super)) $name: $t = $init);
+    };
+    (@ ($($vis:tt)*) ($($key:tt)*) $name:ident: $t:ty = $init:expr) => {
         #[allow(non_snake_case)]
-        $vis mod $name {
+        $($vis)* mod $name {
             #[allow(unused_imports)]
             use super::*;
             thread_local! { static INNER: std::cell::Cell<$t> = const { std::cell::Cell::new($init) }; }
-            pub(super) struct Key;
+            $($key)* struct Key;
             impl $crate::units::MovedKey for Key {
                 type T = $t;
                 #[inline(always)]
@@ -153,7 +168,7 @@ macro_rules! moved_tls {
                 }
             }
         }
-        $vis static $name: $crate::units::Moved<$name::Key> = $crate::units::Moved(std::marker::PhantomData);
+        $($vis)* static $name: $crate::units::Moved<$name::Key> = $crate::units::Moved(std::marker::PhantomData);
     };
 }
 pub(crate) use moved_tls;
@@ -170,11 +185,11 @@ pub(crate) fn untied() -> bool {
 }
 
 struct PoolHooks {
-    memory: fn(bool) -> Option<&'static dyn SharedMemory>,
+    memory: fn() -> Option<&'static dyn SharedMemory>,
     park: fn(Option<u64>),
     maybe_yield: fn(),
     wake: fn(u32),
-    blocking: fn(bool) -> Blocking,
+    off_slot: fn(&mut (dyn FnMut() + Send)) -> bool,
 }
 
 static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();
@@ -185,7 +200,7 @@ fn enable_pool() {
         park: park_unit,
         maybe_yield: yield_unit_if_needed,
         wake: wake_unit_by_id,
-        blocking: mark_pool_blocking,
+        off_slot: run_off_slot,
     });
     UNTIED_ON.store(true, Ordering::SeqCst);
 }
@@ -211,9 +226,9 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 /// Counts from outside the worker pool and from workers that have exited.
-pub(crate) static USTATS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+pub(crate) static USTATS: [AtomicU64; STATS] = [const { AtomicU64::new(0) }; STATS];
 thread_local! {
-    static WORKER_STATS: [Cell<u64>; 16] = [const { Cell::new(0) }; 16];
+    static WORKER_STATS: [Cell<u64>; STATS] = [const { Cell::new(0) }; STATS];
 }
 const S_RESUMES: usize = 0;
 const S_PARKS: usize = 1;
@@ -222,15 +237,14 @@ const S_STEALS: usize = 3;
 const S_OS_WAKES: usize = 4;
 const S_GPOLLS: usize = 5;
 const S_GPOLL_BLOCKS: usize = 6;
-const S_HANDOFF_AGE_NS: usize = 7;
-const S_TIMER_FIRES: usize = 8;
-const S_CREATED: usize = 9;
-const S_CREATE_NS: usize = 10;
-const S_READY_TO_PARK_NS: usize = 11;
-const S_GPOLL_EVENTS: usize = 12;
-const S_NOTIFIED_REQUEUE: usize = 13;
-const S_LIFO: usize = 14;
-const S_HANDOFFS: usize = 15;
+const S_TIMER_FIRES: usize = 7;
+const S_CREATED: usize = 8;
+const S_CREATE_NS: usize = 9;
+const S_READY_TO_PARK_NS: usize = 10;
+const S_GPOLL_EVENTS: usize = 11;
+const S_NOTIFIED_REQUEUE: usize = 12;
+const S_LIFO: usize = 13;
+const STATS: usize = 14;
 fn bump(i: usize) {
     add_stat(i, 1);
 }
@@ -300,6 +314,8 @@ pub(crate) struct Unit {
     /// `u64::MAX`. Set when the unit parks with a deadline; cleared, and the
     /// set entry removed, when the park ends.
     timer_at: AtomicU64,
+    /// The slot whose timer set holds that registration.
+    timer_slot: AtomicUsize,
     /// The unit's scheduler-less waiter (replaces the thread's ALONE).
     pub(crate) alone: std::sync::OnceLock<Arc<crate::tasks::Readies>>,
     pub(crate) alone_depth: Cell<usize>,
@@ -326,8 +342,6 @@ fn unit_ref(id: u32) -> Option<&'static Unit> {
 thread_local! {
     static CUR: Cell<*mut Unit> = const { Cell::new(std::ptr::null_mut()) };
     static WORKER_IX: Cell<usize> = const { Cell::new(usize::MAX) };
-    // Set when this thread owns a slot with handoff enabled.
-    static HOST_CALL: Cell<Option<&'static HostCall>> = const { Cell::new(None) };
     // Turns this worker has taken since it last looked at the injector first.
     static TURNS: Cell<u32> = const { Cell::new(0) };
 }
@@ -352,8 +366,8 @@ struct UP(*const Unit);
 // SAFETY: unit records are leaked and shared by design.
 unsafe impl Send for UP {}
 
-struct Pool {
-    w: usize,
+pub(crate) struct Pool {
+    pub(crate) w: usize,
     locals: Vec<Mutex<VecDeque<UP>>>,
     /// Per worker: the unit a unit running there last woke. Not stealable;
     /// run next by its worker, at most LIFO_RUNS times in a row (as Tokio's
@@ -370,59 +384,75 @@ struct Pool {
     /// Parked workers, most recent last, and their count for a lock-free check.
     idle: Mutex<Vec<usize>>,
     nsleep: AtomicUsize,
-    /// Per worker: its thread, and whether a wake handed it the search role.
-    threads: Vec<std::sync::Mutex<Option<sync::thread::Thread>>>,
-    handoff_ticks: u64,
-    handoff_tick_ns: u64,
-    host_calls: Vec<HostCall>,
-    spares: Mutex<Vec<Arc<Spare>>>,
-    monitor: OnceLock<sync::thread::Thread>,
+    /// Per worker: whether a wake handed it the search role.
     handed: Vec<AtomicBool>,
-    poll: Mutex<()>,
-    /// Set while a worker holds `poll`, for a probe or a blocking wait. A
-    /// worker parks on its own handle only after seeing it set, and the
-    /// holder checks for sleepers after clearing it (see `keep_poller`).
-    poll_held: AtomicBool,
-    poller_blocked: AtomicBool,
-    poll_until: AtomicU64,
-    gep: i32,
-    gwake: i32,
-    /// The shared poller is an io_uring ring, waited on through `_shared`.
+    /// Per worker slot: its poller, which only the slot's thread waits in.
+    slots: Vec<Slot>,
+    /// The slot pollers are io_uring rings (else epoll).
     uring: bool,
-    _shared: Arc<hirsel_core_net::Poller>,
-    /// The shared poller has been handed to a socket registry.
+    /// A socket registry has registered in the slot pollers.
     net_used: AtomicBool,
-    /// Live park deadlines as (deadline, unit id): at most one per unit.
-    timers: Mutex<BTreeSet<(u64, u32)>>,
-    next_timer: AtomicU64,
     stop: AtomicBool,
-    last_poll: AtomicU64,
     spin_ns: u64,
     connection_spins: u64,
     slice_ns: u64,
     poll_every_ns: u64,
-    spin_poll_ns: u64,
+}
+
+/// One worker slot's poller and timers. The slot's thread owns both: it
+/// alone waits in the poller and fires the timers, whether parked (blocked
+/// in the poller until the earliest timer) or running units (checking the
+/// poller and the timers at each unit switch). Other threads post to it a
+/// wake, followed by a wake of the poller. A slot's thread never blocks in a
+/// host call (`off_slot`), so it is the only thread that ever owns the slot.
+///
+/// Each slot owns its poller because an io_uring poll's readiness runs as
+/// task work on the thread that armed it, and under `COOP_TASKRUN` that is
+/// the only thread that sees it without an interrupt: a pool-wide ring
+/// polled by whichever worker was free would leave readiness waiting on a
+/// busy or parked arming thread. A worker parked in its own poller is woken
+/// by its readiness, its timers and the pool's wakes alike.
+struct Slot {
+    poller: Arc<hirsel_core_net::Poller>,
+    /// epoll: the epoll fd and its edge-triggered wake eventfd.
+    epfd: i32,
+    wakefd: i32,
+    /// Live park deadlines on this slot as (deadline, unit id): at most one
+    /// per unit.
+    timers: Mutex<BTreeSet<(u64, u32)>>,
+    /// The set's minimum, stored under its lock.
+    next_timer: AtomicU64,
+    /// epoll: when the slot's thread last polled without blocking.
+    last_poll: AtomicU64,
+}
+impl Slot {
+    fn new(poller: Arc<hirsel_core_net::Poller>) -> Self {
+        let epoll = poller.reactor() == hirsel_core_net::Reactor::Epoll;
+        Slot {
+            epfd: poller.raw_fd(),
+            wakefd: if epoll { poller.wake_fd() } else { -1 },
+            poller,
+            timers: Mutex::new(BTreeSet::new()),
+            next_timer: AtomicU64::new(u64::MAX),
+            last_poll: AtomicU64::new(0),
+        }
+    }
 }
 static POOL: OnceLock<Pool> = OnceLock::new();
 /// Units admitted and not yet ended. The initial units count from the
 /// start; any later unit is admitted with `admit`. Reaching zero is the
 /// decision to stop and is final: `admit` refuses from zero.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
-fn pool() -> &'static Pool {
+pub(crate) fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
 pub(crate) fn memory() -> Option<&'static dyn SharedMemory> {
-    untied().then(|| (pool_hooks().memory)(false)).flatten()
-}
-/// A spare must arm its signal stack even if the memory thread is blocked.
-pub(crate) fn signal_stack_memory() -> Option<&'static dyn SharedMemory> {
-    untied().then(|| (pool_hooks().memory)(true)).flatten()
+    untied().then(|| (pool_hooks().memory)()).flatten()
 }
 
-fn pool_memory(signal_stack: bool) -> Option<&'static dyn SharedMemory> {
+fn pool_memory() -> Option<&'static dyn SharedMemory> {
     let p = pool();
-    ((!signal_stack || p.handoff_ticks == 0) && !p.stop.load(Ordering::Acquire))
-        .then_some(&p.memory as &dyn SharedMemory)
+    (!p.stop.load(Ordering::Acquire)).then_some(&p.memory as &dyn SharedMemory)
 }
 
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));
@@ -530,6 +560,7 @@ fn new_unit(id: u32, helper: bool) -> Box<Unit> {
         created_ns: t0,
         first_park: Cell::new(false),
         timer_at: AtomicU64::new(u64::MAX),
+        timer_slot: AtomicUsize::new(0),
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
         config,
@@ -561,10 +592,38 @@ fn publish_unit(unit: Box<Unit>) {
 /// memory thread never holds the poll turn or the unit's creator.
 /// # Safety
 /// `u` is dequeued by this worker and has never run.
-unsafe fn start_stack(p: &Pool, u: &Unit) {
-    let stack = p.memory.take_unit_stack();
+unsafe fn start_stack(p: &'static Pool, u: &Unit) -> bool {
+    // The checker does not model the memory thread: a start maps in place,
+    // as a cache hit would.
+    #[cfg(test)]
+    if check::modelled() {
+        // SAFETY: by the contract.
+        unsafe { first_frame(u, UnitStack::new()) };
+        return true;
+    }
+    if let Some(stack) = p.memory.cached_unit_stack() {
+        // SAFETY: by the contract.
+        unsafe { first_frame(u, stack) };
+        return true;
+    }
+    // A cache miss maps on the memory thread. The unit stays queued but on
+    // no queue; the job gives it the stack and publishes it again, while
+    // this worker goes on to other work.
+    let up = UP(u);
+    p.memory.post(move || {
+        let up = up;
+        // SAFETY: nobody else holds the dequeued unit until it is published.
+        unsafe { first_frame(&*up.0, UnitStack::new()) };
+        publish(p, &p.injector, up);
+    });
+    false
+}
+
+/// # Safety
+/// `u` has no stack and nobody else is touching it.
+unsafe fn first_frame(u: &Unit, stack: UnitStack) {
     // SAFETY: the frame is written at the top of the unit's own stack, which
-    // this worker alone owns until the unit runs.
+    // this thread alone owns until the unit runs.
     unsafe {
         let top = stack.top();
         let words = hirsel_stack::initial_frame(
@@ -641,14 +700,9 @@ pub(crate) fn running() -> Option<&'static Unit> {
     // SAFETY: a live unit record (records are never freed).
     (!u.is_null()).then(|| unsafe { &*u })
 }
-/// Attach a root context while its unit is running serially. The concurrent
-/// testing pool keeps each context's heap under its own custody.
+/// Attach a root context to its running unit's heap.
 pub(crate) fn heap_for_context() -> Option<Arc<crate::task_heap::Heap>> {
     let unit = running()?;
-    #[cfg(any(test, feature = "testing"))]
-    if crate::tasks::worker_count() > 1 {
-        return None;
-    }
     // SAFETY: the caller is inside the unit, whose dispatcher is exclusive.
     let heap = unsafe { &*unit.heap.get() };
     Some(heap.get_or_init(Arc::default).clone())
@@ -656,37 +710,6 @@ pub(crate) fn heap_for_context() -> Option<Arc<crate::task_heap::Heap>> {
 
 pub(crate) fn unit_id(u: &Unit) -> u32 {
     u.id
-}
-
-/// Record an in-flight sync cell on the running pooled unit so unit teardown
-/// detaches it if the unit ends before completion. Returns `true` if tracked.
-pub(crate) fn track_sync(cell: *mut crate::os_sync::SyncCell) -> bool {
-    if !untied() {
-        return false;
-    }
-    let u = cur();
-    if u.is_null() {
-        return false;
-    }
-    // SAFETY: only the running unit's worker touches its `sync_cells`.
-    unsafe { (*u).sync_cells.borrow_mut().push(cell) };
-    true
-}
-
-/// Remove a completed sync cell from the running pooled unit's tracking list.
-pub(crate) fn untrack_sync(cell: *mut crate::os_sync::SyncCell) {
-    if !untied() {
-        return;
-    }
-    let u = cur();
-    if u.is_null() {
-        return;
-    }
-    // SAFETY: only the running unit's worker touches its `sync_cells`.
-    let mut cells = unsafe { (*u).sync_cells.borrow_mut() };
-    if let Some(i) = cells.iter().position(|&c| c == cell) {
-        cells.swap_remove(i);
-    }
 }
 
 fn work_waiting(p: &Pool, ix: usize) -> bool {
@@ -729,11 +752,6 @@ pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> b
     false
 }
 
-/// Whether the current unit finished a host call after its slot was taken.
-pub(crate) fn lost_slot() -> bool {
-    untied() && worker_ix() == usize::MAX && !cur().is_null()
-}
-
 /// Requeue the running unit when another unit waits and its slice is over.
 pub(crate) fn maybe_yield() {
     (pool_hooks().maybe_yield)();
@@ -746,8 +764,6 @@ fn yield_unit_if_needed() {
         requeue_detached();
         return;
     };
-    #[cfg(test)]
-    check::slot_use(ix);
     if p.queued.load(Ordering::Relaxed) == 0 && private.load(Ordering::Relaxed).is_null() {
         return;
     }
@@ -772,18 +788,20 @@ fn requeue_detached() {
     }
 }
 
-/// Publish readiness to the next entry even when the unit already has a
-/// pending entry. Only the PARKED transition publishes a new queue item.
-pub(crate) fn wake(u: &Unit) {
-    let prior = u
-        .state
+/// Publish readiness to the next entry. Only a parked unit needs a queue item.
+fn mark_ready(u: &Unit) -> bool {
+    u.state
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
             PARKED => Some(QUEUED),
             RUNNING => Some(NOTIFIED),
             QUEUED | NOTIFIED => Some(state),
             _ => None,
-        });
-    if prior == Ok(PARKED) {
+        })
+        == Ok(PARKED)
+}
+
+pub(crate) fn wake(u: &Unit) {
+    if mark_ready(u) {
         enqueue(pool(), u);
     }
 }
@@ -804,8 +822,14 @@ fn push_arrival(u: &Unit, id: u64, flags: u32) {
 }
 /// Readiness queued for the running unit, as (reactor identity, flags), in
 /// the order it reached the unit. A push after the check wakes the unit, so
-/// it is taken at the unit's next switch.
+/// it is taken at the unit's next switch. Nobody else takes the readiness of
+/// the slot this unit runs on, so each scheduler turn takes it here first
+/// rather than going dry, parking and resuming for readiness already there.
 pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
+    let (p, ix) = (pool(), worker_ix());
+    if ix < p.w {
+        check_slot(p, ix);
+    }
     // SAFETY: called by the running unit's scheduler.
     let u = unsafe { &*cur() };
     if !u.xpending.load(Ordering::Acquire) {
@@ -823,16 +847,20 @@ pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
     }
 }
 
-/// The running unit's id, for the shared poller's tags.
-fn shared_unit() -> Option<u32> {
+/// The running unit and the slot its registrations go to, for the slot
+/// pollers' tags: this thread's slot.
+fn here() -> Option<hirsel_core_net::Here> {
     let u = cur();
     if u.is_null() {
         return None;
     }
     // This callback runs before the registry can add a descriptor.
     pool().net_used.store(true, Ordering::Relaxed);
-    // SAFETY: a live unit record.
-    Some(unsafe { (*u).id })
+    Some(hirsel_core_net::Here {
+        // SAFETY: a live unit record.
+        unit: unsafe { (*u).id },
+        slot: WORKER_IX.get(),
+    })
 }
 
 const LIFO_RUNS: u32 = 3;
@@ -842,8 +870,6 @@ fn enqueue(p: &Pool, u: &Unit) {
     observe::queued(u);
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
-        #[cfg(test)]
-        check::slot_use(ix);
         // Woken by the unit running on this worker: it runs here next.
         // Only this worker accesses its private slot.
         let prev = p.lifo[ix].load(Ordering::Relaxed);
@@ -856,260 +882,126 @@ fn enqueue(p: &Pool, u: &Unit) {
     publish(p, if ix < p.w { &p.locals[ix] } else { &p.injector }, UP(u));
 }
 
-/// The running unit is about to make a host call that may block its worker
-/// (a write to a full pipe, a file operation). A unit in this worker's private
-/// slot would wait that long, since only this worker takes it: queue it where
-/// any worker can take it, and tell the pool.
-fn publish_private_slot(p: &Pool, ix: usize) {
-    let l = p.lifo[ix].load(Ordering::Relaxed);
-    if !l.is_null() {
-        p.lifo[ix].store(ptr::null_mut(), Ordering::Relaxed);
-        publish(p, &p.locals[ix], UP(l));
+// ================================================================ off slot
+//
+// A slot's thread never blocks in a host call. A call that can wait without
+// bound (a file or standard-stream operation, a spawn, a wait on the memory
+// thread) runs on a host helper thread, or on the thread that owns the work,
+// while its unit parks. The slot's thread runs other units meanwhile, and the
+// unit resumes on whichever slot takes it after the call completes.
+
+/// Run `call` off the slot: on a host helper thread while the running unit
+/// parks, or in place when no pool unit is running on this thread (a tied
+/// run, a launcher, a helper thread). The unit's state is frozen while it
+/// is parked, so `call` may use everything the unit owns.
+pub(crate) fn off_slot<T: Send>(call: impl FnOnce() -> T + Send) -> T {
+    let mut call = Some(call);
+    let mut answer = None;
+    let mut run = || answer = Some((call.take().unwrap())());
+    if !(untied() && (pool_hooks().off_slot)(&mut run)) {
+        run();
     }
+    answer.unwrap()
 }
 
-// 0 is idle, 1 records a completed call since the last scan, and larger
-// values are start ticks. Keep different workers' exchanges on separate lines.
-const HOST_ACTIVITY: u64 = 1;
-const FIRST_HOST_TICK: u64 = HOST_ACTIVITY + 1;
-const HOST_TICK_US: u64 = 250;
-const HOST_IDLE_TICKS: u64 = 80;
-
-#[repr(align(64))]
-struct HostCall(AtomicU64);
-
-static HOST_TICK: HostCall = HostCall(AtomicU64::new(FIRST_HOST_TICK));
-
-static HOST_MONITOR_PARKED: AtomicBool = AtomicBool::new(false);
-
-pub(crate) struct Blocking {
-    call: Option<(&'static HostCall, u64)>,
+/// True when this thread is a slot thread running a pool unit, which can
+/// park on a `Reply`.
+pub(crate) fn in_unit() -> bool {
+    !cur().is_null() && worker_ix() < pool().w
 }
 
-/// Mark a synchronous call that cannot switch units or enter another marked
-/// call. A taken slot is no longer available once this call returns.
-#[inline]
-pub(crate) fn blocking() -> Blocking {
-    mark_blocking(false)
+struct HostJob {
+    call: *mut (dyn FnMut() + Send),
+    reply: *const Reply,
+}
+// SAFETY: the parked unit pins both until the reply completes.
+unsafe impl Send for HostJob {}
+
+struct Helpers {
+    jobs: VecDeque<HostJob>,
+    idle: usize,
+}
+static HELPERS: std::sync::Mutex<Helpers> = std::sync::Mutex::new(Helpers {
+    jobs: VecDeque::new(),
+    idle: 0,
+});
+static HELPER_WORK: std::sync::Condvar = std::sync::Condvar::new();
+/// Idle helpers kept for the next calls; a helper past this many exits.
+const KEPT_HELPERS: usize = 16;
+
+fn helpers() -> std::sync::MutexGuard<'static, Helpers> {
+    HELPERS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[inline]
-pub(crate) fn blocking_file() -> Blocking {
-    mark_blocking(true)
-}
-
-#[inline(always)]
-fn mark_blocking(publish_private: bool) -> Blocking {
-    if untied() {
-        (pool_hooks().blocking)(publish_private)
-    } else {
-        Blocking { call: None }
+/// Queue `call` for a host helper and park the running unit until it
+/// returns. False when this thread runs no pool unit, so the caller runs
+/// the call in place.
+fn run_off_slot(call: &mut (dyn FnMut() + Send)) -> bool {
+    if !in_unit() {
+        return false;
     }
-}
-
-fn mark_pool_blocking(publish_private: bool) -> Blocking {
-    if let Some(word) = HOST_CALL.get() {
-        // A sole unit is the only thread that could admit a peer.
-        if LIVE.load(Ordering::Acquire) > 1 {
-            let stamp = HOST_TICK.0.load(Ordering::SeqCst);
-            word.0.store(stamp, Ordering::SeqCst);
-            if HOST_MONITOR_PARKED.load(Ordering::SeqCst) {
-                wake_host_monitor();
-            }
-            return Blocking {
-                call: Some((word, stamp)),
-            };
-        }
-    } else if publish_private {
-        publish_before_unmonitored_call();
-    }
-    Blocking { call: None }
-}
-
-#[cold]
-fn wake_host_monitor() {
-    // Only the first marker that consumes the parked flag sends a wake.
-    if HOST_MONITOR_PARKED.swap(false, Ordering::SeqCst) {
-        pool().monitor.get().unwrap().unpark();
-    }
-}
-
-#[cold]
-fn publish_before_unmonitored_call() {
-    let p = pool();
-    let ix = worker_ix();
-    if ix < p.w {
-        publish_private_slot(p, ix);
-    }
-}
-
-impl Drop for Blocking {
-    #[inline]
-    fn drop(&mut self) {
-        if let Some((call, stamp)) = self.call
-            && call
-                .0
-                .compare_exchange(stamp, HOST_ACTIVITY, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
+    let reply = Reply::new();
+    // SAFETY: only the lifetime is erased. The unit stays parked until the
+    // helper completes the reply, and the helper never touches `call` after.
+    let call: *mut (dyn FnMut() + Send + 'static) =
+        unsafe { std::mem::transmute(call as *mut (dyn FnMut() + Send + '_)) };
+    let spawn = {
+        let mut h = helpers();
+        h.jobs.push_back(HostJob {
+            call,
+            reply: &reply,
+        });
+        // Every queued call has its own helper, so one call that waits for
+        // ever (a FIFO nobody writes) never delays another.
+        h.idle < h.jobs.len()
+    };
+    if spawn {
+        if std::thread::Builder::new()
+            .name("hirsel-host".into())
+            .spawn(run_helper)
+            .is_err()
         {
-            // The monitor cleared our stamp. The new owner can already have
-            // published its own stamp, so only a matching exchange may clear it.
-            HOST_CALL.set(None);
-            WORKER_IX.set(usize::MAX);
+            crate::process::stop(b"HostThreads");
         }
+    } else {
+        HELPER_WORK.notify_one();
     }
+    reply.wait();
+    true
 }
 
-struct Spare {
-    state: Mutex<SpareState>,
-}
-
-#[derive(Default)]
-struct SpareState {
-    thread: Option<sync::thread::Thread>,
-    slot: Option<usize>,
-}
-
-impl Spare {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(SpareState::default()),
-        }
-    }
-
-    fn wait(&self, p: &Pool) -> Option<usize> {
-        loop {
-            let mut state = self.state.lock().unwrap();
-            if let Some(ix) = state.slot.take() {
-                return Some(ix);
+fn run_helper() {
+    let mut h = helpers();
+    loop {
+        let Some(job) = h.jobs.pop_front() else {
+            if h.idle >= KEPT_HELPERS {
+                return;
             }
-            if p.stop.load(Ordering::Acquire) {
-                return None;
-            }
-            state.thread.get_or_insert_with(sync::thread::current);
-            drop(state);
-            sync::thread::park();
-        }
-    }
-
-    fn send(&self, slot: Option<usize>) {
-        let thread = {
-            let mut state = self.state.lock().unwrap();
-            state.slot = slot;
-            state.thread.clone()
-        };
-        if let Some(thread) = thread {
-            thread.unpark();
-        }
-    }
-}
-
-fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
-    let _ = p.monitor.set(sync::thread::current());
-    let mut tick = FIRST_HOST_TICK;
-    let mut next_tick = None;
-    let mut last_activity = None;
-    let idle_ns = HOST_IDLE_TICKS * p.handoff_tick_ns;
-    let probe_ns = p.handoff_ticks.min(4) * p.handoff_tick_ns;
-    while !p.stop.load(Ordering::Acquire) {
-        let t = now();
-        if next_tick.is_some_and(|at| t >= at) {
-            // Count one interval even if this thread was descheduled. Calls
-            // published while it was away must age before we can claim them.
-            tick += 1;
-            HOST_TICK.0.store(tick, Ordering::SeqCst);
-            next_tick = None;
-        }
-        let mut rescan = false;
-        let mut pending = false;
-        for (ix, call) in p.host_calls.iter().enumerate() {
-            // The tick publication and marked-slot operations share one
-            // sequentially consistent order. If this load sees an old call,
-            // the next call on that slot must read a tick after this load or
-            // have cleared the old call before this load. It cannot reuse
-            // the aged stamp while our claim is outstanding.
-            let stamp = call.0.load(Ordering::SeqCst);
-            if stamp == 0 {
-                continue;
-            }
-            last_activity = Some(t);
-            if stamp == HOST_ACTIVITY {
-                // A marker that starts and returns between ticks still counts.
-                let _ =
-                    call.0
-                        .compare_exchange(HOST_ACTIVITY, 0, Ordering::SeqCst, Ordering::SeqCst);
-                continue;
-            }
-            pending = true;
-            let age = tick - stamp;
-            if age < p.handoff_ticks {
-                continue;
-            }
-            let mut spares = p.spares.lock().unwrap();
-            if spares.is_empty() {
-                let spare = Arc::new(Spare::new());
-                if !spawn(spare.clone()) {
-                    continue;
-                }
-                spares.push(spare);
-            }
-            if call
-                .0
-                .compare_exchange(stamp, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                #[cfg(test)]
-                check::slot_taken(ix);
-                let spare = spares.pop().unwrap();
-                drop(spares);
-                spare.send(Some(ix));
-                bump(S_HANDOFFS);
-                add_stat(S_HANDOFF_AGE_NS, age.saturating_mul(p.handoff_tick_ns));
-            }
-            rescan = true;
-        }
-        if rescan {
+            h.idle += 1;
+            h = HELPER_WORK.wait(h).unwrap_or_else(|e| e.into_inner());
+            h.idle -= 1;
             continue;
+        };
+        drop(h);
+        // SAFETY: the job's unit is parked on its reply until this
+        // completes it; nothing here touches the job after.
+        unsafe {
+            (*job.call)();
+            Reply::complete(job.reply);
         }
-        if last_activity.is_some_and(|last| t.saturating_sub(last) < idle_ns) {
-            // When only completed calls were seen, probe less often for a
-            // live mark. A probe counts as one tick so a new call cannot
-            // inherit time spent waiting for the probe.
-            let interval = if pending { p.handoff_tick_ns } else { probe_ns };
-            let at = *next_tick.get_or_insert_with(|| t.saturating_add(interval));
-            let delay = at.saturating_sub(now());
-            if delay != 0 {
-                sync::thread::park_timeout(Duration::from_nanos(delay));
-            }
-        } else {
-            next_tick = None;
-            last_activity = None;
-            // Publish the parked flag before checking the slots again. In
-            // the shared SC order, a marker either sees the flag or its mark
-            // is visible to this check. A completed call leaves activity too.
-            HOST_MONITOR_PARKED.store(true, Ordering::SeqCst);
-            if p.host_calls
-                .iter()
-                .all(|call| call.0.load(Ordering::SeqCst) == 0)
-            {
-                sync::thread::park();
-            }
-            HOST_MONITOR_PARKED.store(false, Ordering::SeqCst);
-        }
-    }
-    let spares = std::mem::take(&mut *p.spares.lock().unwrap());
-    for spare in spares {
-        spare.send(None);
+        h = helpers();
     }
 }
 
-/// Put `up` on queue `q`, count it and tell the pool. Every unit that becomes
-/// counted work comes through here, so a sleeping worker or a poller blocked
-/// with no deadline always hears of it.
+/// Put `up` on queue `q`, count it and tell the pool.
 fn publish(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
+    push_counted(p, q, up);
+    notify_worker(p);
+}
+
+fn push_counted(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
     q.lock().unwrap().push_back(up);
     p.queued.fetch_add(1, Ordering::SeqCst);
-    notify_worker(p);
 }
 
 /// Wake a sleeping worker unless the workers already searching cover the
@@ -1125,12 +1017,9 @@ fn notify_worker(p: &Pool) {
     }
     if p.nsleep.load(Ordering::SeqCst) > 0 {
         let idle = p.idle.lock().unwrap();
-        if !covered(p) && hand_search(p, idle) {
-            return;
+        if !covered(p) {
+            hand_search(p, idle);
         }
-    }
-    if p.searching.load(Ordering::SeqCst) == 0 && p.poller_blocked.load(Ordering::SeqCst) {
-        write_wake(p);
     }
 }
 
@@ -1140,70 +1029,41 @@ fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
     p.nsleep.fetch_sub(1, Ordering::SeqCst);
     // The woken worker searches on this count.
     p.searching.fetch_add(1, Ordering::SeqCst);
-    let thread = p.threads[w].lock().unwrap().clone().unwrap();
     p.handed[w].store(true, Ordering::Release);
     drop(idle);
-    thread.unpark();
-    bump(S_OS_WAKES);
+    wake_slot(p, w);
     true
 }
 
-/// Called by a worker about to run a unit. Parked workers sleep with no
-/// timeout, so while any sleeps, some worker must hold the poll turn or be
-/// searching (a searcher ends by polling or by coming here). If none does,
-/// wake a sleeper: it searches, then blocks in the poller until the earliest
-/// deadline.
-fn keep_poller(p: &Pool) {
-    let unwatched =
-        |p: &Pool| !p.poll_held.load(Ordering::SeqCst) && p.searching.load(Ordering::SeqCst) == 0;
-    if p.nsleep.load(Ordering::SeqCst) > 0 && unwatched(p) {
-        let idle = p.idle.lock().unwrap();
-        if unwatched(p) {
-            hand_search(p, idle);
-        }
-    }
-}
-
-/// The poll turn: `poll` held, with `poll_held` set for the sleepers' check.
-struct PollTurn<'a> {
-    p: &'a Pool,
-    _lock: sync::MutexGuard<'a, ()>,
-}
-impl<'a> PollTurn<'a> {
-    fn take(p: &'a Pool) -> Option<Self> {
-        let lock = p.poll.try_lock().ok()?;
-        p.poll_held.store(true, Ordering::SeqCst);
-        Some(PollTurn { p, _lock: lock })
-    }
-}
-impl Drop for PollTurn<'_> {
-    fn drop(&mut self) {
-        // Cleared before the lock is released; a holder that then runs a
-        // unit calls `keep_poller`, which reads the sleepers after this.
-        self.p.poll_held.store(false, Ordering::SeqCst);
-    }
-}
-fn write_wake(p: &Pool) {
+/// Wake slot `ix`'s thread out of its poller, or make its next wait return
+/// at once: a MSG_RING completion on io_uring, an eventfd edge on epoll.
+fn wake_slot(p: &Pool, ix: usize) {
     bump(S_OS_WAKES);
-    let one = 1u64;
-    // SAFETY: eight-byte write to a live eventfd.
-    unsafe { sync::write(p.gwake, (&one as *const u64).cast(), 8) };
+    if p.uring {
+        p.slots[ix].poller.wake();
+    } else {
+        let one = 1u64;
+        // SAFETY: eight-byte write to a live eventfd.
+        unsafe { sync::write(p.slots[ix].wakefd, (&one as *const u64).cast(), 8) };
+    }
 }
 
-/// Register the parking unit's deadline. `next_timer` is the set's minimum,
-/// stored under the set's lock.
-fn add_timer(p: &Pool, at: u64, u: &Unit) {
+/// Register the parking unit's deadline on slot `ix`, the slot it parked
+/// from. `next_timer` is the set's minimum, stored under the set's lock.
+/// The slot's own thread reads it before it next waits; a thread that lost
+/// the slot wakes its new owner to read it.
+fn add_timer(p: &Pool, ix: usize, at: u64, u: &Unit) {
+    let slot = &p.slots[ix];
     {
-        let mut set = p.timers.lock().unwrap();
+        let mut set = slot.timers.lock().unwrap();
+        u.timer_slot.store(ix, Ordering::Relaxed);
         u.timer_at.store(at, Ordering::SeqCst);
         set.insert((at, u.id));
-        p.next_timer
+        slot.next_timer
             .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
     }
-    // The poller publishes `poll_until` and then reloads `next_timer`, so
-    // either it sees this deadline or this load sees its bound.
-    if p.poller_blocked.load(Ordering::SeqCst) && at < p.poll_until.load(Ordering::SeqCst) {
-        write_wake(p);
+    if WORKER_IX.get() != ix {
+        wake_slot(p, ix);
     }
 }
 /// End the unit's park: drop its timer registration if it still has one.
@@ -1216,13 +1076,16 @@ fn clear_timer(p: &Pool, u: &Unit) {
     if at == u64::MAX {
         return;
     }
-    let mut set = p.timers.lock().unwrap();
+    let slot = &p.slots[u.timer_slot.load(Ordering::Relaxed)];
+    let mut set = slot.timers.lock().unwrap();
     set.remove(&(at, u.id));
-    p.next_timer
+    slot.next_timer
         .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
 }
-fn fire_timers(p: &Pool) {
-    let next = p.next_timer.load(Ordering::SeqCst);
+/// Fire slot `ix`'s due timers; only its own thread does.
+fn fire_timers(p: &Pool, ix: usize) {
+    let slot = &p.slots[ix];
+    let next = slot.next_timer.load(Ordering::SeqCst);
     if next == u64::MAX {
         return;
     }
@@ -1232,7 +1095,7 @@ fn fire_timers(p: &Pool) {
     }
     let mut due = Vec::new();
     {
-        let mut set = p.timers.lock().unwrap();
+        let mut set = slot.timers.lock().unwrap();
         while let Some(&(at, id)) = set.first() {
             if at > t {
                 break;
@@ -1247,7 +1110,7 @@ fn fire_timers(p: &Pool) {
                 due.push(u);
             }
         }
-        p.next_timer
+        slot.next_timer
             .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
     }
     for u in due {
@@ -1256,54 +1119,15 @@ fn fire_timers(p: &Pool) {
     }
 }
 
-fn poll_global(p: &Pool, timeout: i32) {
-    let mut evs: [hirsel_core_net::sys::epoll_event; 128] =
-        [hirsel_core_net::sys::epoll_event { events: 0, u64: 0 }; 128];
-    bump(S_GPOLLS);
-    if timeout != 0 {
-        bump(S_GPOLL_BLOCKS);
-    }
-    let n = if p.uring {
-        // The ring's turn drains the wake eventfd itself.
-        #[cfg(target_os = "linux")]
-        {
-            p._shared.wait_shared(&mut evs, timeout) as i32
-        }
-        #[cfg(not(target_os = "linux"))]
-        unreachable!("io_uring is Linux-only")
-    } else {
-        // SAFETY: a live epoll and a writable event array.
-        unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) }
-    };
-    p.last_poll.store(now(), Ordering::Relaxed);
-    for e in evs.iter().take(n.max(0) as usize) {
-        let tag = e.u64;
-        if tag == WAKE_TAG {
-            if !p.uring {
-                let mut v = 0u64;
-                // SAFETY: nonblocking eventfd read.
-                unsafe { sync::read(p.gwake, (&mut v as *mut u64).cast(), 8) };
-            }
-        } else {
-            bump(S_GPOLL_EVENTS);
-            let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
-            if let Some(u) = unit_ref(unit) {
-                let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
-                push_arrival(u, ident, e.events);
-                wake(u);
-            }
-        }
-    }
-    fire_timers(p);
-}
+#[path = "units_poll.rs"]
+mod poll;
+use poll::{check_slot, poll_slot};
 
 /// The next unit for worker `ix`, taken off the queues and the count.
 fn find(p: &Pool, ix: usize) -> Option<UP> {
     // A worker kept busy by its private slot or its own queue still takes
     // from the injector every INJECTOR_EVERY turns (Go's schedtick % 61), so
     // yielded and outside-woken units are not held back behind it for ever.
-    #[cfg(test)]
-    check::slot_use(ix);
     let turns = TURNS.get() + 1;
     TURNS.set(turns);
     if turns >= INJECTOR_EVERY {
@@ -1338,7 +1162,7 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
     }
     p.lifo_runs[ix].store(0, Ordering::Relaxed);
     if p.queued.load(Ordering::SeqCst) == 0 {
-        fire_timers(p);
+        fire_timers(p, ix);
         if p.queued.load(Ordering::SeqCst) == 0 {
             return None;
         }
@@ -1360,8 +1184,6 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
     for j in 1..p.w {
         let v = (ix + j) % p.w;
         if let Ok(mut q) = p.locals[v].try_lock() {
-            #[cfg(test)]
-            check::during_steal(v);
             if let Some(u) = q.pop_back() {
                 drop(q);
                 bump_host(S_STEALS);
@@ -1375,35 +1197,21 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
 }
 
 /// Socket registrations and armed timers can make units runnable at any
-/// point in the turn. They keep the timed slice and existing poll cadence.
-fn has_poll_sources(p: &Pool) -> bool {
-    p.net_used.load(Ordering::Relaxed) || p.next_timer.load(Ordering::SeqCst) != u64::MAX
-}
-
-/// Poll the shared poller without blocking if no worker is blocked in it
-/// and the pool has not polled for `every` nanoseconds.
-fn poll_due(p: &Pool, t: u64, every: u64) {
-    if !p.poller_blocked.load(Ordering::Relaxed)
-        && t.saturating_sub(p.last_poll.load(Ordering::Relaxed)) > every
-        && let Some(_turn) = PollTurn::take(p)
-    {
-        poll_global(p, 0);
-    }
+/// point in the turn. They keep the timed slice.
+fn has_poll_sources(p: &Pool, ix: usize) -> bool {
+    p.net_used.load(Ordering::Relaxed) || p.slots[ix].next_timer.load(Ordering::SeqCst) != u64::MAX
 }
 
 /// Run one queued unit until it parks, yields or ends.
-unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
+unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
         #[cfg(feature = "testing")]
         let entry_ns = if observe::enabled() { now() } else { 0 };
-        if (*u.sp.get()).is_null() {
-            start_stack(p, u);
-            if WORKER_IX.get() != ix {
-                publish(p, &p.locals[ix], up);
-                return;
-            }
+        if (*u.sp.get()).is_null() && !start_stack(p, u) {
+            // The memory thread maps the stack and queues the unit.
+            return;
         }
         // Acquire readiness published while this entry was already queued.
         let _prior = u.state.swap(RUNNING, Ordering::SeqCst);
@@ -1425,7 +1233,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         // The worker's host stack does not move threads.
         let prev_fd = crate::fiber::set_stop_fd_here(u.stop_fd.get());
         *u.host.get() = host as *mut *mut u8;
-        let timed = has_poll_sources(p) || work_waiting(p, ix);
+        let timed = has_poll_sources(p, ix) || work_waiting(p, ix);
         u.slice_start.set(timed.then(now));
         hirsel_stack::switch(host as *mut *mut u8, *u.sp.get());
         u.stop_fd.set(crate::fiber::set_stop_fd_here(prev_fd));
@@ -1456,12 +1264,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     let parked = std::mem::take(&mut *p.idle.lock().unwrap());
                     for w in parked {
                         p.nsleep.fetch_sub(1, Ordering::SeqCst);
-                        let thread = p.threads[w].lock().unwrap().clone().unwrap();
-                        thread.unpark();
-                    }
-                    write_wake(p);
-                    if let Some(monitor) = p.monitor.get() {
-                        monitor.unpark();
+                        wake_slot(p, w);
                     }
                 }
             }
@@ -1469,16 +1272,11 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 #[cfg(feature = "testing")]
                 observe::queued(u);
                 u.state.swap(QUEUED, Ordering::SeqCst);
-                let q = if WORKER_IX.get() == ix {
-                    &p.injector
-                } else {
-                    &p.locals[ix]
-                };
-                publish(p, q, up);
+                publish(p, &p.injector, up);
             }
             After::Wait(deadline) => {
                 if let Some(at) = deadline {
-                    add_timer(p, at, u);
+                    add_timer(p, ix, at, u);
                 }
                 if u.state
                     .compare_exchange(RUNNING, PARKED, Ordering::AcqRel, Ordering::Acquire)
@@ -1494,35 +1292,22 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             }
             After::Run => crate::process::stop(b"UnitLeftWithoutReason"),
         }
-        // Busy workers poll now and then when no idle worker is blocked in
-        // the poller.
-        if !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) && WORKER_IX.get() == ix
-        {
-            poll_due(p, now(), p.poll_every_ns);
-        }
+        // Between units the slot's own thread takes its readiness and fires
+        // its timers: nobody else waits in its poller.
+        check_slot(p, ix);
     }
 }
 
-/// Returns true when a spare took over this slot, false on pool shutdown.
-fn run_slot(p: &'static Pool, ix: usize) -> bool {
-    #[cfg(test)]
-    check::slot_enter(ix);
+/// Run slot `ix` on this thread until the pool stops.
+fn run_slot(p: &'static Pool, ix: usize) {
     WORKER_IX.set(ix);
-    if p.handoff_ticks != 0 {
-        HOST_CALL.set(Some(&p.host_calls[ix]));
-    }
     let mut host: *mut u8 = std::ptr::null_mut();
-    *p.threads[ix].lock().unwrap() = Some(sync::thread::current());
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
     loop {
         if !handed && let Some(u) = find(p, ix) {
-            keep_poller(p);
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
-            if WORKER_IX.get() != ix {
-                return true;
-            }
             continue;
         }
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
@@ -1532,8 +1317,7 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
             break;
         }
         // Search: at most half the workers at once. A searcher watches the
-        // queued count without taking queue locks, and polls only when no
-        // worker is blocked in the poller.
+        // queued count without taking queue locks, and checks its own slot.
         let mut got = None;
         if std::mem::take(&mut handed) || 2 * p.searching.fetch_add(1, Ordering::SeqCst) < p.w {
             let t0 = now();
@@ -1547,114 +1331,60 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
                 }
                 i = i.wrapping_add(1);
                 if i % 64 == 0 {
-                    let t = now();
-                    if t - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
+                    if now() - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    poll_due(p, t, p.spin_poll_ns);
+                    check_slot(p, ix);
                 }
                 std::hint::spin_loop();
             }
         }
         p.searching.fetch_sub(1, Ordering::SeqCst);
         if let Some(u) = got {
-            // The last searcher to find work wakes another if work remains,
-            // or if workers sleep and nobody watches the poller.
+            // The last searcher to find work wakes another if work remains.
             if p.queued.load(Ordering::SeqCst) > 0 {
                 notify_worker(p);
-            } else {
-                keep_poller(p);
             }
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
-            if WORKER_IX.get() != ix {
-                return true;
-            }
             continue;
         }
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
             break;
         }
-        match PollTurn::take(p) {
-            Some(_turn) => {
-                p.poller_blocked.store(true, Ordering::SeqCst);
-                if p.queued.load(Ordering::SeqCst) == 0 && !p.stop.load(Ordering::SeqCst) {
-                    // Publish the bound, then reload: a deadline registered
-                    // before the store is seen here, and one after it sees
-                    // this bound and writes the wake.
-                    let nt = loop {
-                        let nt = p.next_timer.load(Ordering::SeqCst);
-                        p.poll_until.store(nt, Ordering::SeqCst);
-                        if p.next_timer.load(Ordering::SeqCst) >= nt {
-                            break nt;
-                        }
-                    };
-                    let timeout = if nt == u64::MAX {
-                        -1
-                    } else {
-                        nt.saturating_sub(now())
-                            .div_ceil(1_000_000)
-                            .min(i32::MAX as u64) as i32
-                    };
-                    poll_global(p, timeout);
-                }
-                p.poller_blocked.store(false, Ordering::SeqCst);
+        // Park in the slot's own poller until a wake, readiness on its
+        // sockets, or its earliest timer. A wake sent after the push below
+        // stays pending in the poller, so the wait returns at once.
+        {
+            let mut idle = p.idle.lock().unwrap();
+            p.nsleep.fetch_add(1, Ordering::SeqCst);
+            if p.queued.load(Ordering::SeqCst) != 0 || p.stop.load(Ordering::SeqCst) {
+                p.nsleep.fetch_sub(1, Ordering::SeqCst);
+                continue;
             }
-            None => {
-                let mut idle = p.idle.lock().unwrap();
-                p.nsleep.fetch_add(1, Ordering::SeqCst);
-                // Sleep only while another worker holds the poll turn: it
-                // reads the sleepers after it lets the turn go.
-                if p.queued.load(Ordering::SeqCst) != 0
-                    || p.stop.load(Ordering::SeqCst)
-                    || !p.poll_held.load(Ordering::SeqCst)
-                {
-                    p.nsleep.fetch_sub(1, Ordering::SeqCst);
-                    continue;
-                }
-                idle.push(ix);
-                drop(idle);
-                loop {
-                    sync::thread::park();
-                    if p.handed[ix].swap(false, Ordering::AcqRel) {
-                        handed = true;
-                        break;
-                    }
-                    if p.stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-            }
+            idle.push(ix);
         }
+        let slot = &p.slots[ix];
+        let nt = slot.next_timer.load(Ordering::SeqCst);
+        let timeout = (nt != u64::MAX).then(|| nt.saturating_sub(now()));
+        poll_slot(p, ix, timeout);
+        // Leave the idle list; a hand that already took this worker off it
+        // gave it the search role.
+        let mut idle = p.idle.lock().unwrap();
+        if let Some(at) = idle.iter().position(|&w| w == ix) {
+            idle.swap_remove(at);
+            p.nsleep.fetch_sub(1, Ordering::SeqCst);
+        }
+        drop(idle);
+        handed = p.handed[ix].swap(false, Ordering::AcqRel);
     }
-    false
 }
 
-fn worker_main(p: &'static Pool, mut slot: Option<usize>, mut spare: Option<Arc<Spare>>) {
+fn worker_main(p: &'static Pool, ix: usize) {
     #[cfg(feature = "prof")]
     let _worker_profile = crate::prof::Worker::enter();
     crate::fiber::arm();
-    if slot.is_none() {
-        TURNS.set(INJECTOR_EVERY - 1);
-        slot = spare.as_ref().unwrap().wait(p);
-    }
-    while let Some(ix) = slot {
-        if !run_slot(p, ix) {
-            break;
-        }
-        let spare = spare.get_or_insert_with(|| Arc::new(Spare::new()));
-        {
-            let mut idle = p.spares.lock().unwrap();
-            if idle.len() >= p.w || p.stop.load(Ordering::Acquire) {
-                break;
-            }
-            idle.push(spare.clone());
-        }
-        // First check the injector when inheriting a slot. The predecessor
-        // may have left just before its periodic injector check.
-        TURNS.set(INJECTOR_EVERY - 1);
-        slot = spare.wait(p);
-    }
+    run_slot(p, ix);
     merge_stats();
     #[cfg(feature = "testing")]
     observe::flush();
@@ -1677,12 +1407,9 @@ pub(crate) fn launch(
     input: &crate::entry::OsConfig,
     run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
 ) -> u8 {
-    // One poller for every unit's descriptors; its wake eventfd is WAKE_TAG.
-    let shared = hirsel_core_net::share_poller(shared_unit)
+    // One poller per worker slot for the descriptors its units register.
+    let pollers = hirsel_core_net::slot_pollers(w, here)
         .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-    let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
-    let uring = shared.reactor() == hirsel_core_net::Reactor::IoUring;
-    let handoff_ticks = env_u64("HIRSEL_UNTIED_HANDOFF_US", 1_000).div_ceil(HOST_TICK_US);
     let _ = POOL.set(Pool {
         w,
         locals: (0..w).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -1697,29 +1424,13 @@ pub(crate) fn launch(
         searching: AtomicUsize::new(0),
         idle: Mutex::new(Vec::with_capacity(w)),
         nsleep: AtomicUsize::new(0),
-        threads: (0..w).map(|_| std::sync::Mutex::new(None)).collect(),
-        handoff_ticks,
-        handoff_tick_ns: HOST_TICK_US * 1000,
-        host_calls: (0..w).map(|_| HostCall(AtomicU64::new(0))).collect(),
-        spares: Mutex::new(Vec::new()),
-        monitor: OnceLock::new(),
         handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
-        poll: Mutex::new(()),
-        poll_held: AtomicBool::new(false),
-        poller_blocked: AtomicBool::new(false),
-        poll_until: AtomicU64::new(u64::MAX),
-        gep,
-        gwake,
-        uring,
-        _shared: shared,
+        uring: pollers[0].reactor() == hirsel_core_net::Reactor::IoUring,
+        slots: pollers.into_iter().map(Slot::new).collect(),
         net_used: AtomicBool::new(false),
-        timers: Mutex::new(BTreeSet::new()),
-        next_timer: AtomicU64::new(u64::MAX),
         stop: AtomicBool::new(false),
-        last_poll: AtomicU64::new(0),
         connection_spins: env_u64("HIRSEL_UNTIED_CONN_SPINS", 16).min(128),
         spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5) * 1000,
-        spin_poll_ns: env_u64("HIRSEL_UNTIED_SPIN_POLL_US", 20) * 1000,
         slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,
         poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,
     });
@@ -1736,27 +1447,11 @@ pub(crate) fn launch(
         create_unit(i as u32);
     }
     std::thread::scope(|scope| {
-        if p.handoff_ticks != 0 {
-            std::thread::Builder::new()
-                .name("hirsel-monitor".into())
-                .stack_size(128 << 10)
-                .spawn_scoped(scope, || {
-                    watch_blocking(p, |spare| {
-                        std::thread::Builder::new()
-                            .name("hirsel-spare".into())
-                            .stack_size(1 << 20)
-                            .spawn_scoped(scope, move || worker_main(p, None, Some(spare)))
-                            .is_ok()
-                    });
-                    merge_stats();
-                })
-                .unwrap();
-        }
         for ix in 0..w {
             std::thread::Builder::new()
                 .name(format!("hirsel-w{ix}"))
                 .stack_size(1 << 20)
-                .spawn_scoped(scope, move || worker_main(p, Some(ix), None))
+                .spawn_scoped(scope, move || worker_main(p, ix))
                 .unwrap();
         }
     });
@@ -1765,52 +1460,7 @@ pub(crate) fn launch(
     #[cfg(feature = "record")]
     crate::tape::writer::flush();
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
-        p.memory.report();
-        let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
-        #[cfg(feature = "record")]
-        let tape_stats = format!(
-            " tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",
-            crate::tape::TAPE_COUNTS[0].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[4].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[5].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[6].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[7].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[8].load(Ordering::Relaxed),
-        );
-        #[cfg(not(feature = "record"))]
-        let tape_stats = "";
-        eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
-            w,
-            g(S_CREATED),
-            g(S_RESUMES),
-            g(S_PARKS),
-            g(S_YIELDS),
-            g(S_STEALS),
-            g(S_OS_WAKES),
-            g(S_GPOLLS),
-            g(S_GPOLL_BLOCKS),
-            g(S_GPOLL_EVENTS),
-            g(S_TIMER_FIRES),
-            g(S_NOTIFIED_REQUEUE),
-            g(S_CREATE_NS) / g(S_CREATED).max(1),
-            g(S_READY_TO_PARK_NS) / g(S_CREATED).max(1),
-            crate::sequencer::ACQUIRES.load(Ordering::Relaxed),
-            hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
-            g(S_LIFO),
-            g(S_HANDOFFS),
-            p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
-            p.handoff_tick_ns,
-            g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
-            u8::from(p.uring),
-        );
-    }
-    if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {
-        eprintln!("untied: law 4 violated: the cross-worker ordering token was taken");
-        return 101;
+        report::print(p);
     }
     WORST.load(Ordering::Relaxed)
 }

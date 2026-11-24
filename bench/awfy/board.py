@@ -22,17 +22,18 @@ import time
 
 import arena
 import awfy_measure
+import board_baseline
 import build
 import comparison
 import comparison_units
 import receipt
 from receipt import measurement_slot, write as write_json
+from timing_shield import BOARD as LOCK, REGIMES, hold, measurement_affinity
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
-LOCK = Path("/run/user") / str(os.getuid()) / "hirsel-board.lock"
 PINS = {
     "awfy": "f35aed0a61171594804a44efe9d75f1f35360700",
     "resid": "0ab89f373829776d3ea285bfb25f3f1505d7be35",
@@ -286,6 +287,7 @@ class Board:
     def compare_previous(self, baseline, blocked):
         output = StringIO()
         reference = {}
+        receipt_change = {}
         try:
             reference = receipt.read(baseline)
             if reference["complete"] is not True:
@@ -296,12 +298,17 @@ class Board:
                 instructions = receipt.compare(
                     baseline, self.out / "board.json", INSTRUCTION_LIMIT,
                     expected=self.report["instruction_receipt"]["expected_rows"], blocked=blocked)
+        except receipt.OlderBoardReceipt as error:
+            instructions = receipt.REFUSED
+            if not blocked:
+                receipt_change = {"previous_receipt_version": error.version}
+            print(f"REFUSED ({error})", file=output)
         except receipt.INVALID_RECEIPT as error:
             instructions = receipt.REFUSED
             print(f"REFUSED ({error})", file=output)
         status = ("Within +2% on every row", "Instruction regression", "Refused")[instructions]
         details = output.getvalue().splitlines()
-        self.report["instruction_comparison"] = {"status": status, "details": details}
+        self.report["instruction_comparison"] = {"status": status, "details": details, **receipt_change}
 
         size, checkbox = [], []
         refused, failed = instructions == receipt.REFUSED, instructions == 1
@@ -655,11 +662,13 @@ def compile_rows(board, out, prepared, fixture, tools):
             elif mode == "edit" and not rebuilt:
                 sample["status"] = "no-parts-compiled" if side == "hirsel" else "crate-not-rebuilt"
             if side == "hirsel":
+                argv = list(map(str, command))
+                argv[argv.index("--cc") + 1] = "clang"
                 board.report["instruction_receipt"]["rows"].append({
                     "key": f"compile/{label}", "suite": "compile", "mode": mode,
                     "flags": provenance["flags"],
-                    "argv": list(map(str, command)),
-                    "build_record": record, "image_sha256": record["image_sha256"],
+                    "argv": argv, "build_record": record,
+                    "image_sha256": record["image_sha256"], "clang_sha256": record["clang_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
                     "stdout": verify["stdout"], "sample": sample, **fixture_id, **tools,
                 })
@@ -913,8 +922,7 @@ def prepare_checkbox(out, artifacts, env, *, wire_tools=None, jobs=2):
         executable = checkbox.build(artifacts["compiler"], out, web, address, prefix=(CAP,),
                                     flags=release_flags(artifacts), env=env, stdout=log)
     run([artifacts["compiler"], "sdk", "ts", executable, "--output", web,
-         "--n-place", checkbox.N_PLACE, "--runtime", artifacts["runtime"],
-         "--cc", build.llvm_path() / "bin/clang"], env=env)
+         "--n-place", checkbox.N_PLACE], env=env)
     wants = out / "wants.bin"
     run(["node", "--input-type=module", "-e", '''
 import {writeFile} from "node:fs/promises";
@@ -1132,7 +1140,8 @@ def run_board(board, args):
     compile_ready = board.attempt("Compile preparation", prepare_compile, compile_dir, artifacts, env)
     checkbox_dir = out / "checkbox"
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
-    with measurement_slot(args.lock):
+    with hold(REGIMES, args.lock):
+        require_comparison_window()
         os.sched_setaffinity(0, {args.measure_cpus[0]})
         if awfy_ready:
             board.attempt("AWFY measurement", awfy_rows, board, awfy, args.awfy, tools)
@@ -1354,10 +1363,10 @@ def measure_comparison_board(evidence, out, args, selected):
 
 @contextmanager
 def comparison_measurement_hold(args, evidence):
-    with measurement_slot(LOCK.with_name("hirsel-mc-regimes.lock")), measurement_slot(args.lock):
+    with hold(REGIMES, args.lock):
         require_comparison_window()
         evidence["hold"] = {"started": datetime.now().astimezone().isoformat(),
-                            "locks": [str(LOCK.with_name("hirsel-mc-regimes.lock")), str(args.lock)]}
+                            "locks": [str(REGIMES), str(args.lock)]}
         os.sched_setaffinity(0, {args.measure_cpus[0]})
         try:
             yield
@@ -1381,64 +1390,22 @@ def validate_baseline(path, report):
         list(checkbox_changes(row, row, metric))
 
 
-def refused_identity_fields(report):
-    instruction = report["instruction_comparison"]
-    size, checkbox = report["size_comparison"], report["checkbox_comparison"]
-    if (instruction["status"] not in ("Within +2% on every row", "Refused")
-            or any(line.endswith(" FAIL") for line in (*instruction["details"], *size, *checkbox))
-            or any("REFUSED" in line for line in checkbox)):
-        return set()
-
-    changed = set()
-    keys = set(instruction_keys())
-    for line in instruction["details"]:
-        if "REFUSED" not in line:
-            continue
-        match = re.fullmatch(r"(.+) REFUSED \(identity differs: \1: (.+)\)", line)
-        if not match or match[1] not in keys:
-            return set()
-        fields = set(match[2].split(", "))
-        if not fields.issubset((*receipt.WORKLOAD_IDENTITY, "marker", "stdout")):
-            return set()
-        changed.update(fields)
-    if bool(changed) != (instruction["status"] == "Refused"):
-        return set()
-
-    for line in size:
-        if "REFUSED" not in line:
-            continue
-        match = re.fullmatch(r"REFUSED \(size identity differs: (\w+)\)", line)
-        if not match or match[1] not in SIZE_IDENTITY:
-            return set()
-        changed.add(match[1])
-    return changed
-
-
-def rebaseline(run):
+def rebaseline(run, base=None, expected_baseline=None):
     path = run / "board.json"
     if not path.is_file():
         path = run / "board/board.json"
     path = path.resolve()
     report = receipt.read(path)
     exit_status = report["exit_status"]
-    changed = refused_identity_fields(report) if exit_status == receipt.REFUSED and report["complete"] else set()
+    changed = set()
+    if exit_status == receipt.REFUSED and report["complete"]:
+        changed = board_baseline.refused_identity_fields(report, set(instruction_keys()), SIZE_IDENTITY)
     if report["complete"] is not True or report["failures"] or (exit_status != 0 and not changed):
         raise ValueError(f"{path}: rebaseline requires a complete run with clean gates or identity-only refusals")
     validate_baseline(path, report)
-    base = Path.home() / ".local/share/hirsel-board"
-    base.mkdir(parents=True, exist_ok=True)
-    refused = base / "baseline-refused"
-    with measurement_slot(base / "baseline.lock"):
-        previous = refused.read_text().strip() if refused.exists() else None
-        with tempfile.TemporaryDirectory(dir=base) as scratch:
-            link = Path(scratch) / "baseline"
-            link.symlink_to(path)
-            link.replace(base / "last-complete.json")
-        refused.unlink(missing_ok=True)
+    board_baseline.promote(path, base, expected_baseline)
     reason = f"measurement identity changed: {', '.join(sorted(changed))}" if changed else "it is a complete, clean board"
     print(f"Promoted {path} ({report['commit']}) because {reason}.")
-    if previous:
-        print(f"Cleared the promotion hold from {previous}.")
     return 0
 
 
@@ -1466,9 +1433,11 @@ def main():
         parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} rebaseline",
                                          description="Promote a complete board with clean gates or identity-only refusals")
         parser.add_argument("run", type=Path)
+        parser.add_argument("--base", type=Path)
+        parser.add_argument("--expected-baseline", type=Path)
         args = parser.parse_args(sys.argv[2:])
         try:
-            return rebaseline(args.run)
+            return rebaseline(args.run, args.base, args.expected_baseline)
         except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
             print(f"rebaseline refused: {error}", file=sys.stderr)
             return receipt.REFUSED
@@ -1489,7 +1458,7 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
-    validate_cpu_sets(parser, args, width=2)
+    validate_cpu_sets(parser, args, width=2, measure_affinity=measurement_affinity(REGIMES, args.lock))
     families = args.comparison_family or comparison.FAMILIES
     peers = required_peers(set(families)) if args.comparison else set(PINS)
     for peer in PINS:

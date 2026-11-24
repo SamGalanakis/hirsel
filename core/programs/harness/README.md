@@ -92,25 +92,46 @@ agent and the wiring:
 | --- | --- | --- |
 | `advance(tx, h, caller, wake)` | transact trigger target | `harness.advance` |
 | `effect(grants, caller, key)` | granted trigger target | `harness.effect` |
-| `begin` | fenced attempt entry | registered by `harness.register` |
-| `settle(tx, attempt, m)` | fenced attempt entry | `harness.settle` |
+| `begin` | fenced attempt entry | registered by `harness.register_standard` |
+| `settle(tx, h, attempt, m)` | fenced attempt entry | `harness.settle` |
 
-`harness.migrate` and `harness.handles` are the place's `migrate` and
-`handles`. `harness.entries(wiring)` is its `TriggerConfig.entries`.
+The place's `schema` calls `harness.declare_tables` and passes the returned
+handles to its transactions and trigger workers. `harness.entries(wiring)`
+is its `TriggerConfig.entries`.
 `harness.open_session` and `harness.submit` run in any write transaction;
 `harness.window` reads the transcript under the session ACL when registered with `query_as`.
 
 ## How a turn runs
 
-- `submit` appends the user entry, creates the run and calls `advance`. A
-  repeated client key with the same bytes returns its first disposition; a
-  submission during a run is answered `Busy` and leaves no row.
+- `submit(when)` and `command` lodge one row in `harness.ingress`, keyed by
+  a monotonic `enqueue_seq`, answer `Queued(seq)` and call `advance`. A
+  repeated client key with the same bytes returns its current disposition.
+  At a turn boundary (no active run, on `Kick`) every queued command applies
+  first (`Applied`), then the earliest input starts the next run
+  (`Placed(run)`). An `Early` input from the run's caller joins the active
+  run at its next `prepare` (`Joined(run)`); `NextTurn` input waits for the
+  boundary. `finish` arms a `Kick` when the ingress is non-empty.
 - `advance` reads the session row and the active run. To prepare a model
-  call it seals an effect row with only a cutoff, `(head_pos, tail_pos,
-  route, policy)`, and writes the effect trigger and a deadline trigger. No
+  call it seals an effect row with only a cutoff, `(frame, tail_pos,
+  route, policy, omit)`, and writes the effect trigger and a deadline trigger. No
   request body is stored or passed as a trigger argument.
+- History is append-only. `prepare` asks `Agent.pressure` once (bounded,
+  read-only). A valid `OpenFrame(base)` writes `harness.frames[base]` and
+  moves `Session.frame`; the next request starts with the frame's seed and
+  folds a fresh baseline, and a repeated open of the same base is a no-op.
+  `Agent.prompt_view` seals up to 8 omit ranges into the cutoff for one
+  request. `Command::Compact(seed)` opens a frame at the turn boundary.
+- A tool result entry is `ToolResult(id, outcome, presented)`. `present`
+  words each settled outcome once, with `Agent.presenter` (bounded like a
+  gate) or the standard `harness.worded`, and records it in the same
+  transaction. Providers send the recorded text, so resume, resend, forks and
+  releases never change prompt bytes.
+- `Limits.no_progress` (default `Bounded(3)`) stops a run after that many
+  consecutive tool rounds with no `Returned` outcome. `Agent.charge` bounds
+  model resends: `RequireGuarantee` seals the model effect `Once`,
+  `BoundedDuplicate(n)` seals it `Repeatable(n + 1)`.
 - `effect` is the granted worker. It calls `begin`, which records the
-  dispatch durably. It then reads `entries[head_pos..=tail_pos]` through
+  dispatch durably. It then reads the frame seed and `entries[frame..=tail_pos]` through
   `runner.trigger_snapshot`, makes the one outside call, and calls `settle`.
 - `settle` is first-writer-wins. A model answer commits as an `Assistant`
   entry (model.answer) before any tool is derived from it. Derivation runs in
@@ -230,6 +251,9 @@ resume of a parked call in the active run counts. The call expires
 `limits.tool_ms` after it parks. A resume at or after that deadline yields
 `Ignored` and the call settles as `Failed("tool deadline")`.
 
+Harness wake entries take a `runner.park.ParkId`. The action behind that id
+is stored in `harness.wakes` and claimed in the wake transaction.
+
 `harness.cancel(caller, run)` revokes the caller's open approvals and parked
 calls, cancels outstanding effect triggers and releases the session. A
 dispatched effect without a receipt is in doubt. Cancelling a terminal run
@@ -298,32 +322,36 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 - **An answer needs its terminator.** `answer` succeeds only after Anthropic's
   `message_stop` event or OpenAI's `data: [DONE]`, and only with a stop
   reason. A stream that ends sooner, or carries an error event, has no answer.
-  The request was already sent by then, so the worker records doubt and does
-  not seal a partial reply.
+  The worker never seals a partial reply.
 - **Deltas stay in memory.** Text and tool-argument pieces build up in a
   `Stream` held by the worker, under `Bounds` on event bytes, body bytes, text
   bytes, call count and argument bytes. Only the finished answer is stored.
 - **Usage.** Anthropic reports input tokens in `message_start` and cumulative
   output tokens in `message_delta`, so the last value wins. The OpenAI body
   asks for `stream_options.include_usage`, and the usage arrives in a final
-  chunk with no choices.
+  chunk with no choices. `Answer.usage` includes cache reads, cache writes
+  and reasoning tokens when the provider reports them.
 - **Bodies.** Anthropic gets the system text at top level and every tool result
   of one assistant turn as `tool_result` blocks in one user message, with
-  `is_error` set for failures. OpenAI gets a system message, assistant
-  arguments as a JSON string, and one `tool` message per result. `worded` is
-  the one place a tool outcome becomes text the model reads.
+  `is_error` set for failures. Anthropic models configured with `Ephemeral`
+  add a cache breakpoint after the system prompt, the final tool definition
+  and the final message block. OpenAI gets a system message, assistant
+  arguments as a JSON string, and one `tool` message per result. Both send the
+  recorded `Presented` text and error flag; the provider never words an
+  outcome. Stored UTF-8
+  tool results carry a head-and-tail excerpt of at most 4,096 bytes.
 - **Checked fragments.** Tool input schemas and call arguments are raw JSON
   embedded in the body, so `body` checks each one before writing.
 
-- **Transport.** `provider.ask(net, clock, provider, request)` is the
-  agent's model function body. It connects with `open` or `open_tls`; a
-  failure there is `Refused`, since nothing was sent. Once
-  `http_client.request_started`, every failure (a cut stream, a close with no
-  reply, a malformed or over-bound stream) is `Unavailable`, which the worker
-  records as doubt with spend unresolved. A non-200 reply is a definite
-  rejection, `Refused`. The key is a `Secret` sent only as a protected header
-  (`x-api-key`, or `Authorization: Bearer`), and secrets travel only over a
-  verified TLS stream, so plain HTTP endpoints cannot carry one.
+- **Transport.** `provider.ask(net, clock, provider, request)` returns a typed
+  `ModelFault`. A run with a repeatable model may retry throttling and
+  transient failures at the `Retry-After` time. The default delay is two
+  seconds and the cap is 60 seconds. If the stream drops after send, the
+  failed call may have been charged. The harness accounts for that call as
+  unresolved and, if the repeat budget and deadline allow, sends one
+  non-streaming request. The key is a `Secret` sent as a protected header
+  over verified TLS.
+
 
 ## The gateway
 
@@ -340,6 +368,11 @@ options and the idle time.
   session's store, then adds its group and its catalog row; a repeated key
   returns the same id, and an id is never reused. `Adopt` takes a fork's
   exported prefix.
+- A fork copies the selected prefix, including its frames and cut markers,
+  into a fresh store. Its work depends on that prefix. `fork_cache_diff` reads
+  the new store's manifest and journal to reconstruct the recorded call's base.
+  For equal prefixes and local replay histories, neither operation's cost
+  grows with the number of prior session forks.
 - `route(door, id)` wakes the session, starting its place if it is unloaded,
   and returns a lease whose status holds its address. The lease does not hold
   the place; a client's session does. Wire calls go to the place itself. A
@@ -458,6 +491,7 @@ history headers. Denied requests leave a cold place asleep.
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
 | S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |
 | W1 `test_request_bodies_follow_wire_format` | Bodies follow each provider's documented message shape: Anthropic groups one turn's tool results into one user message with `is_error`, and OpenAI sends arguments as a string and asks for usage. | The message shapes in each provider's API reference. |
-| T1 `test_doubt_only_after_send` | Over a simulated TLS network: no listener is Refused; a stream cut before its terminator or a close with no reply after the request is Unavailable (doubt); a 400 reply is Refused; the documented streams read to their documented answers. | Whether request bytes may have reached the provider in each script, and the documented answers. |
+| T1 `test_doubt_only_after_send` | Simulated TLS distinguishes rejection before send, an incomplete response, and a provider error. Complete streams yield their documented answers. | The scripted responses and the documented answers. |
+| `test_harness_fixes` | Checks cache usage and both Anthropic cache modes, typed model faults and the retry trigger, and the UTF-8 excerpt sent to the provider. | Wire fixtures, the recorded trigger due time and a hand-derived excerpt. |
 
 M1 runs over `std.sim.fs` with a 64 KiB port room. A first life that neither ends nor goes idle within a second of its fault is stopped, and the cut follows; 92 of the 217 cases need that stop (REPORT F10). M1 takes about 150 seconds.

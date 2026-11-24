@@ -1,0 +1,187 @@
+pub type Local {
+    component: u16,
+    base: Addr
+}
+
+pub type Path {
+    component: u16,
+    base: Addr,
+    peer: Addr
+}
+
+pub type IceError = Wire(Error) | BadCredentials | BadCheck | UnknownBase | BadCandidate | DuplicateCandidate | PairLimit | RepeatedTransaction | ClockOutOfOrder | Resources(Capacity)
+
+pub opaque type Credentials {
+    ufrag: Bytes,
+    password: Bytes
+}
+
+pub opaque type Lite {
+    credentials: Credentials,
+    bases: List[Local],
+    paths: List[Selection]
+}
+
+type Selection {
+    component: u16,
+    path: Option[Path]
+}
+
+fn ice_text(b: Bytes, lo: u64, hi: u64) -> bool {
+    for i in lo .. hi {
+        let x = b[i]
+        if !(x >= b'a' && x <= b'z') && !(x >= b'A' && x <= b'Z') && !(x >= b'0' && x <= b'9') && x != b'+' && x != b'/' {
+            return false
+        }
+    }
+    true
+}
+
+/// Own the signaled credentials for one ICE generation. The caller supplies their randomness.
+pub fn credentials(take ufrag: Bytes, take password: Bytes) -> Result[Credentials, IceError] {
+    let u = list.len(ufrag)
+    let p = list.len(password)
+    if u < 4 || u > 256 || p < 22 || p > 256 || !ice_text(ufrag, 0, u) || !ice_text(password, 0, p) {
+        return Error(BadCredentials)
+    }
+    Ok(Credentials(ufrag: take ufrag, password: take password))
+}
+
+/// Create an ICE-Lite responder for the local UDP bases advertised to the peer.
+pub fn lite(take local: Credentials, take bases: List[Local]) -> Result[Lite, IceError] {
+    let mut paths: List[Selection] = list.new()
+    let count = list.len(bases)
+    for i in 0u64 .. count {
+        let e = bases[i]
+        if e.component == 0 || e.component > 256 || e.base.port == 0 {
+            return Error(BadCandidate)
+        }
+        for j in 0u64 .. i {
+            if same_address(e.base, bases[j].base) {
+                return Error(DuplicateCandidate)
+            }
+        }
+        if let None = selection_index(paths, e.component) {
+            list.push(mut paths, Selection(component: e.component, path: None))
+        }
+    }
+    Ok(Lite(credentials: take local, bases: take bases, paths: take paths))
+}
+
+fn selection_index(paths: List[Selection], component: u16) -> Option[u64] {
+    for i in 0u64 .. list.len(paths) {
+        if paths[i].component == component {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn local_component(bases: List[Local], endpoint: Addr) -> Option[u16] {
+    for e in bases {
+        if same_address(e.base, endpoint) {
+            return Some(e.component)
+        }
+    }
+    None
+}
+
+fn ice_username(packet: Bytes, username: Option[Range], ufrag: Bytes) -> bool {
+    let Some(user) = username else {
+        return false
+    }
+    let colon = user.lo + list.len(ufrag)
+    if user.hi < colon + 5 || user.hi > colon + 257 || packet[colon] != b':' {
+        return false
+    }
+    list.compare_bytes(list.slice(packet, user.lo, colon), ufrag) == Equal && ice_text(packet, colon + 1, user.hi)
+}
+
+fn incoming_check(local: Credentials, packet: Bytes, mut scratch: Bytes) -> Result[Message, IceError] {
+    let msg = match verify(packet, local.password, mut scratch) {
+        Ok(m) => m,
+        Error(e) => {
+            return Error(Wire(e))
+        },
+    }
+    if msg.class != Request || msg.integrity != Sha1 || !msg.fingerprint {
+        return Error(BadCheck)
+    }
+    if !ice_username(packet, msg.username, local.ufrag) {
+        return Error(BadCredentials)
+    }
+    match (msg.priority, msg.role) {
+        (Some(p), Some(r)) if p > 0 && p <= 0x7effffff && (!msg.nominate || r.role == Controlling) => Ok(msg),
+        (None, None) if !msg.nominate => Ok(msg), // RFC 7675 consent probe
+        _ => Error(BadCheck),
+    }
+}
+
+fn reply_success(tx: Transaction, peer: Addr, key: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, IceError] {
+    match binding_success(tx, peer, Sha1, true, key, mut out, mut scratch) {
+        Ok(n) => Ok(n),
+        Error(e) => Error(Wire(e)),
+    }
+}
+
+/// Reply to an authenticated Binding check. The first authenticated nomination selects
+/// the path for its component. The caller sends out[0,n) back to peer from base.
+pub fn lite_receive(mut agent: Lite, base: Addr, peer: Addr, packet: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, IceError] {
+    let Some(component) = local_component(agent.bases, base) else {
+        return Error(UnknownBase)
+    }
+    let msg = incoming_check(agent.credentials, packet, mut scratch)?
+    let n = reply_success(msg.transaction, peer, agent.credentials.password, mut out, mut scratch)?
+    if msg.nominate {
+        if let Some(i) = selection_index(agent.paths, component) {
+            if let None = agent.paths[i].path {
+                agent.paths[i] = Selection(component: component, path: Some(Path(component: component, base: base, peer: peer)))
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// Return the currently nominated UDP path for a component, if any.
+pub fn lite_selected(agent: Lite, component: u16) -> Option[Path] {
+    if let Some(i) = selection_index(agent.paths, component) {
+        agent.paths[i].path
+    } else {
+        None
+    }
+}
+
+/// Commit the reconciled host pairs from signaling when both agents use ICE-Lite.
+/// The signaling layer supplies one pair per component after address selection
+/// and any updated candidate exchange required by RFC 8445 section 8.2.
+pub fn lite_select_signaled(mut agent: Lite, paths: List[Path]) -> Result[(), IceError] {
+    let n = list.len(paths)
+    if n != list.len(agent.paths) || n == 0 {
+        return Error(BadCandidate)
+    }
+    for i in 0u64 .. n {
+        let path = paths[i]
+        let Some(component) = local_component(agent.bases, path.base) else {
+            return Error(UnknownBase)
+        }
+        if path.component != component || path.peer.port == 0 || !same_family(path.base.ip, path.peer.ip) {
+            return Error(BadCandidate)
+        }
+        for j in 0u64 .. i {
+            if paths[j].component == component {
+                return Error(DuplicateCandidate)
+            }
+        }
+        if let Some(old) = lite_selected(agent, component) {
+            if !same_address(old.base, path.base) || !same_address(old.peer, path.peer) {
+                return Error(BadCheck)
+            }
+        }
+    }
+    for path in paths {
+        if let Some(i) = selection_index(agent.paths, path.component) {
+            agent.paths[i] = Selection(component: path.component, path: Some(path))
+        }
+    }
+    Ok(())
+}

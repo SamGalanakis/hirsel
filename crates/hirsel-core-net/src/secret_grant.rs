@@ -1,11 +1,24 @@
+use crate::secret_aead::{AeadAlg, AeadMode};
 use crate::{Name, Pattern};
 use std::sync::Arc;
+
+mod import_spend;
+pub use import_spend::{ImportKind, ImportRefusal, ImportSpend};
 
 /// The uses of a Secret other than `tls_send` (TLS-5), as a set. `mac`
 /// permits verification too, so its set holds `VERIFY` as well, and an
 /// intersection is the bitwise and.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SecretUse(u8);
+pub struct SecretUse(u32);
+
+/// The sole authority on an imported packet key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportUse {
+    SrtpSend,
+    SrtpReceive,
+    TrafficSend,
+    TrafficReceive,
+}
 
 impl SecretUse {
     pub const VERIFY: Self = Self(1);
@@ -16,17 +29,66 @@ impl SecretUse {
     pub const WRAP: Self = Self(32);
     pub const MTLS_CLIENT_ID: Self = Self(64);
     pub const KDF: Self = Self(128);
+    const SRTP_SEND: Self = Self(1 << 14);
+    const SRTP_RECEIVE: Self = Self(1 << 15);
+    const TRAFFIC_SEND: Self = Self(1 << 16);
+    const TRAFFIC_RECEIVE: Self = Self(1 << 17);
 
-    /// Each use word in its canonical order. A set prints `mac` alone for
-    /// `MAC`, which implies `verify`.
-    const WORDS: [(&str, Self); 8] = [
+    pub fn import(self) -> Option<ImportUse> {
+        Some(match self {
+            Self::SRTP_SEND => ImportUse::SrtpSend,
+            Self::SRTP_RECEIVE => ImportUse::SrtpReceive,
+            Self::TRAFFIC_SEND => ImportUse::TrafficSend,
+            Self::TRAFFIC_RECEIVE => ImportUse::TrafficReceive,
+            _ => return None,
+        })
+    }
+
+    pub const fn aead(alg: AeadAlg, mode: AeadMode) -> Self {
+        let open = 1 << (8 + 2 * alg as u32);
+        match mode {
+            AeadMode::Open => Self(open),
+            AeadMode::Seal => Self(open | (open << 1)),
+        }
+    }
+
+    /// Each use word in canonical order, with a use ahead of any it implies.
+    const WORDS: [(&str, Self); 18] = [
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
         ("kdf", Self::KDF),
         ("sign(ed25519)", Self::SIGN_ED25519),
         ("sign(p256)", Self::SIGN_P256),
         ("sign(rs256)", Self::SIGN_RS256),
+        (
+            "aead(chacha20-poly1305)",
+            Self::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Seal),
+        ),
+        (
+            "aead(aes128-gcm)",
+            Self::aead(AeadAlg::Aes128Gcm, AeadMode::Seal),
+        ),
+        (
+            "aead(aes256-gcm)",
+            Self::aead(AeadAlg::Aes256Gcm, AeadMode::Seal),
+        ),
+        (
+            "open(chacha20-poly1305)",
+            Self::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Open),
+        ),
+        (
+            "open(aes128-gcm)",
+            Self::aead(AeadAlg::Aes128Gcm, AeadMode::Open),
+        ),
+        (
+            "open(aes256-gcm)",
+            Self::aead(AeadAlg::Aes256Gcm, AeadMode::Open),
+        ),
         ("wrap", Self::WRAP),
+        ("srtp_import(send)", Self::SRTP_SEND),
+        ("srtp_import(receive)", Self::SRTP_RECEIVE),
+        ("traffic_import(send)", Self::TRAFFIC_SEND),
+        ("traffic_import(receive)", Self::TRAFFIC_RECEIVE),
         ("mtls_client_id", Self::MTLS_CLIENT_ID),
     ];
 
@@ -47,7 +109,7 @@ impl SecretUse {
 }
 
 /// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
-/// `verify`, `kdf`, `sign(<alg>)`, `wrap` and `mtls_client_id`, written in that
+/// `verify`, `kdf`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap` and `mtls_client_id`, written in that
 /// order, separated by single spaces. A DNS name appears only inside
 /// `tls_send(...)`, so no name can be read as a use.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -72,7 +134,7 @@ impl SecretPolicy {
                 send = Some(Pattern::parse_list(patterns)?);
             } else {
                 let word = SecretUse::word(token)?;
-                // A word given twice, or `verify` beside `mac`, is not canonical.
+                // Reject duplicate permissions, including implied uses.
                 if uses.0 & word.0 != 0 {
                     return None;
                 }
@@ -81,6 +143,11 @@ impl SecretPolicy {
         }
         let send: Arc<[Pattern]> = send.map_or_else(|| Arc::from([]), Into::into);
         if send.is_empty() && uses.is_empty() {
+            return None;
+        }
+        // The four import policy bits follow the AEAD uses. An import owns
+        // exactly one bit and grants no other operation or destination.
+        if uses.0 >> 14 != 0 && (uses.import().is_none() || !send.is_empty()) {
             return None;
         }
         Some(Self { send, uses })
@@ -97,13 +164,19 @@ impl SecretPolicy {
     }
 
     /// The requested policy of a derived key. A parent with `kdf` may
-    /// derive keys for MAC, verification or further derivation.
+    /// derive keys for MAC, verification, further derivation and AEAD.
     pub fn derived(&self, requested: &str) -> Option<Self> {
         if !self.uses.permits(SecretUse::KDF) {
             return None;
         }
         let child = Self::parse(requested)?;
-        let allowed = SecretUse(SecretUse::MAC.0 | SecretUse::KDF.0);
+        let allowed = SecretUse(
+            SecretUse::MAC.0
+                | SecretUse::KDF.0
+                | SecretUse::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Seal).0
+                | SecretUse::aead(AeadAlg::Aes128Gcm, AeadMode::Seal).0
+                | SecretUse::aead(AeadAlg::Aes256Gcm, AeadMode::Seal).0,
+        );
         (child.send.is_empty() && allowed.permits(child.uses)).then_some(child)
     }
 
@@ -190,7 +263,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)
@@ -222,9 +295,48 @@ impl SecretGrant {
     }
 }
 
-pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
-    ring::hmac::sign(&key, data).as_ref().try_into().unwrap()
+#[derive(Clone, Copy)]
+pub enum HmacSha2 {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl HmacSha2 {
+    /// The case of the guest's JwsMacAlg.
+    pub fn from_jws_case(case: u64) -> Self {
+        match case {
+            0 => Self::Sha256,
+            1 => Self::Sha384,
+            2 => Self::Sha512,
+            _ => unreachable!("JwsMacAlg case"),
+        }
+    }
+
+    fn algorithm(self) -> ring::hmac::Algorithm {
+        match self {
+            Self::Sha256 => ring::hmac::HMAC_SHA256,
+            Self::Sha384 => ring::hmac::HMAC_SHA384,
+            Self::Sha512 => ring::hmac::HMAC_SHA512,
+        }
+    }
+
+    pub fn tag_len(self) -> usize {
+        self.algorithm().digest_algorithm().output_len()
+    }
+
+    pub fn sign(self, key: &[u8], data: &[u8]) -> ring::hmac::Tag {
+        let key = ring::hmac::Key::new(self.algorithm(), key);
+        ring::hmac::sign(&key, data)
+    }
+
+    pub fn verify(self, key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+        if tag.len() != self.tag_len() {
+            return false;
+        }
+        let key = ring::hmac::Key::new(self.algorithm(), key);
+        ring::hmac::verify(&key, data, tag).is_ok()
+    }
 }
 
 pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
@@ -248,10 +360,5 @@ pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Ze
     zeroize::Zeroizing::new(ring::hmac::sign(&key, data).as_ref().to_vec())
 }
 
-pub fn verify_hmac_sha256(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
-    if tag.len() != 32 {
-        return false;
-    }
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
-    ring::hmac::verify(&key, data, tag).is_ok()
-}
+#[cfg(test)]
+mod tests;

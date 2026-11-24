@@ -179,3 +179,54 @@ pub fn unlock(take l: Lock) -> Result[HostFile, (IoError, HostFile)] waits {
         Error(e) => Error((e, take g)),
     }
 }
+
+/// Creates an exclusive temporary file below d and appends its suffix to name.
+/// Requires 32 bytes of spare capacity. The caller owns the file and its removal.
+pub fn create_temp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits {
+    host.mkstemp(d, mut name)
+}
+
+/// NotReplaced leaves the old file in place. Unsynced leaves the new file visible
+/// with unknown crash durability.
+pub type ReplaceError = NotReplaced(IoError) | Unsynced(IoError)
+
+fn write_synced(take f: HostFile, data: Bytes) -> Result[(), IoError] waits {
+    let mut out = take f
+    if let Error(e) = host.write(mut out, data) {
+        return Error(e.error)
+    }
+    host.sync(mut out)?
+    host.close(take out)
+}
+
+/// Atomically replaces one regular file directly in d. Syncs the new contents before
+/// renaming, then syncs the directory. On error before rename, attempts to remove
+/// the temp file. Cancellation before rename may leave a .hirsel-tmp- file behind.
+pub fn replace(d: Dir, name: String, data: Bytes) -> Result[(), ReplaceError] waits {
+    if !path.is_name(name) {
+        return Error(NotReplaced(Denied))
+    }
+    let mut tmp = string.with_capacity(45)
+    let prefix = if string.starts_with(name, ".hirsel-tmp-0") {
+        ".hirsel-tmp-1"
+    } else {
+        ".hirsel-tmp-0"
+    }
+    string.push(mut tmp, prefix)
+    let f = match create_temp(d, mut tmp) {
+        Ok(take f) => take f,
+        Error(e) => return Error(NotReplaced(e)),
+    }
+    let renamed = match write_synced(take f, data) {
+        Ok(()) => host.rename(d, tmp, name),
+        Error(e) => Error(e),
+    }
+    if let Error(e) = renamed {
+        let _ = host.remove(d, tmp)
+        return Error(NotReplaced(e))
+    }
+    match host.sync_dir(d) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(Unsynced(e)),
+    }
+}

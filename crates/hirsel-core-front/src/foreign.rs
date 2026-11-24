@@ -155,7 +155,7 @@ impl Program<'_> {
         let TyKind::Adt(declaration, _) = self.types.kind(interface) else {
             return None;
         };
-        let encoded = crate::identity::code_identity(&self.decls, &self.types, function)?;
+        let encoded = crate::identity::code_identity(&self.decls, &self.types, function, &[])?;
         let start = 1 + function.path.definition_identity().len();
         let header = String::from_utf8(encoded[start..].to_vec()).ok()?;
         Some((self.decls[declaration.index()].path.clone(), header))
@@ -241,11 +241,20 @@ impl Program<'_> {
         let mut interfaces = BTreeMap::new();
         let mut uses = BTreeMap::<(ModuleId, DeclId), KindUse>::new();
         let mut releases = BTreeMap::new();
+        let local_start = self.fns.base_len();
         for (function, fd) in self.fns.iter().enumerate() {
             let module = fd.site.module;
             if !self.index.module_is_foreign(module) {
                 continue;
             }
+            // A frozen declaration's ItemRef indexes its publishing request.
+            let handle_site = |header| {
+                if function < local_start {
+                    header
+                } else {
+                    self.handle_site(fd, header)
+                }
+            };
             let shape = headers.calls.entry(function).or_insert_with(|| CallShape {
                 params: fd
                     .params
@@ -343,7 +352,7 @@ impl Program<'_> {
                         false,
                     ) => {
                         if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
-                            let site = self.handle_site(fd, p.site);
+                            let site = handle_site(p.site);
                             note_kind(names, &mut uses, kind, site, false, release, &mut refusals);
                             if release {
                                 releases.insert(raw_kind, function);
@@ -363,7 +372,7 @@ impl Program<'_> {
             }
             if let AbiType::New(raw_kind) = result_shape {
                 if let Some(kind) = self.foreign_marker_decl(raw_kind, module) {
-                    let site = self.handle_site(fd, fd.result_site);
+                    let site = handle_site(fd.result_site);
                     note_kind(names, &mut uses, kind, site, true, false, &mut refusals);
                 }
             } else if result != ERROR && !result_shape.scalar_or_unit() {

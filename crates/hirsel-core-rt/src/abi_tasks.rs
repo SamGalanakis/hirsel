@@ -57,12 +57,15 @@ pub(crate) fn task_resume(context: *mut Context) {
 
 pub use crate::channel::{
     hirsel_core_channel_new, hirsel_core_channel_sender, hirsel_core_receive,
-    hirsel_core_receive_in_loop, hirsel_core_receive_loop_end, hirsel_core_receiver_drop,
-    hirsel_core_send, hirsel_core_sender_drop, hirsel_core_try_receive, hirsel_core_try_send,
+    hirsel_core_receiver_drop, hirsel_core_send, hirsel_core_sender_drop, hirsel_core_try_receive,
+    hirsel_core_try_send,
 };
 pub use crate::latest::{
     hirsel_core_latest_drop, hirsel_core_latest_handle, hirsel_core_latest_new,
     hirsel_core_latest_publish, hirsel_core_latest_read,
+};
+pub use crate::shared::{
+    hirsel_core_shared_new, hirsel_core_shared_release, hirsel_core_shared_share,
 };
 pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,

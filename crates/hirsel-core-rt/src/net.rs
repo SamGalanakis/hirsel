@@ -1,10 +1,16 @@
 //! Network operand adapters. Authority checks precede issue; buffers stay caller-owned.
+mod addr;
+#[cfg(feature = "record")]
+pub(crate) use addr::{address_bytes, denial};
+pub(crate) use addr::{authorize, permits_address};
+pub use addr::{hirsel_core_net_local_addr, hirsel_core_net_narrow, hirsel_core_net_peer_addr};
+
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
     provider::*,
 };
-use hirsel_core_net::{GrantRule, ResolveRule, Rule, RuleView, TlsRule, TlsTrust};
+use hirsel_core_net::{GrantRule, ResolveRule, RuleView, TlsRule, TlsTrust};
 use std::ptr;
 
 #[repr(C)]
@@ -131,7 +137,7 @@ pub struct AddressOutcome {
     pub port: u16,
 }
 impl AddressOutcome {
-    fn new(o: Outcome, a: Address) -> Self {
+    pub(crate) fn new(o: Outcome, a: Address) -> Self {
         Self {
             value: o.value,
             error: o.error,
@@ -184,7 +190,7 @@ pub(crate) struct NetworkRequest {
     pub until: Option<(Provider, u64, u64)>,
     pub backlog: u16,
     pub connecting: Option<u64>,
-    pub denied: bool,
+    pub denial: Option<u8>,
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
     pub tls: *mut crate::host_file::TlsSessions,
@@ -286,55 +292,6 @@ pub(crate) const DENIED: Outcome = Outcome {
     kind: 0,
 };
 
-/// Check an address before issue. A tape records the denial for its inner grant
-/// and delivers it at its ordinary provider boundary.
-pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bool {
-    if unix_operation(request.operation) {
-        // SAFETY: the adapter pins this extension through the provider call.
-        return unsafe { (*request.path.cast::<crate::unix_net::UnixRequest>()).authorized };
-    }
-    if request.operation == RESOLVE {
-        // SAFETY: the resolve adapter pins its request and the Net grant.
-        return unsafe { crate::resolve::authorize(provider, request) };
-    }
-    if !matches!(request.operation, CONNECT | LISTEN) {
-        return true;
-    }
-    // SAFETY: CONNECT and LISTEN carry the Net adapter's pinned extension.
-    unsafe {
-        #[cfg(feature = "record")]
-        if crate::tape::owns(provider) {
-            if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
-                let denied = !permitted(request, handle);
-                (*request.path.cast_mut().cast::<NetworkRequest>()).denied = denied;
-            }
-            return true;
-        }
-        #[cfg(not(feature = "record"))]
-        let _ = provider;
-        permitted(request, request.handle)
-    }
-}
-
-unsafe fn permitted(request: &Request, handle: u64) -> bool {
-    // SAFETY: network adapters pin the scalar address and the grant's Rules.
-    unsafe {
-        let address = &(*request.path.cast::<NetworkRequest>()).address;
-        permits_address(handle, address, u8::from(request.operation == LISTEN))
-    }
-}
-
-/// SAFETY: handle is the live Net grant's immutable rule slice.
-pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
-    unsafe {
-        let rules = &*(handle as *const Rules);
-        rules.permits(|r| {
-            r.address
-                .permits(dir, address.family, address.hi, address.lo, address.port)
-        })
-    }
-}
-
 pub(crate) fn empty_buffer() -> Buffer {
     Buffer {
         data: ptr::null_mut(),
@@ -426,7 +383,7 @@ unsafe fn address_op(
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog,
             connecting: None,
-            denied: false,
+            denial: None,
             direction: 0,
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls_sessions,
@@ -445,7 +402,6 @@ unsafe fn address_op(
         let provider = hirsel_core_capability_provider(context, n);
         #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, provider, &mut request);
-        let _commit = crate::sequencer::enter();
         // A served Net's keys are its own, never a tape's carriers.
         let served = crate::provide::owns(&*provider);
         #[cfg(feature = "record")]
@@ -528,7 +484,7 @@ impl OwnedNet {
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: (key & 3) as u8,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,
@@ -604,7 +560,6 @@ impl OwnedNet {
                 && outcome.status == 0
                 && outcome.error == IoError::OK
             {
-                let _commit = crate::sequencer::enter();
                 (*files)
                     .connected
                     .insert(outcome.value, ((*this).network.address, provider));
@@ -926,7 +881,6 @@ pub(crate) const RESET: Outcome = Outcome {
 };
 
 unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*files)
             .tls_writes
@@ -937,7 +891,6 @@ unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
 
 /// Whether `key` is part of a TLS stream.
 unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .tls_writes
@@ -947,7 +900,6 @@ unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
 
 /// A served Net's socket, half or listener: its port's provider.
 pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Provider> {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .unix_served
@@ -964,7 +916,6 @@ pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Pr
 }
 
 pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .connected
@@ -1026,7 +977,6 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             return DENIED;
         }
         let narrowed = {
-            let _commit = crate::sequencer::enter();
             let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
                 return DENIED;
             };
@@ -1087,7 +1037,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 2,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,
@@ -1148,7 +1098,6 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
 }
 
 pub(crate) unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
-    let _commit = crate::sequencer::enter();
     unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }
 
@@ -1169,7 +1118,6 @@ pub unsafe extern "C" fn hirsel_core_net_split(
                 ..Outcome::default()
             };
         }
-        let _commit = crate::sequencer::enter();
         let files = (*context).host_files;
         #[cfg(feature = "record")]
         let (read, write) = if let Some(tape) = (*files).net_tape {
@@ -1190,94 +1138,8 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         }
     }
 }
-/// Owns a socket or listener while it is in transit.
-pub(crate) struct CrossedSocket {
-    carrier: Option<hirsel_core_net::SocketTransfer>,
-    connected: Option<(Address, Provider)>,
-}
-
-// SAFETY: the provider descriptor moves as opaque data and is used only
-// under its existing calling contract.
-unsafe impl Send for CrossedSocket {}
-
-impl CrossedSocket {
-    pub(crate) fn check(files: &crate::host_file::Files, key: u64) {
-        if key & 3 != 0
-            || files.unix_served.contains_key(&key)
-            || files.tls_sessions.contains_key(&key)
-            || files.tls_writes.contains_key(&key)
-            || files
-                .connected
-                .get(&key)
-                .is_some_and(|(_, provider)| crate::provide::owns(provider))
-        {
-            // A port owns its served keys. TLS halves own separate stream state.
-            crate::process::stop(b"UnitSocket");
-        }
-    }
-
-    pub(crate) fn detach(files: &mut crate::host_file::Files, key: u64) -> Self {
-        #[cfg(feature = "record")]
-        if files.net_tape.is_some() {
-            crate::process::stop(b"UnitRecording");
-        }
-        let carrier = files
-            .sockets
-            .detach(key)
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        Self {
-            carrier: Some(carrier),
-            connected: files.connected.remove(&key),
-        }
-    }
-
-    pub(crate) fn attach(mut self, files: &mut crate::host_file::Files) -> u64 {
-        let key = files
-            .sockets
-            .attach(self.carrier.take().unwrap())
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        if let Some(connected) = self.connected.take() {
-            files.connected.insert(key, connected);
-        }
-        key
-    }
-}
-
-/// Sockets taken from a waiting send are held jointly by its item and the
-/// issuing call, which needs them back if the send is refused or withdrawn.
-pub(crate) type CrossingSockets = std::sync::Arc<std::sync::Mutex<SocketCrossing>>;
-
-pub(crate) enum SocketCrossing {
-    InTransit(Vec<CrossedSocket>),
-    Taken(Vec<u64>),
-}
-
-impl SocketCrossing {
-    pub(crate) fn take(&mut self, files: &mut crate::host_file::Files) {
-        if let Self::InTransit(sockets) = self {
-            let keys = sockets
-                .drain(..)
-                .map(|socket| socket.attach(files))
-                .collect();
-            *self = Self::Taken(keys);
-        }
-    }
-
-    pub(crate) fn keys(&mut self, files: &mut crate::host_file::Files) -> Vec<u64> {
-        self.take(files);
-        let Self::Taken(keys) = self else {
-            unreachable!()
-        };
-        std::mem::take(keys)
-    }
-
-    pub(crate) fn discard(&mut self) -> Vec<u64> {
-        match std::mem::replace(self, Self::Taken(Vec::new())) {
-            Self::InTransit(_) => Vec::new(),
-            Self::Taken(keys) => keys,
-        }
-    }
-}
+mod crossing;
+pub(crate) use crossing::{CrossedSocket, CrossingSockets, SocketCrossing};
 
 /// Reunite the halves of one plain client socket in the run's registry.
 /// # Safety
@@ -1299,7 +1161,6 @@ pub unsafe extern "C" fn hirsel_core_net_join(
         // A served socket's halves rejoin at its port; a TLS stream's never.
         if let Some(provider) = served_socket(context, read) {
             let unix = {
-                let _commit = crate::sequencer::enter();
                 (*(*context).host_files)
                     .unix_served
                     .contains_key(&(read & !3))
@@ -1318,7 +1179,6 @@ pub unsafe extern "C" fn hirsel_core_net_join(
             };
         }
     }
-    let _commit = crate::sequencer::enter();
     unsafe {
         let files = (*context).host_files;
         let key = read & !3;
@@ -1353,6 +1213,10 @@ pub unsafe extern "C" fn hirsel_core_net_join(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
     unsafe {
+        if crate::udp_net::is_socket(key) {
+            crate::udp_net::drop_socket((*context).host_files, key);
+            return;
+        }
         if crate::exec_runtime::is_proc(key) {
             crate::exec_runtime::drop_proc(context, key);
             return;
@@ -1365,7 +1229,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         {
             if answer.status == 0 && answer.error == IoError::OK {
                 let charge = {
-                    let _commit = crate::sequencer::enter();
                     if answer.value != 0 {
                         (*files).datagrams.remove(&key);
                         (*files).connected.remove(&(key & !3));
@@ -1376,16 +1239,12 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             }
             return;
         }
-        let charge = {
-            let _commit = crate::sequencer::enter();
-            (*files).exec_pipes.remove(&key)
-        };
+        let charge = { (*files).exec_pipes.remove(&key) };
         drop(charge);
         if let Some(provider) = served {
             // The port queues the Released; its server is readied outside
             // the run's commit section.
             let gone = crate::provide::release_socket(&provider, key);
-            let _commit = crate::sequencer::enter();
             if key & 3 == 2 {
                 (*files).tls_writes.remove(&(key & !3));
             }
@@ -1396,7 +1255,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             }
             return;
         }
-        let _commit = crate::sequencer::enter();
         (*files).datagrams.remove(&key);
         if key & 3 == 2 {
             (*files).tls_writes.remove(&(key & !3));
@@ -1423,37 +1281,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         }
     }
 }
-/// # Safety
-/// Live run and typed Net grant. Rule scalars come from the caller's Rule.
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_net_narrow(
-    context: *mut Context,
-    n: u64,
-    dir: u8,
-    family: u8,
-    hi: u64,
-    lo: u64,
-    bits: u8,
-    first: u16,
-    last: u16,
-    _site: u64,
-) -> Outcome {
-    let rule = Rule {
-        dir,
-        family,
-        hi,
-        lo,
-        bits,
-        first,
-        last,
-    };
-    if !rule.valid() {
-        return DENIED;
-    }
-    unsafe { narrow(context, n, GrantRule::Address(rule)) }
-}
-
 /// # Safety
 /// Live run, typed Net grant and pinned pattern and digest carriers.
 #[allow(clippy::too_many_arguments)]

@@ -1,0 +1,29 @@
+[package]
+name = "image_pipeline"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+image_core = { major = 1, path = "../image_core" }
+image_jpeg = { major = 1, path = "../image_jpeg" }
+image_webp = { major = 1, path = "../image_webp" }
+av1 = { major = 1, path = "../av1" }
+media_bits = { major = 1, path = "../media_bits" }
+video_yuv = { major = 1, path = "../video_yuv" }
+
+[sources]
+"pipeline.hirsel" = "pipeline"
+"jpeg.hirsel" = "pipeline"
+"avif.hirsel" = "pipeline"
+"accept.hirsel" = "pipeline"
+"url.hirsel" = "pipeline"
+"cache.hirsel" = "pipeline"
+
+[tests]
+limit = 268435456
+grants = ["Foreign=image_jpeg@1/image_jpeg/Jpeg", "Foreign=image_webp@1/webp/Webp", "Foreign=av1@1/av1/DecoderCodec", "Foreign=av1@1/av1/EncoderCodec", "Foreign=video_yuv@1/video_yuv/Yuv"]
+
+[tests.sources]
+"pipeline_law.hirsel" = "tests"
+"oracle_fixtures.hirsel" = "tests"

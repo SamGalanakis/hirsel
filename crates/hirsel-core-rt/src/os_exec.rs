@@ -184,7 +184,15 @@ impl Supervisor {
         input: SpawnInput,
         failure: Option<SetupStep>,
     ) -> Result<Spawned, SpawnError> {
-        let _blocking = crate::units::blocking();
+        // The spawner thread starts the child; this unit waits off the slot.
+        crate::units::off_slot(|| self.spawn_now(input, failure))
+    }
+
+    fn spawn_now(
+        &self,
+        input: SpawnInput,
+        failure: Option<SetupStep>,
+    ) -> Result<Spawned, SpawnError> {
         let _slot = self.spawn_slot.lock().unwrap();
         let mut registry = self.shared.registry.lock().unwrap();
         registry.spawn = Some((input, failure));

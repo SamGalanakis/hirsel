@@ -1,0 +1,243 @@
+type ViewKey: key {
+    entry: Bytes,
+    argument: Bytes,
+    caller: Option[Bytes]
+}
+
+// The index owns one route set per image. Retired subscribers can keep its reads
+// indexed after the live view advances or leaves the join map.
+type SharedView {
+    key: Option[ViewKey],
+    image: Option[Arc[Viewed]],
+    routes: List[RouteKey],
+    subscribers: Map[u64, SubId],
+    live: u64
+}
+
+fn subscription_key[G: send, H: shareable + inert + send](r: Registry[G, H], input: SubscriptionInput) -> Result[ViewKey, Outcome] {
+    let Some(Query(_, _, entry_query)) = map.get(r.slots, input.key) else { return Error(Refused(NoEntry)) }
+    let caller = if entry_query.by_caller {
+        let codec: std.codec.Codec[Caller] = std.codec.of()
+        let mut encoded_caller: Bytes = list.new()
+        std.codec.encode(codec, input.caller, mut encoded_caller) ?=> |_| Failed(Raised(5u32))
+        Some(take encoded_caller)
+    } else {
+        None
+    }
+    Ok(ViewKey(entry: clone(input.key), argument: clone(input.arg), caller: take caller))
+}
+
+fn shared_view_serial(views: Map[ViewKey, u64], key: ViewKey) -> Option[u64] {
+    match map.get(views, key) {
+        Some(serial) => Some(serial),
+        None => None,
+    }
+}
+
+fn index_view(mut subs: Subscriptions, take image: Option[Arc[Viewed]], take failed_reads: List[store.Read]) -> Result[u64, Capacity] {
+    subs.serial += 1u64
+    let serial = subs.serial
+    let (take nodes, take keys) = match image {
+        Some(current) => stage_routes(serial, Some(current.covers), clone(current.reads))?,
+        None => stage_routes(serial, None, take failed_reads)?,
+    }
+    map.insert(mut subs.indexed, serial, SharedView(key: None, image: take image, routes: take keys, subscribers: map.new(), live: 0u64))
+    install_routes(mut subs.root, take nodes)
+    Ok(serial)
+}
+
+fn publish_view(mut subs: Subscriptions, serial: u64, take key: ViewKey) {
+    map.insert(mut subs.views, clone(key), serial)
+    let mut pending_key = Some(take key)
+    let _ = map.update(mut subs.indexed, serial, scoped fn(mut current: SharedView) {
+        current.key = replace(mut pending_key, None)
+    })
+}
+
+fn join_view(mut subs: Subscriptions, serial: u64, id: SubId, live: bool) {
+    let _ = map.update(mut subs.indexed, serial, scoped fn(mut current: SharedView) {
+        map.insert(mut current.subscribers, id.serial, id)
+        if live { current.live += 1u64 }
+    })
+}
+
+fn drop_empty_view(mut subs: Subscriptions, serial: u64) -> bool {
+    let empty = match map.get(subs.indexed, serial) {
+        Some(current) => map.len(current.subscribers) == 0u64,
+        None => return true,
+    }
+    if !empty { return false }
+    let old = option.unwrap(map.remove(mut subs.indexed, serial))
+    if let Some(key) = old.key { let _ = map.remove(mut subs.views, key) }
+    unregister_routes(mut subs.root, old.routes)
+    true
+}
+
+fn leave_view(mut subs: Subscriptions, serial: u64, subscriber: u64, live: bool) {
+    let _ = map.update(mut subs.indexed, serial, scoped fn(mut current: SharedView) {
+        let _ = map.remove(mut current.subscribers, subscriber)
+    })
+    if !drop_empty_view(mut subs, serial) && live { remove_live(mut subs, serial) }
+}
+
+fn remove_live(mut subs: Subscriptions, serial: u64) {
+    let detached = remove_live_routes(mut subs.indexed, mut subs.root, serial)
+    if let Some(Some(take key)) = take detached { let _ = map.remove(mut subs.views, key) }
+}
+
+fn remove_live_routes(mut indexed: Map[u64, SharedView], mut root: Option[Box[Route]], serial: u64) -> Option[Option[ViewKey]] {
+    map.update(mut indexed, serial, scoped fn(mut current: SharedView) -> Option[ViewKey] {
+        current.live -= 1u64
+        if current.live != 0u64 { return None }
+        current.image = None
+        while list.len(current.routes) != 0u64 && current.routes[0u64].route_position < COVER_MAX {
+            let key = list.remove(mut current.routes, 0u64)
+            let previous = replace(mut root, None)
+            root = drop_route(take previous, key)
+        }
+        replace(mut current.key, None)
+    })
+}
+
+type ViewAdmission { serial: u64, charge: u64 }
+
+fn view_admit(subs: Subscriptions, id: SubId, size: u64, routes: Result[u64, Capacity]) -> Result[ViewAdmission, Capacity] {
+    let serial = routes?
+    let entry = option.unwrap(sub_at(subs, id.who, id.sub))
+    let charge = subscription_charge(subs, id.who, id.sub, entry.input, size)?
+    Ok(ViewAdmission(serial: serial, charge: charge))
+}
+
+fn move_subscription(mut subs: Subscriptions, id: SubId, routes: u64, charge: u64, live: bool) {
+    join_view(mut subs, routes, id, live)
+    let previous = map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> u64 {
+        option.unwrap(map.update(mut group, id.sub, scoped fn(mut selected: Sub) -> u64 {
+            selected.live = live
+            selected.charge = charge
+            if !live { selected.due = false }
+            replace(mut selected.routes, routes)
+        }))
+    })
+    leave_view(mut subs, option.unwrap(previous), id.serial, true)
+}
+
+fn view_charge(image: Viewed) -> u64 {
+    let mut charge = wire_round(list.len(image.value))
+    for span in image.covers {
+        charge = int.saturating_add(charge, 32u64 + wire_round(list.len(span.low)) + wire_round(list.len(span.high)))
+    }
+    int.saturating_add(charge, read_charge(image.reads))
+}
+
+fn read_charge(reads: List[store.Read]) -> u64 {
+    let mut charge = 0u64
+    for dependency in reads {
+        let size = match dependency {
+            Point(key) => 24u64 + wire_round(list.len(key)),
+            Span(low, high) => 24u64 + wire_round(list.len(low)) + wire_round(list.len(high)),
+        }
+        charge = int.saturating_add(charge, size)
+    }
+    charge
+}
+
+fn subscription_charge(subs: Subscriptions, who: u64, sub: u32, input: SubscriptionInput, size: u64) -> Result[u64, Capacity] {
+    let Some(lease) = view input.room else { return Ok(0u64) }
+    let requested = int.saturating_add(lease.charge, size)
+    let limit = lease.ledger
+    let mut held = 0u64
+    if let Some(members) = map.get(subs.by_session, who) {
+        for (number, member) in members {
+            if number != sub { held = int.saturating_add(held, member.charge) }
+        }
+    }
+    let available = int.saturating_sub(limit, held)
+    if requested > available { return Error(Capacity(requested: requested, available: available)) }
+    Ok(requested)
+}
+
+fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, image: Viewed, rows: Log[Row]) -> Result[(), Queried] waits {
+    let Some(Query(allowance, steps, _)) = map.get(b.r.slots, key) else { return Error(Stopped(Refused(NoEntry))) }
+    let bindings = option.unwrap(map.get(b.r.bound_slots, key))
+    let projected = bound bytes allowance {
+        bound steps steps { cover_rows(b.reads, b.read_handle, b.base, image.covers, bindings, rows) }
+    }
+    match take projected {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Error(take problem))) => Error(finish_projection(take problem, clone(image.reads))),
+        Ok(Error(limit)) => Error(Faulted(Failed(OutOfTime(limit.steps)), clone(image.reads))),
+        Error(problem) => Error(Stopped(Refused(Budget(room(problem))))),
+    }
+}
+
+
+fn subscription_frame_limit(input: SubscriptionInput) -> u64 {
+    match input.room {
+        Some(lease) => if lease.ledger < lease.frame_limit { lease.ledger } else { lease.frame_limit },
+        None => 18446744073709551615u64,
+    }
+}
+
+fn slot_payload_size(value_len: u64, projected: List[Row]) -> u64 {
+    let mut wanted = value_len
+    for row in projected {
+        // Slot u16, key length u32, and Option tag u32 precede the key and optional value.
+        wanted = int.saturating_add(wanted, 10u64 + list.len(row.key) + wire_optional_bytes(row.value))
+    }
+    wanted
+}
+
+fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, at: u64) -> Owe waits {
+    let mut owes: List[Owe] = list.new()
+    let _ = owe(mut owes, who, at)
+    let rows = match row_log() {
+        Ok(take output) => take output,
+        Error(problem) => {
+            if let Some(entry) = sub_at(b.subs, who, sub) {
+                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(room(problem)))))
+            }
+            end_entry(mut b.subs, who, sub)
+            return list.remove(mut owes, 0u64)
+        },
+    }
+    let (id, generation, take current_image, frame_limit, take projected) = {
+        let Some(entry) = sub_at(b.subs, who, sub) else { return list.remove(mut owes, 0u64) }
+        if !entry.live { return list.remove(mut owes, 0u64) }
+        let shared = option.unwrap(map.get(b.subs.indexed, entry.routes))
+        let Some(image) = shared.image else { fail("runner: missing live view image") }
+        let id = SubId(who: who, sub: sub, serial: entry.serial)
+        let read = view_image_rows(b, entry.input.key, image, rows)
+        (id, entry.generation, arc.share(image), subscription_frame_limit(entry.input), take read)
+    }
+    match take projected {
+        Ok(()) => {
+            let materialized = slot_rows(take rows)
+            match complete_group(frame_limit, current_image.value, materialized) {
+                Ok(take packed) => {
+                    clear_due(mut b.subs, id)
+                    owes[0u64].rows = wire_rows(take materialized, sub)
+                    owes[0u64].group_bytes = 4u64 + list.len(packed)
+                    list.push(mut owes[0u64].groups, OwedGroup(sub: sub, payload: take packed))
+                    owes[0u64].frame_limit = frame_limit
+                    stamp_rows(mut owes[0u64].generations, sub, generation)
+                    list.push(mut owes[0u64].complete, sub)
+                },
+                Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(room(problem)))),
+            }
+        },
+        Error(Stopped(take why)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
+        Error(Faulted(take why, _)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
+        Error(Lost(problem, _)) => {
+            reset_session(mut b.subs, mut owes, who, at)
+            owes[0u64].read_failed = read_failed(problem)
+        },
+        Error(_) => reset_session(mut b.subs, mut owes, who, at),
+    }
+    list.remove(mut owes, 0u64)
+}
+
+fn clear_due(mut subs: Subscriptions, id: SubId) {
+    let _ = map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, id.sub, scoped fn(mut entry: Sub) { entry.due = false })
+    })
+}

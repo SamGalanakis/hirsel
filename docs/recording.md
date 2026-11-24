@@ -31,12 +31,28 @@ the recording runtime. These commands make one:
 | `hirsel run app --record PATH [grants] [-- arguments...]` | builds the recording build and runs it with recording on, into PATH |
 | `hirsel replay app --tape PATH` | builds the recording build and replays PATH with it |
 | `hirsel test app --limit N --replay` | runs each selected test in the recording build, recording on, then replays it ([Testing with recordings](#testing-with-recordings)) |
+| `hirsel test app --limit N --laws` | observes law outcomes in selected tests ([law table](laws.md#observation)) |
 
-A program whose entry reaches a foreign function has no recording build. Each of these
-commands refuses it before building, reading a tape or running native code, as
+**Law observation** is part of the recording runtime. A
+recording executable started with `HIRSEL_LAWS=PATH` writes into PATH the settled outcomes of
+outermost `std.prop` and `std.model` engine calls, as [law table](laws.md) says. The observer
+captures the outcome on return or, for a failing check, immediately before the engine raises its
+own failure. It is read and
+removed like `HIRSEL_RECORD`, works with recording on or off, and is under the same-observation
+rule below. A build without recording contains none of it.
+
+Version note (2026-11-24, verify-phase-spec-2034): adds planned law observation to the
+recording build, so CAP-9 keeps one build switch.
+
+Version note (2026-11-24, verify-observer-2037): defines the observation point for
+an engine check that raises a failure.
+
+A program whose entry reaches a foreign function has no recording build. Recording and
+replay commands refuse it before building, reading a tape or running native code, as
 [FFI-8](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)
 says: `hirsel replay` exits 2 with `replay: refused: FFI-8: …`, and `hirsel test --replay`
-fails each foreign-reaching test alone.
+fails each foreign-reaching test alone. `hirsel test --laws` runs those tests in the
+ordinary build and reports `unobserved (FFI-8)`.
 
 `--release`, `--backend` and `--target` select the engine, optimisation and target of a
 recording build as they do for any other build.
@@ -84,12 +100,24 @@ and every task the run starts belongs to it.
 **Canonical arguments.** An issue's arguments of 16 bytes or fewer are stored literally,
 and longer ones as their xxh3-64 digest.
 
+**Spare capacity.** An issue that reads into a buffer (a listing read, a positioned read,
+`RESOLVE`, `DGRAM_RECV`, `stdin.read`, a credential fetch) records its buffer's spare
+capacity, but a replay does not compare the replaying buffer's spare capacity with the
+recorded one. It requires only that the recorded delivery fits: the bytes, records or
+addresses delivered are at most the replaying buffer's spare capacity, and a replay whose
+buffer is too small for the recorded delivery ends `Diverged` at that issue (RL2). So a
+buffer that grew or shrank between builds, by a capacity rounding or another growth
+policy, replays as long as each delivery still fits. A delivery that contradicts the
+recorded room, such as a datagram whose length and truncation flag disagree with the
+recorded spare capacity, is still `Corrupt`, because the room it is checked against is the
+recorded one.
+
 **Directory and positioned file operations.** Narrowing and opening a listing
 deliver new object ordinals. Each listing read checks the handle ordinal and
-spare capacity, then supplies whole records in the recorded order. Stat
+that the records fit its spare capacity, then supplies whole records in the recorded order. Stat
 operations supply kind, size and signed modification nanoseconds. Positioned
-I/O checks the file ordinal, offset, and spare capacity or input bytes, then
-supplies the read bytes or the committed write count.
+I/O checks the file ordinal, offset, and input bytes, and for a read that the bytes fit
+its spare capacity, then supplies the read bytes or the committed write count.
 
 **Sockets.** The run checks each LISTEN and CONNECT against its source Net rules, and a
 recording records a denied outcome as the delivery the run received. It records the bound
@@ -124,8 +152,13 @@ them may contain such values.
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
 | `CLOSE` of a `Proc`, pipe half or Unix socket | the ordinal and part, as for every dropped host handle | the outcome |
 
-A replay starts no process and opens no socket. It checks each `CLOSE` at its position, so a moved
-drop diverges there (RL2). It then changes local ownership only: nothing is killed,
+A replay starts no process and opens no socket. It matches each `CLOSE` by its ordinal and
+part, not by its position among the frames: a handle's drop may come earlier or later than
+it did in the recording, because when a value is dropped is not an observation the
+program's meaning fixes. Ordinals are allocated in delivery order and never reused, so the
+match is exact. A `CLOSE` contributes no scheduler event. A `CLOSE` the recording does not hold for that ordinal and part, or a
+recorded `CLOSE` whose handle the replay never drops before the run ends, ends the replay
+`Diverged`, the second at the run's end (RL2). It then changes local ownership only: nothing is killed,
 closed or unlinked on the host. A delivery that its issue could not have produced, such as a
 packet whose length and flag contradict its room, is `Corrupt`
 ([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
@@ -156,9 +189,13 @@ environment.
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `until`, each secret's designation in `secrets` order, `wire`, `marks` | the outcome, and the committed count on failure |
-| `SECRET_MAC` | run-owned sink at object 0; canonical args = mode, secret designation, `data` (and `tag` for verify) | the 32-byte tag or the verdict |
-| `SECRET_KDF` | run-owned sink at object 0; canonical args = parent designation, child policy, `key_prefix`, `data` | the delivery position, with no key bytes |
-| `SECRET_MAC` key operations ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
+| `SECRET_MAC` | run-owned sink at object 0; modes 0/1 for SHA-256, 7/8 for SHA-384 and 9/10 for SHA-512 (sign/verify). Modes 11/12, 13/14 and 15/16 enforce the same algorithms' JWS key minimums. Canonical args = mode, secret designation and policy, `data` and the input tag for verify. | the 32-, 48- or 64-byte tag, the verification verdict or the JWS `ShortKey` refusal |
+| `SECRET_KDF` ([TLS-5](spec/tls.md#tls-5-secrets)) | run-owned sink at object 0; canonical args = parent designation and policy, child policy, then `key_prefix` and `data` for HMAC, or the mode, `salt`, `len` and `info` (HKDF) or `cost` (Argon2id) | the delivery position or Argon2id's delivered `Invalid`, without key bytes |
+| `SECRET_MAC` key operations ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm, `Random` identity and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
+| `SECRET_MAC` AEAD ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 5 `aead_seal`, 6 `aead_open`; canonical args = mode, key designation and policy, algorithm, nonce, associated data, plaintext or sealed bytes, and output spare | the refusal or the appended bytes, including the authenticated plaintext for open |
+| `MEDIA_KEY_SHARE` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | object 0. Canonical args bind the Random designation, group and public buffer spare. | The delivery position and public key bytes. Replay holds a share ticket with no private key. |
+| `MEDIA_P256_KEY` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned key generator at object 0. Canonical args bind the Random designation, signing policy and public buffer spare. | The delivery position and 65-byte public point. The Secret’s document stays with the provider. |
+| `MEDIA_AGREEMENT` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned registry verdict at object 0. Canonical args bind the constructor's public operands and share origin, including for virtual shares. | `Invalid` (0), accepted (1), or `Issued` (2). Replay supplies the verdict without an agreement provider call. |
 | `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
 | `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 
@@ -173,7 +210,8 @@ ordinal in the order of the run's grants, like every other grant. The header's g
 snapshot keeps the parameter name, the canonical policy text, and the source label
 (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the order of its
 seal among the run's seals, an unwrapped one by the order of its unwrap among the run's
-unwraps, and a derived one by the position of its `SECRET_KDF` delivery, each together
+unwraps. A derived or host-generated P-256 key is designated by the position of its
+`SECRET_KDF` or `MEDIA_P256_KEY` delivery. The tape binds each designation together
 with its policy. The canonical arguments of
 `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` hold the designation, never the bytes or any function of them, because an
 unkeyed digest of a short secret could be reversed by trying candidate values.
@@ -207,8 +245,25 @@ metadata is the recorded value, never the digest of the replaying executable.
 identity, entry code revision ([PROG-9](spec/programs.md#prog-9-code-descriptors)),
 argument snapshot, root limit or charge policy differs from the replaying build's, and one
 whose header is damaged. The code revision covers the reachable checked code, not the engine
-or the CPU's vector level, so a recording replays on either engine and on any CPU the build
-supports. It exits 2 with `replay: refused: REASON`.
+or the CPU's vector level, so admission accepts a recording on either engine and on any CPU
+the build supports. It exits 2 with `replay: refused: REASON`.
+
+**Another build (2026-11-23, Spec Q1).** Steps and slice ends are a build's own
+([SEM-8](spec/semantics.md#sem-8-determinism), [CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)):
+the same program may take a different number of steps on another engine or optimisation
+level, so its slices may end at other points and a step bound may stop it elsewhere. A
+recording build is the same build as the build without recording, and replay on that build
+is exact. A replay on another build of the same revision is admitted and is exact for a run
+that took no slice end and was stopped by no step bound. For any other run it may end
+`Diverged` where the two builds' steps first differ: a scheduler choice made at a slice end,
+or an `OutOfTime` at another point, is then not the one recorded. A recording also holds
+its **build digest**: the hash of the compiler, the toolchain and runtime archive, the
+program's objects and their sources, the target, the engine, the optimisation level and the
+link mode. It leaves out the launch policy (grants, directories and the replay plan), so the
+launcher-only replay executable of a build, which differs from the recording executable only
+in that policy, has the recording's build digest. When the replaying build's digest differs
+from the recorded one, the replay writes `replay: build differs` first, so such a divergence
+is attributed to the build and not read as a bug in the program.
 
 **Across revisions.** `hirsel replay app --tape PATH --diagnose` admits a recording of
 another code revision and still refuses the other differences. It writes
@@ -259,6 +314,9 @@ Where cleartext can be in a recording:
 | a credential fetch ([TLS-7](spec/tls.md#tls-7-credential-grants)) | the access key id and session token, as received plaintext; never the secret key | The key is sealed by the provider. Replay makes a designation with no bytes, as for a grant. |
 | a wrapped secret | only as `wrap`'s blob, sealed under the KEK | Replay delivers the blob, and opening it needs the KEK's bytes, which a recording never holds. |
 | a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
+| an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. A wholly virtual schedule writes no frame at all: replay recomputes it from the seed and the recorded peer messages. |
+| a key drawn from a host `Random` (a key share, a signing key, an ECDSA nonce) | never; the delivery holds the public key | The draw happens inside the provider and does not pass the replay point. |
+| a packet's plaintext on an opaque path | sealed plaintext as the canonical-arguments rule stores it; every successfully opened plaintext in full, including through `open_into` | Replay checks seals and delivers opens. Opened plaintext is whatever the peer sent (media, or credentials sent inside it), which is one more reason every tape is credential-bearing. |
 | sent plaintext | as the canonical-arguments rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
 
 A replay gets the same results without a secret's bytes. The launcher does not read the
@@ -270,20 +328,22 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 11, which `crates/hirsel-tape-format` owns. Format 7
-added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
+A recording file is a **tape** in format 13, which `crates/hirsel-tape-format` owns. Format 7
+added the run's Map hash key to the header, and format 12 removes it (below). Format 8 adds the terminal byte to stream grants
 and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
 writes each Secret grant's policy as its canonical set of uses
 ([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
 designations, the `wire` and the `marks` of one message. Format 11 adds the `Cred` grant
 record and the credential fetch frames ([TLS-7](spec/tls.md#tls-7-credential-grants)).
-The format is not part of the language and a replay reads only tapes its own build admits,
+Format 12 removes the Map hash key from the header. Format 13 ends a Run's launch metadata
+with the recording's 32-byte build digest. A replay refuses a tape of an earlier format. The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.
 
-- The header ends with the run's 16-byte Map hash key. Replay restores it before starting
-  any task. The Map placement salts and strong placement key are derived from it, not recorded
-  ([PROG-11](spec/programs.md#prog-11-map-index)). Call tape fixtures reserve this field as sixteen zero bytes.
+- The header holds no Map hash key. Every run, a replay included, draws its own key from
+  host entropy at entry, and no observable depends on it
+  ([SEM-5](spec/semantics.md#sem-5-maps), [CAP-8](spec/capabilities.md#cap-8-the-replay-point)),
+  so a replay supplies nothing for it and compares nothing with it.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
   and with duplicates; each address rule occupies 23 bytes.
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of
@@ -294,10 +354,14 @@ through the launch arguments to find and verify the pin.
 - A `Cred` grant record, after the `Secret` grant records, holds the parameter name, the
   source text and the canonical policy text
   ([TLS-7](spec/tls.md#tls-7-credential-grants)), all length-prefixed. A fetch's issue holds
-  the spare capacities of `key_id` and `token` as two little-endian `u64`s, then its
-  deadline. A successful delivery holds its own tape position as `value` (the designation
+  the spare capacities of `key_id` and `token` and its deadline. A successful delivery holds its own tape position as `value` (the designation
   the key gets) and, as the payload, the key id and the session token, each
   length-prefixed, then the expiry as a little-endian `u64`. The key is never in a frame.
+- Buffered issue arguments start with tag 18 and two varint spare capacities. The
+  second is zero for single-buffer operations. The remaining operands follow in the
+  usual literal or digest encoding.
+- A `CLOSE` is an immediate OP with task zero. Its frame keeps its position for
+  diagnostics. Replay matches it by ordinal and part.
 - The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
 - The `GRANT` frame of an `Exec` grant holds the total profile snapshot length, then its
   first payload chunk. `DATA` frames carry the remaining bytes.
@@ -325,7 +389,7 @@ recording. It runs against a controlled provider that the run's configuration ch
 | law | bug | oracle and setup |
 |---|---|---|
 | **RL1** recording changes nothing | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a build without recording | For a corpus of small programs with scripted providers and ordered senders, run the build without recording, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The executable built without recording defines no symbol of the recording runtime. |
-| **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) drop a handle at another point, (b) omit its last send and (c) send other bytes, each still returning the recorded result. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. |
+| **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) keep to the end a handle the recording dropped (its recorded `CLOSE` never comes: `Diverged` at the run's end), (b) omit its last send and (c) send other bytes, each still returning the recorded result, and (d) read into a buffer too small for a recorded delivery. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. Replays with the program edited to (e) drop a handle at another point and (f) read into a larger buffer, each still delivering the recorded bytes, end `Sealed` (2026-11-23, Spec Q5). |
 | **RL3** replay is offline | replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
 | **RL4** replay without the secret | replay reading the secret's source | Replay TL10's recording ([TLS](spec/tls.md#laws)) with the environment variable unset. The run starts. Its outputs equal the recorded run's, byte for byte. The inner provider records zero calls. |
 | **RL5** a secret never reaches a recording | a secret's bytes in a frame or a digest | Record TL10's run and search the recording for the value, its base64 and its raw bytes: there are no hits. |

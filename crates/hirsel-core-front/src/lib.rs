@@ -17,6 +17,7 @@ mod recursion_decls;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
+mod element;
 mod foreign;
 pub use foreign::{AbiParameter, AbiResult, AbiSignature};
 mod identity;
@@ -145,6 +146,7 @@ pub struct Program<'a> {
     core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
     structural_codecs: std::sync::OnceLock<StructuralCodecs>,
     tuple_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
+    ordered_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
     recipe_layouts: std::sync::Mutex<layout::RecipeLayouts>,
@@ -237,7 +239,7 @@ impl SiblingReads {
 /// those items, though no resolved name of the body reaches them, so its reuse
 /// key hashes their closures (`Keys::for_body`). Lowering builds no other path:
 /// a new one is added here first.
-pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 11] = {
+pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 12] = {
     use CoreHelper::*;
     use SiblingReads::*;
     [
@@ -274,6 +276,12 @@ pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 11] = {
             "of",
             Named("codec", &body::BUILTIN_CODEC_MAKERS),
         ),
+        (
+            "std",
+            "codec",
+            "key_of",
+            Named("codec", &body::ordered_codec::MAKERS),
+        ),
         ("core", "list", "reserve", Core(&[ListGrow, ListGrowBy])),
         ("core", "list", "append", Core(&[ListGrowBy])),
         ("core", "list", "fill", Core(&[ListGrowBy])),
@@ -282,9 +290,15 @@ pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 11] = {
         ("core", "string", "reserve", Core(&[ListGrow, ListGrowBy])),
     ]
 };
-/// Tuple codec row construction reads these protocol signatures even when the
-/// source never calls `codec.of`; the driver's prelude component records them.
-pub const TUPLE_CODEC_READS: [&str; 3] = ["take_with", "put_with", "schema_of"];
+/// Codec row construction reads these signatures even when the source never
+/// calls a maker. The driver's prelude component records them.
+pub const TUPLE_CODEC_READS: [&str; 5] = [
+    "take_with",
+    "put_with",
+    "schema_of",
+    "take_key_with",
+    "schema_key",
+];
 /// The core prelude types whose codec is std's structural maker, each with that
 /// maker in `std.codec` (EXPANSION 9.1). Laying out a closed codec row of one of
 /// them reads its maker (the row's codec hook, layout.rs `structural_codec`), and
@@ -502,37 +516,44 @@ impl<'a> Program<'a> {
     /// published function prefix just to find the three protocol declarations.
     fn tuple_codec_protocol(&self) -> Option<&TupleCodecProtocol> {
         self.tuple_codec_protocol
-            .get_or_init(|| {
-                let std = |name: &str| {
-                    self.index
-                        .packages
-                        .iter()
-                        .filter(|p| self.index.symbols.text(p.name) == "std")
-                        .filter_map(|p| {
-                            self.function_id(&DefPath(hirsel_core_ids::ItemPath {
-                                package: hirsel_core_ids::PackageId {
-                                    name: "std".into(),
-                                    version: self.index.symbols.text(p.version).into(),
-                                },
-                                modules: vec!["codec".into()],
-                                name: name.into(),
-                            }))
-                        })
-                        .min()
-                };
-                let (take, put, describe) =
-                    (std("take_with")?, std("put_with")?, std("schema_of")?);
-                let fd = &self.fns[take];
-                Some(TupleCodecProtocol {
-                    of: fd.path.clone(),
-                    bytes: fd.params[0].ty,
-                    codec: fd.params[2].ty,
-                    decoded: fd.result,
-                    written: self.fns[put].result,
-                    schema: self.fns[describe].params[0].ty,
-                })
-            })
+            .get_or_init(|| self.codec_protocol("take_with", "schema_of"))
             .as_ref()
+    }
+
+    fn ordered_codec_protocol(&self) -> Option<&TupleCodecProtocol> {
+        self.ordered_codec_protocol
+            .get_or_init(|| self.codec_protocol("take_key_with", "schema_key"))
+            .as_ref()
+    }
+
+    fn codec_protocol(&self, take: &str, describe: &str) -> Option<TupleCodecProtocol> {
+        let std = |name: &str| {
+            self.index
+                .packages
+                .iter()
+                .filter(|p| self.index.symbols.text(p.name) == "std")
+                .filter_map(|p| {
+                    self.function_id(&DefPath(hirsel_core_ids::ItemPath {
+                        package: hirsel_core_ids::PackageId {
+                            name: "std".into(),
+                            version: self.index.symbols.text(p.version).into(),
+                        },
+                        modules: vec!["codec".into()],
+                        name: name.into(),
+                    }))
+                })
+                .min()
+        };
+        let (take, describe) = (std(take)?, std(describe)?);
+        let fd = &self.fns[take];
+        Some(TupleCodecProtocol {
+            of: fd.path.clone(),
+            bytes: fd.params[0].ty,
+            codec: fd.params[2].ty,
+            decoded: fd.result,
+            written: self.fns[describe].result,
+            schema: self.fns[describe].params[0].ty,
+        })
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
@@ -718,6 +739,7 @@ impl<'a> Program<'a> {
             core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
             structural_codecs: std::sync::OnceLock::new(),
             tuple_codec_protocol: std::sync::OnceLock::new(),
+            ordered_codec_protocol: std::sync::OnceLock::new(),
             layout_type_names: std::sync::OnceLock::new(),
             recipe_layouts: Default::default(),
             row_closures: Default::default(),

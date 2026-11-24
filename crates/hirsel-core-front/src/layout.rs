@@ -100,6 +100,7 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub codecs: &'p crate::StructuralCodecs,
     /// Closed codec tuples get their hook even when no source call requests it.
     pub tuple_codecs: Vec<(TypeRef, TyId)>,
+    pub key_codecs: Vec<(TypeRef, TyId)>,
 }
 
 /// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
@@ -179,12 +180,19 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
             },
         );
         Row::make_mut(&mut self.shapes[r.index()]).send = self.declares_send(ty);
+        if self.module
+            && !has_param(&*self.types, ty)
+            && crate::body::ordered_codec::composite(self.decls, self.types, ty)
+        {
+            self.key_codecs.push((r, ty));
+        }
         let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -317,17 +325,9 @@ impl<T: TyRead> Shapes<'_, T> {
                             None,
                         );
                     }
-                    // A log owns one boxed List carrier.  The source Log[E] declaration
-                    // has E as its only argument; construct the corresponding List[E]
-                    // row here so the box shape is the same row used by list kernels.
-                    Some(Role::Log) => {
-                        let list = self
-                            .decls
-                            .iter()
-                            .position(|d| d.role == Some(Role::List))
-                            .map(|d| crate::types::DeclId(d as u32))?;
-                        let list = self.types.mk(TyKind::Adt(list, vec![args[0]]));
-                        let node = FieldTy::Box(self.shape(list)?);
+                    // A cell owns one boxed `T` (MEM-29).
+                    Some(Role::Cell) => {
+                        let node = FieldTy::Box(self.shape(args[0])?);
                         let body = record(vec![("node", node)]);
                         return self.fill(r, ty, LRepr::Own, body, None, None);
                     }
@@ -365,11 +365,12 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A box or counted reference held as a value: its one pointer field,
                     // cleaned by the recipe (freed, or released, MEM-15/16).
-                    Some(role @ (Role::Box | Role::Rc | Role::Arc)) => {
+                    Some(role @ (Role::Box | Role::Rc | Role::Arc | Role::Shared)) => {
                         let to = self.shape(args[0])?;
                         let field = match role {
                             Role::Box => FieldTy::Box(to),
                             Role::Rc => FieldTy::Rc(to),
+                            Role::Shared => FieldTy::Shared(to),
                             _ => FieldTy::Arc(to),
                         };
                         let held = Some(field.clone());
@@ -378,32 +379,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A provider handle's carrier: its one handle field, cleaned by the
                     // runtime (closing a channel side, abandoning a task, MEM-24).
-                    Some(
-                        role @ (Role::Sender
-                        | Role::Receiver
-                        | Role::Task
-                        | Role::Socket
-                        | Role::HostFile
-                        | Role::Latest
-                        | Role::Client
-                        | Role::Inbox
-                        | Role::Causes
-                        | Role::Flow
-                        | Role::Secret),
-                    ) => {
-                        let handle = match role {
-                            Role::Sender => Handle::Sender,
-                            Role::Receiver => Handle::Receiver,
-                            Role::Task => Handle::Task,
-                            Role::Latest => Handle::Latest,
-                            Role::Client => Handle::Client,
-                            Role::Inbox => Handle::Inbox,
-                            Role::HostFile => Handle::HostFile,
-                            Role::Socket => Handle::Socket,
-                            Role::Flow => Handle::Flow,
-                            Role::Secret => Handle::Secret,
-                            _ => Handle::Causes,
-                        };
+                    Some(role) if let Some(handle) = role.owned_handle() => {
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         let held = Some(FieldTy::Handle(handle));
                         return self.fill(r, ty, LRepr::Own, body, None, held);
@@ -514,6 +490,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
@@ -610,6 +587,7 @@ impl<T: TyRead> Shapes<'_, T> {
         self.of.retain(|_, r| (r.0 as usize) < mark);
         self.hooks.retain(|(r, ..)| (r.0 as usize) < mark);
         self.tuple_codecs.retain(|(r, _)| (r.0 as usize) < mark);
+        self.key_codecs.retain(|(r, _)| (r.0 as usize) < mark);
     }
 
     /// The table block of a `SeqIndex` of `elem` (MEM-12, MEM-24): the sequence's
@@ -639,6 +617,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
@@ -662,25 +641,16 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Box) => FieldTy::Box(self.shape(args[0])?),
                 Some(Role::Rc) => FieldTy::Rc(self.shape(args[0])?),
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
+                Some(Role::Shared) => FieldTy::Shared(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::FrozenBytes) => FieldTy::FrozenBytes,
-                Some(Role::Map | Role::Log) => FieldTy::Inline(self.shape(ty)?),
+                Some(Role::Map | Role::Cell) => FieldTy::Inline(self.shape(ty)?),
                 Some(Role::StaticFn | Role::FlowEndpoint) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
                 Some(Role::ForeignHandle) => FieldTy::Inline(self.shape(ty)?),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
-                Some(Role::Task) => FieldTy::Handle(Handle::Task),
-                Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
-                Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
-                Some(Role::Latest) => FieldTy::Handle(Handle::Latest),
-                Some(Role::Client) => FieldTy::Handle(Handle::Client),
-                Some(Role::Inbox) => FieldTy::Handle(Handle::Inbox),
-                Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
-                Some(Role::Socket) => FieldTy::Handle(Handle::Socket),
-                Some(Role::Flow) => FieldTy::Handle(Handle::Flow),
-                Some(Role::Secret) => FieldTy::Handle(Handle::Secret),
-                Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
+                Some(role) if let Some(handle) = role.owned_handle() => FieldTy::Handle(handle),
                 Some(Role::Text) => {
                     if compact {
                         FieldTy::Text
@@ -886,6 +856,7 @@ pub(crate) fn recipes(p: &mut Program) {
         hooks: vec![],
         codecs: &crate::StructuralCodecs::NONE,
         tuple_codecs: vec![],
+        key_codecs: vec![],
     };
     let mut roots = vec![];
     for (i, decl) in s.decls.own_iter().enumerate() {

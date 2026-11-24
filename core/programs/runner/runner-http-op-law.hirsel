@@ -1,0 +1,222 @@
+type HttpOpInput: codec { name: String = "saved" }
+
+fn http_op_increment(mut tx: store.Tx, h: HttpLawHandles, _caller: Caller, take input: HttpOpInput) -> Result[u64, ()] {
+    if input.name != "saved" { return Error(()) }
+    let previous = match result.unwrap(store.fetch(tx, h.counter, 0u64)) { Some(n) => n, None => 0u64 }
+    result.unwrap(store.put(mut tx, h.counter, 0u64, previous + 1u64))
+    Ok(previous + 1u64)
+}
+
+fn http_op_binding(r: Registry[(), HttpLawHandles], op: String, path: String, status: u16) -> HttpBinding {
+    let key = http_law_key(r.exported[0u64])
+    let mut fields: List[FieldSource] = list.with_capacity(1u64)
+    list.push(mut fields, FieldSource(field: "name", source: Body))
+    HttpBinding(op: string.from(op), method: Post, path: string.from(path), entry: take key, fields: take fields,
+        mode: Stream, ok_status: status, error_status: 422u16, body_max: 1024u64, arg_max: 65536u64,
+        deadline_ms: 1000u64, steps: DEFAULT_STEPS)
+}
+
+fn http_op_model(_tx: store.Tx, _h: HttpLawHandles, take _input: ()) -> Result[Answer[u64], Capacity] {
+    Ok(Answer(value: 7u64, covers: covers()))
+}
+
+fn http_op_read(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(http_op_model), slots(), 65536u64, DEFAULT_STEPS)?
+    let key = http_law_key(r.exported[1u64])
+    bind(mut r, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(),
+        mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
+}
+
+fn http_op_original(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(http_op_increment), 65536u64, DEFAULT_STEPS)?
+    let first = http_op_binding(r, "keep", "/old", 201u16)
+    bind(mut r, take first)?
+    let second = http_op_binding(r, "remove", "/remove", 201u16)
+    bind(mut r, take second)?
+    http_op_read(mut r)
+}
+
+fn http_op_moved(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(http_op_increment), 65536u64, DEFAULT_STEPS)?
+    let first = http_op_binding(r, "keep", "/new", 201u16)
+    bind(mut r, take first)?
+    http_op_read(mut r)
+}
+
+fn http_op_gone(mut _r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] { Ok(()) }
+
+fn http_op_bad_status(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    http_op_original(mut r)?
+    let wrong = http_op_binding(r, "other", "/other", 200u16)
+    bind(mut r, take wrong)
+}
+
+fn http_op_bind_original(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
+    http_op_bind_value(credential, b"A")
+}
+
+fn http_op_bind_changed(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
+    if credential == b"original-token" { return Ok(BoundCaller(caller: store.Caller(issuer: 7u8, subject: b"A"), expires_at_ms: None)) }
+    http_op_bind_value(credential, b"B")
+}
+
+fn http_op_bind_value(credential: Bytes, subject: Bytes) -> Result[BoundCaller, ()] {
+    if credential != b"token" { return Error(()) }
+    Ok(BoundCaller(caller: store.Caller(issuer: 7u8, subject: std.http.copy_bytes(subject)), expires_at_ms: None))
+}
+
+type HttpOpPlace = StaticFn[fn(mut Registry[(), HttpLawHandles]) -> Result[(), RegisterError]]
+
+type HttpOpListener: send {
+    relay: Relay, listener: Listener, publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
+    place: HttpOpPlace, previous: Option[Describe], retired: Option[HttpRetirements], stage: u8, stop: Option[Receiver[u64]],
+}
+
+fn http_op_serve(take job: HttpOpListener) waits {
+    let HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
+        place: definition, previous: take previous, retired: take retired, stage, stop: take stop) = take job
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let builder: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
+    let (take generated_routes, take plans) = match take retired {
+        Some(take rules) => result.unwrap(http_router_with_retirements(reg, previous, rules, take builder)),
+        None => result.unwrap(http_router(reg, previous, take builder)),
+    }
+    let routes = if stage == 2u8 {
+        let mut fault_routes: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
+        result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/old", 1u64, std.router.raw(http_generated_handler)))
+        result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/fail", 1u64, std.router.raw(l15_fail_after_call)))
+        result.unwrap(std.router.build(take fault_routes))
+    } else { take generated_routes }
+    let reads = http_read_access(pub_to, list.new(), 65536u64)
+    let make: scoped[view] fn() -> HttpConnection[(), HttpLawHandles, ()] = fn() -> HttpConnection[(), HttpLawHandles, ()] {
+        let registry_copy = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+        let supplied: Option[Wire[(), ()]] = match stage {
+            1u8 => Some(wire((), Some(code.describe(http_op_bind_changed)), 8192u64, DEFAULT_STEPS)),
+            2u8 => None,
+            _ => Some(wire((), Some(code.describe(http_op_bind_original)), 8192u64, DEFAULT_STEPS)),
+        }
+        let mut client_state = http_connection(take registry_copy, arc.share(plans), take supplied,
+            relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+        http_enable_reads(mut client_state, http_read_endpoint(reads))
+        take client_state
+    }
+    let mut listeners: List[Listener] = list.with_capacity(1u64)
+    list.push(mut listeners, take listener)
+    let mut cfg = http_law_config()
+    cfg.reads_max = 1u64
+    result.unwrap(http_serve_connections(take listeners, clock, tasks, take cfg, take routes, 2097152u64, make, take stop))
+}
+
+type HttpOpDrive: send {
+    actions: Sender[HeadInput], publisher: Sender[PubIn], net: Net, clock: Clock, random: Random, tasks: Tasks,
+    place: HttpOpPlace, previous: Option[Describe], stage: u8,
+}
+
+fn http_op_drive(take d: HttpOpDrive) waits {
+    let mut registry_copy = result.unwrap(placed(d.place, HTTP_LAW_PLACE_BYTES))
+    if let Some(prior) = d.previous { result.unwrap(retain_http_previous(mut registry_copy, prior)) }
+    let (take relay, take relay_task) = result.unwrap(start_relay(registry_copy, d.actions, d.publisher, d.clock, d.tasks,
+        RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let HttpOpDrive(actions: take actions, publisher: take pub_to, net, clock, random, tasks, place: definition, previous: take prior, stage) = take d
+    let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, retired: None, stage, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
+    match stage {
+        0u8 => {
+            let read = http_law_request("GET", net, clock, address, "/read", b"token", 0u32, 0u64, b"", 1000u32, None)
+            let body = b"{\"version\":\"1\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":\"7\",\"rows\":[]}],\"outcomes\":[]}"
+            if read.status != 200u16 || read.body != body { fail("L-op the one-shot read lost its completing Batch") }
+            let api = http_law_request("GET", net, clock, address, "/.hirsel/openapi.json", b"", 0u32, 0u64, b"", 1000u32, None)
+            let document = result.unwrap(string.from_utf8(std.http.copy_bytes(api.body)))
+            if api.status != 200u16 { fail("L-op OpenAPI route did not serve the registry") }
+            let _ = result.unwrap(std.json.size(document))
+            let first = http_law_post(net, clock, address, "/old", b"token", 0u32, 0u64, b"{}", 1000u32)
+            let second = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", 0u32, 0u64, b"{\"name\":\"saved\"}", 1000u32)
+            if first.status != 201u16 || first.body != b"\"1\"" || first.replayed ||
+                second.status != 201u16 || second.body != first.body || !second.replayed {
+                fail("L-op two operations changed a single store identity")
+            }
+        },
+        1u8 => {
+            let fenced = http_law_post_with_caller(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 0u64,
+                b"{}", 1000u32, Some("BwFB"))
+            if fenced.status != 403u16 || fenced.body != b"{\"refused\":\"fenced\"}" || fenced.committed {
+                fail("L-op a changed Caller was not fenced after restart")
+            }
+            let retried = http_law_post(net, clock, address, "/.hirsel/op/keep", b"original-token", 0u32, 0u64, b"{}", 1000u32)
+            if retried.status != 201u16 || !retried.replayed || retried.body != b"\"1\"" {
+                fail("L-op moving the live route changed its alias identity")
+            }
+            let stopped = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", 0u32, 0u64, b"{}", 1000u32)
+            if stopped.status != 404u16 { fail("L-op a removed alias still routed for a live entry") }
+            let current = http_law_post(net, clock, address, "/new", b"token", 0u32, 0u64, b"{}", 1000u32)
+            if current.status != 201u16 || current.replayed || current.body != b"\"2\"" {
+                fail("L-op the Caller fence or removed alias consumed the new Caller's position")
+            }
+        },
+        _ => {
+            let retry = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 0u64, b"{}", 1000u32)
+            if retry.status != 201u16 || retry.body != b"\"1\"" || !retry.replayed {
+                fail("L-op the gone alias did not replay with its previous status and default")
+            }
+            let fresh = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 1u64, b"{}", 1000u32)
+            if fresh.status != 500u16 || fresh.body != b"{\"fault\":\"gone\"}" || !fresh.committed || fresh.replayed {
+                fail("L-op a fresh identity through a gone alias did not record Gone")
+            }
+        },
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take actions
+}
+
+fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, place: HttpOpPlace, stage: u8) waits {
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, directory, c, r, options))
+    let prepared = head_prepare(mut db, Install, false, place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
+    let (take registered, take handles, _, take identity) = match take prepared {
+        Ok(take ready) => take ready,
+        Error(take issue) => fail(start_text(Open(take issue))),
+    }
+    let mut registry_copy = take registered
+    let previous = result.unwrap(http_previous(db))
+    if let Some(prior) = previous { result.unwrap(retain_http_previous(mut registry_copy, prior)) }
+    let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let drive = HttpOpDrive(actions: take to, publisher: post(mail), net: n, clock: c, random: r, tasks: tasks, place: place, previous: take previous, stage: stage)
+    let work = task.spawn(tasks, bytes 16777216u64, take drive, http_op_drive)
+    result.unwrap(run_head(take db, take registry_copy, take identity, take handles, place, HTTP_LAW_PLACE_BYTES, take inbox, take mail,
+        tasks, 1048576u64, None, None))
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+}
+
+@test
+fn test_l_op(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if let Error(InvalidBinding(BindError(op: second, check: StreamStatus(first)))) =
+        placed(code.describe(http_op_bad_status), HTTP_LAW_PLACE_BYTES) {
+        if second != "other" || first != "keep" { fail("L-op status refusal omitted the operation names") }
+    } else { fail("L-op accepted different statuses for the same entry") }
+    let mut with_query = result.unwrap(placed(code.describe(http_op_moved), HTTP_LAW_PLACE_BYTES))
+    let subscribe_mode: Mode = Subscribe
+    for mode in [Read, subscribe_mode] {
+        let mut invalid: HttpBinding = clone(with_query.bindings[1u64].binding)
+        invalid.op = "created-query"
+        invalid.path = "/created-query"
+        invalid.mode = mode
+        invalid.ok_status = 201u16
+        if let Error(InvalidBinding(BindError(op: op, check: Status))) = bind(mut with_query, take invalid) {
+            if op != "created-query" { fail("L-op query status refusal omitted its operation name") }
+        } else { fail("L-op admitted a 201 query result") }
+    }
+    let mut name = string.with_capacity(32u64)
+    let directory = result.unwrap(host.mkdtemp(parent, mut name))
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_original), 0u8)
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_moved), 1u8)
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_gone), 2u8)
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}

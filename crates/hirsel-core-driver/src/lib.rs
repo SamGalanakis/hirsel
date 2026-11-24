@@ -39,6 +39,7 @@ mod check_index;
 mod executable;
 mod flow;
 mod instances;
+mod law_lock;
 mod native;
 pub mod native_debug;
 mod native_entry;
@@ -85,7 +86,6 @@ mod resident;
 mod reuse;
 mod source_delta;
 mod store;
-use bincode::Options;
 pub use meter::{Measurements, Meter, Stage};
 pub use reuse::DefinitionKey;
 use reuse::{Keys, compiler_identity};
@@ -93,7 +93,7 @@ pub use store::Store;
 pub use tool_inputs::link_driver;
 
 use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
-use hirsel_core_ids::{ContentHash, DefPath, PackageId};
+use hirsel_core_ids::{ContentHash, DefPath, PackageId, encoding};
 use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
@@ -192,7 +192,7 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store, true)?;
+        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store)?;
         if !request.use_image(image)? {
             return Err(io::Error::other(
                 "the image holds packages outside the request",
@@ -202,32 +202,18 @@ impl CheckRequest {
     }
 
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(
-            package_dir::PackageDir::open(dir)?,
-            Some(libraries),
-            store,
-            true,
-        )
+        Self::directory(dir, libraries, store)
     }
 
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(
-            package_dir::PackageDir::open(dir)?,
-            Some(libraries),
-            store,
-            false,
-        )
+        Self::from_app(package_dir::PackageDir::open(dir)?, Some(libraries), store)
     }
 
     pub(crate) fn from_app(
         app: package_dir::PackageDir,
         libraries: Option<&Path>,
         store: &Path,
-        program: bool,
     ) -> io::Result<Self> {
-        let libraries = libraries.filter(|root| {
-            !program || product::normalized(root) != product::normalized(Path::new("core"))
-        });
         let mut packages = Self::library_packages(libraries, app.needs_std())?;
         packages.extend(app.dependencies);
         packages.push(app.package);
@@ -257,16 +243,10 @@ impl CheckRequest {
             else {
                 return Ok(false);
             };
-            if in_image.dependencies != requested.dependencies
-                || directory
-                    .stamps
-                    .get(&in_image.package)
-                    .map(|stamp| stamp.hash)
-                    != Some(
-                        image::stamp(requested, self.manifest.as_deref(), self.entry.as_ref())?
-                            .hash,
-                    )
-            {
+            let Some(stamp) = directory.stamps.get(&in_image.package) else {
+                return Ok(false);
+            };
+            if in_image.dependencies != requested.dependencies || !stamp.matches(requested, self)? {
                 return Ok(false);
             }
         }
@@ -344,7 +324,7 @@ mod body {
     /// hasher costs a dispatched write per encoded field.
     pub(crate) fn ir_hash(module: &Module, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
         scratch.clear();
-        bincode::serialize_into(&mut *scratch, module).map_err(io::Error::other)?;
+        encoding::write_fixed(scratch, module)?;
         Ok(Store::ir_hash(scratch))
     }
     impl DefinitionProduct {
@@ -384,7 +364,7 @@ mod body {
                 scratch.clear();
                 {
                     hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-                    bincode::serialize_into(&mut *scratch, ir).map_err(io::Error::other)?;
+                    encoding::write_fixed(scratch, ir)?;
                 }
                 Ok::<_, io::Error>(Store::frame_body(&head, scratch))
             })?;
@@ -1372,17 +1352,12 @@ impl Checked {
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
     let mut bytes = Vec::with_capacity(64);
-    bincode::serialize_into(&mut bytes, value).map_err(io::Error::other)?;
+    encoding::write_fixed(&mut bytes, value)?;
     Ok(bytes)
 }
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(bytes.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(bytes)
-        .ok()
+    encoding::read_fixed(bytes).ok()
 }
 /// A body record checked under the current key: the one the prior
 /// publication's live row names when the row carries the key, else the one
@@ -1630,7 +1605,6 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
         })
         .collect();
 }
-
 #[cfg(test)]
 #[path = "../../hirsel-core-rt/src/openat2_required.rs"]
 mod openat2_required;

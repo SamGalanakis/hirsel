@@ -128,6 +128,19 @@ def reviewed(source, author):
     return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921', 'core-regions-pools-922'} and match[1] != author)
 
 
+def input_identity(spec):
+    packages = []
+    for package in spec['packages']:
+        sources = []
+        for source in package['sources']:
+            file = Path(source['file'])
+            name = file.relative_to(ROOT) if file.is_relative_to(ROOT) else file
+            sources.append(dict(source, file=str(name), sha256=measurement_artifacts.sha256(file)))
+        packages.append(dict(package, sources=sources))
+    normalized = json.dumps(dict(spec, packages=packages), sort_keys=True)
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
 def suite_source():
     groups = [
         ('Binarytrees::', 'binarytrees'), ('Brainfuck::', 'brainfuck'), ('Base64::', 'base64'),
@@ -258,6 +271,7 @@ def build_samples(args):
         if previous and (previous.get('module') != args.module or previous.get('backend') != args.backend):
             raise ValueError('build resume must use the same module and backend')
         report['resumed_from'] = str(args.resume) if args.resume else None
+        primed = False
         for scenario in ['check-fresh', 'build-fresh', 'build-reuse', 'build-edit']:
             prior = next((row for row in previous['rows'] if row['scenario'] == scenario), None) if previous else None
             if prior and previous.get('toolchain') == args.toolchain and all(sample.get('status') == 'ok' for sample in prior['samples'].values()):
@@ -279,8 +293,12 @@ def build_samples(args):
             samples = {side: value for side, value in prior['samples'].items() if value.get('status') == 'ok' and (side != 'hirsel' or previous.get('toolchain') == args.toolchain)} if prior else {}
             row = {'scenario': scenario, 'samples': samples, 'ratios': {}, 'toolchain': args.toolchain,
                    'source_lines': dict(prior.get('source_lines', previous['source_lines']) if prior else counts)}
+            if 'hirsel' not in samples and scenario in ('build-reuse', 'build-edit') and not primed:
+                samples['hirsel'] = {'status': 'blocked', 'reason': 'no successful fresh build in this store'}
             if 'hirsel' not in samples:
                 samples['hirsel'] = collect(command, out / (scenario + '-hirsel'), True)
+                if scenario == 'build-fresh':
+                    primed = samples['hirsel']['status'] == 'ok'
                 active_spec = check_spec if operation == 'check' else edited_spec if scenario == 'build-edit' else spec
                 packages = [[Path(source['file']) for source in package['sources']] for package in active_spec['packages']]
                 loaded = None
@@ -330,7 +348,7 @@ def main():
     parser.add_argument('--matched-author', choices=['langs-numeric-920', 'langs-text-921'], default='langs-numeric-920')
     parser.add_argument('--matched-args', nargs='*', help='argument templates, e.g. {count} {warmup} {iterations}')
     parser.add_argument('--matched-numeric-output', action='store_true', help='twin prints only the computed checksum')
-    parser.add_argument('--resume', type=Path, help='previous report; reuse its complete samples and run missing sides only')
+    parser.add_argument('--resume', type=Path, help='previous report; reuse complete samples whose inputs match')
     parser.add_argument('--suite', action='store_true', help='build-only: generate one dispatcher for all 50 task sources and compare the full upstream binary')
     funding = parser.add_mutually_exclusive_group()
     funding.add_argument('--limit', type=int, default=67108864, help='documented logical root bytes; record the smallest admitted power of two')
@@ -363,7 +381,8 @@ def main():
         os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
         os.environ['HIRSEL_JOBS'] = '1'
         return build_samples(args)
-    config = json.loads(args.config.read_text())
+    config_bytes = args.config.read_bytes()
+    config = json.loads(config_bytes)
     row = next(c for c in config if c['name'] == args.task) if isinstance(config, list) else config[args.task]
     args.out = args.out.resolve()
     args.out.mkdir(parents=True)
@@ -379,59 +398,73 @@ def main():
               'platform': dict(system=os.uname().sysname, release=os.uname().release, machine=os.uname().machine),
               'profiles': 'rustc1.99.0; x86-64; overflow-checks=on; codegen-units=1; no LTO; upstream edition2021, matched2024',
               'hirsel_compiler': str(args.compiler.resolve()), 'runtime': str(args.runtime.resolve())}
+    previous = None
     if args.resume:
         previous = json.loads(args.resume.read_text())
         if previous['task'] != args.task or previous['backend'] != args.backend or previous.get('configuration') != row:
             parser.error('--resume must name the same task, backend and config')
         report['resumed_from'] = str(args.resume.resolve())
-        report['samples'] = {key: value for key, value in previous['samples'].items() if value.get('status') == 'ok' and (key != 'hirsel' or previous.get('root_bytes', 67108864) == args.limit and previous.get('toolchain') == args.toolchain)}
+    samples = report['samples']
     try:
         with tempfile.TemporaryDirectory(prefix='langarena-host-', dir=args.out) as tmp:
             host = Path(tmp)
             config_file = host / 'config.json'
-            config_file.write_bytes(args.config.read_bytes())
+            config_file.write_bytes(config_bytes)
             manifest = args.out / 'inputs.json'
-            manifest.write_text(json.dumps(inputs(ROOT, args.module)))
+            spec = inputs(ROOT, args.module)
+            manifest.write_text(json.dumps(spec))
             binary = args.out / 'hirsel'
+            entry = f'langarena@1/{args.module}/main'
             build = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--entry',
-                     f'langarena@1/{args.module}/main', '--backend', args.backend,
+                     entry, '--backend', args.backend,
                      '--runtime', str(args.runtime.resolve()), '--store', str(host / 'store'),
                      *grant_args(args.module, host), '--limit', str(args.limit), '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')
-            if 'hirsel' not in report['samples'] or args.profile_always:
+            shared = dict(task=args.task, backend=args.backend, config_sha256=hashlib.sha256(config_bytes).hexdigest())
+            identities = {'hirsel': dict(shared, entry=entry, inputs_sha256=input_identity(spec),
+                                         root_bytes=args.limit, toolchain=args.toolchain)}
+            idiomatic = [str(args.idiomatic.resolve()), str(config_file), args.task]
+            if args.idiomatic.is_file():
+                identities['idiomatic'] = dict(shared, argv=[idiomatic[0], 'config.json', args.task],
+                                               binary_sha256=measurement_artifacts.sha256(args.idiomatic))
+            if args.matched and args.matched.is_file() and args.matched_source and reviewed(args.matched_source, args.matched_author):
+                matched = matched_command(args.matched, args.task, row)
+                if args.matched_args is not None:
+                    fields = dict(row, warmup=row.get('warmup_iterations', max(int(row['iterations'] * 0.2), 1)))
+                    matched = [matched[0], *[arg.format_map(fields) for arg in args.matched_args]]
+                identities['matched'] = dict(shared, argv=matched, numeric_output=args.matched_numeric_output,
+                                             binary_sha256=measurement_artifacts.sha256(args.matched),
+                                             reviewed_source_sha256=measurement_artifacts.sha256(args.matched_source))
+            if previous:
+                for side, identity in identities.items():
+                    sample = previous['samples'].get(side, {})
+                    if sample.get('status') == 'ok' and sample.get('identity') == identity:
+                        samples[side] = sample
+            if 'hirsel' not in samples or args.profile_always:
                 wait_load()
                 built = subprocess.run(build, capture_output=True)
                 (args.out / 'build.stdout').write_bytes(built.stdout)
                 (args.out / 'build.stderr').write_bytes(built.stderr)
                 if built.returncode:
-                    if 'hirsel' not in report['samples']:
-                        report['samples']['hirsel'] = {'status': f'build-exit:{built.returncode}'}
+                    if 'hirsel' not in samples:
+                        samples['hirsel'] = {'status': f'build-exit:{built.returncode}'}
                     else:
                         report['profile_build_status'] = built.returncode
                 else:
-                    if 'hirsel' not in report['samples']:
-                        report['samples']['hirsel'] = observe([str(binary), 'config.json', args.task],
+                    if 'hirsel' not in samples:
+                        samples['hirsel'] = observe([str(binary), 'config.json', args.task],
                             args.out / 'hirsel-run', args.task, row['checksum'])
-            if 'idiomatic' in report['samples']:
-                pass
-            elif args.idiomatic.is_file():
-                report['samples']['idiomatic'] = observe([str(args.idiomatic.resolve()), str(config_file), args.task],
-                    args.out / 'idiomatic-run', args.task, row['checksum'], idiomatic=True)
-            else:
-                report['samples']['idiomatic'] = {'status': 'missing-binary'}
-            if 'matched' in report['samples']:
-                pass
-            elif args.matched and args.matched.is_file() and args.matched_source and reviewed(args.matched_source, args.matched_author):
-                command = matched_command(args.matched, args.task, row)
-                if args.matched_args is not None:
-                    fields = dict(row, warmup=row.get('warmup_iterations', max(int(row['iterations'] * 0.2), 1)))
-                    command = [str(args.matched.resolve()), *[arg.format_map(fields) for arg in args.matched_args]]
-                report['samples']['matched'] = observe(command, args.out / 'matched-run', args.task, row['checksum'], numeric=args.matched_numeric_output)
-            else:
-                report['samples']['matched'] = {'status': 'blocked: missing binary or independent review'}
+            if 'idiomatic' not in samples:
+                samples['idiomatic'] = (observe(idiomatic, args.out / 'idiomatic-run', args.task, row['checksum'], idiomatic=True)
+                                        if 'idiomatic' in identities else {'status': 'missing-binary'})
+            if 'matched' not in samples:
+                samples['matched'] = (observe(matched, args.out / 'matched-run', args.task, row['checksum'], numeric=args.matched_numeric_output)
+                                      if 'matched' in identities else {'status': 'blocked: missing binary or independent review'})
+            for side, identity in identities.items():
+                samples[side]['identity'] = identity
             for twin in ['idiomatic', 'matched']:
-                report['ratios'][twin] = ratio(report['samples']['hirsel'], report['samples'][twin])
+                report['ratios'][twin] = ratio(samples['hirsel'], samples[twin])
             if binary.is_file() and (args.profile_always or args.profile and any(r.get('instructions', 0) > 2 for r in report['ratios'].values())):
                 data = args.out / 'perf.data'
                 with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:

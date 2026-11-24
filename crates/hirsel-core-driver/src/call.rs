@@ -6,7 +6,7 @@
 //! connection is made. The specification is docs/spec/sdk.md, "Calling an
 //! entry from the terminal".
 use crate::cli::{Invocation, OptionId};
-use crate::sdk::{Describe, Exported, Schema, stub_name};
+use crate::sdk::{Describe, Exported, Schema, stub_paths};
 use serde_json::{Map, Number, Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -26,7 +26,7 @@ pub struct Options {
     pub n_place: u64,
     pub place_timeout: Duration,
     pub timeout: Duration,
-    pub build: Vec<String>,
+    stream: Option<(u64, u64)>,
     /// The entry name and its flags, after `--`.
     pub call: Vec<String>,
 }
@@ -55,7 +55,7 @@ impl Options {
             n_place: 16 * 1024 * 1024,
             place_timeout: Duration::from_secs(10),
             timeout: Duration::from_secs(10),
-            build: Vec::new(),
+            stream: None,
             call: invocation.arguments,
         };
         for (id, value) in invocation.options {
@@ -71,16 +71,16 @@ impl Options {
                     options.place_timeout = seconds("--place-timeout", &text)?
                 }
                 OptionId::CallTimeout => options.timeout = seconds("--timeout", &text)?,
-                OptionId::Runtime | OptionId::Cc => {
-                    options.build.push(
-                        if id == OptionId::Runtime {
-                            "--runtime"
-                        } else {
-                            "--cc"
-                        }
-                        .into(),
-                    );
-                    options.build.push(text);
+                OptionId::CallStream => {
+                    let bytes: [u8; 16] =
+                        from_hex(&text)
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .ok_or("--stream expects exactly 32 hexadecimal digits")?;
+                    let (t, n) = bytes.split_at(8);
+                    options.stream = Some((
+                        u64::from_be_bytes(t.try_into()?),
+                        u64::from_be_bytes(n.try_into()?),
+                    ));
                 }
                 _ => return Err("unsupported call option".into()),
             }
@@ -141,7 +141,7 @@ fn run_with(
         .into());
     }
     let result = Schema::read(&entry.result)?;
-    // Every argument is typed before the Frame probe or any connection.
+    // Every argument is typed before connecting.
     let argument = arguments(&args, &flags)?;
     let url = Url::parse(
         options
@@ -149,21 +149,8 @@ fn run_with(
             .as_deref()
             .ok_or("call requires --url ws://HOST:PORT/PATH")?,
     )?;
-    let work = tempfile::tempdir()?;
-    let frame = Schema::read(&crate::sdk_command::frame_schema(
-        &std::env::current_exe()?,
-        work.path(),
-        &options.build,
-    )?)?;
-    let outcome = exchange(
-        &url,
-        &frame,
-        &description,
-        name,
-        entry,
-        argument,
-        options.timeout,
-    )?;
+    let frame = Schema::read(crate::sdk_command::FRAME_SCHEMA)?;
+    let outcome = exchange(&url, &frame, &description, name, entry, argument, &options)?;
     let returned = outcome["tag"] == "Returned";
     let shown = if returned {
         let bytes = from_hex(outcome["value"].as_str().unwrap_or_default())
@@ -176,20 +163,16 @@ fn run_with(
     Ok(if returned { 0 } else { 1 })
 }
 
+/// Each entry under its terminal name, `MODULE/NAME` (docs/spec/sdk.md).
 fn named(description: &Describe) -> Result<Vec<(String, &Exported)>, Error> {
-    let mut entries: Vec<(String, &Exported)> = Vec::new();
-    for entry in &description.exported {
-        let name = stub_name(&entry.identity)?;
-        if let Some((_, old)) = entries.iter().find(|(n, _)| *n == name) {
-            return Err(format!(
-                "DuplicateStubName({:?}, {:?})",
-                old.identity, entry.identity
-            )
-            .into());
-        }
-        entries.push((name, entry));
-    }
-    Ok(entries)
+    Ok(stub_paths(description)?
+        .into_iter()
+        .zip(&description.exported)
+        .map(|(path, entry)| {
+            let (name, module) = path.split_last().expect("stub path has a module");
+            (format!("{}/{name}", module.join(".")), entry)
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -333,18 +316,14 @@ fn listing(description: &Describe, entries: &[(String, &Exported)]) -> Result<St
             result
         ));
     }
-    out.push_str("\nUse -- ENTRY --help for one entry's flags and types.\n");
+    out.push_str("\nUse -- MODULE/NAME --help for one entry's flags and types.\n");
     Ok(out)
 }
 
 fn result_types(entry: &Exported) -> Result<(String, Vec<Schema>), Error> {
     let name = |schema: &Schema| type_name(&schema.root, &schema.definitions);
     if entry.kind == 2 {
-        let (key, row) = entry.row_schemas()?;
-        Ok((
-            format!("rows[{}, {}]", name(&key), name(&row)),
-            vec![key, row],
-        ))
+        Ok(entry.query_schemas()?.describe_types(name))
     } else {
         let result = Schema::read(&entry.result)?;
         Ok((name(&result), vec![result]))
@@ -526,7 +505,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn from_hex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_hex(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -948,7 +927,7 @@ fn float(x: f64, canonical_nan: bool) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// One RFC 6455 client session speaking hirsel.2
+// One RFC 6455 client session speaking hirsel.4
 
 struct Url {
     host: String,
@@ -989,7 +968,7 @@ impl Url {
     }
 }
 
-fn random<const N: usize>() -> Result<[u8; N], Error> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], Error> {
     let mut bytes = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes)
@@ -1020,7 +999,7 @@ impl Session {
         };
         let key = base64(&random::<16>()?);
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.2\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
             url.path, url.host, url.port
         );
         session.stream.write_all(request.as_bytes())?;
@@ -1054,8 +1033,8 @@ impl Session {
         if header("Sec-WebSocket-Accept").as_deref() != Some(accept.as_str()) {
             return Err("server's Sec-WebSocket-Accept does not answer our key".into());
         }
-        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.2") {
-            return Err("server did not select the hirsel.2 subprotocol".into());
+        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.4") {
+            return Err("server did not select the hirsel.4 subprotocol".into());
         }
         Ok(session)
     }
@@ -1175,8 +1154,8 @@ impl Session {
     }
 }
 
-/// Hello for one entry, Welcome, Placed, then one Call on a fresh anonymous
-/// Caller (stream 0, position 0). The Call is sent only once the server has
+/// Hello for one entry, Welcome, Placed, then one Call at position 0.
+/// The Call is sent only once the server has
 /// placed the entry under the Describe fingerprints; it is never resent.
 fn exchange(
     url: &Url,
@@ -1185,31 +1164,28 @@ fn exchange(
     name: &str,
     entry: &Exported,
     argument: Vec<u8>,
-    timeout: Duration,
+    options: &Options,
 ) -> Result<Value, Error> {
+    let timeout = options.timeout;
     let deadline = Instant::now() + timeout;
     let mut session = Session::open(url, deadline)?;
     let want = json!({"identity": hex(&entry.identity), "args_fp": entry.args_fp, "result_fp": entry.result_fp});
     let hello = json!({"tag": "Hello", "values": [{"tag": "None"}, [want]]});
     session.send(0x2, &encode(frame, &hello)?)?;
-    let mut welcomed = false;
+    let mut stream = None;
     let mut sent = false;
     let deadline_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     loop {
         let bytes = match session.message() {
             Ok(bytes) => bytes,
-            Err(error) if sent => {
-                return Err(
-                    format!("{error}; the call was sent once and its outcome is unknown").into(),
-                );
-            }
+            Err(error) if sent => return Err(format!("LocallyUnknown: {error}").into()),
             Err(error) => return Err(error),
         };
         let received = decode(frame, &bytes).map_err(|e| format!("server frame: {e}"))?;
         let (tag, _) = tagged(&received, "server frame")?;
         let values = &received["values"];
         match tag {
-            "Welcome" if !welcomed => {
+            "Welcome" if stream.is_none() => {
                 let subject = values[0]["subject"]
                     .as_str()
                     .and_then(from_hex)
@@ -1217,7 +1193,12 @@ fn exchange(
                 if subject.len() > 64 {
                     return Err("Welcome Caller subject exceeds 64 bytes".into());
                 }
-                welcomed = true;
+                let now = values[6].as_u64().ok_or("Welcome has no keyed time")?;
+                let (t, n) = match options.stream {
+                    Some(id) => id,
+                    None => (now, u64::from_le_bytes(random::<8>()?)),
+                };
+                stream = Some(json!({"t": t, "n": n}));
                 let digest = from_hex(values[3].as_str().unwrap_or_default()).unwrap_or_default();
                 let target = values[4].as_str().unwrap_or_default();
                 let n_place = values[5].as_u64().unwrap_or_default();
@@ -1237,13 +1218,15 @@ fn exchange(
                     .into());
                 }
             }
-            "Placed" if welcomed && !sent => {
+            "Placed" if stream.is_some() && !sent => {
                 let (placed, _) = tagged(&received["value"], "Placed")?;
                 match placed {
                     "Ready" => {
                         let slot = &received["value"]["value"];
-                        let call = json!({"tag": "Call", "values": [0, 0, slot, deadline_ms, hex(&argument)]});
-                        session.send(0x2, &encode(frame, &call)?)?;
+                        let call = json!({"tag": "Call", "values": [stream, 0, slot, deadline_ms, hex(&argument)]});
+                        session
+                            .send(0x2, &encode(frame, &call)?)
+                            .map_err(|error| format!("LocallyUnknown: {error}"))?;
                         sent = true;
                     }
                     "Gone" => {
@@ -1269,13 +1252,13 @@ fn exchange(
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .find(|d| d["stream"] == 0 && d["p"] == 0)
+                    .find(|d| Some(&d["stream"]) == stream.as_ref() && d["p"] == 0)
                 {
                     session.close();
                     return Ok(done["outcome"].clone());
                 }
             }
-            "Batch" | "Ended" if welcomed => {}
+            "Batch" | "Ended" if stream.is_some() => {}
             other => {
                 session.close();
                 return Err(format!("server sent {other} out of order").into());
@@ -1287,7 +1270,7 @@ fn exchange(
 // ---------------------------------------------------------------------------
 // RFC 3174 SHA-1 and RFC 4648 base64, for the RFC 6455 accept check only.
 
-fn sha1(data: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let mut padded = data.to_vec();
     padded.push(0x80);
@@ -1350,66 +1333,4 @@ pub(crate) fn base64(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn call_wrong_typed_flags_refuse_before_any_connection() {
-        // Bug: encoding a flag without checking it against the Describe schema.
-        // Oracle: docs/spec/sdk.md, "Calling an entry from the terminal": a flag
-        // that does not fit its type is refused before anything is sent.
-        // Args = record R { n: u64, label: String }; the server is a stub that
-        // only answers Describe, and --url names a port nothing listens on, so
-        // an unchecked flag would fail later with a probe or connect error.
-        let dir = tempfile::tempdir().unwrap();
-        let mut args = vec![3u8, 1, 0, 0, 0, 1, 0, 0, 0, b'R', 0, 0, 0, 0, 0, 2, 0, 0, 0];
-        args.extend([0, 1, 0, 0, 0, b'n', 6]);
-        args.extend([0, 5, 0, 0, 0]);
-        args.extend(b"label");
-        args.extend([13, 19, 0, 0, 0, 0]);
-        let identity = b"\x01app@1/m/record(take app@1/m/R)->u64";
-        let mut describe = Vec::new();
-        let blob = |out: &mut Vec<u8>, b: &[u8]| {
-            out.extend((b.len() as u32).to_le_bytes());
-            out.extend(b);
-        };
-        blob(&mut describe, &[]);
-        blob(&mut describe, b"t");
-        describe.extend(17u64.to_le_bytes());
-        describe.extend(1u32.to_le_bytes());
-        describe.extend(0u32.to_le_bytes());
-        blob(&mut describe, identity);
-        blob(&mut describe, &args);
-        blob(&mut describe, &[3, 0, 0, 0, 0, 6]);
-        describe.extend(1u64.to_le_bytes());
-        describe.extend(2u64.to_le_bytes());
-        blob(&mut describe, &[]);
-        let server = dir.path().join("server");
-        std::fs::write(&server, []).unwrap();
-        let attempt = |flags: &[&str]| {
-            let mut call = vec!["record".to_owned()];
-            call.extend(flags.iter().map(|f| (*f).to_owned()));
-            let options = Options {
-                server: server.clone(),
-                url: Some("ws://127.0.0.1:1/".into()),
-                n_place: 17,
-                place_timeout: Duration::from_secs(1),
-                timeout: Duration::from_secs(1),
-                build: vec![],
-                call,
-            };
-            run_with(options, |_, _, _| Ok(describe.clone()))
-                .unwrap_err()
-                .to_string()
-        };
-        assert_eq!(
-            attempt(&["--n", "seven", "--label", "x"]),
-            "--n expects u64: `seven` is not a decimal integer"
-        );
-        assert_eq!(
-            attempt(&["--n", "18446744073709551616", "--label", "x"]),
-            "--n expects u64: 18446744073709551616 is outside 0..=18446744073709551615"
-        );
-        assert_eq!(attempt(&["--label", "x"]), "missing --n u64");
-    }
-}
+mod tests;

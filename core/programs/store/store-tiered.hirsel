@@ -1,0 +1,125 @@
+// Build the replacement root from the same sealed image the cut writes.
+// The old root and its Hot slots still belong to prior captures.
+fn sealed_tiered_root(root: Arc[std.page.Page], locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[Arc[std.page.Page], Error] {
+    let image = std.page.image_of(root)
+    if std.page.count(image) == 0 {
+        return Ok(arc.share(root))
+    }
+    let mut sealed: Bytes = list.with_capacity(std.page.sealed_size(image))
+    page_result(std.page.seal_located(mut sealed, root, locate))?
+    let ready = page_result(std.page.decode(take sealed, Collection))?
+    page_result(std.page.attach_cold(take ready))
+}
+
+type ReplacedFrame: key {
+    pack: u64,
+    len: u32,
+    stamp: u64
+}
+
+type BranchReplacements: send {
+    branch: u32,
+    frames: List[ReplacedFrame]
+}
+
+// §13.8: each replaced-list row is charged 24 bytes (`branch u32, pack u64,
+// len u32, stamp u64`) and each dropped-list row one 48-byte slot, with the
+// dirty Tiered bytes.
+const REPLACED_ROW: u64 = 24
+const DROPPED_ROW: u64 = 48
+
+// The live replaced and dropped lists since the installed cut (§13.6a T8).
+// The cut that publishes them clears both.
+type TieredDirty: send {
+    replaced: List[BranchReplacements],
+    replaced_rows: u64,
+    dropped: List[DeferredFree]
+}
+
+fn clean_tiered_cut() -> TieredDirty {
+    TieredDirty(replaced: list.new(), replaced_rows: 0, dropped: list.new())
+}
+
+fn replaced_page(ptr: std.page.PagePtr) -> ReplacedFrame {
+    ReplacedFrame(pack: ptr.pack, len: ptr.len, stamp: ptr.stamp)
+}
+
+fn replaced_blob(reference: std.page.BlobRef) -> ReplacedFrame {
+    ReplacedFrame(pack: reference.pack, len: int.truncate(8 + reference.len), stamp: reference.stamp)
+}
+
+// One commit's Cold frames that its plan stopped reaching: replaced edges,
+// and subtrees or blobs a Log floor detached.
+type TieredFreed: send {
+    replaced: List[ReplacedFrame],
+    dropped: List[TieredTarget]
+}
+
+fn no_tiered_freed() -> TieredFreed {
+    TieredFreed(replaced: list.new(), dropped: list.new())
+}
+
+// Admission before the commit is decided: the lists' charge must fit
+// `dirty_bytes`, and the room is reserved so the apply cannot fail.
+fn reserve_tiered_commit(mut dirty: TieredDirty, freed: TieredFreed, limit: u64) -> Result[(), Error] {
+    let replaced_rows = int.saturating_add(dirty.replaced_rows, list.len(freed.replaced))
+    let dropped_rows = int.saturating_add(list.len(dirty.dropped), list.len(freed.dropped))
+    let requested = int.saturating_add(int.saturating_mul(replaced_rows, REPLACED_ROW), int.saturating_mul(dropped_rows, DROPPED_ROW))
+    if requested > limit {
+        return Error(Full(Resident(Capacity(requested: requested, available: limit))))
+    }
+    if list.len(freed.replaced) != 0 {
+        capacity(list.try_reserve(mut dirty.replaced, 1))?
+    }
+    capacity(list.try_reserve(mut dirty.dropped, list.len(freed.dropped)))?
+    Ok(())
+}
+
+fn admit_tiered_commit(mut dirty: TieredDirty, br: u32, take freed: TieredFreed) {
+    let TieredFreed(replaced: take replaced, dropped: take dropped) = take freed
+    dirty.replaced_rows += list.len(replaced)
+    if list.len(replaced) != 0 {
+        list.push(mut dirty.replaced, BranchReplacements(branch: br, frames: take replaced))
+    }
+    for take target in take dropped {
+        list.push(mut dirty.dropped, DeferredFree(branch_id: br, target: take target))
+    }
+}
+
+// The deciding and proposed collection maps are Memory. Settling a commit
+// needs only their descriptors and its final staged puts (§13.1, §13.8).
+fn tiered_data_key(tree: PageTree, key: Bytes) -> bool {
+    let Some(descriptor) = std.page.lookup(tree.root, list.slice(key, 0, 4)) else {
+        return false
+    }
+    descriptor[53u64] == 1
+}
+
+fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: PageTree, operations: DataRows) -> Result[u64, Error] {
+    let order = capacity(data_order(operations))?
+    let mut prior_collection: Option[u32] = None
+    let mut charged = total
+    for slot in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot)
+        let id = list.slice(op.key, 0, 4)
+        let Some(before) = std.page.lookup(base.root, id) else {
+            continue
+        }
+        if before[53u64] != 1 {
+            continue
+        }
+        if retained {
+            if let Some(raw) = view op.value {
+                charged = replay_charge("MANIFEST", charged, 0, entry(op.key, staged_bytes(raw)))?
+            }
+        } else {
+            let collection: u32 = list.word_be(id, 0)
+            if prior_collection != Some(collection) {
+                prior_collection = Some(collection)
+                let after = option.unwrap(std.page.lookup(proposed.root, id))
+                charged = replay_charge("MANIFEST", charged, list.word_le(before, 44), list.word_le(after, 44))?
+            }
+        }
+    }
+    Ok(charged)
+}

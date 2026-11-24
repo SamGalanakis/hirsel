@@ -49,12 +49,28 @@
 using namespace llvm;
 using hirsel_llvm::versionLoop;
 
+// Argument promotion replaces functions but copies their function attributes.
+// Consume this marker before keying the tail or emitting a definition.
+static constexpr StringLiteral TailChanged = "hirsel.post-o3-changed";
+
+extern "C" void hirsel_llvm_note_tail_change(LLVMValueRef Raw) {
+  unwrap<Function>(Raw)->addFnAttr(TailChanged);
+}
+
+extern "C" LLVMBool hirsel_llvm_take_tail_change(LLVMValueRef Raw) {
+  auto &F = *unwrap<Function>(Raw);
+  if (!F.hasFnAttribute(TailChanged)) return false;
+  F.removeFnAttr(TailChanged);
+  return true;
+}
+
 // Let LLVM use the checked end to discharge redundant guards first. A
 // surviving end check for adjacent offsets can use a length limit without
 // replacing checks that already share an end offset with the loop.
-extern "C" void hirsel_llvm_fixed_width_checks(LLVMValueRef Raw) {
+extern "C" LLVMBool hirsel_llvm_fixed_width_checks(LLVMValueRef Raw) {
   auto &F = *unwrap<Function>(Raw);
   using namespace llvm::PatternMatch;
+  bool Changed = false;
     for (BasicBlock &BB : F) {
       auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
       if (!Branch) continue;
@@ -82,7 +98,9 @@ extern "C" void hirsel_llvm_fixed_width_checks(LLVMValueRef Raw) {
       Value *Limit = B.CreateSub(Length, Width);
       Branch->setCondition(B.CreateAnd(HasWidth, B.CreateICmpULE(Start, Limit)));
       RecursivelyDeleteTriviallyDeadInstructions(Condition);
+      Changed = true;
     }
+  return Changed;
 }
 
 extern "C" void hirsel_llvm_prepay_step_trees(void *Raw) {
@@ -226,6 +244,7 @@ public:
       cantFail(PB.parsePassPipeline(Clean,
           "instcombine<no-verify-fixpoint>,simplifycfg,loop-simplify,lcssa,loop-vectorize,instcombine<no-verify-fixpoint>,simplifycfg"));
       Clean.run(F, AM);
+      hirsel_llvm_note_tail_change(wrap(&F));
       return PreservedAnalyses::none();
     }
     return PreservedAnalyses::all();
@@ -802,7 +821,7 @@ static bool forwardRecordJoins(Function &F, FunctionAnalysisManager &AM) {
   return Changed;
 }
 
-static void finishReads(Function &F, FunctionAnalysisManager &FAM, FunctionPassManager &Clean) {
+static bool finishReads(Function &F, FunctionAnalysisManager &FAM, FunctionPassManager &Clean) {
       DenseSet<BasicBlock *> Done;
       for (;;) {
         auto &LI = FAM.getResult<LoopAnalysis>(F);
@@ -823,7 +842,9 @@ static void finishReads(Function &F, FunctionAnalysisManager &FAM, FunctionPassM
       if (Forwarded) FAM.invalidate(F, PreservedAnalyses::none());
       const bool Records = forwardRecordJoins(F, FAM);
       if (Records) FAM.invalidate(F, PreservedAnalyses::none());
-      if (Records || BoundedCursors || Forwarded || !Done.empty()) Clean.run(F, FAM);
+      bool Changed = Records || BoundedCursors || Forwarded || !Done.empty();
+      if (Changed) Clean.run(F, FAM);
+      return Changed;
 }
 
 // The step word is private runtime storage. Once calls have been inlined,
@@ -919,11 +940,12 @@ extern "C" void hirsel_llvm_inline_snapshot_calls(void *Raw) {
 
 // Select an immediate multiply for byte strides that otherwise require an
 // x86 LEA and a shift. Keep address arithmetic visible until after IR passes.
-static void lowerX86IndexStrides(Function &F) {
+static bool lowerX86IndexStrides(Function &F) {
   auto &M = *F.getParent();
-  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return false;
   const auto &DL = M.getDataLayout();
-  if (DL.getIndexSizeInBits(0) != 64) return;
+  if (DL.getIndexSizeInBits(0) != 64) return false;
+  bool Changed = false;
   for (BasicBlock &BB : F) {
     for (auto I = BB.begin(); I != BB.end();) {
       auto *GEP = dyn_cast<GetElementPtrInst>(&*I++);
@@ -955,8 +977,10 @@ static void lowerX86IndexStrides(Function &F) {
       auto *Address = B.CreateGEP(B.getInt8Ty(), GEP->getPointerOperand(), Bytes);
       GEP->replaceAllUsesWith(Address);
       GEP->eraseFromParent();
+      Changed = true;
     }
   }
+  return Changed;
 }
 
 static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
@@ -989,6 +1013,12 @@ static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
 // parser cycles take in each other's whole recursion. A helper's own
 // recursion into a caller outside its cycle keeps the depth bound alone:
 // Queens' search specializes 8 levels into its driver loop.
+// A caller in a call-graph cycle of several functions (the list sorts, the
+// JSON writer) expands helpers on a quarter of the budget: the whole budget
+// cost 1.5G cold compile instructions in the sorts and sped no runtime row.
+// A quarter still takes in the JSON writer's string helper (ParseDom +4%
+// without it). A caller recursive only into itself keeps the whole budget:
+// Towers' disk loop runs 3.4% more instructions on a quarter.
 // A slow path of loop L: between L's header and BB, the dominator chain
 // enters a block only through a two-way edge whose weights make it rarer than
 // one in eight. Those are Hirsel's 2000:1 failure and growth weights and the
@@ -1024,6 +1054,8 @@ static void inlineLoopHelpers(Module &M) {
     auto I = Scc.find(A), J = Scc.find(B);
     return I != Scc.end() && J != Scc.end() && I->second == J->second;
   };
+  DenseMap<unsigned, unsigned> SccSizes;
+  for (auto &[G, N] : Scc) ++SccSizes[N];
   for (Function &F : M) {
     // A lent body is a helper here, never a caller.
     if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
@@ -1079,7 +1111,8 @@ static void inlineLoopHelpers(Module &M) {
       }
     }
     DenseSet<size_t> ExpandedUnwinds;
-    constexpr unsigned Limit = 2048;
+    auto Cycle = Scc.find(&F);
+    const unsigned Limit = Cycle != Scc.end() && SccSizes[Cycle->second] > 1 ? 512 : 2048;
     unsigned Budget = Limit;
     DenseMap<const DISubprogram *, unsigned> SourceBudgets;
     while (!Pending.empty()) {
@@ -1126,6 +1159,7 @@ static void inlineLoopHelpers(Module &M) {
           Pending.push_back({Site, int(History.size()) - 1, 0, Origin});
       }
     }
+    if (!History.empty()) hirsel_llvm_note_tail_change(wrap(&F));
   }
 }
 extern "C" void hirsel_llvm_promote_development_slots(void *ModuleRef) {
@@ -1204,6 +1238,7 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
     for (ReturnInst *R : Returns) { B.SetInsertPoint(R); Write(); }
     DominatorTree DT(F);
     PromoteMemToReg({Counter}, DT);
+    hirsel_llvm_note_tail_change(wrap(&F));
   }
 }
 
@@ -1321,6 +1356,7 @@ extern "C" void hirsel_llvm_inline_recursive_leaves(void *Raw) {
       for (auto *Call : Recursions)
         inlineRecursiveLeaf(*Call, *Leaf, Arg->getArgNo(), *Value);
       Leaf->eraseFromParent();
+      hirsel_llvm_note_tail_change(wrap(&F));
       break;
     }
   }
@@ -1718,19 +1754,21 @@ static bool exactStepRefill(BasicBlock &Slow, BinaryOperator &After,
   return false;
 }
 
-static void reuseStepFlags(Function &F) {
+static bool reuseStepFlags(Function &F) {
   auto &M = *F.getParent();
-  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return;
+  if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) return false;
   auto *Refill = M.getFunction("hirsel_core_step_out");
-  if (!Refill) return;
+  if (!Refill) return false;
   auto *Word = Type::getInt64Ty(M.getContext());
+  bool Changed = false;
   for (BasicBlock &BB : F) {
     auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
     auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
     if (!Cmp || !Cmp->hasOneUse()) continue;
     auto *After = dyn_cast<BinaryOperator>(Cmp->getOperand(0));
     auto *Limit = dyn_cast<ConstantInt>(Cmp->getOperand(1));
-    if (!After || After->getParent() != &BB || After->getType() != Word || !Limit) continue;
+    if (!After || After->getParent() != &BB || After->getType() != Word || !Limit ||
+        After->hasNoSignedWrap()) continue;
     unsigned SlowEdge;
     if (Cmp->getPredicate() == ICmpInst::ICMP_SGT && Limit->isZero()) SlowEdge = 1;
     else if (Cmp->getPredicate() == ICmpInst::ICMP_SLT && Limit->isOne()) SlowEdge = 0;
@@ -1743,7 +1781,9 @@ static void reuseStepFlags(Function &F) {
     if (Slow == Ready || Slow->getSinglePredecessor() != &BB ||
         !exactStepRefill(*Slow, *After, *Refill, M.getDataLayout())) continue;
     After->setHasNoSignedWrap();
+    Changed = true;
   }
+  return Changed;
 }
 
 // The release tail: cleanup's function passes and the native read and check
@@ -1779,15 +1819,27 @@ struct ReleaseTail {
         "simplifycfg,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg"));
   }
 
-  void run(Function &F) {
-    Passes.run(F, FAM);
+  bool lower(Function &F) {
     FAM.invalidate(F, PreservedAnalyses::none());
-    hirsel_llvm_fixed_width_checks(wrap(&F));
-    finishReads(F, FAM, Clean);
-    lowerX86IndexStrides(F);
-    reuseStepFlags(F);
+    bool Changed = hirsel_llvm_fixed_width_checks(wrap(&F));
+    Changed |= finishReads(F, FAM, Clean);
+    Changed |= lowerX86IndexStrides(F);
+    Changed |= reuseStepFlags(F);
     FAM.invalidate(F, PreservedAnalyses::none());
-    hirsel_llvm::CountedExitSplitPass().run(F, FAM);
+    return !hirsel_llvm::CountedExitSplitPass().run(F, FAM).areAllPreserved() || Changed;
+  }
+
+  void run(Function &F, bool Changed) {
+    if (Changed) {
+      Passes.run(F, FAM);
+      lower(F);
+    } else if (lower(F)) {
+      FAM.invalidate(F, PreservedAnalyses::none());
+      Passes.run(F, FAM);
+      // SimplifyCFG can fuse a counted exit again. Do not repeat read
+      // versioning, which could version the original fallback loop again.
+      hirsel_llvm::CountedExitSplitPass().run(F, FAM);
+    }
     FAM.clear(F, F.getName());
   }
 };
@@ -1796,14 +1848,16 @@ struct ReleaseTail {
 extern "C" void *hirsel_llvm_tail_open(LLVMModuleRef Module, LLVMTargetMachineRef Machine) {
   return new ReleaseTail(*unwrap(Module), reinterpret_cast<TargetMachine *>(Machine));
 }
-extern "C" void hirsel_llvm_tail_run(void *Tail, LLVMValueRef Function) {
-  static_cast<ReleaseTail *>(Tail)->run(*unwrap<llvm::Function>(Function));
+extern "C" void hirsel_llvm_tail_run(void *Tail, LLVMValueRef Function, LLVMBool Changed) {
+  static_cast<ReleaseTail *>(Tail)->run(*unwrap<llvm::Function>(Function), Changed);
 }
 extern "C" void hirsel_llvm_tail_close(void *Tail) { delete static_cast<ReleaseTail *>(Tail); }
 
 // Every function's tail, in module order.
 extern "C" void hirsel_llvm_release_tail(LLVMModuleRef Module, LLVMTargetMachineRef Machine) {
   ReleaseTail Tail(*unwrap(Module), reinterpret_cast<TargetMachine *>(Machine));
+  SmallVector<std::pair<Function *, bool>> Functions;
   for (Function &F : *unwrap(Module))
-    if (!F.isDeclaration()) Tail.run(F);
+    if (!F.isDeclaration()) Functions.emplace_back(&F, hirsel_llvm_take_tail_change(wrap(&F)));
+  for (auto [F, Changed] : Functions) Tail.run(*F, Changed);
 }

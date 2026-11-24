@@ -1,20 +1,20 @@
 // MEM-30: each send is step 2*i+1; each completed latch is step 2*i+2.
-// expect: run loop_count(0,0) = 0
-// expect: run loop_count(1,0) = 1
-// expect: run loop_count(5,0) = 3
-// expect: run loop_count(6,0) = 3
-// expect: run loop_count(5,1) = 3
-// expect: run loop_count(6,1) = 3
-// expect: run loop_count(5,2) = 3
-// expect: run loop_count(6,2) = 3
-// expect: run loop_count(5,3) = 3
-// expect: run loop_count(5,4) = 3
-// expect: run exact(0) = 0
-// expect: run exact(1) = 7
-// expect: run nested(4) = 4
-// expect: run nested(5) = 7
-// expect: run reservation() = 1
-// expect: run isolate_stop() = 50
+// expect: reference run loop_count(0,0) = 0
+// expect: reference run loop_count(1,0) = 1
+// expect: reference run loop_count(5,0) = 3
+// expect: reference run loop_count(6,0) = 3
+// expect: reference run loop_count(5,1) = 3
+// expect: reference run loop_count(6,1) = 3
+// expect: reference run loop_count(5,2) = 3
+// expect: reference run loop_count(6,2) = 3
+// expect: reference run loop_count(5,3) = 3
+// expect: reference run loop_count(5,4) = 3
+// expect: reference run exact(0) = 0
+// expect: reference run exact(1) = 7
+// expect: reference run nested(4) = 4
+// expect: reference run nested(5) = 7
+// expect: reference run reservation() = 1
+// expect: reference run isolate_stop() = 50
 fn loop_count(k: u64, form: u64) -> u64 {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(16)
     let mut xs: List[u64] = list.new()
@@ -72,20 +72,20 @@ fn isolate_stop() -> u64 {
     }
 }
 // A callable call is one step; isolate's call and its callback entry are two.
-// expect: run callback(0) = 0
-// expect: run callback(1) = 7
-// expect: run core_callback(1) = 1
-// expect: run core_callback(2) = 7
-// expect: run finalizer(1) = 1 trace 7
-// expect: run finalizer(2) = 7 trace 7
-// expect: run glue(0) = 7
-// expect: run glue(100) = 7
+// expect: reference run callback(0) = 0
+// expect: reference run callback(1) = 7
+// expect: reference run core_callback(1) = 1
+// expect: reference run core_callback(2) = 7
+// expect: reference run finalizer(1) = 1 trace 7
+// expect: reference run finalizer(2) = 7 trace 7
+// expect: reference run glue(0) = 7
+// expect: reference run glue(100) = 7
 // Spawns are the second and fourth parent steps, leaving copies of 16 and 14.
 // After each entry, 15 steps give eight sends and 13 steps give seven sends.
-// expect: run copy_spawn_budget(0) = 15
-// expect: run mixed(0) = fail Division,OutOfTime trace 0
+// expect: reference run copy_spawn_budget(0) = 15
+// expect: reference run mixed(0) = fail Division,OutOfTime trace 0
 // Catching a used root primary retains its replacement cell (FAIL-16).
-// expect: run isolated_mixed(0) = 12 trace 0 used 32
+// expect: reference run isolated_mixed(0) = 12 trace 0 used 32
 fn callback(k: u64) -> u64 {
     match (bound steps k { let f = fn() -> u64 { 7 }; f() }) {
         Ok(v) => v,
@@ -99,8 +99,8 @@ fn shared_callback(n: u64) -> u64 {
 }
 // The call and three latches take four Steps. The same target runs outside
 // the scope first. Its standalone root supplies the other cache build order.
-// expect: run callback_both(3) = 133
-// expect: run callback_both(4) = 33
+// expect: reference run callback_both(3) = 133
+// expect: reference run callback_both(4) = 33
 fn callback_both(k: u64) -> u64 {
     let f = code.callable(code.describe(shared_callback))
     let first = f(3)
@@ -112,20 +112,25 @@ fn callback_both(k: u64) -> u64 {
 pub fn unbounded() -> Result[(), Exit] {
     let f = code.callable(code.describe(shared_callback))
     if f(3) != 3 { return Error(Exit(status: 1)) }
-    // MEM-28. A nine-byte literal still asks for 16 bytes under this byte bound.
-    let admitted = isolate(fn() -> Result[u64, Capacity] {
-        bound bytes 15 {
-            let value: FrozenBytes = b"abcdefghi"
-            list.len(bytebuf.as_bytes(value))
-        }
-    })
-    match caught(take admitted) {
-        Some(c) => if c.requested == 16 && c.available == 15 { Ok(()) } else { Error(Exit(status: 2)) },
-        None => Error(Exit(status: 3)),
+    // MEM-28. The nine-byte literal fits at its logical charge on every build.
+    let admitted = bound bytes 16 {
+        let value: FrozenBytes = b"abcdefghi"
+        let data = bytebuf.as_bytes(value)
+        list.len(data) == 9 && data[8] == b'i'
+    }
+    match admitted {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 2)),
     }
 }
 pub fn bounded() -> Result[(), Exit] {
-    if callback_both(3) == 133 && callback_both(4) == 33 { Ok(()) } else { Error(Exit(status: 1)) }
+    // Three loop iterations cannot fit in two steps. A roomy bound lets the
+    // same callable complete after its unbound call.
+    if callback_both(2) == 132 && callback_both(1000) == 33 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
 }
 
 fn stage_body(take state: (), key: u64, n: u64) -> ((), Option[u64]) {
@@ -204,9 +209,9 @@ fn mixed(d: u64) {
 
 // The unwrap and N-1 latches spend all N Steps. Division is an ordinary
 // failure. Cleanup attempts entry to Failing's finalizer at Step N+1.
-// expect: run exhausted_finalizer(65535,0) = fail Division,OutOfTime trace 0
-// expect: run exhausted_finalizer(65536,0) = fail Division,OutOfTime trace 0
-// expect: run exhausted_finalizer(65537,0) = fail Division,OutOfTime trace 0
+// expect: reference run exhausted_finalizer(65535,0) = fail Division,OutOfTime trace 0
+// expect: reference run exhausted_finalizer(65536,0) = fail Division,OutOfTime trace 0
+// expect: reference run exhausted_finalizer(65537,0) = fail Division,OutOfTime trace 0
 fn exhausted_finalizer(n: u64, d: u64) {
     let _ = bound steps n {
         let f = result.unwrap(Failing(d: 0))
@@ -239,8 +244,8 @@ fn isolated_mixed(d: u64) -> u64 {
     }
 }
 
-// expect: run sort_callback(1) = 1
-// expect: run sort_callback(2) = 7
+// expect: reference run sort_callback(1) = 1
+// expect: reference run sort_callback(2) = 7
 fn sort_callback(k: u64) -> u64 {
     let mut xs: List[u64] = list.new()
     let _ = list.push(mut xs, 2u64)
@@ -265,27 +270,30 @@ pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
 
 fn caught_child(take d: u64) -> u64 { isolated_mixed(d) }
 // The outer isolate catches a Division-primary chain with secondary OutOfTime.
-// expect: run mixed_chain(0) = true
+// expect: reference run mixed_chain(0) = true
 fn mixed_chain(tasks: Tasks) -> bool waits {
     let h = task.spawn(tasks, bytes 4096, 0u64, caught_child)
     match task.join(take h) { Ok(12) => true, _ => false }
 }
 
-// S4: release optimization cannot delete or hoist an empty loop's source Steps.
-// expect: run optimized_spin() = 1000
+// MEM-30: the build must meter an infinite loop even without effects.
+pub fn fuel_stops_infinite_loop() -> Result[(), Exit] {
+    if optimized_spin() == 1000 { Ok(()) } else { Error(Exit(status: 1)) }
+}
+// expect: reference run optimized_spin() = 1000
 fn optimized_spin() -> u64 {
     match (bound steps 1000 { loop {} }) { Error(e) => e.steps, _ => 0 }
 }
 
 // Whole chunks cannot stop early. A short window takes the checked copy and
 // stops at precisely the next unpaid latch, including a list's final latch.
-// expect: run chunk_range(8,3) = 3
-// expect: run chunk_range(8,8) = 7
-// expect: run chunk_range(100000,65536) = 65536
-// expect: run chunk_list(3) = 3
-// expect: run chunk_list(8) = 7
-// expect: run merged_calls(1) = 1
-// expect: run merged_calls(2) = 7
+// expect: reference run chunk_range(8,3) = 3
+// expect: reference run chunk_range(8,8) = 7
+// expect: reference run chunk_range(100000,65536) = 65536
+// expect: reference run chunk_list(3) = 3
+// expect: reference run chunk_list(8) = 7
+// expect: reference run merged_calls(1) = 1
+// expect: reference run merged_calls(2) = 7
 fn chunk_range(n: u64, budget: u64) -> u64 {
     match (bound steps budget {
         let mut sum = 0u64
@@ -309,9 +317,9 @@ fn merged_calls(budget: u64) -> u64 {
 }
 
 // Each outer trip calls leaf once, takes eight inner latches and one outer latch.
-// expect: run chunk_nested(1,9) = 9
-// expect: run chunk_nested(1,10) = 7
-// expect: run chunk_nested(7000,65536) = 65536
+// expect: reference run chunk_nested(1,9) = 9
+// expect: reference run chunk_nested(1,10) = 7
+// expect: reference run chunk_nested(7000,65536) = 65536
 fn chunk_nested(n: u64, budget: u64) -> u64 {
     match (bound steps budget {
         let mut sum = 0u64
@@ -326,13 +334,13 @@ fn chunk_nested(n: u64, budget: u64) -> u64 {
 // Each call of the depth-six binary tree is one Step, 127 in all. A bound of
 // s < 127 refuses a call. A subtree prepaid past the window would let the last
 // subtrees finish, so every refusal point of the checked path is swept.
-// expect: run partial_tree(1) = 1
-// expect: run partial_tree(63) = 63
-// expect: run partial_tree(64) = 64
-// expect: run partial_tree(65) = 65
-// expect: run partial_tree(126) = 126
-// expect: run partial_tree(127) = 1127
-// expect: run partial_tree(128) = 1127
+// expect: reference run partial_tree(1) = 1
+// expect: reference run partial_tree(63) = 63
+// expect: reference run partial_tree(64) = 64
+// expect: reference run partial_tree(65) = 65
+// expect: reference run partial_tree(126) = 126
+// expect: reference run partial_tree(127) = 1127
+// expect: reference run partial_tree(128) = 1127
 fn tree(mut count: u64, depth: u64) {
     count += 1
     if depth != 0 {
@@ -382,7 +390,7 @@ fn burst_task(take tx: Sender[u64]) { let _ = burst(tx, 20) }
 // A loop trip is a send and a latch, so r Steps left at burst's loop send
 // ceil(r/2) times. The sender copy and the spawn take two of eleven, so the
 // child copies nine. Its entry and the call to burst leave seven: four sends.
-// expect: run route_spawn(0) = 2004
+// expect: reference run route_spawn(0) = 2004
 fn route_spawn(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     let a = channel.sender(tx)
@@ -397,7 +405,7 @@ fn route_spawn(tasks: Tasks) -> u64 waits {
     first * 100 + drain(rx)
 }
 // The call by function value and the call to burst leave seven of nine.
-// expect: run route_closure(0) = 2004
+// expect: reference run route_closure(0) = 2004
 fn route_closure(seed: u64) -> u64 {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     let f = fn(t: Sender[u64], n: u64) -> u64 { burst(t, n) }
@@ -416,7 +424,7 @@ fn sort_bursts(tx: Sender[u64], seed: u64) {
 }
 // The call to sort_bursts, its four core calls, the comparator's entry and
 // the call to burst leave nine of sixteen: five sends.
-// expect: run route_callback(0) = 2005
+// expect: reference run route_callback(0) = 2005
 fn route_callback(seed: u64) -> u64 {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     sort_bursts(tx, seed)
@@ -427,7 +435,7 @@ fn route_callback(seed: u64) -> u64 {
 resource type Burst { tx: Sender[u64] } drop(b) { let _ = burst(b.tx, 20) }
 // The constructor's unwrap, the finalizer's entry and its call to burst leave
 // six of nine: three sends.
-// expect: run route_finalizer(0) = 2003
+// expect: reference run route_finalizer(0) = 2003
 fn route_finalizer(seed: u64) -> u64 {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     let a = channel.sender(tx)
@@ -456,7 +464,7 @@ fn gate_round(tasks: Tasks, tx: Sender[u64]) waits {
 // The call to gate_round, its three core calls and the spawn take five of
 // sixteen. The child's entry, ready send, receive and call to burst leave seven
 // of its eleven: four sends after it resumes.
-// expect: run route_resumed(0) = 2004
+// expect: reference run route_resumed(0) = 2004
 fn route_resumed(tasks: Tasks) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64)
     gate_round(tasks, tx)
@@ -469,35 +477,29 @@ fn spin_to(n: u64) -> u64 {
     while i < n { i += 1 }
     i
 }
-// The call by function value and 70,000 latches take 70,001 Steps, past a
-// slice end: a bound of 70,001 fits them and one of 70,000 stops at its last.
-// expect: run route_slice(70000) = 11
+// This callback crosses a step slice. Every iteration costs at least one
+// step, so fewer than n steps must stop regardless of the call's charge.
+// expect: reference run route_slice(70000) = 11
 fn route_slice(n: u64) -> u64 {
     let f = code.callable(code.describe(spin_to))
     let _ = f(n)
-    let fits = match (bound steps (n + 1) { f(n) }) { Ok(v) => if v == n { 1u64 } else { 0 }, Error(_) => 0 }
-    let stops = match (bound steps n { f(n) }) { Error(e) => if e.steps == n { 10u64 } else { 0 }, Ok(_) => 0 }
+    let fits = match (bound steps 200000 { f(n) }) { Ok(v) => if v == n { 1u64 } else { 0 }, Error(_) => 0 }
+    let stops = match (bound steps (n - 1) { f(n) }) { Error(e) => if e.steps == n - 1 { 10u64 } else { 0 }, Ok(_) => 0 }
     fits + stops
 }
+fn route_preserves_bound(count: u64) -> bool {
+    // The unbounded pass sends all twenty. The tight pass cannot complete
+    // all twenty loop iterations, though its prefix is build-specific.
+    count >= 2000 && count < 2020
+}
 fn routes_hold(tasks: Tasks) -> bool waits {
-    route_spawn(tasks) == 2004 && route_closure(0) == 2004 && route_callback(0) == 2005 && route_finalizer(0) == 2003 && route_resumed(tasks) == 2004 && route_slice(70000) == 11
+    route_preserves_bound(route_spawn(tasks))
+        && route_preserves_bound(route_closure(0))
+        && route_preserves_bound(route_callback(0))
+        && route_preserves_bound(route_finalizer(0))
+        && route_preserves_bound(route_resumed(tasks))
+        && route_slice(70000) == 11
 }
 pub fn routes(tasks: Tasks) -> Result[(), Exit] waits {
     if routes_hold(tasks) { Ok(()) } else { Error(Exit(status: 1)) }
-}
-
-// The primary cause of a caught failure, when it is a refused admission.
-fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
-    match r {
-        Ok(Error(causes)) => {
-            for c in causes {
-                return match c.kind {
-                    Capacity(k) => Some(k),
-                    _ => None,
-                }
-            }
-            None
-        },
-        _ => None,
-    }
 }

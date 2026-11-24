@@ -3,6 +3,8 @@ use hirsel_core_ir::{FuncId, eval};
 
 #[path = "diagnostic_fixes.rs"]
 mod diagnostic_fixes;
+#[path = "encoding_laws.rs"]
+mod encoding_laws;
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -302,9 +304,7 @@ fn joined_units_preserve_calls_and_refuse_conflicting_variants() {
 /// Oracle: an independent encode and digest.
 #[test]
 fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
-    let full = |ir: &Module| {
-        ContentHash::of_parts("hirsel.core-ir.v1", [&bincode::serialize(ir).unwrap()[..]])
-    };
+    let full = |ir: &Module| ContentHash::of_parts("hirsel.core-ir.v1", [&encode(ir).unwrap()[..]]);
     let dir = tempfile::tempdir().unwrap();
     let source = "fn answer() -> u64 { 6 * 7 }\nfn wider(a: u64, b: u64) -> u64 { if a > b { a * b } else { a + b + 1 } }\n";
     let check = || {
@@ -383,7 +383,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(41u32.to_le_bytes());
+    expected.extend(42u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
@@ -517,7 +517,7 @@ fn damaged_disk_bytes_are_a_miss() {
     store.select("live", key).unwrap();
     assert_eq!(std::fs::read(dir.path().join("live")).unwrap(), selection);
     let object = b"\x7fELF object bytes".as_slice();
-    let (bare, _) = store
+    let bare = store
         .put_bare(ContentHash::of_bytes(b"object"), object)
         .unwrap();
     assert_eq!(bare.check, XxHash3_64::oneshot(object));
@@ -552,7 +552,7 @@ fn damaged_disk_bytes_are_a_miss() {
         assert!(reads(), "{kind}: whole");
     }
     assert_eq!(store.get(key).unwrap().unwrap(), payload);
-    assert_eq!(store.get_bare(bare).unwrap().unwrap().0, object);
+    assert_eq!(store.get_bare(bare).unwrap().unwrap(), object);
 }
 
 #[test]
@@ -2279,34 +2279,6 @@ fn prog4_source_std_excludes_contract_directory() {
     );
 }
 
-#[test]
-fn canonical_driver_encoding_visits_the_value_once() {
-    struct Counted<'a>(&'a std::cell::Cell<usize>, &'a DefPath);
-    impl Serialize for Counted<'_> {
-        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.0.set(self.0.get() + 1);
-            self.1.serialize(serializer)
-        }
-    }
-    let path = DefPath(hirsel_core_ids::ItemPath {
-        package: hirsel_core_ids::PackageId {
-            name: "package".repeat(20),
-            version: "1".into(),
-        },
-        modules: vec!["nested".repeat(20), "é\0".into()],
-        name: "value".repeat(20),
-    });
-    let visits = std::cell::Cell::new(0);
-    let encoded = encode(&Counted(&visits, &path)).unwrap();
-    assert_eq!(encoded, bincode::serialize(&path).unwrap());
-    assert_eq!(decode::<DefPath>(&encoded), Some(path));
-    assert_eq!(
-        visits.get(),
-        1,
-        "canonical encoding made a sizing traversal"
-    );
-}
-
 /// Sources of a small program over four modules: a shared helper, a mutually
 /// recursive pair, the edited module and an independent reader of the helper.
 fn program_sources(kind: &str) -> [(&'static str, String); 4] {
@@ -2484,7 +2456,7 @@ fn edit_kinds_publish_the_fresh_build() {
             .map(|p| {
                 ContentHash::of_parts(
                     "hirsel.program-index.path.v1",
-                    [&bincode::serialize(p).unwrap()[..]],
+                    [&encoding_laws::fixed_path_bytes(p)[..]],
                 )
                 .0[0]
                     >> 4

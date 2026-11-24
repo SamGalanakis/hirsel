@@ -1,0 +1,37 @@
+// An early return from a loop inside a match arm of a generic function's taken
+// owned Result returns the loop's value (hirsel4-rooms-2301 SIGSEGV).
+// expect: accept
+// expect: run f(7) = 3
+// expect: run f(8) = 2
+// expect: run f(0) = 1
+type Check = A | B | C
+
+fn walk[V](v: V, take r: Result[bool, List[u64]]) -> Check {
+    match take r {
+        Ok(_) => A,
+        Error(xs) => {
+            for x in xs {
+                if x == 7 {
+                    return C
+                }
+            }
+            B
+        },
+    }
+}
+
+fn f(n: u64) -> u64 {
+    let mut xs: List[u64] = list.new()
+    list.push(mut xs, 1)
+    list.push(mut xs, n)
+    let r: Result[bool, List[u64]] = if n == 0 {
+        Ok(true)
+    } else {
+        Error(take xs)
+    }
+    match walk(0u8, take r) {
+        A => 1,
+        B => 2,
+        C => 3
+    }
+}

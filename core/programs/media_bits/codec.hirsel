@@ -1,0 +1,120 @@
+// RFC 6381 sample entry identifiers and their codec configuration records.
+pub type Config = Avc1(Bytes) | Avc3(Bytes) | Hvc1(Bytes) | Hev1(Bytes) | Av01(Bytes) | Mp4a(u8, Bytes)
+
+pub type Error = Truncated | InvalidConfiguration | Unsupported
+
+// Video configurations are box payloads. Mp4a takes the objectTypeIndication
+// and the DecoderSpecificInfo payload (AudioSpecificConfig for MPEG-4 AAC).
+// This reads the signaling fields. Decoders still validate the bitstream.
+pub fn codec_string(config: Config) -> Result[String, Error] {
+    match config {
+        Avc1(record) => avc_string("avc1.", record),
+        Avc3(record) => avc_string("avc3.", record),
+        Hvc1(record) => hevc_string("hvc1.", record),
+        Hev1(record) => hevc_string("hev1.", record),
+        Av01(record) => av1_string(record),
+        Mp4a(indication, asc) => match aac.codec_string(indication, asc) {
+            Ok(take value) => Ok(take value),
+            Error(Truncated) => Error(Truncated),
+            Error(InvalidHeader) => Error(InvalidConfiguration),
+            Error(Unsupported) => Error(Unsupported),
+        },
+    }
+}
+
+fn avc_string(prefix: String, record: Bytes) -> Result[String, Error] {
+    if list.len(record) < 7 {
+        return Error(Truncated)
+    }
+    if record[0] != 1 || (record[4] & 0xfc) != 0xfc || (record[4] & 3) == 2 || (record[5] & 0xe0) != 0xe0 {
+        return Error(InvalidConfiguration)
+    }
+    let mut out = string.from(prefix)
+    for i in 1u64 .. 4 {
+        string.push_uint(mut out, int.widen(record[i]), 16, 2, '0')
+    }
+    Ok(take out)
+}
+
+fn push_upper_hex(mut out: String, value: u64, width: u64) {
+    let mut hex = string.with_capacity(8)
+    string.push_uint(mut hex, value, 16, width, '0')
+    string.push(mut out, string.to_upper(hex))
+}
+
+fn hevc_string(prefix: String, record: Bytes) -> Result[String, Error] {
+    if list.len(record) < 23 {
+        return Error(Truncated)
+    }
+    if record[0] != 1 {
+        return Error(InvalidConfiguration)
+    }
+    let mut out = string.from(prefix)
+    let profile = record[1]
+    match profile >> 6 {
+        1 => string.push_char(mut out, 'A'),
+        2 => string.push_char(mut out, 'B'),
+        3 => string.push_char(mut out, 'C'),
+        _ => (),
+    }
+    string.push_u64(mut out, int.widen(profile & 31))
+    string.push_char(mut out, '.')
+    // ISO/IEC 14496-15 writes flag zero in the low bit of the string's number.
+    let mut flags: u32 = list.word_be(record, 2)
+    let mut compatibility = 0u32
+    for _ in 0u64 .. 32 {
+        compatibility = (compatibility << 1) | (flags & 1)
+        flags >>= 1
+    }
+    push_upper_hex(mut out, int.widen(compatibility), 1)
+    string.push_char(mut out, '.')
+    string.push_char(mut out, if (profile & 32) == 0 {
+        'L'
+    } else {
+        'H'
+    })
+    string.push_u64(mut out, int.widen(record[12]))
+    let mut end = 12u64
+    while end > 6 && record[end - 1] == 0 {
+        end -= 1
+    }
+    for i in 6u64 .. end {
+        string.push_char(mut out, '.')
+        push_upper_hex(mut out, int.widen(record[i]), 2)
+    }
+    Ok(take out)
+}
+
+fn av1_string(record: Bytes) -> Result[String, Error] {
+    if list.len(record) < 4 {
+        return Error(Truncated)
+    }
+    let profile = record[1] >> 5
+    let level = record[1] & 31
+    let high_tier = (record[2] & 0x80) != 0
+    let high_depth = (record[2] & 0x40) != 0
+    let twelve_bit = (record[2] & 0x20) != 0
+    if record[0] != 0x81 || profile > 2 || (high_tier && level < 8) || (twelve_bit && (profile != 2 || !high_depth)) {
+        return Error(InvalidConfiguration)
+    }
+    let depth: u64 = if twelve_bit {
+        12
+    } else if high_depth {
+        10
+    } else {
+        8
+    }
+    // AV1 ISOBMFF §5 permits omitting all fields after bitDepth together.
+    let mut out = string.from("av01.")
+    string.push_u64(mut out, int.widen(profile))
+    string.push_char(mut out, '.')
+    string.push_uint(mut out, int.widen(level), 10, 2, '0')
+    string.push_char(mut out, if high_tier {
+        'H'
+    } else {
+        'M'
+    })
+    string.push_char(mut out, '.')
+    string.push_uint(mut out, depth, 10, 2, '0')
+    Ok(take out)
+}

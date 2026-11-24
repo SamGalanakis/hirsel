@@ -1,0 +1,90 @@
+// FIPS 180-4 sections 5 and 6.4. Compression is provided by core.sha512.
+pub opaque type Sha512 {
+    h: Inline[u64, 8],
+    pending: Inline[u8, 128],
+    used: u64,
+    total: u64
+}
+
+/// Start from the FIPS 180-4 SHA-512 initial words. Alloc: none.
+pub fn start() -> Sha512 {
+    start_from([0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179])
+}
+
+/// Start an empty stream from caller-supplied chaining words. Alloc: none.
+pub fn start_from(h: Inline[u64, 8]) -> Sha512 {
+    Sha512(h: h, pending:[0; 128], used: 0, total: 0)
+}
+
+/// Append input[lo,hi), with list.slice's checked range semantics.
+/// Alloc: none. Retains no input view. Work: O(hi - lo).
+pub fn add(mut s: Sha512, input: Bytes, lo: u64, hi: u64) {
+    let b = list.slice(input, lo, hi)
+    let n = list.len(b)
+    s.total = int.wrapping_add(s.total, n)
+    // Fill the pending block first even when it is empty. For aligned
+    // inputs the prefix and suffix copies then total one block, regardless
+    // of the pending fill at entry.
+    let room = 128 - s.used
+    let first = if n < room {
+        n
+    } else {
+        room
+    }
+    for i in 0u64 .. first {
+        s.pending[s.used + i] = b[i]
+    }
+    s.used += first
+    if s.used < 128 {
+        return
+    }
+    sha512.block(mut s.h, s.pending)
+    let whole = (n - first) / 128
+    sha512.blocks(mut s.h, b, first, whole)
+    let at = first + whole * 128
+    s.used = n - at
+    for i in 0u64 .. s.used {
+        s.pending[i] = b[at + i]
+    }
+}
+
+/// Append one byte. Alloc: none. Work: O(1).
+pub fn add_byte(mut s: Sha512, x: u8) {
+    s.total = int.wrapping_add(s.total, 1)
+    s.pending[s.used] = x
+    s.used += 1
+    if s.used == 128 {
+        sha512.block(mut s.h, s.pending)
+        s.used = 0
+    }
+}
+
+/// Digest in big-endian order. Leaves s usable for further add calls.
+/// Alloc: none. Work: O(1).
+pub fn finish(s: Sha512) -> Inline[u8, 64] {
+    let mut h = s.h
+    let mut tail = s.pending
+    tail[s.used] = 128
+    for i in (s.used + 1) .. 128u64 {
+        tail[i] = 0
+    }
+    if s.used >= 112 {
+        sha512.block(mut h, tail)
+        tail =[0; 128]
+    }
+    inline.set_word_be(mut tail, 112, s.total >> 61)
+    inline.set_word_be(mut tail, 120, s.total << 3)
+    sha512.block(mut h, tail)
+    let mut out: Inline[u8, 64] =[0; 64]
+    for i in 0u64 .. 8u64 {
+        inline.set_word_be(mut out, i * 8, h[i])
+    }
+    out
+}
+
+/// FIPS 180-4 SHA-512 over all bytes. Alloc: none. Work: O(n).
+pub fn hash(b: Bytes) -> Inline[u8, 64] {
+    let mut s = start()
+    add(mut s, b, 0, list.len(b))
+    finish(s)
+}

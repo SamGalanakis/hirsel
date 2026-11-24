@@ -8,7 +8,7 @@ fn scripted_connection(n: Net, clock: Clock, password: Secret, mode: TlsMode) ->
         Error(e) => return Error(transport(e)),
     }
     let session = secure(n, take socket, address, "alpha.test", System, until, mode)?
-    login(take session, "user", "postgres", password, b"rOprNGfwEbeRWgbNEkqO")
+    login(take session, "user", "postgres", password, b"rOprNGfwEbeRWgbNEkqO", until)
 }
 
 fn startup_law(outcome: Result[Conn, Error], scenario: String) -> bool {
@@ -25,8 +25,8 @@ fn startup_law(outcome: Result[Conn, Error], scenario: String) -> bool {
     }
 }
 
-fn malformed_row(mut conn: Conn, scenario: String) -> bool waits {
-    let mut cursor = result.unwrap(query(mut conn, "SELECT 1", list.new()))
+fn malformed_row(mut conn: Conn, scenario: String, clock: Clock, deadline: u64) -> bool waits {
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 1", list.new(), clock, deadline))
     if let Error(Protocol(Fields)) = next(mut cursor) {
         conn = finish(take cursor)
         if let None = transaction(conn) {
@@ -53,9 +53,9 @@ fn sql_failure(e: SqlError) -> bool {
     }
 }
 
-fn reuse_law(mut conn: Conn) -> bool waits {
+fn reuse_law(mut conn: Conn, clock: Clock, deadline: u64) -> bool waits {
     let no_params: List[Param] = list.new()
-    let mut cursor = result.unwrap(query(mut conn, "SELECT 1 / x FROM inputs", no_params))
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 1 / x FROM inputs", no_params, clock, deadline))
     if !result.unwrap(next(mut cursor)) || !integer_row(cursor, 7) {
         return false
     }
@@ -70,12 +70,12 @@ fn reuse_law(mut conn: Conn) -> bool waits {
     if let Some(Idle) = transaction(conn) {} else {
         return false
     }
-    let mut following = result.unwrap(query(mut conn, "SELECT 42", no_params))
+    let mut following = result.unwrap(query(mut conn, "SELECT 42", no_params, clock, deadline))
     if !result.unwrap(next(mut following)) || !integer_row(following, 42) || result.unwrap(next(mut following)) {
         return false
     }
     conn = finish(take following)
-    if let Error(Sql(late)) = execute(mut conn, "SELECT 'late'", no_params) {
+    if let Error(Sql(late)) = execute(mut conn, "SELECT 'late'", no_params, clock, deadline) {
         if !sql_failure(late) {
             return false
         }
@@ -85,11 +85,12 @@ fn reuse_law(mut conn: Conn) -> bool waits {
     if let Some(Idle) = transaction(conn) {} else {
         return false
     }
-    let _ = result.unwrap(execute(mut conn, "BEGIN", no_params))
+    let _ = result.unwrap(execute(mut conn, "BEGIN", no_params, clock, deadline))
+    let _ = result.unwrap(execute(mut conn, "SAVEPOINT recover", no_params, clock, deadline))
     if let Some(InTransaction) = transaction(conn) {} else {
         return false
     }
-    if let Error(Sql(failed)) = execute(mut conn, "SELECT 1 / x FROM inputs", no_params) {
+    if let Error(Sql(failed)) = execute(mut conn, "SELECT 1 / x FROM inputs", no_params, clock, deadline) {
         if !sql_failure(failed) {
             return false
         }
@@ -99,10 +100,22 @@ fn reuse_law(mut conn: Conn) -> bool waits {
     if let Some(Failed) = transaction(conn) {} else {
         return false
     }
-    if let Error(RollbackRequired) = execute(mut conn, "SELECT 1", no_params) {} else {
+    if let Error(Sql(e)) = execute(mut conn, "SELECT 1", no_params, clock, deadline) {
+        if e.sqlstate != "25P02" {
+            return false
+        }
+    } else {
         return false
     }
-    let _ = result.unwrap(execute(mut conn, "ROLLBACK", no_params))
+    if let Some(Failed) = transaction(conn) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "ROLLBACK TO SAVEPOINT recover", no_params, clock, deadline))
+    if let Some(InTransaction) = transaction(conn) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "SELECT 1", no_params, clock, deadline))
+    let _ = result.unwrap(execute(mut conn, "ROLLBACK", no_params, clock, deadline))
     if let Some(Idle) = transaction(conn) {} else {
         return false
     }
@@ -116,7 +129,8 @@ fn reuse_law(mut conn: Conn) -> bool waits {
 }
 
 fn cancel_law(n: Net, clock: Clock, mut conn: Conn) -> bool waits {
-    let mut cursor = result.unwrap(query(mut conn, "SELECT 42", list.new()))
+    let deadline = host.mono_ns(clock) + 5000000000u64
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 42", list.new(), clock, deadline))
     let token = result.unwrap(cancel_token(mut cursor))
     if let Error(CancelUnavailable) = cancel_token(mut cursor) {} else {
         return false
@@ -145,17 +159,18 @@ pub fn main(n: Net, clock: Clock, password: Secret, arguments: Args) -> Result[(
     let outcome = scripted_connection(n, clock, password, mode)
     if equal(name, b"reuse") || equal(name, b"short-row") || equal(name, b"trailing") || equal(name, b"cancel") {
         let mut conn = result.unwrap(take outcome)
+        let deadline = host.mono_ns(clock) + 5000000000u64
         if equal(name, b"reuse") {
-            if !reuse_law(mut conn) {
+            if !reuse_law(mut conn, clock, deadline) {
                 return Error(Exit(status: 2))
             }
-            result.unwrap(close(take conn))
+            result.unwrap(close(take conn, clock, deadline))
         } else if equal(name, b"cancel") {
             if !cancel_law(n, clock, mut conn) {
                 return Error(Exit(status: 5))
             }
         } else {
-            if !malformed_row(mut conn, scenario) {
+            if !malformed_row(mut conn, scenario, clock, deadline) {
                 return Error(Exit(status: 3))
             }
         }

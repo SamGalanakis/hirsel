@@ -1,0 +1,124 @@
+/// ULID network order. The high 48 bits hold Unix milliseconds.
+pub type Ulid: key + ordered {
+    hi: u64,
+    lo: u64
+}
+
+pub type Error: key = InvalidUlid(u64) | ShortInput | TimestampOverflow | RandomOverflow
+
+const DIGITS: String = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+const MAX_MS: u64 = 0xffffffffffff
+
+const MAX_WORD: u64 = 0xffffffffffffffff
+
+/// Reads 16 bytes at the given offset in network order. Returns ShortInput
+/// if the range is outside b. Alloc: nothing. Cost: O(1).
+pub fn from_bytes(b: Bytes, at: u64) -> Result[Ulid, Error] {
+    let len = list.len(b)
+    if at > len || len - at < 16 {
+        return Error(ShortInput)
+    }
+    Ok(Ulid(hi: list.word_be(b, at), lo: list.word_be(b, at + 8)))
+}
+
+/// Combines a 48-bit millisecond timestamp and 10 caller-supplied random
+/// bytes at the given offset. Returns TimestampOverflow or ShortInput.
+/// Alloc: nothing. Cost: O(1).
+pub fn generate(ms: u64, rand: Bytes, at: u64) -> Result[Ulid, Error] {
+    if ms > MAX_MS {
+        return Error(TimestampOverflow)
+    }
+    let len = list.len(rand)
+    if at > len || len - at < 10 {
+        return Error(ShortInput)
+    }
+    let high: u16 = list.word_be(rand, at)
+    let high_bits: u64 = int.widen(high)
+    Ok(Ulid(hi: (ms << 16) | high_bits, lo: list.word_be(rand, at + 2)))
+}
+
+/// Increments the 80-bit randomness, preserving the timestamp. Returns
+/// RandomOverflow if all 80 random bits are set. Alloc: nothing. Cost: O(1).
+pub fn increment(u: Ulid) -> Result[Ulid, Error] {
+    if u.lo < MAX_WORD {
+        return Ok(Ulid(hi: u.hi, lo: u.lo + 1))
+    }
+    if (u.hi & 0xffff) == 0xffff {
+        return Error(RandomOverflow)
+    }
+    Ok(Ulid(hi: u.hi + 1, lo: 0))
+}
+
+fn digit(byte: u8) -> Option[u64] {
+    let upper = if byte >= b'a' && byte <= b'z' {
+        byte - 32
+    } else {
+        byte
+    }
+    let digits = string.as_bytes(DIGITS)
+    for i in 0u64 .. 32u64 {
+        if digits[i] == upper {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Reads 26 Crockford Base32 characters in either ASCII case. The ULID
+/// alphabet excludes I, L, O and U. Returns InvalidUlid at the first wrong byte
+/// (including an overflowing first digit), a short matching prefix's end,
+/// or byte 26 if there is trailing input. Alloc: nothing. Cost: O(26).
+pub fn parse(s: String) -> Result[Ulid, Error] {
+    let b = string.as_bytes(s)
+    let len = list.len(b)
+    let mut hi: u64 = 0
+    let mut lo: u64 = 0
+    let mut i: u64 = 0
+    while i < 26 && i < len {
+        let Some(value) = digit(b[i]) else {
+            return Error(InvalidUlid(i))
+        }
+        if i == 0 && value > 7 {
+            return Error(InvalidUlid(0))
+        }
+        hi = (hi << 5) | (lo >> 59)
+        lo = (lo << 5) | value
+        i += 1
+    }
+    if len != 26 {
+        return Error(InvalidUlid(i))
+    }
+    Ok(Ulid(hi, lo))
+}
+
+/// Appends the canonical uppercase ULID text. Fails: Capacity leaves out
+/// unchanged. Alloc: growth of out. Cost: O(26).
+pub fn push(mut out: String, u: Ulid) {
+    string.reserve(mut out, 26)
+    let digits = string.as_bytes(DIGITS)
+    let mut chars: Inline[char, 26] =['0'; 26]
+    let mut hi = u.hi
+    let mut lo = u.lo
+    for i in 0u64 .. 26u64 {
+        let code: u32 = int.widen(digits[lo & 31])
+        chars[25 - i] = option.unwrap(char.from_u32(code))
+        lo = (lo >> 5) | (hi << 59)
+        hi = hi >> 5
+    }
+    for c in chars {
+        string.push_char(mut out, c)
+    }
+}
+
+/// Returns the canonical 26-character uppercase ULID text. Fails: Capacity.
+pub fn to_string(u: Ulid) -> String {
+    let mut out = string.with_capacity(26)
+    push(mut out, u)
+    take out
+}
+
+/// Returns the Unix timestamp in milliseconds. Alloc: nothing. Cost: O(1).
+pub fn unix_ms(u: Ulid) -> u64 {
+    u.hi >> 16
+}

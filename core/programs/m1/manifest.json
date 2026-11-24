@@ -46,6 +46,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/crc64avro.hirsel",
+          "modules": [
+            "crc64avro"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/dir.hirsel",
           "modules": [
             "dir"
@@ -67,6 +74,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/hex.hirsel",
+          "modules": [
+            "hex"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/int.hirsel",
           "modules": [
             "int"
@@ -84,6 +98,13 @@
           "file": "core/std/json.hirsel",
           "modules": [
             "json"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/json_schema.hirsel",
+          "modules": [
+            "json_schema"
           ],
           "signatures": true
         },
@@ -112,6 +133,20 @@
           "file": "core/std/order.hirsel",
           "modules": [
             "order"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/path.hirsel",
+          "modules": [
+            "path"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/path_pattern.hirsel",
+          "modules": [
+            "path_pattern"
           ],
           "signatures": true
         },

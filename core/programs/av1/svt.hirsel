@@ -1,0 +1,9 @@
+pub fn create(f: Foreign[av1.EncoderCodec], width: u32, height: u32, depth: u32, enc_mode: u32, fast_decode: u32, level_of_parallelism: u32, avif: u32, qp: u32, fps_num: u32, fps_den: u32) -> Option[foreign.Ptr[av1.EncoderHandle]] waits
+
+pub fn destroy(f: Foreign[av1.EncoderCodec], take e: foreign.Ptr[av1.EncoderHandle]) waits
+
+pub fn send(f: Foreign[av1.EncoderCodec], e: foreign.Ptr[av1.EncoderHandle], pixels: Bytes) -> i32 waits
+
+pub fn finish(f: Foreign[av1.EncoderCodec], e: foreign.Ptr[av1.EncoderHandle]) -> i32 waits
+
+pub fn receive(f: Foreign[av1.EncoderCodec], e: foreign.Ptr[av1.EncoderHandle], mut packet: Bytes) -> i64 waits

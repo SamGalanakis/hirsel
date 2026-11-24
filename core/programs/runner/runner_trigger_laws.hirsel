@@ -1,5 +1,12 @@
+@test
+fn law_trigger_model(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
+    let seed = match std.sim.world.test_seed(seed_grant) { Some(n) => n, None => 0u64 }
+    triggers.check_trigger_model(tasks, seed)
+    Ok(())
+}
+
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
-fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
+fn at_base[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe waits {
     at_base_generation(mut b, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: law_caller(who)))
 }
 
@@ -58,22 +65,22 @@ pub fn law_trigger_timer_wall_wait(tasks: Tasks) -> bool waits {
     early == 0u64 && before == 0u64 && set_back == 0u64 && once
 }
 
-type TriggerLawTables: send { effects: store.Table[u64, u64] }
+type TriggerLawTables: shareable + send { effects: store.Table[u64, u64], triggers: triggers.Tables }
 
-fn trigger_law_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    triggers.migrate(mut phase)?
+fn trigger_law_schema(mut d: store.Declare) -> Result[TriggerLawTables, store.Error] {
+    let tables = triggers.declare_tables(mut d)?
     let codec: std.codec.Codec[u64] = std.codec.of()
-    store.migration_create_table(mut phase, store.spec("trigger-law-effects", std.codec.key_u64(), codec))
+    let declared = store.declare_table(mut d, "trigger-law-effects", std.codec.key_u64(), codec)?
+    Ok(TriggerLawTables(effects: store.finish(mut d, take declared)?, triggers: take tables))
 }
 
-fn trigger_law_handles(catalog: store.Schema) -> Result[TriggerLawTables, store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    let effects = store.schema_table(catalog, "trigger-law-effects", std.codec.key_u64(), codec)?
-    Ok(TriggerLawTables(effects: take effects))
+fn trigger_law_tables(mut db: store.Db) -> triggers.Tables waits {
+    let handles = result.unwrap(store.bind_declaration(mut db, Open, trigger_law_schema))
+    clone(handles.triggers)
 }
 
 fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take digit: u64) -> Result[u64, u64] {
-    let old = match result.unwrap(store.fetch(tx, store.shape(h.effects), 0u64)) { Some(value) => value, None => 0u64 }
+    let old = match result.unwrap(store.fetch(tx, h.effects, 0u64)) { Some(value) => value, None => 0u64 }
     let next = old * 10u64 + digit
     result.unwrap(store.put(mut tx, h.effects, 0u64, next))
     if digit == 2u64 { return Error(22u64) }
@@ -85,40 +92,42 @@ fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take 
     Ok(next)
 }
 
-fn trigger_law_grants(seed: (), take ctx: TriggerContext) -> Result[TriggerContext, Capacity] { Ok(take ctx) }
+fn trigger_law_grants(seed: (), unused_handles: TriggerLawTables, take ctx: TriggerContext) -> Result[TriggerContext, Capacity] { Ok(take ctx) }
 
-fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig[TriggerContext, ()] {
+fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig[TriggerContext, TriggerLawTables, ()] {
     TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: (), grant: trigger_law_grants, grant_bytes: 65536u64)
 }
 
 fn trigger_law_places(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables { clone(h.triggers) })
+
     transact(mut reg, code.describe(trigger_law_body), 131072u64, DEFAULT_STEPS)?
     granted(mut reg, code.describe(trigger_law_granted_body), 131072u64, DEFAULT_STEPS)
 }
 
-fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[HeadInput], take allowed: triggers.Entries) -> (Head[TriggerContext, TriggerLawTables], Receiver[PubIn]) {
+fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[HeadInput], take allowed: triggers.Entries) -> (Head[TriggerContext, TriggerLawTables], Receiver[PubIn]) waits {
     let revision = result.unwrap(copy_bytes(string.as_bytes("trigger-law-r1")))
     let config = trigger_law_config(take allowed)
-    let drive = result.unwrap(make_trigger_drive(db, c, tasks, take to, revision, take config))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, trigger_law_schema))
+    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), h, c, tasks, take to, revision, take config))
     let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
-    let h = result.unwrap(store.with_schema(db, code.describe(trigger_law_handles)))
     let (out, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
-    let head = Head(db: take db, r: take reg, replay_identity: list.new(), h: take h, out: take out,
+    let head = Head(db: take db, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take out,
         busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false,
-        trigger_drive: Some(take drive))
+        trigger_drive: Some(take drive), parked: list.new(), recovery: None)
     (take head, take from)
 }
 
-fn trigger_law_outcome[G: send, H: send](head: Head[G, H], id: triggers.Id) -> Option[triggers.Terminal] {
+fn trigger_law_outcome[G: send, H: shareable + inert + send](head: Head[G, H], id: triggers.Id) -> Option[triggers.Terminal] waits {
     match head.trigger_drive {
-        Some(drive) => result.unwrap(triggers.outcome(store.snapshot(head.db), drive.tables, id)),
+        Some(drive) => result.unwrap(triggers.outcome(result.unwrap(store.reader(head.db, 0u64)), store.snapshot(head.db), drive.tables, id)),
         None => None,
     }
 }
 
-fn trigger_law_value(head: Head[TriggerContext, TriggerLawTables]) -> Option[u64] {
-    result.unwrap(store.get(store.snapshot(head.db), store.shape(head.h.effects), 0u64))
+fn trigger_law_value(head: Head[TriggerContext, TriggerLawTables]) -> Option[u64] waits {
+    result.unwrap(store.get(result.unwrap(store.reader(head.db, 0u64)), store.snapshot(head.db), head.h.effects, 0u64))
 }
 
 fn trigger_law_invoked(outcome: Option[triggers.Terminal], expected: Result[u64, u64]) -> bool {
@@ -140,17 +149,17 @@ fn trigger_law_invoked(outcome: Option[triggers.Terminal], expected: Result[u64,
 pub fn journal_law_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = triggers.law_directory(d)
     let mut initial = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
-    let tables = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
+    let handles = result.unwrap(store.bind_declaration(mut initial, Migrate, trigger_law_schema))
+    let tables = view handles.triggers
     let target: triggers.Entry[u64] = result.unwrap(triggers.transact(code.describe(trigger_law_body)))
     let mut allowed = triggers.empty_entries()
     result.unwrap(triggers.allow(mut allowed, target))
     let latest = store.next_call_info(initial).at + 10u64
-    let written = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id), triggers.Error] {
-        let later = triggers.write(mut tx, tables, allowed, target, 4u64, At(latest))?
-        let early = triggers.write(mut tx, tables, allowed, target, 1u64, AfterCommit)?
-        let aborted = triggers.write(mut tx, tables, allowed, target, 2u64, At(latest))?
-        let faulted = triggers.write(mut tx, tables, allowed, target, 3u64, At(latest))?
+    let written = store.run(mut initial, None, (store.copy_env(tables), store.copy_env(target), store.copy_env(allowed), store.copy_env(latest)), fn(mut tx, call_env) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id), triggers.Error] {
+        let later = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 4u64, At(call_env.3))?
+        let early = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 1u64, AfterCommit)?
+        let aborted = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 2u64, At(call_env.3))?
+        let faulted = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 3u64, At(call_env.3))?
         Ok((early, later, aborted, faulted))
     })
     let committed = result.unwrap(trigger_commit(take written))
@@ -179,17 +188,17 @@ pub fn journal_law_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     if trigger_law_value(head) != Some(14u64) { return false }
     let final_snapshot = store.snapshot(head.db)
     if store.version(final_snapshot) != initial_version + 4u64 { return false }
-    let at = result.unwrap(store.get(final_snapshot, store.shape(head.h.effects), 1u64))
+    let at = result.unwrap(store.get(result.unwrap(store.reader(head.db, 0u64)), final_snapshot, head.h.effects, 1u64))
     if let Some(seen) = at { if seen < latest { return false } } else { return false }
     if result.unwrap(advance_triggers(mut head)) { return false }
     let Head(db: take kept, ..) = take head
     result.unwrap(store.close(take kept))
 
     let mut recovered = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    let recovered_tables = result.unwrap(store.with_schema(recovered, code.describe(triggers.tables)))
-    let due = result.unwrap(triggers.next_pending(store.snapshot(recovered), recovered_tables, fn(id: triggers.Id) -> bool { false }))
+    let recovered_tables = trigger_law_tables(mut recovered)
+    let due = result.unwrap(triggers.next_pending(result.unwrap(store.reader(recovered, 0u64)), store.snapshot(recovered), recovered_tables, fn(id: triggers.Id) -> bool { false }))
     if let Some(_) = due { return false }
-    if let Some(Raised(5u32)) = result.unwrap(triggers.outcome(store.snapshot(recovered), recovered_tables, faulted)) { } else { return false }
+    if let Some(Raised(5u32)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(recovered, 0u64)), store.snapshot(recovered), recovered_tables, faulted)) { } else { return false }
     result.unwrap(store.close(take recovered))
     true
 }
@@ -240,13 +249,13 @@ fn trigger_law_granted_body(ctx: TriggerContext, caller: Caller, take digit: u64
 pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = triggers.law_directory(d)
     let mut initial = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
-    let t = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
+    let handles = result.unwrap(store.bind_declaration(mut initial, Migrate, trigger_law_schema))
+    let t = view handles.triggers
     let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
     let mut allowed = triggers.empty_entries()
     result.unwrap(triggers.allow(mut allowed, target))
-    let armed = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
-        triggers.write(mut tx, t, allowed, target, 7u64, AfterCommit)
+    let armed = store.run(mut initial, None, (store.copy_env(t), store.copy_env(target), store.copy_env(allowed)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 7u64, AfterCommit)
     })
     let committed = result.unwrap(trigger_commit(take armed))
     result.unwrap(store.durable(mut initial, committed.ticket))
@@ -301,8 +310,8 @@ fn journal_test_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     if journal_law_trigger_granted(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
-fn trigger_law_snap[G: send, H: send](mut head: Head[G, H], a: triggers.Attempt) -> Result[store.Snapshot, TriggerCallError] waits {
-    let (to, from): (Sender[Result[store.Snapshot, TriggerCallError]], Receiver[Result[store.Snapshot, TriggerCallError]]) = channel.new(1u64)
+fn trigger_law_snap[G: send, H: shareable + inert + send](mut head: Head[G, H], a: triggers.Attempt) -> Result[(store.Reader, store.Snapshot), TriggerCallError] waits {
+    let (to, from): (Sender[Result[(store.Reader, store.Snapshot), TriggerCallError]], Receiver[Result[(store.Reader, store.Snapshot), TriggerCallError]]) = channel.new(1u64)
     let msg = box.new(TriggerInput(action: Snap(a, take to)))
     result.unwrap(trigger_message(mut head, take msg, false))
     result.unwrap(channel.receive(from))
@@ -315,15 +324,14 @@ fn trigger_law_snap[G: send, H: send](mut head: Head[G, H], a: triggers.Attempt)
 pub fn journal_law_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = triggers.law_directory(d)
     let mut initial = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
-    let t = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
-    let h = result.unwrap(store.with_schema(initial, code.describe(trigger_law_handles)))
+    let handles = result.unwrap(store.bind_declaration(mut initial, Migrate, trigger_law_schema))
+    let t = view handles.triggers
     let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
     let mut allowed = triggers.empty_entries()
     result.unwrap(triggers.allow(mut allowed, target))
-    let armed = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
-        result.unwrap(store.put(mut tx, h.effects, 9u64, 4242u64))
-        triggers.write(mut tx, t, allowed, target, 7u64, AfterCommit)
+    let armed = store.run(mut initial, None, (store.copy_env(t), store.copy_env(handles), store.copy_env(target), store.copy_env(allowed)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        result.unwrap(store.put(mut tx, call_env.1.effects, 9u64, 4242u64))
+        triggers.write(mut tx, call_env.0, call_env.3, call_env.2, 7u64, AfterCommit)
     })
     let committed = result.unwrap(trigger_commit(take armed))
     result.unwrap(store.durable(mut initial, committed.ticket))
@@ -350,8 +358,8 @@ pub fn journal_law_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let live = match view check.action { Boundary(a, _) => a, _ => return false }
     if triggers.number(live) != 2u64 { return false }
     match trigger_law_snap(mut head, old) { Error(StaleAttempt) => (), _ => return false }
-    let Ok(seen) = trigger_law_snap(mut head, live) else { return false }
-    if result.unwrap(store.get(seen, store.shape(head.h.effects), 9u64)) != Some(4242u64) { return false }
+    let Ok((take read_handle, seen)) = trigger_law_snap(mut head, live) else { return false }
+    if result.unwrap(store.get(read_handle, seen, head.h.effects, 9u64)) != Some(4242u64) { return false }
     result.unwrap(trigger_message(mut head, take check, false))
     let inbound = result.unwrap(channel.receive(inbox))
     let TriggerMessage(take request) = take inbound else { return false }
@@ -391,8 +399,6 @@ fn trigger_scan_law_old(mut reg: Registry[TriggerContext, TriggerLawTables]) -> 
     granted(mut reg, code.describe(trigger_scan_law_removed_run), 131072u64, DEFAULT_STEPS)
 }
 
-fn trigger_scan_law_keep_schema(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
-
 fn trigger_scan_law_bytes(n: u64, byte: u8) -> Bytes {
     let mut raw: Bytes = list.with_capacity(n)
     list.fill(mut raw, n, byte)
@@ -417,20 +423,24 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let old_digest = trigger_scan_law_bytes(32u64, 1u8)
     let new_digest = trigger_scan_law_bytes(32u64, if same_image { 1u8 } else { 2u8 })
     let new_place = if same_image { code.describe(trigger_scan_law_old) } else { code.describe(trigger_scan_law_new) }
-    let new_n_place = if same_image { n_place * 2u64 } else { n_place }
+    let new_n_place = n_place
     let mut old_reg = result.unwrap(placed(code.describe(trigger_scan_law_old), n_place))
     // Model an older body at the same path and schema, as recorded by OLD.
     if !same_image { old_reg.exported[0u64].revision = trigger_scan_law_bytes(32u64, 3u8) }
     let Registry(exported: take exported, ..) = take old_reg
     let release = result.unwrap(release_digest(exported))
-    let old_desc = result.unwrap(encode_describe(Describe(digest: clone(old_digest),
-        target: "", n_place: n_place, exported: take exported)))
-    let mut staged = result.unwrap(store.stage_migration(db, tasks, code.describe(trigger_law_migrate)))
+    let old_description = Describe(digest: clone(old_digest), target: "", n_place: n_place,
+        revision: launch_bytes(launch_env().revision), exported: take exported, tables: list.new(), bindings: list.new())
+    let old_binding = result.unwrap(identity_digest(old_description))
+    let old_desc = result.unwrap(encode_describe(old_description))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let handles = result.unwrap(trigger_law_schema(mut declaration))
+    let mut staged = result.unwrap(store.finish_migration(db, take declaration))
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     result.unwrap(store.stage_activation(mut staged, 1u64, None, old_desc, release_codec,
-        ReleaseRecord(release: take release, digest: clone(old_digest))))
+        ReleaseRecord(release: take release, digest: clone(old_digest), binding: clone(old_binding), n_place: n_place, prepared: list.new())))
     result.unwrap(store.install_activation(mut db, take staged))
-    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let tables = view handles.triggers
 
     let changed = result.unwrap(triggers.transact(code.describe(trigger_law_body)))
     let unchanged = result.unwrap(triggers.transact(code.describe(trigger_scan_law_unchanged)))
@@ -444,35 +454,35 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let mut old_entries: triggers.Entries = clone(new_entries)
     result.unwrap(triggers.allow(mut old_entries, removed))
     result.unwrap(triggers.allow(mut old_entries, removed_run))
-    let written = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id, triggers.Id, Option[triggers.Id]), triggers.Error] {
-        let kept = triggers.write(mut tx, tables, old_entries, kept_run, 7u64, At(0u64))?
-        let lost = triggers.write(mut tx, tables, old_entries, removed_run, 0u64, At(1u64))?
-        let gone = triggers.write(mut tx, tables, old_entries, removed, 0u64, At(2u64))?
-        let cancel = triggers.write(mut tx, tables, old_entries, removed, 0u64, At(3u64))?
-        let park_cancel = triggers.write(mut tx, tables, old_entries, removed_run, 0u64, At(4u64))?
-        let _ = triggers.write(mut tx, tables, old_entries, changed, 1u64, At(5u64))?
-        let _ = triggers.write(mut tx, tables, old_entries, unchanged, 0u64, At(7u64))?
-        let _ = triggers.write(mut tx, tables, old_entries, unchanged, 0u64, At(6u64))?
-        let staying = if same_image { Some(triggers.write(mut tx, tables, old_entries, kept_run, 0u64, At(8u64))?) } else { None }
+    let written = store.run(mut db, None, (store.copy_env(same_image), store.copy_env(tables), store.copy_env(changed), store.copy_env(unchanged), store.copy_env(removed), store.copy_env(kept_run), store.copy_env(removed_run), store.copy_env(old_entries)), fn(mut tx, call_env) -> Result[(triggers.Id, triggers.Id, triggers.Id, triggers.Id, triggers.Id, Option[triggers.Id]), triggers.Error] {
+        let kept = triggers.write(mut tx, call_env.1, call_env.7, call_env.5, 7u64, At(0u64))?
+        let lost = triggers.write(mut tx, call_env.1, call_env.7, call_env.6, 0u64, At(1u64))?
+        let gone = triggers.write(mut tx, call_env.1, call_env.7, call_env.4, 0u64, At(2u64))?
+        let cancel = triggers.write(mut tx, call_env.1, call_env.7, call_env.4, 0u64, At(3u64))?
+        let park_cancel = triggers.write(mut tx, call_env.1, call_env.7, call_env.6, 0u64, At(4u64))?
+        let _ = triggers.write(mut tx, call_env.1, call_env.7, call_env.2, 1u64, At(5u64))?
+        let _ = triggers.write(mut tx, call_env.1, call_env.7, call_env.3, 0u64, At(7u64))?
+        let _ = triggers.write(mut tx, call_env.1, call_env.7, call_env.3, 0u64, At(6u64))?
+        let staying = if call_env.0 { Some(triggers.write(mut tx, call_env.1, call_env.7, call_env.5, 0u64, At(8u64))?) } else { None }
         Ok((kept, lost, gone, cancel, park_cancel, staying))
     })
     let (kept, lost, gone, cancel, park_cancel, staying) = result.unwrap(trigger_commit(take written)).value
     let base = store.snapshot(db)
-    let first = option.unwrap(result.unwrap(triggers.next_pending(base, tables, fn(id: triggers.Id) -> bool { false })))
-    let second = option.unwrap(result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { id == kept })))
-    let cancelling_row = option.unwrap(result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { id != park_cancel })))
-    let parked_row = result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { Some(id) != staying }))
-    let started = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        let _ = triggers.start(mut tx, tables, first, old_digest)?
-        let _ = triggers.start(mut tx, tables, second, old_digest)?
-        let Body(park) = triggers.start(mut tx, tables, cancelling_row, old_digest)? else { return Error(StaleAttempt) }
-        triggers.hold(mut tx, tables, park, 0u64, list.new(), list.new())?
-        if let Some(row_to_park) = parked_row {
-            let Body(hold) = triggers.start(mut tx, tables, row_to_park, old_digest)? else { return Error(StaleAttempt) }
-            triggers.hold(mut tx, tables, hold, 0u64, list.new(), list.new())?
+    let first = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), base, tables, fn(id: triggers.Id) -> bool { false })))
+    let second = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), base, tables, scoped fn(id: triggers.Id) -> bool { id == kept })))
+    let cancelling_row = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), base, tables, scoped fn(id: triggers.Id) -> bool { id != park_cancel })))
+    let parked_row = result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), base, tables, scoped fn(id: triggers.Id) -> bool { Some(id) != staying }))
+    let started = store.run(mut db, None, (store.copy_env(old_binding), store.copy_env(tables), store.copy_env(cancel), store.copy_env(park_cancel), store.copy_env(first), store.copy_env(second), store.copy_env(cancelling_row), store.copy_env(parked_row)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+        let _ = triggers.start(mut tx, call_env.1, call_env.4, call_env.0)?
+        let _ = triggers.start(mut tx, call_env.1, call_env.5, call_env.0)?
+        let Body(park) = triggers.start(mut tx, call_env.1, call_env.6, call_env.0)? else { return Error(StaleAttempt) }
+        triggers.hold(mut tx, call_env.1, park, 0u64, list.new(), list.new())?
+        if let Some(row_to_park) = call_env.7 {
+            let Body(hold) = triggers.start(mut tx, call_env.1, row_to_park, call_env.0)? else { return Error(StaleAttempt) }
+            triggers.hold(mut tx, call_env.1, hold, 0u64, list.new(), list.new())?
         }
-        triggers.request_cancel(mut tx, tables, cancel)?
-        triggers.request_cancel(mut tx, tables, park_cancel)
+        triggers.request_cancel(mut tx, call_env.1, call_env.2)?
+        triggers.request_cancel(mut tx, call_env.1, call_env.3)
     })
     let _ = result.unwrap(trigger_commit(take started))
 
@@ -482,8 +492,8 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest),
         clock: c, tasks: tasks, n_place: new_n_place, place: new_place,
-        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: clone(new_entries))
-    result.unwrap(prepare_export(setup, source, new_digest))
+        on_migrate: None, schema: code.describe(trigger_law_schema), triggers: clone(new_entries))
+    result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
     let rows = result.unwrap(std.codec.decode(codec, raw))
@@ -518,7 +528,8 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let mut head = take running
     head.r = result.unwrap(placed(new_place, new_n_place))
     let mut drive = option.unwrap(replace(mut head.trigger_drive, None))
-    drive.revision = clone(new_digest)
+    let new_binding = result.unwrap(trigger_stamp(head.r.exported, head.r.bindings, new_n_place))
+    drive.revision = clone(new_binding)
     head.trigger_drive = Some(take drive)
     for i in 0u64 .. 8u64 {
         if !result.unwrap(advance_triggers(mut head)) { fail("L40: due trigger did not advance") }
@@ -529,7 +540,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     if let Some(Cancelled) = trigger_law_outcome(head, park_cancel) {} else { fail("L40: parked cancel did not settle") }
     if let Some(parked_id) = staying {
         if let Some(Gone) = trigger_law_outcome(head, lost) {} else { fail("L40: same-image retry of removed entry did not end Gone") }
-        if let Some(Request(1u64, 0u64, _, _)) = result.unwrap(triggers.hold_mark(snapshot, tables, parked_id)) {} else { fail("L40: same-image Request hold changed") }
+        if let Some(Request(1u64, 0u64, _, _)) = result.unwrap(triggers.hold_mark(result.unwrap(store.reader(head.db, 0u64)), snapshot, tables, parked_id)) {} else { fail("L40: same-image Request hold changed") }
         for i in 0u64 .. 2u64 {
             let TriggerMessage(take message) = result.unwrap(channel.receive(inbox)) else { fail("L40: retry did not reach its trigger call") }
             result.unwrap(trigger_message(mut head, take message, false))
@@ -540,8 +551,8 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
         if let Some(Returned(_)) = trigger_law_outcome(head, kept) {} else { fail("L40: retry did not return") }
     } else {
         for id in [kept, lost] {
-            match result.unwrap(triggers.hold_mark(snapshot, tables, id)) {
-                Some(Revision(before, after)) => if before != old_digest || after != new_digest { fail("L40: wrong image digests in hold") },
+            match result.unwrap(triggers.hold_mark(result.unwrap(store.reader(head.db, 0u64)), snapshot, tables, id)) {
+                Some(Revision(before, after)) => if before != old_binding || after != new_binding { fail("L40: wrong release identities in hold") },
                 _ => fail("L40: changed image did not park the run"),
             }
         }
@@ -553,17 +564,23 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
 }
 
 fn trigger_scan_law_last(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables { clone(h.triggers) })
+
     transact(mut reg, code.describe(trigger_scan_law_removed), 131072u64, DEFAULT_STEPS)
 }
 
-fn trigger_scan_law_empty(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] { Ok(()) }
+fn trigger_scan_law_empty(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables { clone(h.triggers) })
+    Ok(())
+}
 
-fn trigger_scan_law_install(mut db: store.Db, tasks: Tasks, n_place: u64,
-    place: StaticFn[fn(mut Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError]],
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]) -> u64 waits {
+fn trigger_scan_law_install(mut db: store.Db, n_place: u64,
+    place: StaticFn[fn(mut Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError]]) -> u64 waits {
     let reg = result.unwrap(placed(place, n_place))
-    let (take description, take record) = result.unwrap(prepare_activation(reg, n_place))
-    let mut pending_install = result.unwrap(store.stage_migration(db, tasks, migrate))
+    let (take description, take record) = result.unwrap(prepare_activation(reg, n_place, list.new()))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(trigger_law_schema(mut declaration))
+    let mut pending_install = result.unwrap(store.finish_migration(db, take declaration))
     let version = store.version(store.snapshot(db)) + 1u64
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     result.unwrap(store.stage_activation(mut pending_install, version, result.unwrap(current_description(db)), description, release_codec, record))
@@ -575,14 +592,14 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let dir = triggers.law_directory(d)
     let n_place = 1048576u64
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
-    let _ = trigger_scan_law_install(mut db, tasks, n_place, code.describe(trigger_scan_law_last), code.describe(trigger_law_migrate))
-    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let _ = trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_last))
+    let tables = trigger_law_tables(mut db)
     let target = result.unwrap(triggers.transact(code.describe(trigger_scan_law_removed)))
     let mut listed = triggers.empty_entries()
     result.unwrap(triggers.allow(mut listed, target))
     let due = host.wall_ms(c) + 100u64
-    let written = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
-        triggers.write(mut tx, tables, listed, target, 0u64, At(due))
+    let written = store.run(mut db, None, (store.copy_env(tables), store.copy_env(target), store.copy_env(listed), store.copy_env(due)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 0u64, At(call_env.3))
     })
     let id = result.unwrap(trigger_commit(take written)).value
     let attempt = trigger_scan_law_bytes(16u64, 9u8)
@@ -592,16 +609,29 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest),
         clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty),
-        migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: triggers.empty_entries())
-    result.unwrap(prepare_export(setup, source, digest))
+        on_migrate: None, schema: code.describe(trigger_law_schema), triggers: triggers.empty_entries())
+    result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
     let rows = result.unwrap(std.codec.decode(codec, raw))
     if list.len(rows) != 1u64 || rows[0u64].class != Gone || rows[0u64].count != 1u64 || rows[0u64].earliest_due != due {
         fail("L40: final entry did not scan as Gone")
     }
+    // The import accepts only the preview's exact Describe (launch.md "Hot
+    // deploy"), whose tables come from describe mode's Migrate run of `schema`.
+    let launch = launch_env()
+    let Registry(exported: take shown, bindings: take shown_bindings, ..) = result.unwrap(placed(code.describe(trigger_scan_law_empty), n_place))
+    let shown_release = result.unwrap(http_release_digest(shown, shown_bindings))
+    let shown_tables = result.unwrap(store.describe_declarations(c, code.describe(trigger_law_schema)))
+    if list.len(shown_tables) == 0u64 { fail("L40: the law schema declares no table") }
+    let preview = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: n_place,
+        revision: launch_bytes(launch.revision), exported: take shown, tables: take shown_tables, bindings: take shown_bindings)
+    let prepared = result.unwrap(store.validate_prepared(exported_store.dir))
+    if !store.prepared_matches(prepared, result.unwrap(encode_describe(preview)), shown_release, launch_bytes(launch.digest)) {
+        fail("L40: PREPARED's Describe is not the preview's")
+    }
     store.release_export(mut db, attempt)
-    let selection = Current(trigger_scan_law_install(mut db, tasks, n_place, code.describe(trigger_scan_law_empty), code.describe(trigger_scan_law_keep_schema)))
+    let selection = Current(trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_empty)))
     result.unwrap(store.close(take db))
 
     let (to, events): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
@@ -610,16 +640,17 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let initial_window: Option[DrainWindow] = None
     let drain = latest.new(arc.new(initial_window))
     let triggering = if explicit_empty { Some(trigger_law_config(triggers.empty_entries())) } else { None }
-    let job = ManagedHead(backing: Disk(dir, clone(options)), selection: selection, tasks: tasks, clock: c, random: r,
-        place: code.describe(trigger_scan_law_empty), migrate: code.describe(trigger_scan_law_keep_schema),
-        handles: code.describe(trigger_law_handles), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
+    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r,
+        place: code.describe(trigger_scan_law_empty), on_migrate: None,
+        schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),
         cut: result.unwrap(cut_activity()), triggering: take triggering, idle: None, expected_store: None)
-    let allowance = head_bytes(job.backing, job.n_place, job.n_publisher)
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
+    let allowance = writer + job.n_place + job.n_publisher
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)
     if let Ok(Recovered) = channel.receive(events) {} else { fail("L40: serving head did not recover") }
     result.unwrap(channel.send(head_to, HeadContinue))
-    if let Ok(Activated(_, _, _, _)) = channel.receive(events) {} else { fail("L40: serving head did not activate") }
+    if let Ok(Activated(_, _, _, _, _)) = channel.receive(events) {} else { fail("L40: serving head did not activate") }
     result.unwrap(channel.send(head_to, HeadContinue))
     if let Ok(Published(_)) = channel.receive(events) {} else { fail("L40: serving head did not publish") }
     host.sleep_until_wall(c, due)
@@ -631,7 +662,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     if let Ok(HeadEnded(Ok(None))) = channel.receive(events) {} else { fail("L40: serving head did not close") }
     result.unwrap(task.join(take server))
     let reopened = result.unwrap(store.open(tasks, dir, c, r, options))
-    let outcome = result.unwrap(triggers.outcome(store.snapshot(reopened), tables, id))
+    let outcome = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), tables, id))
     result.unwrap(store.close(take reopened))
     if let Some(Gone) = outcome { Ok(()) } else { fail("L40: Gone did not survive reopen") }
 }
@@ -641,14 +672,14 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
 pub fn journal_law_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = triggers.law_directory(d)
     let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(trigger_law_migrate)))
-    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let handles = result.unwrap(store.bind_declaration(mut db, Migrate, trigger_law_schema))
+    let tables = view handles.triggers
     let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
     let mut allowed = triggers.empty_entries()
     result.unwrap(triggers.allow(mut allowed, target))
-    let queued = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(triggers.Id, triggers.Id), triggers.Error] {
-        let live = triggers.write(mut tx, tables, allowed, target, 7u64, AfterCommit)?
-        let held = triggers.write(mut tx, tables, allowed, target, 5u64, AfterCommit)?
+    let queued = store.run(mut db, None, (store.copy_env(tables), store.copy_env(target), store.copy_env(allowed)), fn(mut tx, call_env) -> Result[(triggers.Id, triggers.Id), triggers.Error] {
+        let live = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 7u64, AfterCommit)?
+        let held = triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 5u64, AfterCommit)?
         Ok((live, held))
     })
     let writing = result.unwrap(trigger_commit(take queued))
@@ -659,8 +690,8 @@ pub fn journal_law_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let mut head = take built
     if !result.unwrap(advance_triggers(mut head)) { return false }
 
-    let cancellation = store.run(mut head.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        triggers.request_cancel(mut tx, tables, live)
+    let cancellation = store.run(mut head.db, None, (store.copy_env(tables), store.copy_env(live)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+        triggers.request_cancel(mut tx, call_env.0, call_env.1)
     })
     let requested = result.unwrap(trigger_commit(take cancellation))
     result.unwrap(store.durable(mut head.db, requested.ticket))
@@ -684,8 +715,8 @@ pub fn journal_law_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     if let Some(_) = trigger_law_outcome(head, held) { return false }
     if result.unwrap(advance_triggers(mut head)) { return false }
 
-    let cancel_held = store.run(mut head.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        triggers.request_cancel(mut tx, tables, held)
+    let cancel_held = store.run(mut head.db, None, (store.copy_env(tables), store.copy_env(held)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+        triggers.request_cancel(mut tx, call_env.0, call_env.1)
     })
     let marked = result.unwrap(trigger_commit(take cancel_held))
     result.unwrap(store.durable(mut head.db, marked.ticket))
@@ -713,98 +744,11 @@ const INBOX: u64 = 64u64
 // (session, sub); the expected caches are written out by hand from the store's values at each
 // version, as a from-scratch run of the query would give them (K1), never from the publisher.
 // A value is the u64 codec's 8 bytes little-endian (codec.md), so `word` is the oracle's.
-type Qh: send { t: store.Shape[u64, u64] }
+type Qh: shareable + send { t: store.Table[u64, u64] }
 
-fn q1(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
-    let allowed = match store.fetch(tx, h.t, 0u64) {
-        Ok(Some(p)) => p != 0u64,
-        Ok(None) => false,
-        Error(_) => fail("subs: q1 reads perm"),
-    }
-    if allowed {
-        cover(h.t, Included(1u64), Included(2u64))
-    } else {
-        cover(h.t, Included(1u64), Excluded(1u64))
-    }
-}
-
-fn qf(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
-    match store.fetch(tx, h.t, 2u64) {
-        Ok(Some(v)) => if v == 2u64 {
-            fail("subs: qf at row1 = 2")
-        },
-        _ => (),
-    }
-    cover(h.t, Included(2u64), Included(2u64))
-}
-
-// q_late reads row1 and covers it. When row1 is 2 it also reads perm, then faults, so its
-// partial read log holds a key its last good run never read.
-fn q_late(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
-    match store.fetch(tx, h.t, 2u64) {
-        Ok(Some(v)) => if v == 2u64 {
-            let _ = store.fetch(tx, h.t, 0u64)
-            fail("subs: q_late at row1 = 2")
-        },
-        _ => (),
-    }
-    cover(h.t, Included(2u64), Included(2u64))
-}
-
-fn q_moving(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
-    let selector = option.unwrap(result.unwrap(store.fetch(tx, h.t, 0u64)))
-    let key = if selector == 0u64 {
-        3u64
-    } else {
-        4u64
-    }
-    let mut scan = match store.range(tx, h.t, Included(key), Excluded(key + 1u64)) {
-        Ok(take rows) => take rows,
-        Error(_) => fail("subs: q_moving range")
-    }
-    let chosen = match result.unwrap(store.next_range(mut scan)) {
-        Some((_, _)) => 2u64,
-        None => 1u64
-    }
-    cover(h.t, Included(chosen), Included(chosen))
-}
-
-fn q_range_prefix(tx: store.Tx, h: Qh, take limit: u32) -> Result[Cover, Capacity] {
-    let mut rows = match store.range(tx, h.t, Included(1u64), Excluded(10u64)) {
-        Ok(take cursor) => take cursor,
-        Error(_) => fail("subs: prefix range")
-    }
-    let mut key = 0u64
-    for _ in 0u64 .. int.widen(limit) {
-        match result.unwrap(store.next_range(mut rows)) {
-            Some((k, _)) => {
-                key = k
-            },
-            None => {
-                break
-            }
-        }
-    }
-    cover(h.t, Included(key), Included(key))
-}
-
-fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(q1), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(qf), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_late), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_moving), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_range_prefix), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)
-}
-
-fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
-    Ok(Qh(t: store.shape(t)))
-}
-
-fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Cover, Capacity]]) -> Bytes {
+fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Answer[()], Capacity]]) -> Bytes {
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(law_query_slots())))
     let (take k, _) = result.unwrap(described_result(code.identity(f), None, Query, ca, take result_schema))
     k
 }
@@ -825,46 +769,46 @@ fn apply_all(mut c: Client, take owes: List[Owe]) -> bool {
     true
 }
 
-fn step_held[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
-    let mut fenced = Fenced(sessions: list.new(), all: false)
+fn step_held[G: send, H: shareable + inert + send](mut b: Board[G, H]) -> List[Owe] waits {
+    let mut fenced = Fenced(sessions: map.new())
     round(mut b, mut fenced)
 }
 
 pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     let empty = store.snapshot(db)
-    set(mut db, t, 0u64, 1u64)
-    set(mut db, t, 1u64, 0u64)
-    set(mut db, t, 2u64, 0u64)
+    let mut model: List[Option[u64]] = list.new()
+    let mut watched: List[Watched] = list.new()
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 0u64)
+    law_set(mut db, mut model, t, 2u64, 0u64)
     let base = store.snapshot(db)
     let mut keys: List[Bytes] = list.new()
-    for ch in result.unwrap(store.changes(empty, base)) {
+    for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
         list.push(mut keys, clone(ch.tree_key))
-    }
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
     }
     let reg = match placed(code.describe(subs_place), 1048576u64) {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let mut cl = Client(caches: list.new(), last: list.new())
     let k1 = query_key(code.describe(q1))
     let kf = query_key(code.describe(qf))
     // subscribe_at_latest: w0 commits and is released, then session 0 subscribes Q1 before the
     // round. Its result is the base's (row0 = 0), labelled with the base.
-    set(mut db, t, 1u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 1u64)
     b.newest = Some(store.snapshot(db))
     let first = at_base(mut b, 0u64, 1u32, clone(k1), no_arg())
     if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
-    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) {
+    list.push(mut watched, Watched(who: 0u64, sub: 1u32, q: Q1))
+    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
@@ -875,51 +819,62 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if !apply(mut cl, at_base(mut b, 0u64, 2u32, clone(kf), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
         return false
     }
-    set(mut db, t, 2u64, 5u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+    list.push(mut watched, Watched(who: 1u64, sub: 1u32, q: Q1))
+    list.push(mut watched, Watched(who: 0u64, sub: 2u32, q: Qf))
+    if !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 5u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // rerun_without_retract: revoke re-runs both Q1s, whose Covers become empty, so both lose
     // row0 and row1. A Subscribe of Q1 now completes with an empty result (L17).
-    set(mut db, t, 0u64, 0u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     let empty_result = at_base(mut b, 1u64, 3u32, clone(k1), no_arg())
     if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
         return false
     }
-    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
-    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
-    set(mut db, t, 0u64, 1u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) {
+    list.push(mut watched, Watched(who: 1u64, sub: 3u32, q: Q1))
+    if !image_matches(cl, keys, model, watched) {
         return false
     }
-    set(mut db, t, 2u64, 2u64)
+    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
+    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 2u64)
     let owes = step(mut b, db)
     let mut faulted = false
     for o in owes {
         for e in o.ended {
-            faulted = o.session == 0u64 && e.0 == 2u32 && match e.2 {
+            faulted = o.session == 0u64 && e.sub == 2u32 && match e.outcome {
                 Failed(Raised(n)) => n == 5u32,
                 _ => false,
             }
         }
     }
-    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) {
+    unwatch(mut watched, 0u64, 2u32)
+    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // Moving the selector invalidates the Point and moves the read Span from [4,5) to
     // [3,4). A write at the old lower bound must miss both Spans. The new lower bound
     // must rerun the query and move its Cover from row0 to row1.
     let moving = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_moving)), no_arg())
-    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
-    set(mut db, t, 0u64, 0u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
-    set(mut db, t, 4u64, 20u64)
-    if list.len(step(mut b, db)) != 0u64 { return false }
-    set(mut db, t, 3u64, 21u64)
-    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8))
+    list.push(mut watched, Watched(who: 2u64, sub: 1u32, q: QMoving))
+    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 4u64, 20u64)
+    if list.len(step(mut b, db)) != 0u64 || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 3u64, 21u64)
+    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8)) && image_matches(cl, keys, model, watched)
 }
 
 fn range_limit(n: u32) -> Bytes {
@@ -931,21 +886,20 @@ fn range_limit(n: u32) -> Bytes {
 // A tail insert misses a prefix subscription but hits a cursor that received
 // None. An insert before the prefix's first row also changes its Cover.
 pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
-    let cv = std.codec.of_u64()
-    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 3, 30)
     set(mut db, t, 7, 70)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
-    let h = result.unwrap(subs_handles(mut db))
-    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
     let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
     set(mut db, t, 8, 80)
-    let delta = result.unwrap(store.changes(b.base, store.snapshot(db)))
-    let hits = result.unwrap(affected_subscriptions(b.subs, delta))
-    if list.len(hits) != 1 || hits[0].0 .who != 2 || !hits[0].1 {
+    let hits = result.unwrap(affected_routes(b, store.snapshot(db)))
+    if list.len(hits) != 1 || hits[0].0 != option.unwrap(sub_at(b.subs, 2u64, 1u32)).routes || !hits[0].1 {
         return false
     }
     let updated = step(mut b, db)
@@ -953,25 +907,26 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
         return false
     }
     set(mut db, t, 2, 20)
-    let changed = result.unwrap(store.changes(b.base, store.snapshot(db)))
-    let reruns = result.unwrap(affected_subscriptions(b.subs, changed))
+    let reruns = result.unwrap(affected_routes(b, store.snapshot(db)))
     if list.len(reruns) != 2 || !reruns[0].1 || !reruns[1].1 {
         return false
     }
-    let projected = step(mut b, db)
-    if list.len(projected) != 2 {
+    b.newest = Some(store.snapshot(db))
+    let mut fenced = Fenced(sessions: map.new())
+    let projected = round(mut b, mut fenced)
+    // Both read sets hit. The prefix moves its cover from key 3 to key 2.
+    // The exhausted cursor still covers key 8, so its unit result and rows send no group.
+    if map.len(fenced.sessions) != 2 || !map.contains(fenced.sessions, 1u64) || !map.contains(fenced.sessions, 2u64) {
         return false
     }
-    for owed in projected {
-        if owed.session == 1 {
-            if list.len(owed.rows) != 2 {
-                return false
-            }
-        } else if owed.session != 2 || list.len(owed.rows) != 0 {
-            return false
-        }
-    }
-    true
+    if list.len(projected) != 1 || projected[0].session != 1 || list.len(projected[0].rows) != 2 ||
+        list.len(projected[0].groups) != 1 || projected[0].reset || list.len(projected[0].ended) != 0 { return false }
+    let rows = view projected[0].rows
+    let inserted = view rows[0]
+    let removed = view rows[1]
+    inserted.sub == 1 && removed.sub == 1 && inserted.value == Some(clone(b"\x14\x00\x00\x00\x00\x00\x00\x00")) && removed.value == None
+        && list.slice(inserted.key, 4u64, list.len(inserted.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x02"
+        && list.slice(removed.key, 4u64, list.len(removed.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x03"
 }
 
 @test

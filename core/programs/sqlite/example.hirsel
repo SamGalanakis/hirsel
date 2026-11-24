@@ -1,0 +1,16 @@
+@test
+fn sum_orders(f: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
+    let mut db = sqlite.open_memory(f)?
+    sqlite.exec(mut db, "CREATE TABLE orders (customer INTEGER, total INTEGER)")?
+    sqlite.exec(mut db, "INSERT INTO orders VALUES (1, 18), (1, 24), (2, 90)")?
+    let mut statement = sqlite.prepare(mut db, "SELECT sum(total) FROM orders WHERE customer = ?1")?
+    sqlite.bind_i64(mut statement, 1, 1)?
+    let Row = sqlite.step(mut statement)? else {
+        fail("expected one aggregate row")
+    }
+    if sqlite.column_i64(mut statement, 0) != 42 {
+        fail("customer 1 has orders totaling 18 + 24")
+    }
+    sqlite.finalize(take statement)?
+    sqlite.close(take db)
+}

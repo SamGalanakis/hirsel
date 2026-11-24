@@ -1,0 +1,79 @@
+// S2's live read scenarios: init as `checkpoint`, a write phase that stages
+// the writer's COMMIT around a capture, and a locked reopen.
+fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, scenario: View[String]) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0))
+    if phase == "init" {
+        disk_crash_init(d, c, r, tasks, "checkpoint") ?=> |_| Exit(status: 31)
+        return Ok(())
+    }
+    if phase == "write" {
+        let published = disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
+        let mut ack = string.from("ACK ")
+        string.push_u64(mut ack, published)
+        let _ = stdout.write(out, ack)
+        let _ = stdout.write(out, "DONE")
+        return Ok(())
+    }
+    let raw_floor = option.unwrap(args.get(argv, 3))
+    let floor: u64 = result.unwrap(int.parse(raw_floor))
+    let db = open(tasks, d, c, r, disk_crash_options("checkpoint")) ?=> |_| Exit(status: 33)
+    let head = version(snapshot(db))
+    close(take db) ?=> |_| Exit(status: 33)
+    if head < floor {
+        fail("a live read published a head the store did not keep")
+    }
+    return Ok(())
+}
+
+// The adapter applies the staged COMMIT for head + 1 when recovery stats
+// the terminal segment. The durability cases write it unsynced before the
+// stat returns. The boundary case writes and syncs it with a new END after
+// the stat took its size. The live read must publish head + 1, which the
+// locked reopen must still find after restart discards unsynced bytes.
+fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scenario: View[String]) -> Result[u64, Error] waits {
+    let boundary = scenario == "follower-boundary"
+    let read_only = scenario == "read-only-durable"
+    let (_, id, take manifest) = read_only_manifest(d)?
+    let first = manifest.first_live
+    let initial = read_only_checkpoint(d, id, take manifest)?
+    let JournalRecovered(replay: take known, seq: seq, end: end, ..) = journal_recover(d, id, first, Locked, take initial)?
+    let wanted = known.state.tips[0u64].head + 1
+    let segment = journal_path(seq, "")?
+    let frame = journal_empty_commit(DiskContext(store: id, role: 2, seq: seq), end, wanted)
+    let mut message: Bytes = list.new()
+    list.append(mut message, string.into_bytes(string.from("STAGE")))
+    list.push(mut message, if read_only { 2u8 } else if boundary { 1u8 } else { 0u8 })
+    capacity(le(mut message, end, 8))?
+    capacity(le(mut message, string.byte_len(segment), 1))?
+    list.append(mut message, string.into_bytes(take segment))
+    capacity(le(mut message, list.len(frame), 4))?
+    list.append(mut message, frame)
+    if boundary {
+        let ctx = DiskContext(store: id, role: 4, seq: seq)
+        let mut end_image = capacity(disk_header_bytes(ctx, 0, 0))?
+        let mut payload: Bytes = list.new()
+        capacity(le(mut payload, end + list.len(frame), 8))?
+        list.append(mut end_image, capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?)
+        list.append(mut message, end_image)
+    }
+    let _ = stdout.write_bytes(out, message)
+    if read_only {
+        let captured = open_read_only(d, disk_crash_options("checkpoint"))?
+        let published = version(captured.snapshot)
+        if published != wanted {
+            fail("the staged writer COMMIT did not reach the read-only open")
+        }
+        return Ok(published)
+    }
+    let plan = follower_law_plan(Directory, disk_crash_options("checkpoint"))
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, Some(id))?
+    let published = applied(replica, follower_main(replica))?.version
+    if published != wanted {
+        fail("the staged writer COMMIT did not reach the follower")
+    }
+    close_follower_service(take service)?
+    Ok(published)
+}
+

@@ -7,6 +7,13 @@ type Error = Box<dyn std::error::Error>;
 pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
+mod http;
+mod stubs;
+
+pub use http::HttpBinding;
+use stubs::StubTypes;
+pub(crate) use stubs::{entry_path, stub_paths};
+
 pub(crate) struct Reader<'a> {
     pub(crate) bytes: &'a [u8],
     pub(crate) at: usize,
@@ -20,6 +27,9 @@ impl<'a> Reader<'a> {
     }
     pub(crate) fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
+    }
+    fn half(&mut self) -> Result<u16, Error> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
     }
     pub(crate) fn count(&mut self) -> Result<usize, Error> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?) as usize)
@@ -41,17 +51,18 @@ impl<'a> Reader<'a> {
             Err("Malformed: trailing bytes".into())
         }
     }
-    fn ty(&mut self) -> Result<Value, Error> {
+    fn ty(&mut self, key: bool) -> Result<Value, Error> {
         let op = self.byte()?;
         Ok(match op {
             0..=13 | 20 => json!([op]),
-            14 | 16 => json!([op, self.ty()?]),
-            15 | 17 => json!([op, self.ty()?, self.ty()?]),
+            14 | 16 => json!([op, self.ty(key)?]),
+            21 if key => json!([op, self.ty(key)?]),
+            15 | 17 => json!([op, self.ty(key)?, self.ty(key)?]),
             18 => {
                 let n = self.count()?;
                 let mut types = Vec::new();
                 for _ in 0..n {
-                    types.push(self.ty()?);
+                    types.push(self.ty(key)?);
                 }
                 json!([op, types])
             }
@@ -87,7 +98,7 @@ impl Schema {
             let name = r.name()?;
             let args = r.count()?;
             for _ in 0..args {
-                let _ = r.ty()?;
+                let _ = r.ty(key)?;
             }
             let kind = r.byte()?;
             let body = match kind {
@@ -95,8 +106,9 @@ impl Schema {
                     let n = r.count()?;
                     let mut fields = Vec::new();
                     for _ in 0..n {
-                        fields
-                            .push(json!({"removed":r.removed()?,"name":r.name()?,"type":r.ty()?}));
+                        fields.push(
+                            json!({"removed":r.removed()?,"name":r.name()?,"type":r.ty(key)?}),
+                        );
                     }
                     json!(fields)
                 }
@@ -109,18 +121,18 @@ impl Schema {
                         let n = r.count()?;
                         let mut fields = Vec::new();
                         for _ in 0..n {
-                            fields.push(r.ty()?);
+                            fields.push(r.ty(key)?);
                         }
                         variants.push(json!({"removed":removed,"name":name,"fields":fields}));
                     }
                     json!(variants)
                 }
-                2 => r.ty()?,
+                2 => r.ty(key)?,
                 _ => return Err("Malformed: schema definition kind".into()),
             };
             definitions.push(json!({"name":name,"kind":kind,"body":body}));
         }
-        let root = r.ty()?;
+        let root = r.ty(key)?;
         r.done()?;
         Ok(Self {
             root,
@@ -198,7 +210,7 @@ impl Schema {
             14 if t[1] == json!([3]) => "Uint8Array".into(),
             14 => format!("Array<{}>", Self::typescript(&t[1], prefix)),
             15 => format!(
-                "Map<{}, {}>",
+                "ReadonlyMap<{}, {}>",
                 Self::typescript(&t[1], prefix),
                 Self::typescript(&t[2], prefix)
             ),
@@ -219,6 +231,7 @@ impl Schema {
             ),
             19 => format!("{prefix}Def{}", t[1]),
             20 => "never".into(),
+            21 => format!("{{ value: {} }}", Self::typescript(&t[1], prefix)),
             _ => unreachable!(),
         }
     }
@@ -232,30 +245,90 @@ pub struct Exported {
     pub args_fp: u64,
     pub result_fp: u64,
     pub revision: Vec<u8>,
+    pub slots: Vec<ExportedSlot>,
+    pub value: Vec<u8>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeclaredCollection {
+    pub name: String,
+    pub id: u32,
+    pub owner: u32,
+    pub kind: u8,
+}
+
+pub struct ExportedSlot {
+    pub name: String,
+    pub kind: u32,
+    pub key: Vec<u8>,
+    pub key_json: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+pub(crate) struct QuerySchemas {
+    pub value: Schema,
+    pub slots: Vec<QuerySlot>,
+}
+
+impl QuerySchemas {
+    pub(crate) fn describe_types(self, name: impl Fn(&Schema) -> String) -> (String, Vec<Schema>) {
+        let mut description = name(&self.value);
+        let mut schemas = vec![self.value];
+        for slot in self.slots {
+            description.push_str(&format!(
+                ", {}: rows[{}, {}]",
+                slot.name,
+                name(&slot.key),
+                name(&slot.row)
+            ));
+            schemas.extend([slot.key, slot.row]);
+        }
+        (description, schemas)
+    }
+}
+
+pub(crate) struct QuerySlot {
+    pub name: String,
+    pub key: Schema,
+    pub row: Schema,
 }
 
 impl Exported {
-    pub(crate) fn row_schemas(&self) -> Result<(Schema, Schema), Error> {
-        let mut input = Reader {
-            bytes: &self.result,
-            at: 0,
-        };
-        let key_size = input.count()?;
-        let key = Schema::read(input.take(key_size)?)?;
-        let value_size = input.count()?;
-        let value = Schema::read(input.take(value_size)?)?;
-        input.done()?;
-        if !key.key || value.key {
-            return Err("Malformed: query needs an ordered key schema and a value schema".into());
+    pub(crate) fn query_schemas(&self) -> Result<QuerySchemas, Error> {
+        let value = Schema::read(&self.value)?;
+        if value.key {
+            return Err("Malformed: query result needs a value schema".into());
         }
-        Ok((key, value))
+        let mut slots = Vec::new();
+        for slot in &self.slots {
+            let key = match slot.kind {
+                0 | 2 => Schema::read(&slot.key)?,
+                1 if slot.key.is_empty() => Schema::read(&[4, 0, 0, 0, 0, 0])?,
+                _ => return Err("Malformed: query slot kind or key schema".into()),
+            };
+            let row = Schema::read(&slot.value)?;
+            if !key.key || row.key {
+                return Err(
+                    "Malformed: slot needs an ordered key schema and a value schema".into(),
+                );
+            }
+            slots.push(QuerySlot {
+                name: slot.name.clone(),
+                key,
+                row,
+            });
+        }
+        Ok(QuerySchemas { value, slots })
     }
 }
 pub struct Describe {
     pub digest: Vec<u8>,
     pub target: String,
     pub n_place: u64,
+    pub revision: Vec<u8>,
     pub exported: Vec<Exported>,
+    pub tables: Vec<DeclaredCollection>,
+    pub bindings: Vec<HttpBinding>,
 }
 impl Describe {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
@@ -269,6 +342,7 @@ impl Describe {
         let digest = r.bytes()?;
         let target = r.name()?;
         let n_place = r.word()?;
+        let revision = r.bytes()?;
         let n = r.count()?;
         let mut exported = Vec::new();
         for _ in 0..n {
@@ -276,7 +350,7 @@ impl Describe {
             if kind > 3 {
                 return Err("Malformed: entry kind".into());
             }
-            exported.push(Exported {
+            let mut entry = Exported {
                 kind,
                 identity: r.bytes()?,
                 args: r.bytes()?,
@@ -284,13 +358,45 @@ impl Describe {
                 args_fp: r.word()?,
                 result_fp: r.word()?,
                 revision: r.bytes()?,
+                slots: Vec::new(),
+                value: Vec::new(),
+            };
+            for _ in 0..r.count()? {
+                entry.slots.push(ExportedSlot {
+                    name: r.name()?,
+                    kind: r.count()? as u32,
+                    key: r.bytes()?,
+                    key_json: r.bytes()?,
+                    value: r.bytes()?,
+                });
+            }
+            entry.value = r.bytes()?;
+            if kind != 2 && (!entry.slots.is_empty() || !entry.value.is_empty()) {
+                return Err("Malformed: call entry carries query schemas".into());
+            }
+            exported.push(entry);
+        }
+        let mut tables = Vec::new();
+        for _ in 0..r.count()? {
+            tables.push(DeclaredCollection {
+                name: r.name()?,
+                id: r.count()? as u32,
+                owner: r.count()? as u32,
+                kind: r.byte()?,
             });
+        }
+        let mut bindings = Vec::new();
+        for _ in 0..r.count()? {
+            bindings.push(HttpBinding::read(r)?);
         }
         Ok(Self {
             digest,
             target,
             n_place,
+            revision,
             exported,
+            tables,
+            bindings,
         })
     }
 }
@@ -305,50 +411,24 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
         ),
         1 => format!("AlreadyRegistered({:?})", r.bytes()?),
         2 => "Bounds".to_owned(),
+        3 => http::bind_error(&mut r)?,
         _ => return Err("Malformed: describe error tag".into()),
     };
     r.done()?;
     Ok(message)
 }
 
-pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
-    // PROG-9: version 01 followed by UTF-8 D S, with S beginning at '('.
-    if identity.first() != Some(&1) {
-        return Err("Malformed: entry identity version".into());
-    }
-    let text = std::str::from_utf8(&identity[1..])?;
-    let (path, _) = text.split_once('(').ok_or("Malformed: entry signature")?;
-    let name = path
-        .rsplit('/')
-        .next()
-        .ok_or("Malformed: definition identity")?;
-    let mut out = Vec::new();
-    let mut bytes = name.as_bytes().iter().copied();
-    while let Some(b) = bytes.next() {
-        out.push(if b == b'%' {
-            let hi = bytes.next().ok_or("Malformed: percent escape")?;
-            let lo = bytes.next().ok_or("Malformed: percent escape")?;
-            u8::from_str_radix(std::str::from_utf8(&[hi, lo])?, 16)?
-        } else {
-            b
-        });
-    }
-    Ok(String::from_utf8(out)?)
-}
-
 /// Complete all generation before touching the requested output directory.
 pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> {
-    let mut names = BTreeMap::new();
-    for entry in &describe.exported {
-        let name = stub_name(&entry.identity)?;
-        if let Some(old) = names.insert(name, &entry.identity) {
-            return Err(format!("DuplicateStubName({old:?}, {:?})", entry.identity).into());
-        }
-    }
+    let paths = stub_paths(describe)?;
     let mut js = RUNTIME.to_owned();
     let mut dts = DECLARATIONS.to_owned();
     let mut entries = "import * as codec from './codec.js';\n".to_owned();
     entries.push_str(&format!("export const identity = Object.freeze({{digest:Uint8Array.from({}),target:{},n_place:{}n}});\n",json!(describe.digest),json!(describe.target),describe.n_place));
+    entries.push_str(&format!(
+        "export const tables = Object.freeze({});\n",
+        json!(describe.tables)
+    ));
     entries.push_str("export const want = [\n");
     for entry in &describe.exported {
         entries.push_str(&format!(
@@ -358,59 +438,109 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             entry.result_fp
         ));
     }
-    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\n");
-    let mut calls = Vec::new();
-    let mut subscriptions = Vec::new();
-    let mut decoded = Vec::new();
+    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
+    let mut calls = StubTypes::default();
+    let mut subscriptions = StubTypes::default();
+    let mut decoded = StubTypes::default();
     for (i, entry) in describe.exported.iter().enumerate() {
         let args = Schema::read(&entry.args)?;
         let arg_name = format!("Args{i}");
         js.push_str(&args.javascript(&arg_name));
         dts.push_str(&args.declarations(&arg_name));
-        let name = json!(stub_name(&entry.identity)?);
+        let path = &paths[i];
+        let (name, module) = path.split_last().expect("stub path has a module");
+        let at = |root: &str| format!("ns({root},{})[{}]", json!(module), json!(name));
         if entry.kind == 2 {
-            let (key, row) = entry.row_schemas()?;
-            let key_name = format!("Key{i}");
-            let row_name = format!("RowValue{i}");
-            js.push_str(&key.javascript(&key_name));
-            js.push_str(&row.javascript(&row_name));
-            dts.push_str(&key.declarations(&key_name));
-            dts.push_str(&row.declarations(&row_name));
-            entries.push_str(&format!("subscribe[{name}] = (args,onRows,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows,onEnd);\n"));
-            subscriptions.push(format!(
-                "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+            let query = entry.query_schemas()?;
+            entries.push_str(&format!("{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n", at("subscribe")));
+            subscriptions.insert(path, format!(
+                "(args: codec.{arg_name}, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
-            entries.push_str(&format!("subscribeDecoded[{name}] = (args,onRows,onEnd) => subscribe[{name}](args,rows => onRows(rows.map(row => decodeRow(row,codec.{key_name},codec.{row_name}))),onEnd);\n"));
-            decoded.push(format!(
-                "{name}: (args: codec.{arg_name}, onRows: (rows: DecodedRow<codec.{key_name}, codec.{row_name}>[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+            let value = format!("Value{i}");
+            js.push_str(&query.value.javascript(&value));
+            dts.push_str(&query.value.declarations(&value));
+            let mut names = Vec::new();
+            let mut key_codecs = Vec::new();
+            let mut row_codecs = Vec::new();
+            let mut slot_types = Vec::new();
+            let mut slot_keys = Vec::new();
+            for (s, slot) in query.slots.iter().enumerate() {
+                let key = format!("Key{i}_{s}");
+                let row = format!("RowValue{i}_{s}");
+                js.push_str(&slot.key.javascript(&key));
+                js.push_str(&slot.row.javascript(&row));
+                dts.push_str(&slot.key.declarations(&key));
+                dts.push_str(&slot.row.declarations(&row));
+                let slot_name = json!(slot.name);
+                slot_types.push(format!(
+                    "{slot_name}: DecodedRow<{slot_name}, codec.{key}, codec.{row}>"
+                ));
+                slot_keys.push(format!("{slot_name}: codec.{key}"));
+                names.push(slot_name);
+                key_codecs.push(format!("codec.{key}"));
+                row_codecs.push(format!("codec.{row}"));
+            }
+            entries.push_str(&format!(
+                "{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
+                at("subscribeDecoded"), json!(names), key_codecs.join(","), row_codecs.join(",")
             ));
+            let slots = format!("{{ {} }}", slot_types.join("; "));
+            let sub = format!(
+                "Subscription<codec.{value}, {slots}, {{ {} }}>",
+                slot_keys.join("; ")
+            );
+            decoded.insert(path, format!("(args: codec.{arg_name}, onChange: (sub: {sub}, change: Change<codec.{value}, {slots}>) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
         } else {
             let result = Schema::read(&entry.result)?;
             let result_name = format!("Result{i}");
             js.push_str(&result.javascript(&result_name));
             dts.push_str(&result.declarations(&result_name));
-            entries.push_str(&format!("call[{name}] = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n"));
-            calls.push(format!(
-                "{name}: (args: codec.{arg_name}) => Promise<Outcome<codec.{result_name}>>"
-            ));
+            entries.push_str(&format!("{} = (args,options) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode,options);\n", at("call")));
+            calls.insert(
+                path,
+                format!("(args: codec.{arg_name}, options?: CallOptions) => Promise<Outcome<codec.{result_name}>>"),
+            );
         }
     }
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
     if !decoded.is_empty() {
-        entries.push_str("function decodeRow(row,key,value) {\n\
-            if (row.key.length < 4) throw new codec.Malformed('truncated table key');\n\
-            const table = new DataView(row.key.buffer,row.key.byteOffset,4).getUint32(0);\n\
-            return {sub:row.sub,table,key:key.decode(row.key.subarray(4)),\n\
-                value:row.value.tag === 'Some' ? {tag:'Some',value:value.decode(row.value.value)} : row.value};\n\
-            }\n");
+        entries.push_str(r#"export function queryCodec(value,names,keys,rows,keyPrefixBytes = 4) {
+    const positions = new Map(names.map((name, i) => [name, i]));
+    const slot = position => {
+        if (names[position] === undefined) throw new codec.Malformed('unknown row slot');
+        return names[position];
+    };
+    const decodeRow = (i, key, value) => ({slot:slot(i),key:keys[i].decode(key),
+        value:value.tag === 'Some' ? {tag:'Some',value:rows[i].decode(value.value)} : value});
+    return {
+        value: value.decode, slot, keyPrefixBytes,
+        key: (name, key) => keys[positions.get(name)].encode(key),
+        encodeValue: value.encode,
+        encodeRow(name, key, row) {
+            const i = positions.get(name);
+            if (row.slot !== name || row.value.tag !== 'Some') throw new codec.Malformed('invalid Draft row');
+            const actual = keys[i].encode(row.key);
+            if (actual.length !== key.length || actual.some((byte, j) => byte !== key[j])) {
+                throw new codec.Malformed('Draft row key mismatch');
+            }
+            const raw = rows[i].encode(row.value.value);
+            return {raw, decoded:decodeRow(i,key,{tag:'Some',value:raw})};
+        },
+        row(row) {
+            if (row.key.length < keyPrefixBytes) throw new codec.Malformed('truncated collection key');
+            return decodeRow(row.slot,row.key.subarray(keyPrefixBytes),row.value);
+        },
+    };
+}
+"#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Row, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport type DecodedRow<K, V> = {{sub: number; table: number; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }}; subscribeDecoded: {{ {} }} }};\n",
-        calls.join("; "),
-        subscriptions.join("; "),
-        decoded.join("; ")
+        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
+        calls.render(),
+        subscriptions.render(),
+        decoded.render()
     );
-    Ok(BTreeMap::from([
+    let mut files = BTreeMap::from([
         ("package.json".into(), "{\"type\":\"module\"}\n".into()),
         ("codec.js".into(), js),
         ("codec.d.ts".into(), dts),
@@ -419,6 +549,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         (
             "client.ts".into(),
             include_str!("../../../sdk/client/client.ts").into(),
+        ),
+        (
+            "image.ts".into(),
+            include_str!("../../../sdk/client/image.ts").into(),
         ),
         (
             "browser.ts".into(),
@@ -432,7 +566,9 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             "persistence.ts".into(),
             include_str!("../../../sdk/client/persistence.ts").into(),
         ),
-    ]))
+    ]);
+    http::generate(describe, &mut files)?;
+    Ok(files)
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {
     let files = generate(describe)?;
@@ -450,7 +586,7 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
         .get_mut("codec.d.ts")
         .unwrap()
         .push_str(&schema.declarations("Frame"));
-    for name in ["Outcome", "Fault", "Refusal"] {
+    for name in ["Outcome", "Fault", "Refusal", "StreamId", "Part"] {
         let index = schema
             .definitions
             .iter()
@@ -460,6 +596,14 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
                     .is_some_and(|path| path.rsplit(['.', '/']).next() == Some(name))
             })
             .ok_or_else(|| format!("Frame schema has no {name}"))?;
+        if name == "Outcome"
+            && let Some(http) = files.get_mut("http.js")
+        {
+            http.push_str(&format!(
+                "const outcomeSchema = [[19,{index}],{}];\n",
+                json!(schema.definitions)
+            ));
+        }
         files.get_mut("codec.js").unwrap().push_str(&format!(
             "export const {name} = makeCodec([19,{index}],{});\n",
             json!(schema.definitions)
@@ -468,8 +612,8 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
             "export type {name} = FrameDef{index};\nexport const {name}: Codec<{name}>;\n"
         ));
     }
-    files.insert("frame.js".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol = 'hirsel.2';\nexport const Raised = Object.freeze({Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});\nexport const BadKind = Object.freeze({Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});\n".into());
-    files.insert("frame.d.ts".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol: 'hirsel.2';\nexport const Raised: Readonly<{Overflow:1; Bounds:2; Division:3; Unwrap:4; Fail:5; Cancelled:6; Capacity:7; OutOfTime:8}>;\nexport const BadKind: Readonly<{Truncated:0; Invalid:1; Utf8:2; Duplicate:3; Trailing:4; Schema:5; Value:6}>;\n".into());
+    files.insert("frame.js".into(),"export {Frame,Outcome,Fault,Refusal,StreamId,Part} from './codec.js';\nexport const subprotocol = 'hirsel.4';\nexport const Raised = Object.freeze({Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});\nexport const BadKind = Object.freeze({Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6,StreamFuture:7});\n".into());
+    files.insert("frame.d.ts".into(),"export {Frame,Outcome,Fault,Refusal,StreamId,Part} from './codec.js';\nexport const subprotocol: 'hirsel.4';\nexport const Raised: Readonly<{Overflow:1; Bounds:2; Division:3; Unwrap:4; Fail:5; Cancelled:6; Capacity:7; OutOfTime:8}>;\nexport const BadKind: Readonly<{Truncated:0; Invalid:1; Utf8:2; Duplicate:3; Trailing:4; Schema:5; Value:6; StreamFuture:7}>;\n".into());
     write_files(files, out)
 }
 
@@ -483,6 +627,7 @@ fn write_files(files: BTreeMap<String, String>, out: &Path) -> Result<(), Error>
 
 #[cfg(test)]
 mod tests {
+    use super::stubs::stub_path;
     use super::*;
     fn scalar(op: u8) -> Vec<u8> {
         vec![3, 0, 0, 0, 0, op]
@@ -496,6 +641,8 @@ mod tests {
             args_fp: u64::MAX,
             result_fp: 7,
             revision: vec![1; 32],
+            slots: vec![],
+            value: vec![],
         }
     }
     #[test]
@@ -507,7 +654,7 @@ mod tests {
         }
         for (tail, want) in [
             (vec![14, 3], "Uint8Array"),
-            (vec![15, 13, 6], "Map<string, bigint>"),
+            (vec![15, 13, 6], "ReadonlyMap<string, bigint>"),
             (vec![16, 16, 5], "Option<Option<number>>"),
             (vec![17, 6, 13], "Result<bigint, string>"),
             (vec![17, 3, 20], "Result<number, never>"),
@@ -542,30 +689,68 @@ mod tests {
         );
     }
     #[test]
-    fn sdk_duplicate_stub_name_writes_nothing() {
-        let d = Describe {
+    fn sdk_stub_paths_namespace_by_module() {
+        // Oracle: docs/spec/sdk.md section 4. Stubs are api.call.<module>.<name>,
+        // nested for a nested module; a clash or a function/namespace overlap is
+        // DuplicateStubName before any output is written.
+        let mut d = Describe {
             digest: vec![1],
             target: "t".into(),
             n_place: 16,
-            exported: vec![entry("a", "toggle"), entry("b", "toggle")],
+            revision: vec![],
+            exported: vec![entry("a", "get"), entry("b", "get"), entry("x/y", "get")],
+            tables: vec![],
+            bindings: vec![],
         };
+        let files = generate(&d).unwrap();
+        for line in [
+            "ns(call,[\"a\"])[\"get\"] = (args,options) => client.call(want[0],codec.Args0.encode(args),codec.Result0.decode,options);\n",
+            "ns(call,[\"b\"])[\"get\"] = (args,options) => client.call(want[1],codec.Args1.encode(args),codec.Result1.decode,options);\n",
+            "ns(call,[\"x\",\"y\"])[\"get\"] = (args,options) => client.call(want[2],codec.Args2.encode(args),codec.Result2.decode,options);\n",
+        ] {
+            assert!(files["entries.js"].contains(line), "{line}");
+        }
+        assert!(files["entries.d.ts"].contains(
+            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0, options?: CallOptions) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1, options?: CallOptions) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2, options?: CallOptions) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  } };\n"
+        ));
+        assert_eq!(
+            stub_path(&entry("x", "%74oggle").identity).unwrap(),
+            ["x", "toggle"]
+        );
+        assert_eq!(
+            stub_path(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
+            ["runner_launch", "echo"]
+        );
+        let generic_cases: &[(&[u8], [&str; 2])] = &[
+            (
+                b"\x01app@1/main/pick[u64]{plain[u64]}($0,$0)->$0",
+                ["main", "pick"],
+            ),
+            (
+                b"\x01app@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)",
+                ["main", "swap"],
+            ),
+            (b"\x01app@1/main/a%5Bb(u64)->u64", ["main", "a[b"]),
+        ];
+        for &(identity, expected) in generic_cases {
+            assert_eq!(stub_path(identity).unwrap(), expected);
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("absent");
-        assert!(
-            write(&d, &out)
-                .unwrap_err()
-                .to_string()
-                .starts_with("DuplicateStubName(")
+        d.exported.push(entry("x", "y"));
+        assert_eq!(
+            write(&d, &out).unwrap_err().to_string(),
+            "DuplicateStubName(x.y::get, x::y)"
         );
         assert!(!out.exists());
+        d.exported.truncate(2);
+        d.exported[0].identity = generic_cases[0].0.to_vec();
+        d.exported[1].identity = b"\x01app@1/main/pick[u32]{plain[u32]}($0,$0)->$0".to_vec();
         assert_eq!(
-            stub_name(&entry("x", "%74oggle").identity).unwrap(),
-            "toggle"
+            write(&d, &out).unwrap_err().to_string(),
+            "DuplicateStubName(main::pick, main::pick)"
         );
-        assert_eq!(
-            stub_name(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
-            "echo"
-        );
+        assert!(!out.exists());
         let existing = dir.path().join("existing");
         std::fs::create_dir(&existing).unwrap();
         std::fs::write(existing.join("codec.js"), "original").unwrap();
@@ -579,21 +764,48 @@ mod tests {
     fn sdk_generation_preserves_identity_fingerprints_and_entry_kinds() {
         let mut query = entry("m", "rows");
         query.kind = 2;
-        query.result = [6, 0, 0, 0, 4, 0, 0, 0, 0, 6, 6, 0, 0, 0, 3, 0, 0, 0, 0, 13].to_vec();
+        query.value = scalar(0);
+        query.slots = vec![
+            ExportedSlot {
+                name: "data".into(),
+                kind: 0,
+                key: vec![4, 0, 0, 0, 0, 6],
+                key_json: scalar(6),
+                value: scalar(13),
+            },
+            ExportedSlot {
+                name: "other".into(),
+                kind: 1,
+                key: vec![],
+                key_json: scalar(0),
+                value: scalar(5),
+            },
+        ];
+        let mut computed = entry("m", "total");
+        computed.kind = 2;
+        computed.value = scalar(6);
         let d = Describe {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
             n_place: u64::MAX,
-            exported: vec![entry("m", "toggle"), query],
+            revision: vec![],
+            exported: vec![entry("m", "toggle"), query, computed],
+            tables: vec![],
+            bindings: vec![],
         };
         let files = generate(&d).unwrap();
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
         assert!(files["entries.js"].contains("args_fp:18446744073709551615n"));
-        assert!(files["entries.js"].contains("call[\"toggle\"]"));
-        assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
+        assert!(files["entries.js"].contains("ns(call,[\"m\"])[\"toggle\"]"));
+        assert!(files["entries.js"].contains("ns(subscribe,[\"m\"])[\"rows\"]"));
+        assert!(files["entries.js"].contains("ns(subscribeDecoded,[\"m\"])[\"rows\"]"));
+        assert!(files["entries.js"].contains("ns(subscribe,[\"m\"])[\"total\"]"));
+        assert!(files["entries.js"].contains("ns(subscribeDecoded,[\"m\"])[\"total\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type Key1 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type RowValue1 = string"));
+        assert!(files["codec.d.ts"].contains("export type Key1_0 = bigint"));
+        assert!(files["codec.d.ts"].contains("export type RowValue1_0 = string"));
+        assert!(files["codec.d.ts"].contains("export type Value1 = undefined"));
+        assert!(files["codec.d.ts"].contains("export type RowValue1_1 = number"));
         assert!(!files["codec.js"].contains("require("));
         assert_eq!(
             serde_json::from_str::<Value>(&files["package.json"]).unwrap()["type"],
@@ -602,9 +814,10 @@ mod tests {
     }
     #[test]
     fn sdk_describe_and_nominal_schemas() {
-        // Describe {digest: [], target: "t", n_place: 17, exported: []}.
+        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: [], tables: [], bindings: []}.
         let bytes = [
-            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0,
         ];
         let describe = Describe::read(&bytes).unwrap();
         assert_eq!(describe.target, "t");
@@ -662,6 +875,7 @@ mod tests {
         blob(&mut bytes, &[]);
         blob(&mut bytes, b"t");
         bytes.extend_from_slice(&17u64.to_le_bytes());
+        blob(&mut bytes, &[42; 32]);
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
         blob(&mut bytes, &e.identity);
@@ -670,7 +884,12 @@ mod tests {
         bytes.extend_from_slice(&e.args_fp.to_le_bytes());
         bytes.extend_from_slice(&e.result_fp.to_le_bytes());
         blob(&mut bytes, &e.revision);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        blob(&mut bytes, &[]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         let description = Describe::read(&bytes).unwrap();
+        assert_eq!(description.revision, [42; 32]);
         assert_eq!(description.exported[0].args_fp, u64::MAX);
         assert_eq!(description.exported[0].result_fp, 7);
         assert_eq!(description.exported[0].revision, e.revision);

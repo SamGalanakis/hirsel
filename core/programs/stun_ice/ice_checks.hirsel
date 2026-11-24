@@ -1,0 +1,453 @@
+const TA: u64 = 50000000
+
+const MIN_RTO: u64 = 500000000
+
+const CONSENT_LIFE: u64 = 30000000000
+
+const MIN_PROBE: u64 = 4000000000
+
+fn pair_priority(p: Pair, role: Role) -> u64 {
+    let g: u64 = int.widen(if role == Controlling {
+        p.local_priority
+    } else {
+        p.remote_priority
+    })
+    let d: u64 = int.widen(if role == Controlling {
+        p.remote_priority
+    } else {
+        p.local_priority
+    })
+    if g > d {
+        (d << 32) + (g << 1) + 1
+    } else {
+        (g << 32) + (d << 1)
+    }
+}
+
+fn same_foundation(a: Pair, b: Pair) -> bool {
+    if a.local_foundation != b.local_foundation {
+        return false
+    }
+    if let (Some(x), Some(y)) = (a.remote_foundation, b.remote_foundation) {
+        return x == y
+    }
+    false
+}
+
+fn eligible(pairs: List[Pair], index: u64, role: Role) -> bool {
+    let p = pairs[index]
+    if p.state == Waiting {
+        return true
+    }
+    if p.state != Frozen {
+        return false
+    }
+    let priority = pair_priority(p, role)
+    let mut earlier = false
+    for j in 0u64 .. list.len(pairs) {
+        let peer = pairs[j]
+        if j == index || !same_foundation(p, peer) {
+            continue
+        }
+        if peer.state == Valid {
+            return true
+        }
+        if peer.state == Running || peer.state == Waiting {
+            earlier = true
+        }
+        if peer.state == Frozen && (peer.path.component < p.path.component || (peer.path.component == p.path.component && (pair_priority(peer, role) > priority || (pair_priority(peer, role) == priority && j < index)))) {
+            earlier = true
+        }
+    }
+    !earlier
+}
+
+fn can_nominate(pairs: List[Pair], index: u64, role: Role) -> bool {
+    let p = pairs[index]
+    if role != Controlling || p.state != Valid {
+        return false
+    }
+    let priority = pair_priority(p, role)
+    for j in 0u64 .. list.len(pairs) {
+        let other = pairs[j]
+        if j == index || other.path.component != p.path.component || other.state == Failed {
+            continue
+        }
+        if let Some(f) = other.flight {
+            if f.check.nominate {
+                return false
+            }
+        }
+        let rank = pair_priority(other, role)
+        if rank > priority || (rank == priority && j < index) {
+            return false
+        }
+    }
+    true
+}
+
+fn next_probe(now: u64, random: u32) -> u64 {
+    let sample: u64 = int.widen(random)
+    int.saturating_add(now, MIN_PROBE + ((sample * 2000000001) >> 32))
+}
+
+fn select(mut agent: Agent, path: Path, mapped: Addr, now: u64, expires: u64, jitter: u32) {
+    if let Some(i) = seat_index(agent.seats, path.component) {
+        let route = Route(path: path, mapped: mapped)
+        let active = Active(route: route, expires: expires, due: next_probe(now, jitter), probes:[None; 8])
+        agent.seats[i] = Seat(component: path.component, selected: Some(active))
+    }
+}
+
+/// Return the nominated route only while its RFC 7675 consent is valid.
+/// After consent expires or is revoked, create a new agent with fresh credentials.
+pub fn full_selected(agent: Agent, component: u16, now: u64) -> Option[Route] {
+    if let Some(i) = seat_index(agent.seats, component) {
+        if let Some(active) = agent.seats[i].selected {
+            if now < active.expires {
+                return Some(active.route)
+            }
+        }
+    }
+    None
+}
+
+fn fail_pair(mut agent: Agent, i: u64) {
+    let mut p = agent.pairs[i]
+    p.state = Failed
+    p.nominate = false
+    p.flight = None
+    p.mapped = None
+    agent.pairs[i] = p
+}
+
+fn set_flight(mut agent: Agent, i: u64, f: Flight) {
+    let mut p = agent.pairs[i]
+    p.state = Running
+    p.flight = Some(f)
+    agent.pairs[i] = p
+}
+
+fn requeue(mut agent: Agent, i: u64) {
+    let mut p = agent.pairs[i]
+    p.state = Waiting
+    p.flight = None
+    p.mapped = None
+    agent.pairs[i] = p
+    enqueue(mut agent, i)
+}
+
+fn write_request(remote: Remote, tx: Transaction, check: Option[Check], mut out: Bytes, mut scratch: Bytes) -> Result[u64, IceError] {
+    match binding_request(tx, remote.username, check, Sha1, true, remote.credentials.password, mut out, mut scratch) {
+        Ok(n) => Ok(n),
+        Error(e) => Error(Wire(e)),
+    }
+}
+
+fn earlier_at(current: Option[u64], at: u64) -> Option[u64] {
+    if let Some(t) = current {
+        if t < at {
+            return current
+        }
+    }
+    Some(at)
+}
+
+fn paced(now: u64, pace: u64) -> u64 {
+    if now > pace {
+        now
+    } else {
+        pace
+    }
+}
+
+fn pop_trigger(mut queue: List[u64]) {
+    let n = list.len(queue)
+    list.copy_within(mut queue, 1, 0, n - 1)
+    list.truncate(mut queue, n - 1)
+}
+
+fn outstanding(agent: Agent, tx: Transaction) -> bool {
+    for p in agent.pairs {
+        if let Some(f) = p.flight {
+            if f.transaction == tx {
+                return true
+            }
+        }
+    }
+    for seat in agent.seats {
+        if let Some(active) = seat.selected {
+            for slot in active.probes {
+                if let Some(probe) = slot {
+                    if probe.tx == tx {
+                        return true
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Drive paced checks, retransmissions, regular nomination and consent freshness.
+/// now is the caller's monotonic clock in nanoseconds. Poll again at WakeAt.
+/// Send(path,n) loans out[0,n) to the caller for one datagram.
+pub fn full_poll(mut agent: Agent, now: u64, entropy: Entropy, mut out: Bytes, mut scratch: Bytes) -> Result[Poll, IceError] {
+    if let None = agent.remote {
+        return Ok(Idle)
+    }
+    let mut wake: Option[u64] = None
+    let pace = agent.paced_at
+    for i in 0u64 .. list.len(agent.seats) {
+        if let Some(active) = agent.seats[i].selected {
+            if now >= active.expires {
+                continue
+            }
+            wake = earlier_at(wake, active.expires)
+            let due = paced(active.due, pace)
+            if now >= due {
+                return start_probe(mut agent, i, active, now, entropy, mut out, mut scratch)
+            }
+            wake = earlier_at(wake, due)
+        }
+    }
+    let mut active_checks = 0u64
+    for i in 0u64 .. list.len(agent.pairs) {
+        let p = agent.pairs[i]
+        if has_selection(agent.seats, p.path.component) {
+            continue
+        }
+        if let Some(f) = p.flight {
+            if f.attempt == 7 {
+                if now >= f.due {
+                    fail_pair(mut agent, i)
+                } else {
+                    wake = earlier_at(wake, f.due)
+                    active_checks += 1
+                }
+                continue
+            }
+            active_checks += 1
+            let due = paced(f.due, pace)
+            if now >= due {
+                let attempt = f.attempt + 1
+                let delay = int.saturating_mul(f.rto, 1u64 << (attempt - 1))
+                let retry = Flight(transaction: f.transaction, check: f.check, attempt: attempt, rto: f.rto, due: int.saturating_add(now, delay))
+                return write_check(mut agent, i, retry, now, mut out, mut scratch)
+            }
+            wake = earlier_at(wake, due)
+        } else if p.state == Waiting {
+            active_checks += 1
+        }
+    }
+    while list.len(agent.triggered) != 0 {
+        let index = agent.triggered[0]
+        let p = agent.pairs[index]
+        if p.state != Waiting || has_selection(agent.seats, p.path.component) {
+            pop_trigger(mut agent.triggered)
+            continue
+        }
+        if now < pace {
+            wake = earlier_at(wake, pace)
+            break
+        }
+        let got = first_check(mut agent, index, false, now, active_checks, entropy, mut out, mut scratch)?
+        pop_trigger(mut agent.triggered)
+        return Ok(got)
+    }
+    let mut highest: Option[u64] = None
+    let mut rank = 0u64
+    let mut nominate = false
+    for i in 0u64 .. list.len(agent.pairs) {
+        let p = agent.pairs[i]
+        if has_selection(agent.seats, p.path.component) {
+            continue
+        }
+        let order = pair_priority(p, agent.role)
+        if order <= rank {
+            continue
+        }
+        let proposed = can_nominate(agent.pairs, i, agent.role)
+        if proposed || eligible(agent.pairs, i, agent.role) {
+            highest = Some(i)
+            rank = order
+            nominate = proposed
+        }
+    }
+    if let Some(i) = highest {
+        if now >= pace {
+            return first_check(mut agent, i, nominate, now, active_checks, entropy, mut out, mut scratch)
+        }
+        wake = earlier_at(wake, pace)
+    }
+    if let Some(t) = wake {
+        Ok(WakeAt(t))
+    } else {
+        Ok(Idle)
+    }
+}
+
+fn first_check(mut agent: Agent, i: u64, nominate: bool, now: u64, waiting: u64, entropy: Entropy, mut out: Bytes, mut scratch: Bytes) -> Result[Poll, IceError] {
+    if outstanding(agent, entropy.transaction) {
+        return Error(RepeatedTransaction)
+    }
+    let paced_rto = int.saturating_mul(TA, waiting)
+    let rto = if paced_rto > MIN_RTO {
+        paced_rto
+    } else {
+        MIN_RTO
+    }
+    let p = agent.pairs[i]
+    let check = Check(role: IceRole(role: agent.role, tie: agent.tie), priority: 0x6e000000 | (p.local_priority & 0x00ffffff), nominate: nominate)
+    let f = Flight(transaction: entropy.transaction, check: check, attempt: 1, rto: rto, due: int.saturating_add(now, rto))
+    write_check(mut agent, i, f, now, mut out, mut scratch)
+}
+
+fn write_check(mut agent: Agent, i: u64, f: Flight, now: u64, mut out: Bytes, mut scratch: Bytes) -> Result[Poll, IceError] {
+    let path = agent.pairs[i].path
+    let n = match agent.remote {
+        Some(remote) => write_request(remote, f.transaction, Some(f.check), mut out, mut scratch)?,
+        None => {
+            return Ok(Idle)
+        },
+    }
+    set_flight(mut agent, i, f)
+    agent.paced_at = int.saturating_add(now, TA)
+    Ok(Send(path, n))
+}
+
+fn start_probe(mut agent: Agent, index: u64, take active: Active, now: u64, entropy: Entropy, mut out: Bytes, mut scratch: Bytes) -> Result[Poll, IceError] {
+    if outstanding(agent, entropy.transaction) {
+        return Error(RepeatedTransaction)
+    }
+    let mut next = take active
+    for i in 0u64 .. 8 {
+        let reusable = if let Some(p) = next.probes[i] {
+            int.saturating_sub(now, p.sent) >= CONSENT_LIFE
+        } else {
+            true
+        }
+        if reusable {
+            let n = match agent.remote {
+                Some(remote) => write_request(remote, entropy.transaction, None, mut out, mut scratch)?,
+                None => {
+                    return Ok(Idle)
+                },
+            }
+            let path = next.route.path
+            next.probes[i] = Some(Probe(tx: entropy.transaction, sent: now))
+            next.due = next_probe(now, entropy.jitter)
+            agent.seats[index] = Seat(component: path.component, selected: Some(take next))
+            agent.paced_at = int.saturating_add(now, TA)
+            return Ok(Send(path, n))
+        }
+    }
+    // Four seconds separate probes, so at most eight fit into the expiry window.
+    Error(ClockOutOfOrder)
+}
+
+fn consent_response(mut agent: Agent, base: Addr, peer: Addr, msg: Message, now: u64) -> bool {
+    for i in 0u64 .. list.len(agent.seats) {
+        if let Some(active) = agent.seats[i].selected {
+            if now >= active.expires || !same_address(base, active.route.path.base) || !same_address(peer, active.route.path.peer) {
+                continue
+            }
+            let mut next = active
+            for j in 0u64 .. 8 {
+                if let Some(probe) = next.probes[j] {
+                    if probe.tx != msg.transaction || int.saturating_sub(now, probe.sent) >= CONSENT_LIFE {
+                        continue
+                    }
+                    next.probes[j] = None
+                    if let Some(403) = msg.code {
+                        if msg.class == Failure {
+                            next.expires = now
+                        }
+                    }
+                    if let Some(mapped) = msg.mapped {
+                        if msg.class == Success && msg.xor_mapped && same_address(mapped, active.route.mapped) {
+                            next.expires = int.saturating_add(now, CONSENT_LIFE)
+                        }
+                    }
+                    agent.seats[i] = Seat(component: active.route.path.component, selected: Some(next))
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+fn full_response(mut agent: Agent, base: Addr, peer: Addr, msg: Message, now: u64, entropy: Entropy) -> Result[Receive, IceError] {
+    if consent_response(mut agent, base, peer, msg, now) {
+        return Ok(Processed)
+    }
+    for i in 0u64 .. list.len(agent.pairs) {
+        let p = agent.pairs[i]
+        let Some(f) = p.flight else {
+            continue
+        }
+        if f.transaction != msg.transaction || has_selection(agent.seats, p.path.component) {
+            continue
+        }
+        if (f.attempt == 7 && now >= f.due) || !same_address(base, p.path.base) || !same_address(peer, p.path.peer) {
+            fail_pair(mut agent, i)
+            return Ok(Processed)
+        }
+        if msg.class == Failure {
+            if let Some(487) = msg.code {
+                if f.check.role.role == agent.role {
+                    switch_role(mut agent, reverse(f.check.role.role))
+                    agent.tie = entropy.transaction.low
+                }
+                requeue(mut agent, i)
+            } else {
+                fail_pair(mut agent, i)
+            }
+            return Ok(Processed)
+        }
+        let Some(mapped) = msg.mapped else {
+            fail_pair(mut agent, i)
+            return Ok(Processed)
+        }
+        if !msg.xor_mapped || !same_family(mapped.ip, base.ip) || mapped.port == 0 {
+            fail_pair(mut agent, i)
+            return Ok(Processed)
+        }
+        let mut next = p
+        next.state = Valid
+        next.flight = None
+        next.mapped = Some(mapped)
+        next.valid_until = int.saturating_add(now, CONSENT_LIFE)
+        agent.pairs[i] = next
+        if (f.check.nominate && agent.role == Controlling) || (p.nominate && agent.role == Controlled) {
+            select(mut agent, p.path, mapped, now, next.valid_until, entropy.jitter)
+        }
+        return Ok(Processed)
+    }
+    Ok(Ignored)
+}
+
+/// An ICMP error fails a connectivity check. It does not revoke consent
+/// on an already nominated route.
+pub fn full_path_failed(mut agent: Agent, path: Path) {
+    if !has_selection(agent.seats, path.component) {
+        if let Some(i) = find_pair(agent.pairs, path) {
+            fail_pair(mut agent, i)
+        }
+    }
+}
+
+/// Revoke consent after an authenticated transport close such as a DTLS fatal alert.
+pub fn full_revoke(mut agent: Agent, path: Path, now: u64) {
+    if let Some(i) = seat_index(agent.seats, path.component) {
+        if let Some(active) = agent.seats[i].selected {
+            if same_address(path.base, active.route.path.base) && same_address(path.peer, active.route.path.peer) {
+                let mut next = active
+                next.expires = now
+                next.probes =[None; 8]
+                agent.seats[i] = Seat(component: path.component, selected: Some(next))
+            }
+        }
+    }
+}

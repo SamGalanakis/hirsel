@@ -40,28 +40,39 @@ pub(crate) struct ImageDirectory {
 pub(crate) struct PackageStamp {
     pub hash: ContentHash,
     pub namespace: Option<hirsel_core_resolve::PackageNamespace>,
+    /// Bundled files use their module names in every installation.
+    canonical_names: bool,
 }
 
-pub(crate) fn stamp(
+impl PackageStamp {
+    pub(crate) fn matches(
+        &self,
+        requested: &PackageManifest,
+        request: &CheckRequest,
+    ) -> io::Result<bool> {
+        let current = stamp(
+            requested,
+            request.manifest.as_deref(),
+            request.entry.as_ref(),
+            self.canonical_names,
+        )?;
+        Ok(self.hash == current.hash)
+    }
+}
+
+fn stamp(
     package: &PackageManifest,
     manifest: Option<&Path>,
     entry: Option<&DefPath>,
+    canonical_names: bool,
 ) -> io::Result<PackageStamp> {
     let mut files = Vec::with_capacity(package.sources.len());
     for source in &package.sources {
-        let manifest =
-            manifest.filter(|_| !matches!(package.package.name.as_str(), "core" | "std"));
-        let name = source
-            .name(manifest)?
-            .filter(|_| !matches!(package.package.name.as_str(), "core" | "std"))
-            .unwrap_or_else(|| {
-                format!(
-                    "{}@{}/{}",
-                    package.package.name,
-                    package.package.version,
-                    source.modules.join("/")
-                )
-            });
+        let name = if canonical_names {
+            None
+        } else {
+            source.name(manifest)?
+        };
         let test = source.captured.as_ref().is_some_and(|source| source.test);
         files.push((
             name,
@@ -71,15 +82,9 @@ pub(crate) fn stamp(
             ContentHash::of_bytes(&source.read()?),
         ));
     }
-    files.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| left.1.cmp(right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
     let owner = entry.filter(|entry| entry.0.package == package.package);
     let hash = ContentHash::of_parts(
-        "hirsel.package-image-stamp.v1",
+        "hirsel.package-image-stamp.v2",
         [&encode(&(
             &package.package,
             &package.dependencies,
@@ -91,7 +96,48 @@ pub(crate) fn stamp(
     Ok(PackageStamp {
         hash,
         namespace: package.namespace.clone(),
+        canonical_names,
     })
+}
+
+pub(crate) struct ImageInput {
+    request: CheckRequest,
+    stamps: Vec<(PackageId, PackageStamp)>,
+}
+
+impl ImageInput {
+    pub(crate) fn prepare(mut request: CheckRequest, canonical_names: bool) -> io::Result<Self> {
+        if request.entry.is_some() {
+            return Err(io::Error::other(
+                "a core library image has no program entry",
+            ));
+        }
+        request.library = LibraryInput::Produce;
+        request.capture_sources()?;
+        request.inputs.normalise(request.manifest.as_deref());
+        let stamps = request
+            .inputs
+            .packages
+            .iter()
+            .map(|package| {
+                stamp(package, request.manifest.as_deref(), None, canonical_names)
+                    .map(|stamp| (package.package.clone(), stamp))
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self { request, stamps })
+    }
+
+    pub(crate) fn digest(&self) -> io::Result<ContentHash> {
+        let packages: Vec<_> = self.stamps.iter().map(|(_, stamp)| stamp.hash).collect();
+        Ok(ContentHash::of_parts(
+            "hirsel.package-image-inputs.v1",
+            [&encode(&(&self.request.inputs.core, packages))?[..]],
+        ))
+    }
+
+    pub(crate) fn set_store(&mut self, store: PathBuf) {
+        self.request.store = store;
+    }
 }
 
 /// The workspace image supplies this member's checked dependency packages.
@@ -115,27 +161,22 @@ pub(crate) fn closure_image(
         return Ok(None);
     }
     input.entry = None;
-    input.inputs.normalise(input.manifest.as_deref());
-    let stamps = input
-        .inputs
-        .packages
-        .iter()
-        .map(|package| stamp(package, input.manifest.as_deref(), None).map(|stamp| stamp.hash))
-        .collect::<io::Result<Vec<_>>>()?;
+    let mut input = ImageInput::prepare(input, false)?;
     let digest = ContentHash::of_parts(
-        "hirsel.workspace-dependency-image.v1",
-        [&encode(&(compiler_identity()?, stamps))?[..]],
+        "hirsel.workspace-dependency-image.v2",
+        [&compiler_identity()?.0[..], &input.digest()?.0[..]],
     );
-    input.store = request
+    let store = request
         .store
         .join("package-images")
         .join(crate::request::hex(digest));
-    if let Some(image) = CoreImage::open(&input.store)? {
+    if let Some(image) = CoreImage::open(&store)? {
         return Ok(Some(image));
     }
     if produce {
+        input.set_store(store);
         return Driver::default()
-            .produce_image(input, meter)
+            .produce_package(input, meter, true, ContentHash::default())
             .map(|(_, image)| image);
     }
     Ok(None)
@@ -407,6 +448,74 @@ impl CoreImage {
 fn miss() -> io::Error {
     io::Error::other("core image cache miss: damaged or missing external bytes; rebuild the image")
 }
+
+#[test]
+fn source_package_image_uses_the_captured_text_and_name() {
+    use hirsel_core_resolve::{CapturedSource, ModuleSource};
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("core.hirsel");
+    std::fs::write(&file, "pub fn answer() -> u64 { 41 }").unwrap();
+    let lookup = |value, name: &str, namespace| {
+        let core = package("core");
+        let inputs = CorpusManifest {
+            core: core.clone(),
+            packages: vec![PackageManifest {
+                package: core,
+                dependencies: vec![],
+                namespace,
+                sources: vec![ModuleSource {
+                    file: file.clone(),
+                    modules: vec!["core".into()],
+                    signatures: true,
+                    foreign: false,
+                    captured: Some(CapturedSource {
+                        bytes: format!("pub fn answer() -> u64 {{ {value} }}")
+                            .into_bytes()
+                            .into(),
+                        name: Some(name.into()),
+                        test: false,
+                    }),
+                }],
+            }],
+        };
+        let product =
+            PackageProduct::sources(inputs, directory.path(), &mut Meter::new(false)).unwrap();
+        let image = CoreImage::open(&product.image.store_root())
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.file(0).unwrap().name.as_deref(), Some(name));
+        let answer = image
+            .demand(&DefPath::from_full("core@1/core/answer").unwrap())
+            .unwrap();
+        let result = hirsel_core_ir::eval::run(
+            answer.ir().unwrap(),
+            answer.check.function.unwrap(),
+            &[],
+            1_000_000,
+        );
+        assert_eq!(
+            result.outcome,
+            hirsel_core_ir::eval::Outcome::Returned(vec![value])
+        );
+        product.rebuilt
+    };
+    assert!(lookup(7, "first.hirsel", None));
+    assert!(lookup(9, "first.hirsel", None));
+    assert!(lookup(9, "renamed.hirsel", None));
+    std::fs::remove_file(&file).unwrap();
+    assert!(!lookup(9, "renamed.hirsel", None));
+    assert!(lookup(
+        9,
+        "renamed.hirsel",
+        Some(hirsel_core_resolve::PackageNamespace {
+            root: None,
+            foreign: ContentHash::of_bytes(b"changed foreign stamp"),
+            published_bindings: BTreeMap::new(),
+            foreign_inputs: BTreeMap::new(),
+        })
+    ));
+}
+
 impl Driver {
     /// Use the ordinary request path with an explicit image output product.
     pub fn produce_image(
@@ -414,32 +523,23 @@ impl Driver {
         request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
-        self.produce_package(request, meter, true, ContentHash::default())
+        self.produce_package(
+            ImageInput::prepare(request, false)?,
+            meter,
+            true,
+            ContentHash::default(),
+        )
     }
     pub(crate) fn produce_package(
         &mut self,
-        mut request: CheckRequest,
+        input: ImageInput,
         meter: &mut Meter,
         require_complete: bool,
         source_stamp: ContentHash,
     ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
-        if request.entry.is_some() {
-            return Err(io::Error::other(
-                "a core library image has no program entry",
-            ));
-        }
-        request.library = LibraryInput::Produce;
-        request.capture_sources()?;
-        request.inputs.normalise(request.manifest.as_deref());
+        let ImageInput { request, stamps } = input;
+        let stamps = stamps.into_iter().collect();
         let mut inputs = request.inputs.clone();
-        let stamps = inputs
-            .packages
-            .iter()
-            .map(|package| {
-                stamp(package, request.manifest.as_deref(), request.entry.as_ref())
-                    .map(|stamp| (package.package.clone(), stamp))
-            })
-            .collect::<io::Result<BTreeMap<_, _>>>()?;
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
         let Some(library) = product.library.clone() else {

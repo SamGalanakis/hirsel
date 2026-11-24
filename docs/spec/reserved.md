@@ -129,7 +129,8 @@ type's values are still built only through code its owner wrote.
 semantic code and runtime-contract identity; a generic identity includes its type, size,
 dictionary and generator dependencies, never backend addresses or clone numbers. An entry
 is made by library code at registration, never declared: module `runner` of package
-`store` registers a top-level non-generic function `f` by its `StaticFn` with `compute`
+`store` registers a top-level function `f`, or an instance of a generic one at closed type
+arguments, by its `StaticFn` with `compute`
 (`fn(take A) -> R`), `transact` (`fn(mut Tx, H, take A) -> Result[R, E]`), `query`
 (`fn(Tx, H, take A) -> Cover`) or `granted` (`fn(G, take A) -> R waits`), each with `A`, `R` and `E` bounded `codec`, where `H:
 send` is the place's handles (its Tables and Indexes), passed by view and built at open by
@@ -145,8 +146,8 @@ itself, because an owning closure is never shareable. Requests resolve only to r
 entries; an ID grants no code execution authority and serializes no closure captures.
 The [runner launch contract](launch.md) fixes describe mode and the immutable
 SHA-256 executable digest, target and `n_place`, privately supplied by the runtime.
-*v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions without type parameters have
-identity bytes; the runner is a library over v1, not a language form; the code revision
+*v1:* PROG-5, PROG-6, PROG-9, SEM-8: named top-level functions, and generic ones at closed
+type arguments with their dictionaries, have identity bytes; sizes never enter them; the runner is a library over v1, not a language form; the code revision
 is `code.revision` (PROG-9).
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and
@@ -177,8 +178,8 @@ PROG-7, PROG-8.
 no read/count/clear, and `finish(take Log[E])->OwnedEvents[E]` transfers without
 allocation. E is independently owned inert data, never scoped/region/resource. This does
 not allow writes through ordinary frozen views; queries cannot report success after a
-failed tracking append." *v1:* MEM-29: a `Log[E]` is a handle to a separately admitted
-node whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is
+failed tracking append." *v1:* MEM-29: a `Log[E: inert]` is an opaque library type over a
+task-local `Cell[List[E]]` whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is
 inert at every depth.
 
 **R19.** "Opaque capability facades declare their nominal public authority independently
@@ -279,13 +280,13 @@ raises `Fail(text)`. A later typed reading of a failure is a core function over 
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
-| L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
+| L, append-only log and task-local cell | `Cell[T]` (MEM-29), readable and task-local; `Log[E]` is a library type over it | open: shared cells, which wait for R3 |
 | I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points (CAP-8); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, plus `host.random` and `host.stopped` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin` and `Env`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1 with flows (CONC-14). Selection, shared limits, mutexes and atomics later. |
 
 ## Not in v1
 
-User-made shared limits; mutexes and cells; atomics, which are not planned (R3); weak counted references; catching
+User-made shared limits; mutexes and shared cells; atomics, which are not planned (R3); weak counted references; catching
 failures other than by `isolate`; deadlines and timeouts other than `host.sleep_until` and the network operations' declared `until`; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code; foreign functions other than FFI-2's, and every R5
 *Later* item; layout declarations other

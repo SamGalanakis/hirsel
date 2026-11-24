@@ -1,0 +1,537 @@
+pub type Kind: send = Memory | Directory | Bucket(std.object.LaneConfig)
+
+pub type Options: send {
+    create: bool,
+    lock_wait_ms: u64,
+    group_commits: u32,
+    group_bytes: u32,
+    checkpoint_bytes: u64,
+    journal_limit: u64,
+    pack_bytes: u64,
+    resident_limit: u64,
+    cache_bytes: u64,
+    writer_pin_bytes: u64,
+    dirty_bytes: u64,
+    pager_task_bytes: u64,
+    // Pages each cut drains from the deferred-free queue (§13.6).
+    free_budget: u64,
+    authority: StorageKind,
+    expect: Option[StoreId],
+    activation: Option[u64],
+    binding: Option[Bytes],
+    claim_ms: u64,
+    head_poll_ms: u64,
+    checkpoint_entries: u64,
+    retain: u8,
+    stream_retention_ms: u64,
+    streams_per_caller_max: u64,
+    streams_max: u64,
+}
+
+pub type Overrides: send {
+    resident_limit: Option[u64],
+    journal_limit: Option[u64],
+    checkpoint_bytes: Option[u64],
+    pack_bytes: Option[u64],
+    group_bytes: Option[u64],
+    group_commits: Option[u32],
+    lock_wait_ms: Option[u64],
+    cache_bytes: Option[u64],
+    writer_pin_bytes: Option[u64],
+    dirty_bytes: Option[u64],
+    pager_task_bytes: Option[u64],
+    readers: Option[u64],
+}
+
+pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
+
+const MIB: u64 = 1048576
+const CUT_FIXED_BYTES: u64 = 65536
+const KEY_LIMIT: u64 = 4096
+const CUT_STEP_BYTES: u64 = KEY_LIMIT + VALUE_LIMIT
+
+pub opaque type WriterPlan: send {
+    total: u64,
+    parts: WriterParts
+}
+
+type WriterParts: send {
+    terms: Inline[(String, u64), 15],
+    count: u64
+}
+
+fn writer_parts() -> WriterParts {
+    WriterParts(terms: [
+        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0),
+        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0),
+        ("", 0), ("", 0), ("", 0), ("", 0), ("", 0)
+    ], count: 0)
+}
+
+fn writer_add(mut parts: WriterParts, take name: String, n: u64) {
+    parts.terms[parts.count] = (take name, n)
+    parts.count += 1
+}
+
+fn writer_total(parts: WriterParts) -> Option[u64] {
+    let mut total = 0u64
+    for i in 0u64 .. parts.count {
+        total = int.checked_add(total, parts.terms[i].1)?
+    }
+    Some(total)
+}
+
+fn writer_shortage(have: u64, parts: WriterParts) -> Shortage {
+    let mut details: List[(String, u64)] = list.with_capacity(parts.count)
+    for i in 0u64 .. parts.count {
+        let term = view parts.terms[i]
+        add_size(mut details, term.0, term.1)
+    }
+    shortage(have, take details)
+}
+
+pub fn derived_sizes() -> Overrides {
+    Overrides(resident_limit: None, journal_limit: None,
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+}
+
+pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
+    sized_with(kind, share, derived_sizes())
+}
+
+fn size_or(overridden: Option[u64], derived: u64) -> u64 {
+    match overridden { Some(n) => n, None => derived }
+}
+
+fn add_size(mut parts: List[(String, u64)], name: String, n: u64) -> () {
+    list.push(mut parts, (string.from(name), n))
+}
+
+fn total_sizes(parts: List[(String, u64)]) -> Option[u64] {
+    let mut total = 0u64
+    for i in 0u64 .. list.len(parts) {
+        total = int.checked_add(total, parts[i].1)?
+    }
+    Some(total)
+}
+
+fn shortage(have: u64, take parts: List[(String, u64)]) -> Shortage {
+    Shortage(need: size_or(total_sizes(parts), 18446744073709551615u64), have: have, parts: take parts)
+}
+
+fn cut_work(resident: u64) -> u64 {
+    // Dividing first keeps ceil(resident / 11) and the doubled result in range.
+    let blocks = resident / 11 + if resident % 11 == 0 { 0u64 } else { 1u64 }
+    2 * blocks + CUT_FIXED_BYTES
+}
+
+fn largest_resident(room: u64) -> u64 {
+    // Each 11 resident bytes use 13 bytes including the two cut working bytes.
+    let tail = size_or(int.checked_sub(room % 13, 2), 0)
+    11 * (room / 13) + tail
+}
+
+type TieredSizes {
+    cache: u64,
+    writer: u64,
+    dirty: u64,
+    pager: u64
+}
+
+const MIN_WRITER_PINS: u64 = 2 * VALUE_LIMIT + MIB
+
+fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[(TieredSizes, u64)] {
+    let writer = size_or(o.writer_pin_bytes, q)
+    let minimum_cache = int.checked_add(writer, size_or(o.readers, VALUE_LIMIT + MIB))?
+    let cache = size_or(o.cache_bytes, minimum_cache)
+    let dirty = size_or(o.dirty_bytes, q)
+    let pager = size_or(o.pager_task_bytes, (q + 3) / 4)
+    let after_cut = int.checked_sub(resident_limit, CUT_PIN_BYTES)?
+    let after_dirty = int.checked_sub(after_cut, dirty)?
+    let after_pager = int.checked_sub(after_dirty, pager)?
+    let remainder = int.checked_sub(after_pager, 64 * MIB)?
+    if writer < MIN_WRITER_PINS || cache < minimum_cache || cache > remainder {
+        return None
+    }
+    Some((TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager), remainder))
+}
+
+// The open's Tiered floor (§13.8): the writer partition is at least Wmin and
+// inside the cache, and the resident limit covers C + K + D + P + 64 MiB with
+// each term counted once.
+fn tiered_open_funded(o: Options) -> bool {
+    if o.writer_pin_bytes < MIN_WRITER_PINS || o.cache_bytes < o.writer_pin_bytes {
+        return false
+    }
+    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES),
+        int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
+    needed <= o.resident_limit
+}
+
+fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
+    let zero = TieredSizes(cache: 0, writer: 0, dirty: 0, pager: 0)
+    if let Memory = kind { return zero }
+    let Some(initial) = tiered_sizes_at(MIN_WRITER_PINS, resident_limit, o) else { return zero }
+    let mut best = initial
+    let mut low = MIN_WRITER_PINS
+    let mut high = 64 * MIB
+    while low < high {
+        let middle = low + (high - low + 1) / 2
+        match tiered_sizes_at(middle, resident_limit, o) {
+            Some(next_shape) => {
+                low = middle
+                best = next_shape
+            },
+            None => { high = middle - 1 },
+        }
+    }
+    let (candidate, remainder) = best
+    let mut sizes = candidate
+    if let None = o.cache_bytes {
+        sizes.cache = order.max(sizes.cache, order.min(4 * low, remainder))
+    }
+    sizes
+}
+
+pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {
+    let (take options, _) = writer_reservation(kind, share, o)?
+    Ok(take options)
+}
+
+pub opaque type PlacePlan: send {
+    options: Options,
+    writer: WriterPlan,
+    capture: Option[FollowerPlan],
+    capture_extra: u64
+}
+
+pub fn planned(kind: Kind, share: u64, o: Overrides) -> Result[PlacePlan, Shortage] {
+    if let Bucket(lanes) = kind {
+        let service = option.unwrap(service_bytes(list.new()))
+        let starter = follower_starter_bytes()
+        let extra = service + starter
+        let writer_share = int.saturating_sub(share, extra)
+        let (take options, take writer) = writer_reservation(kind, writer_share, o) ?=> |short| {
+            let Shortage(parts: take writer_terms, ..) = take short
+            let mut parts = take writer_terms
+            add_size(mut parts, "follower_service", service)
+            add_size(mut parts, "follower_starter", starter)
+            shortage(share, take parts)
+        }
+        let transport = option.unwrap(std.object.lane_reservation(lanes))
+        let capture = follower_from_options(kind, clone(options), writer_bytes(writer) - transport)?
+        return Ok(PlacePlan(options: take options, writer: take writer, capture: Some(take capture), capture_extra: extra))
+    }
+    let (take options, take writer) = writer_reservation(kind, share, o)?
+    Ok(PlacePlan(options: take options, writer: take writer, capture: None, capture_extra: 0))
+}
+
+pub fn planned_options(p: PlacePlan) -> Options {
+    clone(p.options)
+}
+
+pub fn planned_bytes(p: PlacePlan) -> u64 {
+    writer_bytes(p.writer) + p.capture_extra
+}
+
+// Sim pays for the request lanes outside the head. Weak publishers overlap
+// the writer, and the capture uses the same lanes after the writer refuses.
+pub fn planned_sim_bytes(p: PlacePlan, weak_room: u64) -> Result[u64, Capacity] {
+    if let Some(capture) = p.capture {
+        let writer = plan_bytes(capture)
+        let extra = order.max(p.capture_extra, weak_room)
+        match int.checked_add(writer, extra) {
+            Some(total) => Ok(total),
+            None => Error(Capacity(requested: extra, available: 18446744073709551615u64 - writer)),
+        }
+    } else { Ok(planned_bytes(p)) }
+}
+
+pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
+    clone(p.capture)
+}
+
+pub fn writer_plan(kind: Kind, o: Options) -> Result[WriterPlan, Shortage] {
+    let fixed = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit),
+        checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes),
+        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
+        cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
+        dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: None)
+    let (_, take writer) = writer_reservation(kind, 18446744073709551615u64, fixed)?
+    Ok(take writer)
+}
+
+pub fn writer_bytes(p: WriterPlan) -> u64 {
+    p.total
+}
+
+fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
+    if let Memory = kind {
+        let mut parts = writer_parts()
+        let resident = size_or(o.resident_limit, order.max(int.saturating_sub(share, MIB), MIB))
+        writer_add(mut parts, "memory_keep", MIB)
+        writer_add(mut parts, "resident_limit", order.max(resident, MIB))
+        let Some(total) = writer_total(parts) else {
+            return Error(writer_shortage(share, parts))
+        }
+        if resident < MIB || total > share {
+            return Error(writer_shortage(share, parts))
+        }
+        let commits = match o.group_commits {
+            Some(n) => n,
+            None => 64u32
+        }
+        return Ok((make_sized_options(kind, o, commits, 4 * MIB, 0, 0, 0, resident), WriterPlan(total, parts: take parts)))
+    }
+    disk_reservation(kind, share, o)
+}
+
+fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
+    let tiered = tiered_sizes(kind, resident, o)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2,
+        stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64)
+}
+
+// The Directory journal worker's grant beyond its group buffer, holding its
+// END scratch and write state (§3.4), and the idle timer's grant.
+const JOURNAL_WORKER_SLACK: u64 = 65536
+const JOURNAL_WINDOW_STEP: u64 = 1048576
+const JOURNAL_ZERO_CHUNK: u64 = 32768
+const JOURNAL_BULK_GROUP: u64 = 65536
+
+const JOURNAL_TIMER_GRANT: u64 = 4096
+
+// Recovery reads the journal through one input chunk of this many bytes.
+const JOURNAL_CHUNK_BYTES: u64 = 65536
+
+// The ready channel covers startup. The other five stay live after open.
+fn journal_ready_bytes() -> u64 {
+    option.unwrap(charge.channel(bytes[Result[(), Capacity]], 1))
+}
+
+fn journal_channel_bytes(group_count: u64) -> u64 {
+    option.unwrap(charge.channel(bytes[JournalMsg], 2 * group_count)) +
+        option.unwrap(charge.channel(bytes[Ack], 3 * group_count + 3)) +
+        journal_ready_bytes() +
+        option.unwrap(charge.channel(bytes[WriteNotice], 2)) +
+        option.unwrap(charge.channel(bytes[()], 1)) +
+        option.unwrap(charge.channel(bytes[()], 1))
+}
+
+fn writer_state_bytes() -> u64 {
+    // The six empty pages at genesis are the collection, stream and catalog
+    // roots, the empty collection child and the two pack-list roots.
+    // The inline Db and the provider's file bookkeeping take no allocations.
+    let page = option.unwrap(charge.counted(bytes[std.page.Page]))
+    // An empty format-3 image consists of its 24-byte header.
+    let image = option.unwrap(charge.seq(bytes[u8], 24))
+    6 * (page + image) + option.unwrap(charge.seq(bytes[Head], 4))
+}
+
+// The largest pack or MANIFEST file a cut writes (§3.9).
+fn cut_output_bytes(pack: u64) -> u64 {
+    order.max(pack, page_manifest_file_size(MANIFEST_LIMIT, 1))
+}
+
+fn history_workspace_bytes(packet: u64, compare: u64) -> Option[u64] {
+    let entry_buffers = int.checked_add(charge.seq(bytes[u8], packet)?, charge.seq(bytes[u8], compare)?)?
+    let head_buffers = 2 * option.unwrap(charge.seq(bytes[u8], HISTORY_HEAD_LIMIT))
+    let key = option.unwrap(charge.seq(bytes[u8], HISTORY_BUFFER_KEY_BYTES))
+    int.checked_add(entry_buffers, head_buffers + key)
+}
+
+const CUT_HISTORY_RETAIN_LIMIT: u64 = 255
+
+fn cut_history_packet_room() -> u64 {
+    // CHECKPOINT carries up to one root locator's rows and retain (a u8)
+    // checkpoint references. This also covers one locator chunk.
+    189 + BINDING_BYTES + (4 * bytes[u64]) * (HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
+}
+
+fn bucket_cut_parts(pack: u64) -> WriterParts {
+    let mut parts = writer_parts()
+    let unbounded = 18446744073709551615u64
+    let output = cut_output_bytes(pack)
+    let manifest = option.unwrap(charge.seq(bytes[u8], cut_output_bytes(0)))
+    let staging = option.unwrap(charge.seq(bytes[u8], order.min(output, HISTORY_PART_BYTES))) + option.unwrap(charge.seq(bytes[Bytes], 1))
+    // PackBuffers.out stays live through the MANIFEST PUT. The cut has
+    // its own history workspace and may grow its comparison buffer to
+    // the output width. The multipart part and the encoded MANIFEST are
+    // from separate upload steps.
+    writer_add(mut parts, "cut_output", size_or(charge.seq(bytes[u8], output), unbounded))
+    writer_add(mut parts, "cut_workspace", size_or(history_workspace_bytes(cut_history_packet_room(), output), unbounded))
+    writer_add(mut parts, "put_buffer", order.max(manifest, staging))
+    take parts
+}
+
+// The journal's fixed grants and workspace live through every phase. A
+// cut drains the outstanding frames before it takes the journal session.
+fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
+    let unbounded = 18446744073709551615u64
+    let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
+    let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
+    let floor = int.checked_add(checkpoint_budget, FRAME_LIMIT)
+    let minimum_journal = size_or(floor, unbounded)
+    let journal = size_or(o.journal_limit, minimum_journal)
+    let group = size_or(o.group_bytes, 4 * MIB)
+    let commits = match o.group_commits {
+        Some(n) => n,
+        None => 64u32
+    }
+    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
+    let mut parts = writer_parts()
+    let mut cut_parts = writer_parts()
+    let mut recovery = JOURNAL_CHUNK_BYTES + FRAME_LIMIT
+    if let Bucket(config) = kind {
+        let lanes = std.object.lane_reservation(config)
+        valid = valid && lanes != None
+        writer_add(mut parts, "client_lanes", size_or(lanes, unbounded))
+        let group_room = order.min(group, 4294967295u64)
+        let packet = object_writer_entry_room(group_room)
+        writer_add(mut parts, "history_workspace", option.unwrap(history_workspace_bytes(packet, packet)))
+        writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), Error]], object_writer_journal_room(group_room))))
+        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], OBJECT_TIMER_GRANT)))
+        // Recovery reads one object at a time. Replay can hold the fetched
+        // entry beside its decoded frame. The checkpoint can hold its entry
+        // beside a pack read. The growing suffix and location tables remain
+        // charged at the call that allocates them.
+        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(order.max(group_room, FRAME_LIMIT))))
+        let checkpoint_read = int.checked_add(option.unwrap(charge.seq(bytes[u8], cut_history_packet_room())), size_or(charge.seq(bytes[u8], cut_output_bytes(pack)), unbounded))
+        recovery = order.max(fetched_entry + FRAME_LIMIT, size_or(checkpoint_read, unbounded))
+        cut_parts = bucket_cut_parts(pack)
+    } else {
+        let worker = charge.task(bytes[Result[(), Error]], size_or(int.checked_add(group, JOURNAL_WORKER_SLACK), unbounded))
+        writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
+        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT)))
+        writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack))
+    }
+    writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
+    writer_add(mut parts, "writer_state", writer_state_bytes())
+    let write = 2 * FRAME_LIMIT
+    writer_add(mut cut_parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
+    writer_add(mut cut_parts, "cut_step", CUT_STEP_BYTES)
+    let cut_fixed = size_or(writer_total(cut_parts), unbounded)
+    let derived = match writer_total(parts) {
+        Some(lifetime) => {
+            let steady = int.saturating_sub(share, lifetime)
+            let by_write = int.saturating_sub(steady, order.max(write, recovery))
+            let by_cut = largest_resident(int.saturating_sub(steady, cut_fixed))
+            order.min(by_write, by_cut)
+        },
+        None => 0u64,
+    }
+    let resident = size_or(o.resident_limit, order.max(derived, MIB))
+    let minimum = order.max(resident, MIB)
+    writer_add(mut parts, "resident_limit", minimum)
+    let work = cut_work(minimum) - CUT_FIXED_BYTES
+    let cut = size_or(int.checked_add(cut_fixed, work), unbounded)
+    if cut >= write && cut >= recovery {
+        for i in 0u64 .. cut_parts.count {
+            let (take name, n) = replace(mut cut_parts.terms[i], ("", 0))
+            writer_add(mut parts, take name, n)
+        }
+        writer_add(mut parts, "checkpoint_task_work", work)
+    } else if write >= recovery {
+        writer_add(mut parts, "staged_frame", FRAME_LIMIT)
+        writer_add(mut parts, "frames_in_flight", FRAME_LIMIT)
+    } else {
+        if let Directory = kind {
+            writer_add(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES)
+            writer_add(mut parts, "recovered_frame", FRAME_LIMIT)
+        } else {
+            writer_add(mut parts, "recovery", recovery)
+        }
+    }
+    let Some(total) = writer_total(parts) else {
+        return Error(writer_shortage(share, parts))
+    }
+    if !valid || resident < MIB || total > share {
+        return Error(writer_shortage(share, parts))
+    }
+    Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
+}
+
+pub opaque type FollowerPlan: send {
+    kind: Kind,
+    options: Options,
+    envelope: u64,
+    root: u64
+}
+
+pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
+    let effective = Overrides(resident_limit: Some(o.resident_limit), journal_limit: Some(o.journal_limit),
+        checkpoint_bytes: Some(o.checkpoint_bytes), pack_bytes: Some(o.pack_bytes),
+        group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
+        cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
+        dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
+    let (take sized_options, writer) = writer_reservation(kind, 18446744073709551615u64, effective)?
+    let transport = if let Bucket(lanes) = kind { option.unwrap(std.object.lane_reservation(lanes)) } else { 0u64 }
+    let mut effective_options = take sized_options
+    effective_options.claim_ms = o.claim_ms
+    effective_options.head_poll_ms = o.head_poll_ms
+    effective_options.checkpoint_entries = o.checkpoint_entries
+    effective_options.retain = o.retain
+    follower_from_options(kind, take effective_options, writer_bytes(writer) - transport)
+}
+
+fn follower_from_options(kind: Kind, take options: Options, envelope: u64) -> Result[FollowerPlan, Shortage] {
+    let control = follower_control_bytes()
+    let task_bytes = follower_task_bytes(0)
+    let overhead = control + task_bytes
+    if envelope < overhead {
+        let mut parts: List[(String, u64)] = list.with_capacity(2)
+        add_size(mut parts, "follower_control", control)
+        add_size(mut parts, "follower_task", task_bytes)
+        return Error(shortage(envelope, take parts))
+    }
+    Ok(FollowerPlan(kind, options: take options, envelope, root: envelope - overhead))
+}
+
+pub fn plan_bytes(p: FollowerPlan) -> u64 {
+    p.envelope
+}
+
+pub fn service_bytes(plans: List[FollowerPlan]) -> Option[u64] {
+    let mut room = follower_service_bytes()
+    for plan in plans {
+        room = int.checked_add(room, plan.envelope)?
+    }
+    Some(room)
+}
+
+
+pub fn follower_starter_bytes() -> u64 {
+    follower_task_bytes(0) + order.max(follower_startup_reply_bytes(),
+        order.max(follower_provision_bytes(), follower_request_bytes()))
+}
+
+// Price the fixed roots and the per-level allocations in weak_publisher.
+fn sim_level_bytes(names: List[String]) -> u64 {
+    let roots = 2 * option.unwrap(charge.latest())
+    let progress = option.unwrap(charge.counted(bytes[LevelProgress]))
+    let frontiers = option.unwrap(charge.counted(bytes[WeakFrontiers]))
+    let lifetime = option.unwrap(charge.channel(bytes[()], 1))
+    let n = list.len(names)
+    let notice = option.unwrap(charge.channel(bytes[WeakNotice], 1))
+    let senders = option.unwrap(charge.seq(bytes[Sender[WeakNotice]], n))
+    let receivers = option.unwrap(charge.seq(bytes[Receiver[WeakNotice]], n))
+    let names_storage = option.unwrap(charge.seq(bytes[String], n))
+    let mut room = roots + progress + frontiers + lifetime + n * notice + 2 * senders + receivers + names_storage
+    for name in names { room += option.unwrap(charge.seq(bytes[u8], string.byte_len(name))) }
+    room
+}
+
+/// Fixed opening room for sim@1's weak barriers.
+pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
+    if list.len(declaration.weak) == 0 { return 0 }
+    sim_level_bytes(declaration.weak)
+}
+
+fn branch_record_bytes(name: String) -> u64 {
+    143 + string.byte_len(name)
+}
+
+fn pin_record_bytes(name: String) -> u64 {
+    130 + string.byte_len(name)
+}

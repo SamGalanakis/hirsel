@@ -15,15 +15,14 @@ pub const OPENROUTER: String = "openrouter.ai"
 
 pub const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 
-// A small session's store: each place reserves its resident cache, its pack
-// buffer and its journal group up front, and the defaults size those for a
-// large database (1 GiB resident).
+// The notes place shares its task with a helper. Keep its resident and journal buffers small.
+fn sizes() -> store.Overrides {
+    store.Overrides(resident_limit: Some(4194304u64), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(1048576u64), group_commits: None, lock_wait_ms: None,
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+}
+
 pub fn options() -> store.Options {
-    let mut o = store.defaults()
-    o.resident_limit = 4194304u64
-    o.pack_bytes = 1048576u64
-    o.group_bytes = 1048576u32
-    o
+    result.unwrap(store.sized_with(Directory, 67108864u64, sizes()))
 }
 
 // ---- the app's own tables ----
@@ -40,35 +39,35 @@ const NEXT_ID: u64 = 0u64
 
 pub const RESULTS: u64 = 1u64
 
-type Tables {
+pub type Tables: shareable + send {
     notes: store.Table[u64, String],
     stats: store.Table[u64, u64]
 }
 
-fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
+pub type Handles: shareable + send {
+    harness: harness.Handles,
+    tables: Tables,
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    harness.migrate(mut phase)?
-    harness.release.migrate(mut phase)?
+pub fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let handles = harness.declare_tables(mut d)?
     let c_note: std.codec.Codec[String] = std.codec.of()
-    let c_count: std.codec.Codec[u64] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec(notes_name(), std.codec.key_u64(), c_note)))?
-    created(store.migration_create_table(mut phase, store.spec(stats_name(), std.codec.key_u64(), c_count)))
+    let notes = store.declare_table(mut d, notes_name(), std.codec.key_u64(), c_note)?
+    let notes_table = store.finish(mut d, take notes)?
+    let stats = store.declare_table(mut d, stats_name(), std.codec.key_u64(), std.codec.of_u64())?
+    let stats_table = store.finish(mut d, take stats)?
+    Ok(Handles(harness: take handles, tables: Tables(notes: take notes_table, stats: take stats_table)))
 }
 
-pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
-    let c_note: std.codec.Codec[String] = std.codec.of()
-    let c_count: std.codec.Codec[u64] = std.codec.of()
-    Ok(Tables(notes: store.schema_table(schema, notes_name(), std.codec.key_u64(), c_note)?, stats: store.schema_table(schema, stats_name(), std.codec.key_u64(), c_count)?))
+fn harness_handles(h: Handles) -> harness.Handles { clone(h.harness) }
+
+pub fn seed_schema(mut d: store.Declare) -> Result[harness.Handles, store.Error] {
+    let Handles(harness: take handles, ..) = schema(mut d)?
+    Ok(take handles)
 }
 
 fn stat(tx: store.Tx, t: Tables, k: u64) -> Result[u64, store.Error] {
-    match store.fetch(tx, store.shape(t.stats), k)? {
+    match store.fetch(tx, t.stats, k)? {
         Some(n) => Ok(n),
         None => Ok(0u64)
     }
@@ -117,11 +116,8 @@ fn numbered(take head: String, n: u64) -> Bytes {
 }
 
 // ---- Inside tools: they run in advance's transaction ----
-fn note_add(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+fn note_add(mut tx: store.Tx, h: harness.Handles, t: Tables, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let line = text_arg(inv.args, "text")?
-    let Ok(t) = tables(store.tx_schema(tx)) else {
-        return Error(Unavailable)
-    }
     let Ok(id) = stat(tx, t, NEXT_ID) else {
         return Error(Unavailable)
     }
@@ -134,12 +130,9 @@ fn note_add(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harn
     Ok(Now(numbered("added note ", id)))
 }
 
-fn note_delete(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+fn note_delete(mut tx: store.Tx, h: harness.Handles, t: Tables, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let id = id_arg(inv.args)?
-    let Ok(t) = tables(store.tx_schema(tx)) else {
-        return Error(Unavailable)
-    }
-    match store.fetch(tx, store.shape(t.notes), id) {
+    match store.fetch(tx, t.notes, id) {
         Ok(Some(_)) => (),
         Ok(None) => return Error(BadArgs("no such note")),
         Error(_) => return Error(Unavailable),
@@ -153,7 +146,7 @@ fn note_delete(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
 // ---- the gate, the reaction and the section ----
 // Deleting is the one call that needs a person: it is held until the run's
 // caller approves these exact arguments.
-fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+fn confirm_delete(tx: store.Tx, h: harness.Handles, t: Tables, ask: harness.Ask) -> harness.Verdict {
     if ask.call.name == "note_delete" {
         Hold("deleting a note needs your approval")
     } else {
@@ -162,12 +155,9 @@ fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
 }
 
 // Counts tool results in the transaction that appends each one.
-fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
-    let ToolResult(_, _) = view e else {
+fn tally(mut tx: store.Tx, h: harness.Handles, t: Tables, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+    let ToolResult(_, _, _) = view e else {
         return Ok(())
-    }
-    let Ok(t) = tables(store.tx_schema(tx)) else {
-        return Error(Unavailable)
     }
     let Ok(n) = stat(tx, t, RESULTS) else {
         return Error(Unavailable)
@@ -179,12 +169,11 @@ fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Faul
 }
 
 // The notes as the model sees them, rendered from rows before each request.
-fn notes_section(tx: store.Tx) -> Result[Option[String], store.Error] {
-    let t = tables(store.tx_schema(tx))?
+fn notes_section(tx: store.Tx, h: harness.Handles, t: Tables) -> Result[Option[String], store.Error] {
     let mut out = string.from("Notes:")
     let next = stat(tx, t, NEXT_ID)?
     for id in 0u64 .. next {
-        if let Some(line) = store.fetch(tx, store.shape(t.notes), id)? {
+        if let Some(line) = store.fetch(tx, t.notes, id)? {
             string.push(mut out, "\n")
             string.push_u64(mut out, id)
             string.push(mut out, ". ")
@@ -219,6 +208,7 @@ pub type Services: send {
 }
 
 pub type Grants: send {
+    handles: Handles,
     context: runner.TriggerContext,
     helper: Sender[HelperAsk],
     clock: Clock,
@@ -237,7 +227,7 @@ pub fn copy_live(l: Live, group: String) -> Live {
     Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group), model: string.from(l.model))
 }
 
-fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+fn make_grants(s: Services, h: Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     let live = match s.live {
         Some(l) => Some(copy_live(l, l.group)),
         None => None,
@@ -247,7 +237,7 @@ fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, C
         None => string.new(),
     }
     let stream = copy_stream(s.stream, group)
-    Ok(Grants(context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
+    Ok(Grants(handles: clone(h), context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
 }
 
 // ---- Outside tools: they run in a worker, off the write lock ----
@@ -272,7 +262,7 @@ fn summarize(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits 
 
 // ---- the parent agent ----
 fn usage() -> harness.Usage {
-    harness.Usage(input: 10u64, output: 5u64)
+    harness.Usage(input: 10u64, output: 5u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)
 }
 
 fn call(take id: String, take name: String, take args: String) -> harness.Call {
@@ -281,7 +271,7 @@ fn call(take id: String, take name: String, take args: String) -> harness.Call {
 
 fn returned(r: harness.Request, id: String) -> String {
     for e in r.messages {
-        if let ToolResult(at, Returned(Inline(b))) = e {
+        if let ToolResult(at, Returned(Inline(b)), _) = e {
             if at == id {
                 if let Ok(take s) = string.from_utf8(clone(b)) {
                     return take s
@@ -293,13 +283,13 @@ fn returned(r: harness.Request, id: String) -> String {
 }
 
 // Three rounds, chosen by how many tool results the request carries.
-fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut results = 0u64
     let mut prompt = string.new()
     for e in r.messages {
         match e {
             User(text) => { prompt = string.from(text) },
-            ToolResult(_, _) => { results += 1u64 },
+            ToolResult(_, _, _) => { results += 1u64 },
             _ => (),
         }
     }
@@ -338,7 +328,7 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
     let _ = channel.send(reply, harness.Answer(text: take words, calls: take calls, stop: stop, usage: usage()))
     match channel.receive(replied) {
         Ok(take a) => Ok(take a),
-        Error(_) => Error(Unavailable)
+        Error(_) => Error(Rejected("scripted model unavailable"))
     }
 }
 
@@ -353,7 +343,7 @@ fn scripted_release(r: harness.Request) -> Option[(bool, Option[String])] {
                 written = false;
                 result = None
             },
-            ToolResult(id, outcome) => {
+            ToolResult(id, outcome, _) => {
                 if id == "write" {
                     if let Returned(_) = outcome { written = true }
                 }
@@ -374,7 +364,7 @@ fn scripted_release(r: harness.Request) -> Option[(bool, Option[String])] {
 }
 
 // The scripted answer, its text drafted in eight pieces over about a second.
-fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let answer = scripted_model(g, take request)?
     let n = string.byte_len(answer.text)
     if list.len(answer.calls) == 0u64 && n > 0u64 {
@@ -395,7 +385,7 @@ fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[ha
 }
 
 // Live asks OpenRouter, stream drafts the script, otherwise the script answers.
-fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     if let Some(live) = view g.live {
         return live_model(g, live, take request, mut draft)
     }
@@ -405,53 +395,40 @@ fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.pre
     scripted_model(g, take request)
 }
 
-fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let m = harness.provider.Model(dialect: OpenAi, name: string.from(live.model), max_tokens: 512u64)
+fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let m = harness.provider.Model(dialect: OpenAi, name: string.from(live.model), max_tokens: 512u64, cache_control: Off)
     let endpoint = harness.provider.Endpoint(address: live.address, authority: OPENROUTER, prefix: "/api", security: Https(OPENROUTER, System))
     let p = harness.provider.Provider(model: take m, endpoint: take endpoint, key: secret.share(live.key), bounds: harness.provider.bounds(), deadline_ms: 45000u64)
     emit(live.out, "OpenRouter request attempted", "")
-    let response = harness.provider.ask_reported(live.net, g.clock, take p, take request, mut draft)
+    let response = harness.provider.ask_with_preview(live.net, g.clock, take p, take request, mut draft)
     match take response {
-        Ok(harness.provider.Reported(answer: take a, cached_input: cached)) => {
-            if let Some(hit) = cached {
-                if hit <= a.usage.input {
-                    let mut s = string.from("OpenRouter prompt tokens: hit ")
-                    string.push_u64(mut s, hit)
-                    string.push(mut s, ", miss ")
-                    string.push_u64(mut s, a.usage.input - hit)
-                    emit(live.out, take s, "")
-                }
+        Ok(take a) => {
+            let hit = a.usage.cache_read
+            if hit <= a.usage.input {
+                let mut s = string.from("OpenRouter prompt tokens: hit ")
+                string.push_u64(mut s, hit)
+                string.push(mut s, ", miss ")
+                string.push_u64(mut s, a.usage.input - hit)
+                emit(live.out, take s, "")
             }
             Ok(take a)
         },
-        Error(Http(status, message)) => {
-            let mut why = harness.provider.http_error(status, message)
-            if status == 400u16 || status == 404u16 {
-                string.push(mut why, ". Check OPENROUTER_MODEL against https://openrouter.ai/models and retry.")
-            } else if status < 500u16 {
-                string.push(mut why, ". Check this model's access, credits and rate limits in OpenRouter, then retry.")
+        Error(take fault) => {
+            let why = match fault {
+                Throttled(message, _) => string.from(message),
+                Transient(message, _) => string.from(message),
+                ContextExceeded(message) => string.from(message),
+                StreamDropped(message) => string.from(message),
+                Rejected(message) => string.from(message),
             }
             emit(live.out, "OpenRouter ", why)
-            Error(Refused(take why))
-        },
-        Error(Transport(take fault)) => {
-            match fault {
-                Refused(why) => {
-                    let mut line = string.from(why)
-                    string.push(mut line, ". Check your connection to openrouter.ai and retry.")
-                    emit(live.out, "OpenRouter ", line)
-                },
-                BadArgs(why) => emit(live.out, "OpenRouter request invalid. Check the request data. ", why),
-                Unavailable => emit(live.out, "OpenRouter response ended early. Check the run before retrying.", ""),
-                _ => (),
-            }
             Error(take fault)
         },
     }
 }
 
-pub fn notes_agent() -> harness.Agent[Grants] {
-    let mut a = harness.agent("notes", "notes", code.describe(model))
+pub fn notes_agent(tables: Tables) -> harness.Agent[Grants, Tables] {
+    let mut a: harness.Agent[Grants, Tables] = harness.agent("notes", "notes", code.describe(model), clone(tables))
     list.push(mut a.tools, harness.inside("note_add", "saves a note", "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", code.describe(note_add)))
     list.push(mut a.tools, harness.inside("note_delete", "deletes a note by id", "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}", code.describe(note_delete)))
     list.push(mut a.tools, harness.outside("clock", "reads the wall clock", "{\"type\":\"object\"}", Repeatable(3u64), code.describe(clock_tool)))
@@ -469,9 +446,9 @@ fn wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(advance), code.describe(effect))
 }
 
-fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn advance(mut tx: store.Tx, h: Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = wired()?
-    harness.advance(mut tx, h, notes_agent(), w, take wake)
+    harness.advance_park(mut tx, h.harness, notes_agent(h.tables), w, take wake)
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
@@ -482,54 +459,55 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
     if let Some(l) = view g.live {
         target = Some(harness.preview.target(l.preview, l.group, g.clock))
     }
-    harness.effect(g.context, g, take key, notes_agent(), code.describe(settle), take target)
+    harness.effect(g.context, g.handles.harness, g, take key, notes_agent(g.handles.tables), code.describe(settle), take target)
 }
 
-fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn settle(mut tx: store.Tx, h: Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = wired() else {
         return Error(Missing("harness: wiring"))
     }
-    harness.settle(mut tx, notes_agent(), w, a, take m)
+    harness.settle(mut tx, h.harness, notes_agent(h.tables), w, a, take m)
 }
 
-pub fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
+pub fn submit_entry(mut tx: store.Tx, h: Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
     let w = wired()?
-    harness.submit(mut tx, h, notes_agent(), w, caller, take m)
+    harness.submit(mut tx, h.harness, notes_agent(h.tables), w, caller, NextTurn, take m)
 }
 
-pub fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
+pub fn decide_entry(mut tx: store.Tx, h: Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
     let w = wired()?
-    harness.decide(mut tx, h, notes_agent(), w, caller, take d)
+    harness.decide(mut tx, h.harness, notes_agent(h.tables), w, caller, take d)
 }
 
-pub fn settle_release_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take ask: harness.release.DevSettlement) -> Result[harness.Filed, harness.Refused] {
-    harness.release.dev_settle(mut tx, h, caller, notes_agent(), wired()?, take ask)
+pub fn settle_release_entry(mut tx: store.Tx, h: Handles, caller: store.Caller, take ask: harness.release.DevSettlement) -> Result[harness.Filed, harness.Refused] {
+    harness.release.dev_settle(mut tx, h.harness, caller, notes_agent(h.tables), wired()?, take ask)
 }
 
-pub fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)?
+pub fn place(mut r: runner.Registry[Grants, Handles]) -> Result[(), runner.RegisterError] {
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness_handles, BYTES, BYTES)?
     runner.transact(mut r, code.describe(submit_entry), BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(decide_entry), BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(settle_release_entry), BYTES, runner.DEFAULT_STEPS)?
     let proposals: std.codec.Codec[harness.release.Proposal] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, runner.DEFAULT_STEPS)?
-    harness.pending_waits_entry(mut r, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as_with(mut r, code.describe(harness.release.dev_proposals), harness.release.proposal_slots()?, harness_handles, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as_with(mut r, code.describe(harness.pending_waits), harness.wait_slots()?, harness_handles, BYTES, runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, runner.DEFAULT_STEPS)
+    runner.query_as_with(mut r, code.describe(harness.window), harness.window_slots()?, harness_handles, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as_with(mut r, code.describe(harness.history_cuts), harness.cut_slots()?, harness_handles, BYTES, runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----
 type HelperGrants: send {
+    handles: harness.Handles,
     context: runner.TriggerContext
 }
 
-fn helper_grants(s: (), take ctx: runner.TriggerContext) -> Result[HelperGrants, Capacity] {
-    Ok(HelperGrants(context: take ctx))
+fn helper_grants(s: (), h: harness.Handles, take ctx: runner.TriggerContext) -> Result[HelperGrants, Capacity] {
+    Ok(HelperGrants(handles: clone(h), context: take ctx))
 }
 
 // Answers with the first sentence of the newest user message.
-fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut last = string.new()
     for e in r.messages {
         if let User(t) = e {
@@ -548,39 +526,39 @@ fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harn
         string.push(mut words, s)
     }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
-    let _ = channel.send(reply, harness.Answer(text: take words, calls: list.new(), stop: "end", usage: harness.Usage(input: 4u64, output: 2u64)))
+    let _ = channel.send(reply, harness.Answer(text: take words, calls: list.new(), stop: "end", usage: harness.Usage(input: 4u64, output: 2u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)))
     match channel.receive(replied) {
         Ok(take a) => Ok(take a),
-        Error(_) => Error(Unavailable)
+        Error(_) => Error(Rejected("scripted model unavailable"))
     }
 }
 
-fn helper_agent() -> harness.Agent[HelperGrants] {
-    harness.agent("helper", "scripted", code.describe(helper_model))
+fn helper_agent() -> harness.Agent[HelperGrants, ()] {
+    harness.agent("helper", "scripted", code.describe(helper_model), ())
 }
 
 fn helper_wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(helper_advance), code.describe(helper_effect))
 }
 
-fn helper_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn helper_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = helper_wired()?
-    harness.advance(mut tx, h, helper_agent(), w, take wake)
+    harness.advance_park(mut tx, h, helper_agent(), w, take wake)
 }
 
 fn helper_effect(g: HelperGrants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, helper_agent(), code.describe(helper_settle), None)
+    harness.effect(g.context, g.handles, g, take key, helper_agent(), code.describe(helper_settle), None)
 }
 
-fn helper_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn helper_settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = helper_wired() else {
         return Error(Missing("harness: wiring"))
     }
-    harness.settle(mut tx, helper_agent(), w, a, take m)
+    harness.settle(mut tx, h, helper_agent(), w, a, take m)
 }
 
 fn helper_place(mut r: runner.Registry[HelperGrants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(helper_advance), code.describe(helper_effect), code.describe(helper_settle), BYTES, BYTES)
+    harness.register_standard(mut r, code.describe(helper_advance), code.describe(helper_effect), code.describe(helper_settle), harness.select_handles, BYTES, BYTES)
 }
 
 // The helper's service: it owns the helper place's directory and, per ask,
@@ -599,7 +577,7 @@ pub type HelperSeed: send {
 fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
     let w = result.unwrap(helper_wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: helper_grants, grant_bytes: 65536u64)
-    runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    runner.PlaceConfig(backing: Disk(dir), sizes: sizes(), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, String] waits {
@@ -607,10 +585,7 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
         Ok(take v) => take v,
         Error(_) => return Error("helper: open")
     }
-    let Ok(()) = store.run_migration(mut db, seed.tasks, code.describe(harness.migrate)) else {
-        return Error("helper: migrate")
-    }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.bind_declaration(mut db, Migrate, harness.declare_tables) else {
         return Error("helper: schema")
     }
     let Ok(w) = helper_wired() else {
@@ -618,11 +593,11 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
     }
     let mut client_key = string.from("ask-")
     string.push_u64(mut client_key, n)
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        if n == 0u64 {
-            harness.open_session(mut tx, h, "scripted", All)?
+    let ran = store.run(mut db, None, (store.copy_env(line), store.copy_env(n), store.copy_env(h), store.copy_env(w), store.copy_env(client_key)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        if call_env.1 == 0u64 {
+            harness.open_session(mut tx, call_env.2, "scripted", All)?
         }
-        harness.submit(mut tx, h, helper_agent(), w, you(), harness.Submit(client_key: clone(client_key), text: clone(line)))
+        harness.submit(mut tx, call_env.2, helper_agent(), call_env.3, you(), NextTurn, harness.Submit(client_key: clone(call_env.4), text: clone(call_env.0)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("helper: submit did not commit")
@@ -638,11 +613,11 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
         return Error("helper: reopen")
     }
     let snap = store.snapshot(db2)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(session)) = store.get(result.unwrap(store.reader(db2, 0u64)), snap, h.session, 0u64) else {
         return Error("helper: no session")
     }
     let last = session.next_pos - 1u64
-    let answer: Result[String, String] = match store.get(snap, store.shape(h.entries), last) {
+    let answer: Result[String, String] = match store.get(result.unwrap(store.reader(db2, 0u64)), snap, h.entries, last) {
         Ok(Some(Assistant(a))) => Ok(clone(a.text)),
         _ => Error("helper: the run did not end in an answer"),
     }
@@ -669,14 +644,14 @@ pub fn loopback() -> Addr {
 }
 
 pub fn wire() -> runner.WireConfig {
-    let mut w = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut w = runner.wire_defaults(65536u64)
     w.n_pool = 4194304u64
     w
 }
 
 // Runs a place until it is idle: no run can move without a person or a
 // timer, so `operate` returns.
-fn until_idle[G: send, S: send](take config: runner.PlaceConfig[G, harness.Handles, S, ()]) -> Result[(), String] waits {
+fn until_idle[G: send, H: shareable + inert + send, S: send](take config: runner.PlaceConfig[G, H, S, ()]) -> Result[(), String] waits {
     let (stop, stopped): (Sender[()], Receiver[()]) = channel.new(1u64)
     let Ok(status) = runner.status_root() else {
         return Error("place: status")
@@ -694,12 +669,11 @@ fn until_idle[G: send, S: send](take config: runner.PlaceConfig[G, harness.Handl
             Error(take s)
         },
         Error(Exceeds(_)) => Error("place: a bound was exceeded"),
-        Error(Disagrees(_)) => Error("place: its image disagrees with the store"),
         Error(Full(_)) => Error("place: out of capacity"),
     }
 }
 
-pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, Handles, Services, ()] {
     let w = result.unwrap(wired())
     let grant_bytes = if let Some(_) = view s.live {
         LIVE_GRANT_BYTES
@@ -707,7 +681,7 @@ pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, task
         65536u64
     }
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: take s, grant: make_grants, grant_bytes: grant_bytes)
-    runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    runner.PlaceConfig(backing: take backing, sizes: sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(schema), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 // ---- printing ----
@@ -746,8 +720,8 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
                 emit(out, take s, args_text(c.args))
             }
         },
-        ToolResult(id, o) => {
-            let (words, _) = harness.provider.worded(o)
+        ToolResult(id, _, shown) => {
+            let words = view shown.text
             let mut s = string.from("  result ")
             string.push(mut s, id)
             string.push(mut s, ": ")
@@ -765,7 +739,6 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
             emit(out, take s, "")
         },
         Inform(t) => emit(out, "  inform: ", t),
-        Reset(t) => emit(out, "  reset: ", t),
         Note(t, _) => emit(out, "  note: ", t),
     }
 }
@@ -791,28 +764,23 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
         Ok(take v) => take v,
         Error(_) => return Error("open")
     }
-    let Ok(()) = store.run_migration(mut db, tasks, code.describe(migrate)) else {
-        return Error("migrate")
-    }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.bind_declaration(mut db, Migrate, schema) else {
         return Error("schema")
     }
     let Ok(w) = wired() else {
         return Error("wiring")
     }
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        harness.open_session(mut tx, h, "scripted", All)?
-        harness.set_reader(mut tx, h, you(), true)?
-        let Ok(t) = tables(store.tx_schema(tx)) else {
-            return Error(Storage)
-        }
+    let ran = store.run(mut db, None, (store.copy_env(prompt), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, call_env.1.harness, "scripted", All)?
+        harness.set_reader(mut tx, call_env.1.harness, you(), true)?
+        let t = view call_env.1.tables
         let Ok(()) = store.put(mut tx, t.notes, 0u64, "Team meeting on Tuesday.") else {
             return Error(Storage)
         }
         let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else {
             return Error(Storage)
         }
-        harness.submit(mut tx, h, notes_agent(), w, you(), harness.Submit(client_key: "k1", text: string.from(prompt)))
+        harness.submit(mut tx, call_env.1.harness, notes_agent(call_env.1.tables), call_env.2, you(), NextTurn, harness.Submit(client_key: "k1", text: string.from(call_env.0)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("submit did not commit")
@@ -832,15 +800,15 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         Ok(take v) => take v,
         Error(_) => return Error("open")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.bind_declaration(mut db, Open, schema) else {
         return Error("schema")
     }
     let snap = store.snapshot(db)
-    let Ok(waits) = harness.pending_approvals(snap, h, you()) else { return Error("read approvals") }
+    let Ok(waits) = harness.pending_approvals(result.unwrap(store.reader(db, 0u64)), snap, h.harness, you()) else { return Error("read approvals") }
     if list.len(waits) != 1u64 { return Error("expected one open approval") }
     let wait = waits[0u64]
     let ek = harness.EffectKey(run: wait.run, round: wait.round, kind: harness.TOOL, ordinal: wait.ordinal)
-    let Ok(Some(held)) = store.get(snap, store.shape(h.effects), ek) else {
+    let Ok(Some(held)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.harness.effects, ek) else {
         return Error("the held call is missing")
     }
     if let Some(c) = held.call {
@@ -853,8 +821,8 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         return Error("wiring")
     }
     let d = harness.Decision(run: wait.run, round: wait.round, ordinal: wait.ordinal, key: clone(wait.key), allow: true)
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Ruling, harness.Refused] {
-        harness.decide(mut tx, h, notes_agent(), w, you(), clone(d))
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(w), store.copy_env(d)), fn(mut tx, call_env) -> Result[harness.Ruling, harness.Refused] {
+        harness.decide(mut tx, call_env.0.harness, notes_agent(call_env.0.tables), call_env.1, you(), clone(call_env.2))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("the decision did not commit")
@@ -870,44 +838,44 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
 }
 
 fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
-    let Ok(db) = store.open(tasks, dir, clock, random, options()) else {
+    let Ok(take opened) = store.open(tasks, dir, clock, random, options()) else {
         return Error("open")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let mut db = take opened
+    let Ok(handles) = store.bind_declaration(mut db, Open, schema) else {
         return Error("schema")
     }
-    let Ok(t) = store.with_schema(db, code.describe(tables)) else {
-        return Error("tables")
-    }
+    let h = view handles.harness
+    let t = view handles.tables
     let snap = store.snapshot(db)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(session)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64) else {
         return Error("no session")
     }
     emit(out, "transcript:", "")
     for pos in 0u64 .. session.next_pos {
-        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) {
+        if let Ok(Some(e)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, pos) {
             show_entry(out, e)
         }
     }
     emit(out, "notes:", "")
-    let mut rows = match store.scan(snap, store.shape(t.notes), Unbounded, Unbounded) {
+    let mut rows = match store.scan(result.unwrap(store.reader(db, 0u64)), snap, t.notes, Unbounded, Unbounded) {
         Ok(take v) => take v,
         Error(_) => return Error("scan")
     }
-    while let Ok(Some((id, text))) = store.next(mut rows) {
+    while let Ok(Some((id, text))) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows) {
         let mut s = string.from("  ")
         string.push_u64(mut s, id)
         string.push(mut s, ". ")
         emit(out, take s, text)
     }
-    let counted = match store.get(snap, store.shape(t.stats), RESULTS) {
+    let counted = match store.get(result.unwrap(store.reader(db, 0u64)), snap, t.stats, RESULTS) {
         Ok(Some(n)) => n,
         _ => 0u64
     }
     let mut tallied = string.from("tool results counted by the reaction: ")
     string.push_u64(mut tallied, counted)
     emit(out, take tallied, "")
-    let Ok(Some(run)) = store.get(snap, store.shape(h.runs), 0u64) else {
+    let Ok(Some(run)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64) else {
         return Error("no run")
     }
     let mut s = string.from("spend: ")
@@ -935,15 +903,19 @@ pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, 
     }
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
-    let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
-    let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let config = helper_settings(helper, clock, random, tasks, net)
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options())))
+    // Runner's 1 MiB keep and 8 MiB for the helper's submit and read work.
+    let allowance = result.unwrap(runner.operate_bytes(config)) + 9 * 1048576u64 + writer
+    let helping = task.spawn(tasks, bytes allowance, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
+    let first = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = first {
         return quit(out, why)
     }
     if let Error(take why) = approve(out, parent, clock, random, tasks) {
         return quit(out, why)
     }
-    let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let second = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = second {
         return quit(out, why)
     }

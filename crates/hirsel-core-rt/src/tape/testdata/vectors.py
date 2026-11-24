@@ -1,4 +1,4 @@
-"""Independent oracle for the tape laws (REPLAY-SPEC sections 4 and 5, tape format 11).
+"""Independent oracle for the tape laws (REPLAY-SPEC sections 4 and 5, tape format 13).
 
 Imports no compiler or runtime code: it encodes the spec's byte format by hand
 and checks blocks with the system libxxhash. Run from anywhere:
@@ -50,8 +50,8 @@ def block(seq, flags, payload):
     return head + payload + struct.pack('<Q', xxh3(TAPE_ID + head + payload))
 
 # Header: Call tape (no header grants).
-header = (struct.pack('<HB', 11, 2) + TAPE_ID + lb(b'app@1/main/run') + BUILD
-          + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + vi(0) + bytes(16))
+header = (struct.pack('<HB', 13, 2) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+          + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + vi(0))
 
 # Op tags (provider.rs) and grant kinds (entry.rs).
 OPEN, READ, CLOSE, MKDTEMP, WALL_MS, MONO_NS, STDOUT, RENAME, SLEEP_UNTIL, SYNC_DIR = 0, 1, 3, 7, 10, 11, 12, 14, 15, 17
@@ -77,11 +77,12 @@ class Tape:
     def grant(s, kind, vector=None, gap=0):
         data = lb(vector) if kind == ARGS else bytes([0]) if 4 <= kind <= 6 else b''
         s.put(bytes([7]) + vi(gap) + bytes([kind]) + data)
-    def op(s, op, obj, a, value=0, error=None, written=None, payload=b''):
+    def op(s, op, obj, a, value=0, error=None, written=None, payload=b'', spare=None):
         head = 3
         f = b''
         if s.task != 0: head |= 0x10; f += vi(0); s.task = 0
-        f = bytes([head]) + f + bytes([op]) + vi(obj) + args(a)
+        room = b'' if spare is None else bytes([18]) + vi(spare) + vi(0)
+        f = bytes([head]) + f + bytes([op]) + vi(obj) + room + args(a)
         if op in (WALL_MS, MONO_NS):
             prev = s.prev.get((op, obj), 0); s.prev[(op, obj)] = value; value = zz(value - prev)
         f += bytes([1 if error else 0]) + vi(value)
@@ -111,8 +112,8 @@ t.op(STDOUT, 2, b'0123456789abcdefXYZ', written=19)   # 19 bytes: digest
 t.op(OPEN, 3, bytes([0]) + b'missing', error=(1, 0))  # NotFound
 t.op(OPEN, 3, bytes([0]) + b'data', 5)                # ordinal 5
 big = bytes((i * 7 + 1) & 0xff for i in range(70_000))
-t.op(READ, 5, struct.pack('<Q', 70_000), 70_000, payload=big)
-t.op(READ, 5, struct.pack('<Q', 10), 0, payload=b'')
+t.op(READ, 5, b'', 70_000, payload=big, spare=70_000)
+t.op(READ, 5, b'', 0, spare=10)
 t.op(CLOSE, 5, b'')
 t.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9_000))
 t.op(RENAME, 3, b'a\0b')
@@ -137,9 +138,9 @@ g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
 
 # The two-clock model places GRANT at open, with a delta of zero.
 TAPE_ID = bytes(range(16))
-model_header = (struct.pack('<HB', 11, 2) + TAPE_ID + lb(b'pkg/charge#0001')
+model_header = (struct.pack('<HB', 13, 2) + TAPE_ID + lb(b'pkg/charge#0001')
                 + bytes(range(32)) + struct.pack('<IQQ', 1, 1024, 0) + b'\0'
-                + lb(b'arg-7') + vi(0) + bytes(16))
+                + lb(b'arg-7') + vi(0))
 first_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(1_000_000_123))
 second_clock = bytes([0x13, 0, MONO_NS, 1, 0, 0]) + vi(zz(5_000))
 model = b''.join([
@@ -157,8 +158,8 @@ loopback = 0x7f000001
 listen_rule = struct.pack('<BBQQBHH', 1, 0, 0, loopback, 32, 0, 65535)
 connect_rule = struct.pack('<BBQQBHH', 0, 1, 0, 1, 128, 1, 65535)
 grants = bytes([NET]) + vi(3) + listen_rule + connect_rule + listen_rule
-header = (struct.pack('<HB', 11, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
-          + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + lb(grants) + bytes(16))
+header = (struct.pack('<HB', 13, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+          + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + lb(grants))
 net = Tape()
 net.grant(NET)
 net.grant(CLOCK)
@@ -167,7 +168,7 @@ net.op(LISTEN, 1, addr(0) + struct.pack('<H', 8), 3, payload=addr(49217))
 deadline = vi(2) + struct.pack('<Q', 5000)
 net.put(bytes([1, ACCEPT]) + vi(3) + args(deadline))
 net.put(bytes([2, 0, 0]) + vi(4) + lb(addr(49218)))
-net.op(RECV_BOUNDED, 4, struct.pack('<Q', 70000) + deadline, 70000, payload=big)
+net.op(RECV_BOUNDED, 4, deadline, 70000, payload=big, spare=70_000)
 net.op(SEND_PAIR, 4, deadline + lb(b'abc') + lb(b'def'), value=4)
-net.op(RECV_BOUNDED, 4, struct.pack('<Q', 1) + deadline, error=(5, 0))
+net.op(RECV_BOUNDED, 4, deadline, error=(5, 0), spare=1)
 (HERE / 'net-tape.bin').write_bytes(net.end(0, struct.pack('<I', 0)))

@@ -6,11 +6,11 @@ pub type Account: send + codec {
 }
 
 fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
-    let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        let a = Account(id: i, balance: int.narrow(i), owner: string.from("owner000"))
-        store.put(mut tx, t, i, a)?
-        let back = option.unwrap(store.fetch(tx, store.shape(t), i)?)
-        if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
+    let done = result.unwrap(store.run(mut db, None, (copy_env(i), copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {
+        let a = Account(id: call_env.0, balance: int.narrow(call_env.0), owner: string.from("owner000"))
+        store.put(mut tx, call_env.1, call_env.0, a)?
+        let back = option.unwrap(store.fetch(tx, call_env.1, call_env.0)?)
+        if back.id != call_env.0 || back.balance != int.narrow(call_env.0) || back.owner != "owner000" {
             fail("store R1 wrong row")
         }
         Ok(back.id + string.byte_len(back.owner))
@@ -23,16 +23,16 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
 
 type Reader: send {
     held: store.Snapshot,
-    sh: store.Shape[u64, Account]
+    sh: store.Table[u64, Account]
 }
 
-fn reader(take r: Reader) -> u64 {
+fn read_source(take r: Reader) -> u64 {
     let mut state: u64 = 1
     let mut sum: u64 = 0
     for _ in 0u64 .. 100000 {
         let k = store.splitmix64(state) % 100000
         state = int.wrapping_add(state, 0x9E3779B97F4A7C15u64)
-        let a = option.unwrap(result.unwrap(store.get(r.held, r.sh, k)))
+        let a = option.unwrap(result.unwrap(store.get(read_handle, r.held, r.sh, k)))
         if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
             fail("store R3 wrong row")
         }
@@ -43,7 +43,7 @@ fn reader(take r: Reader) -> u64 {
 
 pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let accounts: std.codec.Codec[Account] = std.codec.of()
     result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), accounts)))
     let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts))
@@ -53,7 +53,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
         }
     }
     let held = store.snapshot(db)
-    let sh = store.shape(t)
+    let sh: store.Table[u64, Account] = clone(t)
     let mut gate = result.unwrap(host.open(dir, "gate", Read))
     let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))
@@ -67,8 +67,8 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
             sum += insert(mut db, t, i)
         }
     } else if mode == "R2" {
-        let mut rows = result.unwrap(store.scan(held, sh, Unbounded, Unbounded))
-        while let Some((k, a)) = result.unwrap(store.next(mut rows)) {
+        let mut rows = result.unwrap(store.scan(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded))
+        while let Some((k, a)) = result.unwrap(store.next(result.unwrap(reader(db, 0u64)), mut rows)) {
             if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
                 fail("store R2 wrong row")
             }
@@ -76,7 +76,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
         }
     } else {
         let payload = Reader(held: take held, sh: take sh)
-        let h = task.spawn(tasks, bytes 16777216, take payload, reader)
+        let h = task.spawn(tasks, bytes 16777216, take payload, read_source)
         sum = result.unwrap(task.join(take h))
     }
     let elapsed = host.mono_ns(clock) - start

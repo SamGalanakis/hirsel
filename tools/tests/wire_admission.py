@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import struct
@@ -13,7 +14,7 @@ from tempfile import TemporaryDirectory
 import time
 import traceback
 
-from wire_process import accept_from, stop_process
+from wire_process import accept_from, stop_listener, stop_process
 from wire_wsock import GUID, REQUEST, connect, frame, head, read_frame, wait_ready
 
 
@@ -31,13 +32,23 @@ def blob(b):
 
 def fingerprint(*opcodes):
     # Schema v3, no named definitions; CRC-64-AVRO, SEM-10.
+    return crc64(b'\x03\0\0\0\0' + bytes(opcodes))
+
+
+def crc64(data):
     value = 0xc15d213aa4d7a795
-    for byte in b'\x03\0\0\0\0' + bytes(opcodes):
+    for byte in data:
         value ^= byte
         for _ in range(8):
             value = (value >> 1) ^ (0xc15d213aa4d7a795 if value & 1 else 0)
     return value
 
+
+# The query result schema contains the unit value and one named table slot.
+READ_RESULT_FP = crc64(
+    blob(b'\x03\0\0\0\0\x00') + u32(1) + blob(b'data') + u32(0)
+    + blob(b'\x04\0\0\0\0\x06') + blob(b'\x03\0\0\0\0\x05')
+)
 
 # PROG-9 encodes the entire function signature, including the transaction's
 # Caller parameter. RUNNER-SPEC rule 3 puts those identity bytes in the key.
@@ -45,11 +56,12 @@ ENTRIES = {
     'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
     'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
-    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Cover,core@1/core/Capacity]', fingerprint(5), fingerprint(0)),
+    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[core@1/core/()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }
 CREDENTIAL = bytes(16)
+TEST_BIRTH = time.time_ns() // 1000000
 TRACE = []
 # The compiler, runtime and linker for the hirsel call laws, set by main.
 CLI = {}
@@ -62,7 +74,7 @@ def hello(names=(), credential=CREDENTIAL):
 
 
 def call(stream, p, slot=0, arg=b'', deadline=10000):
-    return u32(1) + u32(stream) + u64(p) + u32(slot) + u32(deadline) + blob(arg)
+    return u32(1) + u64(TEST_BIRTH) + u64(stream) + u64(p) + u32(slot) + u32(deadline) + blob(arg)
 
 
 class Decode:
@@ -94,6 +106,8 @@ class Decode:
                 return ('out_of_bytes', self.word(8), self.word(8))
             if fault == 2:
                 return ('out_of_time', self.word(8))
+            if fault == 4:
+                return ('conflict', self.blob().decode())
             assert fault == 3
             return ('gone',)
         if tag == 2:
@@ -107,12 +121,13 @@ class Decode:
         return ('abandoned' if tag == 3 else 'in_doubt',)
 
     def done(self):
-        return (self.word(), self.word(8), self.outcome())
+        return ((self.word(8), self.word(8)), self.word(8), self.outcome())
 
     def read(self):
         tag = self.word()
         if tag == 4:
-            out = ('welcome', (self.word(1), self.blob()), self.word(), self.word(8), self.blob(), self.blob(), self.word(8))
+            out = ('welcome', (self.word(1), self.blob()), self.word(), self.word(8), self.blob(),
+                   self.blob(), self.word(8), self.word(8), self.word(8))
         elif tag == 5:
             entry = self.word()
             out = ('placed', entry) if entry == 2 else ('placed', entry, self.word())
@@ -121,14 +136,18 @@ class Decode:
         elif tag == 6:
             version = self.word(8)
             complete = [self.word() for _ in range(self.word())]
-            rows = []
+            groups = []
             for _ in range(self.word()):
-                sub, key = self.word(), self.blob()
-                present = self.word()
-                assert present in (0, 1)
-                rows.append((sub, key, self.blob() if present else None))
+                sub, value = self.word(), self.blob()
+                rows = []
+                for _ in range(self.word()):
+                    slot, key = self.word(2), self.blob()
+                    present = self.word()
+                    assert present in (0, 1)
+                    rows.append((slot, key, self.blob() if present else None))
+                groups.append((sub, value, rows))
             done = [self.done() for _ in range(self.word())]
-            out = ('batch', version, complete, rows, done)
+            out = ('batch', version, complete, groups, done)
         elif tag == 7:
             out = ('ended', self.word(), self.outcome())
         else:
@@ -170,7 +189,8 @@ def welcomed(names=(), credential=CREDENTIAL):
 
 def done(s, expected, version):
     answer = receive(s)
-    assert answer == ('batch', version, [], [], [expected]), answer
+    stream, p, outcome = expected
+    assert answer == ('batch', version, [], [], [((TEST_BIRTH, stream), p, outcome)]), answer
 
 
 def hello_order():
@@ -233,7 +253,7 @@ def resume_unknown():
             s.sendall(frame(2, u32(2) + u32(sub) + u32(0) + blob(u32(0)) + u32(1) + blob(b'unknown')))
             assert receive(s) == ('reset', 0, [])
         s.sendall(frame(2, u32(2) + u32(3) + u32(0) + blob(u32(0)) + u32(0)))
-        assert receive(s) == ('batch', 2, [3], [], [])
+        assert receive(s) == ('batch', 2, [3], [(3, b'', [])], [])
 
 
 def request_mismatch_wire():
@@ -245,7 +265,7 @@ def request_mismatch_wire():
         done(s, (0, 0, ('refused', 6)), 4)
         s.sendall(frame(2, u32(2) + u32(1) + u32(1) + blob(u32(0)) + u32(0)))
         answer = receive(s)
-        assert answer[:3] == ('batch', 4, [1]) and len(answer[3]) == 1 and answer[3][0][2] == u32(7) and answer[4] == [], answer
+        assert answer == ('batch', 4, [1], [(1, b'', [(0, bytes(8), u32(7))])], []), answer
 
 
 def resend_same_p():
@@ -255,7 +275,7 @@ def resend_same_p():
             reader.sendall(frame(2, u32(2) + u32(1) + u32(0) + blob(u32(0)) + u32(0)))
             value = receive(reader)
             assert value[0] == 'batch' and value[2] == [1] and value[4] == [], value
-            return value[1], [row[2] for row in value[3]]
+            return value[1], [row[2] for sub, _, rows in value[3] if sub == 1 for row in rows]
 
     peer, principal = welcomed(('put',))
     request_bytes = frame(2, call(0, 0, arg=u32(7)))
@@ -302,7 +322,7 @@ def reply_over_done_max():
         s.sendall(frame(2, call(2, 0, 1, u32(8169))))
         done(s, (2, 0, ('out_of_bytes', 8173, 8172)), 4)
         s.sendall(frame(2, u32(2) + u32(1) + u32(2) + blob(u32(0)) + u32(0)))
-        assert receive(s) == ('batch', 4, [1], [], [])
+        assert receive(s) == ('batch', 4, [1], [(1, b'', [])], [])
 
 
 def welcome_with_small_budget():
@@ -315,6 +335,15 @@ def welcome_with_small_budget():
         assert read_frame(s) == (10, ping)
         s.sendall(frame(8, b'\x03\xe8'))
         assert read_frame(s) == (8, b'\x03\xe8')
+
+
+def welcome_samples_store_stream_time():
+    with upgraded(frame(2, hello())) as s:
+        welcome = receive(s)
+        assert welcome[0] == 'welcome'
+        keyed, retention = welcome[-2:]
+        assert TEST_BIRTH <= keyed <= time.time_ns() // 1000000, welcome
+        assert retention == 721000, welcome
 
 
 def faulted_owner_releases_slot():
@@ -345,10 +374,49 @@ def faulted_owner_releases_slot():
 
 
 
-def hirsel_call(url, *call):
-    command = [CLI['compiler'], 'call', CLI['server'], '--url', url, '--runtime', CLI['runtime']]
-    command += ['--cc', CLI['cc']] if CLI.get('cc') else []
+def hirsel_call(url, *call, stream=None):
+    # Describe the admission fixture at the same n_place it serves.
+    command = [CLI['compiler'], 'call', CLI['server'], '--url', url,
+               '--n-place', '1048576']
+    if stream is not None:
+        command.extend(['--stream', stream])
     return subprocess.Popen(command + ['--', *call], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def supplied_id_never_rotates():
+    given = '0000019a6b2c3d4e0102030405060708'
+    t, n = int(given[:16], 16), int(given[16:], 16)
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        url = f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel'
+        process = hirsel_call(url, 'admission/shape', '--arg', '17', stream=given)
+        try:
+            with accept_from(listener, process.pid, descendants=True) as s:
+                s.settimeout(10)
+                key = next(line.split(b':', 1)[1].strip() for line in head(s).split(b'\r\n')
+                           if line.lower().startswith(b'sec-websocket-key:'))
+                accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
+                s.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n')
+                op, payload = read_frame(s, masked=True)
+                assert op == 2 and payload[:4] == u32(0)
+                caller = bytes([2]) + blob(b'one-caller')
+                welcome = (u32(4) + caller + u32(4) + u64(1048576) + blob(b'') + blob(b'') + u64(0)
+                           + u64(t + 6000000000) + u64(5184000000))
+                s.sendall(frame(2, welcome, masked=False) + frame(2, u32(5) + u32(0) + u32(0), masked=False))
+                op, payload = read_frame(s, masked=True)
+                assert op == 2 and payload[:32] == u32(1) + u64(t) + u64(n) + u64(0) + u32(0), payload
+                done = u64(t) + u64(n) + u64(0) + u32(2) + u32(7)
+                s.sendall(frame(2, u32(6) + u64(0) + u32(0) + u32(0) + u32(1) + done, masked=False))
+                assert read_frame(s, masked=True)[0] == 8
+            out, err = process.communicate(timeout=10)
+            assert process.returncode == 1 and json.loads(out) == {
+                'tag': 'Refused', 'value': {'tag': 'HistoryUnavailable'}}, (out, err)
+        finally:
+            if process.poll() is None:
+                stop_process(process)
 
 
 def cli_call_exact_value():
@@ -357,7 +425,7 @@ def cli_call_exact_value():
     # Some(n + 2)), nested: Some(None), total: n + 2). For n = 2^53 + 1 an f64
     # decoder prints 9007199254740992 and 9007199254740996 instead.
     n = 2**53 + 1
-    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'shape', '--arg', str(n))
+    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'admission/shape', '--arg', str(n))
     try:
         out, err = process.communicate(timeout=120)
     finally:
@@ -377,7 +445,7 @@ def cli_call_fingerprint_mismatch():
         listener.bind(('127.0.0.1', 0))
         listener.listen(1)
         listener.settimeout(120)
-        process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'shape', '--arg', '1')
+        process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'admission/shape', '--arg', '1')
         try:
             s = accept_from(listener, process.pid, descendants=True)
             with s:
@@ -386,12 +454,13 @@ def cli_call_fingerprint_mismatch():
                            if line.lower().startswith(b'sec-websocket-key:'))
                 accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
                 s.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.2\r\n\r\n')
+                          b'Sec-WebSocket-Accept: ' + accept + b'\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n')
                 op, hello_bytes = read_frame(s, masked=True)
                 # Hello with no credential, exactly one want.
                 assert op == 2 and Decode(hello_bytes).word() == 0, hello_bytes
                 assert hello_bytes[4:12] == u32(0) + u32(1), hello_bytes
-                welcome = u32(4) + bytes([1]) + blob(bytes(16)) + u32(4) + u64(1048576) + blob(b'') + blob(b'') + u64(0)
+                welcome = (u32(4) + bytes([1]) + blob(bytes(16)) + u32(4) + u64(1048576) + blob(b'') + blob(b'')
+                           + u64(0) + u64(TEST_BIRTH) + u64(5184000000))
                 s.sendall(frame(2, welcome, masked=False) + frame(2, u32(5) + u32(2), masked=False))
                 after = []
                 while not after or after[-1][0] != 8:
@@ -407,16 +476,85 @@ def cli_call_fingerprint_mismatch():
     assert all(op != 2 for op, _ in after), after
 
 
+def cli_dry_run_conflict():
+    store = Path(CLI['server']).with_name('migration-store')
+    subprocess.run([CLI['server'], 'seed'], check=True)
+    before = {file.name: file.read_bytes() for file in store.iterdir()}
+    done = subprocess.run([CLI['compiler'], 'dry-run', '--exe', CLI['server'], '--store', str(store)],
+                          capture_output=True, text=True)
+    assert done.returncode == 1, (done.stdout, done.stderr)
+    assert 'add index unique' in done.stdout.splitlines(), done.stdout
+    # The fixture inserts 9 and 3 with value 22, plus 5 with value 17.
+    assert ('backfill rows.unique: read 3, wrote 2, Conflict: '
+            '0000000000000003 and 0000000000000009') in done.stdout.splitlines(), done.stdout
+    assert {file.name: file.read_bytes() for file in store.iterdir()} == before
+
+
+def cli_dev_restores_subscription():
+    root = Path(__file__).resolve().parents[2]
+    with TemporaryDirectory(prefix='hirsel-dev-law-') as tmp:
+        work = Path(tmp)
+        server = work / 'board'
+        server.mkdir()
+        (work / 'hirsel.toml').write_text('[workspace]\nmembers = ["board", "store", "runner"]\n')
+        (server / 'hirsel.toml').write_text(
+            '[package]\nname = "board"\nmajor = 1\ncharge = "charge-v1"\n'
+            '[dependencies]\nstd = { major = 1 }\n'
+            'store = { major = 1, path = "../store" }\n'
+            'runner = { major = 1, path = "../runner" }\n'
+            '[sources]\n"main.hirsel" = "main"\n[program]\nmodule = "main"\nfunction = "main"\n')
+        for package in ('store', 'runner'):
+            original = root / 'core/programs' / package
+            shutil.copytree(original, work / package, ignore=shutil.ignore_patterns('hirsel.lock', '.hirsel-*'))
+        source = server / 'main.hirsel'
+        shutil.copyfile(root / 'core/programs/wire/dev.hirsel', source)
+        command = [CLI['compiler'], 'dev', str(server), '--listen', '127.0.0.1:0',
+                   '--libraries', str(root / 'core'), '--source-core', '--source-std',
+                   '--backend', 'cranelift', '--runtime', CLI['runtime']]
+        with (work / 'stderr').open('w+') as log:
+            dev = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True)
+            try:
+                for line in dev.stdout:
+                    if line.startswith('hirsel dev listening on '):
+                        port = int(line.rsplit(':', 1)[1])
+                        break
+                else:
+                    raise AssertionError(f'dev exited before listening: {dev.poll()}')
+                with connect(port) as client:
+                    client.settimeout(180)
+                    wants = (
+                        blob(b'\x01board@1/main/current(store@1/store/Tx,(),take())->core@1/core/Result[runner@1/runner/Answer[u64],core@1/core/Capacity]')
+                        + u64(fingerprint(0)) + u64(crc64(blob(b'\x03\0\0\0\0\x06') + u32(0)))
+                    )
+                    client.sendall(REQUEST + frame(2, u32(0) + u32(1) + blob(CREDENTIAL) + u32(1) + wants))
+                    assert head(client).startswith(b'HTTP/1.1 101 ')
+                    assert receive(client)[0] == 'welcome'
+                    placed = receive(client)
+                    assert placed == ('placed', 0, 0), placed
+                    client.sendall(frame(2, u32(2) + u32(7) + u32(0) + blob(b'') + u32(0)))
+                    before = receive(client)
+                    assert before[0] == 'batch' and before[2:] == ([7], [(7, u64(41), [])], []), before
+                    source.write_text(source.read_text().replace('Answer[u64]', 'Answer[u32]').replace('41u64', '42u32'))
+                    after = receive(client)
+                    assert after[0] == 'batch' and after[2:] == ([7], [(7, u32(42), [])], []), after
+                    assert after[1] > before[1], (before, after)
+            finally:
+                stop_process(dev)
+                print(dev.stdout.read(), end='')
+                log.seek(0)
+                print(log.read(), end='')
+
+
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
-         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
-         cli_call_exact_value, cli_call_fingerprint_mismatch)}
+         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget, welcome_samples_store_stream_time,
+         cli_call_exact_value, cli_call_fingerprint_mismatch, supplied_id_never_rotates)}
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--server', required=True, type=Path)
-    p.add_argument('--case', action='append', choices=CASES)
+    p.add_argument('--server', type=Path)
+    p.add_argument('--case', action='append', choices=[*CASES, 'cli_dry_run_conflict', 'cli_dev_restores_subscription'])
     p.add_argument('--report', type=Path)
     p.add_argument('--compiler', type=Path, help='hirsel, for the hirsel call laws')
     p.add_argument('--runtime', type=Path)
@@ -426,6 +564,13 @@ def main():
     rows = []
     selected = args.case or CASES
     for name in selected:
+        if name in ('cli_dry_run_conflict', 'cli_dev_restores_subscription', 'supplied_id_never_rotates'):
+            globals()[name]()
+            rows.append({'law': name, 'passed': True})
+            print(f'{name}: PASS', flush=True)
+            continue
+        if args.server is None:
+            p.error('--server is required for the admission cases')
         temporary = TemporaryDirectory(prefix='wire-cut-') if name == 'resend_same_p' else None
         environment = None
         if temporary:
@@ -433,18 +578,19 @@ def main():
             fixture = Path(__file__).resolve().parents[2] / 'core/tools/std_socket.c'
             subprocess.run(['cc', '-shared', '-fPIC', '-DWIRE_CUT_OUTCOME', str(fixture), '-ldl', '-o', str(shim)], check=True)
             environment = os.environ | {'LD_PRELOAD': str(shim)}
-        process = subprocess.Popen([str(args.server.resolve()), name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
+        process = subprocess.Popen([str(args.server.resolve()), name, str(TEST_BIRTH)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
         try:
             wait_ready(process, 18094)
             TRACE.clear()
             CASES[name]()
             if name == 'welcome_with_small_budget':
-                stop_process(process)
+                stop_listener(process, 18094)
                 refused = subprocess.Popen([str(args.server.resolve()), 'wire_control_budget_too_small'])
                 try:
                     assert refused.wait(timeout=8) == 0, 'mandatory control budget was not refused at serve'
                 finally:
-                    stop_process(refused)
+                    stop_listener(refused, 18094)
             rows.append({'law': name, 'passed': True})
             print(f'{name}: PASS', flush=True)
         except Exception as error:
@@ -452,7 +598,7 @@ def main():
             print(f'{name}: FAIL {error}; received {repr(TRACE)[-3000:]}', flush=True)
             traceback.print_exc()
         finally:
-            stop_process(process)
+            stop_listener(process, 18094)
             if temporary:
                 temporary.cleanup()
             stderr = process.stderr.read().decode(errors='replace')

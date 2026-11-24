@@ -87,7 +87,7 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
 }
 
 pub(crate) struct Read<'a, 'b> {
-    pub(super) budget: &'b mut DecodeBudget,
+    pub(super) budget: &'b Debit<'b>,
     depth: usize,
     bytes: &'a [u8],
     pub(super) pools: Pools,
@@ -97,11 +97,7 @@ pub(crate) struct Read<'a, 'b> {
 }
 
 impl<'a, 'b> Read<'a, 'b> {
-    pub(crate) fn new(
-        bytes: &'a [u8],
-        magic: &[u8],
-        budget: &'b mut DecodeBudget,
-    ) -> DecodeResult<Self> {
+    pub(crate) fn new(bytes: &'a [u8], magic: &[u8], budget: &'b Debit<'b>) -> DecodeResult<Self> {
         budget.check_depth(1)?;
         let header_len = magic.len() - 2;
         if bytes.get(..header_len) == Some(&magic[..header_len])
@@ -188,7 +184,10 @@ impl<'a, 'b> Read<'a, 'b> {
         })
     }
 
-    fn nested<T>(&mut self, decode: impl FnOnce(&mut Self) -> DecodeResult<T>) -> DecodeResult<T> {
+    pub(crate) fn nested<T>(
+        &mut self,
+        decode: impl FnOnce(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<T> {
         self.budget.check_depth(self.depth + 1)?;
         self.depth += 1;
         let result = decode(self);
@@ -368,6 +367,22 @@ impl Wire for String {
     }
 }
 
+impl Wire for std::sync::Arc<str> {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        out.count(self.len());
+        out.raw(self.as_bytes());
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let n = input.count()?;
+        let bytes = input.take(n)?;
+        let value = std::str::from_utf8(bytes).map_err(|_| invalid("invalid UTF-8"))?;
+        input.budget.charge_bytes(n)?;
+        input.budget.allocation::<[usize; 2]>(1)?;
+        Ok(Self::from(value))
+    }
+}
+
 pub(super) fn write_slice<T: Wire>(values: &[T], out: &mut Write<'_, '_, '_>) {
     out.count(values.len());
     for value in values {
@@ -440,9 +455,17 @@ macro_rules! pools {
             }
 
             fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
-                let items = Vec::<$ty>::read(input)?;
-                input.budget.reserve(&mut input.pools.$pool, items.len())?;
-                Ok(Self::push(&mut input.pools.$pool, items))
+                let len = input.count()?;
+                let start = input.pools.$pool.len();
+                input.nested(|input| {
+                    for _ in 0..len {
+                        let item = <$ty>::read(input)?;
+                        input.budget.reserve(&mut input.pools.$pool, 1)?;
+                        input.pools.$pool.push(item);
+                    }
+                    Ok(())
+                })?;
+                Ok(Self::new(start as u32, len as u32))
             }
         }
     )*};
@@ -555,7 +578,7 @@ impl Wire for DefPath {
             .next()
             .and_then(|p| p.split_once('@'))
             .ok_or_else(|| invalid("missing package version"))?;
-        fn component(text: &str, budget: &mut DecodeBudget) -> DecodeResult<String> {
+        fn component(text: &str, budget: &Debit<'_>) -> DecodeResult<String> {
             budget.charge_bytes(text.len())?;
             let mut input = text.as_bytes().iter().copied();
             let mut bytes = Vec::with_capacity(text.len());
@@ -588,9 +611,8 @@ impl Wire for DefPath {
             name,
         });
         // The canonical spelling may grow its output buffer geometrically.
-        input
-            .budget
-            .charge_bytes(text.len().saturating_mul(4).saturating_add(8))?;
+        let spelling = input.budget.scratch();
+        spelling.charge_bytes(text.len().saturating_mul(4).saturating_add(8))?;
         if path.definition_identity() != text
             || !version.bytes().all(|b| b.is_ascii_digit())
             || version.is_empty()
@@ -625,7 +647,7 @@ impl Wire for InstanceKey {
         out.count(self.arguments.len());
         if !out.module.planning {
             for &arg in &self.arguments {
-                out.module.module.closure(arg).hash.write(out);
+                out.module.closure_hash(arg).write(out);
             }
         }
         let prior = std::mem::replace(&mut out.module.metadata, true);
@@ -658,9 +680,10 @@ pub(super) fn encode_closure(rows: &[ClosureRow], out: &mut Write<'_, '_, '_>) {
     out.count(rows.len());
     for row in rows {
         row.shape.write(out);
-        for hook in &row.hooks {
-            hook.write(out);
-        }
+        let [finalizer, clone, codec, key_codec] = &row.hooks;
+        finalizer.write(out);
+        clone.write(out);
+        write_codecs(codec, key_codec, out);
     }
 }
 
@@ -676,12 +699,60 @@ record!(ItemPath {
     modules,
     name
 });
-record!(Signature {
-    params,
-    results,
-    dest,
-    never
-});
+/// `dest` is a tag: 0 none, 1 an owned result's type, 2 a view's type and its
+/// anchors (OWN-20), never empty; a signature with no anchors has the bytes it had
+/// before they existed.
+impl Wire for Signature {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        let Self {
+            params,
+            results,
+            dest,
+            anchors,
+            never,
+        } = self;
+        params.write(out);
+        results.write(out);
+        match (dest, anchors.is_empty()) {
+            (None, _) => 0u8.write(out),
+            (Some(t), true) => {
+                1u8.write(out);
+                t.write(out);
+            }
+            (Some(t), false) => {
+                2u8.write(out);
+                t.write(out);
+                anchors.write(out);
+            }
+        }
+        never.write(out);
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let params = Wire::read(input)?;
+        let results = Wire::read(input)?;
+        let (dest, anchors) = match u8::read(input)? {
+            0 => (None, vec![]),
+            1 => (Some(Wire::read(input)?), vec![]),
+            2 => {
+                let dest = Some(Wire::read(input)?);
+                let anchors: Vec<u32> = Wire::read(input)?;
+                if anchors.is_empty() {
+                    return Err(invalid("a dest view with no anchors"));
+                }
+                (dest, anchors)
+            }
+            _ => return Err(invalid("invalid dest tag")),
+        };
+        Ok(Self {
+            params,
+            results,
+            dest,
+            anchors,
+            never: Wire::read(input)?,
+        })
+    }
+}
 record!(Field { name, ty });
 record!(Case { name, fields });
 record!(AddressInfo { base, steps, ty });
@@ -751,6 +822,16 @@ impl Wire for CompactRoot {
     }
 }
 
+// The two bits name the optional codec makers. Shapes with only a value
+// codec keep the encoding of its Option.
+fn write_codecs<T: Wire>(codec: &Option<T>, key: &Option<T>, out: &mut Write<'_, '_, '_>) {
+    let flags = u8::from(codec.is_some()) | (u8::from(key.is_some()) << 1);
+    flags.write(out);
+    for maker in codec.iter().chain(key) {
+        maker.write(out);
+    }
+}
+
 impl Wire for Shape {
     fn write(&self, out: &mut Write<'_, '_, '_>) {
         let Self {
@@ -761,6 +842,7 @@ impl Wire for Shape {
             finalizer,
             clone,
             codec,
+            key_codec,
             grant,
             send,
             held,
@@ -772,14 +854,14 @@ impl Wire for Shape {
         if out.closure {
             finalizer.write(out);
             clone.write(out);
-            codec.write(out);
+            write_codecs(codec, key_codec, out);
             grant.write(out);
             send.write(out);
             held.write(out);
             return;
         }
         held.write(out);
-        let hooks = [finalizer, clone, codec];
+        let hooks = [finalizer, clone, codec, key_codec];
         let prior = std::mem::replace(&mut out.module.metadata, true);
         let module = out.module.module;
         for hook in hooks.into_iter().filter_map(|f| *f) {
@@ -806,21 +888,35 @@ impl Wire for Shape {
         }
         finalizer.write(out);
         clone.write(out);
-        codec.write(out);
+        write_codecs(codec, key_codec, out);
         grant.write(out);
         send.write(out);
     }
 
     fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let name = Wire::read(input)?;
+        let repr = Wire::read(input)?;
+        let carried = Wire::read(input)?;
+        let body = Wire::read(input)?;
+        let held = Wire::read(input)?;
+        let finalizer = Wire::read(input)?;
+        let clone = Wire::read(input)?;
+        let flags = u8::read(input)?;
+        if flags > 3 {
+            return Err(invalid("invalid codec maker flags"));
+        }
+        let codec = (flags & 1 != 0).then(|| Wire::read(input)).transpose()?;
+        let key_codec = (flags & 2 != 0).then(|| Wire::read(input)).transpose()?;
         Ok(Self {
-            name: Wire::read(input)?,
-            repr: Wire::read(input)?,
-            carried: Wire::read(input)?,
-            body: Wire::read(input)?,
-            held: Wire::read(input)?,
-            finalizer: Wire::read(input)?,
-            clone: Wire::read(input)?,
-            codec: Wire::read(input)?,
+            name,
+            repr,
+            carried,
+            body,
+            held,
+            finalizer,
+            clone,
+            codec,
+            key_codec,
             grant: Wire::read(input)?,
             send: Wire::read(input)?,
         })

@@ -16,27 +16,30 @@ ENTRY = "checkbox@1/main"
 N_PLACE = "1048576"
 
 
-def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
+def inputs(work, source=PROGRAM / "main.hirsel", source_overrides=None):
     """Core, std, the store and runner packages with the modules checkbox binds, and checkbox;
-    `store_sources` maps a module name to a replacement file."""
-    store_sources = store_sources or {}
+    `source_overrides` maps an original source path to a replacement file."""
+    source_overrides = source_overrides or {}
     core = {"name": "core", "version": "1"}
     std = {"name": "std", "version": "1"}
     packages = []
     for name, dependencies in [("core", []), ("std", [core])]:
+        library = ROOT / "core" / name
         packages.append({
             "package": {"name": name, "version": "1"}, "dependencies": dependencies,
             "sources": [
-                {"file": str(file), "modules": [file.stem], "signatures": name == "core"}
-                for file in sorted((ROOT / "core" / name).glob("*.hirsel"))
+                {"file": str(file), "modules": list(relative.with_suffix("").parts), "signatures": name == "core"}
+                for file in sorted(library.rglob("*.hirsel"))
+                if (relative := file.relative_to(library)).parts[0] != "tests"
             ],
         })
     bound = []
-    for name, modules in (("store", ("store",)), ("runner", ("triggers", "runner", "ingress"))):
+    for name in ("store", "runner"):
         directory = PROGRAM.parent / name
         with (directory / "hirsel.toml").open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         package = manifest["package"]
+        program = manifest.get("program", {}).get("module")
         packages.append({
             "package": {"name": package["name"], "version": str(package["major"])},
             "dependencies": [core] + [
@@ -44,10 +47,10 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
                 for name, dep in manifest["dependencies"].items()
             ],
             "sources": [
-                {"file": str(store_sources.get(module, directory / file)),
+                {"file": str(source_overrides.get(directory / file, directory / file)),
                  "modules": module.split("."), "signatures": False}
                 for file, module in manifest["sources"].items()
-                if module in modules
+                if module != program
             ],
         })
         bound.append(packages[-1]["package"])
@@ -61,7 +64,7 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
     return path
 
 
-def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sources=None, *,
+def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", source_overrides=None, *,
           prefix=(), flags=(), env=None, stdout=None, entry="main"):
     work.mkdir(parents=True, exist_ok=True)
     data = work / "data"
@@ -69,7 +72,7 @@ def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sou
     executable = work / "checkbox"
     port = int(listen.rsplit(":", 1)[1])
     subprocess.run([
-        *prefix, compiler, "build", *flags, "--source-core", "--inputs", inputs(work, source, store_sources),
+        *prefix, compiler, "build", *flags, "--source-core", "--inputs", inputs(work, source, source_overrides),
         "--store", work / "compiler-store", "--entry", ENTRY + "/" + entry,
         "--dir", data, "--dir", web, "--grant", "Tasks", "--grant", "Clock", "--grant", "Process", "--grant", "Stderr",
         "--grant", "Random", "--grant", f"Net=Listen {listen.rsplit(':', 1)[0]}/32 {port}-{port}",

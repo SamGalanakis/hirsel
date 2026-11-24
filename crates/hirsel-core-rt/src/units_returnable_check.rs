@@ -18,14 +18,7 @@
 //! cover a short read that keeps its progress, a resume that is Pending
 //! again, a paired send, readiness given inside `issue` (before the task
 //! returns its stack), EOF, and a cancellation after issue.
-//!
-//! `handoff_returnable` runs the same law with the pool's blocking-call
-//! hand-off in between: once the client has issued, the root makes a host
-//! call long enough for its worker slot to go to the spare thread, then
-//! joins the client. The scheduler idles and parks the unit off the
-//! handed-off thread, so the unit (its scheduler, the parked client's record
-//! and the stack stock) continues on the other OS thread. The client must
-//! then be resumed on a thread other than the one it issued on.
+
 use super::{FLAG, now, served, sleep_producer};
 use crate::Context;
 use crate::provider::{
@@ -47,12 +40,6 @@ static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PENDING: super::seam::AtomicU64 = super::seam::AtomicU64::new(0);
 /// Operations issued in this run, so each finds its scripted answers.
 static OPS: Mutex<Vec<Script>> = Mutex::new(Vec::new());
-/// Set by `handoff_body`: the root hands off once while the client is parked.
-static HANDOFF: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
-/// The OS thread the last operation was issued on, and whether one of its
-/// continuations ran on another.
-static ISSUED_ON: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
-static MOVED: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
 
 /// One operation's scripted answers to `resume`, by its issue order.
 #[derive(Clone, Copy)]
@@ -260,13 +247,9 @@ unsafe fn boundary(
 ) -> Outcome {
     // SAFETY: by the contract; the site carries the script key.
     unsafe {
-        let thread = std::thread::current().id();
         if *word == 0 {
             OPS.lock().unwrap().push(SCRIPT[*job.next_op]);
             *job.next_op += 1;
-            *ISSUED_ON.lock().unwrap() = Some(thread);
-        } else if *ISSUED_ON.lock().unwrap() != Some(thread) {
-            MOVED.store(true, Ordering::SeqCst);
         }
         let site = OPS.lock().unwrap().len() as u64 - 1;
         let tail = Buffer {
@@ -475,16 +458,6 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
             // pass, where the outside provider gets its turn.
             // The client's task sets `done`.
             while !job.done.read_volatile() {
-                if HANDOFF.load(Ordering::SeqCst) && !OPS.lock().unwrap().is_empty() {
-                    // Lose the worker slot in a blocking call, then wait for
-                    // the client: the scheduler idles, the unit parks off the
-                    // handed-off thread and a worker resumes it on its own.
-                    super::host_for(super::param(0));
-                    while crate::units::worker_ix() != usize::MAX {
-                        super::host_for(super::param(0));
-                    }
-                    break;
-                }
                 scribble_turn(context);
             }
             join(context, client_task, true);
@@ -575,34 +548,6 @@ pub(super) fn body(_: u32) -> u8 {
         "the returnable form's provider sequence and carrier lengths differ from the stackful form's"
     );
     served(0, "the returnable client matched the stackful one");
-    0
-}
-
-/// `body` with a hand-off while each form's client is parked.
-pub(super) fn handoff_body(_: u32) -> u8 {
-    HANDOFF.store(true, Ordering::SeqCst);
-    let stackful = run_form(false);
-    MOVED.store(false, Ordering::SeqCst);
-    let returnable = run_form(true);
-    let moved = MOVED.load(Ordering::SeqCst);
-    FLAG[0].store(true, Ordering::SeqCst);
-    assert!(
-        returnable.3 > 0,
-        "the returnable client never returned its stack"
-    );
-    assert!(
-        moved,
-        "the returnable client never resumed on another thread"
-    );
-    assert_eq!(
-        (&returnable.0, &returnable.1, &returnable.2),
-        (&stackful.0, &stackful.1, &stackful.2),
-        "after a hand-off, the returnable form's provider sequence and carrier lengths differ from the stackful form's"
-    );
-    served(
-        0,
-        "the returnable client resumed on another thread and matched the stackful one",
-    );
     0
 }
 

@@ -1,13 +1,54 @@
 // Module harness: outside payloads. Blob staging for results too large to inline, and
 // the granted worker that makes a sealed effect's one outside call and settles it.
 fn blob_key(hash: Bytes) -> String {
-    let digits = string.as_bytes("0123456789abcdef")
     let mut key = string.into_bytes("sha256/")
-    for b in hash {
-        list.push(mut key, digits[int.widen(b >> 4u8)])
-        list.push(mut key, digits[int.widen(b & 15u8)])
-    }
+    std.hex.append_from(mut key, list.len(hash), scoped fn(i: u64) -> u8 {
+        hash[i]
+    })
     result.unwrap(string.from_utf8(take key))
+}
+
+const EXCERPT_BYTES: u64 = 4096u64
+
+pub fn truncate_middle(text: String, max: u64) -> String {
+    middle_excerpt(string.as_bytes(text), max)
+}
+
+fn elision(dropped: u64) -> String {
+    let mut marker = string.from("\n[")
+    string.push_u64(mut marker, dropped)
+    string.push(mut marker, " bytes omitted]\n")
+    take marker
+}
+
+// The marker counts bytes excluded after rounding each cut inwards to a
+// UTF-8 boundary. A budget too small for the marker yields an empty excerpt.
+fn middle_excerpt(source: Bytes, max: u64) -> String {
+    let n = list.len(source)
+    let mut out: Bytes = list.with_capacity(if max < n { max } else { n })
+    if n <= max {
+        list.append(mut out, source)
+    } else {
+        let mut marker = elision(n)
+        loop {
+            let size = string.byte_len(marker)
+            let keep = if max >= size { max - size } else { 0u64 }
+            let mut head = (keep + 1u64) / 2u64
+            let mut tail = n - keep / 2u64
+            while (source[head] & 192u8) == 128u8 { head -= 1u64 }
+            while tail < n && (source[tail] & 192u8) == 128u8 { tail += 1u64 }
+            marker = elision(tail - head)
+            if string.byte_len(marker) == size {
+                if size <= max {
+                    list.append(mut out, list.slice(source, 0u64, head))
+                    list.append(mut out, string.as_bytes(marker))
+                    list.append(mut out, list.slice(source, tail, n))
+                }
+                break
+            }
+        }
+    }
+    result.unwrap(string.from_utf8(take out))
 }
 
 // Read through the same bucket and prefix used for the write. The caller
@@ -36,7 +77,11 @@ pub fn store_payload(mut client: std.object.Client, take body: Bytes, take mime:
     if size <= INLINE_LIMIT {
         return Ok(Inline(take body))
     }
-    let reference = BlobRef(digest: digest(body), len: size, mime: take mime)
+    let excerpt = match std.utf8.validate(body) {
+        Ok(()) => Some(middle_excerpt(body, EXCERPT_BYTES)),
+        Error(_) => None,
+    }
+    let reference = BlobRef(digest: digest(body), len: size, mime: take mime, excerpt: take excerpt)
     let (written, _) = std.object.store_no_clobber(mut client, blob_key(reference.digest), take body, deadline_ns)
     match written {
         Ok(Created(_)) => (),
@@ -87,17 +132,17 @@ fn doubt[F](ctx: runner.TriggerContext, settle_entry: StaticFn[F], key: EffectKe
     }
 }
 
-fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G], port: G) -> Outcome waits {
+fn remote_effect[G: send, App: inert + send](read_handle: store.Reader, snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G, App], port: G) -> Outcome waits {
     let Some(resolve) = a.mcp_peer else {
         return Gone
     }
     let Some(pos) = e.cutoff.tools_pos else {
         return Gone
     }
-    let Ok(pinned) = store.get(snap, store.shape(h.entries), pos) else {
+    let Ok(pinned) = store.get(read_handle, snap, h.entries, pos) else {
         return InDoubt
     }
-    let Ok(found) = store.get(snap, store.shape(h.mcp_catalog), c.name) else {
+    let Ok(found) = store.get(read_handle, snap, h.mcp_catalog, c.name) else {
         return InDoubt
     }
     let Some(row) = found else {
@@ -122,7 +167,7 @@ fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, 
     tool_result(port, a, take reply)
 }
 
-fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) -> Outcome waits {
+fn tool_result[G: send, App: inert + send](port: G, a: Agent[G, App], take reply: Result[Bytes, Fault]) -> Outcome waits {
     let body = match take reply {
         Ok(take output) => take output,
         Error(Unavailable) => return InDoubt,
@@ -141,48 +186,76 @@ fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) 
     }
 }
 
+fn reconcile_tool[G: send, App: inert + send](port: G, a: Agent[G, App], key: EffectKey, e: Effect) -> Option[Receipt] waits {
+    let Some(c) = view e.call else {
+        return None
+    }
+    let Some(Outside(_, _, Some(reconcile))) = tool_named(a, c.name) else {
+        return None
+    }
+    let check = code.callable(reconcile)
+    match check(port, key) {
+        Ok(Some(take output)) => Some(Tool(tool_result(port, a, Ok(take output)))),
+        Ok(None) => Some(Tool(Failed("not dispatched"))),
+        Error(_) => None,
+    }
+}
+
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 // A target streams the model's draft and each tool's progress to the preview hub.
-pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
+pub fn effect[G: send, App: inert + send, F](ctx: runner.TriggerContext, h: Handles, port: G, take key: EffectKey, a: Agent[G, App], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
-    match permit {
-        Some(Go(_)) => (),
+    let (recover, dispatches) = match permit {
+        Some(Go(n)) => (false, n),
+        Some(Doubt) if key.kind == TOOL => (true, 0u64),
         Some(Doubt) => return Ok(doubt(ctx, settle_entry, key)),
         Some(Shut) => return Ok(Skipped),
         None => return Ok(Lost),
     }
-    let Ok(snap) = runner.trigger_snapshot(ctx) else {
+    let Ok((take read_handle, snap)) = runner.trigger_snapshot(ctx) else {
         return Ok(Lost)
     }
-    let Ok(h) = handles(store.snapshot_schema(snap)) else {
+    let Ok(Some(take e)) = store.get(read_handle, snap, h.effects, key) else {
         return Ok(Lost)
     }
-    let Ok(Some(take e)) = store.get(snap, store.shape(h.effects), key) else {
-        return Ok(Lost)
-    }
-    let receipt: Receipt = if key.kind == MODEL {
-        let Ok(take asked) = request(snap, h, key, e.cutoff) else {
+    let receipt: Receipt = if recover {
+        let Some(take recovered) = reconcile_tool(port, a, key, e) else {
+            return Ok(doubt(ctx, settle_entry, key))
+        }
+        take recovered
+    } else if key.kind == MODEL || key.kind == WARM {
+        let Ok(take asked) = request(read_handle, snap, h, key, e) else {
             return Ok(Lost)
         }
-        let mut sink = effect_preview(target, snap, h, ctx, key)
-        let call = code.callable(a.model)
-        let answered = call(port, take asked, mut sink)
+        let mut sink: Option[preview.Source] = if key.kind == WARM { None } else { effect_preview(read_handle, target, snap, h, ctx, key) }
+        let race = match e.repeat {
+            Repeatable(max) if key.kind == MODEL && e.stream && dispatches < max => a.hedged_model,
+            _ => None,
+        }
+        let answered = match race {
+            Some(f) => {
+                let call = code.callable(f)
+                call(port, take asked, mut sink, Hedge(context: runner.share_trigger_context(ctx), key: key, dispatches: dispatches))
+            },
+            None => {
+                let call = code.callable(a.model)
+                call(port, take asked, mut sink)
+            },
+        }
         match take answered {
             Ok(take answer) => Model(take answer),
-            // Unavailable after the send may have been charged: record doubt.
-            Error(Unavailable) => return Ok(doubt(ctx, settle_entry, key)),
-            Error(take fault) => ModelFailed(fault_text(take fault)),
+            Error(take fault) => ModelFailed(take fault),
         }
     } else {
-        let progress = effect_preview(target, snap, h, ctx, key)
+        let progress = effect_preview(read_handle, target, snap, h, ctx, key)
         let Some(c) = view e.call else {
             return Ok(Lost)
         }
         let outcome: Receipt = if mcp_tools.reserved(c.name) {
-            Tool(remote_effect(snap, h, e, c, a, port))
+            Tool(remote_effect(read_handle, snap, h, e, c, a, port))
         } else {
-            let Some(Outside(f, _)) = tool_named(a, c.name) else {
+            let Some(Outside(f, _, _)) = tool_named(a, c.name) else {
                 return Ok(Lost)
             }
             let Inline(raw) = view c.args else {
@@ -201,14 +274,14 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
     }
 }
 
-fn effect_preview(target: Option[preview.Target], snap: store.Snapshot, h: Handles, ctx: runner.TriggerContext, key: EffectKey) -> Option[preview.Source] {
+fn effect_preview(read_handle: store.Reader, target: Option[preview.Target], snap: store.Snapshot, h: Handles, ctx: runner.TriggerContext, key: EffectKey) -> Option[preview.Source] waits {
     let Some(t) = view target else {
         return None
     }
-    let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(s)) = store.get(read_handle, snap, h.session, 0u64) else {
         return None
     }
-    let Ok(Some(r)) = store.get(snap, store.shape(h.runs), key.run) else {
+    let Ok(Some(r)) = store.get(read_handle, snap, h.runs, key.run) else {
         return None
     }
     let a = runner.trigger_attempt(ctx)

@@ -1,0 +1,117 @@
+// LANG-6, OWN-7, OWN-16: the view-join matrix for `&&` and `||` operands. An `if`
+// join of views inside an operand: a selected temporary (3) ends when that operand's
+// bool is produced, before the locals b (2), a (1); a skipped operand makes nothing.
+// and_temp: c == 9 skips; c == 1 makes 3 (3 == 3); c == 0 views a (1 != 3).
+// or_temp: c == 9 decides; c == 1 makes 3 (3 == 3); c == 0 views b (2 != 3).
+// and_bytes / or_bytes: last byte of "abc" (99) or "abcde" (101) against 99.
+// and_two: both(3 or a, b) = 32 or 12, compared with 32.
+// expect: run and_temp(9) = 0 trace 2,1
+// expect: run and_temp(1) = 1 trace 3,2,1
+// expect: run and_temp(0) = 0 trace 2,1
+// expect: run or_temp(9) = 1 trace 2,1
+// expect: run or_temp(1) = 1 trace 3,2,1
+// expect: run or_temp(0) = 0 trace 2,1
+// expect: run and_bytes(1) = 1
+// expect: run and_bytes(0) = 0
+// expect: run or_bytes(1) = 1
+// expect: run or_bytes(0) = 0
+// expect: run and_two(1) = 1 trace 3,2,1
+// expect: run and_two(0) = 0 trace 2,1
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+scoped type Holder {
+    m: View[Mark]
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn mk(i: u64) -> Mark {
+    result.unwrap(Mark(id: i))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn both(x: Mark, y: Mark) -> u64 {
+    x.id * 10 + y.id
+}
+
+fn and_temp(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    if c != 9 && id_of(if c == 1 {
+        me(mk(3))
+    } else {
+        view a
+    }) == 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn or_temp(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    if c == 9 || id_of(if c == 1 {
+        me(mk(3))
+    } else {
+        view b
+    }) == 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn and_bytes(c: u64) -> u64 {
+    if c != 9 && last_byte(if c == 1 {
+        string.as_bytes(made("abc"))
+    } else {
+        string.as_bytes(made("abcde"))
+    }) == 99 {
+        1
+    } else {
+        0
+    }
+}
+
+fn or_bytes(c: u64) -> u64 {
+    if c == 9 || last_byte(match c {
+        1 => string.as_bytes(made("abc")),
+        _ => string.as_bytes(made("abcde"))
+    }) == 99 {
+        1
+    } else {
+        0
+    }
+}
+
+fn and_two(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    if c != 9 && both(if c == 1 {
+        me(mk(3))
+    } else {
+        view a
+    }, view b) == 32 {
+        1
+    } else {
+        0
+    }
+}

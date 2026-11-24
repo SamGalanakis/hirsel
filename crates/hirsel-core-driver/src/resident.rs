@@ -1,5 +1,5 @@
 //! The resident compiler (`hirsel serve`): one long-lived process per store
-//! that serves the store's `build` and `run` requests, so the state a request
+//! that serves the store's `build`, `run` and `test` requests, so the state a request
 //! derives from unchanged inputs stays in memory between edits.
 //!
 //! A request runs in the server exactly as it runs one-shot: the server calls
@@ -15,267 +15,34 @@
 //! client, under the client's terminal and signals; the server keeps the
 //! program's scratch directory until that client hangs up.
 use crate::request::Outcome;
-use hirsel_core_ids::ContentHash;
-use hirsel_core_resolve::{ModuleId, Resolution, SourceId};
-use hirsel_core_syntax::{Derive, ParseMode, ParseOutput, Symbol, Symbols};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+mod memo;
+pub(crate) use memo::{
+    DEBUG_POSITIONS, MATERIALISED, Memo, OBJECT_RECORDS, RECIPE_GROUPS, RECIPE_REACH, REFERENCED,
+    RESOLVED, RUNTIME_SOURCES, WorkingMemo, parse_file, source_hash, symbol_suffix,
+};
 
 const SOCKET: &str = "resident.sock";
 const LOCK: &str = "resident.lock";
 const PROTOCOL: u32 = 1;
-/// The memory above which a server exits after a request.
-pub(crate) const DEFAULT_MAX_MEMORY: u64 = 1 << 30;
+/// Cold Place builds peaked at 1,168 MiB. Add 512 MiB for retained sets
+/// and round up to a 256 MiB boundary.
+pub(crate) const DEFAULT_MAX_MEMORY: u64 = 1792 << 20;
 
 static SERVING: AtomicBool = AtomicBool::new(false);
 thread_local! {
     /// The connection of the request being served, until it is answered.
     static CLIENT: std::cell::RefCell<Option<UnixStream>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The requests this server has begun, which dates each memo entry's use.
-static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A resident compiler's memo of one pure derivation, keyed by every input
-/// the derivation reads, so an entry is never stale; outside a server it
-/// remembers nothing. After each request the server drops the entries that
-/// request did not use ([`sweep`]), so a memo holds one request's working set.
-pub(crate) struct Memo<K, V> {
-    entries: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<K, (V, u64)>>>,
-}
-impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            entries: std::sync::LazyLock::new(Default::default),
-        }
-    }
-    /// The value under `key`, made by `make` unless remembered; a None key
-    /// is a derivation this memo does not key.
-    pub(crate) fn get_or<E>(
-        &self,
-        key: Option<K>,
-        make: impl FnOnce() -> Result<V, E>,
-    ) -> Result<V, E> {
-        let Some(key) = key.filter(|_| serving()) else {
-            return make();
-        };
-        let request = REQUEST.load(Ordering::Relaxed);
-        if let Some((value, used)) = self.entries.lock().unwrap().get_mut(&key) {
-            *used = request;
-            return Ok(value.clone());
-        }
-        let value = make()?;
-        self.entries
-            .lock()
-            .unwrap()
-            .insert(key, (value.clone(), request));
-        Ok(value)
-    }
-    /// The value under `key` if remembered; a server's request that reads
-    /// it uses it.
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
-        if !serving() {
-            return None;
-        }
-        let request = REQUEST.load(Ordering::Relaxed);
-        let mut entries = self.entries.lock().unwrap();
-        let (value, used) = entries.get_mut(key)?;
-        *used = request;
-        Some(value.clone())
-    }
-    /// Remember `value` under `key`, in a server.
-    pub(crate) fn insert(&self, key: K, value: V) {
-        if serving() {
-            let request = REQUEST.load(Ordering::Relaxed);
-            self.entries.lock().unwrap().insert(key, (value, request));
-        }
-    }
-    fn sweep(&self, request: u64) {
-        self.entries
-            .lock()
-            .unwrap()
-            .retain(|_, (_, used)| *used == request);
-    }
-}
-
-/// Materialised instances, by identity and definition record.
-pub(crate) static MATERIALISED: Memo<
-    (
-        hirsel_core_ir::Identity,
-        Option<hirsel_core_ids::ContentHash>,
-    ),
-    crate::instances::Materialised,
-> = Memo::new();
-
-/// The last accepted recipe header walk for an entry and its check inputs.
-pub(crate) static RECIPE_REACH: Memo<
-    ContentHash,
-    Arc<std::sync::Mutex<Option<crate::reachability::RecipeGraph>>>,
-> = Memo::new();
-
-/// Code object names checked in the last publication into a local build store.
-pub(crate) static RECIPE_FILES: Memo<
-    PathBuf,
-    Arc<std::sync::Mutex<Option<crate::code_store::Watch>>>,
-> = Memo::new();
-
-/// Address plans for entries of a local build.
-pub(crate) static RECIPE_GROUPS: Memo<
-    ContentHash,
-    Arc<std::sync::Mutex<Option<crate::native::recipe_groups::Groups>>>,
-> = Memo::new();
-
-/// The site items each link input references, by the input's content key.
-pub(crate) static REFERENCED: Memo<
-    (hirsel_core_ids::ContentHash, u64),
-    crate::native_entry::Referenced,
-> = Memo::new();
-
-/// The part of a remembered source map a link's inputs reference, and whether
-/// they spawn units, by the map's key and the digest of what each input
-/// references.
-pub(crate) static RUNTIME_SOURCES: Memo<
-    (
-        hirsel_core_ids::ContentHash,
-        Vec<hirsel_core_ids::ContentHash>,
-    ),
-    (Arc<hirsel_core_ir::source::SourceMap>, bool),
-> = Memo::new();
-
-/// Where each location of a shared product's debug rows lands in a source
-/// map (`native_debug::side`), by the map's key and the rows' address; the
-/// entry holds the rows, so that address names them while it is remembered.
-pub(crate) static DEBUG_POSITIONS: Memo<
-    (ContentHash, usize),
-    (
-        Arc<hirsel_core_ir::source::NativeDebug>,
-        crate::native_debug::Locations,
-    ),
-> = Memo::new();
-
-/// Each stored object record's key-determined parts, by store and key.
-pub(crate) static OBJECT_RECORDS: Memo<(PathBuf, ContentHash), crate::native_object::Shared> =
-    Memo::new();
-
-#[derive(Clone)]
-struct SourceHash {
-    bytes: Arc<[u8]>,
-    hash: ContentHash,
-}
-
-static SOURCE_HASHES: Memo<PathBuf, SourceHash> = Memo::new();
-
-/// Hash a captured file once per content change. The path selects the
-/// previous capture; an exact byte comparison confirms the hit.
-pub(crate) fn source_hash(path: &Path, bytes: &Arc<[u8]>) -> ContentHash {
-    if !serving() {
-        return ContentHash::of_bytes(bytes);
-    }
-    let request = REQUEST.load(Ordering::Relaxed);
-    let mut entries = SOURCE_HASHES.entries.lock().unwrap();
-    if let Some((prior, used)) = entries.get_mut(path)
-        && prior.bytes == *bytes
-    {
-        *used = request;
-        return prior.hash;
-    }
-    let hash = ContentHash::of_bytes(bytes);
-    entries.insert(
-        path.to_owned(),
-        (
-            SourceHash {
-                bytes: Arc::clone(bytes),
-                hash,
-            },
-            request,
-        ),
-    );
-    hash
-}
-
-#[derive(Clone)]
-struct Parsed {
-    output: Arc<ParseOutput>,
-    added: Arc<[String]>,
-    after: ContentHash,
-}
-
-static PARSED: Memo<ContentHash, Parsed> = Memo::new();
-
-/// The parse stores numeric symbols. The key names all earlier assignments,
-/// and replaying the parse's additions gives later files the same numbers.
-pub(crate) fn parse_file(
-    prefix: &mut ContentHash,
-    symbols: &mut Symbols,
-    hash: ContentHash,
-    bytes: &[u8],
-    mode: ParseMode,
-    derive: Option<&Derive>,
-) -> io::Result<(ContentHash, ParseOutput, bool)> {
-    let style = derive.map(|d| (&d.codec, &d.path));
-    let key = crate::native::key("hirsel.resident-parse.v1", &(*prefix, hash, mode, style))?;
-    let start = symbols.len();
-    let mut miss = false;
-    let parsed = PARSED.get_or(Some(key), || {
-        miss = true;
-        let output = hirsel_core_resolve::parse_module(bytes, mode, symbols, derive);
-        let added: Arc<[String]> = symbol_suffix(symbols, start).into();
-        let after = if added.is_empty() {
-            *prefix
-        } else {
-            crate::native::key("hirsel.resident-symbols.v1", &(*prefix, &added))?
-        };
-        Ok::<_, io::Error>(Parsed {
-            output: Arc::new(output),
-            added,
-            after,
-        })
-    })?;
-    if !miss {
-        for name in parsed.added.iter() {
-            symbols.intern(name);
-        }
-    }
-    *prefix = parsed.after;
-    Ok((key, (*parsed.output).clone(), miss))
-}
-
-pub(crate) fn symbol_suffix(symbols: &Symbols, start: usize) -> Vec<String> {
-    (start..symbols.len())
-        .map(|i| symbols.text(Symbol(i as u32)).to_owned())
-        .collect()
-}
-
-/// File syntax plus its occurrence, the whole request's index shape and
-/// final symbol assignments. Diagnostics with cross-file sites are rebuilt
-/// against the current index.
-pub(crate) static RESOLVED: Memo<
-    (ContentHash, ContentHash, ContentHash, ModuleId, SourceId),
-    Vec<Arc<Resolution>>,
-> = Memo::new();
-
-/// Drop every memo entry the request numbered `request` did not use.
-fn sweep(request: u64) {
-    MATERIALISED.sweep(request);
-    RECIPE_REACH.sweep(request);
-    RECIPE_FILES.sweep(request);
-    RECIPE_GROUPS.sweep(request);
-    REFERENCED.sweep(request);
-    OBJECT_RECORDS.sweep(request);
-    DEBUG_POSITIONS.sweep(request);
-    RUNTIME_SOURCES.sweep(request);
-    SOURCE_HASHES.sweep(request);
-    PARSED.sweep(request);
-    RESOLVED.sweep(request);
 }
 
 /// Whether this process is a resident compiler serving requests.
@@ -377,7 +144,7 @@ fn write_message(stream: &mut UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Re
 }
 
 /// One message, with the descriptors that came with its first bytes.
-fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
+pub(crate) fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
     let mut length = [0u8; 4];
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(4 * 8) } as usize];
     let mut iov = libc::iovec {
@@ -435,46 +202,78 @@ fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::Fil
     Ok((crate::package_files::fd_path(&held)?.join(name), held))
 }
 
-/// Where the resident compiler of a `build` or `run` request listens: the
-/// store `--store` names, else `.hirsel-core` in the package directory, and
-/// whether the request asks for one (`--resident`). None for any
-/// other request.
-fn request_store(args: &[String]) -> Option<(PathBuf, bool)> {
+struct Route {
+    store: PathBuf,
+    resident: bool,
+    retryable: bool,
+    input: memo::Input,
+}
+
+/// Route a request to the resident compiler for its store.
+fn route(args: &[String]) -> Option<Route> {
     use crate::cli::OptionId as Opt;
     let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.iter().cloned()).ok()?
     else {
         return None;
     };
-    if !matches!(invocation.command.name, "build" | "run") {
+    if !matches!(invocation.command.name, "build" | "run" | "test") {
         return None;
     }
     let mut store = None;
     let mut resident = false;
+    // Test processes run on the server and may already have had effects.
+    let mut retryable = invocation.command.name != "test";
+    let mut manifest = None;
+    let mut recipe = None;
+    let mut entry = None;
     for (option, value) in &invocation.options {
         match option {
             Opt::Store => store = value.clone().map(PathBuf::from),
             Opt::Resident => resident = true,
+            Opt::Inputs => manifest = value.as_deref().map(PathBuf::from),
+            Opt::Recipe => recipe = value.clone(),
+            Opt::Entry => entry = value.clone(),
+            // Ordinary compiler stores publish by content. A durable code
+            // store also refreshes publication times. A custom linker can
+            // have its own effects. Never repeat either after a lost reply.
+            Opt::CodeStore | Opt::Cc => retryable = false,
+            Opt::Grant
+                if invocation.command.name == "run"
+                    && value.as_deref().is_some_and(|v| v.starts_with("Foreign=")) =>
+            {
+                retryable = false;
+            }
             _ => {}
         }
     }
-    let store = store.unwrap_or_else(|| {
-        Path::new(invocation.positional.as_deref().unwrap_or(".")).join(".hirsel-core")
-    });
-    Some((store, resident))
+    let package = PathBuf::from(invocation.positional.as_deref().unwrap_or("."));
+    let store = store.unwrap_or_else(|| crate::store::default_path(&package));
+    let input = if let Some(recipe) = recipe {
+        memo::Input::Recipe(recipe)
+    } else if let Some(manifest) = manifest {
+        memo::Input::Manifest(manifest, entry)
+    } else {
+        memo::Input::Package(package, entry)
+    };
+    Some(Route {
+        store,
+        resident,
+        retryable,
+        input,
+    })
 }
 
-/// Submit a `build` or `run` request to the resident compiler serving its
+/// Submit a `build`, `run` or `test` request to the resident compiler serving its
 /// store, starting one first under `--resident`. The request's exit status
 /// when a server answered it; None when the caller runs it itself.
 pub fn submit(args: &[String]) -> Option<i32> {
-    let (store, resident) = request_store(args)?;
-    match try_submit(&store, args, resident) {
+    let route = route(args)?;
+    match try_submit(&route, args) {
         Ok(answer) => answer,
-        Err(error) if resident => {
+        Err(error) => {
             eprintln!("hirsel: resident compiler: {error}");
             Some(2)
         }
-        Err(_) => None,
     }
 }
 
@@ -483,7 +282,19 @@ fn connect(store: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
-fn try_submit(store: &Path, args: &[String], resident: bool) -> io::Result<Option<i32>> {
+fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
+    let Route {
+        store,
+        resident,
+        retryable,
+        ..
+    } = route;
+    let (resident, retryable) = (*resident, *retryable);
+    let (mut stream, mut started) = match connect(store) {
+        Ok(stream) => (stream, false),
+        Err(_) if resident => (start(store)?, true),
+        Err(_) => return Ok(None),
+    };
     let request = Request {
         protocol: PROTOCOL,
         toolchain: Toolchain::current()?,
@@ -494,26 +305,48 @@ fn try_submit(store: &Path, args: &[String], resident: bool) -> io::Result<Optio
         stop: false,
     };
     let request = serde_json::to_vec(&request)?;
-    let mut started = false;
+    let mut retried = false;
+    // A killed attempt can have printed a complete JSON result before it
+    // sent its reply. Only forward stdout from the attempt that answered.
+    let mut output = (resident && retryable)
+        .then(tempfile::tempfile)
+        .transpose()?;
     loop {
-        let stream = match connect(store) {
-            Ok(stream) => Some(stream),
-            Err(_) if resident && !started => {
-                start(store)?;
+        let stdout = if let Some(output) = &mut output {
+            output.set_len(0)?;
+            output.rewind()?;
+            output.as_raw_fd()
+        } else {
+            1
+        };
+        let (answer, _) = match write_message(&mut stream, &request, &[0, stdout, 2])
+            .and_then(|()| read_message(&mut stream))
+        {
+            Ok(answer) => answer,
+            Err(error) if connection_lost(&error) && retryable && resident && !retried => {
+                drop(stream);
+                stream = start(store)?;
                 started = true;
+                retried = true;
                 continue;
             }
-            Err(error) if resident => return Err(error),
-            Err(_) => None,
+            Err(error) if connection_lost(&error) && retryable && !resident => return Ok(None),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "the server ended without an answer: {error}"
+                )));
+            }
         };
-        let Some(mut stream) = stream else {
-            return Ok(None);
-        };
-        write_message(&mut stream, &request, &[0, 1, 2])?;
-        let (answer, _) = read_message(&mut stream).map_err(|error| {
-            io::Error::other(format!("the server ended without an answer: {error}"))
-        })?;
-        match serde_json::from_slice::<Answer>(&answer)? {
+        let answer = serde_json::from_slice::<Answer>(&answer)?;
+        if !matches!(answer, Answer::Refused(_))
+            && let Some(output) = &mut output
+        {
+            output.rewind()?;
+            let mut stdout = io::stdout().lock();
+            io::copy(output, &mut stdout)?;
+            stdout.flush()?;
+        }
+        match answer {
             Answer::Exit(code) => return Ok(Some(code)),
             Answer::Launch { argv, env } => {
                 let argv: Vec<OsString> = argv.into_iter().map(OsString::from_vec).collect();
@@ -528,14 +361,25 @@ fn try_submit(store: &Path, args: &[String], resident: bool) -> io::Result<Optio
             }
             Answer::Refused(_) if resident && !started => {
                 // The refusing server exits; start this toolchain's own.
+                drop(stream);
                 wait_gone(store);
-                start(store)?;
+                stream = start(store)?;
                 started = true;
             }
             Answer::Refused(reason) if resident => return Err(io::Error::other(reason)),
             Answer::Refused(_) => return Ok(None),
         }
     }
+}
+
+fn connection_lost(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    )
 }
 
 /// Wait until no server holds the store's lock.
@@ -549,8 +393,8 @@ fn wait_gone(store: &Path) {
     }
 }
 
-/// Start a server for `store` in its own session and wait until it accepts.
-fn start(store: &Path) -> io::Result<()> {
+/// Start a server for `store` and return the connection the request will use.
+fn start(store: &Path) -> io::Result<UnixStream> {
     use std::os::unix::process::CommandExt;
     std::fs::create_dir_all(store)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -564,13 +408,22 @@ fn start(store: &Path) -> io::Result<()> {
         .process_group(0);
     let mut child = command.spawn()?;
     for _ in 0..10_000 {
-        if connect(store).is_ok() {
-            return Ok(());
+        if let Ok(stream) = connect(store) {
+            return Ok(stream);
         }
         if let Some(status) = child.try_wait()? {
             // Another client's server may have taken the lock first.
-            if connect(store).is_ok() {
-                return Ok(());
+            if let Ok(stream) = connect(store) {
+                return Ok(stream);
+            }
+            if status.success() {
+                // The old server can relinquish the lock before its
+                // replacement binds, or while our child is exiting.
+                if lock(store)?.is_some() {
+                    child = command.spawn()?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
             }
             return Err(io::Error::other(format!(
                 "the resident compiler exited at start: {status}"
@@ -653,7 +506,7 @@ impl Serve {
             }
         }
         let store = store.unwrap_or_else(|| {
-            Path::new(invocation.positional.as_deref().unwrap_or(".")).join(".hirsel-core")
+            crate::store::default_path(Path::new(invocation.positional.as_deref().unwrap_or(".")))
         });
         Ok(Self {
             store,
@@ -719,8 +572,9 @@ fn serve_requests(
     let home = std::env::current_dir()?;
     // Launched programs' scratch directories, until their clients hang up.
     let mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)> = Vec::new();
-    loop {
-        let (mut stream, _) = accept(listener, &mut launched)?;
+    let mut sets = memo::WorkingSets::default();
+    let mut retire_when_idle = false;
+    while let Some(mut stream) = accept(listener, &mut launched, retire_when_idle)? {
         let Ok((bytes, fds)) = read_message(&mut stream) else {
             continue;
         };
@@ -729,6 +583,7 @@ fn serve_requests(
             continue;
         };
         let current = Toolchain::current().ok();
+        let route = route(&request.args);
         let refusal = if request.stop {
             Some("stopped")
         } else if request.protocol != PROTOCOL
@@ -738,7 +593,7 @@ fn serve_requests(
             Some("the client runs another toolchain")
         } else if request.env != env {
             Some("the client's environment differs from the server's")
-        } else if fds.len() != 3 || request_store(&request.args).is_none() {
+        } else if fds.len() != 3 || route.is_none() {
             Some("the request is not one a resident compiler serves")
         } else {
             None
@@ -755,10 +610,10 @@ fn serve_requests(
             unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
         }
         drop(fds);
-        let served = REQUEST.fetch_add(1, Ordering::Relaxed) + 1;
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
+        CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
-            CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
+            sets.begin(route.unwrap().input.absolute(&cwd));
             let args = request.args;
             std::panic::catch_unwind(move || crate::request::serve(args))
         } else {
@@ -778,15 +633,14 @@ fn serve_requests(
         if let Outcome::Launch(launch) = outcome {
             launched.push((stream, launch.keep));
         }
-        sweep(served);
         if panicked {
             // The request's state may be torn; the next client starts afresh.
             return Ok(101);
         }
-        if resident_bytes() > max_memory {
-            return Ok(0);
-        }
+        // A launched program's scratch must survive until its client is done.
+        retire_when_idle = !sets.fit(max_memory);
     }
+    Ok(0)
 }
 
 fn refuse(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
@@ -802,8 +656,12 @@ fn refuse(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
 fn accept(
     listener: &UnixListener,
     launched: &mut Vec<(UnixStream, Option<crate::store::Scratch>)>,
-) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
+    retire_when_idle: bool,
+) -> io::Result<Option<UnixStream>> {
     loop {
+        if retire_when_idle && launched.is_empty() {
+            return Ok(None);
+        }
         let mut polls: Vec<libc::pollfd> = std::iter::once(listener.as_raw_fd())
             .chain(launched.iter().map(|(stream, _)| stream.as_raw_fd()))
             .map(|fd| libc::pollfd {
@@ -825,8 +683,8 @@ fn accept(
             index += 1;
             polls[index].revents == 0
         });
-        if polls[0].revents != 0 {
-            return listener.accept();
+        if polls[0].revents != 0 && (!retire_when_idle || !launched.is_empty()) {
+            return listener.accept().map(|(stream, _)| Some(stream));
         }
     }
 }

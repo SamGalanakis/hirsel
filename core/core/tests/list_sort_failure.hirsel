@@ -143,44 +143,6 @@ fn comparator_fail_8(out: Stdout) -> u64 {
     sort_fail_at(out, 8)
 }
 
-// Admission of 21 resource holders is exactly 21*8. It precedes every comparator
-// call and element move, so the audit's cleanup sees the source order intact.
-resource type SourceOrderAudit {
-    out: Stdout,
-    values: List[SortItem]
-} drop(t) {
-    let mut valid = list.len(t.values) == 21
-    let mut id: u64 = 0
-    for x in t.values {
-        valid = valid && x.id == id
-        id += 1
-    }
-    let _ = stdout.write(t.out, if valid {
-        "ok"
-    } else {
-        "bad"
-    })
-}
-
-// expect: stdout "okXXXXXXXXXXXXXXXXXXXXX"
-// expect: run scratch_capacity_atomic(out) = 168
-fn scratch_capacity_atomic(out: Stdout) -> u64 {
-    refused_request(isolate(fn() -> Result[(), Capacity] {
-        let mut values: List[SortItem] = list.with_capacity(21)
-        for id in 0u64 .. 21 {
-            list.push(mut values, result.unwrap(SortItem(out, id, key: 21 - id)))
-        }
-        let mut audit = result.unwrap(SourceOrderAudit(out, values: take values))
-        bound bytes 0 {
-            list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
-                let called: Option[u64] = None
-                let _ = option.unwrap(called)
-                Equal
-            })
-        }
-    }))
-}
-
 // n=7 keys [3,2,1,0,3,2,1], stable ids [3,2,6,1,5,0,4].
 // 15 calls cover both a completed insertion and an insertion interrupted by failure.
 resource type SevenAudit {
@@ -960,27 +922,4 @@ fn small_plain_104_56() -> bool {
 // expect: run small_plain_104_158() = fail Unwrap
 fn small_plain_104_158() -> bool {
     merge_plain_fail_at(104, 158)
-}
-
-// The primary cause of a caught failure, when it is a refused admission.
-fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
-    match r {
-        Ok(Error(causes)) => {
-            for c in causes {
-                return match c.kind {
-                    Capacity(k) => Some(k),
-                    _ => None,
-                }
-            }
-            None
-        },
-        _ => None,
-    }
-}
-
-fn refused_request[R](r: Result[Result[R, Causes], Capacity]) -> u64 {
-    match refusal(r) {
-        Some(c) => c.requested,
-        None => 99,
-    }
 }

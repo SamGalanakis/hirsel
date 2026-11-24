@@ -13,7 +13,7 @@ pub type Replied[R] {
 
 pub type Seen {
     version: u64,
-    rows: List[runner.Row]
+    rows: List[runner.SubRow]
 }
 
 // What the fixture's own tasks spend beyond operate's allowance: the phase forwarder,
@@ -22,7 +22,7 @@ const OWN_BYTES: u64 = 65536u64
 
 type PlaceEvent: send = Phase(runner.Phase) | Finished(Result[runner.Ended, runner.StartError]) | Expired
 
-type PlaceJob[G: send, H: send, S: send, B: send]: send {
+type PlaceJob[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B],
     stop: Receiver[()],
     status: Latest[runner.Status],
@@ -30,7 +30,7 @@ type PlaceJob[G: send, H: send, S: send, B: send]: send {
     need: u64,
 }
 
-type Operated[G: send, H: send, S: send, B: send]: send {
+type Operated[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B],
     stop: Receiver[()],
     status: Latest[runner.Status],
@@ -55,7 +55,7 @@ type Sub: send {
     id: u32,
     ready: bool,
     ended: bool,
-    rows: List[runner.Row]
+    rows: List[runner.SubRow]
 }
 
 pub opaque type Client {
@@ -98,24 +98,25 @@ pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, runner.Caller, tak
     callee(f, std.codec.of(), std.codec.of())
 }
 
-fn query_callee[F, A: codec, K, V](f: StaticFn[F], key_codec: std.codec.Key[K], value_codec: std.codec.Codec[V]) -> Callee[A, ()] {
+fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner.Slots[H]) -> Callee[A, R] {
     let args: std.codec.Codec[A] = std.codec.of()
-    let schema = result.unwrap(runner.query_result_schema(key_codec, value_codec))
+    let reply: std.codec.Codec[R] = std.codec.of()
+    let schema = result.unwrap(runner.query_result_schema(reply, declared))
     let identity = code.identity(f)
     let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
-    Callee(key: take key, args: args, reply: std.codec.of_unit())
+    Callee(key: take key, args: args, reply: reply)
 }
 
-pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
-    query_callee(f, key, value)
+pub fn query_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
+    query_callee(f, declared)
 }
 
-pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, runner.Caller, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
-    query_callee(f, key, value)
+pub fn query_as_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, runner.Caller, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
+    query_callee(f, declared)
 }
 
 // The place's entry keys in registration order, as its Hello lists them.
-fn place_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
+fn place_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
     let mut r: runner.Registry[G, H] = runner.registry()
     let run = code.callable(place)
     if let Error(e) = run(mut r) {
@@ -144,7 +145,7 @@ fn loopback_any(a: Addr) -> bool {
     }
 }
 
-fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
+fn run_place[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
@@ -165,16 +166,16 @@ fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B])
     let _ = channel.send(to, Finished(take ended))
 }
 
-fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: shareable + inert + send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }
 
-pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
+pub fn start[G: send, H: shareable + inert + send, S: send, B: send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
     match p.backing {
         Memory => (),
         Temp(_) => (),
-        Disk(_, _) => return Error(Start(Missing("backing")))
+        _ => return Error(Start(Missing("backing")))
     }
     if !loopback_any(p.listen) {
         return Error(Start(Missing("listen")))
@@ -183,10 +184,13 @@ pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H
         Ok(take k) => take k,
         Error(e) => return Error(Start(e))
     }
-    let need = match runner.operate_bytes(p) {
+    let overhead = match runner.operate_bytes(p) {
         Ok(total) => total,
         Error(cap) => return Error(Full(cap))
     }
+    let store_share = match p.backing { Memory => 1074790400u64, _ => 67108864u64 }
+    let configured = int.checked_add(overhead, store_share + 1048576u64)
+    let Some(need) = configured else { return Error(Full(Capacity(requested: store_share, available: 0))) }
     let root = match runner.status_root() {
         Ok(take made) => take made,
         Error(cap) => return Error(Full(cap))
@@ -280,7 +284,7 @@ pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[C
 }
 
 // The entry keys a client of a place registered by `place` may call.
-pub fn entry_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
+pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
     place_keys(place)
 }
 
@@ -326,7 +330,7 @@ fn named(ids: List[u32], id: u32) -> bool {
 
 // Applies one Batch to the subscription caches as the client cache does: a sub named in
 // `complete` restarts from an empty image, then each row replaces or removes its key.
-fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row]) {
+fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.SubRow]) {
     for i in 0u64 .. list.len(c.subs) {
         if named(complete, c.subs[i].id) {
             c.subs[i].rows = list.new()
@@ -335,7 +339,7 @@ fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row
     }
     for row in rows {
         if let Some(at) = find_sub(c.subs, row.sub) {
-            let mut kept: List[runner.Row] = list.new()
+            let mut kept: List[runner.SubRow] = list.new()
             for old in c.subs[at].rows {
                 if old.key != row.key {
                     list.push(mut kept, clone(old))
@@ -364,12 +368,13 @@ fn step(mut c: Client, want: Option[u64]) -> Step waits {
         return Gone
     }
     match wire_client.wait(c.conn) {
-        Got(Batch(version, take complete, take rows, take done)) => {
+        Got(Batch(version, take complete, take groups, take done)) => {
+            let rows = runner.publication_rows(take groups)
             apply(mut c, version, complete, rows)
             if let Some(p) = want {
                 for take d in take done {
                     let runner.Done(stream: stream, p: at, outcome: take outcome) = take d
-                    if stream == 0u32 && at == p {
+                    if stream == store.StreamId(t: 0u64, n: 0u64) && at == p {
                         return Answered(take outcome, version)
                     }
                 }
@@ -419,7 +424,7 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     let arg = encoded(e.args, a)?
     let p = c.next_p
     c.next_p += 1u64
-    if let Error(_) = channel.send(c.conn.to, Send(Call(0u32, p, slot, deadline_ms, take arg))) {
+    if let Error(_) = channel.send(c.conn.to, Send(Call(store.StreamId(t: 0u64, n: 0u64), p, slot, deadline_ms, take arg))) {
         return Error(Closed)
     }
     loop {
@@ -537,6 +542,6 @@ pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[
         None => return Error(Closed)
     }
     wait_until(mut c, within_ms, Reached(at, version))?
-    let rows: List[runner.Row] = clone(c.subs[at].rows)
+    let rows: List[runner.SubRow] = clone(c.subs[at].rows)
     Ok(Seen(version: c.version, rows: take rows))
 }

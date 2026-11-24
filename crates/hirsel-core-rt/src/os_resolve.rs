@@ -117,7 +117,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
     let result = completion.clone();
     #[cfg(test)]
     let lookup = LOOKUP.with(|entry| entry.borrow().clone());
-    let blocking = crate::units::blocking();
     let helper = std::thread::Builder::new()
         .name("hirsel-resolve".into())
         .spawn(move || {
@@ -134,7 +133,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
                 active.complete(token);
             }
         });
-    drop(blocking);
     match helper {
         Ok(helper) => {
             #[cfg(test)]

@@ -1,0 +1,4 @@
+/// Appends an RFC 9106 Argon2id v0x13 tag to out's spare capacity.
+/// Admits and refunds 1024 bytes per rounded working block, and charges one
+/// step per block per pass in addition to the call step.
+pub fn id(password: Bytes, salt: Bytes, key: Bytes, data: Bytes, cost: Argon2Cost, len: u64, mut out: Bytes) -> Result[(), Argon2Error]

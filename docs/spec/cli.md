@@ -44,11 +44,11 @@ charge observation archive.
 
 `hirsel serve [package-dir]` keeps one compiler process for a store
 (`--store`, or `.hirsel-core` in the package directory). That process
-answers the store's `build` and `run` requests and keeps in memory the
+answers the store's `build`, `run` and `test` requests and keeps in memory the
 state those requests derive from unchanged inputs. The process listens
 on `resident.sock` in the store and holds `resident.lock` while it runs.
 
-`hirsel build` and `hirsel run` send their request to the store's
+`hirsel build`, `hirsel run` and `hirsel test` send their request to the store's
 resident compiler when one is running, and otherwise compile in their
 own process. `--resident` also starts a resident compiler when none
 serves the store, and replaces one that refuses the request. A
@@ -58,12 +58,21 @@ environment and standard streams. Its output is byte-identical to a
 one-shot build. A `run` request's program runs in the client process,
 under the client's terminal and signals.
 
+If the connection ends before the compiler answers, `--resident`
+reconnects to a resident compiler, starting one if needed, and retries
+compilation once. A `test` request or a request that can publish to a
+durable code store or invoke a custom linker reports the lost answer. The
+client starts a `run` program after receiving the complete launch answer.
+
 A resident compiler refuses a request from another toolchain or another
 environment. The client then compiles in its own process. A refusal for
-another toolchain also stops the server. The server exits after a
-request that leaves it above `--max-memory BYTES` (default 1 GiB)
-resident, and after a request that panics. `hirsel serve --stop`
-stops the store's server.
+another toolchain also stops the server. After each request, the server
+evicts least recently used working sets until its resident memory fits
+`--max-memory BYTES` (default 1.75 GiB). An exact memo entry shared by
+several working sets stays cached while any of those sets remains.
+If the limit is still exceeded after eviction, the server exits when
+its launched clients finish. It also exits after a request that panics.
+`hirsel serve --stop` stops the store's server.
 
 ## CPU profiles
 
@@ -112,7 +121,8 @@ has no embedded DWARF.
 For `prof replay`, use `--mem=exact` for exact peak counters and backing
 lifetimes, or `--mem=sampled` for weighted allocation estimates. A bare
 `--mem` selects sampled mode. `prof run --mem` samples every live worker and
-reports weighted retained bytes and allocation rates by callsite. Live
+reports weighted allocated and resident backing bytes at the peak and
+last RSS reads, plus allocation rates by callsite. Live
 memory is sampled only: `prof run --mem=exact` refuses and names replay.
 `prof attach --mem` refuses, because attaching cannot sample allocations
 made before it. `prof peak-mem` reads the memory results and budget scopes

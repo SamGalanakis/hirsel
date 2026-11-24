@@ -1,0 +1,96 @@
+diff -ru a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c	2026-11-02 08:20:12.000000000 +0100
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c	2026-11-24 15:26:43.721941979 +0100
+@@ -224,11 +224,8 @@
+ #endif
+ 
+ // Thread-safe RTCD initialization using lazily-initialized mutex
+-DEFINE_ONCE_MUTEX(rtcd_init_mutex);
+ 
+ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+-    RUN_ONCE_MUTEX(rtcd_init_mutex);
+-    svt_block_on_mutex(rtcd_init_mutex);
+ 
+     /* Avoid check that pointer is set double, after first setup. */
+     static bool first_call_setup = true;
+@@ -1519,7 +1516,6 @@
+     }
+     (void)flags;
+ 
+-    svt_release_mutex(rtcd_init_mutex);
+ }
+ 
+ // clang-format on
+diff -ru a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+--- a/Source/Lib/Codec/common_dsp_rtcd.c	2026-11-02 08:20:12.000000000 +0100
++++ b/Source/Lib/Codec/common_dsp_rtcd.c	2026-11-24 15:26:43.722431862 +0100
+@@ -470,7 +470,6 @@
+ #endif
+ 
+ // Thread-safe RTCD initialization using lazily-initialized mutex
+-DEFINE_ONCE_MUTEX(common_rtcd_init_mutex);
+ 
+ // Build-mode handshake for the unit-test harness. Reflects how THIS library
+ // translation unit was compiled, so the tests can detect a mismatched
+@@ -484,8 +483,6 @@
+ }
+ 
+ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+-    RUN_ONCE_MUTEX(common_rtcd_init_mutex);
+-    svt_block_on_mutex(common_rtcd_init_mutex);
+ 
+     /* Avoid check that pointer is set double, after first setup. */
+     static bool first_call_setup = true;
+@@ -2278,7 +2275,6 @@
+     }
+     (void)flags;
+ 
+-    svt_release_mutex(common_rtcd_init_mutex);
+ }
+ 
+ // clang-format on
+diff -ru a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
+--- a/Source/Lib/Globals/enc_handle.c	2026-11-02 08:20:12.000000000 +0100
++++ b/Source/Lib/Globals/enc_handle.c	2026-11-24 15:26:43.721472866 +0100
+@@ -179,13 +179,6 @@
+ uint8_t svt_aom_set_tpl_group(PictureParentControlSet* pcs, uint8_t tpl_group_level, uint32_t source_width,
+                               uint32_t source_height);
+ 
+-static void enc_switch_to_real_time() {
+-#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+-    if (!geteuid()) {
+-        (void)pthread_setschedparam(pthread_self(), SCHED_FIFO, &(struct sched_param){.sched_priority = 99});
+-    }
+-#endif
+-}
+ 
+ typedef enum ParallelLevel {
+     PARALLEL_LEVEL_1     = 1,
+@@ -1347,6 +1340,9 @@
+ void svt_aom_build_tx_org(void);
+ 
+ static ONCE_ROUTINE(init_global_tables) {
++    // Rewrites process-wide dispatch tables; runs once, before any encoder.
++    svt_aom_setup_common_rtcd_internal(EB_CPU_FLAGS_ALL);
++    svt_aom_setup_rtcd_internal(EB_CPU_FLAGS_ALL);
+     svt_aom_asm_set_convolve_asm_table();
+     svt_aom_init_intra_dc_predictors_c_internal();
+ #if CONFIG_ENABLE_HIGH_BIT_DEPTH
+@@ -1382,8 +1378,6 @@
+     EbColorFormat       color_format   = scs->static_config.encoder_color_format;
+     const bool          single_thread  = (scs->lp == 1);
+ 
+-    svt_aom_setup_common_rtcd_internal(scs->static_config.use_cpu_flags);
+-    svt_aom_setup_rtcd_internal(scs->static_config.use_cpu_flags);
+     svt_run_once(&global_tables_once, init_global_tables);
+ 
+     // Per-instance block geometry table allocation
+@@ -6064,8 +6058,6 @@
+     EbEncHandle*     handle;
+     svt_av1_print_version();
+ 
+-    enc_switch_to_real_time();
+-
+     // Set Component Size & Version
+     svt_enc_component->size = sizeof(EbComponentType);
+ 

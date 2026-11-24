@@ -1,7 +1,7 @@
 // L22 negative control. The view Tx passed to look cannot become writable.
-pub fn rejected(s: store.Snapshot, t: store.Table[u64, u64]) -> bool {
-    let answer = store.look(s, None, fn(tx: store.Tx) -> bool {
-        match store.put(mut tx, t, 1, 2) {
+pub fn rejected(read_handle: store.Reader, s: store.Snapshot, t: store.Table[u64, u64]) -> bool waits {
+    let answer = store.look(read_handle, s, None, t, fn(tx, call_env) -> bool waits {
+        match store.put(mut tx, call_env, 1, 2) {
             Ok(()) => true,
             Error(_) => false
         }

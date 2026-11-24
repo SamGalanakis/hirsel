@@ -40,7 +40,4 @@ allow-git = []
 [advisories]
 unmaintained = "all"
 unsound = "all"
-# supply-chain-1546: keep reporting bincode pending a replacement for its persisted format.
-# supply-chain-1546: keep reporting rustix pending an upgrade. Its only consumer,
-# tempfile, does not use the affected extended-attribute API.
 ignore = []

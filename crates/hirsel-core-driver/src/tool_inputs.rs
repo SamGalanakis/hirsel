@@ -7,25 +7,13 @@ use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
 use serde::Serialize;
 use std::ffi::OsStr;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
-const LINK_RECIPE_SCHEMA: u32 = 6;
-/// The libraries every direct link appends at the input marker.
-pub(crate) const SUPPORT_LIBS: &[&str] = &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
-
-/// The support libraries a direct link adds for `target`: glibc's on Linux.
-/// A Darwin recipe already names libSystem and the runtime's frameworks.
-pub(crate) fn support_libs(target: &str) -> &'static [&'static str] {
-    if hirsel_core_layout::Target::from_triple(target).is_some_and(|t| t.is_darwin()) {
-        &[]
-    } else {
-        SUPPORT_LIBS
-    }
-}
+const LINK_RECIPE_SCHEMA: u32 = 7;
 
 /// What the runtime archive needs from the system on macOS
 /// (`rustc --print native-static-libs`).
@@ -469,7 +457,7 @@ fn installed_toolchain(
             args.push(arg.clone());
         }
     }
-    let closure = crate::link_closure::closure(&args, INPUT_MARKER, &[], true)
+    let closure = crate::link_closure::closure(&args, INPUT_MARKER, true)
         .map_err(|error| refused(error.to_string()))?;
     let mut paths = closure.files;
     paths.push(linker.clone());
@@ -1122,7 +1110,7 @@ fn capture_link_recipe_with(
         argv = filtered;
     }
     let mut args = Vec::with_capacity(argv.len() + 1);
-    let mut marker = false;
+    let mut marker = None;
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
@@ -1150,26 +1138,26 @@ fn capture_link_recipe_with(
             // capture could not replay (a gcc `cc1` and `as` pair rather
             // than a clang `-cc1`): folding it into the marker would drop a
             // link input and link a different program.
-            if marker {
+            if marker.replace(args.len()).is_some() {
                 return Err(io::Error::other(format!(
                     "link recipe capture through {} cannot replay the compile of a link source the driver adds; name a clang driver",
                     driver.display()
                 )));
             }
-            args.push(INPUT_MARKER.into());
-            marker = true;
         } else {
             args.push(arg.clone());
         }
         i += 1;
     }
-    if !marker {
-        let at = args
-            .iter()
+    let marker = marker.unwrap_or_else(|| {
+        args.iter()
             .position(|arg| arg == "-lc" || arg == "--as-needed")
-            .unwrap_or(args.len());
-        args.insert(at, INPUT_MARKER.into());
-    }
+            .unwrap_or(args.len())
+    });
+    args.insert(marker, INPUT_MARKER.into());
+    // These libraries follow the request objects in the driver's link order.
+    let support = ["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+    args.splice(marker + 1..marker + 1, support.map(str::to_owned));
     // The driver's configuration files decide its argv: a changed one
     // captures again.
     let configuration = stderr
@@ -1219,14 +1207,13 @@ fn recipe_files(
     args: &[String],
     configuration: impl Iterator<Item = PathBuf>,
 ) -> io::Result<(Vec<RecipeFile>, Vec<PathBuf>)> {
-    let closure =
-        crate::link_closure::closure(args, INPUT_MARKER, SUPPORT_LIBS, false).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                host_link_input_error(error)
-            } else {
-                error
-            }
-        })?;
+    let closure = crate::link_closure::closure(args, INPUT_MARKER, false).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            host_link_input_error(error)
+        } else {
+            error
+        }
+    })?;
     let mut paths = closure.files;
     paths.push(linker.to_owned());
     paths.extend(configuration);
@@ -1393,8 +1380,9 @@ fn observe(path: &Path, previous: Option<&RecipeFile>) -> io::Result<RecipeFile>
     let mut file = std::fs::File::open(path)?;
     let stat = stat_of(&file.metadata()?);
     let after = clock();
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let content = ContentHash::of_stream("hirsel.text.v1", stat.len, |digest| {
+        io::copy(&mut file, digest).map(drop)
+    })?;
     #[cfg(test)]
     {
         READS.set(READS.get() + 1);
@@ -1402,7 +1390,6 @@ fn observe(path: &Path, previous: Option<&RecipeFile>) -> io::Result<RecipeFile>
             after_read();
         }
     }
-    let content = ContentHash::of_bytes(&bytes);
     let same = previous.filter(|record| record.stat == stat && record.content == content);
     let trust = match (same.map(|record| &record.trust), &before) {
         (Some(Trust::Settled), _) => Trust::Settled,
@@ -1686,7 +1673,7 @@ mod tests {
         use crate::foreign_archive::{ArchiveOrigin, SealedArchive, check_distinct_definitions};
         use hirsel_core_ids::DefPath;
         use hirsel_core_ir::Identity;
-        use hirsel_core_ir::decode::DecodeBudget;
+        use hirsel_core_ir::decode::Debit;
         use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
 
         let target = "aarch64-apple-darwin";
@@ -1732,7 +1719,15 @@ mod tests {
                 len: bytes.len() as u64,
             };
             (
-                SealedArchive::open(bytes, object, &module, target, None).unwrap(),
+                SealedArchive::open(
+                    bytes,
+                    object,
+                    &module,
+                    target,
+                    None,
+                    &hirsel_core_ir::decode::Debit::unlimited(),
+                )
+                .unwrap(),
                 object,
             )
         };
@@ -1772,7 +1767,7 @@ mod tests {
                 (&valid, origin(valid_object, &module)),
                 (&other, origin(other_object, &second)),
             ],
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .err()
         .unwrap();
@@ -1817,7 +1812,7 @@ mod tests {
         };
         use hirsel_core_ids::DefPath;
         use hirsel_core_ir::Identity;
-        use hirsel_core_ir::decode::DecodeBudget;
+        use hirsel_core_ir::decode::Debit;
         use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
 
         let target = "x86_64-unknown-linux-gnu";
@@ -1826,7 +1821,14 @@ mod tests {
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let open = |bytes, hash, len| {
-            SealedArchive::open(bytes, ObjectRef { hash, len }, &module, target, None)
+            SealedArchive::open(
+                bytes,
+                ObjectRef { hash, len },
+                &module,
+                target,
+                None,
+                &Debit::unlimited(),
+            )
         };
         let prefix = |hash: ContentHash| {
             format!(
@@ -1921,9 +1923,14 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         let archive_path = fixture.path().join("laws.a");
         let mut staged = LinkArchives::default();
         staged
-            .admit(valid_object, &leaf, target, Some("laws.a"), || {
-                Ok(std::fs::read(&archive_path)?)
-            })
+            .admit(
+                valid_object,
+                &leaf,
+                target,
+                Some("laws.a"),
+                &Debit::unlimited(),
+                || Ok(std::fs::read(&archive_path)?),
+            )
             .unwrap();
         let second_module = DefPath::from_full("other@1/native").unwrap();
         let origin = ArchiveOrigin {
@@ -1943,7 +1950,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
                     },
                 ),
             ],
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .unwrap();
         let (second, second_object) = build_source(
@@ -1983,7 +1990,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
                     },
                 ),
             ],
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .err()
         .unwrap();
@@ -2025,16 +2032,15 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
             absent: vec![],
             identity: ContentHash::default(),
         };
-        let collision = staged
-            .append_link_inputs(&mut vec![fixture.path().join("laws.o")], &caller, &plan)
-            .unwrap_err();
+        let mut laws = vec![fixture.path().join("laws.o")];
+        let collision = staged.append_link_inputs(&mut laws, &[], &caller, &plan);
         assert_eq!(
-            collision.to_string(),
+            collision.unwrap_err().to_string(),
             "FFI-3: symbol hfl_shared is defined by archive laws.a of ffi_laws@1/native and by the generated code",
         );
         let mut inputs = vec![caller.clone()];
         staged
-            .append_link_inputs(&mut inputs, &caller, &plan)
+            .append_link_inputs(&mut inputs, &[], &caller, &plan)
             .unwrap();
         let linked = Command::new(&plan.linker)
             .args(["--shared", "--no-undefined"])

@@ -121,9 +121,9 @@ fn left() -> i64 { ORIGIN.x }
 ```
 ```hirsel unbuilt
 // in a package that depends on package store, whose root module is store/store.hirsel
-fn count(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+fn count(db: store.Db, t: store.Table[u64, u64]) -> u64 {
   let n = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
-    option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
+    option.unwrap(result.unwrap(store.fetch(tx, t, 1u64)))
   }));
   n
 }
@@ -718,8 +718,8 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 ### LANG-20: Constants
 
 `const N: T = e` declares a plain constant or a static string. For a plain `T`, `e` may use
-literals, operators, tuple, plain and `Inline` array constructions, and other constants; it
-calls no function. Constants are evaluated once, before any body is checked, in
+literals, operators, tuple, plain and `Inline` array constructions, other constants and
+`bytes[T]` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge)); it calls no function. Constants are evaluated once, before any body is checked, in
 dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
 constants reach itself, is refused. A **static string** is a constant of type `String` whose
 `e` is a string literal or another static string, `const NAME: String = "hirsel"`, and

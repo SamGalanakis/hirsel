@@ -98,6 +98,9 @@ pub(crate) fn cancellation_point(operation: u8) -> bool {
             | MONO_NS
             | SECRET_MAC
             | SECRET_KDF
+            | MEDIA_P256_KEY
+            | MEDIA_KEY_SHARE
+            | MEDIA_AGREEMENT
             | SCRAM_VERIFY
             | crate::foreign::handles::RELEASE_WAIT_OP
     )
@@ -194,7 +197,7 @@ pub(crate) unsafe fn clock(
             return drive(context, provider, request, None);
         }
         crate::process::deny_describe_capability(context);
-        let _commit = crate::tasks::before_provider_entry();
+        crate::tasks::before_provider_entry();
         #[cfg(test)]
         crate::os::probe::note_outside(crate::os::probe::WAIT, request, 0);
         let outcome = crate::os::clock((*provider).state, request);
@@ -232,7 +235,7 @@ pub(crate) unsafe fn drive(
     issued: Option<&mut Option<Outcome>>,
 ) -> Outcome {
     // SAFETY: forwarded, for operations that need no Net authorization.
-    unsafe { drive_with(context, provider, request, issued, |_, _| true) }
+    unsafe { drive_with(context, provider, request, issued, |_, _| None) }
 }
 
 #[inline(always)]
@@ -241,7 +244,7 @@ pub(crate) unsafe fn drive_with(
     provider: *const Provider,
     request: *mut Request,
     issued: Option<&mut Option<Outcome>>,
-    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+    authorize: impl FnOnce(&Provider, &mut Request) -> Option<Outcome>,
 ) -> Outcome {
     // SAFETY: forwarded; the stackful form always ends with an outcome.
     unsafe {
@@ -272,12 +275,12 @@ unsafe fn admit<const RETURNABLE: bool>(
     provider: *const Provider,
     request: *mut Request,
     issued: Option<&mut Option<Outcome>>,
-    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+    authorize: impl FnOnce(&Provider, &mut Request) -> Option<Outcome>,
 ) -> Option<Outcome> {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         crate::process::deny_describe_capability(context);
-        let _commit = crate::tasks::before_provider_entry();
+        crate::tasks::before_provider_entry();
         let site = (*request).site;
         let operation = (*request).operation;
         if cancellation_point(operation) {
@@ -285,7 +288,7 @@ unsafe fn admit<const RETURNABLE: bool>(
                 return Some(CANCELLED);
             }
             let request = &*request;
-            if (operation == MKDTEMP
+            if (matches!(operation, MKDTEMP | MKSTEMP)
                 && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
                 || (operation == NEXT_ENTRIES
                     && request.buffer.capacity.saturating_sub(request.buffer.len) < 258)
@@ -299,16 +302,30 @@ unsafe fn admit<const RETURNABLE: bool>(
                 return Some(CANCELLED);
             }
         }
+        if operation == WRITE_AT && (*request).mode == MODE_DIRECT {
+            let request = &*request;
+            let aligned = |n: u64| n.is_multiple_of(DIRECT_ALIGNMENT);
+            if !aligned(request.offset())
+                || !aligned(request.buffer.len as u64)
+                || !aligned(request.buffer.data.addr() as u64)
+            {
+                return Some(Outcome {
+                    error: IoError::from_errno(libc::EINVAL),
+                    ..Outcome::default()
+                });
+            }
+        }
         if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
-            || (operation == WRITE_AT && !matches!((*request).mode, 1 | 3 | 4))
+            || (operation == WRITE_AT
+                && !matches!((*request).mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT))
         {
             return Some(Outcome {
                 error: IoError::from_errno(libc::EACCES),
                 ..Outcome::default()
             });
         }
-        if !authorize(&*provider, &mut *request) {
-            return Some(crate::net::DENIED);
+        if let Some(refusal) = authorize(&*provider, &mut *request) {
+            return Some(refusal);
         }
         if RETURNABLE {
             crate::tasks::provider_operation_returnable(context, &*provider, request)

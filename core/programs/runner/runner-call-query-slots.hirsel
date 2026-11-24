@@ -1,0 +1,3 @@
+fn query_table(h: Hd) -> store.Table[u64, u64] { clone(h.t) }
+
+fn query_slots() -> Result[runner.Slots[Hd], runner.RegisterError] { runner.table_slot("data", code.describe(query_table)) }

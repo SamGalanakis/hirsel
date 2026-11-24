@@ -137,48 +137,7 @@ fn execute_injected(
 ) {
     execute_reports(input, runs, optimize, limit, injection, None);
 }
-fn execute_reports(
-    input: &impl NativeInput,
-    runs: &[(FuncId, Vec<u64>)],
-    optimize: bool,
-    limit: u64,
-    injection: Option<(usize, bool)>,
-    reports: Option<&[eval::Report]>,
-) {
-    let cases: Vec<_> = runs
-        .iter()
-        .enumerate()
-        .map(|(i, (function, args))| NativeCase {
-            function: *function,
-            args,
-            limit,
-            injection,
-            report: reports.map(|reports| &reports[i]),
-        })
-        .collect();
-    execute_cases(input, optimize, &cases);
-}
-
-struct NativeCase<'a> {
-    function: FuncId,
-    args: &'a [u64],
-    limit: u64,
-    injection: Option<(usize, bool)>,
-    report: Option<&'a eval::Report>,
-}
-
-fn execute_cases(input: &impl NativeInput, optimize: bool, cases: &[NativeCase<'_>]) {
-    execute_cases_with_rows(input, optimize, cases, false);
-}
-
-fn execute_cases_with_rows(
-    input: &impl NativeInput,
-    optimize: bool,
-    cases: &[NativeCase<'_>],
-    debug_lines: bool,
-) {
-    execute_cases_with_bindings(input, optimize, cases, debug_lines, "", false);
-}
+include!("native_report.rs");
 
 fn execute_cases_with_bindings(
     input: &impl NativeInput,
@@ -186,7 +145,7 @@ fn execute_cases_with_bindings(
     cases: &[NativeCase<'_>],
     debug_lines: bool,
     bindings: &str,
-    memcheck: bool,
+    check: NativeCheck,
 ) {
     let module = input.module();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
@@ -594,26 +553,10 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         source.push_str(&process_calls);
     }
     source.push_str("return 0; }\n");
-    let actual = link_run_checked(&scratch, &source, memcheck);
+    let actual = link_run_checked(&scratch, &source, matches!(check, NativeCheck::Memcheck));
     // Decode each report independently so a red row cannot hide later rows in
     // this executable. The count words include either results or causes, then
     // retained charge, the drop trace, and admission attempts.
-    fn take_report<'a>(words: &mut &'a [u64]) -> Option<&'a [u64]> {
-        let count = usize::try_from(*words.get(1)?).ok()?;
-        if *words.first()? == 2 {
-            let end = count.checked_add(2)?;
-            let report = words.get(..end)?;
-            *words = &words[end..];
-            return Some(report);
-        }
-        let payload = count.checked_mul(if *words.first()? == 0 { 1 } else { 3 })?;
-        let trace_at = payload.checked_add(3)?;
-        let trace = usize::try_from(*words.get(trace_at)?).ok()?;
-        let end = trace_at.checked_add(trace)?.checked_add(2)?;
-        let report = words.get(..end)?;
-        *words = &words[end..];
-        Some(report)
-    }
     let (mut actual, mut expected) = (actual.as_slice(), expected.as_slice());
     let mut failures = Vec::new();
     for case in cases {
@@ -621,7 +564,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         let args = case.args;
         let got = take_report(&mut actual);
         let want = take_report(&mut expected).expect("the authored report is complete");
-        if got != Some(want) {
+        if !reports_agree(check, got, want) {
             let name = &module.instances[module.functions[function.index()].instance.index()];
             failures.push(format!(
                 "case {}({args:?}) limit {} injection {:?}: expected {want:?}, got {got:?}",
@@ -778,7 +721,7 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
     };
     let run = command.output().unwrap();
     assert!(
-        run.status.success(),
+        run.status.success() && !String::from_utf8_lossy(&run.stderr).contains("checked allocator: leaked "),
         "native execution: {:?}\n{}",
         run.status,
         String::from_utf8_lossy(&run.stderr)

@@ -2,7 +2,9 @@
 //! Fast copies refund their unexecuted suffix; short windows keep checked work.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+mod neutral_runtime;
 mod regions;
+use neutral_runtime::neutral_runtime;
 pub(super) use regions::plans as regions;
 
 #[cfg(all(test, not(hirsel_lazy_core)))]
@@ -390,40 +392,6 @@ fn inert_drop(module: &Module, ty: usize, seen: &mut BTreeSet<usize>) -> bool {
             .flat_map(|c| &c.fields)
             .all(|f| inert_field(module, &f.ty, seen)),
     }
-}
-fn neutral_runtime(op: RtOp) -> bool {
-    matches!(
-        op,
-        RtOp::DestId
-            | RtOp::CompareBytes
-            | RtOp::MapHashBytes
-            | RtOp::MapHashWord
-            | RtOp::MapHashStart
-            | RtOp::MapHashAddWord
-            | RtOp::MapHashAddBytes
-            | RtOp::MapHashFinish
-            | RtOp::MapPlaceWord
-            | RtOp::MapPlaceBytes
-            | RtOp::MapStrongWord
-            | RtOp::MapStrongBytes
-            | RtOp::MapStrongStart
-            | RtOp::Xxh3Short
-            | RtOp::Xxh3Stripes
-            | RtOp::Sha1Blocks
-            | RtOp::ZeroBytes
-            | RtOp::Sha256Blocks
-            | RtOp::Crc32c
-            | RtOp::Crc64Nvme
-            | RtOp::Crc32cCombine
-            | RtOp::Crc64NvmeCombine
-            | RtOp::Ed25519Verify
-            | RtOp::P256Verify
-            | RtOp::P256VerifyDer
-            | RtOp::CauseNext
-            | RtOp::CauseValue
-            | RtOp::ArgsLen
-            | RtOp::ArgsGet
-    )
 }
 pub(super) fn neutral_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> bool {
     match *inst {

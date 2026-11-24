@@ -1,0 +1,144 @@
+// A writer that ended without its ack (cancelled before it could send
+// Broken) is a terminal failure: the place stops, unacked sequences unanswered.
+fn journal_receive(db: Db) -> Ack waits {
+    match channel.receive(disk_state(db).acks) {
+        Ok(ack) => ack,
+        Error(_) => Broken(Closed),
+    }
+}
+
+fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
+    write_disk(mut db.disk, take ack, scoped fn(mut state: DiskState, take incoming: Ack) -> Result[(), Error] {
+        match take incoming {
+            Journaled(n, bytes_out) => {
+                state.journaled = n
+                state.inflight -= bytes_out - state.acked_bytes
+                state.acked_bytes = bytes_out
+                Ok(())
+            },
+            ObjectJournaled(n, bytes_out, journal_entries) => {
+                state.journaled = n
+                state.inflight -= bytes_out - state.acked_bytes
+                state.acked_bytes = bytes_out
+                if let Some(mut object_writer) = state.object {
+                    object_writer.entries = journal_entries
+                }
+                Ok(())
+            },
+            ObjectBroken(take problem) => {
+                let terminal: Error = clone(problem)
+                if let Some(mut object_writer) = state.object {
+                    object_writer.failed = Some(take terminal)
+                }
+                Error(take problem)
+            },
+            Broken(e) => {
+                if let None = state.poison {
+                    state.poison = Some(e)
+                }
+                Error(Poisoned(option.unwrap(state.poison)))
+            },
+        }
+    })
+}
+
+fn journal_poll(mut db: Db) -> Result[(), Error] {
+    let _ = journal_poll_groups(mut db)?
+    Ok(())
+}
+
+fn journal_poll_groups(mut db: Db) -> Result[u64, Error] {
+    let mut groups = 0u64
+    while let Some(take ack) = close_ack(db) {
+        journal_ack(mut db, take ack)?
+        groups += 1
+    }
+    healthy(db)?
+    Ok(groups)
+}
+
+pub fn close(take db: Db) -> Result[(), Error] waits {
+    let mut owned = take db
+    if !is_disk(owned) {
+        return Ok(())
+    }
+    let mut failure: Option[Error] = None
+    if let None = journal_poison(owned) {
+        let last_frame = Ticket(store: owned.store, open: open_number(owned), mark: Journal(owned.frame_seq, 0, 0))
+        if let Error(take e) = durable(mut owned, last_frame) {
+            failure = Some(take e)
+        }
+    }
+    let connection = replace(mut owned.disk, None)
+    let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
+    // A Reader may still hold the pager's requests, so the pager is cancelled
+    // rather than waited for once the store's sender is dropped.
+    clear_parked(mut owned)
+    owned.pager_writer = None
+    owned.pager = None
+    if let Some(take running) = take pager_task {
+        let mut pager = take running
+        task.cancel(mut pager)
+        let _ = task.join(take pager)
+    }
+    let _ = take timer
+    let _ = take frames
+    let mut poison = fault
+    let remaining: Option[Receiver[Ack]] = if let Some(_) = poison {
+        let _ = take acknowledgements
+        None
+    } else {
+        Some(take acknowledgements)
+    }
+    match task.join(take writer) {
+        Ok(Error(Io(e))) => if let None = poison {
+            poison = Some(e)
+        },
+        Ok(Error(take e)) => if let None = failure {
+            failure = Some(take e)
+        },
+        Ok(Ok(())) => (),
+        Error(_) => if let None = poison {
+            poison = Some(Closed)
+        },
+    }
+    if let Some(receiver) = remaining {
+        while let Ok(ack) = channel.try_receive(receiver) {
+            if let Broken(e) = ack {
+                if let None = poison {
+                    poison = Some(e)
+                }
+            }
+        }
+    }
+    let _ = take notices
+    let _ = take notice_to
+    if let Some(ObjectWriterState(terminal: take terminal, watch: take watch, ..)) = take object_writer {
+        let _ = take terminal
+        if let Some(take live_watch) = take watch {
+            let _ = task.join(take live_watch)
+        }
+    }
+    if let Some(take held_lock) = take lock {
+        if let Error(e) = host.close(take held_lock) {
+            if let None = poison { poison = Some(e) }
+        }
+    }
+    match poison {
+        Some(e) => Error(Poisoned(e)),
+        None => match take failure {
+            Some(take e) => Error(take e),
+            None => Ok(()),
+        },
+    }
+}
+
+fn close_ack(db: Db) -> Option[Ack] {
+    let Some(state) = view db.disk else {
+        return None
+    }
+    match channel.try_receive(state.acks) {
+        Ok(ack) => Some(ack),
+        Error(_) => None,
+    }
+}

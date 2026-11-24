@@ -18,12 +18,12 @@ struct world {
     size_t issues, deliveries;
 };
 static struct world world;
-static uint8_t operand_bytes[64]="abc";
-static int is_file(uint8_t op) { return (op>=1 && op<=5) || op==16; }
+static uint8_t operand_bytes[300]="abc";
+static int is_file(uint8_t op) { return (op>=1 && op<=5) || op==16 || op==37 || op==38 || op==45 || op==47; }
 static int has_operand(uint8_t op) {
-    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14) || op==18;
+    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14) || op==18 || op==37 || op==38 || op==43 || op==44 || op==45 || op==46 || op==119;
 }
-static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==14; }
+static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==43 || op==44 || op==46; }
 static void require(int condition) { if(!condition) abort(); }
 static int path_is(HirselCoreHostRequest *r,const char *s) {
     return r->path_len==strlen(s) && !memcmp(r->path,s,r->path_len);
@@ -31,23 +31,27 @@ static int path_is(HirselCoreHostRequest *r,const char *s) {
 static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) {
     struct world *w=state;
     if(w->seeding) return (HirselCoreHostOutcome){.value=111};
-    if(w->matrix==2) { require(r->operation==3); return (HirselCoreHostOutcome){0}; }
+    if(w->matrix==2) { require(r->operation==(w->operation==45 ? 48 : 3)); return (HirselCoreHostOutcome){0}; }
     w->issues++;
     if(w->matrix) {
         uint8_t op=r->operation;
         require(op==w->operation && r->site==0);
-        require(r->mode==(op==0 ? 3 : 0));
+        require(r->mode==(op==0 || op==119 ? 3 : op==38 ? 1 : 0));
         require(r->handle==(is_file(op) ? 111 : 7));
         if(op==14) {
             require(r->buffer.data==NULL && r->buffer.len==0 && r->buffer.capacity==0);
-            require(r->path!=NULL && r->path_len==7);
-        } else if(op==15) {
+            require(r->path!=NULL && r->path_len==7 && !memcmp(r->path,"abc\0abc",7));
+        } else if(op==15 || op==77) {
             require(r->buffer.data!=NULL && r->buffer.len==8 && r->buffer.capacity==8);
             require(r->path==NULL && r->path_len==0);
+            uint64_t deadline=0; memcpy(&deadline,r->buffer.data,8); require(deadline==3);
+        } else if(op==37 || op==38) {
+            require(r->buffer.data==operand_bytes && r->buffer.len==3 && r->buffer.capacity==64);
+            require(r->path!=NULL && r->path_len==8 && !memcmp(r->path,"\x08\x07\x06\x05\x04\x03\x02\x01",8));
         } else {
             require(r->buffer.data==(has_operand(op) ? operand_bytes : NULL));
             require(r->buffer.len==(has_operand(op) ? 3 : 0));
-            require(r->buffer.capacity==(has_operand(op) ? 64 : 0));
+            require(r->buffer.capacity==(has_operand(op) ? (op==45 ? 300 : 64) : 0));
             require(r->path==(has_path(op) ? operand_bytes : NULL));
             require(r->path_len==(has_path(op) ? 3 : 0));
         }
@@ -59,7 +63,8 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
             hirsel_core_raise(w->ctx,hirsel_core_cause_new(5,0));
         return (HirselCoreHostOutcome){
             .value=UINT64_C(0x1011121314151617),.error={5,UINT32_C(0x89abcdef)},
-            .written=UINT64_C(0x2122232425262728),.status=status};
+            .written=(op==46 || op==47) ? UINT64_C(0xa122232425262728) : UINT64_C(0x2122232425262728),
+            .status=status,.kind=0x9a};
     }
     switch(r->operation) {
     case 0:

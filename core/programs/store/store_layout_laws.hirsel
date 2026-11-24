@@ -1,5 +1,5 @@
 // The least step bound under which fetching key `k` returns.
-fn fetch_threshold[V](tx: Tx, sh: Shape[u64, V], k: u64) -> u64 {
+fn fetch_threshold[V](tx: Tx, sh: Table[u64, V], k: u64) -> u64 {
     let mut low = 0u64
     let mut high = 100000u64
     while low < high {
@@ -19,25 +19,179 @@ fn fetch_threshold[V](tx: Tx, sh: Shape[u64, V], k: u64) -> u64 {
     low
 }
 
-// The fetch threshold of every 17th key of `rows` and of keys 1 and 2 of `large`.
-fn layout_thresholds(mut db: Db) -> List[u64] waits {
-    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let big = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
-    let again = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[List[u64], Error] {
-        let mut seen: List[u64] = list.new()
-        let mut k = 1u64
-        while k <= 2000 {
-            list.push(mut seen, fetch_threshold(tx, shape(t), k))
-            k += 17
+// The log observes admission even when the enclosing bound has no steps left
+// to finish returning. The transaction aborts so every probe starts fresh.
+fn overrun_probe(mut db: Db, t: Table[u64, u64], rows: u64, outer: u64, inner: u64) -> (bool, bool) waits {
+    let entered: core.Log[u64] = log.new()
+    let returned: core.Log[u64] = log.new()
+    let line = main_branch(db)
+    let keep: Option[fn(Error) -> bool] = None
+    let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. rows {
+            put(mut tx, t, k, k)?
         }
-        list.push(mut seen, fetch_threshold(tx, shape(big), 1))
-        list.push(mut seen, fetch_threshold(tx, shape(big), 2))
-        Ok(take seen)
+        let _ = rollback_writes_on_overrun(mut tx, outer, scoped fn(mut w: Tx) -> Result[(), Error] {
+            let stopped = rollback_writes_on_overrun(mut w, inner, scoped fn(mut i: Tx) -> Result[(), Error] {
+                log.append(entered, 1)
+                loop {}
+            })
+            if let Error(OutOfTime(steps: n)) = stopped {
+                if n == inner {
+                    log.append(returned, 1)
+                }
+            }
+            Ok(())
+        })
+        Error(Missing("probe"))
     }))
-    match take again {
-        Committed(Done(value: take seen, ..)) => take seen,
-        _ => fail("layout read"),
+    match take out {
+        Aborted(_) => (list.len(log.finish(take entered)) == 1, list.len(log.finish(take returned)) == 1),
+        _ => fail("overrun admission probe"),
     }
+}
+
+fn overrun_threshold(mut db: Db, t: Table[u64, u64], rows: u64, inner: u64) -> u64 waits {
+    let mut low = inner
+    let mut high = inner * 2
+    while true {
+        let (entered, _) = overrun_probe(mut db, t, rows, high, inner)
+        if entered {
+            break
+        }
+        if high > 9223372036854775807 {
+            fail("overrun body never admitted")
+        }
+        high *= 2
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        let (entered, _) = overrun_probe(mut db, t, rows, mid, inner)
+        if entered {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    low
+}
+
+// The admission threshold is independent of the staged row count. Landing
+// at the continuation after an overrun costs the refused call's steps plus
+// the whole reservation. Repeated overruns leave the read cost and rows intact.
+pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = view t
+    let inner = 4000u64
+    let threshold = overrun_threshold(mut db, t, 2, inner)
+    if threshold != overrun_threshold(mut db, t, 65, inner) || overrun_probe(mut db, t, 2, threshold - 1, inner) != (false, true) {
+        return false
+    }
+    let mut low = 0u64
+    let mut high = threshold - 1
+    while low < high {
+        let mid = low + (high - low) / 2
+        let (_, returned) = overrun_probe(mut db, t, 2, mid, inner)
+        if returned {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    let spent = low + inner
+    if overrun_probe(mut db, t, 2, spent, inner) != (true, true) || overrun_probe(mut db, t, 2, spent - 1, inner) != (true, false) {
+        return false
+    }
+    let wrote: core.Log[u64] = log.new()
+    let line = main_branch(db)
+    let keep: Option[fn(Error) -> bool] = None
+    let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+        put(mut tx, t, 1, 10)?
+        let read_cost = fetch_threshold(tx, sh, 2)
+        for _ in 0u64 .. 8 {
+            let over = rollback_writes_on_overrun(mut tx, inner, scoped fn(mut w: Tx) -> Result[(), Error] {
+                put(mut w, t, 1, 11)?
+                put(mut w, t, 2, 20)?
+                log.append(wrote, 1)
+                loop {}
+            })
+            match over {
+                Error(OutOfTime(steps: n)) => if n != inner {
+                    return Error(Missing("overrun bound"))
+                },
+                _ => return Error(Missing("overrun")),
+            }
+        }
+        let same_reads = fetch_threshold(tx, sh, 2) == read_cost && fetch(tx, sh, 1)? == Some(10) && fetch(tx, sh, 2)? == None
+        put(mut tx, t, 3, 30)?
+        Ok(same_reads)
+    }))
+    let s = snapshot(db)
+    match take out {
+        Committed(done) => done.value && list.len(log.finish(take wrote)) == 8 && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 1)) == Some(10) && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 2)) == None && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 3)) == Some(30),
+        _ => false,
+    }
+}
+
+@test
+fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
+    if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type LayoutAnswers {
+    version: u64,
+    points: List[Option[u64]],
+    rows: List[(u64, u64)],
+    large: List[(u64, String)],
+    indexed: List[(u64, u64)],
+    delta: List[Change],
+    account: u64
+}
+
+fn collect_layout_rows[K, V](take source: Rows[K, V]) -> List[(K, V)] waits {
+    let mut rows = take source
+    let mut all: List[(K, V)] = list.new()
+    while let Some(take row) = result.unwrap(next(law_reader(rows.capture), mut rows)) {
+        list.push(mut all, take row)
+    }
+    take all
+}
+
+fn layout_index(n: u64) -> Result[u64, Capacity] {
+    Ok(n % 3)
+}
+
+fn layout_answers(mut db: Db) -> LayoutAnswers waits {
+    let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let big = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let ix = result.unwrap(bind_table_index(mut db, t, "by_three", code.describe(layout_index), std.codec.key_u64()))
+    let at = snapshot(db)
+    let sh = view t
+    let mut points: List[Option[u64]] = list.new()
+    let mut k = 1u64
+    while k <= 2000 {
+        list.push(mut points, result.unwrap(get(result.unwrap(reader(db, 0u64)), at, sh, k)))
+        k += 17
+    }
+    let rows = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, sh, Unbounded, Unbounded)))
+    let large = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, big, Unbounded, Unbounded)))
+    let indexed = collect_layout_rows(result.unwrap(find(result.unwrap(reader(db, 0u64)), at, ix, Included(1), Included(2))))
+    let empty = Snapshot(store: at.store, open: at.open, branch: at.branch, head: 0, roots: empty_roots(), watermark: 1)
+    let Changes(rows: take delta, ..) = result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, at))
+    let account = accounts(db)
+    if !account.exact {
+        fail("layout account")
+    }
+    LayoutAnswers(version: version(at), points: take points, rows: take rows, large: take large, indexed: take indexed, delta: take delta, account: account.logical)
+}
+
+fn same_layout_answers(a: LayoutAnswers, b: LayoutAnswers) -> bool {
+    a.version == b.version && a.points == b.points && a.rows == b.rows && a.large == b.large && a.indexed == b.indexed && a.account == b.account && list.len(a.delta) == list.len(b.delta) && same_rows(a.delta, b.delta, 0, list.len(a.delta))
 }
 
 // Commits: 2,000 rows written in descending key order in one transaction,
@@ -45,58 +199,64 @@ fn layout_thresholds(mut db: Db) -> List[u64] waits {
 // then single-row writes. Under `held`, a pin keeps the tables' first
 // version, so every commit copies the pages it edits.
 fn layout_commits(mut db: Db, held: bool) -> bool waits {
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
+    result.unwrap(with_index(mut declared, "by_three", code.describe(layout_index), std.codec.key_u64()))
+    result.unwrap(create_table(mut db, take declared))
     result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
-    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let _ = result.unwrap(bind_table_index(mut db, t, "by_three", code.describe(layout_index), std.codec.key_u64()))
     let big = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
     let mut raw: Bytes = list.with_capacity(65536)
     list.fill(mut raw, 65536, 97u8)
     let large = result.unwrap(string.from_utf8(take raw))
     // Then single-row commits run past several leaf splits.
     let mut steps: List[u8] = list.with_capacity(409)
-    for step in [0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8, 5u8] {
-        list.push(mut steps, step)
+    for operation in[0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8, 5u8] {
+        list.push(mut steps, operation)
     }
     for _ in 0u64 .. 400 {
         list.push(mut steps, 3u8)
     }
-    let mut fresh = 5000u64
-    for step in steps {
-        if held && step == 0u8 {
+    let mut newer = 5000u64
+    for operation in steps {
+        if held && operation == 0u8 {
             let first = snapshot(db)
             let _ = result.unwrap(pin(mut db, "held", first))
         }
-        let wrote = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            match step {
+        let wrote = result.unwrap(run(mut db, None, (copy_env(t), copy_env(big), copy_env(large), copy_env(newer), copy_env(operation)), fn(mut tx, call_env) -> Result[(), Error] {
+            match call_env.4 {
                 0u8 => {
                     let mut k = 2000u64
                     while k > 0 {
-                        put(mut tx, t, k, k)?
+                        put(mut tx, call_env.0, k, k)?
                         k -= 1
                     }
                 },
                 1u8 => {
-                    put(mut tx, big, 1, large)?
-                    put(mut tx, big, 2, "small")?
+                    put(mut tx, call_env.1, 1, call_env.2)?
+                    put(mut tx, call_env.1, 2, "small")?
                 },
                 2u8 => {
                     let mut k = 7u64
                     while k <= 2000 {
-                        let _ = delete(mut tx, t, k)?
+                        let _ = delete(mut tx, call_env.0, k)?
                         k += 7
                     }
                 },
-                3u8 => put(mut tx, t, fresh, fresh)?,
-                4u8 => put(mut tx, t, fresh - 4000, fresh)?,
-                _ => put(mut tx, big, 2, "a longer small value")?,
+                3u8 => put(mut tx, call_env.0, call_env.3, call_env.3)?,
+                4u8 => put(mut tx, call_env.0, call_env.3 - 4000, call_env.3)?,
+                _ => put(mut tx, call_env.1, 2, "a longer small value")?,
             }
             Ok(())
         }))
         match take wrote {
             Committed(_) => (),
-            _ => return false,
+            Aborted(Undone(value: Limit(Transaction), ..)) => fail("layout transaction size"),
+            Aborted(_) => fail("layout transaction aborted"),
+            Refused(_) => fail("layout transaction refused"),
+            _ => fail("layout transaction failed"),
         }
-        fresh += 1
+        newer += 1
     }
     true
 }
@@ -107,42 +267,47 @@ fn heads_canonical(db: Db) -> bool {
     result.unwrap(std.page.canonical(roots.collections.root)) && result.unwrap(std.page.canonical(roots.streams.root)) && result.unwrap(std.page.canonical(roots.catalog.root))
 }
 
-// MEM-30: a body's steps follow from its source and its values, and the page
-// layout it reads is one of those values. A re-execution reads a base that a
-// checkpoint, a MANIFEST load or journal recovery may have rebuilt, so every
-// load path must leave the layout the live commits left, and so must commits
-// made while a pin shares their pages. Oracle: the fetch step thresholds of
-// the live store, compared across the four load paths and the pinned run,
-// and each head's pages against their sealed images.
+// AP2/AP3: unpacking a cut and replaying a journal preserve the logical
+// answers. The checkpoint must also seal the pages it publishes.
 pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
-    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     if !layout_commits(mut db, false) {
         return false
     }
-    let live = layout_thresholds(mut db)
-    let mut sealed = heads_canonical(db)
+    let live_bytes = layout_answers(mut db)
     result.unwrap(close(take db))
-    let mut replayed_db = result.unwrap(open(tasks, dir, c, r, defaults()))
-    let replayed = layout_thresholds(mut replayed_db)
-    sealed = sealed && heads_canonical(replayed_db)
+    let mut replayed_db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
+    let replayed = layout_answers(mut replayed_db)
     let _ = result.unwrap(checkpoint(mut replayed_db))
-    let cut = layout_thresholds(mut replayed_db)
-    sealed = sealed && heads_canonical(replayed_db)
+    let cut = layout_answers(mut replayed_db)
+    let mut sealed = heads_canonical(replayed_db)
     result.unwrap(close(take replayed_db))
-    let mut loaded_db = result.unwrap(open(tasks, dir, c, r, defaults()))
-    let loaded = layout_thresholds(mut loaded_db)
+    let mut loaded_db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
+    let loaded = layout_answers(mut loaded_db)
     sealed = sealed && heads_canonical(loaded_db)
     result.unwrap(close(take loaded_db))
     let pinned_dir = disk_test_directory(d)
-    let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, defaults()))
+    let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     if !layout_commits(mut held_db, true) {
         return false
     }
-    let held = layout_thresholds(mut held_db)
-    sealed = sealed && heads_canonical(held_db)
+    let _ = result.unwrap(unpin(mut held_db, "held"))
+    let held = layout_answers(mut held_db)
     result.unwrap(close(take held_db))
-    sealed && live == replayed && live == cut && live == loaded && live == held
+    if !sealed {
+        fail("layout checkpoint pages")
+    }
+    if !same_layout_answers(live_bytes, replayed) {
+        fail("layout replay answers")
+    }
+    if !same_layout_answers(live_bytes, cut) {
+        fail("layout cut answers")
+    }
+    if !same_layout_answers(live_bytes, loaded) {
+        fail("layout loaded answers")
+    }
+    same_layout_answers(live_bytes, held)
 }
 
 @test
@@ -152,4 +317,41 @@ fn disk_test_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     } else {
         Error(())
     }
+}
+
+fn migrate_workspace_row(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+    Ok(Some((k, v + 1)))
+}
+
+// AP13 and AP15. Each scalar table has a 5-byte catalog key and a
+// 59-byte catalog value: 62 + 8 + 64 + 126 = 260 with its descriptor.
+// The source has one row: 62 + round8(4 + 8) + round8(2 + 8) = 94.
+// The workspace peaks at (260 + 94) + 260 + (94 + 8) = 716.
+@test
+fn migrate_workspace_ceiling(c: Clock) -> Result[(), Error] waits {
+    for ceiling in 715u64 .. 717 {
+        let mut db = test_db(c, ceiling)
+        let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+        let old = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        if !typed_put(mut db, old, 7, 70) {
+            fail("workspace fixture did not commit")
+        }
+        let source: Table[u64, u64] = clone(old)
+        let replacement = spec("next", std.codec.key_u64(), std.codec.of_u64())
+        match migrate(mut db, take source, take replacement, migrate_workspace_row) {
+            Ok(_) if ceiling == 716 => {
+                let rebuilt = table(mut db, "next", std.codec.key_u64(), std.codec.of_u64())?
+                if version(snapshot(db)) != 3 || get(reader(db, 0)?, snapshot(db), rebuilt, 7)? != Some(71) {
+                    fail("migration at the ceiling did not publish the rebuilt row")
+                }
+            },
+            Error(Full(Resident(p))) if ceiling == 715 && p.requested == 716 && p.available == 715 => {
+                if version(snapshot(db)) != 2 || get(reader(db, 0)?, snapshot(db), old, 7)? != Some(70) {
+                    fail("workspace refusal changed the source table")
+                }
+            },
+            _ => fail("wrong result at the migration workspace ceiling"),
+        }
+    }
+    Ok(())
 }

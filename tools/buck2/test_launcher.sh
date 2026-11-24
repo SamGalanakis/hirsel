@@ -189,11 +189,23 @@ takes_value() {
 # spellings too, preserving all other arguments and literal filters after --.
 remaining=$#
 literal=false
+unset requested_logfile
 while [ "$remaining" -gt 0 ]; do
   argument=$1; shift; remaining=$((remaining - 1))
   if "$literal"; then set -- "$@" "$argument"; continue; fi
   case "$argument" in
     --) literal=true ;;
+    --logfile | --logfile=*)
+      if [ -n "${HIRSEL_TEST_FILTER_CASES:-}" ]; then
+        [ "${requested_logfile+x}" != x ] || { echo "duplicate --logfile" >&2; exit 2; }
+        if [ "$argument" = --logfile ]; then
+          [ "$remaining" -gt 0 ] || { echo "$argument requires a value" >&2; exit 2; }
+          requested_logfile=$1; shift; remaining=$((remaining - 1))
+        else
+          requested_logfile=${argument#*=}
+        fi
+        continue
+      fi ;;
     --test-threads | --test-threads=*)
       case "$argument" in
         --test-threads)
@@ -264,7 +276,27 @@ run_harness() (
     done
     export RUSTC_BOOTSTRAP=1
   fi
-  "$harness" "$@"
+  if [ -z "${HIRSEL_TEST_FILTER_CASES:-}" ]; then
+    "$harness" "$@"
+    exit $?
+  fi
+  # libtest writes results directly to this file, even with --nocapture.
+  expected="$(printf '%s\n' "$HIRSEL_TEST_FILTER_CASES" |
+    awk -v target="$TEST_TARGET" '$1 == target {print $2}' | LC_ALL=C sort)"
+  unset HIRSEL_TEST_FILTER_CASES
+  logfile="$action_cache/libtest-results"
+  status=0
+  "$harness" --logfile "$logfile" "$@" || status=$?
+  if [ "${requested_logfile+x}" = x ] && [ -f "$logfile" ]; then
+    cat "$logfile" > "$requested_logfile"
+  fi
+  [ "$status" -eq 0 ] || exit "$status"
+  completed="$(sed -n 's/^ok //p' "$logfile" | LC_ALL=C sort)"
+  if [ -z "$expected" ] || [ "$completed" != "$expected" ]; then
+    printf 'test_launcher.sh: %s expected bodies:\n%s\ncompleted bodies:\n%s\n' \
+      "$TEST_TARGET" "$expected" "$completed" >&2
+    exit 2
+  fi
 )
 test_binary="${HIRSEL_TEST_BINARY:-}"
 unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_POOL
@@ -335,6 +367,10 @@ for argument in "$@"; do
     *) filtered=true ;;
   esac
 done
+if "$discovery" && [ -n "${HIRSEL_TEST_FILTER_CASES:-}" ]; then
+  echo "test_launcher.sh: filtered execution requires test bodies" >&2
+  exit 2
+fi
 if "$discovery" && [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
 if [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   if [ -n "$test_binary" ] && { "$filtered" || "$restricted"; }; then

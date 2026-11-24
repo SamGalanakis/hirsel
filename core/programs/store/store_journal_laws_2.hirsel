@@ -2,7 +2,7 @@
 // storage to grow under the zero-byte grant.
 @test
 fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut mem = memory(c, r, defaults())
+    let mut mem = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let slots = list.capacity(mem.heads)
     for id in 1u64 .. slots {
         let saved = snapshot(mem)
@@ -51,19 +51,19 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     }
 }
 
-// L51(a) and (k). Main is 147 bytes. 44,500 full pins and two
-// 89-byte names take the total to 16,777,069, leaving exactly 147 bytes.
+// L51(a) and (k). Main is 147 bytes. 43,575 full pins and
+// pins named with 143 and 144 bytes bring the total to 16,777,069.
 fn fork_limit_manifest() -> PageManifest {
     let mut manifest = page_manifest_empty()
     manifest.fence = 1
-    let roots = manifest.branches[0].roots
+    let roots: LocatedRoots = clone(manifest.branches[0].roots)
     let padding = string.repeat("x", 249)
-    for i in 0u64 .. 44500 {
+    for i in 0u64 .. 43575 {
         let name = result.unwrap(disk_path("", 100000 + i, padding))
-        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots))
+        list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 89), branch: 0, version: 0, roots: roots))
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 89), branch: 0, version: 0, roots: roots))
+    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
     take manifest
 }
 
@@ -83,7 +83,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(disk_publish_manifest(child, id, fork_limit_manifest()))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 2u8)
-    fork_limit_image(child, id, attempt, "betas", 111)?
+    fork_limit_image(child, id, attempt, "betas", 119)?
     match open_export(child, c, attempt, options) {
         Error(Store(Corrupt(Fault(why: Malformed, ..)))) => (),
         _ => fail("export accepted the over-limit FORK"),
@@ -93,14 +93,14 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("open accepted the over-limit FORK"),
     }
-    fork_limit_image(child, id, attempt, "beta", 110)?
+    fork_limit_image(child, id, attempt, "beta", 118)?
     let exported = open_export(child, c, attempt, options)?
     if exported.db.record_bytes != 16777216 || option.unwrap(branch(exported.db, "beta")).id != 1 {
         fail("export lost the equality FORK")
     }
     deploy_result(disk_io(host.remove(child, "EXPORT")))?
     let mut db = deploy_result(open(tasks, child, c, r, options))?
-    if db.record_bytes != 16777216 || disk_state(db).uncovered != 38 {
+    if db.record_bytes != 16777216 || disk_state(db).uncovered != 46 {
         fail("open lost the equality FORK")
     }
     let beta = option.unwrap(branch(db, "beta"))
@@ -115,20 +115,20 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let (refork, _) = deploy_result(fork(mut db, "beta", held))?
     let _ = deploy_result(checkpoint(mut db))?
-    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
-    if read_le(manifest, 76, 4) != 16777368 {
+    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
+    if read_le(manifest, 76, 4) != 16777532 {
         fail("cut encoded the wrong fork record total")
     }
     let _ = deploy_result(delete_branch(mut db, refork))?
-    let too_long = string.repeat("q", 26)
+    let too_long = string.repeat("q", 18)
     match pin(mut db, too_long, held) {
         Error(Limit(Manifest)) => (),
         _ => fail("over-limit pin was accepted"),
     }
-    let fitting = string.repeat("q", 25)
+    let fitting = string.repeat("q", 17)
     let _ = deploy_result(pin(mut db, fitting, held))?
-    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
-    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777368 {
+    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
+    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777532 {
         fail("cut encoded the wrong pin record total")
     }
     deploy_result(close(take db))
@@ -144,9 +144,9 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     db.fence = 1
     deploy_result(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32())))?
     let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
-    let initial = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 1, 1u32)?
-        put(mut tx, rows, 2, 2u32)
+    let initial = deploy_result(run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, 1u32)?
+        put(mut tx, call_env, 2, 2u32)
     }))?
     let Committed(_) = initial else {
         return Error(ExportMismatch)
@@ -154,8 +154,8 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let old = snapshot(db)
     let _ = deploy_result(pin(mut db, "pin", old))?
     for value in 3u32 .. 5 {
-        let updated = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, rows, 2, value)
+        let updated = deploy_result(run(mut db, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, 2, call_env.1)
         }))?
         let Committed(_) = updated else {
             return Error(ExportMismatch)
@@ -168,9 +168,9 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(disk_io(host.remove(exported.dir, "EXPORT")))?
     let mut reopened = deploy_result(open(tasks, exported.dir, c, r, options))?
     let name = string.repeat("n", 100)
-    let live = snapshot(db)
+    let live_bytes = snapshot(db)
     let loaded = snapshot(reopened)
-    let (direct, _) = deploy_result(fork(mut db, name, live))?
+    let (direct, _) = deploy_result(fork(mut db, name, live_bytes))?
     let (from_disk, _) = deploy_result(fork(mut reopened, name, loaded))?
     if direct.id != 1 || from_disk.id != 1 || accounts(db).logical != 604 || accounts(db).exact || accounts(reopened).logical != 518 || !accounts(reopened).exact {
         return Error(ExportMismatch)
@@ -180,7 +180,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(close(take db))
 }
 
-// AP17. A 73-byte put and a 38-byte FORK cross 110 bytes. A successful
+// AP17. A 77-byte put and a 46-byte FORK cross 110 bytes. A successful
 // cut covers both. An allocation refusal during planning leaves both in
 // the original segment.
 @test
@@ -192,7 +192,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         let mut db = open(tasks, child, c, r, options)?
         create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 73 {
+        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 77 {
             return Error(Foreign)
         }
         let previous = db.file_seq
@@ -215,7 +215,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
             return Error(Foreign)
         }
         let expected_journal = if refuse {
-            111u64
+            123u64
         } else {
             0u64
         }
@@ -228,7 +228,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
         close(take db)?
         let reopened = open(tasks, child, c, r, options)?
-        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(11u64) {
+        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(result.unwrap(reader(reopened, 0u64)), snapshot_of(reopened, beta)?, rows, 1)? != Some(11u64) {
             return Error(Foreign)
         }
         close(take reopened)?
@@ -237,7 +237,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 }
 
 // L51(g), at full page size. The distinct blobs force one pack per row and
-// more than one branch of pack-list pages. The manifest still holds 299 bytes.
+// more than one branch of pack-list pages. The manifest still holds 463 bytes.
 @test
 fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
@@ -260,8 +260,8 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let first = disk_state(db).pages.next_pack
     let _ = checkpoint(mut db)?
     let after = disk_state(db).pages.next_pack
-    let manifest = disk_read_file(child, "MANIFEST", 387)?
-    if read_le(manifest, 76, 4) != 299 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
+    let manifest = disk_read_file(child, "MANIFEST", 551)?
+    if read_le(manifest, 76, 4) != 463 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
         return Error(Foreign)
     }
     let held = snapshot(db)
@@ -304,7 +304,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 }
 
 fn journal_crash_options() -> Options {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     options.group_commits = 2
@@ -327,8 +327,8 @@ fn journal_is_poisoned[T](take response: Result[T, Error]) -> bool {
 }
 
 fn journal_put_ticket(mut db: Db, t: Table[u64, u64], key: u64) -> Result[Ticket, Error] waits {
-    let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, key, key + 10)
+    let committed = run(mut db, None, (copy_env(key), copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.0 + 10)
     })?
     match take committed {
         Committed(done) => Ok(done.ticket),
@@ -354,9 +354,9 @@ fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out:
     result.unwrap(channel.send(wake, ()))
     result.unwrap(task.join(take turn))
     let boundary = disk_end(d, db.store, db.file_seq)?
-    // HEADER (72) + empty COMMIT with DATA section (42) + the put's
-    // overhead (9), table-prefixed u64 key (12), and schema-tagged row (10).
-    Ok(boundary == Some(145u64))
+    // HEADER (72) + COMMIT with DATA section (42) + the format-5 put:
+    // tag and lengths (9), prior (4), prefixed key (12), tagged row (10).
+    Ok(boundary == Some(149u64))
 }
 
 pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -385,8 +385,8 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
     if !pack {
         result.unwrap(stdout.write(out, "ARM"))
     }
-    let saved = match run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 0, 10)
+    let saved = match run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 0, 10)
     }) {
         Ok(Committed(done)) => done.ticket,
         _ => return false
@@ -424,8 +424,8 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
         match take first {
             Error(Poisoned(Other(125))) => {},
             Ok(()) => {
-                let second = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-                    put(mut tx, t, 1, 11)
+                let second = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+                    put(mut tx, call_env, 1, 11)
                 })
                 match take second {
                     Error(Poisoned(Other(125))) => {},
@@ -438,8 +438,8 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
             _ => return false
         }
     }
-    if !journal_is_poisoned(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 2, 12)
+    if !journal_is_poisoned(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 2, 12)
     })) {
         return false
     }
@@ -459,11 +459,11 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
     for _ in 0u64 .. wakes {
         if let Some(disk) = db.disk {
-        let sender = view disk.journal
+            let sender = view disk.journal
             result.unwrap(channel.send(sender, Barrier))
         }
         if let Some(disk) = db.disk {
-        let receiver = view disk.written
+            let receiver = view disk.written
             match result.unwrap(channel.receive(receiver)) {
                 Written => {},
                 WriteFailed(e) => return Error(Poisoned(e))
@@ -482,11 +482,11 @@ fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[()
     let mut owned = take db
     result.unwrap(stdout.write(out, "ARM"))
     journal_frameless_wakes(owned, 8)?
-    let mut last = journal_put_ticket(mut owned, t, 0)?
+    let mut final_item = journal_put_ticket(mut owned, t, 0)?
     for k in 1u64 .. 4 {
-        last = journal_put_ticket(mut owned, t, k)?
+        final_item = journal_put_ticket(mut owned, t, k)?
     }
-    durable(mut owned, last)?
+    durable(mut owned, final_item)?
     journal_note(out, owned.heads[0].head)
     journal_frameless_wakes(owned, 8)?
     close(take owned)
@@ -527,8 +527,8 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
     }
     if scenario == "poison-cut" {
         result.unwrap(stdout.write(out, "ARM"))
-        let pending = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, t, 0, 10)
+        let pending = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env, 0, 10)
         })?
         match take pending {
             Committed(_) => {},
@@ -559,8 +559,8 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
         return Ok(())
     }
     for k in 0u64 .. 6 {
-        let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, t, k, k + 10)
+        let committed = run(mut db, None, (copy_env(t), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, call_env.1, call_env.1 + 10)
         })?
         let commit_ticket = match take committed {
             Committed(done) => done.ticket,
@@ -612,8 +612,8 @@ fn journal_fork_case(scenario: String) -> Option[ForkCrash] {
 
 fn journal_crash_fork_write(take writer: Db, rows: Table[u64, u64], out: Stdout, fork_case: ForkCrash) -> Result[(), Error] waits {
     let mut db = take writer
-    let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 1, 11)
+    let initial = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, 11)
     })?
     let Committed(first) = take initial else {
         fail("fork parent commit refused")
@@ -642,8 +642,8 @@ fn journal_crash_fork_write(take writer: Db, rows: Table[u64, u64], out: Stdout,
         fail("fork returned before its ack")
     }
     journal_note(out, 3)
-    let update = run_on(mut db, beta, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 2, 22)
+    let update = run_on(mut db, beta, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 2, 22)
     })?
     let Committed(child) = take update else {
         fail("fork child commit refused")
@@ -672,11 +672,11 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
     if main_version < 1 || main_version > 3 {
         return Ok(false)
     }
-    if get(main, shape(rows), 1)? != (if main_version >= 2 {
+    if get(law_reader(main), main, rows, 1)? != (if main_version >= 2 {
         Some(11u64)
     } else {
         None
-    }) || get(main, shape(rows), 2)? != None {
+    }) || get(law_reader(main), main, rows, 2)? != None {
         return Ok(false)
     }
     let main_call = recorded(db, main_branch(db), 3)?
@@ -695,7 +695,7 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
         }
         let child = snapshot_of(db, b)?
         let child_head = version(child)
-        if child_head < 2 || child_head > 4 || get(child, shape(rows), 1)? != Some(11u64) || get(child, shape(rows), 2)? != (if child_head >= 3 {
+        if child_head < 2 || child_head > 4 || get(law_reader(child), child, rows, 1)? != Some(11u64) || get(law_reader(child), child, rows, 2)? != (if child_head >= 3 {
             Some(22u64)
         } else {
             None
@@ -742,14 +742,14 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
     }
     if event_count >= 3 {
         let old = Branch(store: db.store, id: 1)
-        let written = run_on(mut db, old, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, rows, 9, 99)
+        let written = run_on(mut db, old, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env, 9, 99)
         })?
         let Committed(done) = written else {
             return Ok(false)
         }
         durable(mut db, done.ticket)?
-        if get(snapshot_of(db, old)?, shape(rows), 9)? != Some(99u64) || get(snapshot_of(db, gamma)?, shape(rows), 9)? != None {
+        if get(result.unwrap(reader(db, 0u64)), snapshot_of(db, old)?, rows, 9)? != Some(99u64) || get(result.unwrap(reader(db, 0u64)), snapshot_of(db, gamma)?, rows, 9)? != None {
             return Ok(false)
         }
         let _ = delete_branch(mut db, old)?
@@ -773,9 +773,9 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
         close(take db)?
         return Ok(valid)
     }
-    let sh = shape(t)
+    let sh = view t
     let head = db.heads[0].head
-    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
+    let final_item = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
         2u64
     } else if scenario == "journal" {
         8u64
@@ -784,7 +784,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     } else {
         7u64
     }
-    if head < 1 || head > last || head < minimum {
+    if head < 1 || head > final_item || head < minimum {
         return Ok(false)
     }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
@@ -816,7 +816,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
         } else {
             None
         }
-        if get(snapshot(db), sh, k)? != expected {
+        if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)? != expected {
             return Ok(false)
         }
     }
@@ -844,6 +844,20 @@ fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "journal-keyed" {
+        let text = option.unwrap(args.get(argv, 3))
+        let mut floor = 0u64
+        for digit in string.as_bytes(text) { floor = floor * 10 + int.widen(digit - b'0') }
+        return match claim_crash_phase(d, c, r, tasks, out, phase, floor) {
+            Ok(()) => {
+                if phase == "write" { let _ = stdout.write(out, "DONE") }
+                Ok(())
+            },
+            Error(Io(_)) if phase == "write" => Ok(()),
+            Error(Poisoned(_)) if phase == "write" => Ok(()),
+            Error(_) => Error(Exit(status: 32)),
+        }
+    }
     let recovery_sync = scenario == "orphan-end-recovery-sync"
     let orphan_end = recovery_sync || scenario == "orphan-end"
     if phase == "init" {
@@ -851,8 +865,8 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
         result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
         if orphan_end {
             let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-            let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-                put(mut tx, t, 0, 10)
+            let written = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+                put(mut tx, call_env, 0, 10)
             }))
             match take written {
                 Committed(done) => result.unwrap(durable(mut db, done.ticket)),
@@ -960,10 +974,10 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if !typed_put(mut db, t, 1, 11) || !typed_put(mut db, t, 2, 22) {
         return false
     }
-    let sh = shape(t)
+    let sh = view t
     result.unwrap(close(take db))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    let good = result.unwrap(get(snapshot(reopened), sh, 1)) == Some(11u64) && result.unwrap(get(snapshot(reopened), sh, 2)) == Some(22u64)
+    let good = result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 1)) == Some(11u64) && result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 2)) == Some(22u64)
     result.unwrap(close(take reopened))
     good
 }

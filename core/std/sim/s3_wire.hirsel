@@ -1,0 +1,341 @@
+pub type Target {
+    key: String,
+    query: Map[String, String]
+}
+
+pub type WireRequest {
+    method: String,
+    target: Target,
+    fields: Map[String, String]
+}
+
+pub fn piece(data: Bytes, lo: u64, hi: u64) -> String {
+    result.unwrap(string.from_utf8(clone(list.slice(data, lo, hi))))
+}
+
+fn nibble(c: u8) -> Option[u8] {
+    if c >= b'0' && c <= b'9' {
+        return Some(c - b'0')
+    }
+    let lower = int.to_ascii_lower(c)
+    if lower >= b'a' && lower <= b'f' {
+        return Some(lower - b'a' + 10)
+    }
+    None
+}
+
+pub fn decode(text: String) -> Option[String] {
+    let raw = string.as_bytes(text)
+    let mut octets: Bytes = list.with_capacity(list.len(raw))
+    let mut i = 0u64
+    while i < list.len(raw) {
+        if raw[i] == b'%' {
+            if i + 2 >= list.len(raw) {
+                return None
+            }
+            let Some(hi) = nibble(raw[i + 1]) else {
+                return None
+            }
+            let Some(lo) = nibble(raw[i + 2]) else {
+                return None
+            }
+            list.push(mut octets, (hi << 4) | lo)
+            i += 3
+        } else {
+            list.push(mut octets, raw[i])
+            i += 1
+        }
+    }
+    match string.from_utf8(take octets) {
+        Ok(take value) => Some(take value),
+        Error(_) => None
+    }
+}
+
+pub fn or_else(value: Option[u64], fallback: u64) -> u64 {
+    match value {
+        Some(n) => n,
+        None => fallback
+    }
+}
+
+pub fn parse_target(raw: String) -> Option[Target] {
+    let octets = string.as_bytes(raw)
+    let end = list.len(octets)
+    if end == 0 || octets[0] != b'/' {
+        return None
+    }
+    let cut = or_else(list.find_byte(octets, 0, end, b'?'), end)
+    let Some(take key) = decode(piece(octets, 1, cut)) else {
+        return None
+    }
+    let mut query: Map[String, String] = map.new()
+    let mut at = cut + 1
+    while at < end {
+        let stop = or_else(list.find_byte(octets, at, end, b'&'), end)
+        let eq = or_else(list.find_byte(octets, at, stop, b'='), stop)
+        let name = piece(octets, at, eq)
+        let value = piece(octets, order.min(eq + 1, stop), stop)
+        if name == "" || map.get(query, name) != None {
+            return None
+        }
+        map.insert(mut query, take name, take value)
+        at = stop + 1
+    }
+    Some(Target(key: take key, query: take query))
+}
+
+pub fn parse_headers(raw: Bytes, head: http1.Head) -> Option[Map[String, String]] {
+    let mut out: Map[String, String] = map.new()
+    for i in 0u64 .. head.count {
+        let h = head.fields[i]
+        let mut name = piece(raw, h.name.start, h.name.end)
+        string.make_ascii_lower(mut name)
+        let span = list.slice(raw, h.value.start, h.value.end)
+        let Ok(take value) = string.from_utf8(clone(span)) else {
+            return None
+        }
+        if map.get(out, name) != None {
+            return None
+        }
+        map.insert(mut out, take name, take value)
+    }
+    Some(take out)
+}
+
+pub fn u64_field(s: String) -> Option[u64] {
+    let parsed: Result[u64, ParseError] = int.parse(s)
+    match parsed {
+        Ok(n) => Some(n),
+        Error(_) => None
+    }
+}
+
+pub fn body_length(fields: Map[String, String]) -> Option[u64] {
+    if map.get(fields, "transfer-encoding") != None {
+        return None
+    }
+    match map.get(fields, "content-length") {
+        Some(n) => u64_field(n),
+        None => Some(0)
+    }
+}
+
+pub fn hex(digest: Inline[u8, 32]) -> String {
+    let digits = string.as_bytes("0123456789abcdef")
+    let mut out: Bytes = list.with_capacity(64)
+    for i in 0u64 .. 32 {
+        list.push(mut out, digits[int.widen(digest[i] >> 4)])
+        list.push(mut out, digits[int.widen(digest[i] & 15)])
+    }
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn canonical_value(mut out: String, value: String) {
+    let octets = string.as_bytes(value)
+    let mut gap = false
+    let mut start = 0u64
+    for i in 0u64 .. list.len(octets) {
+        if octets[i] == b' ' || octets[i] == b'\t' {
+            if i > start {
+                if gap {
+                    string.push(mut out, " ")
+                }
+                string.push(mut out, string.slice(value, start, i))
+                gap = true
+            }
+            start = i + 1
+        }
+    }
+    if start < list.len(octets) {
+        if gap {
+            string.push(mut out, " ")
+        }
+        string.push(mut out, string.slice(value, start, list.len(octets)))
+    }
+}
+
+pub fn sorted_keys[V](m: Map[String, V]) -> List[String] {
+    let mut keys: List[String] = list.with_capacity(map.len(m))
+    for (key, _) in m {
+        list.push(mut keys, clone(key))
+    }
+    list.sort(mut keys, fn(a: String, b: String) -> Order {
+        order.compare(a, b)
+    })
+    take keys
+}
+
+fn append_query(mut out: String, query: Map[String, String]) {
+    let keys = sorted_keys(query)
+    for i in 0u64 .. list.len(keys) {
+        if i != 0 {
+            string.push(mut out, "&")
+        }
+        let key = keys[i]
+        string.push(mut out, key)
+        string.push(mut out, "=")
+        if let Some(value) = map.get(query, key) {
+            string.push(mut out, value)
+        }
+    }
+}
+
+fn canonical_headers(mut out: String, fields: Map[String, String], signed: String) -> bool {
+    let octets = string.as_bytes(signed)
+    let mut last = string.from("")
+    let mut has_host = false
+    let mut has_date = false
+    let mut at = 0u64
+    while at < list.len(octets) {
+        let stop = or_else(list.find_byte(octets, at, list.len(octets), b';'), list.len(octets))
+        let name = piece(octets, at, stop)
+        if order.compare(last, name) != Less || (stop + 1 == list.len(octets) && octets[stop] == b';') {
+            return false
+        }
+        let Some(value) = map.get(fields, name) else {
+            return false
+        }
+        string.push(mut out, name)
+        string.push(mut out, ":")
+        canonical_value(mut out, value)
+        string.push(mut out, "\n")
+        has_host = has_host || name == "host"
+        has_date = has_date || name == "x-amz-date"
+        last = take name
+        at = stop + 1
+    }
+    for (name, _) in fields {
+        if string.starts_with(name, "x-amz-") && name != "x-amz-content-sha256" {
+            let mut wanted = string.from(";")
+            string.push(mut wanted, name)
+            string.push(mut wanted, ";")
+            let mut names = string.from(";")
+            string.push(mut names, signed)
+            string.push(mut names, ";")
+            if string.find(names, 0, wanted) == None {
+                return false
+            }
+        }
+    }
+    has_host && has_date
+}
+
+pub fn authenticated(credential_scope: String, signing_key: Secret, req: WireRequest, raw_target: String, body: Bytes) -> bool {
+    let fields = view req.fields
+    let Some(auth) = map.get(fields, "authorization") else {
+        return false
+    }
+    let Some(date) = map.get(fields, "x-amz-date") else {
+        return false
+    }
+    let Some(payload_digest) = map.get(fields, "x-amz-content-sha256") else {
+        return false
+    }
+    let Some((credential, rest)) = string.split_once(auth, ", SignedHeaders=") else {
+        return false
+    }
+    let Some((signed, signature)) = string.split_once(rest, ", Signature=") else {
+        return false
+    }
+    let mut prefix = string.from("AWS4-HMAC-SHA256 Credential=")
+    string.push(mut prefix, credential_scope)
+    if credential != prefix || string.byte_len(signature) != 64 {
+        return false
+    }
+    let Some((_, scope)) = string.split_once(credential_scope, "/") else {
+        return false
+    }
+    if string.byte_len(date) != 16 || string.byte_len(scope) < 8 || string.slice(date, 0, 8) != string.slice(scope, 0, 8) {
+        return false
+    }
+    if payload_digest != "UNSIGNED-PAYLOAD" && payload_digest != hex(sha256.hash(body)) {
+        return false
+    }
+    let mut canonical: String = clone(req.method)
+    string.push(mut canonical, "\n")
+    match string.split_once(raw_target, "?") {
+        Some((path, _)) => string.push(mut canonical, path),
+        None => string.push(mut canonical, raw_target)
+    }
+    string.push(mut canonical, "\n")
+    append_query(mut canonical, req.target.query)
+    string.push(mut canonical, "\n")
+    if !canonical_headers(mut canonical, fields, signed) {
+        return false
+    }
+    string.push(mut canonical, "\n")
+    string.push(mut canonical, signed)
+    string.push(mut canonical, "\n")
+    string.push(mut canonical, payload_digest)
+    let mut message = string.from("AWS4-HMAC-SHA256\n")
+    string.push(mut message, date)
+    string.push(mut message, "\n")
+    string.push(mut message, scope)
+    string.push(mut message, "\n")
+    string.push(mut message, hex(sha256.hash(string.as_bytes(canonical))))
+    let raw = string.as_bytes(signature)
+    let mut tag: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        let Some(hi) = nibble(raw[2 * i]) else {
+            return false
+        }
+        let Some(lo) = nibble(raw[2 * i + 1]) else {
+            return false
+        }
+        list.push(mut tag, (hi << 4) | lo)
+    }
+    if let Ok(true) = secret.verify_hmac_sha256(signing_key, string.as_bytes(message), tag) {
+        return true
+    }
+    false
+}
+
+fn xml_text(mut xml: String, text: String) {
+    let octets = string.as_bytes(text)
+    let mut start = 0u64
+    for i in 0u64 .. list.len(octets) {
+        let escaped = match octets[i] {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            b'\'' => "&apos;",
+            _ => ""
+        }
+        if escaped != "" {
+            string.push(mut xml, string.slice(text, start, i))
+            string.push(mut xml, escaped)
+            start = i + 1
+        }
+    }
+    string.push(mut xml, string.slice(text, start, list.len(octets)))
+}
+
+pub fn element(mut xml: String, tag: String, value: String) {
+    string.push(mut xml, "<")
+    string.push(mut xml, tag)
+    string.push(mut xml, ">")
+    xml_text(mut xml, value)
+    string.push(mut xml, "</")
+    string.push(mut xml, tag)
+    string.push(mut xml, ">")
+}
+
+pub fn metadata(fields: Map[String, String]) -> Map[String, String] {
+    let mut out: Map[String, String] = map.new()
+    for (name, value) in fields {
+        if string.starts_with(name, "x-amz-meta-") {
+            map.insert(mut out, clone(name), clone(value))
+        }
+    }
+    take out
+}
+
+pub fn etag(data: Bytes) -> String {
+    let mut out = string.from("\"")
+    let digest = hex(sha256.hash(data))
+    string.push(mut out, string.slice(digest, 0, 32))
+    string.push(mut out, "\"")
+    take out
+}

@@ -1,3 +1,20 @@
+/// Accepts the expected TCP peer, closing unrelated connections. Each accept
+/// uses the same absolute deadline.
+pub fn accept_from(mut listener: Listener, expected: Addr, until: Until) -> Result[Socket, NetError] waits {
+    loop {
+        let (take socket, peer) = host.accept(mut listener, until)?
+        if peer == expected && net.peer_addr(socket)? == expected {
+            return Ok(take socket)
+        }
+        let _ = take socket
+        if let At(clock, deadline) = until {
+            if host.mono_ns(clock) >= deadline {
+                return Error(TimedOut)
+            }
+        }
+    }
+}
+
 // NET-7 graceful TCP end, composed from existing ownership and host.recv_bounded.
 pub type FinishError: send = Network(NetError)
 

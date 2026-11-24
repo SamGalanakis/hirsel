@@ -267,12 +267,17 @@ impl<'a> Plan<'a> {
     /// it, a changed reachable body changes it. And it defines each `revisions`
     /// row's carrier, a Bytes `{bytes, 32, 0}` over the revision, under its
     /// symbol: these override the empty carriers the units define (PROG-9).
+    /// A recording or replay entry also holds `build`, the digest of the
+    /// build without its launch policy: a Run tape records it and a replay
+    /// whose own differs writes `replay: build differs`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit(
         &self,
         target: &str,
         sources: &SourceMap,
         source_identity: hirsel_core_ids::ContentHash,
         revision: &[u8; 32],
+        build: &[u8; 32],
         revisions: &[(String, [u8; 32])],
         (live_sites, spawns_units): (Option<&BTreeSet<u64>>, bool),
     ) -> Result<Vec<u8>> {
@@ -289,6 +294,11 @@ impl<'a> Plan<'a> {
         for (symbol, revision) in revisions {
             data::carrier(&mut object, symbol, revision)?;
         }
+        let build = if self.recording || self.replay.is_some() {
+            Some(data::bytes(&mut object, None, build.to_vec(), 8)?)
+        } else {
+            None
+        };
         let signature = signature(&object, &[I64, I64, I64], Some(I8));
         let entry = object
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
@@ -302,6 +312,7 @@ impl<'a> Plan<'a> {
             entry,
             waits,
             spawns_units,
+            build,
         )?;
         let mut product = object.finish();
         unwind.write(&mut product).map_err(error)?;

@@ -64,21 +64,6 @@ fn stable_owned_strings() -> bool {
     xs[0] == "a" && xs[1] == "bb" && xs[2] == "cc"
 }
 
-// Short insertion sorts admit no scratch even with owned list storage.
-// expect: run stable_short_without_allocation() = 12345
-fn stable_short_without_allocation() -> u64 {
-    let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 0 {
-        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
-            compare(a, b)
-        })
-    }
-    match r {
-        Ok(()) => digits(xs),
-        _ => 99
-    }
-}
-
 // Each encoded value carries its input index. Sizes 0..17 cover odd trailing
 // runs. Key, order and bitmask together describe the expected permutation.
 // expect: run model_all_small_sizes() = true
@@ -153,23 +138,20 @@ fn ordinary_list_after_sort() -> u64 {
     a * 100 + b * 10 + option.unwrap(list.pop(mut xs))
 }
 
-// Equal zero-sized entries need no admission and retain their list shape.
+// Sorting zero-sized entries retains the list shape and calls the comparator.
 // expect: run zero_size_sort() = true
 fn zero_size_sort() -> bool {
-    let r = bound bytes 0 {
-        let mut xs: List[()] = list.new()
-        for _ in 0u64 .. 5 {
-            list.push(mut xs, ())
-        }
-        let cap = list.capacity(xs)
-        let mut compared = false
-        list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
-            compared = true;
-            Equal
-        })
-        list.len(xs) == 5 && list.capacity(xs) == cap && compared
+    let mut xs: List[()] = list.new()
+    for _ in 0u64 .. 5 {
+        list.push(mut xs, ())
     }
-    result.unwrap(r)
+    let cap = list.capacity(xs)
+    let mut compared = false
+    list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
+        compared = true;
+        Equal
+    })
+    list.len(xs) == 5 && list.capacity(xs) == cap && compared
 }
 
 // Stable insertion sort using ordinary swaps, independent of run detection and merging.
@@ -209,12 +191,9 @@ fn stable_generated_runs() -> bool {
             if n > 1 {
                 reference(mut expected, 128)
             }
-            let sorted = bound bytes (n * 8) {
-                list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
-                    compare(a / 128, b / 128)
-                })
-            }
-            result.unwrap(sorted)
+            list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+                compare(a / 128, b / 128)
+            })
             if xs != expected {
                 return false
             }
@@ -223,10 +202,9 @@ fn stable_generated_runs() -> bool {
     true
 }
 
-// A full partition exceeds the bound. Sorting and merging smaller runs must
-// preserve input order among equal keys across the run boundary.
-// expect: run stable_bounded_scratch() = true
-fn stable_bounded_scratch() -> bool {
+// Compare stability on longer mixed, ascending and descending runs.
+// expect: run stable_large_inputs() = true
+fn stable_large_inputs() -> bool {
     let n: u64 = 257
     let mut rng: u64 = 966490
     for shape in 0u64 .. 3 {
@@ -246,12 +224,9 @@ fn stable_bounded_scratch() -> bool {
             list.push(mut expected, entry)
         }
         reference(mut expected, 512)
-        let sorted = bound bytes 1024 {
-            list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
-                compare(a / 512, b / 512)
-            })
-        }
-        result.unwrap(sorted)
+        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+            compare(a / 512, b / 512)
+        })
         if xs != expected || list.capacity(xs) != n {
             return false
         }

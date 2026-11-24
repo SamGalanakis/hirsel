@@ -138,7 +138,8 @@ Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
 published recipe over the release std. When the build's library image holds
 the std its std product prebuilt for the build's target and generator, the
 release std is that: every plain std root the image checked whole, with what
-it reaches, less the roots `ALWAYS_IMPORT` holds back. Its modules each run
+it reaches, less the roots that take bindable code or make owned network waits
+and what those roots reach. Its modules each run
 the full optimizer and emit machine code when the toolchain installs the
 target (`std-product --install`) or on `std-product --store|--image --target
 TRIPLE`. A build over
@@ -150,7 +151,7 @@ roots, each with its step summary, and lends bodies of at most `LEND_LIMIT`
 instructions `available_externally` for inlining. The release unit holds the
 program's own bodies and every other library instance it reaches, so its
 optimiser sees the closure and dictionary arguments it passes them, along with
-the roots `ALWAYS_IMPORT` holds back and what they reach; it calls every export
+the held roots and what they reach; it calls every export
 by its symbol, and its widths stay dynamic. A program that reaches no std
 root links the side like any other.
 The unit's key covers every reached module and the sealed and place-blind
@@ -290,7 +291,11 @@ gap to be closed later.
 - **The store is never synced.** Writers rename a locked temporary from
   `<store>/tmp` into place; opening a store removes each temporary no writer
   holds. After a power loss a torn, short, zero-filled or missing record fails
-  its check or is absent, so it is a miss and is rebuilt. This contract covers the
+  its check or is absent, so it is a miss and is rebuilt. A build's own code
+  cache (`<store>/code-store`, `<store>/code`) follows the same rule: each
+  publication appends one unsynced pack (payloads, an index of xxh3-64-checked
+  rows, a checked trailer), and a pack whose trailer or index fails its check is
+  ignored and a row whose payload fails its check is a miss. This contract covers the
   driver's build cache only. A host's code store, image store and assembly records
   back retained releases, are synced in the order
   [launch.md](../../docs/spec/launch.md#release-recipe-and-host-assembly) gives, and
@@ -397,8 +402,11 @@ provide a synchronized run observer before using it.
 Installed dependency tests are not rediscovered. Tests take only unmarked
 capabilities, no `Args` or type parameters, and return `Result[(), E]`; only
 other tests may refer to them. A test retains normal access to its module's
-private helpers. `--filter <substring>` matches the full definition path; the
-driver visits matching paths in lexical order. No matching test exits 2.
+private helpers. `--filter <substring>` matches any full definition path
+containing the substring. `--exact <definition>` matches the complete path,
+such as `app@1/main/smoke`. Repeat `--exact` to select multiple paths.
+The selectors are mutually exclusive. The driver visits matching paths in
+lexical order. No matching test exits 2.
 
 Each selected test builds through the ordinary reachable closure and runs in
 its own process. When `hirsel.toml` declares `[tests]`, its `limit`, `dirs`, and `grants`

@@ -1,4 +1,4 @@
-//! FAIL-15: native allocation failure is a named run stop, never Rust abort.
+//! Isolated checks for allocator stops and checked diagnostics.
 #[test]
 #[ignore = "isolated native refusal, invoked by the named parent"]
 fn native_refusal_child() {
@@ -66,5 +66,47 @@ fn fail15_native_allocator_refusal_is_a_reported_run_stop_without_cleanup() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(output.stderr, b"run stop: HostMemory\n");
+    }
+}
+
+#[test]
+#[ignore = "isolated checked allocator diagnostic, invoked by the named parent"]
+fn checked_allocator_child() {
+    let pointer = super::allocate_raw(std::alloc::Layout::new::<u64>());
+    if std::env::var_os("HIRSEL_TEST_CHECKED_LEAK").is_some() {
+        return;
+    }
+    // SAFETY: the second call deliberately exercises checked mode's non-live
+    // address diagnostic. The first call transferred the live allocation.
+    unsafe {
+        super::deallocate_raw(pointer);
+        super::deallocate_raw(pointer);
+    }
+    panic!("checked free of a non-live address returned");
+}
+
+#[test]
+fn checked_allocator_reports_the_original_site() {
+    const CHILD: &str = "allocator::stop_tests::checked_allocator_child";
+    for leak in [false, true] {
+        let mut child = crate::test_process::command();
+        child
+            .args(["--ignored", "--exact", CHILD, "--test-threads=1"])
+            .env("HIRSEL_ALLOC", "checked")
+            .env_remove("HIRSEL_TEST_CHECKED_LEAK");
+        if leak {
+            child.env("HIRSEL_TEST_CHECKED_LEAK", "1");
+        }
+        let output = child.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = if leak {
+            "checked allocator: leaked 8 bytes"
+        } else {
+            "checked allocator: free of non-live block"
+        };
+        assert_eq!(output.status.success(), leak, "{stderr}");
+        assert!(stderr.contains(message), "{stderr}");
+        assert!(stderr.contains("allocated at:"), "{stderr}");
+        assert!(stderr.contains("checked_allocator_child"), "{stderr}");
     }
 }

@@ -20,8 +20,11 @@ await client.whenReady();
 const api = bind(client);
 ```
 
-For reconnect recovery, supply an application `credential` that the server's
-binding maps to the same Caller on each open.
+For reconnect recovery, supply an application `credential` source,
+`async () => bytes`, that the server's binding maps to the same Caller on each
+open. The client calls it for the first Hello and once more when the place
+refuses or expires the credential (Close 4401, Close 1008 before Welcome, or
+HTTP 401); meanwhile the state is `CredentialNeeded`.
 Storage keeps the Caller returned by the server with each stream. When an
 anonymous reconnect receives a fresh Caller, any pending call becomes
 `LocallyUnknown` and the new stream starts at position zero.
@@ -46,33 +49,62 @@ leased again. A later explicit client can allocate another stream.
 
 `Incompatible` is terminal until `reconnect()` or a bindings reload. `Unbound`
 means the place closed the Hello with 1008 before Welcome: its `PlaceConfig.wire`
-binding refused the credential, or none was given (pass `credential`). It is
-terminal until `reconnect()`. The original
+binding refused the credential and one refresh did not recover, or none was
+given (pass `credential`). It is terminal until `reconnect()`. The original
 pending request survives both. `StorageUnavailable` permits no sends; close the
 client and reopen after storage is available. `close()` releases the stream lease
 and preserves pending durable work. Each send checks the installation generation
 under its lock, so a live client with an older generation cannot send work.
 
-Subscription callbacks receive a complete current array of raw rows after an
-atomic Batch. Reset and reconnect preserve the old cache until the replacement
-id appears in `Batch.complete`, including an empty initial result. Old ids are
-ignored. All subscriptions use `resume: None`.
+Subscription callbacks receive `onChange(sub, change)` after the entire Batch
+applies. `change.rows` carries the old and new rows for changed keys.
+`sub.rows(slot)`, `sub.map(slot)` and `sub.get(slot, key)` share frozen rows.
+The array and map keep their identity until the slot changes. Mutating shared
+`Uint8Array` or `Map` leaves, or a map returned by `sub.map`, is undefined
+behavior. Use `api.subscribeDecoded.<module>.<name>` for typed keys and values.
+Its map and delta keys are hex of the ordered slot key. Raw subscriptions
+use full wire keys.
 
-Pass `onEnd` after the row callback on `api.subscribe.<name>`,
-`client.subscribe()` or `client.subscribeChanges()` to receive the decoded
-`SubscriptionEnd` reason. The client removes the subscription before calling
-`onEnd` once for its `Ended` frame. Reset and reconnect resubscribe, and an empty
-completed Batch calls the row callback with `[]`.
+Reset, connection loss and terminal client states clear the public images and
+retire their old ids. Each cleared subscription receives a data-free
+invalidation after the affected handles become `Pending`. Reset and reconnect
+resubscribe with `resume: None`. The fresh completion publishes only rows
+in the new image, including an empty initial result.
 
-Optional predictions supplied as the fourth `call()` argument are removed when a matching outcome row arrives;
-`onPrediction` runs after the complete Batch has been applied.
+Pass `onEnd` after `onChange` to receive the decoded `SubscriptionEnd` reason.
+The client removes the subscription before calling `onEnd` once for its
+`Ended` frame. [SDK subscription contract](../../docs/spec/sdk.md#subscriptions)
 
-The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in
+Pass `{optimistic(draft) { … }}` as the second argument to a generated call,
+or the fourth argument to `client.call`. The draft's `get`, `put`, `delete`
+and `value` methods operate on your subscription handles. Generated handles
+use the slot's typed key. The client replays these synchronous functions in
+queue order against the latest server image. A successful outcome commits
+its rows and removes its optimistic writes together. Equal bytes keep the
+current row and emit no change. A failure removes its writes immediately.
+After reconnect, a successful outcome can arrive before the subscription is
+current. Its writes remain queued until the affected subscriptions complete or
+end. Public reads still return `Pending` before each subscription completes.
+Reloading loses the functions and recovers only the durable call.
+[SDK optimistic write contract](../../docs/spec/sdk.md#optimistic-writes)
+
+The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in
 `//:core-evaluator`. They use the generated Frame codec and independent
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
 W3e; these laws make no claim about that integration.
 
-The packed-package check runs in `//:core-evaluator`. To run it alone, use
-`.buck2/bin/buck2 test //:core-evaluator -- --test-arg=--filter --test-arg=sdk.client:packed_consumer`.
-It installs the tarball offline and type-checks and runs generated bindings in
-an isolated Node project.
+## Run the subscription example
+
+The [subscription example](tests/subscription-cache.ts) reads a row committed
+by the [store and runner program](tests/packed_consumer.hirsel). It displays
+the row from `get` and the count from `map` on every `onChange`. The call
+temporarily reopens the item through `optimistic`. The runner reply carries
+no row update, so the item returns to its committed state.
+
+From the repository root, run the packed-package check in `//:core-evaluator`.
+It installs the tarball offline, builds and runs the Hirsel program, then
+type-checks and runs the TypeScript example with the generated bindings.
+
+```sh
+.buck2/bin/buck2 test //:core-evaluator -- --test-arg=--filter --test-arg=sdk.client:packed_consumer
+```

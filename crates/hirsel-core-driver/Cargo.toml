@@ -19,7 +19,7 @@ cranelift-codegen = { version = "=0.136.3", default-features = false, features =
 cranelift-frontend = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-module = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-object = { version = "=0.136.3", default-features = false }
-mimalloc = { version = "=0.1.52", default-features = false, features = ["override"] }
+mimalloc = { version = "=0.1.52", default-features = false }
 rustc-hash = "2"
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-diag = { path = "../hirsel-core-diag" }
@@ -40,10 +40,9 @@ toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "=0.8.5"
-bincode = "1.3.3"
 object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "macho", "names", "read_core", "std", "write"] }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "xxhash3_64"] }
 
@@ -54,4 +53,10 @@ hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 
 [build-dependencies]
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
-sha2 = "0.10"
+sha2 = "0.11"
+
+# mimalloc replaces the C allocator on Linux only. Its macOS malloc zone
+# leaves a fork hook unset that libmalloc calls in every forked child, so the
+# launcher's children crash before they exec.
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "=0.1.52", default-features = false, features = ["override"] }

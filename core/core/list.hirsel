@@ -3,6 +3,10 @@ pub fn new[T]() -> List[T]
 
 pub fn with_capacity[T](n: u64) -> List[T]
 
+// Allocate the initial backing at a constant power-of-two alignment. Growth
+// uses the ordinary List contract, so reserve the full aligned room here.
+pub fn with_capacity_aligned[T](n: u64, alignment: u64) -> List[T]
+
 pub fn len[T](xs: List[T]) -> u64
 
 pub fn capacity[T](xs: List[T]) -> u64

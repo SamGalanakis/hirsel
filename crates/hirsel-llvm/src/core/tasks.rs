@@ -114,7 +114,7 @@ impl FunctionEmitter<'_> {
         if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
             results[0] = Ty::Ptr;
         }
-        if matches!(op, HostOp::Listen | HostOp::Accept) {
+        if op.address_outcome() {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
         } else if op == HostOp::TlsConnect {
             results.extend([U; 4]);
@@ -128,6 +128,8 @@ impl FunctionEmitter<'_> {
             HostOp::Connect
             | HostOp::Listen
             | HostOp::Accept
+            | HostOp::LocalAddr
+            | HostOp::PeerAddr
             | HostOp::RecvBounded
             | HostOp::RecvReady
             | HostOp::SendPair
@@ -144,6 +146,12 @@ impl FunctionEmitter<'_> {
             | HostOp::DatagramSend
             | HostOp::DatagramSendTo
             | HostOp::DatagramRecv
+            | HostOp::UdpOpen
+            | HostOp::UdpBind
+            | HostOp::UdpBindGroup
+            | HostOp::UdpRecv
+            | HostOp::UdpSend
+            | HostOp::UdpLocalAddr
             | HostOp::NetNarrowUnix
             | HostOp::Resolve
             | HostOp::CredFetch
@@ -156,10 +164,31 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretNarrow
             | HostOp::SecretHmac
             | HostOp::SecretDeriveHmac
+            | HostOp::SecretDeriveHkdf
+            | HostOp::SecretDeriveArgon2id
             | HostOp::SecretVerifyHmac
+            | HostOp::SecretHmacSha384
+            | HostOp::SecretHmacSha512
+            | HostOp::SecretVerifyHmacSha384
+            | HostOp::SecretVerifyHmacSha512
+            | HostOp::SecretJwsHmacSign
+            | HostOp::SecretJwsHmacVerify
             | HostOp::SecretWrap
             | HostOp::SecretUnwrap
             | HostOp::SecretSign
+            | HostOp::SecretP256Key
+            | HostOp::SecretKeyShare
+            | HostOp::ScheduleQuicInitial
+            | HostOp::ScheduleSealer
+            | HostOp::ScheduleOpener
+            | HostOp::ScheduleHeaderMask
+            | HostOp::PacketSeal
+            | HostOp::PacketSealInto
+            | HostOp::PacketOpen
+            | HostOp::PacketOpenInto
+            | HostOp::PacketMask
+            | HostOp::SecretAeadSeal
+            | HostOp::SecretAeadOpen
             | HostOp::StdinRead
             | HostOp::StreamTerminal
             | HostOp::EnvGet
@@ -168,6 +197,7 @@ impl FunctionEmitter<'_> {
             | HostOp::EnvNarrow
             | HostOp::ProvideClock
             | HostOp::ProvideRandom
+            | HostOp::ProvideRandomTape
             | HostOp::ProvideProcess
             | HostOp::ClockAdvance
             | HostOp::ClockSetWall
@@ -179,11 +209,13 @@ impl FunctionEmitter<'_> {
             | HostOp::CallWord
             | HostOp::CallSecret
             | HostOp::CallPayload
+            | HostOp::CallPayloadPrefix
             | HostOp::PortReply
             | HostOp::ProvideDir
             | HostOp::ProvideNet
             | HostOp::ProvideExec
             | HostOp::PortFill
+            | HostOp::UdpFillPackets
             | HostOp::ExecSpawn
             | HostOp::ExecWait
             | HostOp::ExecSignal
@@ -266,6 +298,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Unlock
             | HostOp::Mkdir
             | HostOp::Mkdtemp
+            | HostOp::Mkstemp
             | HostOp::Remove
             | HostOp::RemoveTree
             | HostOp::WallMs
@@ -274,6 +307,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Stderr
             | HostOp::Sync
             | HostOp::SyncDir
+            | HostOp::ZeroExtension
             | HostOp::Random
             | HostOp::Stopped
             | HostOp::OpenDir
@@ -304,12 +338,7 @@ impl FunctionEmitter<'_> {
         values.push(status);
         values
     }
-    pub(super) fn runtime_call(
-        &mut self,
-        op: RtOp,
-        site: &CallSite,
-        fused_receive: bool,
-    ) -> Result<()> {
+    pub(super) fn runtime_call(&mut self, op: RtOp, site: &CallSite) -> Result<()> {
         let args = site
             .args
             .get(&self.body.pools.args)
@@ -330,6 +359,7 @@ impl FunctionEmitter<'_> {
             op,
             RtOp::Join { .. }
                 | RtOp::CheckCancel
+                | RtOp::Argon2id
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
@@ -380,6 +410,7 @@ impl FunctionEmitter<'_> {
             RtOp::ArgsLen => {
                 self.native_call("hirsel_core_args_len", &[U], &[ptr(CONTEXT), u(&args[0])])
             }
+            RtOp::RootLimit => self.native_call("hirsel_core_root_limit", &[U], &[ptr(CONTEXT)]),
             RtOp::LaunchWord => self.native_call(
                 "hirsel_core_launch_word",
                 &[U],
@@ -491,6 +522,11 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Sha1Compress => self.native_call(
+                "hirsel_core_sha1_compress",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
             RtOp::ZeroBytes => self.native_call(
                 "hirsel_core_zero_bytes",
                 &[],
@@ -498,6 +534,11 @@ impl FunctionEmitter<'_> {
             ),
             RtOp::Sha256Blocks => self.native_call(
                 "hirsel_core_sha256_blocks",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::Sha512Blocks => self.native_call(
+                "hirsel_core_sha512_blocks",
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
@@ -525,11 +566,17 @@ impl FunctionEmitter<'_> {
                 &[U],
                 &[u(&args[0]), u(&args[1]), u(&args[2])],
             ),
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer => {
                 let name = match op {
                     RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
                     RtOp::P256Verify => "hirsel_core_p256_verify",
                     RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    RtOp::P384Verify => "hirsel_core_p384_verify",
+                    RtOp::P384VerifyDer => "hirsel_core_p384_verify_der",
                     _ => unreachable!(),
                 };
                 self.native_call(
@@ -545,6 +592,48 @@ impl FunctionEmitter<'_> {
                     ],
                 )
             }
+            RtOp::RsaVerifyPkcs1Sha256 | RtOp::RsaVerifyPssSha256 => {
+                let name = if op == RtOp::RsaVerifyPkcs1Sha256 {
+                    "hirsel_core_rsa_verify_pkcs1_sha256"
+                } else {
+                    "hirsel_core_rsa_verify_pss_sha256"
+                };
+                self.native_call(
+                    name,
+                    &[U],
+                    &[
+                        p(&args[0]),
+                        u(&args[1]),
+                        p(&args[2]),
+                        u(&args[3]),
+                        p(&args[4]),
+                        u(&args[5]),
+                        p(&args[6]),
+                        u(&args[7]),
+                    ],
+                )
+            }
+            RtOp::Argon2id => self.native_call(
+                "hirsel_core_argon2id",
+                &[U, U, K, K],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    u(&args[1]),
+                    p(&args[2]),
+                    u(&args[3]),
+                    p(&args[4]),
+                    u(&args[5]),
+                    p(&args[6]),
+                    u(&args[7]),
+                    arg(Type::I32, args[8].clone()),
+                    arg(Type::I32, args[9].clone()),
+                    arg(Type::I32, args[10].clone()),
+                    u(&args[11]),
+                    p(&args[12]),
+                    u(&at),
+                ],
+            ),
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&args[..4])]
             }
@@ -695,15 +784,12 @@ impl FunctionEmitter<'_> {
             RtOp::Send { .. } | RtOp::Receive { .. } => self.native_call(
                 if matches!(op, RtOp::Send { .. }) {
                     "hirsel_core_send"
-                } else if fused_receive {
-                    "hirsel_core_receive_in_loop"
                 } else {
                     "hirsel_core_receive"
                 },
                 &[B, K],
                 &[ptr(CONTEXT), p(&args[0]), p(&args[1]), u(&at)],
             ),
-            // Never fused: a receive run cannot span a park that returns.
             RtOp::ReceiveRec { .. } => self.native_call(
                 "hirsel_core_receive_rec",
                 &[B, K],
@@ -724,6 +810,20 @@ impl FunctionEmitter<'_> {
             RtOp::LatestHandle => {
                 self.native_call("hirsel_core_latest_handle", &[P], &[p(&args[0])])
             }
+            RtOp::SharedNew { item } => {
+                let cross = self.cross(item, 0);
+                self.native_call(
+                    "hirsel_core_shared_new",
+                    &[P, U],
+                    &[ptr(CONTEXT), p(&args[0]), p(&cross), u(&args[1])],
+                )
+            }
+            RtOp::SharedShare => self.native_call("hirsel_core_shared_share", &[P], &[p(&args[0])]),
+            RtOp::SharedRelease { .. } => self.native_call(
+                "hirsel_core_shared_release",
+                &[],
+                &[ptr(CONTEXT), p(&args[0])],
+            ),
             RtOp::LatestRead => self.native_call("hirsel_core_latest_read", &[P], &[p(&args[0])]),
             RtOp::LatestPublish => self.native_call(
                 "hirsel_core_latest_publish",

@@ -9,7 +9,8 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
   checks, plus the llvm-sys 231.0.1 version and checksum.
 - `install --unpack DIR`: unpack the verified tree without root and print the
   `LLVM_SYS_231_PREFIX` and loader path that select it. `install --source` prints
-  the build commands for the pinned source.
+  the build commands for the pinned source. `install --bolt-tools DIR` unpacks
+  the verified post-link tools used to build the distribution.
 - `check [--prefix DIR]`: verify the LLVM version, shared library, headers,
   X86 and AArch64 targets, clang and ld.lld versions, and the llvm-sys version
   and checksum in Cargo.lock. Link and execute `fixtures/version.c` with the
@@ -48,11 +49,16 @@ require a shared libLLVM; binary archives are not a fallback.
 ## Engine libLLVM
 
 `build-libllvm` builds a libLLVM 23.1.5 for the compiler alone from the locked source
-archive with profile guidance, ThinLTO, X86, AArch64 and zlib. It runs three
-stages: an IR-instrumented library;
+archive with profile guidance, ThinLTO, BOLT, X86, AArch64 and zlib. It starts
+with an IR-instrumented library,
 `engine_llvm.py train`, which builds the training programs through it (the LangArena
 suite, every M1 program and the documents layout family, all generated from the
-repository's own input helpers); and the profile-guided build.
+repository's own input helpers), and the profile-guided link with relocations.
+`bolt.py` instruments that link, merges profiles from the release std, cold
+LangArena and Gateway builds, then rewrites the original library using rustc's
+x86-64 opt-dist layout options. Both instrumentation and rewriting use the
+linked symbols and relocations. The engine collects counters in 16 MiB text
+regions to fit the 8 GiB cap and uses one merged profile for the rewrite.
 
 The guard builds the training programs and four held-out ones (the graph and json
 layout families and the M2b table and dispatch_cross_package workloads). It compares
@@ -65,15 +71,21 @@ Use the manylinux_2_28 x86-64 image with its GCC Toolset to build the engine.
 `build-libllvm DIR ARTIFACTS bootstrap` builds the stock shared library, headers,
 clang and LLVM tools. For `instr` and `opt`, set `CC` and `CXX` to the bootstrap
 compilers and supply the same snapshot's lld, TableGen and compiler-rt profile runtime.
+`bolt-tools` builds llvm-bolt, its instrumentation runtime and merge-fdata from
+the optimized build tree. Upload the printed archive and update the `bolt_tools`
+record in the lock. These tools are used at build time.
 
 On Ubuntu 24.04, build the release compiler and shipping runtime at
 `engine_llvm_guard_source` with `core/tools/measurement_artifacts.py`. Use its JSON as
 `ARTIFACTS` and set `HIRSEL_LLVM_PROFILE_SOURCE` to that checkout. Run `train` on the
 host with the instrumented library and the same snapshot's llvm-profdata. Place the
-merged `llvm.profdata` in `DIR` for the container's `opt` stage. Run `guard` on the
-host with the optimized library in `DIR`. It verifies the reference deb and enforces
-a 2 GiB memory cgroup with no swap. Upload the qualified library under the printed
-name and update `engine_llvm` in the lock.
+merged `llvm.profdata` in `DIR` for the container's `opt` stage. Run `bolt` on the
+host with the optimized library in `DIR/opt/lib`, `DIR/bolt-install/bin` (or the
+verified BOLT tools on PATH), and release compiler/runtime artifacts from the
+checkout whose sources will train BOLT. Run `guard` with the historical
+compiler and workloads after the rewrite. It verifies the reference deb and
+enforces a 2 GiB memory cgroup with no swap. Upload the qualified library under
+the printed name and update `engine_llvm` in the lock.
 
 The bootstrap places the stock library in the tree's `lib/` and the optimized
 library in its `engine/`. The compiler's RPATH selects the engine while clang

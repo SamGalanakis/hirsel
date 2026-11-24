@@ -26,13 +26,23 @@ import threading
 import time
 import tomllib
 
+from std_contracts import Contract, discover, host_parameter, matches_filter, test_module
 from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from loopback_peer import accept_from
 
-LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
+LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 1-65535', 'Tls *.test 0-65535 System')
+
+
+def fixture_source(file):
+    """A contract file's source, with its generated vectors when it opts in."""
+    source = file.read_text()
+    if source.startswith('// test-vectors\n'):
+        generator = file.parent / 'vectors' / file.stem / 'generate.py'
+        source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
+    return source
 
 
 def simulation_support(module):
@@ -89,8 +99,13 @@ def network_case(case):
     return '(network)' in case.call
 
 
+LIVE_UDP_CASES = ('net:udp_gro_first_truncates', 'net:udp_group_recycles_a_full_member_capture',
+                  'net:udp_pool_charge_outlives_its_helper')
+
+
 def unit_socket_case(case):
-    return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket')
+    return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket',
+                         *LIVE_UDP_CASES)
 
 
 def simulated_network_case(case, evaluating=False):
@@ -98,8 +113,11 @@ def simulated_network_case(case, evaluating=False):
             and (evaluating or case.call != 'net_parity(network)'))
 
 
-def loopback_grants():
-    return ['--grant', 'Net=' + ';'.join(LOOPBACK_RULES), '--grant', 'Clock', '--grant', 'Tasks']
+def loopback_grants(case):
+    rules = LOOPBACK_RULES
+    if case.name in LIVE_UDP_CASES:
+        rules += ('UdpBind 127.0.0.0/8 1-65535', 'UdpSend 127.0.0.0/8 1-65535')
+    return ['--grant', 'Net=' + ';'.join(rules), '--grant', 'Clock', '--grant', 'Tasks']
 
 def exec_fixture(scratch, host):
     """Pin a host executable with a known exit and derive its EXEC-1 approval."""
@@ -134,241 +152,6 @@ def exec_fixture(scratch, host):
 
 LANES = {'895': 'core-check-895', '910': 'core-check-calls-910', '912': 'core-check-index-912',
          '913': 'core-check-callables-913', '914': 'core-ops-914'}
-
-
-@dataclasses.dataclass(frozen=True)
-class Contract:
-    file: Path
-    line: int
-    call: str
-    expected: str
-    waits: bool
-    stdout: bytes = b""
-    stderr: bytes = b""
-    first_write: int | None = None
-    test_of: str | None = None
-    host_op: int = 0
-    package: str = "std"
-    evaluator_only: str | None = None
-    # `// engine-fact: <fact>` before the law: an engine states <fact> to its code
-    # generator on the strength of this law, so the native suites run it on each engine.
-    engine_fact: str | None = None
-    # `// schedule: seeds N [max_events M]` before the law: the native run repeats the
-    # law under N seeded schedules (core/tools/std_schedule.c).
-    schedule: tuple[int, int | None] | None = None
-    root_limit: int = 64 << 20
-    evaluator_instructions: int = 1_000_000_000
-    # File-level `// test-env: NAME=VALUE`: each native law of the file runs once
-    # more with NAME=VALUE set, e.g. to select a portable runtime path.
-    run_env: tuple[tuple[str, str], ...] = ()
-    # Exact Env grant names. None means absent, and byte values can be non-UTF-8.
-    env_fixture: tuple[tuple[str, bytes | None], ...] = ()
-    # A per-law reason why the evaluator cannot run this native contract.
-    native_only: str | None = None
-
-    @property
-    def name(self):
-        prefix = self.package + '.' if self.package != 'std' else ''
-        return prefix + self.file.stem + ':' + self.call.split('(')[0]
-
-
-def masked_source(source):
-    return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
-                    lambda m: ' ' * len(m[0]), source, flags=re.S)
-
-
-def declared_names(source):
-    # Inspect only named module-level declarations, not callable parameter types.
-    masked = masked_source(source)
-    depth = 0
-    names = []
-    tokens = list(re.finditer(r'[A-Za-z_]\w*|[{}]', masked))
-    for i, token in enumerate(tokens):
-        text = token[0]
-        if text == '{':
-            depth += 1
-        elif text == '}':
-            depth -= 1
-        elif depth == 0 and text in ('fn', 'type', 'const') and i + 1 < len(tokens) and re.match(r'\s+[A-Za-z_]', masked[token.end():]):
-            names.append((text, tokens[i + 1][0]))
-    return names
-
-
-def test_module(root, file, source):
-    first = source.splitlines()[0] if source.splitlines() else ''
-    if not first.startswith('// test-of:'):
-        return None
-    match = re.fullmatch(r'// test-of: (core|std)\.([a-z][a-z0-9_]*)', first)
-    if not match:
-        raise ValueError(f'{file}: invalid first-line test-of marker')
-    package, module = match.groups()
-    if file.parent != root / 'core' / package / 'tests':
-        raise ValueError(f'{file}: test-of must name its own library package')
-    library = root / 'core' / package / (module + '.hirsel')
-    if not library.is_file():
-        raise ValueError(f'{file}: test-of module does not exist')
-    if not re.search(r'^// test-reason: \S.+', source, re.M):
-        raise ValueError(f'{file}: marked test needs // test-reason: why public API cannot express it')
-    names = declared_names(source)
-    if any(kind != 'fn' for kind, _ in names) or re.search(r'^\s*pub\b', source, re.M):
-        raise ValueError(f'{file}: marked test may add only private test/helper functions')
-    masked = masked_source(source)
-    functions = list(re.finditer(r'\bfn\s+[A-Za-z_]\w*', masked))
-    if any('{' not in masked[f.end():functions[i+1].start() if i+1 < len(functions) else len(masked)]
-           for i, f in enumerate(functions)):
-        raise ValueError(f'{file}: marked helper functions must have bodies')
-    original = {name for _, name in declared_names(library.read_text())}
-    additions = [name for _, name in names]
-    if len(additions) != len(set(additions)) or original.intersection(additions):
-        raise ValueError(f'{file}: test-of declaration name collision')
-    if 'native_contract' in original or 'native_contract' in additions:
-        raise ValueError(f'{file}: reserved adapter name collision')
-    return module
-
-
-def matches_filter(root, case, selector):
-    return (case.name.startswith(selector)
-            or case.package == 'std' and ('std.' + case.name).startswith(selector)
-            or str(case.file.relative_to(root)).startswith(selector))
-
-
-def env_fixture(file, source):
-    # // test-env-fixture: {"MISSING": null, "TEXT": "value", "RAW": [255]}
-    fixtures = re.findall(r'^// test-env-fixture: (.+)$', source, re.M)
-    if not fixtures:
-        return ()
-    if len(fixtures) != 1:
-        raise ValueError(f'{file}: expected one Env fixture')
-    entries = json.loads(fixtures[0])
-    if not isinstance(entries, dict) or not entries:
-        raise ValueError(f'{file}: Env fixture must name at least one key')
-    result = []
-    for name, value in entries.items():
-        if not re.fullmatch(r'[A-Z0-9_]+', name):
-            raise ValueError(f'{file}: invalid Env fixture key {name!r}')
-        if isinstance(value, str):
-            value = value.encode()
-        elif isinstance(value, list):
-            value = bytes(value)
-        elif value is not None:
-            raise ValueError(f'{file}: invalid Env fixture value for {name}')
-        if value is not None and b'\0' in value:
-            raise ValueError(f'{file}: NUL in Env fixture value for {name}')
-        result.append((name, value))
-    return tuple(result)
-
-
-def discover(root, filters):
-    contracts = []
-    files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
-    files += list((root / 'core/programs/runner/tests').glob('*.hirsel'))
-    for file in sorted(files):
-        source = file.read_text()
-        test_of = test_module(root, file, source)
-        backend = re.findall(r'^// test-backend: (.+)$', source, re.M)
-        if backend and backend != ['evaluator']:
-            raise ValueError(f'{file}: only // test-backend: evaluator is supported')
-        reason = re.search(r'^// test-reason: (\S.+)$', source, re.M)
-        if backend and not reason:
-            raise ValueError(f'{file}: evaluator-only law needs // test-reason:')
-        evaluator_only = reason[1] if backend else None
-        run_env = tuple(tuple(pair) for pair in re.findall(r'^// test-env: ([A-Z0-9_]+)=(\S+)$', source, re.M))
-        fixture = env_fixture(file, source)
-        stdout = stderr = b""
-        first_write = None
-        host_op = 0
-        engine_fact = None
-        schedule = None
-        root_limit = 64 << 20
-        evaluator_instructions = 1_000_000_000
-        native_only = None
-        for line, text in enumerate(source.splitlines(), 1):
-            if text.startswith("// test-limit: "):
-                root_limit = int(text.removeprefix("// test-limit: "))
-                if not 0 < root_limit < 1 << 64:
-                    raise ValueError(f'{file}:{line}: test limit is outside u64')
-            if text.startswith("// test-instructions: "):
-                evaluator_instructions = int(text.removeprefix("// test-instructions: "))
-                if not 0 < evaluator_instructions < 1 << 64:
-                    raise ValueError(f'{file}:{line}: evaluator instruction limit is outside u64')
-            if text.startswith("// test-native-only:"):
-                native_only = text.removeprefix("// test-native-only:").strip()
-                if not native_only or evaluator_only:
-                    raise ValueError(f'{file}:{line}: native-only law needs a reason and cannot be evaluator-only')
-            if text.startswith("// schedule: "):
-                words = text.removeprefix("// schedule: ").split()
-                if len(words) not in (2, 4) or words[0] != 'seeds' or words[2:3] not in ([], ['max_events']):
-                    raise ValueError(f'{file}:{line}: unreadable schedule line')
-                schedule = (int(words[1]), int(words[3]) if len(words) == 4 else None)
-            if text.startswith("// engine-fact: "):
-                engine_fact = text.removeprefix("// engine-fact: ").strip()
-            if text.startswith("// expect: stdout "):
-                stdout = json.loads(text.removeprefix("// expect: stdout ")).encode()
-            if text.startswith("// expect: stderr "):
-                stderr = json.loads(text.removeprefix("// expect: stderr ")).encode()
-            if text.startswith("// host: first_write "):
-                words = text.removeprefix("// host: first_write ").split()
-                first_write = int(words[0])
-                host_op = 2 if words[1:] == ["file"] else 0
-            if text == "// host: remove_tree_prefix a":
-                first_write, host_op = 0, 9
-            match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
-            if not match:
-                if text.strip().startswith('// expect: run '):
-                    raise ValueError(f'{file}:{line}: unreadable run oracle')
-                continue
-            call, expected = match.groups()
-            if '(env)' in call and not fixture:
-                raise ValueError(f'{file}:{line}: Env law needs a fixture')
-            if expected.startswith('fault ') and not evaluator_only:
-                raise ValueError(f'{file}:{line}: fault oracle requires // test-backend: evaluator')
-            if expected.startswith('fault '):
-                if not isinstance(json.loads(expected.removeprefix('fault ')), str):
-                    raise ValueError(f'{file}:{line}: fault oracle must be an exact JSON string')
-            if evaluator_only and (not call.endswith('()') or first_write is not None or schedule):
-                raise ValueError(f'{file}:{line}: evaluator-only laws take no host arguments')
-            name = call.split('(')[0]
-            header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
-            if header is None:
-                raise ValueError(f'{file}:{line}: no function for {call}')
-            package = 'runner' if file.parent == root / 'core/programs/runner/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture,
-                            native_only=native_only)
-            schedule = None
-            root_limit = 64 << 20
-            evaluator_instructions = 1_000_000_000
-            native_only = None
-            stdout = stderr = b""
-            first_write = None
-            host_op = 0
-            engine_fact = None
-            if not filters or any(matches_filter(root, case, selector) for selector in filters):
-                contracts.append(case)
-    if not contracts:
-        raise ValueError(f'no expect: run tests match {filters!r}')
-    return contracts
-
-
-def host_parameter(case):
-    if '(https)' in case.call:
-        return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
-    if network_case(case):
-        return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
-    if '(unix, dir, tasks)' in case.call:
-        return 'native_net:Net,native_dir:Dir,native_tasks:Tasks', ''
-    if '(exec, tasks)' in case.call:
-        return 'native_tasks:Tasks,native_exec:Exec', ''
-    if '(granted, tasks)' in case.call:  # An entry-grant Secret: native only.
-        return 'native_tasks:Tasks,native_granted:Secret', ''
-    if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
-        return 'native_dir:Dir,native_tasks:Tasks', ''
-    if '(clock, tasks)' in case.call:
-        return 'native_clock:Clock,native_tasks:Tasks', ''
-    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env')]:
-        if '(' + argument + ')' in case.call:
-            name = 'native_' + argument
-            return name + ':' + kind, name
-    return '', ''
 
 
 @contextlib.contextmanager
@@ -443,18 +226,9 @@ def https_observation(case, result, tape, raw, token, peer):
         for form in (value, base64.b64encode(value)):
             if any(form in output for output in (result.stdout, result.stderr, sealed)):
                 return bool(sealed), 'a Secret representation escaped'
-    diagnostics, _, stdout = result.stdout.partition(b'\n')
-    try:
-        product = json.loads(diagnostics)
-    except ValueError:
-        return False, f'HTTPS run did not report diagnostics: {result.stdout!r} {result.stderr!r}'
-    if not product.get('native'):
-        return False, first_stop(product) or f'HTTPS run did not build: {result.stderr!r}'
-    if product['diagnostics']:
-        return False, f'HTTPS run reported diagnostics: {product["diagnostics"]!r}'
-    cause = observation(case, subprocess.CompletedProcess([], result.returncode, stdout, result.stderr))
-    if cause:
-        return bool(sealed), cause
+    ran, cause = entry_observation(case, result)
+    if not ran or cause:
+        return ran and bool(sealed), cause
     if not sealed:
         return False, 'HTTPS run did not record a tape'
     try:
@@ -462,6 +236,17 @@ def https_observation(case, result, tape, raw, token, peer):
     except (OSError, ValueError) as error:
         return True, str(error)
     return True, None
+
+
+def entry_observation(case, result):
+    diagnostics, _, stdout = result.stdout.partition(b'\n')
+    try:
+        product = json.loads(diagnostics)
+    except ValueError:
+        return False, f'run did not report diagnostics: {result.stdout!r} {result.stderr!r}'
+    if not product.get('native') or product['diagnostics']:
+        return False, first_stop(product) or f'run did not build: {result.stderr!r}'
+    return True, observation(case, subprocess.CompletedProcess([], result.returncode, stdout, result.stderr))
 
 
 class Evaluator:
@@ -485,7 +270,7 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, events=False, progress=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if events:
             # CONC-10 events are recorded only on request (22f95498).
@@ -494,8 +279,6 @@ class Evaluator:
             request["instructions"] = instructions
         if sdk_out is not None:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
-        if sdk_compiler is not None:
-            request.update(sdk_compiler=str(sdk_compiler), sdk_native_options=sdk_native_options)
         with (contextlib.nullcontext(progress) if progress else Case(entry, 'evaluator')) as active:
             self.active_case = active
             line = bytearray()
@@ -539,9 +322,12 @@ def wrapper(case, port=None):
     call = call.replace('(granted, tasks)', '(native_granted,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
+    if case.argv is not None:
+        call = call.replace('(args', '(native_args', 1).replace(', env', ', native_env', 1)
     if port is not None:
         address = f'Addr(ip: V4(2130706433u32), port: {port}u16)'
         call = call.replace('(https)', f'(native_net,native_clock,{address},token,native_out,native_err)')
+    if port is not None or case.argv is not None:
         return f'\npub fn native_contract({parameters})->Result[(),Exit]{effect} {{\nif {call} == {case.expected} {{Ok(())}} else {{Error(Exit(status: 1))}}\n}}\n'
     if case.expected.startswith(('fail ', 'fault ', 'stop ')):
         body = f'let _ = {call}\nOk(())'
@@ -658,8 +444,7 @@ def observation(case, result):
     return f'exit {result.returncode}, stdout {result.stdout!r}, stderr {result.stderr!r}; expected {case.expected}'
 
 
-def test_observation(case, result, entry):
-    """Keep source failure/output oracles while executing PROG-4 test runs."""
+def test_observation(case, result, entry, *, replay=False):
     try:
         product = json.loads(result.stdout)
     except ValueError:
@@ -674,6 +459,8 @@ def test_observation(case, result, entry):
         return True, 'native test execution timed out'
     if result.returncode != int(not test['passed']):
         return False, f'test aggregate disagrees with its outcome: exit {result.returncode}, {test!r}'
+    if replay and (result.returncode != 0 or test['status'] != 0):
+        return True, f"replay did not seal: test exited {test['status']}: {test['stderr']}"
     output = subprocess.CompletedProcess([], test['status'], test['stdout'].encode(), test['stderr'].encode())
     return True, observation(case, output)
 
@@ -786,13 +573,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
+                if case.name == 'dir:walkdir_preorder':
+                    (host / 'link').symlink_to('a', target_is_directory=True)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                fixture = case.file.read_text()
-                source = original + fixture
-                if fixture.startswith('// test-vectors\n'):
-                    generator = case.file.parent / 'vectors' / case.file.stem / 'generate.py'
-                    source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
+                source = original + fixture_source(case.file)
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
                     frame = case.package == 'runner'
                     if frame and protocol_codec is None and typescript_override is None:
@@ -801,27 +586,41 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             return n.to_bytes(4, 'little')
                         def blob(b):
                             return count(len(b)) + b
-                        def exported(kind, identity, args, result, args_fp, result_fp):
+                        def exported(kind, identity, args, result, args_fp, result_fp, schemas=b""):
                             result_schema = result if kind == 2 else bytes([3, 0, 0, 0, 0]) + result
                             return (count(kind) + blob(identity) + blob(bytes([3, 0, 0, 0, 0]) + args)
                                     + blob(result_schema)
-                                    + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little') + blob(bytes(32)))
+                                    + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little') + blob(bytes(32)) + (schemas or bytes(8)))
                         def record_definition(name, field, ty):
                             return (blob(name.encode()) + count(0) + bytes([0])
                                     + count(1) + bytes([0]) + blob(field.encode()) + ty)
-                        # Scripted entries exercise the generator and stubs without
-                        # depending on the launch/Describe producer. Frame comes
-                        # from the actual runner declaration through std.codec.
+                        # Scripted Describe entries exercise the generator, with Frame from std.codec.
                         returned = (bytes([3]) + count(2) + record_definition('fixture.main.Reply', 'n', bytes([6]))
                                     + record_definition('fixture.main.Problem', 'message', bytes([13]))
                                     + bytes([17, 19]) + count(0) + bytes([19]) + count(1))
                         transaction = (count(1) + blob(b'\x01fixture@1/main/commit(take u64)->core@1/core/Result[fixture@1/main/Reply,fixture@1/main/Problem]')
                                        + blob(bytes([3, 0, 0, 0, 0, 6])) + blob(returned)
-                                       + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)))
-                        row_schemas = blob(bytes([4, 0, 0, 0, 0, 6])) + blob(bytes([3, 0, 0, 0, 0, 14, 3]))
-                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + count(3)
+                                       + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)) + bytes(8))
+                        unit = blob(bytes([3, 0, 0, 0, 0, 0]))
+                        slots = (count(1) + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
+                                 + blob(bytes([3, 0, 0, 0, 0, 6]))
+                                 + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
+                        events_identity = b'\x01fixture@1/main/events(take ())->EventValue'
+                        event_value = bytes([3]) + count(1) + blob(b'fixture.main.EventValue') + count(0) + bytes([0]) + count(0) + bytes([19]) + count(0)
+                        def event_slot(name, value):
+                            return (blob(name) + count(0) + blob(bytes([4, 0, 0, 0, 0, 5]))
+                                    + blob(bytes([3, 0, 0, 0, 0, 5])) + blob(bytes([3, 0, 0, 0, 0]) + value))
+                        event_slots = count(2) + event_slot(b'unit', bytes([0])) + event_slot(b'option', bytes([16, 5]))
+                        event_entry = (count(2) + blob(events_identity) + unit + blob(bytes([3, 0, 0, 0, 0, 0]))
+                                       + (11).to_bytes(8, 'little') + (12).to_bytes(8, 'little') + blob(bytes(32)) + event_slots + blob(event_value))
+                        event_binding = (blob(b'events') + count(0) + blob(b'/events')
+                                         + blob(events_identity + (11).to_bytes(8, 'little') + (12).to_bytes(8, 'little'))
+                                         + count(0) + count(1) + (200).to_bytes(2, 'little') + (422).to_bytes(2, 'little')
+                                         + b''.join(n.to_bytes(8, 'little') for n in [0, 4096, 1000, 10000]) + count(0))
+                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(4)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
-                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', row_schemas, 2, 3) + transaction)
+                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', unit + slots, 2, 3, slots + unit)
+                                       + transaction + event_entry + count(0) + count(1) + event_binding)
                         description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
                         generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'
@@ -829,13 +628,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         probe.write_text(case.file.read_text())
                         probe_inputs = work / 'frame-schema.json'
                         probe_inputs.write_text(json.dumps(manifest(root, case, probe)))
-                        native_options = ['--runtime', str(runtime)] if compiler and runtime else None
-                        if native_options and cc:
-                            native_options += ['--cc', str(cc)]
                         built = resident.evaluate(probe_inputs, 'runner@1/tests/codec_frames/ts_frame_schema', progress=progress,
-                                                  sdk_out=generated, sdk_describe=description_file,
-                                                  sdk_compiler=compiler if native_options else None,
-                                                  sdk_native_options=native_options)
+                                                  sdk_out=generated, sdk_describe=description_file)
                         report = json.loads(built.stdout)
                         if built.returncode or report.get('error'):
                             resident.errors.seek(0)
@@ -850,7 +644,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     if frame:
                         program += f'import * as frame from {json.dumps(module.with_name("frame.js").resolve().as_uri())};'
                         program += f'import * as entries from {json.dumps(module.with_name("entries.js").resolve().as_uri())};'
-                    arguments = 'c,frame,entries' if frame else 'c'
+                    arguments = 'c'
+                    if frame:
+                        http_url = module.with_name("http.js").resolve().as_uri()
+                        arguments = f'c,frame,entries,new URL({json.dumps(http_url)})'
                     program += f'console.log(JSON.stringify(await {law}({arguments})));'
                     partner = progress.run([str(node), '--input-type=module', '--eval', program], capture_output=True, text=True)
                     if partner.returncode:
@@ -881,10 +678,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(source_rows))
-                archive = (record_runtime or runtime) if https or replay else runtime
-                command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(archive), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
-                           '-o', str(scratch / 'programs')]
+                command = [str(compiler), 'run' if https or case.argv is not None else 'test', '--inputs', str(inputs), '--backend', engine,
+                           '--runtime', str((record_runtime or runtime) if https or replay else runtime),
+                           '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit), '-o', str(scratch / 'programs')]
                 if replay:
                     command.extend(['--replay', '--expect-verdict', 'Sealed', '--rerun'])
                 environment = None
@@ -896,6 +692,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                     '--grant', 'Secret:token=env:HIRSEL_TL10_TOKEN to alpha.test'])
                     environment = {**os.environ, 'SSL_CERT_FILE': str(roots), 'HIRSEL_TL10_TOKEN': token.decode()}
                     environment.pop('SSL_CERT_DIR', None)
+                elif case.argv is not None:
+                    command.extend(['--entry', entry])
                 else:
                     command.extend(['--test-timeout', str(timeout), '--dir', str(host)])
                 if evaluating:
@@ -965,7 +763,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if '(granted, tasks)' in case.call:
                     command.extend(['--grant', 'Tasks', '--grant', 'Secret:native_granted=env:HIRSEL_GRANTED_SECRET to alpha.test kdf'])
                     environment = {**os.environb, b'HIRSEL_GRANTED_SECRET': b'granted-token'}
-                if '(env)' in case.call:
+                if ':Env' in host_parameter(case)[0]:
                     command.extend(['--grant', 'Env=' + ','.join(name for name, _ in case.env_fixture)])
                     environment = os.environb.copy()
                     for name, value in case.env_fixture:
@@ -978,12 +776,14 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if simulated:
                     command.extend(['--grant', 'Tasks'])
                 elif network_case(case):
-                    command.extend(loopback_grants())
+                    command.extend(loopback_grants(case))
                 elif '(unix, dir, tasks)' in case.call:
                     grant = f'Net=UnixRoot parity {host};UnixBind parity packet;UnixSend parity packet'
                     command.extend(['--grant', grant, '--grant', 'Tasks'])
                 if case.first_write is not None:
-                    wrapped = 'hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io'
+                    wrapped = ['hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io']
+                    if case.host_op == 119:
+                        wrapped.extend(['hirsel_core_host_rename', 'getrandom'])
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
                                     wrapped))
                 if case.schedule:
@@ -991,7 +791,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     if schedule_runtime is not None:
                         command[command.index('--runtime') + 1] = str(schedule_runtime)
                     scripts.append(('std_schedule.c', [f'-DSEEDS={seeds}'] + ([f'-DMAX_EVENTS={most}u'] if most is not None else []),
-                                    'hirsel_core_os_run_with_sources'))
+                                    ['hirsel_core_os_run_with_sources']))
                 if scripts:
                     (scratch / 'bin').mkdir()
                     linker = scratch / 'bin/scripted-cc'
@@ -1007,22 +807,26 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                                 *defines, '-o', str(support)], capture_output=True)
                         if built.returncode:
                             raise RuntimeError(f'{source}: {built.stderr.decode()}')
-                        extra += [shlex.quote(str(support)), '-Wl,--wrap=' + wrapped]
+                        extra += [shlex.quote(str(support)), *['-Wl,--wrap=' + symbol for symbol in wrapped]]
                     linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + ' '.join(extra) + '\n')
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
+                if case.argv is not None:
+                    command.extend(['--', *case.argv])
                 result = progress.run(command, cwd=host, capture_output=True, env=environment,
                                       on_start=client.set_result if https else None)
                 if https:
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
+                elif case.argv is not None:
+                    row['ran'], row['cause'] = entry_observation(case, result)
                 else:
-                    row['ran'], row['cause'] = test_observation(case, result, entry)
+                    row['ran'], row['cause'] = test_observation(case, result, entry, replay=replay)
                     for name, value in case.run_env if row['cause'] is None else ():
                         test_environment = {**(os.environb if environment is None else environment),
                                             os.fsencode(name): os.fsencode(value)}
                         again = progress.run(command, cwd=host, capture_output=True, env=test_environment)
-                        _, cause = test_observation(case, again, entry)
+                        _, cause = test_observation(case, again, entry, replay=replay)
                         if cause:
                             row['cause'] = f'with {name}={value}: {cause}'
                             break
@@ -1073,7 +877,7 @@ def main():
     if args.replay:
         if args.backend in ('all', 'evaluator') or args.record_runtime is None or not args.filter:
             parser.error('--replay requires a native backend, --record-runtime and a filter')
-        if any('(https)' in case.call or case.schedule for case in contracts):
+        if any('(https)' in case.call or case.schedule or case.argv is not None for case in contracts):
             parser.error('--replay requires contracts that run through hirsel test without a scripted scheduler')
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,

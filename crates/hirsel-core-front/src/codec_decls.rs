@@ -7,6 +7,7 @@ use hirsel_core_syntax::{NodeId, NodeKind};
 pub struct CodecDecl {
     pub via: Option<CodecVia>,
     pub removed: Vec<RemovedDecl>,
+    pub defaulted_fields: bool,
     /// Parameters conditioning codec, including removed types or the via representation.
     pub params: Vec<u32>,
     /// The derived maker `D$codec` (EXPANSION section 0), the function `codec.of`

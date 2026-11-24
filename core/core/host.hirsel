@@ -10,7 +10,7 @@ pub fn open_dir(d: Dir, p: String) -> Result[Dir, IoError] waits
 
 pub fn read_only(d: Dir) -> Dir
 
-pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits
+pub fn entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 
 pub fn next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
 
@@ -32,6 +32,8 @@ pub fn mkdir(d: Dir, p: String) -> Result[(), IoError] waits
 
 pub fn mkdtemp(d: Dir, mut name: String) -> Result[Dir, IoError] waits
 
+pub fn mkstemp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits
+
 pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
 
 pub fn remove_tree(d: Dir, p: String) -> Result[(), IoError] waits
@@ -43,6 +45,9 @@ pub fn sync(mut f: HostFile) -> Result[(), IoError] waits
 
 // Flush directory entry updates (fsync on the granted directory).
 pub fn sync_dir(d: Dir) -> Result[(), IoError] waits
+
+/// Whether a crashed extension can expose only zeros or bytes written there.
+pub fn zero_extension(d: Dir) -> Result[bool, IoError] waits
 
 pub fn random(r: Random, mut b: Bytes)
 
@@ -87,3 +92,15 @@ pub fn send_datagram(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), 
 pub fn send_to(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits
 
 pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits
+
+pub fn udp_open(n: Net, v6: bool, opts: UdpOptions) -> Result[UdpSocket, NetError] waits
+
+pub fn udp_bind(n: Net, a: Addr, opts: UdpOptions) -> Result[(UdpSocket, Addr), NetError] waits
+
+pub fn udp_bind_group(n: Net, a: Addr, opts: UdpOptions, members: u16, steer: Steer, mut out: List[UdpSocket]) -> Result[Addr, NetError] waits
+
+pub fn udp_recv(mut s: UdpSocket, mut buf: Bytes, mut out: List[UdpPacket], until: Until) -> Result[u64, NetError] waits
+
+pub fn udp_send(mut s: UdpSocket, data: Bytes, pkts: List[UdpTx], until: Until) -> Result[u64, NetError] waits
+
+pub fn udp_local_addr(s: UdpSocket) -> Result[Addr, NetError] waits

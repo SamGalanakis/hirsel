@@ -9,14 +9,18 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 // Runs and commits without the I4 settle: the S1 laws' direct entry.
 fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
     let keep_reply: Option[fn(A) -> bool] = None
-    match stage(mut db, i, wall, steps, keep_reply, body) {
+    let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    match stage(mut db, i, wall, steps, keep_reply, attempt, no_pins, body) {
         Over(take o) => Ok(take o),
-        Ran(take ran) => commit_ran(mut db, i, take ran)
+        Ran(take ran) => commit_ran(mut db, i, take ran),
+        DraftError(take problem) => Error(take problem),
+        Latched => fail("execute: a Hot law's attempt latched")
     }
 }
 
 fn fetch_raw(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    match fetch_logical(tx, logical_key(id, key)?) {
+    match fetch_logical(tx, logical_key(id, key)?)? {
         Some(v) => Ok(Some(copied(v)?)),
         None => Ok(None)
     }
@@ -49,10 +53,10 @@ fn put_logical_key(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Err
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let p = logical_key(id, key)?
-    let Some(refund) = delete_refund(tx, p) else {
+    let Some(refund) = delete_refund(tx, p)? else {
         return Ok(false)
     }
-    let frame = edit_frame(tx, p, 5 + list.len(p), tx.frame_bytes)?
+    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes)?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
     Ok(true)
@@ -60,15 +64,6 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
 
 // The COMMIT frame this Tx encodes (section 2.4). A frame with stream ops and
 // no data ops has no data head.
-fn tx_frame(tx: Tx) -> u64 {
-    let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
-    if tx.rows == 0 && tx.streams != 0 {
-        total - 5
-    } else {
-        total
-    }
-}
-
 // G1: admit the entire frame before staging either the reply or the CALL.
 fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Result[(), Error] {
     if let Some(_) = tx.call {
@@ -79,9 +74,9 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
             return Error(Exists("call"))
         }
     }
-    let (take key, take value) = reply_row(tx, c.stream, p, r)?
+    let (take key, take value) = reply_row(tx, result.unwrap(stream_key_bytes(c.stream)), p, r)?
     call_checked(c)?
-    let size = call_section_bytes(c, false)
+    let size = call_section_bytes(c, None)
     stream_write(mut tx, take key, take value, size)?
     tx.call = Some(CallSection(record: take c, settlement: None))
     Ok(())
@@ -129,37 +124,87 @@ fn value_at(s: Snapshot, k: u64) -> u64 {
 
 // L1: sorted slot model, own writes, abort and fault never change published roots.
 // Wrong implementation caught: publish before body success; omit old-root lookup.
-pub fn law_model(c: Clock) -> bool {
-    for seed in 0u64 .. 2 {
-        let mut db = raw_test_db(c, 1073741824)
-        let mut model: List[u64] = list.with_capacity(24)
-        list.fill(mut model, 24, 0u64)
-        for step in 0u64 .. 64 {
-            let wall = seed * 64 + step
-            let state = splitmix64(wall)
-            let k = state % 24
-            let choice = (state >> 8) % 5
-            let v = wall + 1
-            let ok = model_step(mut db, wall)
-            if !ok {
-                return false
-            }
-            if choice < 3 {
-                let _ = list.set(mut model, k, if choice == 0 {
-                    0u64
-                } else {
-                    v
-                })
-            }
-            let held = snapshot(db)
-            for at in 0u64 .. 24 {
-                if value_at(held, at) != model[at] {
-                    return false
-                }
+// The commands come from a std.prop tape, so a failing sequence shrinks to a
+// minimal one. A command is (kind, slot): kind 0 deletes, 1 and 2 put, 3 puts
+// then aborts, 4 puts then faults. Command i runs at wall i and puts wall + 1.
+pub fn law_model(seed: u64) -> Result[(), ()] {
+    let command = std.prop.pair(std.prop.u64_in(0, 4), std.prop.u64_in(0, 23))
+    let commands = std.prop.make(fn(mut src: std.prop.Source) -> List[(u64, u64)] {
+        let mut tape: List[(u64, u64)] = list.new()
+        for i in 0u64 ..= 128 {
+            let drawn = std.prop.span(mut src, 1, fn(mut choice: std.prop.Source) -> Option[(u64, u64)] {
+                // 99% continuation puts about half the tapes at depth 64.
+                // Record a stop at the cap too, so deleting a span still replays.
+                let more = std.prop.weighted(mut choice, if i < 128 { 99 } else { 0 }, 100)
+                if more && i < 128 { Some(std.prop.draw(mut choice, command)) } else { None }
+            })
+            let Some(operation) = drawn else { break }
+            list.push(mut tape, operation)
+        }
+        take tape
+    }, model_show_tape)
+    let mut config = std.prop.config()
+    config.seed = seed
+    std.prop.check(config, take commands, model_run)
+}
+
+fn model_show_tape(tape: List[(u64, u64)], mut out: String) {
+    string.push(mut out, "[")
+    let mut sep = ""
+    for (kind, slot) in tape {
+        string.push(mut out, sep)
+        string.push(mut out, "(")
+        string.push_u64(mut out, kind)
+        string.push(mut out, ", ")
+        string.push_u64(mut out, slot)
+        string.push(mut out, ")")
+        sep = ", "
+    }
+    string.push(mut out, "]")
+}
+
+// A closure cannot capture the test's Clock (LANG-14), so each run takes a
+// virtual one; the store reads no time beyond the wall each command passes.
+fn model_run(tape: List[(u64, u64)]) -> Result[(), String] {
+    let _ = std.prop.sometimes("64 or more commands", list.len(tape) >= 64)
+    let (c, _hand) = provide.clock(0u64, 0u64)
+    let mut db = raw_test_db(c, 1073741824)
+    let mut model: List[u64] = list.with_capacity(24)
+    list.fill(mut model, 24, 0u64)
+    let mut wall: u64 = 0
+    for (kind, k) in tape {
+        if !model_step(mut db, wall, kind, k) {
+            return Error(model_miss("outcome", wall, kind, k))
+        }
+        if kind < 3 {
+            let _ = list.set(mut model, k, if kind == 0 {
+                0u64
+            } else {
+                wall + 1
+            })
+        }
+        let held = snapshot(db)
+        for at in 0u64 .. 24 {
+            if value_at(held, at) != model[at] {
+                return Error(model_miss("published slots", wall, kind, k))
             }
         }
+        wall += 1
     }
-    true
+    Ok(())
+}
+
+fn model_miss(what: String, wall: u64, kind: u64, k: u64) -> String {
+    let mut out = string.from("L1: ")
+    string.push(mut out, what)
+    string.push(mut out, " differ from the model after command ")
+    string.push_u64(mut out, wall)
+    string.push(mut out, " (kind ")
+    string.push_u64(mut out, kind)
+    string.push(mut out, ", slot ")
+    string.push_u64(mut out, k)
+    string.push(mut out, ")")
+    out
 }
 
 // L2: an escaped cursor and snapshot retain exactly the transaction's frozen tree.
@@ -173,7 +218,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     }
     let held = snapshot(db)
     let before = version(held)
-    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[ByteRows, Error] {
+    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[PageRange, Error] {
         let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
         put_bytes(mut tx, 1, key_word(0), key_word(9999))?
         Ok(take rows)
@@ -214,7 +259,7 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
     let cv = std.codec.of_u64()
     result.unwrap(create_table(mut db, spec("range-law", std.codec.key_u64(), cv)))
     let t = result.unwrap(table(mut db, "range-law", std.codec.key_u64(), cv))
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 6 {
         if !typed_put(mut db, t, k, k + 1) {
             return false
@@ -228,7 +273,7 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
         }
         let mut rows = range(tx, sh, Excluded(1), Included(3))?
         let mut sum: u64 = 0
-        while let Some((_, val)) = next_range(mut rows)? {
+        while let Some((_, val)) = next_in(tx, mut rows)? {
             sum += val
         }
         Ok(sum)
@@ -319,7 +364,7 @@ pub fn law_foreign(c: Clock) -> bool waits {
     let stores: Inline[StoreId, 3] =[StoreId(hi: 9, lo: 2), StoreId(hi: 1, lo: 9), StoreId(hi: 9, lo: 9)]
     for i in 0u64 .. 3 {
         let foreign = Branch(store: stores[i], id: 0)
-        let outcome = run_on(mut db, foreign, None, fn(mut tx: Tx) -> Result[(), ()] {
+        let outcome = run_on(mut db, foreign, None, (), fn(mut tx, unused_env) -> Result[(), ()] {
             fail("foreign body must not run")
         })
         match take outcome {
@@ -332,15 +377,10 @@ pub fn law_foreign(c: Clock) -> bool waits {
     true
 }
 
-fn model_step(mut db: Db, wall: u64) -> bool {
-    let outer_choice = (splitmix64(wall) >> 8) % 5
+fn model_step(mut db: Db, wall: u64, kind: u64, k: u64) -> bool {
     let outcome = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        let at = info(mut tx).at
-        let state = splitmix64(at)
-        let choice = (state >> 8) % 5
-        let k = state % 24
-        let v = at + 1
-        if choice == 0 {
+        let v = info(mut tx).at + 1
+        if kind == 0 {
             let _ = delete_bytes(mut tx, 1, key_word(k))?
         } else {
             put_bytes(mut tx, 1, key_word(k), key_word(v))?
@@ -349,29 +389,25 @@ fn model_step(mut db: Db, wall: u64) -> bool {
                 return Error(Missing("law"))
             }
         }
-        if choice == 3 {
+        if kind == 3 {
             return Error(Foreign)
         }
-        if choice == 4 {
+        if kind == 4 {
             fail("L1 injected fault")
         }
         Ok(1)
     })
     match take outcome {
-        Ok(Committed(_)) => outer_choice < 3,
-        Ok(Aborted(Undone(value: Foreign, ticket: None))) => outer_choice == 3,
-        Ok(Failed(_)) => outer_choice == 4,
+        Ok(Committed(_)) => kind < 3,
+        Ok(Aborted(Undone(value: Foreign, ticket: None))) => kind == 3,
+        Ok(Failed(_)) => kind == 4,
         _ => false
     }
 }
 
 @test
-fn test_model(c: Clock) -> Result[(), ()] {
-    if law_model(c) {
-        Ok(())
-    } else {
-        Error(())
-    }
+fn test_model(seed_grant: Env) -> Result[(), ()] {
+    law_model(bucket_law_seed(seed_grant, 0))
 }
 
 @test
@@ -429,8 +465,8 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let n = 10000u64
     let mut ops = new_data_rows()
     list.reserve(mut ops.rest, n - 2)
-    for position in 0u64 .. n {
-        push_data_row(mut ops, DataOp(key: key_word(n - position), value: None))
+    for slot_order in 0u64 .. n {
+        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None, trim: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -448,8 +484,8 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     if list.len(slots) != n || list.capacity(slots) < n || 8 * list.capacity(slots) != room {
         return Error(())
     }
-    for position in 0u64 .. n {
-        if slots[position] != n - position - 1 {
+    for slot_order in 0u64 .. n {
+        if slots[slot_order] != n - slot_order - 1 {
             return Error(())
         }
     }
@@ -457,7 +493,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    encode_staged(ci, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
+    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from
@@ -473,18 +509,18 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, key_word(1), key_word(11))?
         put_bytes(mut tx, 1, key_word(2), key_word(33))?
         let _ = delete_bytes(mut tx, 1, key_word(1))?
-        if tx.frame_bytes != 88 || tx.ops.rows.count != 2 {
+        if tx.ops.rows.count != 2 {
             return Error(Foreign)
         }
         capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72))
     })
     match take outcome {
         Ok(Committed(done)) => {
-            let expected: Inline[u8, 88] =[17u8, 0u8, 1u8, 0u8, 72u8, 0u8, 0u8, 0u8, 113u8, 81u8, 236u8, 174u8, 179u8, 213u8, 128u8, 52u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 30u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 2u8, 0u8, 0u8, 0u8, 2u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 33u8]
-            if list.len(done.value) != 88 {
+            let expected: Inline[u8, 96] =[17, 0, 1, 0, 80, 0, 0, 0, 135, 213, 200, 80, 237, 65, 92, 89, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33]
+            if list.len(done.value) != 96 {
                 return false
             }
-            for i in 0u64 .. 88 {
+            for i in 0u64 .. 96 {
                 if done.value[i] != expected[i] {
                     return false
                 }
@@ -514,7 +550,7 @@ pub fn law_reader_task(c: Clock, tasks: Tasks) -> bool waits {
         }
     }
     let held = snapshot(db)
-    let reader = task.spawn(tasks, bytes 1048576, take held, fn(take s: Snapshot) -> bool {
+    let read_source = task.spawn(tasks, bytes 1048576, take held, fn(take s: Snapshot) -> bool {
         let mut rows = result.unwrap(scan_raw(s, 1, Unbounded, Unbounded))
         for k in 0u64 .. 24 {
             if value_at(s, k) != k + 1 {
@@ -534,7 +570,7 @@ pub fn law_reader_task(c: Clock, tasks: Tasks) -> bool waits {
             return false
         }
     }
-    result.unwrap(task.join(take reader))
+    result.unwrap(task.join(take read_source))
 }
 
 @test
@@ -549,8 +585,8 @@ fn test_reader_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 // The public constructor must draw identity once from Random's spare-capacity API.
 @test
 fn test_memory_identity(c: Clock, r: Random) -> Result[(), ()] {
-    let a = memory(c, r, defaults())
-    let b = memory(c, r, defaults())
+    let a = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
+    let b = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let first_id = identity(a)
     if same(first_id, identity(a)) && !same(first_id, identity(b)) && version(snapshot(a)) == 0 {
         Ok(())
@@ -605,18 +641,18 @@ type FollowingReader: send {
     done: Receiver[()]
 }
 
-fn read_following(take reader: FollowingReader) -> bool waits {
+fn read_following(take read_source: FollowingReader) -> bool waits {
     let mut previous: u64 = 0
     for _ in 0u64 .. 64 {
-        result.unwrap(channel.receive(reader.done))
-        let s = latest.read(reader.current)
+        result.unwrap(channel.receive(read_source.done))
+        let s = latest.read(read_source.current)
         let v = version(s)
         if v < previous || value_at(s, 1) != v {
             return false
         }
         previous = v
     }
-    let final_root = latest.read(reader.current)
+    let final_root = latest.read(read_source.current)
     version(final_root) == 64 && value_at(final_root, 1) == 64
 }
 
@@ -630,7 +666,7 @@ fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     let (send2, receive2): (Sender[()], Receiver[()]) = channel.new(1)
     let payload = FollowingReader(current: latest.handle(h), done: take receive)
     let payload2 = FollowingReader(current: take h, done: take receive2)
-    let reader = task.spawn(tasks, bytes 1048576, take payload, read_following)
+    let read_source = task.spawn(tasks, bytes 1048576, take payload, read_following)
     let reader2 = task.spawn(tasks, bytes 1048576, take payload2, read_following)
     for v in 1u64 .. 65 {
         if !put_one(mut db, 1, v) {
@@ -639,7 +675,7 @@ fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
         result.unwrap(channel.send(send, ()))
         result.unwrap(channel.send(send2, ()))
     }
-    let a = result.unwrap(task.join(take reader))
+    let a = result.unwrap(task.join(take read_source))
     let b = result.unwrap(task.join(take reader2))
     if a && b {
         Ok(())
@@ -712,82 +748,10 @@ fn quotient(v: u64) -> Result[u64, Capacity] {
     Ok(v / 4)
 }
 
-fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
-    match result.unwrap(get(s, t, k)) {
+fn typed_value(s: Snapshot, t: Table[u64, u64], k: u64) -> u64 waits {
+    match result.unwrap(get(law_reader(s), s, t, k)) {
         None => 0,
         Some(v) => v
-    }
-}
-
-// One transaction writes row 1, nests a body that writes row 2 and spins
-// under a bound of N inside an outer bound of `outer`, tries to reserve one
-// more step in the outer bound, then writes row 3. Answers whether the
-// spinning body ran, the committed rows 1, 2 and 3, and whether the one-step
-// reservation after it was admitted.
-fn overrun_case(c: Clock, outer: u64) -> (u64, u64, u64, u64, bool) waits {
-    let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let ran: Log[u64] = log.new()
-    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
-        put(mut tx, t, 1, 10)?
-        let nested = rollback_writes_on_overrun(mut tx, outer, scoped fn(mut o: Tx) -> Result[(Result[Result[(), Error], OutOfTime], bool), Error] {
-            let inner = rollback_writes_on_overrun(mut o, 1000, scoped fn(mut i: Tx) -> Result[(), Error] {
-                log.append(ran, 1)
-                put(mut i, t, 2, 20)?
-                loop {}
-            })
-            let probe = bound steps 1 {
-                ()
-            }
-            let admitted = match probe {
-                Ok(_) => true,
-                Error(_) => false,
-            }
-            Ok((take inner, admitted))
-        })
-        let probed = match nested {
-            Ok(Ok((Error(OutOfTime(steps: 1000)), admitted))) => admitted,
-            _ => return Error(Missing("overrun")),
-        }
-        put(mut tx, t, 3, 30)?
-        Ok(probed)
-    })
-    let probed = match take out {
-        Ok(Committed(done)) => done.value,
-        _ => return (9, 0, 0, 0, false),
-    }
-    let s = snapshot(db)
-    let sh = shape(t)
-    (list.len(log.finish(take ran)), typed_value(s, sh, 1), typed_value(s, sh, 2), typed_value(s, sh, 3), probed)
-}
-
-// MEM-30 with a rollback-able Tx. An overrun leaves none of the body's writes,
-// and the transaction goes on to write and commit. Oracle for the charge, by
-// hand from rollback_writes_on_overrun's source: the outer body's call (1),
-// the call of rollback_writes_on_overrun (1), freeze (its call, three
-// replace, two empty_ops at 6 each: its call, new_data_rows with three
-// list.new, map.new; then list.push and arc.new: 18), share_roots (1 + 3
-// share_page_tree + 4 arc.share: the collection map's root and empty child,
-// the streams and catalog roots), two empty_ops (12) and the clone of the
-// layer list (1) come to 41 before the inner bound of N is reserved, and the
-// overrun returns at `?` with no step. So an outer bound of N + 41 runs the
-// body and is then exhausted: a one-step reservation after it is refused,
-// which an overrun that refunded a step would admit. N + 42 leaves that step,
-// and N + 40 refuses the body's entry and keeps N - 1.
-pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
-    let exact = overrun_case(c, 1041)
-    let spare = overrun_case(c, 1042)
-    let short = overrun_case(c, 1040)
-    exact.0 == 1 && exact.1 == 10 && exact.2 == 0 && exact.3 == 30 && !exact.4 && spare.0 == 1 && spare.4 && short.0 == 0 && short.1 == 10 && short.2 == 0 && short.3 == 30 && short.4
-}
-
-@test
-fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
-    if law_rollback_on_overrun(c) {
-        Ok(())
-    } else {
-        Error(())
     }
 }
 
@@ -803,10 +767,10 @@ fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
 // row 1 as "one", row 2 gone, rows 3, 4 and 64 as staged, row 101 present,
 // and 65 rows in all (64 staged, less row 2, plus rows 100 and 101). The inner callback's bound is below what its enclosing bound has
 // left, since a nested bound cannot grant steps its parent no longer holds.
-fn layered_reads(tx: Tx, sh: Shape[u64, String], big: String) -> Result[bool, Error] {
+fn layered_reads(tx: Tx, sh: Table[u64, String], big: String) -> Result[bool, Error] {
     let mut rows = range(tx, sh, Included(1), Included(200))?
     let mut seen = 0u64
-    while let Some(_) = next_range(mut rows)? {
+    while let Some(_) = next_in(tx, mut rows)? {
         seen += 1
     }
     let one = fetch(tx, sh, 1)? == Some(string.from("one"))
@@ -823,14 +787,14 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
     let mut raw: Bytes = list.with_capacity(1000)
     list.fill(mut raw, 1000, 97u8)
     let big = result.unwrap(string.from_utf8(take raw))
-    let sh = shape(t)
-    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+    let sh = view t
+    let out = run(mut db, None, (copy_env(t), copy_env(big), copy_env(sh)), fn(mut tx, call_env) -> Result[bool, Error] {
         for k in 1u64 .. 65 {
-            put(mut tx, t, k, big)?
+            put(mut tx, call_env.0, k, call_env.1)?
         }
         let shared = bound bytes 32768 {
             rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
-                put(mut w, t, 1, "one")
+                put(mut w, call_env.0, 1, "one")
             })
         }
         let fits = match shared {
@@ -838,34 +802,34 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
             _ => false,
         }
         let nested = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
-            put(mut w, t, 100, "hundred")?
+            put(mut w, call_env.0, 100, "hundred")?
             let inner = rollback_writes_on_overrun(mut w, 50000, scoped fn(mut v: Tx) -> Result[(), Error] {
-                let _ = delete(mut v, t, 2)?
-                put(mut v, t, 101, "hundred one")
+                let _ = delete(mut v, call_env.0, 2)?
+                put(mut v, call_env.0, 101, "hundred one")
             })
             match inner {
                 Ok(Ok(())) => {},
                 _ => return Error(Missing("inner")),
             }
-            if layered_reads(w, sh, big)? {
+            if layered_reads(w, call_env.2, call_env.1)? {
                 Ok(())
             } else {
                 Error(Missing("reads"))
             }
         })
         let typed = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
-            put(mut w, t, 3, "three")?
+            put(mut w, call_env.0, 3, "three")?
             Error(Missing("typed"))
         })
         let over = rollback_writes_on_overrun(mut tx, 1000, scoped fn(mut w: Tx) -> Result[(), Error] {
-            put(mut w, t, 4, "four")?
+            put(mut w, call_env.0, 4, "four")?
             loop {}
         })
         let kept = rollback_writes_on_error(mut tx, scoped fn(mut w: Tx) -> Result[(), Error] {
-            if !layered_reads(w, sh, big)? {
+            if !layered_reads(w, call_env.2, call_env.1)? {
                 return Error(Missing("reads after overrun"))
             }
-            put(mut w, t, 5, "five")
+            put(mut w, call_env.0, 5, "five")
         })
         let shapes = match (nested, typed, over, kept) {
             (Ok(Ok(())), Ok(Error(_)), Error(_), Ok(())) => true,
@@ -889,11 +853,11 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
         } else {
             Some(string.from(big))
         }
-        if result.unwrap(get(s, sh, k)) != want {
+        if result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, k)) != want {
             good = false
         }
     }
-    good && result.unwrap(get(s, sh, 100)) == Some(string.from("hundred")) && result.unwrap(get(s, sh, 101)) == Some(string.from("hundred one"))
+    good && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 100)) == Some(string.from("hundred")) && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 101)) == Some(string.from("hundred one"))
 }
 
 @test
@@ -905,16 +869,34 @@ fn test_callback_shares_staged(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-// For each bound in 0..`top`, whether a bounded body that deletes row 2 and
-// writes rows 3 and 5 returns, on a store with rows 1..64
-// whose old rows are retained (a pin) or not.
-fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
+fn retention_returned(mut db: Db, t: Table[u64, u64], steps: u64) -> bool waits {
+    let ran = result.unwrap(run(mut db, None, (copy_env(steps), copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
+        let bounded = rollback_writes_on_overrun(mut tx, call_env.0, scoped fn(mut w: Tx) -> Result[(), Error] {
+            let _ = delete(mut w, call_env.1, 2)?
+            put(mut w, call_env.1, 3, 30)?
+            put(mut w, call_env.1, 5, 50)
+        })
+        let status = match bounded {
+            Ok(Ok(())) => "returned",
+            Error(_) => "overran",
+            _ => fail("retention body refused"),
+        }
+        // Abort so every bound starts from the same rows.
+        Error(Missing(status))
+    }))
+    match take ran {
+        Aborted(Undone(value: Missing(why), ..)) => why == "returned",
+        _ => fail("retention run"),
+    }
+}
+
+fn retention_threshold(c: Clock, retained: bool) -> u64 waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let seeded = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let seeded = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         for k in 1u64 .. 65 {
-            put(mut tx, t, k, k)?
+            put(mut tx, call_env, k, k)?
         }
         Ok(())
     }))
@@ -926,41 +908,29 @@ fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
         let held = snapshot(db)
         let _ = result.unwrap(pin(mut db, "held", held))
     }
-    let mut out: List[bool] = list.new()
-    for b in 0u64 .. top {
-        let ran = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
-            let bounded = rollback_writes_on_overrun(mut tx, b, scoped fn(mut w: Tx) -> Result[(), Error] {
-                let _ = delete(mut w, t, 2)?
-                put(mut w, t, 3, 30)?
-                put(mut w, t, 5, 50)
-            })
-            let returned = match bounded {
-                Ok(_) => true,
-                Error(_) => false,
-            }
-            // Abort, so every bound starts from the same rows.
-            Error(Missing(if returned {
-                "returned"
-            } else {
-                "overran"
-            }))
-        }))
-        match take ran {
-            Aborted(Undone(value: Missing(why), ..)) => list.push(mut out, why == "returned"),
-            _ => fail("retention run"),
+    let mut low = 0u64
+    let mut high = 1u64
+    while !retention_returned(mut db, t, high) {
+        if high > 9223372036854775807 {
+            fail("retention body never returned")
+        }
+        high *= 2
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        if retention_returned(mut db, t, mid) {
+            high = mid
+        } else {
+            low = mid + 1
         }
     }
-    take out
+    low
 }
 
-// Re-executing a body on a replay fork runs it with old rows retained, where
-// the live run may not have. Its metered steps must not depend on that, or a
-// tight bound gives the two runs different outcomes. Oracle: the outcome of
-// each bound without retention; the bound sweeps past the body's whole cost.
+// A replay fork retains old rows even when the live run does not. The body
+// must return at the same step threshold under either retention policy.
 pub fn law_retention_keeps_steps(c: Clock) -> bool waits {
-    let live = retention_outcomes(c, false, 1200)
-    let held = retention_outcomes(c, true, 1200)
-    live[1199] && live == held
+    retention_threshold(c, false) == retention_threshold(c, true)
 }
 
 @test

@@ -8,7 +8,7 @@ use hirsel_core_ids::launch::Metadata;
 use std::{
     collections::VecDeque,
     ptr::NonNull,
-    sync::{Condvar, Mutex, OnceLock, mpsc},
+    sync::{Condvar, Mutex, OnceLock},
     thread::{self, JoinHandle},
 };
 
@@ -26,7 +26,7 @@ pub(super) struct UnitStack {
 unsafe impl Send for UnitStack {}
 
 impl UnitStack {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let guard = crate::task_heap::page_bytes();
         let len = UNIT_STACK_BYTES + guard;
         // SAFETY: allocate a private stack and make its lowest page inaccessible.
@@ -164,13 +164,11 @@ pub(crate) struct Memory {
     pages: Cache<Mapping>,
     work: Mutex<Work>,
     ready: Condvar,
-    release_room: Condvar,
 }
 
 /// The storage operations a running task can request from its unit pool.
 pub(crate) trait SharedMemory: Sync {
     fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata;
-    fn signal_stack(&self) -> Stack;
     fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32>;
     fn take_task_stack(&self) -> Stack;
     fn put_task_stack(&self, stack: Stack);
@@ -203,7 +201,6 @@ impl Memory {
                 closing: false,
             }),
             ready: Condvar::new(),
-            release_room: Condvar::new(),
         }
     }
 
@@ -219,27 +216,54 @@ impl Memory {
         }
     }
 
-    pub(crate) fn map<T: Send + 'static>(&self, map: impl FnOnce() -> T + Send + 'static) -> T {
-        let (send, receive) = mpsc::sync_channel(1);
-        self.work.lock().unwrap().maps.push_back(Box::new(move || {
-            let _ = send.send(map());
-        }));
-        self.ready.notify_one();
-        match receive.try_recv() {
-            Ok(value) => value,
-            Err(mpsc::TryRecvError::Empty) => {
-                let _blocking = super::blocking();
-                receive.recv().unwrap()
-            }
-            Err(mpsc::TryRecvError::Disconnected) => panic!("memory thread disconnected"),
+    /// Run `job` on the memory thread.
+    pub(super) fn post(&self, job: impl FnOnce() + Send + 'static) {
+        // The checker models no memory thread: a scheduled thread runs the
+        // job in place, at the point it would be posted.
+        #[cfg(test)]
+        if super::check::modelled() {
+            return job();
         }
+        self.work.lock().unwrap().maps.push_back(Box::new(job));
+        self.ready.notify_one();
     }
 
+    /// Map on the memory thread while the running unit parks. Off the pool
+    /// (no unit to park) the caller maps in place.
+    pub(crate) fn map<T: Send + 'static>(&self, map: impl FnOnce() -> T + Send + 'static) -> T {
+        #[cfg(test)]
+        if super::check::modelled() {
+            return map();
+        }
+        if !super::in_unit() {
+            return map();
+        }
+        struct Out<T>(*mut Option<T>, *const super::Reply);
+        // SAFETY: the parked unit keeps both alive until the reply completes.
+        unsafe impl<T: Send> Send for Out<T> {}
+        let reply = super::Reply::new();
+        let mut answer = None;
+        let out = Out(&mut answer, &reply);
+        self.post(move || {
+            let out = out;
+            // SAFETY: as above; nothing touches `out` after the completion.
+            unsafe {
+                *out.0 = Some(map());
+                super::Reply::complete(out.1);
+            }
+        });
+        reply.wait();
+        answer.unwrap()
+    }
+
+    /// Queue `release` for the memory thread, or dispose of it here when the
+    /// queue is full rather than wait for room.
     fn release(&self, bytes: usize, release: Reclaim) {
         let mut work = self.work.lock().unwrap();
-        while work.releases.len() == RELEASE_SLOTS {
-            let _blocking = super::blocking();
-            work = self.release_room.wait(work).unwrap();
+        if work.releases.len() == RELEASE_SLOTS {
+            drop(work);
+            release.dispose();
+            return;
         }
         work.releases.push_back((bytes, release));
         work.pending_bytes += bytes;
@@ -253,9 +277,6 @@ impl Memory {
                 let mut work = self.work.lock().unwrap();
                 while work.maps.is_empty() && work.releases.is_empty() && !work.closing {
                     work = self.ready.wait(work).unwrap();
-                }
-                if work.releases.len() == RELEASE_SLOTS {
-                    self.release_room.notify_all();
                 }
                 (work.maps.pop_front(), work.releases.pop_front())
             };
@@ -278,10 +299,8 @@ impl Memory {
         drop(self.pages.drain());
     }
 
-    pub(super) fn take_unit_stack(&self) -> UnitStack {
-        self.unit_stacks
-            .take(|_| true)
-            .unwrap_or_else(|| self.map(UnitStack::new))
+    pub(super) fn cached_unit_stack(&self) -> Option<UnitStack> {
+        self.unit_stacks.take(|_| true)
     }
 
     pub(super) fn put_unit_stack(&self, stack: UnitStack) {
@@ -311,20 +330,28 @@ impl SharedMemory for Memory {
     fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata {
         // All units have the same target and leading launch options. Resolve
         // the lazy digest here so its file mapping is also released here.
-        self.launch
-            .get_or_init(|| {
-                let target = target.to_owned();
-                self.map(move || {
+        // The memory thread resolves it once; later jobs find it set. No
+        // worker waits inside `get_or_init`.
+        if let Some(launch) = self.launch.get() {
+            return launch.clone();
+        }
+        struct Cell(*const OnceLock<Metadata>);
+        // SAFETY: the pool's memory outlives the memory thread's jobs.
+        unsafe impl Send for Cell {}
+        let cell = Cell(&self.launch);
+        let target = target.to_owned();
+        self.map(move || {
+            let cell = cell;
+            // SAFETY: as above.
+            let launch = unsafe { &*cell.0 };
+            launch
+                .get_or_init(|| {
                     let launch = Metadata::native(&target, n_place, describe);
                     let _ = launch.digest();
                     launch
                 })
-            })
-            .clone()
-    }
-
-    fn signal_stack(&self) -> Stack {
-        self.map(Stack::new)
+                .clone()
+        })
     }
 
     fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32> {

@@ -15,6 +15,7 @@ pub mod abi_tasks;
 #[cfg(feature = "allocation-count")]
 mod allocation_count;
 mod allocator;
+mod argon2id;
 mod backing_observation;
 pub mod block;
 pub mod causes;
@@ -38,7 +39,10 @@ pub mod host_ops;
 mod isa;
 pub mod isolate;
 pub mod latest;
+#[cfg(feature = "record")]
+mod law;
 pub mod limit;
+mod media;
 #[cfg(feature = "prof")]
 mod mem_prof;
 #[cfg(any(test, feature = "prof"))]
@@ -50,6 +54,7 @@ mod os_net;
 mod os_resolve;
 mod os_sync;
 mod os_tls;
+pub use os_tls::packet_cipher::PacketCipher;
 mod os_unix;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
@@ -65,9 +70,10 @@ mod retention;
 pub mod schedule_script;
 mod scram;
 pub mod secret;
-mod sequencer;
 mod sha1;
 mod sha256;
+mod sha512;
+pub mod shared;
 mod signature;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
@@ -81,6 +87,7 @@ pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod test_provider;
 pub mod tls;
+mod udp_net;
 mod units;
 pub mod units_lang;
 mod unix_net;
@@ -143,6 +150,7 @@ pub struct Context {
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
     pub(crate) foreign: *const foreign::Run,
+    pub(crate) root_limit: u64,
 }
 
 const _: () =
@@ -195,6 +203,7 @@ impl Context {
 
     pub(crate) fn with_funding(current: Funding) -> Self {
         current.normalize();
+        let root_limit = current.capacity();
         static DEFAULT_KEYS: std::sync::OnceLock<MapKeys> = std::sync::OnceLock::new();
         let (map_hash_key, map_fast_salt, map_strong_key) =
             *DEFAULT_KEYS.get_or_init(|| map_keys(&[0; 16]));
@@ -224,12 +233,14 @@ impl Context {
             frame_lists: frame_list::FrameLists::default(),
             spare_isolate_cell: None,
             foreign: std::ptr::null(),
+            root_limit,
         }
     }
 
     #[cfg(feature = "testing")]
     pub fn reset_test_limit(&mut self, bytes: u64) {
         self.current = Funding::root(bytes);
+        self.root_limit = bytes;
         self.current.bind();
     }
     /// Harness-only transfer of an owned descriptor into this run's socket records.

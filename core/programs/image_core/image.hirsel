@@ -1,0 +1,261 @@
+pub type Format = Jpeg | Png | Webp | Avif | Gif | Qoi
+
+pub type ColorSpace = Unspecified | Srgb | DisplayP3 | EmbeddedIcc
+
+pub type IccStorage = Raw | Zlib | JpegSegments
+
+// For JPEG, the range spans the APP2 headers as well as the profile fragments.
+pub type IccProfile {
+    start: u64,
+    end: u64,
+    storage: IccStorage
+}
+
+pub type Limits {
+    max_bytes: u64,
+    // JPEG bytes through the first scan header.
+    max_header_bytes: u64,
+    max_pixels: u64,
+    max_frames: u32,
+    max_steps: u64
+}
+
+pub type ImageInfo {
+    format: Format,
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    orientation: u8,
+    has_alpha: bool,
+    frame_count: u32,
+    color_space: ColorSpace,
+    icc_profile: Option[IccProfile]
+}
+
+pub type Error = UnknownFormat | Truncated | Malformed | Unsupported | ByteLimit | HeaderLimit | PixelLimit | FrameLimit | WorkLimit
+
+// The pixel cap covers full canvas pixels across all frames.
+fn check_size(w: u32, h: u32, frames: u32, limits: Limits) -> Result[(), Error] {
+    if w == 0 || h == 0 || frames == 0 {
+        return Error(Malformed)
+    }
+    if frames > limits.max_frames {
+        return Error(FrameLimit)
+    }
+    let width: u64 = int.widen(w)
+    let height: u64 = int.widen(h)
+    let count: u64 = int.widen(frames)
+    if width * height > limits.max_pixels / count {
+        return Error(PixelLimit)
+    }
+    Ok(())
+}
+
+fn info(format: Format, w: u32, h: u32, depth: u8, alpha: bool) -> ImageInfo {
+    ImageInfo(format: format, width: w, height: h, bit_depth: depth, orientation: 1, has_alpha: alpha, frame_count: 1, color_space: Unspecified, icc_profile: None)
+}
+
+// Reads container metadata before any pixel allocation. Entropy streams are
+// validated by their decoders. The input remains owned by the caller.
+pub fn probe(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    if list.len(input) > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    let inspected = bound steps limits.max_steps {
+        probe_header(input, limits)
+    }
+    match inspected {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn probe_header(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    if n < 2 {
+        return Error(Truncated)
+    }
+    let first: u16 = list.word_be(input, 0)
+    if first == 0xffd8 {
+        return probe_jpeg(input, limits)
+    }
+    if n < 4 {
+        return Error(Truncated)
+    }
+    let magic: u32 = list.word_be(input, 0)
+    if magic == 0x716f6966 {
+        return probe_qoi(input, limits)
+    }
+    if magic == 0x89504e47 {
+        return probe_png(input, limits)
+    }
+    if magic == 0x47494638 {
+        return probe_gif(input, limits)
+    }
+    if magic == 0x52494646 {
+        return probe_webp(input, limits)
+    }
+    if n >= 8 {
+        let kind: u32 = list.word_be(input, 4)
+        if kind == 0x66747970 {
+            return probe_avif(input, limits)
+        }
+    }
+    Error(UnknownFormat)
+}
+
+fn probe_qoi(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    if list.len(input) < 14 {
+        return Error(Truncated)
+    }
+    let w: u32 = list.word_be(input, 4)
+    let h: u32 = list.word_be(input, 8)
+    check_size(w, h, 1, limits)?
+    let channels = input[12]
+    if (channels != 3 && channels != 4) || input[13] > 1 {
+        return Error(Malformed)
+    }
+    let mut header = info(Qoi, w, h, 8, channels == 4)
+    if input[13] == 0 {
+        header.color_space = Srgb
+    }
+    Ok(header)
+}
+
+fn png_components(kind: u8, depth: u8) -> Result[u64, Error] {
+    match kind {
+        0 => if depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16 {
+            Ok(1)
+        } else {
+            Error(Malformed)
+        },
+        3 => if depth == 1 || depth == 2 || depth == 4 || depth == 8 {
+            Ok(1)
+        } else {
+            Error(Malformed)
+        },
+        2 => if depth == 8 || depth == 16 {
+            Ok(3)
+        } else {
+            Error(Malformed)
+        },
+        4 => if depth == 8 || depth == 16 {
+            Ok(2)
+        } else {
+            Error(Malformed)
+        },
+        6 => if depth == 8 || depth == 16 {
+            Ok(4)
+        } else {
+            Error(Malformed)
+        },
+        _ => Error(Malformed),
+    }
+}
+
+fn probe_png(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    if n < 33 {
+        return Error(Truncated)
+    }
+    let signature: u64 = list.word_be(input, 0)
+    let len: u32 = list.word_be(input, 8)
+    let kind: u32 = list.word_be(input, 12)
+    if signature != 0x89504e470d0a1a0a || len != 13 || kind != 0x49484452 {
+        return Error(Malformed)
+    }
+    let w: u32 = list.word_be(input, 16)
+    let h: u32 = list.word_be(input, 20)
+    check_size(w, h, 1, limits)?
+    let depth = input[24]
+    let colors = input[25]
+    png_components(colors, depth)?
+    if w > 0x7fffffff || h > 0x7fffffff || input[26] != 0 || input[27] != 0 || input[28] > 1 {
+        return Error(Malformed)
+    }
+    let crc: u32 = list.word_be(input, 29)
+    if std.crc32.update(0, input, 12, 29) != crc {
+        return Error(Malformed)
+    }
+    let mut header = info(Png, w, h, depth, colors == 4 || colors == 6)
+    let mut at = 33u64
+    let mut declared = 0u32
+    let mut frames = 0u32
+    let mut seen_data = false
+    while at < n {
+        if n - at < 12 {
+            return Error(Truncated)
+        }
+        let size: u32 = list.word_be(input, at)
+        let count: u64 = int.widen(size)
+        if count > n - at - 12 {
+            return Error(Truncated)
+        }
+        let tag: u32 = list.word_be(input, at + 4)
+        let body = at + 8
+        let end = body + count
+        if tag == 0x6163544c {
+            if count != 8 || declared != 0 || seen_data {
+                return Error(Malformed)
+            }
+            declared = list.word_be(input, body)
+            check_size(w, h, declared, limits)?
+        } else if tag == 0x6663544c {
+            if count != 26 || frames == declared {
+                return Error(Malformed)
+            }
+            let fw: u32 = list.word_be(input, body + 4)
+            let fh: u32 = list.word_be(input, body + 8)
+            let x: u32 = list.word_be(input, body + 12)
+            let y: u32 = list.word_be(input, body + 16)
+            if fw == 0 || fh == 0 || x >= w || y >= h || fw > w - x || fh > h - y {
+                return Error(Malformed)
+            }
+            frames += 1
+        } else if tag == 0x49444154 {
+            seen_data = true
+        } else if tag == 0x74524e53 {
+            header.has_alpha = true
+        } else if tag == 0x65584966 {
+            header.orientation = exif_orientation(input, body, end)?
+        } else if tag == 0x73524742 {
+            if count != 1 || input[body] > 3 {
+                return Error(Malformed)
+            }
+            header.color_space = Srgb
+        } else if tag == 0x63494350 {
+            if count != 4 || input[body + 3] > 1 {
+                return Error(Malformed)
+            }
+            if input[body + 1] == 13 && input[body + 2] == 0 && input[body + 3] == 1 {
+                if input[body] == 1 {
+                    header.color_space = Srgb
+                } else if input[body] == 12 {
+                    header.color_space = DisplayP3
+                }
+            }
+        } else if tag == 0x69434350 {
+            let start = png_icc_offset(input, body, end)?
+            header.icc_profile = Some(IccProfile(start: start, end: end, storage: Zlib))
+            header.color_space = EmbeddedIcc
+        } else if tag == 0x49454e44 {
+            if count != 0 || end + 4 != n || !seen_data || frames != declared {
+                return Error(Malformed)
+            }
+            if declared != 0 {
+                header.frame_count = declared
+            }
+            return Ok(header)
+        }
+        at = end + 4
+    }
+    Error(Truncated)
+}
+
+fn has_icc(header: ImageInfo) -> bool {
+    if let Some(_) = header.icc_profile {
+        true
+    } else {
+        false
+    }
+}

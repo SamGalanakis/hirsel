@@ -5,6 +5,8 @@ charge = "charge-v1"
 
 [sources]
 "postgres.hirsel" = "postgres"
+"diagnostic.hirsel" = "postgres"
+"exchange.hirsel" = "postgres"
 
 [dependencies]
 std = { major = 1 }
@@ -15,3 +17,4 @@ grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]
 
 [tests.sources]
 "sim_tests.hirsel" = "sim_tests"
+"example.hirsel" = "example"

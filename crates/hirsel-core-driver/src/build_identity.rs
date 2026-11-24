@@ -260,3 +260,92 @@ mod assembly_environment {
         assert_ne!(original.2.recipe, cold.2.recipe, "builtin numbers enter R");
     }
 }
+
+// The recapture follows an ELF link's lld editor; a Mach-O link runs ld64
+// through the driver and observes no separate editor.
+#[cfg(target_os = "linux")]
+#[test]
+fn development_link_recapture_preserves_the_observed_recipe() {
+    for after_check in [false, true] {
+        for changed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut options = native_options(Backend::Cranelift, dir.path());
+            let bin = dir.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            let first = bin.join("first/ld.lld");
+            let second = bin.join("second/ld.lld");
+            for path in [&first, &second] {
+                std::fs::create_dir(path.parent().unwrap()).unwrap();
+            }
+            let clang = options.link.driver();
+            let lld = clang.with_file_name("ld.lld");
+            let quote =
+                |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+            let editor = format!("#!/bin/sh\nexec {} \"$@\"\n", quote(&lld));
+            crate::executable::write(&first, editor.as_bytes(), 0o755).unwrap();
+            let replacement = if changed {
+                format!("{editor}# different editor bytes\n")
+            } else {
+                editor.clone()
+            };
+            crate::executable::write(&second, replacement.as_bytes(), 0o755).unwrap();
+            let cc = bin.join("clang");
+            let script = format!(
+                "#!/bin/sh\neditor={}\nif [ ! -f \"$editor\" ]; then editor={}; fi\n\
+                 if [ \"$1\" = -print-prog-name=ld.lld ]; then printf '%s\\n' \"$editor\"; exit; fi\n\
+                 exec {} --ld-path=\"$editor\" \"$@\"\n",
+                quote(&first),
+                quote(&second),
+                quote(clang)
+            );
+            crate::executable::write(&cc, script.as_bytes(), 0o755).unwrap();
+            options.link = Link::Driver(cc);
+            let observed =
+                crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)
+                    .unwrap();
+            assert_eq!(observed.1.linker, first);
+            options.observed = Some(Arc::new(observed));
+            let entry = DefPath::from_full("app@1/main/main").unwrap();
+            let request = source_request(
+                "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }",
+                dir.path(),
+            );
+            let product = Driver::default()
+                .check(request, &mut Meter::new(false))
+                .unwrap();
+            if after_check {
+                let first = first.clone();
+                AFTER_CHECK.with(|hook| {
+                    *hook.borrow_mut() =
+                        Some(Box::new(move |_| std::fs::remove_file(&first).unwrap()));
+                });
+            } else {
+                std::fs::remove_file(&first).unwrap();
+            }
+            let result = product.build(&entry, &options);
+            AFTER_CHECK.with(|hook| hook.borrow_mut().take());
+            if changed {
+                match result {
+                    Err(NativeStop::Link(reason)) => {
+                        assert_eq!(reason, "link inputs changed during native build")
+                    }
+                    Err(other) => panic!("unexpected link refusal: {other}"),
+                    Ok(_) => panic!("changed recipe linked under the original key"),
+                }
+                assert!(!options.output.exists());
+                crate::executable::write(&first, editor.as_bytes(), 0o755).unwrap();
+                let original = product.build(&entry, &options).unwrap();
+                assert!(
+                    original.linked,
+                    "the refused attempt must leave the original key empty"
+                );
+                run_clean(&original.executable, 7);
+            } else {
+                let recovered = result.unwrap();
+                assert!(recovered.linked);
+                run_clean(&recovered.executable, 7);
+                assert!(!product.build(&entry, &options).unwrap().linked);
+            }
+        }
+    }
+}

@@ -8,15 +8,91 @@ std = { major = 1 }
 
 [sources]
 "store.hirsel" = "store"
+"store-stream-key.hirsel" = "store"
+"store-keyed-journal.hirsel" = "store"
+"store-keyed-claims.hirsel" = "store"
+"store-keyed-lifecycle.hirsel" = "store"
+"store-streams.hirsel" = "store"
+"store-attempts.hirsel" = "store"
+"store-commit.hirsel" = "store"
+"store-commit-wire.hirsel" = "store"
+"store-mux.hirsel" = "store"
+"sizes.hirsel" = "store"
 "store-journal-worker.hirsel" = "store"
+"store-journal-status.hirsel" = "store"
+"store-journal-recover.hirsel" = "store"
 "store-pages.hirsel" = "store"
+"store-tiered.hirsel" = "store"
+"store-tiered-frames.hirsel" = "store"
+"store-tiered-packs.hirsel" = "store"
+"store-tiered-ranges.hirsel" = "store"
+"store-tiered-cache.hirsel" = "store"
+"store-tiered-pager.hirsel" = "store"
+"store-tiered-pager-batch.hirsel" = "store"
+"store-tiered-attempt.hirsel" = "store"
+"store-tiered-plan.hirsel" = "store"
+"store-tiered-point-read.hirsel" = "store"
+"store-tiered-count.hirsel" = "store"
+"store-tiered-scan.hirsel" = "store"
+"store-tiered-span.hirsel" = "store"
+"store-tiered-initial-changes.hirsel" = "store"
+"store-tiered-pins.hirsel" = "store"
+"store-tiered-overlay.hirsel" = "store"
+"store-tiered-replay.hirsel" = "store"
+"store-tiered-fold.hirsel" = "store"
+"store-tiered-emission.hirsel" = "store"
+"store-tiered-publish.hirsel" = "store"
+"store-cut-participants.hirsel" = "store"
+"store-tiered-probe.hirsel" = "store"
+"store-tiered-probe-index.hirsel" = "store"
+"store-tiered-promote.hirsel" = "store"
+"store-tiered-frees.hirsel" = "store"
+"store-tiered-lineage.hirsel" = "store"
+"store-tiered-residency.hirsel" = "store"
 "store-manifest.hirsel" = "store"
+"store-list-read.hirsel" = "store"
+"store-manifest-wire.hirsel" = "store"
+"store-page-recovery.hirsel" = "store"
 "store-locations.hirsel" = "store"
 "store-packs.hirsel" = "store"
+"store-pack-index.hirsel" = "store"
 "store-scrub.hirsel" = "store"
-"store-bucket.hirsel" = "store"
+"store-history.hirsel" = "store"
+"store-history-read.hirsel" = "store"
+"store-history-witness.hirsel" = "store"
+"store-history-packs.hirsel" = "store"
+"store-reclaim.hirsel" = "store"
+"store-register.hirsel" = "store"
+"store-object-authority.hirsel" = "store"
+"store-object-open.hirsel" = "store"
+"store-object-import.hirsel" = "store"
+"store-object-export.hirsel" = "store"
+"store-export.hirsel" = "store"
+"store-install.hirsel" = "store"
+"store-object-cut.hirsel" = "store"
+"store-activation.hirsel" = "store"
+"store-object-journal.hirsel" = "store"
+"store-sim-levels.hirsel" = "store"
+"store-object-writer.hirsel" = "store"
+"store-levels.hirsel" = "store"
+"store-health.hirsel" = "store"
+"store-health-types.hirsel" = "status"
+"store-followers.hirsel" = "store"
+"store-follower-service.hirsel" = "store"
+"store-object-follower.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
+"store-tx.hirsel" = "store"
+"store-tiered-refusals.hirsel" = "store"
+"store-index-registry.hirsel" = "store"
+"store-declare.hirsel" = "store"
+"store-migration.hirsel" = "store"
+"store-projector.hirsel" = "store"
+"store-read.hirsel" = "store"
+"store-read-pages.hirsel" = "store"
+"store-cell.hirsel" = "store"
+"store-log.hirsel" = "store"
+"store-edge.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]
@@ -28,33 +104,103 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"store_size_laws.hirsel" = "store"
 "location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"
 "import_read_laws.hirsel" = "store"
 "bucket_laws.hirsel" = "store"
+"bucket_order_laws.hirsel" = "store"
+"bucket_q5_laws.hirsel" = "store"
+"object_cut_laws.hirsel" = "store"
+"object_journal_laws.hirsel" = "store"
+"authority_laws.hirsel" = "store"
+"follower_laws.hirsel" = "store"
+"replication_laws.hirsel" = "store"
 "store_put_laws.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"
+"store_lookup_laws.hirsel" = "store"
+"store_declare_laws.hirsel" = "store"
+"store_changes_page_law.hirsel" = "store"
 "store_fork_laws.hirsel" = "store"
 "store_read_laws.hirsel" = "store"
 "store_disk_laws.hirsel" = "store"
 "store_disk_laws_2.hirsel" = "store"
 "store_crash_laws.hirsel" = "store"
+"store_claim_crash_laws.hirsel" = "store"
+"follower_crash_laws.hirsel" = "store"
 "store_journal_laws.hirsel" = "store"
 "store_journal_laws_2.hirsel" = "store"
 "store_journal_laws_3.hirsel" = "store"
 "store_journal_laws_4.hirsel" = "store"
 "store_pages_paged_laws.hirsel" = "store"
+"tiered_laws.hirsel" = "store"
+"tiered_read_laws.hirsel" = "store"
+"tiered_fold_laws.hirsel" = "store"
+"tiered_promote_laws.hirsel" = "store"
+"tiered_lineage_laws.hirsel" = "store"
+"tiered_plan_laws.hirsel" = "store"
+"tiered_snapshot_laws.hirsel" = "store"
+"tiered_pager_batch_laws.hirsel" = "store"
+"tiered_attempt_laws.hirsel" = "store"
+"tiered_call_laws.hirsel" = "store"
+"tiered_open_laws.hirsel" = "store"
+"tiered_queue_laws.hirsel" = "store"
+"tiered_count_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
+"store_format4_laws.hirsel" = "store"
+"cell_log_laws.hirsel" = "store"
+"store_prior_laws.hirsel" = "store"
+"store_format4_prior_fixtures.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "store"
 "store_packs_disk_laws.hirsel" = "store"
 "store_scrub_laws.hirsel" = "store"
 "store_layout_laws.hirsel" = "store"
 "store_reexec_laws.hirsel" = "store"
 
-[tests.runs."store@1/store/frame_size_boundary"]
+[tests.runs."store@1/store/test_memory_no_frame_limit"]
 limit = 134217728
+
+[tests.runs."store@1/store/directory_grant_covers_journal_worker"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_place_plan_at_floor"]
+limit = 134217728
+
+# The pager reserves C + K + P = 80,794,472 B at the Tiered floor,
+# plus the Task allocation and request channel.
+[tests.runs."store@1/store/test_l70_tiered_sizes_include_cut_quota"]
+limit = 83886080
+
+# A store open at the Tiered floor: r = 182,375,272 B resident (the pager's
+# C + K + P among it) plus the journal worker and timer tasks.
+[tests.runs."store@1/store/test_l70_tiered_open_at_floor"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l68_cut_emits_hot_tiered_write"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l68_served_write_to_cold_tiered"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l69_cut_files_replaced_cold_frames"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l68_fold_cut_publishes_replayed_writes"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l68_fold_cut_counts_pinned_cold_root"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_fold_cut_queues_detached_leaf"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_live_trims_queue_detached_subtrees"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_cuts_drain_queued_pages"]
+limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
@@ -62,11 +208,21 @@ limit = 536870912
 [tests.runs."store@1/store/bucket_test_fence"]
 limit = 536870912
 
-[tests.runs."store@1/store/bucket_test_read_only_mirror"]
+[tests.runs."store@1/store/bucket_test_read_only_capture"]
 limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_ignored_conditions_refuse_genesis"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_register_fence"]
+grants = ["Clock", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]
 
 [tests.runs."store@1/store/bucket_test_soak"]
 limit = 536870912
+
+[tests.runs."store@1/store/bucket_test_claim_cut"]
+limit = 536870912
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]
 
 [tests.runs."store@1/store/disk_pack_bound"]
 limit = 536870912
@@ -89,5 +245,64 @@ limit = 536870912
 [tests.runs."store@1/store/journal_test_fork_pack_lists"]
 limit = 536870912
 
+[tests.runs."store@1/store/journal_test_v264_recovery"]
+limit = 268435456
+
 [tool.workloads]
 s1 = { module = "main", grants = ["Stdout"] }
+
+# These fixtures hold the simulator or writer and one or more follower grants.
+
+[tests.runs."store@1/store/position_survives_three_cuts"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_branch_position"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_follower"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_follower_steps"]
+# Launch ceiling for the fixture's derived two-slot reservation.
+limit = 335544320
+
+[tests.runs."store@1/store/bucket_test_m2_object_writer"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_retention_witness"]
+# Launch ceiling for the fixture's derived one-slot reservation.
+limit = 268435456
+
+[tests.runs."store@1/store/bucket_test_m2_standalone_import"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_prepared_install"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_binding"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_replication"]
+# Launch ceiling for the fixture's derived three-slot reservation.
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_test_m2_follower_overlap"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_fresh_order"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_ack_history"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_claim_witness"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_q5_matrix"]
+limit = 268435456
+
+[tests.runs."store@1/store/bucket_test_m2_genesis_debris"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_sim_levels"]
+limit = 268435456

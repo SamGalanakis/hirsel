@@ -592,3 +592,38 @@ fn ledger_law() {
         );
     }
 }
+
+impl super::Body {
+    /// What an arrival carried, part of its taker's input.
+    pub(super) fn content(&self) -> String {
+        use super::{Body, Credit, Settle};
+        let amounts = |cs: &[Credit]| {
+            cs.iter()
+                .map(|c| c.amount.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        match self {
+            Body::Credits(cs) => amounts(cs),
+            Body::LastRelease(retained, _) => retained.to_string(),
+            // SAFETY: the end arrival owns the ended helper's context.
+            Body::HelperEnd(e) => {
+                let h = unsafe { e.0.as_ref() };
+                let info = h.helper.as_ref().unwrap();
+                format!(
+                    "root {} ret {}",
+                    h.current_used(),
+                    info.ret.as_ref().map_or(0, |v| v.bytes())
+                )
+            }
+            Body::Settlement(_, Settle::Accepted(cs)) => amounts(cs),
+            Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) => {
+                format!("{} bytes", v.bytes())
+            }
+            Body::Item(_, v) => format!("{} bytes tag {}", v.bytes(), v.tag),
+            Body::Close(_) | Body::SealAnswer(_) | Body::Cancel | Body::SharedRelease(_) => {
+                String::new()
+            }
+        }
+    }
+}

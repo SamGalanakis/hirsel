@@ -4,8 +4,8 @@ use crate::mem_sampler::Sampler;
 use crate::prof::{self, Kind};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const TOP_SCOPES: usize = 20;
 const DEFAULT_ENTRIES: usize = 65_536;
@@ -600,25 +600,26 @@ pub(crate) fn scope_exit(kind: u64) {
     });
 }
 
-/// A live run samples on every worker with no shared order. Each worker draws
-/// its own geometric byte gaps. Frees can run on another worker, so sampled
-/// addresses live in one lock-free open-addressed table.
+/// Workers draw independent geometric byte gaps. The sample stays with the
+/// address when ownership moves to a different worker.
 static LIVE: OnceLock<Live> = OnceLock::new();
-const EMPTY: usize = 0;
-const VACATED: usize = 1;
-/// Inserts and lookups probe the same bounded window, so a resident address is
-/// always found. A full window is reported as state loss.
-const PROBES: usize = 128;
 const WORKER_SHIFT: u32 = 40;
 
 struct Live {
-    addresses: Box<[AtomicUsize]>,
-    ids: Box<[AtomicU64]>,
-    mask: usize,
+    samples: Mutex<HashMap<usize, LiveSample>>,
+    capacity: usize,
+    // Each sampled address marks its bucket for its whole lifetime. Collisions
+    // can cause an extra lookup. An unmarked bucket always rules out a sample.
+    marks: Box<[AtomicU32]>,
     /// Sampled allocations the table could not hold, and frees of sampled
     /// allocations on a thread with no runtime stream.
     lost: AtomicU64,
     workers: AtomicU64,
+}
+
+struct LiveSample {
+    id: u64,
+    bytes: u64,
 }
 
 struct LiveWorker {
@@ -632,11 +633,11 @@ thread_local! {
 }
 
 pub(crate) fn start_live(Settings { capacity, .. }: Settings) {
-    let slots = (capacity * 2).next_power_of_two().max(PROBES);
+    let slots = (capacity * 2).next_power_of_two();
     let live = Live {
-        addresses: (0..slots).map(|_| AtomicUsize::new(EMPTY)).collect(),
-        ids: (0..slots).map(|_| AtomicU64::new(0)).collect(),
-        mask: slots - 1,
+        samples: Mutex::new(HashMap::new()),
+        capacity,
+        marks: (0..slots).map(|_| AtomicU32::new(0)).collect(),
         lost: AtomicU64::new(0),
         workers: AtomicU64::new(1),
     };
@@ -647,83 +648,46 @@ pub(crate) fn start_live(Settings { capacity, .. }: Settings) {
 }
 
 impl Live {
-    fn home(&self, address: usize) -> usize {
-        (address >> 4).wrapping_mul(0x9e37_79b9_7f4a_7c15_u64 as usize) & self.mask
-    }
-
-    fn slots(&self, address: usize) -> impl Iterator<Item = usize> + '_ {
-        let home = self.home(address);
-        (0..PROBES).map(move |step| (home + step) & self.mask)
-    }
-
-    fn find(&self, address: usize) -> Option<usize> {
-        for slot in self.slots(address) {
-            match self.addresses[slot].load(Ordering::Acquire) {
-                found if found == address => return Some(slot),
-                EMPTY => return None,
-                _ => {}
-            }
-        }
-        None
+    #[inline]
+    fn mark(&self, address: usize) -> &AtomicU32 {
+        let hash = (address >> 3) ^ (address >> 19);
+        &self.marks[hash & (self.marks.len() - 1)]
     }
 
     fn allocate(&self, address: usize, bytes: u64, backing: Backing) {
-        if !prof::enabled() {
-            return;
-        }
         let Some((probability, id)) = LIVE_WORKER.with_borrow_mut(|worker| {
-            let worker = worker.get_or_insert_with(|| self.worker());
+            if worker.is_none() {
+                if !prof::enabled() {
+                    return None;
+                }
+                *worker = Some(self.worker());
+            }
+            let worker = worker.as_mut().unwrap();
             let probability = worker.sampler.include(bytes)?;
             worker.next += 1;
             Some((probability, worker.prefix | worker.next))
         }) else {
             return;
         };
-        // The address's previous owner freed it without an observed free.
-        // Close that sample so the slot holds one live allocation.
-        if let Some(slot) = self.find(address) {
-            let old = self.ids[slot].load(Ordering::Relaxed);
-            prof::append(Kind::Alloc, &[1, old, 0, 0, 0, prof::now_ns()], &[]);
-            self.ids[slot].store(id, Ordering::Relaxed);
-        } else if !self.claim(address, id) {
+        if !prof::enabled() {
+            return;
+        }
+        let mut samples = self.samples.lock().unwrap();
+        if samples.len() == self.capacity {
             self.lost.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        let ts = prof::now_ns();
+        if let Some(old) = samples.insert(address, LiveSample { id, bytes }) {
+            prof::append(Kind::Alloc, &[1, old.id, 0, 0, 0, ts], &[]);
+        } else {
+            self.mark(address).fetch_add(1, Ordering::Relaxed);
+        }
+        drop(samples);
         super::prof_stack::capture(
             Kind::Alloc,
-            &[
-                0,
-                id,
-                bytes,
-                backing as u64,
-                probability.to_bits(),
-                prof::now_ns(),
-            ],
+            &[0, id, bytes, backing as u64, probability.to_bits(), ts],
         );
-    }
-
-    fn claim(&self, address: usize, id: u64) -> bool {
-        for slot in self.slots(address) {
-            let entry = &self.addresses[slot];
-            let mut current = entry.load(Ordering::Relaxed);
-            while matches!(current, EMPTY | VACATED) {
-                match entry.compare_exchange_weak(
-                    current,
-                    address,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        // Only this address's free reads the id, and it is
-                        // ordered after this allocation returns.
-                        self.ids[slot].store(id, Ordering::Relaxed);
-                        return true;
-                    }
-                    Err(actual) => current = actual,
-                }
-            }
-        }
-        false
     }
 
     fn worker(&self) -> LiveWorker {
@@ -738,22 +702,94 @@ impl Live {
     }
 
     fn resize(&self, address: usize, bytes: u64) {
-        if let Some(slot) = self.find(address) {
-            let id = self.ids[slot].load(Ordering::Relaxed);
-            prof::append(Kind::Alloc, &[2, id, bytes, 0, 0, prof::now_ns()], &[]);
+        if self.mark(address).load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if let Some(sample) = self.samples.lock().unwrap().get_mut(&address) {
+            sample.bytes = bytes;
+            prof::append(
+                Kind::Alloc,
+                &[2, sample.id, bytes, 0, 0, prof::now_ns()],
+                &[],
+            );
         }
     }
 
     fn free(&self, address: usize, bytes: u64) {
-        let Some(slot) = self.find(address) else {
+        let mark = self.mark(address);
+        if mark.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut samples = self.samples.lock().unwrap();
+        let Some(sample) = samples.remove(&address) else {
             return;
         };
-        let id = self.ids[slot].load(Ordering::Relaxed);
-        self.addresses[slot].store(VACATED, Ordering::Release);
+        mark.fetch_sub(1, Ordering::Relaxed);
         if prof::enabled() {
-            prof::append(Kind::Alloc, &[1, id, bytes, 0, 0, prof::now_ns()], &[]);
+            prof::append(
+                Kind::Alloc,
+                &[1, sample.id, bytes, 0, 0, prof::now_ns()],
+                &[],
+            );
         } else {
             self.lost.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+pub(crate) struct Residency {
+    pub(crate) timestamp: u64,
+    pub(crate) rss: u64,
+    pub(crate) samples: Vec<(u64, u64)>,
+}
+
+pub(crate) fn residency() -> Option<Residency> {
+    let live = LIVE.get()?;
+    let page = crate::task_heap::page_bytes();
+    let samples = live.samples.lock().unwrap();
+    let timestamp = prof::now_ns();
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss = statm.split_ascii_whitespace().nth(1)?.parse::<u64>().ok()? * page as u64;
+    let samples = samples
+        .iter()
+        .filter_map(|(&address, sample)| {
+            let bytes = resident_bytes(address, sample.bytes as usize, page)?;
+            Some((sample.id, bytes))
+        })
+        .collect();
+    Some(Residency {
+        timestamp,
+        rss,
+        samples,
+    })
+}
+
+fn resident_bytes(address: usize, bytes: usize, page: usize) -> Option<u64> {
+    let end = address.checked_add(bytes)?;
+    let mut start = address & !(page - 1);
+    let mut resident = 0;
+    let mut pages = [0u8; 256];
+    while start < end {
+        let count = (end - start).div_ceil(page).min(pages.len());
+        // SAFETY: mincore looks up the virtual page range in the kernel. It
+        // does not dereference that range and writes at most count result bytes.
+        // macOS types the result vector as `char`.
+        if unsafe {
+            libc::mincore(
+                start as *mut libc::c_void,
+                count * page,
+                pages.as_mut_ptr().cast(),
+            )
+        } != 0
+        {
+            return None;
+        }
+        for &entry in &pages[..count] {
+            if entry & 1 != 0 {
+                resident += (start + page).min(end) - start.max(address);
+            }
+            start += page;
+        }
+    }
+    Some(resident as u64)
 }

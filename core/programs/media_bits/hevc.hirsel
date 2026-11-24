@@ -1,0 +1,242 @@
+// ITU-T H.265 §§7.3.1–7.3.2. Inputs are individual NAL units without
+// start codes or length prefixes. Parameter-set readers expose header fields.
+pub type Error = Truncated | InvalidNal | InvalidRbsp
+
+pub type Nal {
+    kind: u8,
+    layer_id: u8,
+    temporal_id: u8,
+    irap: bool,
+    idr: bool
+}
+
+pub fn nal(unit: Bytes) -> Result[Nal, Error] {
+    if list.len(unit) < 2 {
+        return Error(Truncated)
+    }
+    let a = unit[0]
+    let b = unit[1]
+    let temporal_plus_one = b & 7
+    if (a & 128) != 0 || temporal_plus_one == 0 {
+        return Error(InvalidNal)
+    }
+    let kind = (a >> 1) & 63
+    Ok(Nal(kind: kind, layer_id: ((a & 1) << 5) | (b >> 3), temporal_id: temporal_plus_one - 1, irap: kind >= 16 && kind <= 23, idr: kind == 19 || kind == 20))
+}
+
+type Cursor {
+    at: u64,
+    octet: u8,
+    left: u64,
+    zeros: u8
+}
+
+fn parameter_set(unit: Bytes, kind: u8) -> Result[Cursor, Error] {
+    let header = nal(unit)?
+    if header.kind != kind || header.temporal_id != 0 || (kind == 32 && header.layer_id != 0) {
+        return Error(InvalidNal)
+    }
+    Ok(Cursor(at: 2, octet: 0, left: 0, zeros: 0))
+}
+
+fn bits(unit: Bytes, mut c: Cursor, width: u64) -> Result[u64, Error] {
+    let mut value = 0u64
+    let mut remaining = width
+    while remaining != 0 {
+        if c.left == 0 {
+            let end = list.len(unit)
+            if c.at == end {
+                return Error(Truncated)
+            }
+            let mut octet = unit[c.at]
+            c.at += 1
+            if c.zeros == 2 {
+                if octet < 3 {
+                    return Error(InvalidRbsp)
+                }
+                if octet == 3 {
+                    if c.at == end {
+                        return Error(Truncated)
+                    }
+                    octet = unit[c.at]
+                    if octet > 3 {
+                        return Error(InvalidRbsp)
+                    }
+                    c.at += 1
+                }
+                c.zeros = 0
+            }
+            c.zeros = if octet == 0 {
+                c.zeros + 1
+            } else {
+                0
+            }
+            c.octet = octet
+            c.left = 8
+        }
+        let width_now = if remaining < c.left {
+            remaining
+        } else {
+            c.left
+        }
+        c.left -= width_now
+        remaining -= width_now
+        let octet: u64 = int.widen(c.octet)
+        value = (value << width_now) | ((octet >> c.left) & ((1u64 << width_now) - 1))
+    }
+    Ok(value)
+}
+
+fn ue(unit: Bytes, mut c: Cursor, max: u64) -> Result[u64, Error] {
+    let mut zeros = 0u64
+    while bits(unit, mut c, 1)? == 0 {
+        zeros += 1
+        if zeros > 32 || (1u64 << zeros) - 1 > max {
+            return Error(InvalidRbsp)
+        }
+    }
+    let value = (1u64 << zeros) - 1 + bits(unit, mut c, zeros)?
+    if value > max {
+        return Error(InvalidRbsp)
+    }
+    Ok(value)
+}
+
+pub type ProfileTierLevel {
+    profile_space: u8,
+    tier: bool,
+    profile_id: u8,
+    compatibility: u32,
+    constraints: u64,
+    level_id: u8
+}
+
+fn profile_tier_level(unit: Bytes, mut c: Cursor, sub_layers: u64) -> Result[ProfileTierLevel, Error] {
+    let space: u8 = int.narrow(bits(unit, mut c, 2)?)
+    let tier = bits(unit, mut c, 1)? != 0
+    let profile: u8 = int.narrow(bits(unit, mut c, 5)?)
+    let compatibility: u32 = int.narrow(bits(unit, mut c, 32)?)
+    let constraints = bits(unit, mut c, 48)?
+    let level: u8 = int.narrow(bits(unit, mut c, 8)?)
+    let mut present = 0u64
+    for i in 0u64 .. sub_layers {
+        present |= bits(unit, mut c, 2)? << (i * 2)
+    }
+    if sub_layers != 0 && bits(unit, mut c, (8 - sub_layers) * 2)? != 0 {
+        return Error(InvalidRbsp)
+    }
+    for i in 0u64 .. sub_layers {
+        let flags = (present >> (i * 2)) & 3
+        if (flags & 2) != 0 {
+            let _ = bits(unit, mut c, 40)?
+            let _ = bits(unit, mut c, 48)?
+        }
+        if (flags & 1) != 0 {
+            let _ = bits(unit, mut c, 8)?
+        }
+    }
+    Ok(ProfileTierLevel(profile_space: space, tier: tier, profile_id: profile, compatibility: compatibility, constraints: constraints, level_id: level))
+}
+
+pub type VideoParameterSet {
+    id: u8,
+    layers: u8,
+    temporal_layers: u8,
+    temporal_id_nested: bool,
+    profile: ProfileTierLevel
+}
+
+pub fn parse_vps(unit: Bytes) -> Result[VideoParameterSet, Error] {
+    let mut c = parameter_set(unit, 32)?
+    let id: u8 = int.narrow(bits(unit, mut c, 4)?)
+    let _ = bits(unit, mut c, 2)?
+    let layers: u8 = int.narrow(bits(unit, mut c, 6)? + 1)
+    let sub_layers = bits(unit, mut c, 3)?
+    let nested = bits(unit, mut c, 1)? != 0
+    if layers > 63 || sub_layers > 6 || (sub_layers == 0 && !nested) || bits(unit, mut c, 16)? != 0xffff {
+        return Error(InvalidRbsp)
+    }
+    Ok(VideoParameterSet(id: id, layers: layers, temporal_layers: int.narrow(sub_layers + 1), temporal_id_nested: nested, profile: profile_tier_level(unit, mut c, sub_layers)?))
+}
+
+pub type SequenceParameterSet {
+    id: u8,
+    video_id: u8,
+    temporal_layers: u8,
+    temporal_id_nested: bool,
+    profile: ProfileTierLevel,
+    chroma_format: u8,
+    separate_colour_plane: bool,
+    coded_width: u32,
+    coded_height: u32,
+    width: u32,
+    height: u32,
+    luma_depth: u8,
+    log2_max_poc_lsb: u8,
+    chroma_depth: u8
+}
+
+pub fn parse_sps(unit: Bytes) -> Result[SequenceParameterSet, Error] {
+    let mut c = parameter_set(unit, 33)?
+    let video_id: u8 = int.narrow(bits(unit, mut c, 4)?)
+    let sub_layers = bits(unit, mut c, 3)?
+    let nested = bits(unit, mut c, 1)? != 0
+    if sub_layers > 6 || (sub_layers == 0 && !nested) {
+        return Error(InvalidRbsp)
+    }
+    let profile = profile_tier_level(unit, mut c, sub_layers)?
+    let id: u8 = int.narrow(ue(unit, mut c, 15)?)
+    let chroma = ue(unit, mut c, 3)?
+    let separate = chroma == 3 && bits(unit, mut c, 1)? != 0
+    let width = ue(unit, mut c, 0xffffffff)?
+    let height = ue(unit, mut c, 0xffffffff)?
+    let mut crop_x = 0u64
+    let mut crop_y = 0u64
+    if bits(unit, mut c, 1)? != 0 {
+        let sub_width = if chroma == 1 || chroma == 2 {
+            2u64
+        } else {
+            1u64
+        }
+        let sub_height = if chroma == 1 {
+            2u64
+        } else {
+            1u64
+        }
+        let left = ue(unit, mut c, width)?
+        let right = ue(unit, mut c, width)?
+        let top = ue(unit, mut c, height)?
+        let bottom = ue(unit, mut c, height)?
+        crop_x = (left + right) * sub_width
+        crop_y = (top + bottom) * sub_height
+    }
+    if width <= crop_x || height <= crop_y {
+        return Error(InvalidRbsp)
+    }
+    let luma: u8 = int.narrow(ue(unit, mut c, 8)? + 8)
+    let chroma_depth: u8 = int.narrow(ue(unit, mut c, 8)? + 8)
+    let log2_max_poc_lsb: u8 = int.narrow(ue(unit, mut c, 12)? + 4)
+    Ok(SequenceParameterSet(id: id, video_id: video_id, temporal_layers: int.narrow(sub_layers + 1), temporal_id_nested: nested, profile: profile, chroma_format: int.narrow(chroma), separate_colour_plane: separate, coded_width: int.narrow(width), coded_height: int.narrow(height), width: int.narrow(width - crop_x), height: int.narrow(height - crop_y), luma_depth: luma, log2_max_poc_lsb: log2_max_poc_lsb, chroma_depth: chroma_depth))
+}
+
+pub type PictureParameterSet {
+    id: u8,
+    sequence_id: u8,
+    dependent_slice_segments: bool,
+    output_flag_present: bool,
+    extra_slice_header_bits: u8,
+    sign_data_hiding: bool,
+    cabac_init_present: bool
+}
+
+pub fn parse_pps(unit: Bytes) -> Result[PictureParameterSet, Error] {
+    let mut c = parameter_set(unit, 34)?
+    let id: u8 = int.narrow(ue(unit, mut c, 63)?)
+    let sequence_id: u8 = int.narrow(ue(unit, mut c, 15)?)
+    let dependent = bits(unit, mut c, 1)? != 0
+    let output = bits(unit, mut c, 1)? != 0
+    let extra: u8 = int.narrow(bits(unit, mut c, 3)?)
+    let sign = bits(unit, mut c, 1)? != 0
+    let cabac = bits(unit, mut c, 1)? != 0
+    Ok(PictureParameterSet(id: id, sequence_id: sequence_id, dependent_slice_segments: dependent, output_flag_present: output, extra_slice_header_bits: extra, sign_data_hiding: sign, cabac_init_present: cabac))
+}

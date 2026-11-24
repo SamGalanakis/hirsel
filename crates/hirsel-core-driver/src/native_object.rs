@@ -9,7 +9,6 @@ use crate::{Store, decode, encode};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::{NativeDebug, NativeObject};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
 use std::io;
 
 pub(crate) const SCHEMA: u32 = 3;
@@ -31,14 +30,13 @@ fn debug_name(key: ContentHash) -> ContentHash {
 const DEBUG_SCHEMA: u32 = 1;
 
 /// Store `native`'s object and debug rows under the names `key` derives: the
-/// object, the debug rows' name and the descriptor the object's bytes were
-/// written through.
+/// object and the debug rows' name.
 fn put_parts(
     store: &Store,
     key: ContentHash,
     native: &NativeObject,
-) -> io::Result<(Bare, Option<ContentHash>, File)> {
-    let (object, file) = store.put_bare(object_name(key), &native.bytes)?;
+) -> io::Result<(Bare, Option<ContentHash>)> {
+    let object = store.put_bare(object_name(key), &native.bytes)?;
     let debug = match &native.debug {
         Some(debug) => {
             let name = debug_name(key);
@@ -47,17 +45,13 @@ fn put_parts(
         }
         None => None,
     };
-    Ok((object, debug, file))
+    Ok((object, debug))
 }
 
 /// Publish an emitted object and its debug rows with their record under
-/// `key`: the object, and the descriptor its bytes were written through.
-pub(crate) fn publish(
-    store: &Store,
-    key: ContentHash,
-    native: &NativeObject,
-) -> io::Result<(Bare, File)> {
-    let (object, debug, file) = put_parts(store, key, native)?;
+/// `key`: the object.
+pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) -> io::Result<Bare> {
+    let (object, debug) = put_parts(store, key, native)?;
     store.put_keyed(
         key,
         &encode(&Root {
@@ -66,27 +60,23 @@ pub(crate) fn publish(
             debug,
         })?,
     )?;
-    Ok((object, file))
+    Ok(object)
 }
 
 pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
     store.path(identity)
 }
 
-/// The object stored under `key` when every part checks, with the
-/// descriptor its bytes were checked through; the link hands that descriptor
-/// to the linker.
-pub(crate) fn load(
-    store: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(Bare, NativeObject, File)>> {
+/// The object stored under `key` when every part checks; the link hands its
+/// checked bytes to the linker.
+pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, NativeObject)>> {
     let Some((object, debug)) = record(store, key)? else {
         return Ok(None);
     };
-    let Some((bytes, file)) = store.get_bare(object)? else {
+    let Some(bytes) = store.get_bare(object)? else {
         return Ok(None);
     };
-    Ok(Some((object, NativeObject { bytes, debug }, file)))
+    Ok(Some((object, NativeObject { bytes, debug })))
 }
 
 /// The parts of the record under `key` that are a function of the key: the
@@ -114,35 +104,36 @@ fn record(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Option<Na
     Ok(Some((root.object, debug)))
 }
 
-/// A stored record's key-determined parts ([`record`]), shared by a
-/// resident compiler's requests.
-pub(crate) type Shared = (Bare, Option<std::sync::Arc<NativeDebug>>);
+/// A stored record's key-determined parts ([`record`]) and its object's
+/// checked bytes, shared by a resident compiler's requests.
+pub(crate) type Shared = (
+    Bare,
+    Option<std::sync::Arc<NativeDebug>>,
+    std::sync::Arc<[u8]>,
+);
 
-/// [`load`] without the object's bytes, its debug rows shared: a resident
-/// compiler remembers each record it read. The object itself is read and
-/// checked again through the descriptor returned, which the link hands the
-/// linker.
-pub(crate) fn load_shared(
-    store: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(Bare, Option<std::sync::Arc<NativeDebug>>, File)>> {
-    let shared = crate::resident::OBJECT_RECORDS.get_or(
-        Some((store.root().to_owned(), key)),
-        || match record(store, key) {
-            Ok(Some((object, debug))) => Ok((object, debug.map(std::sync::Arc::new))),
-            Ok(None) => Err(None),
-            Err(error) => Err(Some(error)),
-        },
-    );
-    let (object, debug) = match shared {
-        Ok(shared) => shared,
-        Err(None) => return Ok(None),
-        Err(Some(error)) => return Err(error),
-    };
-    let Some((_, file)) = store.get_bare(object)? else {
-        return Ok(None);
-    };
-    Ok(Some((object, debug, file)))
+/// [`load`] with its object read and checked: a resident compiler remembers
+/// each record it read with its object's bytes, which are a function of the
+/// record's key, and reads neither again.
+pub(crate) fn load_shared(store: &Store, key: ContentHash) -> io::Result<Option<Shared>> {
+    let shared =
+        crate::resident::OBJECT_RECORDS.get_or(Some((store.root().to_owned(), key)), || {
+            let (object, debug) = match record(store, key) {
+                Ok(Some(found)) => found,
+                Ok(None) => return Err(None),
+                Err(error) => return Err(Some(error)),
+            };
+            match store.get_bare(object) {
+                Ok(Some(bytes)) => Ok((object, debug.map(std::sync::Arc::new), bytes.into())),
+                Ok(None) => Err(None),
+                Err(error) => Err(Some(error)),
+            }
+        });
+    match shared {
+        Ok(shared) => Ok(Some(shared)),
+        Err(None) => Ok(None),
+        Err(Some(error)) => Err(error),
+    }
 }
 
 /// A Cranelift development instance's record, under its instance key
@@ -178,19 +169,18 @@ pub(crate) struct Instance {
 pub(crate) const INSTANCE_SCHEMA: u32 = 5;
 
 /// Publish an emitted instance's object, debug rows and record under its
-/// key; the object, the debug rows' name and the descriptor the object's
-/// bytes were written through.
+/// key; the object and the debug rows' name.
 pub(crate) fn publish_instance(
     store: &Store,
     key: ContentHash,
     object: &NativeObject,
     mut record: Instance,
-) -> io::Result<(Bare, Option<ContentHash>, File)> {
-    let (bare, debug, file) = put_parts(store, key, object)?;
+) -> io::Result<(Bare, Option<ContentHash>)> {
+    let (bare, debug) = put_parts(store, key, object)?;
     record.object = bare;
     record.debug = debug;
     store.put_keyed(key, &encode(&record)?)?;
-    Ok((record.object, record.debug, file))
+    Ok((record.object, record.debug))
 }
 
 /// The record stored under `key`, when it decodes, names its key's object and
@@ -302,7 +292,7 @@ mod tests {
         // An object record naming another key's debug rows, each stored
         // soundly under its own name, links rows of another object.
         let (_dir, store) = fresh();
-        let (object_a, _) = publish(&store, a, &object(b"a")).unwrap();
+        let object_a = publish(&store, a, &object(b"a")).unwrap();
         publish(&store, b, &object(b"b")).unwrap();
         let foreign = Root {
             schema: SCHEMA,
@@ -343,8 +333,8 @@ mod tests {
                     scopes: vec![],
                 }),
             };
-            let (identity, _) = publish(&store, key, &object).unwrap();
-            let (loaded, warm, _) = load(&store, key).unwrap().unwrap();
+            let identity = publish(&store, key, &object).unwrap();
+            let (loaded, warm) = load(&store, key).unwrap().unwrap();
             assert_eq!(identity, loaded);
             assert_eq!(object, warm);
             let bytes = std::fs::read(path(&store, loaded.address)).unwrap();

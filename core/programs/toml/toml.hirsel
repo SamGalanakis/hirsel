@@ -1,0 +1,947 @@
+/// Resource limits per call. Depth counts edges from the root table and is capped at 64.
+/// byte_limit bounds the input of parse and the output of serialize. Steps are MEM-30 steps.
+pub type Limits {
+    byte_limit: u64,
+    depth: u64,
+    steps: u64
+}
+
+pub fn limits() -> Limits {
+    Limits(byte_limit: 1048576, depth: MAX_DEPTH, steps: 32000000)
+}
+
+const MAX_DEPTH: u64 = 64
+
+/// Syntax, InvalidEscape, InvalidUtf8, Redefined, NumberRange and Depth carry
+/// zero-based byte offsets. The serializer reports Depth at its output position.
+pub type Error = Syntax(u64) | InvalidEscape(u64) | InvalidUtf8(u64) | Redefined(u64) | NumberRange(u64) | Depth(u64) | ByteLimit | StepLimit | Memory(Capacity)
+
+/// A parsed document. Node indices belong to their document. The root is index zero.
+pub opaque type Document {
+    nodes: List[Node]
+}
+
+pub type Entry {
+    key: String,
+    child: u64
+}
+
+/// Local wall time with fractional seconds truncated to nanosecond precision.
+pub type Time: key {
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanos: u32
+}
+
+/// RFC 3339 offset. The sign preserves the distinction between +00:00 and -00:00.
+pub type Offset: key {
+    negative: bool,
+    minutes: u16
+}
+
+/// Tables and strings have the same values regardless of the syntax used to write them.
+/// Floats carry binary64 bits so signed zero and NaN have well-defined tree equality.
+/// All NaN spellings yield the same quiet NaN. Arrays contain child indices in order.
+pub type Value = Table(List[Entry]) | Array(List[u64]) | Text(String) | Boolean(bool) | Integer(i64) | Float(u64) | Date(std.time.Date) | LocalTime(Time) | LocalDateTime(std.time.Date, Time) | OffsetDateTime(std.time.Date, Time, Offset)
+
+type Origin: key = Implicit | Declared | Dotted | InlineTable | ArrayTables | Atom
+
+type Node {
+    origin: Origin,
+    depth: u64,
+    data: Value
+}
+
+type Cursor {
+    at: u64
+}
+
+/// Reads one node. An index outside the document returns None.
+pub fn value(doc: Document, index: u64) -> Option[View[Value]] in doc {
+    if index < list.len(doc.nodes) {
+        Some(doc.nodes[index].data)
+    } else {
+        None
+    }
+}
+
+/// Finds a direct child of a table. Array and scalar nodes have no named children.
+pub fn child(doc: Document, table: u64, name: String) -> Option[u64] {
+    let Some(Table(entries)) = value(doc, table) else {
+        return None
+    }
+    lookup(entries, name)
+}
+
+fn lookup(entries: List[Entry], name: String) -> Option[u64] {
+    for entry in entries {
+        if entry.key == name {
+            return Some(entry.child)
+        }
+    }
+    None
+}
+
+fn bounded[T](steps: u64, run: scoped[view] fn() -> Result[T, Error]) -> Result[T, Error] {
+    match isolate(scoped fn() -> Result[T, Error] {
+        match (bound steps steps {
+            run()
+        }) {
+            Ok(take answer) => take answer,
+            Error(_) => Error(StepLimit),
+        }
+    }) {
+        Ok(Ok(take answer)) => take answer,
+        Error(problem) => Error(Memory(problem)),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(problem) = cause.kind {
+                    return Error(Memory(problem))
+                }
+                break
+            }
+            fail("TOML: unexpected failure")
+        },
+    }
+}
+
+/// Parses a UTF-8 TOML 1.0.0 document. A leading UTF-8 BOM is accepted.
+/// No capability is needed. All input refusals are typed.
+pub fn parse(input: Bytes, budget: Limits) -> Result[Document, Error] {
+    if list.len(input) > budget.byte_limit {
+        return Error(ByteLimit)
+    }
+    bounded(budget.steps, scoped fn() -> Result[Document, Error] {
+        parse_document(input, order.min(budget.depth, MAX_DEPTH))
+    })
+}
+
+fn parse_document(input: Bytes, max_depth: u64) -> Result[Document, Error] {
+    if let Error(problem) = string.validate_utf8(input) {
+        return Error(InvalidUtf8(problem.valid_up_to))
+    }
+    let mut doc = Document(nodes: list.new())
+    let mut section = add_node(mut doc, Declared, 0, Table(list.new()))
+    let mut c = Cursor(at: 0)
+    if byte(input, 0) == 239 && byte(input, 1) == 187 && byte(input, 2) == 191 {
+        c.at = 3
+    }
+    trivia(input, mut c)?
+    while c.at < list.len(input) {
+        if eat(input, mut c, b'[') {
+            let array_header = eat(input, mut c, b'[')
+            section = parse_header(input, mut c, mut doc, max_depth, array_header)?
+        } else {
+            assignment(input, mut c, mut doc, section, max_depth)?
+        }
+        spaces(input, mut c)
+        if byte(input, c.at) == b'#' {
+            comment(input, mut c)?
+        }
+        if c.at < list.len(input) && !newline(input, mut c) {
+            return Error(Syntax(c.at))
+        }
+        trivia(input, mut c)?
+    }
+    Ok(take doc)
+}
+
+fn add_node(mut doc: Document, origin: Origin, level: u64, take node_value: Value) -> u64 {
+    let index = list.len(doc.nodes)
+    list.push(mut doc.nodes, Node(origin, depth: level, data: take node_value))
+    index
+}
+
+fn put_entry(mut doc: Document, parent: u64, take name: String, index: u64) {
+    if let Table(mut entries) = doc.nodes[parent].data {
+        list.push(mut entries, Entry(key: take name, child: index))
+    } else {
+        fail("TOML: expected table")
+    }
+}
+
+fn append_child(mut doc: Document, parent: u64, index: u64) {
+    if let Array(mut items) = doc.nodes[parent].data {
+        list.push(mut items, index)
+    } else {
+        fail("TOML: expected array")
+    }
+}
+
+fn below(doc: Document, parent: u64, max_depth: u64, pos: u64) -> Result[u64, Error] {
+    let level = doc.nodes[parent].depth + 1
+    if level > max_depth {
+        return Error(Depth(pos))
+    }
+    Ok(level)
+}
+
+fn table_path(mut doc: Document, parent: u64, take name: String, max_depth: u64, pos: u64, header: bool) -> Result[u64, Error] {
+    let level = below(doc, parent, max_depth, pos)?
+    if let Some(index) = child(doc, parent, name) {
+        return match doc.nodes[index].origin {
+            Implicit => {
+                if !header {
+                    doc.nodes[index].origin = Dotted
+                }
+                Ok(index)
+            },
+            Dotted => Ok(index),
+            Declared => if header {
+                Ok(index)
+            } else {
+                Error(Redefined(pos))
+            },
+            ArrayTables => {
+                if !header {
+                    return Error(Redefined(pos))
+                }
+                let Array(items) = doc.nodes[index].data else {
+                    fail("TOML: expected array of tables")
+                }
+                Ok(items[list.len(items) - 1])
+            },
+            _ => Error(Redefined(pos)),
+        }
+    }
+    let origin = if header {
+        Implicit
+    } else {
+        Dotted
+    }
+    let index = add_node(mut doc, origin, level, Table(list.new()))
+    put_entry(mut doc, parent, take name, index)
+    Ok(index)
+}
+
+fn parse_header(input: Bytes, mut c: Cursor, mut doc: Document, max_depth: u64, array_header: bool) -> Result[u64, Error] {
+    let mut parent: u64 = 0
+    loop {
+        spaces(input, mut c)
+        let pos = c.at
+        let name = key(input, mut c)?
+        spaces(input, mut c)
+        if eat(input, mut c, b'.') {
+            parent = table_path(mut doc, parent, take name, max_depth, pos, true)?
+            continue
+        }
+        require(input, mut c, b']')?
+        if array_header {
+            require(input, mut c, b']')?
+        }
+        let level = below(doc, parent, max_depth, pos)?
+        if let Some(index) = child(doc, parent, name) {
+            if array_header && doc.nodes[index].origin == ArrayTables {
+                return new_array_table(mut doc, index, max_depth, pos)
+            }
+            if !array_header && doc.nodes[index].origin == Implicit {
+                doc.nodes[index].origin = Declared
+                return Ok(index)
+            }
+            return Error(Redefined(pos))
+        }
+        if array_header {
+            let index = add_node(mut doc, ArrayTables, level, Array(list.new()))
+            put_entry(mut doc, parent, take name, index)
+            return new_array_table(mut doc, index, max_depth, pos)
+        }
+        let index = add_node(mut doc, Declared, level, Table(list.new()))
+        put_entry(mut doc, parent, take name, index)
+        return Ok(index)
+    }
+}
+
+fn new_array_table(mut doc: Document, array_index: u64, max_depth: u64, pos: u64) -> Result[u64, Error] {
+    let level = below(doc, array_index, max_depth, pos)?
+    let index = add_node(mut doc, Declared, level, Table(list.new()))
+    append_child(mut doc, array_index, index)
+    Ok(index)
+}
+
+fn assignment(input: Bytes, mut c: Cursor, mut doc: Document, table: u64, max_depth: u64) -> Result[(), Error] {
+    let mut parent = table
+    loop {
+        spaces(input, mut c)
+        let pos = c.at
+        let name = key(input, mut c)?
+        spaces(input, mut c)
+        if eat(input, mut c, b'.') {
+            parent = table_path(mut doc, parent, take name, max_depth, pos, false)?
+            continue
+        }
+        require(input, mut c, b'=')?
+        spaces(input, mut c)
+        if let Some(_) = child(doc, parent, name) {
+            return Error(Redefined(pos))
+        }
+        let level = below(doc, parent, max_depth, c.at)?
+        let index = parse_value(input, mut c, mut doc, level, max_depth)?
+        put_entry(mut doc, parent, take name, index)
+        return Ok(())
+    }
+}
+
+fn parse_value(input: Bytes, mut c: Cursor, mut doc: Document, level: u64, max_depth: u64) -> Result[u64, Error] {
+    let head = byte(input, c.at)
+    if head == b'[' {
+        c.at += 1
+        let index = add_node(mut doc, Atom, level, Array(list.new()))
+        trivia(input, mut c)?
+        while !eat(input, mut c, b']') {
+            let item_depth = below(doc, index, max_depth, c.at)?
+            let item = parse_value(input, mut c, mut doc, item_depth, max_depth)?
+            append_child(mut doc, index, item)
+            trivia(input, mut c)?
+            if eat(input, mut c, b']') {
+                break
+            }
+            require(input, mut c, b',')?
+            trivia(input, mut c)?
+        }
+        return Ok(index)
+    }
+    if head == b'{' {
+        c.at += 1
+        let index = add_node(mut doc, InlineTable, level, Table(list.new()))
+        spaces(input, mut c)
+        if !eat(input, mut c, b'}') {
+            loop {
+                assignment(input, mut c, mut doc, index, max_depth)?
+                spaces(input, mut c)
+                if eat(input, mut c, b'}') {
+                    break
+                }
+                require(input, mut c, b',')?
+            }
+        }
+        return Ok(index)
+    }
+    let node_value = if head == 34 || head == 39 {
+        Text(quoted(input, mut c, true)?)
+    } else {
+        scalar(input, mut c)?
+    }
+    Ok(add_node(mut doc, Atom, level, take node_value))
+}
+
+fn byte(input: Bytes, at: u64) -> u8 {
+    if at < list.len(input) {
+        input[at]
+    } else {
+        0
+    }
+}
+
+fn eat(input: Bytes, mut c: Cursor, wanted: u8) -> bool {
+    if byte(input, c.at) == wanted {
+        c.at += 1
+        true
+    } else {
+        false
+    }
+}
+
+fn require(input: Bytes, mut c: Cursor, wanted: u8) -> Result[(), Error] {
+    if eat(input, mut c, wanted) {
+        Ok(())
+    } else {
+        Error(Syntax(c.at))
+    }
+}
+
+fn horizontal(head: u8) -> bool {
+    head == 32 || head == 9
+}
+
+fn spaces(input: Bytes, mut c: Cursor) {
+    while horizontal(byte(input, c.at)) {
+        c.at += 1
+    }
+}
+
+fn newline(input: Bytes, mut c: Cursor) -> bool {
+    if eat(input, mut c, 10) {
+        return true
+    }
+    if byte(input, c.at) == 13 && byte(input, c.at + 1) == 10 {
+        c.at += 2
+        return true
+    }
+    false
+}
+
+fn control(head: u8) -> bool {
+    (head < 32 && head != 9) || head == 127
+}
+
+fn comment(input: Bytes, mut c: Cursor) -> Result[(), Error] {
+    c.at += 1
+    while c.at < list.len(input) {
+        let head = byte(input, c.at)
+        if head == 10 || (head == 13 && byte(input, c.at + 1) == 10) {
+            break
+        }
+        if control(head) {
+            return Error(Syntax(c.at))
+        }
+        c.at += 1
+    }
+    Ok(())
+}
+
+fn trivia(input: Bytes, mut c: Cursor) -> Result[(), Error] {
+    loop {
+        spaces(input, mut c)
+        if byte(input, c.at) == b'#' {
+            comment(input, mut c)?
+        }
+        if !newline(input, mut c) {
+            return Ok(())
+        }
+    }
+}
+
+fn digit(head: u8) -> bool {
+    head >= b'0' && head <= b'9'
+}
+
+fn bare(head: u8) -> bool {
+    digit(head) || (head >= b'A' && head <= b'Z') || (head >= b'a' && head <= b'z') || head == b'_' || head == b'-'
+}
+
+fn owned_text(input: Bytes, from: u64, until: u64) -> String {
+    let mut out: Bytes = list.with_capacity(until - from)
+    list.append(mut out, list.slice(input, from, until))
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn key(input: Bytes, mut c: Cursor) -> Result[String, Error] {
+    let head = byte(input, c.at)
+    if head == 34 || head == 39 {
+        return quoted(input, mut c, false)
+    }
+    let from = c.at
+    while bare(byte(input, c.at)) {
+        c.at += 1
+    }
+    if from == c.at {
+        return Error(Syntax(from))
+    }
+    Ok(owned_text(input, from, c.at))
+}
+
+fn quoted(input: Bytes, mut c: Cursor, allow_multi: bool) -> Result[String, Error] {
+    let quote = byte(input, c.at)
+    c.at += 1
+    let multi = allow_multi && byte(input, c.at) == quote && byte(input, c.at + 1) == quote
+    if multi {
+        c.at += 2
+        let _ = newline(input, mut c)
+    }
+    let mut out: Bytes = list.new()
+    while c.at < list.len(input) {
+        let head = byte(input, c.at)
+        if head == quote {
+            c.at += 1
+            if !multi {
+                return Ok(result.unwrap(string.from_utf8(take out)))
+            }
+            if byte(input, c.at) == quote && byte(input, c.at + 1) == quote {
+                c.at += 2
+                for _ in 0u64 .. 2u64 {
+                    if eat(input, mut c, quote) {
+                        list.push(mut out, quote)
+                    }
+                }
+                return Ok(result.unwrap(string.from_utf8(take out)))
+            }
+            list.push(mut out, quote)
+        } else if quote == 34 && head == 92 {
+            escape(input, mut c, mut out, multi)?
+        } else if multi && newline(input, mut c) {
+            list.push(mut out, 10u8)
+        } else {
+            if control(head) {
+                return Error(Syntax(c.at))
+            }
+            c.at += 1
+            list.push(mut out, head)
+        }
+    }
+    Error(Syntax(c.at))
+}
+
+fn escape(input: Bytes, mut c: Cursor, mut out: Bytes, multi: bool) -> Result[(), Error] {
+    let pos = c.at
+    c.at += 1
+    let head = byte(input, c.at)
+    if multi && (horizontal(head) || head == 10 || head == 13) {
+        spaces(input, mut c)
+        if !newline(input, mut c) {
+            return Error(InvalidEscape(pos))
+        }
+        loop {
+            spaces(input, mut c)
+            if !newline(input, mut c) {
+                return Ok(())
+            }
+        }
+    }
+    c.at += 1
+    if head == b'u' || head == b'U' {
+        let count: u64 = if head == b'u' {
+            4
+        } else {
+            8
+        }
+        let mut code: u32 = 0
+        for _ in 0u64 .. count {
+            let Some(part) = int.ascii_digit(byte(input, c.at), 16) else {
+                return Error(InvalidEscape(c.at))
+            }
+            code = code * 16 + int.widen(part)
+            c.at += 1
+        }
+        let Some(scalar_char) = char.from_u32(code) else {
+            return Error(InvalidEscape(pos))
+        }
+        let mut utf = string.new()
+        string.push_char(mut utf, scalar_char)
+        list.append(mut out, string.as_bytes(utf))
+        return Ok(())
+    }
+    let decoded: u8 = match head {
+        b'b' => 8,
+        b't' => 9,
+        b'n' => 10,
+        b'f' => 12,
+        b'r' => 13,
+        34 => 34,
+        92 => 92,
+        _ => return Error(InvalidEscape(pos)),
+    }
+    list.push(mut out, decoded)
+    Ok(())
+}
+
+const INFINITY_BITS: u64 = 0x7ff0000000000000
+
+const NAN_BITS: u64 = 0x7ff8000000000000
+
+const SIGN_BIT: u64 = 0x8000000000000000
+
+fn scalar(input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    let start = c.at
+    if digit(byte(input, start)) && digit(byte(input, start + 1)) {
+        let third = byte(input, start + 2)
+        if third == b':' {
+            return Ok(LocalTime(time_value(input, mut c)?))
+        }
+        if digit(third) && digit(byte(input, start + 3)) && byte(input, start + 4) == b'-' {
+            return date_value(input, mut c)
+        }
+    }
+    let head = byte(input, start)
+    if head == b't' {
+        keyword(input, mut c, b"true")?
+        return Ok(Boolean(true))
+    }
+    if head == b'f' {
+        keyword(input, mut c, b"false")?
+        return Ok(Boolean(false))
+    }
+    let signed_number = head == b'+' || head == b'-'
+    let negative = head == b'-'
+    if signed_number {
+        c.at += 1
+    }
+    let first = byte(input, c.at)
+    if first == b'i' {
+        keyword(input, mut c, b"inf")?
+        return Ok(Float(INFINITY_BITS | (if negative {
+            SIGN_BIT
+        } else {
+            0
+        })))
+    }
+    if first == b'n' {
+        keyword(input, mut c, b"nan")?
+        return Ok(Float(NAN_BITS))
+    }
+    if first == b'0' && !signed_number {
+        let radix: u32 = match byte(input, c.at + 1) {
+            b'x' => 16,
+            b'o' => 8,
+            b'b' => 2,
+            _ => 10,
+        }
+        if radix != 10 {
+            c.at += 2
+            let mut digits_out: Bytes = list.new()
+            number_digits(input, mut c, radix, mut digits_out)?
+            return integer(take digits_out, radix, start)
+        }
+    }
+    let mut spelling: Bytes = list.new()
+    if negative {
+        list.push(mut spelling, b'-')
+    }
+    let whole = c.at
+    number_digits(input, mut c, 10, mut spelling)?
+    if first == b'0' && c.at - whole > 1 {
+        return Error(Syntax(whole + 1))
+    }
+    let fraction = eat(input, mut c, b'.')
+    if fraction {
+        list.push(mut spelling, b'.')
+        number_digits(input, mut c, 10, mut spelling)?
+    }
+    let exponent = eat(input, mut c, b'e') || eat(input, mut c, b'E')
+    if exponent {
+        list.push(mut spelling, b'e')
+        let sign = byte(input, c.at)
+        if sign == b'+' || sign == b'-' {
+            c.at += 1
+            list.push(mut spelling, sign)
+        }
+        number_digits(input, mut c, 10, mut spelling)?
+    }
+    if fraction || exponent {
+        let token = result.unwrap(string.from_utf8(take spelling))
+        match float.parse64(token) {
+            Ok(x) => Ok(Float(float.to_bits64(x))),
+            Error(OutOfRange) => Error(NumberRange(start)),
+            Error(_) => Error(Syntax(start)),
+        }
+    } else {
+        integer(take spelling, 10, start)
+    }
+}
+
+fn keyword(input: Bytes, mut c: Cursor, expected: Bytes) -> Result[(), Error] {
+    for letter in expected {
+        require(input, mut c, letter)?
+    }
+    Ok(())
+}
+
+fn number_digits(input: Bytes, mut c: Cursor, radix: u32, mut spelling: Bytes) -> Result[(), Error] {
+    loop {
+        let head = byte(input, c.at)
+        if let None = int.ascii_digit(head, radix) {
+            return Error(Syntax(c.at))
+        }
+        list.push(mut spelling, head)
+        c.at += 1
+        if !eat(input, mut c, b'_') {
+            if let None = int.ascii_digit(byte(input, c.at), radix) {
+                return Ok(())
+            }
+        }
+    }
+}
+
+fn integer(take spelling: Bytes, radix: u32, start: u64) -> Result[Value, Error] {
+    let token = result.unwrap(string.from_utf8(take spelling))
+    match int.parse_int(token, radix) {
+        Ok(x) => Ok(Integer(x)),
+        Error(OutOfRange) => Error(NumberRange(start)),
+        Error(_) => Error(Syntax(start)),
+    }
+}
+
+fn decimal(input: Bytes, mut c: Cursor, width: u64) -> Result[u16, Error] {
+    let mut n: u16 = 0
+    for _ in 0u64 .. width {
+        let head = byte(input, c.at)
+        if !digit(head) {
+            return Error(Syntax(c.at))
+        }
+        n = n * 10 + int.widen(head - b'0')
+        c.at += 1
+    }
+    Ok(n)
+}
+
+fn date_value(input: Bytes, mut c: Cursor) -> Result[Value, Error] {
+    let pos = c.at
+    let year = decimal(input, mut c, 4)?
+    require(input, mut c, b'-')?
+    let month: u8 = int.narrow(decimal(input, mut c, 2)?)
+    require(input, mut c, b'-')?
+    let day: u8 = int.narrow(decimal(input, mut c, 2)?)
+    let Some(day_value) = std.time.date(year, month, day) else {
+        return Error(Syntax(pos))
+    }
+    let sep = byte(input, c.at)
+    if sep != b'T' && sep != b't' && !(sep == b' ' && digit(byte(input, c.at + 1))) {
+        return Ok(Date(day_value))
+    }
+    c.at += 1
+    let clock_value = time_value(input, mut c)?
+    let marker = byte(input, c.at)
+    let offset_value = if marker == b'Z' || marker == b'z' {
+        c.at += 1
+        Offset(negative: false, minutes: 0)
+    } else if marker == b'+' || marker == b'-' {
+        c.at += 1
+        let offset_pos = c.at
+        let hours = decimal(input, mut c, 2)?
+        require(input, mut c, b':')?
+        let minutes = decimal(input, mut c, 2)?
+        if hours > 23 || minutes > 59 {
+            return Error(Syntax(offset_pos))
+        }
+        Offset(negative: marker == b'-', minutes: hours * 60 + minutes)
+    } else {
+        return Ok(LocalDateTime(day_value, clock_value))
+    }
+    Ok(OffsetDateTime(day_value, clock_value, offset_value))
+}
+
+fn time_value(input: Bytes, mut c: Cursor) -> Result[Time, Error] {
+    let pos = c.at
+    let hour: u8 = int.narrow(decimal(input, mut c, 2)?)
+    require(input, mut c, b':')?
+    let minute: u8 = int.narrow(decimal(input, mut c, 2)?)
+    require(input, mut c, b':')?
+    let second: u8 = int.narrow(decimal(input, mut c, 2)?)
+    if hour > 23 || minute > 59 || second > 60 {
+        return Error(Syntax(pos))
+    }
+    let mut nanos: u32 = 0
+    if eat(input, mut c, b'.') {
+        let from = c.at
+        while digit(byte(input, c.at)) {
+            if c.at - from < 9 {
+                nanos = nanos * 10 + int.widen(byte(input, c.at) - b'0')
+            }
+            c.at += 1
+        }
+        let places = c.at - from
+        if places == 0 {
+            return Error(Syntax(from))
+        }
+        for _ in order.min(places, 9) .. 9u64 {
+            nanos *= 10
+        }
+    }
+    Ok(Time(hour, minute, second, nanos))
+}
+
+type Output {
+    text: String,
+    max_bytes: u64,
+    max_depth: u64
+}
+
+/// Serializes a document as TOML 1.0.0. The representation uses quoted keys,
+/// inline tables and escaped strings, preserving the typed values.
+pub fn serialize(doc: Document, budget: Limits) -> Result[String, Error] {
+    bounded(budget.steps, scoped fn() -> Result[String, Error] {
+        let mut out = Output(text: string.new(), max_bytes: budget.byte_limit, max_depth: order.min(budget.depth, MAX_DEPTH))
+        let Table(entries) = doc.nodes[0].data else {
+            fail("TOML: expected root table")
+        }
+        for entry in entries {
+            write_text(mut out, entry.key)?
+            write(mut out, " = ")?
+            write_node(mut out, doc, entry.child)?
+            write(mut out, "\n")?
+        }
+        let Output(text: take encoded, max_bytes: _, max_depth: _) = take out
+        Ok(take encoded)
+    })
+}
+
+fn write(mut out: Output, fragment: String) -> Result[(), Error] {
+    if string.byte_len(fragment) > out.max_bytes - string.byte_len(out.text) {
+        return Error(ByteLimit)
+    }
+    string.push(mut out.text, fragment)
+    Ok(())
+}
+
+fn write_text(mut out: Output, text: String) -> Result[(), Error] {
+    write(mut out, "\"")?
+    let mut i: u64 = 0
+    let mut from: u64 = 0
+    let raw = string.as_bytes(text)
+    while i < list.len(raw) {
+        let head = raw[i]
+        if head < 32 || head == 127 || head == 34 || head == 92 {
+            write(mut out, string.slice(text, from, i))?
+            match head {
+                8 => write(mut out, "\\b")?,
+                9 => write(mut out, "\\t")?,
+                10 => write(mut out, "\\n")?,
+                12 => write(mut out, "\\f")?,
+                13 => write(mut out, "\\r")?,
+                34 => write(mut out, "\\\"")?,
+                92 => write(mut out, "\\\\")?,
+                _ => {
+                    let mut escaped = string.from("\\u")
+                    string.push_uint(mut escaped, int.widen(head), 16, 4, '0')
+                    write(mut out, escaped)?
+                },
+            }
+            from = i + 1
+        }
+        i += 1
+    }
+    write(mut out, string.slice(text, from, i))?
+    write(mut out, "\"")
+}
+
+fn write_node(mut out: Output, doc: Document, index: u64) -> Result[(), Error] {
+    let node = doc.nodes[index]
+    if node.depth > out.max_depth {
+        return Error(Depth(string.byte_len(out.text)))
+    }
+    match node.data {
+        Table(entries) => {
+            write(mut out, "{")?
+            let mut first = true
+            for entry in entries {
+                if !first {
+                    write(mut out, ", ")?
+                }
+                first = false
+                write_text(mut out, entry.key)?
+                write(mut out, " = ")?
+                write_node(mut out, doc, entry.child)?
+            }
+            write(mut out, "}")
+        },
+        Array(items) => {
+            write(mut out, "[")?
+            let mut first = true
+            for item in items {
+                if !first {
+                    write(mut out, ", ")?
+                }
+                first = false
+                write_node(mut out, doc, item)?
+            }
+            write(mut out, "]")
+        },
+        Text(text) => write_text(mut out, text),
+        _ => {
+            let mut token = string.new()
+            write_scalar(mut token, node.data)
+            write(mut out, token)
+        },
+    }
+}
+
+fn write_scalar(mut token: String, atom: Value) {
+    match atom {
+        Boolean(x) => string.push(mut token, if x {
+            "true"
+        } else {
+            "false"
+        }),
+        Integer(x) => string.push_i64(mut token, x),
+        Float(bits) => {
+            if bits == NAN_BITS {
+                string.push(mut token, "nan")
+            } else if bits == INFINITY_BITS {
+                string.push(mut token, "inf")
+            } else if bits == (SIGN_BIT | INFINITY_BITS) {
+                string.push(mut token, "-inf")
+            } else {
+                float.push_json_f64(mut token, float.from_bits64(bits))
+            }
+        },
+        Date(day) => std.time.push_date(mut token, day),
+        LocalTime(clock) => write_time(mut token, clock),
+        LocalDateTime(day, clock) => write_datetime(mut token, day, clock),
+        OffsetDateTime(day, clock, offset) => {
+            write_datetime(mut token, day, clock)
+            if offset.minutes == 0 && !offset.negative {
+                string.push_char(mut token, 'Z')
+            } else {
+                string.push_char(mut token, if offset.negative {
+                    '-'
+                } else {
+                    '+'
+                })
+                string.push_uint(mut token, int.widen(offset.minutes / 60), 10, 2, '0')
+                string.push_char(mut token, ':')
+                string.push_uint(mut token, int.widen(offset.minutes % 60), 10, 2, '0')
+            }
+        },
+        _ => fail("TOML: expected scalar"),
+    }
+}
+
+fn write_datetime(mut token: String, day: std.time.Date, clock: Time) {
+    std.time.push_date(mut token, day)
+    string.push_char(mut token, 'T')
+    write_time(mut token, clock)
+}
+
+fn write_time(mut token: String, clock: Time) {
+    string.push_uint(mut token, int.widen(clock.hour), 10, 2, '0')
+    string.push_char(mut token, ':')
+    string.push_uint(mut token, int.widen(clock.minute), 10, 2, '0')
+    string.push_char(mut token, ':')
+    string.push_uint(mut token, int.widen(clock.second), 10, 2, '0')
+    if clock.nanos != 0 {
+        string.push_char(mut token, '.')
+        let mut frac = clock.nanos
+        let mut width: u64 = 9
+        while frac % 10 == 0 {
+            frac /= 10
+            width -= 1
+        }
+        string.push_uint(mut token, int.widen(frac), 10, width, '0')
+    }
+}
+
+/// Compares two documents by value. Table order and spelling have no effect.
+pub fn equal(a: Document, b: Document, steps: u64) -> Result[bool, Error] {
+    bounded(steps, scoped fn() -> Result[bool, Error] {
+        Ok(equal_node(a, 0, b, 0))
+    })
+}
+
+fn equal_node(a: Document, ai: u64, b: Document, bi: u64) -> bool {
+    match (view a.nodes[ai].data, view b.nodes[bi].data) {
+        (Table(xs), Table(ys)) => {
+            if list.len(xs) != list.len(ys) {
+                return false
+            }
+            for entry in xs {
+                let Some(other) = lookup(ys, entry.key) else {
+                    return false
+                }
+                if !equal_node(a, entry.child, b, other) {
+                    return false
+                }
+            }
+            true
+        },
+        (Array(xs), Array(ys)) => {
+            if list.len(xs) != list.len(ys) {
+                return false
+            }
+            for i in 0u64 .. list.len(xs) {
+                if !equal_node(a, xs[i], b, ys[i]) {
+                    return false
+                }
+            }
+            true
+        },
+        (Text(x), Text(y)) => x == y,
+        (Boolean(x), Boolean(y)) => x == y,
+        (Integer(x), Integer(y)) => x == y,
+        (Float(x), Float(y)) => x == y,
+        (Date(x), Date(y)) => x == y,
+        (LocalTime(x), LocalTime(y)) => x == y,
+        (LocalDateTime(xd, xt), LocalDateTime(yd, yt)) => xd == yd && xt == yt,
+        (OffsetDateTime(xd, xt, xo), OffsetDateTime(yd, yt, yo)) => xd == yd && xt == yt && xo == yo,
+        _ => false,
+    }
+}

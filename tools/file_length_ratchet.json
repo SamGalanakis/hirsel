@@ -13,11 +13,14 @@
     "reason": "gateway-push-1905"
   },
   "core/programs/harness/laws.hirsel": {
-    "lines": 1989
+    "lines": 1901,
+    "raise_revision": 2,
+    "reason": "m3-s3-slots-2010"
   },
   "core/programs/platform/platform.hirsel": {
-    "lines": 3972,
-    "reason": "release-publish-1912"
+    "lines": 3851,
+    "raise_revision": 1,
+    "reason": "platform-l42-2063"
   },
   "core/programs/platform/platform_laws.hirsel": {
     "lines": 2020,
@@ -27,8 +30,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 10184,
-    "reason": "release-publish-1912"
+    "lines": 7042,
+    "raise_revision": 8,
+    "reason": "m3-s3-slots-2010"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -36,61 +40,78 @@
   "core/programs/search/unicode.hirsel": {
     "lines": 1936
   },
-  "core/programs/sqlite/hirsel_sqlite.c": {
-    "lines": 1056
-  },
   "core/programs/store/store-manifest.hirsel": {
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 19102,
-    "reason": "store-sync-1906"
+    "lines": 7178,
+    "raise_revision": 17,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/char.hirsel": {
     "lines": 4741
   },
   "core/std/codec.hirsel": {
-    "lines": 2831
+    "lines": 2878,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/float.hirsel": {
     "lines": 3331
   },
   "core/std/http.hirsel": {
-    "lines": 3260
+    "lines": 3306,
+    "raise_revision": 5,
+    "reason": "hirsel4-cutover-2276"
   },
   "core/std/json.hirsel": {
-    "lines": 3786
+    "lines": 3627,
+    "raise_revision": 1,
+    "reason": "http-server-dx-2291"
   },
   "core/std/markdown.hirsel": {
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2461
+    "lines": 2950,
+    "raise_revision": 12,
+    "reason": "object-peer-fallback-2170"
   },
   "core/std/omap.hirsel": {
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3115,
-    "reason": "reexec-1902"
+    "lines": 3636,
+    "raise_revision": 16,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {
-    "lines": 1743
+    "lines": 1748,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "core/std/regex.hirsel": {
-    "lines": 28360
+    "lines": 14386,
+    "raise_revision": 1,
+    "reason": "std-micro-prims-2019"
   },
   "core/std/sim/s3.hirsel": {
-    "lines": 1135
+    "lines": 1405,
+    "raise_revision": 7,
+    "reason": "object-peer-fallback-2170"
   },
   "core/std/string.hirsel": {
     "lines": 1044
   },
   "core/std/tests/codec.hirsel": {
-    "lines": 2611
+    "lines": 2680,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/tests/http_connection.hirsel": {
-    "lines": 1728
+    "lines": 1848,
+    "raise_revision": 2,
+    "reason": "std2-fetch-2129 places the pool admission and client identity laws with the HTTP connection laws"
   },
   "core/std/tests/json.hirsel": {
     "lines": 1240
@@ -105,13 +126,17 @@
     "lines": 1439
   },
   "core/std/tests/string.hirsel": {
-    "lines": 1512
+    "lines": 1522,
+    "raise_revision": 1,
+    "reason": "std-micro-prims-2019"
   },
   "core/std/zstd.hirsel": {
     "lines": 1415
   },
   "core/tools/runner_tests.py": {
-    "lines": 1526
+    "lines": 1512,
+    "raise_revision": 1,
+    "reason": "bucket-backing-t1-2022"
   },
   "core/tools/std_native.py": {
     "lines": 1105
@@ -129,8 +154,9 @@
     "lines": 1076
   },
   "crates/hirsel-core-driver/src/cli.rs": {
-    "lines": 1337,
-    "reason": "h-release-1895"
+    "lines": 1412,
+    "raise_revision": 3,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
     "lines": 1203
@@ -150,14 +176,19 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1634
+    "lines": 1616,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2927,
-    "reason": "h-release-1895"
+    "lines": 2799,
+    "raise_revision": 3,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-driver/src/product.rs": {
-    "lines": 1121
+    "lines": 1126,
+    "raise_revision": 1,
+    "reason": "native-std-mix-2059"
   },
   "crates/hirsel-core-driver/src/reach.rs": {
     "lines": 1141
@@ -166,14 +197,19 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 2184
+    "lines": 2187,
+    "raise_revision": 1,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
-    "lines": 4287
+    "lines": 4309,
+    "raise_revision": 2,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1943,
-    "reason": "h-release-1895"
+    "lines": 2074,
+    "raise_revision": 7,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2641,
@@ -184,13 +220,17 @@
     "reason": "stale-codec-1910"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1184
+    "lines": 1180,
+    "raise_revision": 2,
+    "reason": "cc-s4-pack-2143"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2687
+    "lines": 2981,
+    "raise_revision": 8,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -198,10 +238,14 @@
     "reason": "cs-store-split-1935"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
-    "lines": 2523
+    "lines": 2532,
+    "raise_revision": 1,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2587
+    "lines": 2619,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -210,40 +254,58 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4788
+    "lines": 4122,
+    "raise_revision": 6,
+    "reason": "cell-2140"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2851
+    "lines": 2866,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
-    "lines": 2354
+    "lines": 2361,
+    "raise_revision": 1,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-front/src/body/maps.rs": {
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3178
+    "lines": 3058,
+    "raise_revision": 2,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2578
   },
   "crates/hirsel-core-front/src/body/places.rs": {
-    "lines": 1860
+    "lines": 1861,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/templates.rs": {
-    "lines": 1388
+    "lines": 1437,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
     "lines": 1217
   },
   "crates/hirsel-core-front/src/body/writers.rs": {
-    "lines": 2531
+    "lines": 2532,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3815
+    "lines": 3821,
+    "raise_revision": 3,
+    "reason": "cell-2140"
   },
   "crates/hirsel-core-front/src/layout.rs": {
-    "lines": 1033
+    "lines": 1047,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/tests.rs": {
     "lines": 1512
@@ -255,18 +317,22 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8524
+    "lines": 8431,
+    "raise_revision": 5,
+    "reason": "crypto-argon2-2130"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2877,
-    "raise_revision": 1,
-    "reason": "checkbox-red-1946 marks returnable park exits for native result lowering"
+    "lines": 2340,
+    "raise_revision": 8,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
-    "lines": 1145
+    "lines": 1151,
+    "raise_revision": 2,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
     "lines": 2181
@@ -278,22 +344,30 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2431
+    "lines": 2390,
+    "raise_revision": 6,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905
   },
   "crates/hirsel-core-layout/src/recipe.rs": {
-    "lines": 1964
+    "lines": 1970,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-layout/src/tests.rs": {
-    "lines": 1469
+    "lines": 1471,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-net/src/reactor.rs": {
     "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
-    "lines": 2726
+    "lines": 2717,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
     "lines": 4760
@@ -317,7 +391,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1536
+    "lines": 1376,
+    "raise_revision": 1,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1582
@@ -332,7 +408,9 @@
     "lines": 1013
   },
   "crates/hirsel-core-rt/src/provide.rs": {
-    "lines": 2336
+    "lines": 2209,
+    "raise_revision": 1,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-rt/src/provider_s0_tests.rs": {
     "lines": 2346
@@ -353,7 +431,9 @@
     "lines": 2258
   },
   "crates/hirsel-core-rt/src/tape/tests.rs": {
-    "lines": 2499
+    "lines": 2553,
+    "raise_revision": 1,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-rt/src/task_heap.rs": {
     "lines": 2650
@@ -380,10 +460,12 @@
     "lines": 1778
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
-    "lines": 2001
+    "lines": 1978
   },
   "crates/hirsel-core-syntax/src/derive.rs": {
-    "lines": 1704
+    "lines": 1711,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-syntax/src/parser.rs": {
     "lines": 1694
@@ -407,10 +489,14 @@
     "lines": 1897
   },
   "crates/hirsel-llvm/src/core/cleanup.rs": {
-    "lines": 1585
+    "lines": 1573,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2604
+    "lines": 2593,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
     "lines": 1222

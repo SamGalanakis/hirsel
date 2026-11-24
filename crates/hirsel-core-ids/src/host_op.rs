@@ -109,16 +109,59 @@ host_ops! {
     DATAGRAM_SEND_TO = 113,
     DATAGRAM_RECV = 114,
     NET_NARROW_UNIX = 115,
+    LOCAL_ADDR = 116,
+    PEER_ADDR = 117,
+    CALL_PAYLOAD_PREFIX = 118,
+    MKSTEMP = 119,
+    ZERO_EXTENSION = 124,
+    PROVIDE_RANDOM_TAPE = 131,
+    MEDIA_AGREEMENT = 132,
+    UDP_OPEN = 133,
+    UDP_BIND = 134,
+    UDP_BIND_GROUP = 135,
+    UDP_RECV = 136,
+    UDP_SEND = 137,
+    UDP_LOCAL_ADDR = 138,
+    UDP_FILL_PACKETS = 139,
+    MEDIA_P256_KEY = 140,
+    MEDIA_KEY_SHARE = 141,
+    SCHEDULE_QUIC_INITIAL = 142,
+    SCHEDULE_SEALER = 143,
+    SCHEDULE_OPENER = 144,
+    SCHEDULE_HEADER_MASK = 145,
+    PACKET_SEAL = 146,
+    PACKET_SEAL_INTO = 147,
+    PACKET_OPEN = 148,
+    PACKET_OPEN_INTO = 149,
+    PACKET_MASK = 150,
 }
+
+// OpenMode's appended case numbers. Existing cases and tape records keep
+// their ordinals.
+pub const MODE_DURABLE: u8 = 5;
+pub const MODE_DIRECT: u8 = 6;
+pub const DIRECT_ALIGNMENT: u64 = 4096;
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
 pub const DIR_READ_ONLY: u64 = 1 << 62;
 
 /// Directory operations that need write authority and the writing modes of open.
 pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
-    matches!(op, MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | RENAME) || (op == OPEN && mode != 0)
+    matches!(
+        op,
+        MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | RENAME
+    ) || (op == OPEN && mode != 0)
+}
+
+/// A temporary name suffix must fit the 32 bytes guaranteed at entry.
+pub fn valid_temp_suffix(suffix: &[u8]) -> bool {
+    (1..=32).contains(&suffix.len()) && suffix.iter().all(u8::is_ascii_alphanumeric)
 }
 
 pub fn unix_operation(op: u8) -> bool {
     (UNIX_CONNECT..=DATAGRAM_RECV).contains(&op)
+}
+
+pub fn udp_operation(op: u8) -> bool {
+    (UDP_OPEN..=UDP_LOCAL_ADDR).contains(&op)
 }

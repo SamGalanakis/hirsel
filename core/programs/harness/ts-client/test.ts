@@ -5,12 +5,70 @@
 //
 //   node test.ts <built gateway>          run the checks
 //   node test.ts <built gateway> serve    serve the example page and keep running
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { stripTypeScriptTypes } from "node:module";
 import { Client, type ReleaseDecision, type State } from "./client.ts";
+
+async function followLifecycle() {
+  const originalFetch = globalThis.fetch;
+  const requests: { signal: AbortSignal; send: (status: string) => void; end: () => void }[] = [];
+  globalThis.fetch = async (_url, init) => {
+    const { signal } = init!;
+    let open = true;
+    return new Response(new ReadableStream({
+      start(controller) {
+        // Hold any queued network data even after abort, so the retired reader
+        // can deliver a late chunk after the new image has arrived.
+        requests.push({
+          signal: signal!,
+          send: (status) => controller.enqueue(new TextEncoder().encode(
+            `data: ${JSON.stringify({ at: 0, line: { Status: status } })}\n\nevent: batch\ndata: {}\n\n`,
+          )),
+          end: () => { if (open) controller.close(); },
+        });
+      },
+      cancel() { open = false; },
+    }));
+  };
+  const images: string[] = [];
+  const client = new Client({
+    base: "http://gateway", session: 0, credential: "test",
+    onChange: (state) => { if (state.live) images.push(state.status); },
+  });
+  const flush = () => new Promise<void>((ok) => setImmediate(ok));
+  try {
+    client.start();
+    client.start();
+    assert.equal(requests.length, 1, "two starts must share one stream");
+    await flush();
+    client.stop();
+    client.start();
+    assert.equal(requests[0].signal.aborted, true);
+    assert.equal(requests.length, 2);
+    requests[1].send("new");
+    await flush();
+    requests[0].send("retired");
+    await flush();
+    assert.deepEqual(images, ["new"]);
+    assert.equal(client.state().status, "new");
+    assert.equal(requests.length, 2);
+  } finally {
+    client.stop();
+    for (const request of requests) request.end();
+    await flush();
+    globalThis.fetch = originalFetch;
+  }
+}
+
+if (process.argv[2] === "--follow-only") {
+  await followLifecycle();
+  console.log("ok follow lifecycle");
+  process.exit(0);
+}
 
 const here = new URL(".", import.meta.url);
 const gateway = spawn(process.argv[2], [], { stdio: ["pipe", "pipe", "inherit"] });
@@ -142,6 +200,7 @@ const command = (action: string, at: number): Promise<number> => new Promise((ok
 });
 
 try {
+  await followLifecycle();
   check("session created", (await (await fetch(`${base}/sessions`, { method: "POST", body: "k0", headers: { Authorization: `Bearer ${me}` } })).json()) === 0);
   client.start();
   await until("the first image", () => state?.live === true);

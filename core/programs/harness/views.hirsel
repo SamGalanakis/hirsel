@@ -5,7 +5,7 @@ fn line(e: Entry) -> Option[View] {
         User(text) => Some(Line("user", clone(text))),
         Inform(text) => Some(Line("info", clone(text))),
         Assistant(answer) => Some(Line("assistant", clone(answer.text))),
-        ToolResult(id, _) => Some(Line("tool", clone(id))),
+        ToolResult(id, _, _) => Some(Line("tool", clone(id))),
         _ => None,
     }
 }
@@ -16,7 +16,7 @@ fn status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused
 
 // Writes the status only when it changes, so a watcher sees no empty update.
 fn show_status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused] {
-    if let Some(Status(current)) = kept(store.fetch(tx, store.shape(h.views), 0u64))? {
+    if let Some(Status(current)) = kept(store.fetch(tx, h.views, 0u64))? {
         if current == text {
             return Ok(())
         }
@@ -51,7 +51,7 @@ fn reader_key(caller: store.Caller) -> Result[Bytes, Capacity] {
 // is rows from `page_from(before, n)` up to `before`: a reader pins `before` at its
 // oldest held row, so later appends never move a page. Rows are sparse, so a page can be
 // short or empty before the first row; a reader stops when `page_from` reaches 1.
-pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64) | Transcript
+pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64) | Transcript | PendingTurn
 
 pub fn page_from(before: u64, lines: u64) -> u64 {
     if before > lines + 1u64 {
@@ -62,17 +62,29 @@ pub fn page_from(before: u64, lines: u64) -> u64 {
 }
 
 // Register with query_as so the membership read is tracked for this Caller.
-pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.views)
+fn shown_table(h: Handles) -> store.Table[u64, View] { clone(h.views) }
+
+pub fn window_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("window", code.describe(shown_table))
+}
+
+fn cut_table(h: Handles) -> store.Table[u64, u64] { clone(h.fork_cuts) }
+
+pub fn cut_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("cuts", code.describe(cut_table))
+}
+
+pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) -> Result[runner.Answer[()], Capacity] {
+    let t = view h.views
     if reader_allowed(tx, h, caller)? {
         return visible_window(tx, h, w)
     }
-    runner.cover(t, Included(0u64), Excluded(0u64))
+    runner.table_answer("window", t, Included(0u64), Excluded(0u64))
 }
 
 pub fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[bool, Capacity] {
     let key = reader_key(caller)?
-    Ok(match store.fetch(tx, store.shape(h.readers), take key) {
+    Ok(match store.fetch(tx, h.readers, take key) {
         Ok(Some(true)) => true,
         _ => false,
     })
@@ -80,31 +92,39 @@ pub fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[
 
 // Finds cuts inside the requested page. The page starts at the newest cut,
 // then its cursor moves into the pinned predecessor on the next request.
-pub fn history_cuts(tx: store.Tx, h: Handles, caller: store.Caller, take range: (u64, u64)) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.fork_cuts)
+pub fn history_cuts(tx: store.Tx, h: Handles, caller: store.Caller, take range: (u64, u64)) -> Result[runner.Answer[()], Capacity] {
+    let t = view h.fork_cuts
     if reader_allowed(tx, h, caller)? {
-        return runner.cover(t, Included(range.0), Excluded(range.1))
+        return runner.table_answer("cuts", t, Included(range.0), Excluded(range.1))
     }
-    runner.cover(t, Included(0u64), Excluded(0u64))
+    runner.table_answer("cuts", t, Included(0u64), Excluded(0u64))
 }
 
-fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.views)
+fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[runner.Answer[()], Capacity] {
+    let t = view h.views
     match w {
-        Status => runner.cover(t, Included(0u64), Included(0u64)),
-        Transcript => runner.cover(t, Unbounded, Unbounded),
+        Status => runner.table_answer("window", t, Included(0u64), Included(0u64)),
+        PendingTurn => {
+            // The status row is a presence marker. The queued message is not part of the transcript yet.
+            match queue_empty(tx, h) {
+                Ok(false) => runner.table_answer("window", t, Included(0u64), Included(0u64)),
+                Ok(true) => runner.table_answer("window", t, Included(0u64), Excluded(0u64)),
+                Error(_) => fail("cannot read the pending turn"),
+            }
+        },
+        Transcript => runner.table_answer("window", t, Unbounded, Unbounded),
         Tail(n) => {
-            let next = match store.fetch(tx, store.shape(h.session), 0u64) {
+            let next = match store.fetch(tx, h.session, 0u64) {
                 Ok(Some(s)) => s.next_pos + 1u64,
                 _ => 1u64
             }
-            runner.cover(t, Included(page_from(next, n)), Unbounded)
+            runner.table_answer("window", t, Included(page_from(next, n)), Unbounded)
         },
-        From(first) => runner.cover(t, Included(if first == 0u64 {
+        From(first) => runner.table_answer("window", t, Included(if first == 0u64 {
             1u64
         } else {
             first
         }), Unbounded),
-        Page(before, n) => runner.cover(t, Included(page_from(before, n)), Excluded(before)),
+        Page(before, n) => runner.table_answer("window", t, Included(page_from(before, n)), Excluded(before)),
     }
 }

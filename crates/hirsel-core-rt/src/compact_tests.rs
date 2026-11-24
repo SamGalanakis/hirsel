@@ -358,10 +358,10 @@ fn map_hash_uses_the_siphash_13_vectors() {
     }
 }
 
-/// PROG-11's independent vectors cover the two sides of an 8-byte tail
+/// Independent vectors for docs/internal/map-index.md cover both sides of an 8-byte tail
 /// and a 16-byte chunk, the signed-word width and all four derivation labels.
 #[test]
-fn map_placement_matches_prog_11_vectors() {
+fn map_placement_matches_fixed_key_vectors() {
     use hirsel_core_layout::{map_hash, map_index};
 
     let key = std::array::from_fn(|i| i as u8);

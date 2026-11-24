@@ -1,0 +1,247 @@
+pub opaque type OpenClaimCursor {
+    rows: Option[std.page.Cursor]
+}
+
+pub fn open_claim_cursor(db: Db) -> OpenClaimCursor {
+    let roots = view db.heads[0u64].roots
+    OpenClaimCursor(rows: if list.len(roots.keyed) == 0 {
+        None
+    } else {
+        let slot: u64 = int.widen(CLAIM_OPEN)
+        Some(std.page.cursor_open(roots.keyed[slot].root, None, true, false))
+    })
+}
+
+pub fn next_open_claim(mut cursor: OpenClaimCursor) -> Option[Bytes] {
+    match cursor.rows {
+        Some(mut rows) => {
+            let no_prefix: Bytes = list.new()
+            match std.page.cursor_next_key(mut rows, no_prefix) {
+                Some((take encoded, _)) => Some(take encoded),
+                None => None,
+            }
+        },
+        None => None,
+    }
+}
+
+pub type ClaimRecovery {
+    claim: ClaimKey,
+    arguments: Bytes,
+    completion: ClaimCompletion
+}
+
+pub fn recovery_policy(recovery: ClaimRecovery) -> View[KeyedPolicy] in recovery {
+    view recovery.completion.policy
+}
+
+pub fn claim_clock(db: Db) -> Clock { db.clock }
+
+pub fn recover_claim(db: Db, encoded: Bytes) -> Result[Option[ClaimRecovery], Error] {
+    let roots = view db.heads[0u64].roots
+    if let None = keyed_lookup(roots.keyed, CLAIM_OPEN, encoded) { return Ok(None) }
+    let Some(raw_claim) = keyed_lookup(roots.keyed, CLAIMS, encoded) else { return Error(malformed(0)) }
+    let state = claim_parse(raw_claim)?
+    if state.replied { return Error(malformed(0)) }
+    let op_end = claim_op_end(encoded)?
+    let principal_end = claim_principal_end(encoded, op_end)?
+    let op = list.slice(encoded, 0, op_end)
+    let Some(raw_policy) = keyed_lookup(roots.keyed, KEYED_OPS, op) else { return Error(malformed(0)) }
+    let policy = read_keyed_policy(raw_policy)?
+    let arguments = copied(list.slice(raw_claim, 41, list.len(raw_claim)))?
+    let caller = Caller(issuer: encoded[op_end], subject: copied(list.slice(encoded, op_end + 2, principal_end))?)
+    let claim = ClaimKey(op: copied(list.slice(op, 1, op_end))?, caller: take caller,
+        key: copied(list.slice(encoded, principal_end + 1, list.len(encoded)))?)
+    let committed = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0u64].head))
+    let completion = ClaimCompletion(ticket: committed, key: copied(encoded)?, request: state.digest, policy: take policy, admitted_width: list.len(raw_claim))
+    Ok(Some(ClaimRecovery(claim: take claim, arguments: take arguments, completion: take completion)))
+}
+
+pub fn has_keyed_ops(db: Db) -> bool {
+    list.len(db.heads[0u64].roots.keyed) != 0
+}
+
+pub type ClaimExpiry: key + send = Never | Finite(u64)
+
+pub type DroppedClaimOp: send {
+    op: Bytes,
+    last_expiry: ClaimExpiry
+}
+
+fn claim_op_high(encoded_op: Bytes) -> Result[Bytes, Error] {
+    let Some(take high) = stream_prefix_end(encoded_op) else {
+        return Error(malformed(0))
+    }
+    Ok(take high)
+}
+
+fn claim_op_latest(roots: Roots, encoded_op: Bytes, at: u64) -> Result[Option[ClaimExpiry], Error] {
+    let open_slot: u64 = int.widen(CLAIM_OPEN)
+    let exp_slot: u64 = int.widen(CLAIM_EXP)
+    let high = claim_op_high(encoded_op)?
+    let start = copied(encoded_op)?
+    let mut admissions = std.page.cursor_open_bounded(roots.keyed[open_slot].root, Some(take start), true, false, Some(copied(high)?))
+    let no_prefix: Bytes = list.new()
+    if let Some(_) = std.page.cursor_next_key(mut admissions, no_prefix) {
+        return Ok(Some(Never))
+    }
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(take high), false, true, Some(copied(encoded_op)?))
+    let Some((take indexed, _)) = std.page.cursor_next_key(mut expiry_index, no_prefix) else {
+        return Ok(None)
+    }
+    let expiry: u64 = list.word_be(indexed, list.len(encoded_op))
+    if claim_expired(expiry, at) {
+        return Ok(None)
+    }
+    Ok(Some(if expiry == CLAIM_NEVER {
+        Never
+    } else {
+        Finite(expiry)
+    }))
+}
+
+fn check_keyed_open(db: Db, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[(Option[u64], Option[DroppedClaimOp]), Error] {
+    let roots = view db.heads[0u64].roots
+    if list.len(roots.keyed) == 0 {
+        return Ok((None, None))
+    }
+    let slot: u64 = int.widen(KEYED_OPS)
+    let mut ops = std.page.cursor_open(roots.keyed[slot].root, None, true, false)
+    let no_prefix: Bytes = list.new()
+    let mut sampled: Option[u64] = None
+    while let Some((take encoded, _)) = std.page.cursor_next_key(mut ops, no_prefix) {
+        let op = list.slice(encoded, 1, list.len(encoded))
+        if bound_op(op) {
+            continue
+        }
+        let at = match sampled {
+            Some(at) => at,
+            None => {
+                let sampled_at = keyed_time(db)
+                sampled = Some(sampled_at)
+                sampled_at
+            },
+        }
+        if let Some(expiry) = claim_op_latest(roots, encoded, at)? {
+            return Ok((sampled, Some(DroppedClaimOp(op: copied(op)?, last_expiry: expiry))))
+        }
+    }
+    Ok((sampled, None))
+}
+
+/// Verify that unbound operations have no live claims. The clock this check
+/// uses becomes durable before the absence of live claims is relied on.
+pub fn check_dropped_claim_ops(mut db: Db, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[Option[DroppedClaimOp], Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let (sampled, take dropped) = check_keyed_open(db, bound_op)?
+    let Some(at) = sampled else {
+        return Ok(None)
+    }
+    let keep: Option[fn(Error) -> bool] = None
+    let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut _tx: Tx) -> Result[(), Error] {
+        Ok(())
+    })?
+    match take outcome {
+        Committed(done) => durable(mut db, done.ticket)?,
+        Refused(problem) => return Error(Full(problem)),
+        Aborted(Undone(value: take problem, ..)) => return Error(take problem),
+        _ => return Error(Missing("claim open check")),
+    }
+    Ok(take dropped)
+}
+
+pub opaque type ClaimSweep {
+    after: Option[Bytes],
+    revisit: Option[Bytes]
+}
+
+pub fn claim_sweep_start() -> ClaimSweep {
+    ClaimSweep(after: None, revisit: None)
+}
+
+pub type ClaimSweepWork {
+    examined: u64,
+    deleted_rows: u64
+}
+
+fn plan_claim_sweep(roots: Roots, cursor: ClaimSweep, at: u64, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[(ClaimSweep, ClaimSweepWork, List[KeyedEdit]), Error] {
+    let mut edits: List[KeyedEdit] = list.new()
+    if list.len(roots.keyed) == 0 {
+        return Ok((claim_sweep_start(), ClaimSweepWork(examined: 0, deleted_rows: 0), take edits))
+    }
+    let seek = match cursor.revisit {
+        Some(op) => Some(copied(op)?),
+        None => match cursor.after {
+            Some(op) => Some(copied(op)?),
+            None => None
+        },
+    }
+    let inclusive = match cursor.revisit {
+        Some(_) => true,
+        None => false
+    }
+    let keyed_slot: u64 = int.widen(KEYED_OPS)
+    let sweep_tree = view roots.keyed[keyed_slot]
+    let mut ops = std.page.cursor_open(sweep_tree.root, take seek, inclusive, false)
+    let no_prefix: Bytes = list.new()
+    let Some((take encoded, _)) = std.page.cursor_next_key(mut ops, no_prefix) else {
+        return Ok((claim_sweep_start(), ClaimSweepWork(examined: 0, deleted_rows: 0), take edits))
+    }
+    if bound_op(list.slice(encoded, 1, list.len(encoded))) {
+        return Ok((ClaimSweep(after: Some(take encoded), revisit: None), ClaimSweepWork(examined: 1, deleted_rows: 0), take edits))
+    }
+    let exp_slot: u64 = int.widen(CLAIM_EXP)
+    let mut expiry_index = std.page.cursor_open_bounded(roots.keyed[exp_slot].root, Some(copied(encoded)?), true, false, Some(claim_op_high(encoded)?))
+    let mut examined = 1u64
+    let mut deleted_rows = 0u64
+    let op_width = list.len(encoded)
+    while examined < 3 {
+        let Some((take indexed, _)) = std.page.cursor_next_key(mut expiry_index, no_prefix) else {
+            break
+        }
+        examined += 1
+        let expiry: u64 = list.word_be(indexed, op_width)
+        if !claim_expired(expiry, at) {
+            break
+        }
+        forget_claim(roots, mut edits, list.slice(indexed, op_width + 8, list.len(indexed)), expiry)?
+        deleted_rows += 1
+    }
+    let work = ClaimSweepWork(examined: examined, deleted_rows: deleted_rows)
+    if claim_count_after(roots, edits, CLAIM_COUNT, encoded) == 0 {
+        append_claim_edit(mut edits, KEYED_OPS, encoded, None)?
+        return Ok((ClaimSweep(after: Some(take encoded), revisit: None), work, take edits))
+    }
+    // A refused commit keeps the cursor at the same op. Successful deletions
+    // advance that op's index front, so its next pass needs no retained key.
+    let next_pass = if deleted_rows == 0 {
+        ClaimSweep(after: Some(take encoded), revisit: None)
+    } else {
+        ClaimSweep(after: None, revisit: Some(take encoded))
+    }
+    Ok((take next_pass, work, take edits))
+}
+
+pub fn sweep_claims(mut db: Db, mut cursor: ClaimSweep, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[ClaimSweepWork, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let at = keyed_time(db)
+    let (take next_pass, work, take edits) = plan_claim_sweep(db.heads[0u64].roots, cursor, at, bound_op)?
+    if list.len(edits) != 0 {
+        let keep: Option[fn(Error) -> bool] = None
+        let held = db.keyed_credit
+        let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            tx.keyed = Some(KeyedDraft(edits: clone(edits), after: held))
+            Ok(())
+        })?
+        match take outcome {
+            Committed(done) => durable(mut db, done.ticket)?,
+            Refused(problem) => return Error(Full(problem)),
+            Aborted(Undone(value: take problem, ..)) => return Error(take problem),
+            _ => return Error(Missing("claim sweep")),
+        }
+    }
+    cursor = take next_pass
+    Ok(work)
+}

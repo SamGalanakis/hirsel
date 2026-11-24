@@ -2,3 +2,10 @@
 /// Compress b's 64-byte blocks and its RFC 3174 padding into h. Takes one
 /// step and allocates nothing. h starts with the SHA-1 initial words for a digest.
 pub fn blocks(mut h: Inline[u32, 5], b: Bytes)
+
+/// Compress count 64-byte blocks from at without padding. A range outside b
+/// fails with Bounds before writing h. Allocates nothing.
+pub fn compress(mut h: Inline[u32, 5], b: Bytes, at: u64, count: u64)
+
+/// Compress one 64-byte block without padding. Allocates nothing.
+pub fn block(mut h: Inline[u32, 5], b: Inline[u8, 64])

@@ -1,0 +1,258 @@
+pub type Error = Probe(media_container.probe.Error) | Mp4(media_container.mp4.VodError) | Edit(media_container.mp4.ClipError) | Webm(media_container.webm.ProbeError) | Avc(h264.Error) | Av1(av1.Av1Error) | Yuv(video_yuv.YuvError) | Image(image_core.image.Error) | Pipeline(image_pipeline.pipeline.PipelineError) | Limit | Unsupported | BadPacket | NoKeyframe | BadLayout
+
+type Codec = H264 | Av1Codec
+
+type Location = Mp4Sample(u64, u64) | WebmCue(media_container.webm.Cue)
+
+type Key {
+    time_ms: u64,
+    location: Location
+}
+
+pub opaque type Index {
+    size: image_core.image.Size,
+    matrix: video_yuv.Matrix,
+    orientation: u8,
+    codec: Codec,
+    config: Bytes,
+    keys: List[Key]
+}
+
+pub type IndexLimits {
+    container: media_container.probe.Limits,
+    samples: u64
+}
+
+fn probe_result[T](take value: Result[T, media_container.probe.Error]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Probe(e)),
+    }
+}
+
+fn mp4_result[T](take value: Result[T, media_container.mp4.VodError]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Mp4(e)),
+    }
+}
+
+fn webm_result[T](take value: Result[T, media_container.webm.ProbeError]) -> Result[T, Error] {
+    match take value {
+        Ok(take data) => Ok(take data),
+        Error(e) => Error(Webm(e)),
+    }
+}
+
+fn owned_bytes(input: Bytes) -> Bytes {
+    let mut data: Bytes = list.with_capacity(list.len(input))
+    list.append(mut data, input)
+    take data
+}
+
+fn compare_keys(a: Key, b: Key) -> Order {
+    if a.time_ms < b.time_ms {
+        Less
+    } else if a.time_ms > b.time_ms {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+fn make_index(size: image_core.image.Size, matrix: video_yuv.Matrix, orientation: u8, codec: Codec, take config: Bytes, take entries: List[Key]) -> Result[Index, Error] {
+    let mut keys = take entries
+    if list.len(keys) == 0 {
+        return Error(NoKeyframe)
+    }
+    list.sort_stable(mut keys, compare_keys)
+    Ok(Index(size: size, matrix: matrix, orientation: orientation, codec: codec, config: take config, keys: take keys))
+}
+
+fn video_matrix(height: u32, colour: Option[media_container.mp4.Colour]) -> Result[video_yuv.Matrix, Error] {
+    if let Some(c) = colour {
+        if c.full_range == Some(true) || c.transfer == 16 || c.transfer == 18 {
+            return Error(Unsupported)
+        }
+        match c.matrix {
+            1 => return Ok(Bt709),
+            5 => return Ok(Bt601),
+            6 => return Ok(Bt601),
+            9 => return Ok(Bt2020),
+            2 => {},
+            _ => return Error(Unsupported),
+        }
+    }
+    Ok(if height >= 720 {
+        Bt709
+    } else {
+        Bt601
+    })
+}
+
+fn config_box(entry: Bytes, kind: u32) -> Result[Bytes, Error] {
+    let n = list.len(entry)
+    let top = match media_container.mp4.read_box(entry, 0, n, true) {
+        Ok(box) => box,
+        Error(_) => return Error(BadPacket),
+    }
+    let mut at = media_container.mp4.box_body(top) + 78
+    let mut found: Option[Bytes] = None
+    while at < n {
+        let child = match media_container.mp4.read_box(entry, at, n, true) {
+            Ok(box) => box,
+            Error(_) => return Error(BadPacket),
+        }
+        at = media_container.mp4.box_next(child)
+        if media_container.mp4.box_kind(child) == kind {
+            if let Some(_) = view found {
+                return Error(BadPacket)
+            }
+            found = Some(owned_bytes(list.slice(entry, media_container.mp4.box_body(child), at)))
+        }
+    }
+    match take found {
+        Some(take data) => Ok(take data),
+        None => Error(BadPacket),
+    }
+}
+
+fn mp4_index(vod: media_container.mp4.Vod, max_samples: u64) -> Result[Index, Error] {
+    for i in 0u64 .. media_container.mp4.vod_tracks(vod) {
+        let (track, hdr) = mp4_result(media_container.mp4.vod_track(vod, i))?
+        if track.handler != 0x76696465 {
+            continue
+        }
+        let (codec, kind) = match track.codec {
+            0x61766331 => (H264, 0x61766343u32),
+            0x61766333 => (H264, 0x61766343u32),
+            0x61763031 => (Av1Codec, media_container.mp4.AV1C),
+            _ => continue,
+        }
+        let mut config: Result[Bytes, Error] = Error(BadPacket)
+        mp4_result(media_container.mp4.vod_sample_entry(vod, i, scoped fn(entry: Bytes) {
+            config = config_box(entry, kind)
+        }))?
+        let size = image_core.image.Size(width: int.widen(track.width), height: int.widen(track.height))
+        let matrix = video_matrix(size.height, hdr.colour)?
+        let orientation: u8 = match track.rotation {
+            Some(0) => 1,
+            Some(180) => 3,
+            Some(- 180) => 3,
+            Some(- 90) => 6,
+            Some(90) => 8,
+            _ => return Error(Unsupported),
+        }
+        let mut keys: List[Key] = list.new()
+        match media_container.mp4.vod_sync_samples(vod, i, max_samples, scoped fn(time: u64, sample: media_container.mp4.VodSample) {
+            list.push(mut keys, Key(time_ms: time, location: Mp4Sample(sample.offset, int.widen(sample.size))))
+        }) {
+            Ok(()) => {},
+            Error(e) => return Error(Edit(e)),
+        }
+        let raw = (take config)?
+        return make_index(size, matrix, orientation, codec, take raw, take keys)
+    }
+    Error(Unsupported)
+}
+
+fn webm_index(vod: media_container.webm.WebmProbe, max_cues: u64) -> Result[Index, Error] {
+    let scale = media_container.webm.probe_info(vod).timestamp_scale
+    for i in 0u64 .. media_container.webm.probe_tracks(vod) {
+        let mut selected: Option[(u64, image_core.image.Size, Codec, Bytes)] = None
+        webm_result(media_container.webm.probe_track(vod, i, scoped fn(info: media_container.webm.WebmFormat, codec: Bytes, config: Bytes) {
+            if info.track.kind == 1 && info.track.codec_delay == 0 {
+                let width: Option[u32] = int.try_narrow(info.width)
+                let height: Option[u32] = int.try_narrow(info.height)
+                if let (Some(w), Some(h)) = (width, height) {
+                    if codec == b"V_AV1" || codec == b"V_MPEG4/ISO/AVC" {
+                        let kind = if codec == b"V_AV1" {
+                            Av1Codec
+                        } else {
+                            H264
+                        }
+                        selected = Some((info.track.number, image_core.image.Size(width: w, height: h), kind, owned_bytes(config)))
+                    }
+                }
+            }
+        }))?
+        if let Some((number, size, codec, take config)) = take selected {
+            let mut keys: List[Key] = list.new()
+            let mut failed = false
+            media_container.webm.probe_cues(vod, scoped fn(cue: media_container.webm.Cue) {
+                if cue.track == number && !failed {
+                    if let Some(ns) = int.checked_mul(cue.time, scale) {
+                        if list.len(keys) < max_cues {
+                            list.push(mut keys, Key(time_ms: ns / 1000000, location: WebmCue(cue)))
+                            return
+                        }
+                    }
+                    failed = true
+                }
+            })
+            if failed {
+                return Error(Limit)
+            }
+            return make_index(size, video_matrix(size.height, None)?, 1, codec, take config, take keys)
+        }
+    }
+    Error(Unsupported)
+}
+
+/// Builds an index without reading media payload. The caller supplies exact
+/// ranges from one immutable object, using pread or an HTTP Range reader.
+pub fn index(file_size: u64, limits: IndexLimits, read: scoped fn(u64, u64) -> Result[Bytes, media_container.probe.Error] waits) -> Result[Index, Error] waits {
+    match probe_result(media_container.probe.video_probe(file_size, limits.container, read))? {
+        Mp4Vod(vod) => mp4_index(vod, limits.samples),
+        WebmVod(vod) => webm_index(vod, limits.samples),
+    }
+}
+
+fn key_index(source: Index, time_ms: u64) -> Result[u64, Error] {
+    let mut lo = 0u64
+    let mut hi = list.len(source.keys)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if source.keys[mid].time_ms <= time_ms {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == 0 {
+        Error(NoKeyframe)
+    } else {
+        Ok(lo - 1)
+    }
+}
+
+fn read_packet(location: Location, cap: u64, read: scoped fn(u64, u64) -> Result[Bytes, media_container.probe.Error] waits) -> Result[Bytes, Error] waits {
+    match location {
+        Mp4Sample(at, n) => {
+            if n > cap {
+                return Error(Limit)
+            }
+            let data = probe_result(read(at, n))?
+            if n == 0 || list.len(data) != n {
+                return Error(BadPacket)
+            }
+            Ok(take data)
+        },
+        WebmCue(cue) => {
+            let mut read_error: Option[media_container.probe.Error] = None
+            let result = media_container.webm.read_cue(cue, cap, scoped fn(at: u64, n: u64) -> Result[Bytes, media_container.webm.ProbeError] waits {
+                match read(at, n) {
+                    Ok(take raw) => Ok(take raw),
+                    Error(e) => {
+                        read_error = Some(e)
+                        Error(ProbeReadFailed)
+                    },
+                }
+            })
+            if let Some(e) = read_error {
+                return Error(Probe(e))
+            }
+            webm_result(take result)
+        },
+    }
+}

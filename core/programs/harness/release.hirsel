@@ -6,8 +6,8 @@
 // proposal's parked tool call its result.
 //
 // The app lists the tools with `add_tools` from its `agent()`, so every entry reaches them,
-// creates the tables with `migrate` beside `harness.migrate`, and forwards the query and
-// settle entries after checking the host's Caller. The host uses release_publish.
+// declares the tables through `harness.declare_tables`, and forwards the query and settle
+// entries after checking the host's Caller. The host uses release_publish.
 
 pub type File: codec + send {
     path: String,
@@ -34,7 +34,7 @@ pub type Proposal: codec + send {
     state: State
 }
 
-pub type Tables: send {
+pub type Tables: shareable + send {
     files: store.Table[String, String],
     proposals: store.Table[Bytes, Proposal]
 }
@@ -47,42 +47,22 @@ fn proposals_name() -> String {
     "release.proposals"
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     let c_text: std.codec.Codec[String] = std.codec.of()
     let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec(files_name(), std.codec.key_string(), c_text)) {
-        Error(Exists(_)) => (),
-        Error(take e) => return Error(take e),
-        Ok(()) => (),
-    }
-    match store.migration_create_table(mut phase, store.spec(proposals_name(), std.codec.key_bytes(), c_proposal)) {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
-}
-
-pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
-    let c_text: std.codec.Codec[String] = std.codec.of()
-    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
-    Ok(Tables(
-        files: store.schema_table(schema, files_name(), std.codec.key_string(), c_text)?,
-        proposals: store.schema_table(schema, proposals_name(), std.codec.key_bytes(), c_proposal)?,
-    ))
+    let files = store.declare_table(mut d, files_name(), std.codec.key_string(), c_text)?
+    let files_table = store.finish(mut d, take files)?
+    let proposals = store.declare_table(mut d, proposals_name(), std.codec.key_bytes(), c_proposal)?
+    let proposals_table = store.finish(mut d, take proposals)?
+    Ok(Tables(files: take files_table, proposals: take proposals_table))
 }
 
 // The four Inside tools.
-pub fn add_tools[G: send](mut a: harness.Agent[G]) {
+pub fn add_tools[G: send, App: inert + send](mut a: harness.Agent[G, App]) {
     list.push(mut a.tools, harness.inside("read_source", "Reads one source file of this harness.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", code.describe(read_source)))
     list.push(mut a.tools, harness.inside("write_source", "Writes one source file of this harness; empty text deletes it.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}", code.describe(write_source)))
     list.push(mut a.tools, harness.inside("list_source", "Lists this harness's source files, one path per line.", "{\"type\":\"object\"}", code.describe(list_source)))
     list.push(mut a.tools, harness.inside("propose_release", "Proposes the current source as this harness's next release; the result arrives when the host has decided.", "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"package\":{\"type\":\"string\"},\"grants\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"dirs\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"summary\"]}", code.describe(propose_release)))
-}
-
-fn opened(tx: store.Tx) -> Result[Tables, harness.Fault] {
-    match tables(store.tx_schema(tx)) {
-        Ok(take t) => Ok(take t),
-        Error(_) => Error(Unavailable),
-    }
 }
 
 fn arguments(args: Bytes) -> Result[mcp.rpc.Fields, harness.Fault] {
@@ -129,18 +109,18 @@ fn path_arg(args: Bytes) -> Result[String, harness.Fault] {
     Ok(path)
 }
 
-fn read_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn read_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let path = path_arg(inv.args)?
-    match store.fetch(tx, store.shape(t.files), path) {
+    match store.fetch(tx, t.files, path) {
         Ok(Some(take text)) => Ok(Now(string.into_bytes(take text))),
         Ok(None) => Error(Refused("no such source file")),
         Error(_) => Error(Unavailable),
     }
 }
 
-fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn write_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let path = path_arg(inv.args)?
     let text = arg(inv.args, "text")?
     let wrote: Result[(), store.Error] = if string.byte_len(text) == 0u64 {
@@ -157,15 +137,15 @@ fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, 
     }
 }
 
-fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
-    let Ok(take cursor) = store.range(tx, store.shape(t.files), Unbounded, Unbounded) else {
+fn list_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
+    let Ok(take cursor) = store.range(tx, t.files, Unbounded, Unbounded) else {
         return Error(Unavailable)
     }
     let mut rows = take cursor
     let mut out: Bytes = list.new()
     loop {
-        match store.next_range(mut rows) {
+        match store.next_in(tx, mut rows) {
             Ok(Some((path, _))) => {
                 list.extend(mut out, string.as_bytes(path))
                 list.push(mut out, b'\n')
@@ -180,11 +160,11 @@ fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
 // The tree hash: SHA-256 over every (path, text) in path order, each key-encoded, so two
 // trees hash alike exactly when they hold the same files.
 fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
-    let mut rows = store.range(tx, store.shape(t.files), Unbounded, Unbounded)?
+    let mut rows = store.range(tx, t.files, Unbounded, Unbounded)?
     let mut hash = std.sha256.start()
     let mut n = 0u64
     let mut size = 4u64
-    while let Some((path, text)) = store.next_range(mut rows)? {
+    while let Some((path, text)) = store.next_in(tx, mut rows)? {
         size += 8u64 + string.byte_len(path) + string.byte_len(text)
         if size > platform.launcher.TREE_BYTES {
             return Error(Limit(Value))
@@ -221,8 +201,8 @@ fn call_id(key: harness.EffectKey) -> Bytes {
 }
 
 // Files the current tree as a proposal and parks the call until the host settles it.
-fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn propose_release[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let fields = arguments(inv.args)?
     let summary = text_arg(fields, "summary")?
     let package = if mcp.rpc.contains(fields, "package") { text_arg(fields, "package")? } else { "." }
@@ -243,10 +223,10 @@ fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Repl
 }
 
 // The host's read: every filed proposal, by its ID.
-pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] {
-    let mut rows = store.scan(snap, store.shape(t.proposals), Unbounded, Unbounded)?
+pub fn pending(read_handle: store.Reader, snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] waits {
+    let mut rows = store.scan(read_handle, snap, t.proposals, Unbounded, Unbounded)?
     let mut out: List[(Bytes, Proposal)] = list.new()
-    while let Some((take id, take p)) = store.next(mut rows)? {
+    while let Some((take id, take p)) = store.next(read_handle, mut rows)? {
         if let Filed = p.state {
             list.push(mut out, (take id, take p))
         }
@@ -256,11 +236,11 @@ pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)
 
 // The source a proposal names, in path order, or None when the tree has changed since it
 // was filed: the host never publishes source the proposal did not name.
-pub fn source(snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] {
-    let mut rows = store.scan(snap, store.shape(t.files), Unbounded, Unbounded)?
+pub fn source(read_handle: store.Reader, snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] waits {
+    let mut rows = store.scan(read_handle, snap, t.files, Unbounded, Unbounded)?
     let mut hash = std.sha256.start()
     let mut files: List[File] = list.new()
-    while let Some((take path, take text)) = store.next(mut rows)? {
+    while let Some((take path, take text)) = store.next(read_handle, mut rows)? {
         hash_file(mut hash, path, text)
         list.push(mut files, File(path: take path, text: take text))
     }
@@ -285,53 +265,57 @@ pub type DevSettlement: codec + send { id: Bytes, decision: DevDecision }
 pub type FiledProposal: codec + send { id: Bytes, proposal: Proposal }
 
 // The development gateway delegates release decisions to the session's readers.
-pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
-    let t = tables(store.tx_schema(tx)) ?=> |_| read_failed()
-    let shape = store.shape(t.proposals)
-    if harness.reader_allowed(tx, h, caller)? {
-        return runner.cover(shape, Unbounded, Unbounded)
-    }
-    runner.cover(shape, Included(list.new()), Excluded(list.new()))
+fn proposal_table(h: harness.Handles) -> store.Table[Bytes, Proposal] { clone(h.source.proposals) }
+
+pub fn proposal_slots() -> Result[runner.Slots[harness.Handles], runner.RegisterError] {
+    runner.table_slot("proposals", code.describe(proposal_table))
 }
 
-pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
+pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Answer[()], Capacity] {
+    let shape = view h.source.proposals
+    if harness.reader_allowed(tx, h, caller)? {
+        return runner.table_answer("proposals", shape, Unbounded, Unbounded)
+    }
+    runner.table_answer("proposals", shape, Included(list.new()), Excluded(list.new()))
+}
+
+pub fn dev_settle[G: send, App: inert + send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G, App], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
     if !(harness.reader_allowed(tx, h, caller) ?=> |_| Storage) {
         return Error(NotAllowed)
     }
-    let t = tables(store.tx_schema(tx)) ?=> |_| Storage
     let DevSettlement(id: take id, decision: take decision) = take ask
     let state = match take decision {
         Publish => Published("approved, not deployed"),
         Reject(take why) => Rejected(take why),
     }
-    settle(mut tx, h, t, a, w, id, take state)
+    settle(mut tx, h, h.source, a, w, id, take state)
 }
 
 // WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
 // Each Cover is published against the same transaction snapshot as the scan that chose it.
-pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] {
-    let shape = store.shape(t.proposals)
+pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Answer[()], Capacity] {
+    let shape = view t.proposals
     let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
-    while let Some((id, proposal)) = store.next_range(mut rows) ?=> |_| read_failed() {
+    while let Some((id, proposal)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
         if let Filed = proposal.state {
-            return runner.cover(shape, Included(clone(id)), Included(clone(id)))
+            return runner.table_answer("proposals", shape, Included(clone(id)), Included(clone(id)))
         }
     }
-    runner.cover(shape, Included(list.new()), Excluded(list.new()))
+    runner.table_answer("proposals", shape, Included(list.new()), Excluded(list.new()))
 }
 
 // Publish one source row per WIRE query, so a full tree need not fit in one batch.
-pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Cover, Capacity] {
-    let shape = store.shape(t.files)
+pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Answer[()], Capacity] {
+    let shape = view t.files
     let low: store.Bound[String] = match after {
         Some(path) => Excluded(string.from(path)),
         None => Unbounded,
     }
     let mut rows = store.range(tx, shape, low, Unbounded) ?=> |_| read_failed()
-    if let Some((path, _)) = store.next_range(mut rows) ?=> |_| read_failed() {
-        return runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
+    if let Some((path, _)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
+        return runner.table_answer("files", shape, Included(string.from(path)), Included(string.from(path)))
     }
-    runner.cover(shape, Included(""), Excluded(""))
+    runner.table_answer("files", shape, Included(""), Excluded(""))
 }
 
 fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }
@@ -340,8 +324,8 @@ fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }
 // calls this after authorizing its caller as the host. A proposal already settled, or
 // unknown, is Ignored; the proposal row records the decision even when the call has since
 // timed out.
-pub fn settle[G: send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
-    let Ok(found) = store.fetch(tx, store.shape(t.proposals), id) else {
+pub fn settle[G: send, App: inert + send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G, App], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
+    let Ok(found) = store.fetch(tx, t.proposals, id) else {
         return Error(Storage)
     }
     let Some(take p) = found else {

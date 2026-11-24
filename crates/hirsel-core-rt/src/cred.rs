@@ -11,7 +11,7 @@ use crate::{
     secret::{Origin, Secret},
     tasks::Outside,
 };
-use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource};
+use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource, secret_aead::SecretBytes};
 use rustls::{
     ClientConfig,
     client::UnbufferedClientConnection,
@@ -97,7 +97,7 @@ pub(crate) struct Fetched {
     pub(crate) key_id: Zeroizing<Vec<u8>>,
     pub(crate) token: Zeroizing<Vec<u8>>,
     /// Absent on replay: the designation has no bytes behind it.
-    pub(crate) secret: Option<Arc<Zeroizing<Vec<u8>>>>,
+    pub(crate) secret: Option<Arc<SecretBytes>>,
     pub(crate) expires_ns: u64,
 }
 
@@ -209,7 +209,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
         answer: None,
     }));
     let result = completion.clone();
-    let blocking = crate::units::blocking();
     let helper = std::thread::Builder::new()
         .name("hirsel-cred".into())
         .spawn(move || {
@@ -223,7 +222,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
                 active.complete(token);
             }
         });
-    drop(blocking);
     match helper {
         Ok(helper) => {
             drop(helper);
@@ -473,7 +471,7 @@ fn imds(at: SocketAddrV4, deadline: Option<u64>) -> Answer {
         key_id: exact(member(json, b"AccessKeyId")?),
         token: exact(member(json, b"Token")?),
         expires_ns: expiry(member(json, b"Expiration")?)?,
-        secret: Some(Arc::new(exact(secret))),
+        secret: Some(Arc::new(SecretBytes::new(exact(secret)))),
     };
     Ok(fetched)
 }
@@ -613,7 +611,7 @@ fn assume_role(source: &StsSource, deadline: Option<u64>) -> Answer {
         key_id: exact(text(element(credentials, b"AccessKeyId")?)?),
         token: exact(text(element(credentials, b"SessionToken")?)?),
         expires_ns: expiry(text(element(credentials, b"Expiration")?)?)?,
-        secret: Some(Arc::new(exact(secret))),
+        secret: Some(Arc::new(SecretBytes::new(exact(secret)))),
     })
 }
 
@@ -857,7 +855,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 0,
                 os: &OPERATIONS,
                 tls: ptr::null_mut(),

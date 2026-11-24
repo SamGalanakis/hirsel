@@ -1,0 +1,22 @@
+// Logical charges under charge-v1 (MEM-24, MEM-33). Overflow returns None.
+pub fn round(n: u64) -> Option[u64]
+
+pub fn boxed(payload: u64) -> Option[u64]
+
+pub fn counted(payload: u64) -> Option[u64]
+
+pub fn shared(payload: u64) -> Option[u64]
+
+pub fn seq(element: u64, capacity: u64) -> Option[u64]
+
+pub fn map(key: u64, value: u64, capacity: u64) -> Option[u64]
+
+pub fn channel(item: u64, capacity: u64) -> Option[u64]
+
+pub fn task(result: u64, limit: u64) -> Option[u64]
+
+pub fn block(fields: u64, grant: u64) -> Option[u64]
+
+pub fn port(item: u64, capacity: u64) -> Option[u64]
+
+pub fn latest() -> Option[u64]

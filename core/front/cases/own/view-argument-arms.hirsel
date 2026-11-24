@@ -1,0 +1,85 @@
+// LANG-11, OWN-7, OWN-16: `match`, guarded `match` and `loop`/`break` view arms passed
+// for a view parameter join a view as `if` and `if let` do: the join owns nothing, so
+// each local is finalized once, at its own end (b (2), then a (1)); a selected arm's
+// temporary lives through the call (LANG-6). Mixing an owned arm after a view arm is
+// refused as in `if`.
+// matched / guarded: c == 1 views a (1), else b (2); trace 2,1.
+// matched_temp: last byte of "abc" (99) or "abcde" (101).
+// broken: id_of(view a) = 1; trace 2,1. broken_temp: last byte of "abc" = 99.
+// expect: run matched(1) = 1 trace 2,1
+// expect: run matched(0) = 2 trace 2,1
+// expect: run guarded(1) = 1 trace 2,1
+// expect: run guarded(0) = 2 trace 2,1
+// expect: run matched_temp(1) = 99
+// expect: run matched_temp(0) = 101
+// expect: run broken(1) = 1 trace 2,1
+// expect: run broken_temp(1) = 99
+// expect: refuse LANG-11 at 83:14
+// expect: compared LANG-11 at 83:14 | core@1/core/List[u8] | View[core@1/core/List[u8]]
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn matched(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let b = result.unwrap(Mark(id: 2))
+    id_of(match c {
+        1 => view a,
+        _ => view b
+    })
+}
+
+fn guarded(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let b = result.unwrap(Mark(id: 2))
+    id_of(match c {
+        k if k == 1 => view a,
+        _ => view b
+    })
+}
+
+fn matched_temp(c: u64) -> u64 {
+    last_byte(match c {
+        1 => string.as_bytes(made("abc")),
+        _ => string.as_bytes(made("abcde"))
+    })
+}
+
+fn broken(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let b = result.unwrap(Mark(id: 2))
+    id_of(loop {
+        break view a
+    })
+}
+
+fn broken_temp(c: u64) -> u64 {
+    last_byte(loop {
+        break string.as_bytes(made("abc"))
+    })
+}
+
+fn width(b: Bytes) -> u64 {
+    list.len(b)
+}
+
+fn mixed(c: u64, s: String) -> u64 {
+    width(match c {
+        1 => string.as_bytes(s),
+        _ => string.into_bytes(string.from(s))
+    })
+}

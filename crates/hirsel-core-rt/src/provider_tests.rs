@@ -1,10 +1,10 @@
 use crate::{abi::*, causes, os::OsProvider, process::*, provider::*};
 use std::{fs::File, os::fd::OwnedFd};
-struct Fixture {
-    root: tempfile::TempDir,
-    os: OsProvider,
-    dir: u64,
-    context: *mut crate::Context,
+pub(super) struct Fixture {
+    pub(super) root: tempfile::TempDir,
+    pub(super) os: OsProvider,
+    pub(super) dir: u64,
+    pub(super) context: *mut crate::Context,
 }
 impl Fixture {
     fn new() -> Self {
@@ -25,7 +25,7 @@ impl Fixture {
             context,
         }
     }
-    fn call(
+    pub(super) fn call(
         &mut self,
         op: u8,
         handle: u64,
@@ -53,10 +53,10 @@ impl Fixture {
         assert_eq!(outcome.status, 0);
         (outcome, request.buffer.len)
     }
-    fn simple(&mut self, op: u8, handle: u64, path: &[u8], mode: u8) -> Outcome {
+    pub(super) fn simple(&mut self, op: u8, handle: u64, path: &[u8], mode: u8) -> Outcome {
         self.call(op, handle, path, mode, &mut [], 0).0
     }
-    fn open(&mut self, path: &[u8], mode: u8) -> u64 {
+    pub(super) fn open(&mut self, path: &[u8], mode: u8) -> u64 {
         let o = self.simple(OPEN, self.dir, path, mode);
         assert_eq!(o.error, IoError::OK);
         o.value
@@ -1632,6 +1632,7 @@ fn operator_listener_is_private() {
             capacity: 0,
         }
     }
+    crate::openat2_required::require();
     // SAFETY: geteuid has no failure.
     let uid = unsafe { libc::geteuid() };
     let root = carrier(b"test");
@@ -1673,7 +1674,6 @@ fn operator_listener_is_private() {
             "the operator's own UID is admitted"
         );
 
-        // The same listener admitting another UID: the connection is closed, never returned.
         let mut stranger = UnixStream::connect(&bound).unwrap();
         assert_eq!(
             os_unix::accept(&mut files.sockets, fd, only.map(|u| u + 1)).map(|o| o.value),

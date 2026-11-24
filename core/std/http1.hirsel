@@ -382,6 +382,24 @@ fn newline(b: Bytes, mut at: u64) -> Result[(), Stop] {
     Ok(())
 }
 
+/// Checks an Upgrade token with an optional protocol version.
+pub fn valid_upgrade_protocol(protocol: Bytes) -> bool {
+    let n = list.len(protocol)
+    if n == 0 {
+        return false
+    }
+    let mut has_version = false
+    for i in 0u64 .. n {
+        let c = protocol[i]
+        if c == b'/' && !has_version && i != 0 && i + 1 != n {
+            has_version = true
+        } else if !token(c) {
+            return false
+        }
+    }
+    true
+}
+
 /// Whether c is an RFC 9110 field-name token byte.
 pub fn token(c: u8) -> bool {
     int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126

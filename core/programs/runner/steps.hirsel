@@ -8,7 +8,7 @@ pub opaque scoped type Ctx[G: send] {
 }
 
 type Fingerprint: codec + send { contract: Bytes }
-type Row: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
+type SubRow: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
 type Mode: codec + send = First | Resend | Lookup
 type Begin: codec + send { index: u64, fingerprint: Fingerprint, mode: Mode }
 type Finish: codec + send { step: Begin, raw: Bytes }
@@ -18,30 +18,21 @@ type TxRequest: codec + send { index: u64, arg: Bytes }
 const OUTSIDE: u8 = 0
 const TRANSACTION: u8 = 1
 
-type Tables {
+pub opaque type Tables: shareable + send {
     caps: store.Table[Bytes, u64],
-    rows: store.Table[Bytes, Row],
+    rows: store.Table[Bytes, SubRow],
     triggers: triggers.Tables,
 }
 
 fn caps_name() -> String { "store.steps.caps" }
 fn rows_name() -> String { "store.steps.rows" }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    ensure_table(store.migration_create_table(mut phase, store.spec(caps_name(), std.codec.key_bytes(), std.codec.of_u64())))?
-    let row: std.codec.Codec[Row] = std.codec.of()
-    ensure_table(store.migration_create_table(mut phase, store.spec(rows_name(), std.codec.key_bytes(), row)))
-}
-
-fn ensure_table(take made: Result[(), store.Error]) -> Result[(), store.Error] {
-    match take made { Error(Exists(_)) => Ok(()), other => take other }
-}
-
-fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
-    let caps = store.schema_table(schema, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
-    let row: std.codec.Codec[Row] = std.codec.of()
-    let rows = store.schema_table(schema, rows_name(), std.codec.key_bytes(), row)?
-    Ok(Tables(caps: take caps, rows: take rows, triggers: triggers.tables(schema)?))
+pub fn declare_tables(mut d: store.Declare, take pending: triggers.Tables) -> Result[Tables, store.Error] {
+    let caps = store.declare_table(mut d, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
+    let cap_table = store.finish(mut d, take caps)?
+    let row: std.codec.Codec[SubRow] = std.codec.of()
+    let rows = store.declare_table(mut d, rows_name(), std.codec.key_bytes(), row)?
+    Ok(Tables(caps: take cap_table, rows: store.finish(mut d, take rows)?, triggers: take pending))
 }
 
 fn encode[A: codec](a: A) -> Result[Bytes, store.Error] {
@@ -94,7 +85,7 @@ fn trigger_write(take changed: Result[(), triggers.Error]) -> Result[(), store.E
 
 fn capped(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64) -> Result[bool, store.Error] {
     let key = run_key(a)?
-    let Some(limit) = store.fetch(tx, store.shape(t.caps), key)? else { return Error(Missing("step cap")) }
+    let Some(limit) = store.fetch(tx, t.caps, key)? else { return Error(Missing("step cap")) }
     if index < limit { return Ok(false) }
     trigger_write(triggers.finish(mut tx, t.triggers, a, Cap))?
     Ok(true)
@@ -108,7 +99,7 @@ fn hold(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64, expected: 
 fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin) -> Result[Reply, store.Error] {
     if capped(mut tx, t, a, b.index)? { return Ok(Capped) }
     let key = row_key(a, b.index)?
-    match store.fetch(tx, store.shape(t.rows), key)? {
+    match store.fetch(tx, t.rows, key)? {
         Some(Finished(take saved, take raw)) => {
             if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
             return Ok(Replay(take raw))
@@ -130,7 +121,7 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
 
 fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Finish) -> Result[Reply, store.Error] {
     let key = row_key(a, f.step.index)?
-    let Some(Started(attempt, take saved)) = store.fetch(tx, store.shape(t.rows), key)? else { return Error(Missing("started step")) }
+    let Some(Started(attempt, take saved)) = store.fetch(tx, t.rows, key)? else { return Error(Missing("started step")) }
     if saved.contract != f.step.fingerprint.contract { return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint) }
     match f.step.mode {
         Lookup => (),
@@ -142,17 +133,17 @@ fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Fini
     Ok(Replay(take copied))
 }
 
-fn control(mut tx: store.Tx, a: triggers.Attempt, take command: Command) -> Result[Reply, store.Error] {
-    let t = tables(store.tx_schema(tx))?
+fn control(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take command: Command) -> Result[Reply, store.Error] {
     match take command {
         Enter(take b) => start_outside(mut tx, t, a, take b),
         Finalize(take f) => finish_outside(mut tx, t, a, take f),
     }
 }
 
-pub fn register[G: send, H: send](mut r: runner.Registry[G, H], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let invoke: own[send] fn(mut store.Tx, triggers.Attempt, take Command) -> Result[Reply, store.Error] = control
-    runner.register_attempt(mut r, code.describe(control), take invoke, encoded, steps)
+pub fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], select: fn(H) -> Tables, encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    runner.register_attempt(mut r, code.describe(control), select, fn(mut tx: store.Tx, h: H, a: triggers.Attempt, take command: Command, pick: fn(H) -> Tables) -> Result[Reply, store.Error] {
+        control(mut tx, pick(h), a, take command)
+    }, encoded, steps)
 }
 
 fn must[A, E](take value: Result[A, E]) -> A {
@@ -180,11 +171,7 @@ fn dispatch[F, A: codec, E: codec](route: runner.TriggerContext, f: StaticFn[F],
     }
 }
 
-pub fn schedule[A](mut tx: store.Tx, entries: triggers.Entries, target: triggers.Entry[A], arg: A, cap: u64, due: triggers.Due) -> Result[triggers.Id, triggers.Error] {
-    let t = match tables(store.tx_schema(tx)) {
-        Ok(take t) => take t,
-        Error(take problem) => return Error(Store(take problem)),
-    }
+pub fn schedule[A](mut tx: store.Tx, t: Tables, entries: triggers.Entries, target: triggers.Entry[A], arg: A, cap: u64, due: triggers.Due) -> Result[triggers.Id, triggers.Error] {
     let id = triggers.write(mut tx, t.triggers, entries, target, arg, due)?
     let raw = encode(id) ?=> Store
     match store.put(mut tx, t.caps, raw, cap) {
@@ -223,24 +210,33 @@ fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) 
     }
 }
 
-fn outside_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+fn outside_request_identity[A: codec, R, E](index: u64, a: A, identity: Bytes, mode: Mode, cr: std.codec.Codec[R], ce: std.codec.Codec[E]) -> Begin {
     let ca: std.codec.Codec[A] = std.codec.of()
-    let cr: std.codec.Codec[R] = std.codec.of()
-    let ce: std.codec.Codec[E] = std.codec.of()
-    let encoded = must(fingerprint(OUTSIDE, code.identity(f), ca, cr, ce, must(encode(a))))
+    let encoded = must(fingerprint(OUTSIDE, identity, ca, cr, ce, must(encode(a))))
     Begin(index: index, fingerprint: take encoded, mode: mode)
 }
 
-fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, callback: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+fn outside_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    outside_request_identity(index, a, code.identity(f), mode, cr, ce)
+}
+
+fn keyed_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    outside_request_identity(index, a, code.identity(f), mode, cr, ce)
+}
+
+fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, invoke: scoped fn(G, StepId, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
     let copied: Begin = clone(before)
     let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(take copied))
     match (take attempted)? {
         Ready => (),
         other => return reply_value(mut ctx, take other),
     }
-    let invoke = code.callable(callback)
     let value = match map.get(ctx.grants, ctx.index) {
-        Some(grant) => invoke(grant, take a),
+        Some(grant) => invoke(grant, next_id(ctx), take a),
         None => fail("step wrapper: no grant for outside step"),
     }
     let finished = Finish(step: take before, raw: must(encode(value)))
@@ -248,25 +244,52 @@ fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, ta
     reply_value(mut ctx, (take result)?)
 }
 
+fn unkeyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let invoke = code.callable(f)
+    outside(mut ctx, take a, take request, scoped fn(grant: G, _id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, take arg) })
+}
+
+fn keyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let invoke = code.callable(f)
+    outside(mut ctx, take a, take request, scoped fn(grant: G, id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, must(outside_key(id)), take arg) })
+}
+
 pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let request = outside_request(ctx.index, a, f, First)
-    outside(mut ctx, take a, take request, f)
+    unkeyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
     let request = outside_request(ctx.index, a, f, Resend)
-    outside(mut ctx, take a, take request, f)
+    unkeyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
     let request = outside_request(ctx.index, a, f, Lookup)
-    outside(mut ctx, take a, take request, lookup)
+    unkeyed_outside(mut ctx, take a, take request, lookup)
 }
 
-fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest, f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]]) -> Result[Reply, store.Error] {
-    let t = tables(store.tx_schema(tx))?
+/// Passes the encoded step id to a fresh outside call. Replay returns the stored result.
+pub fn keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let request = keyed_request(ctx.index, a, f, First)
+    keyed_outside(mut ctx, take a, take request, f)
+}
+
+pub fn resend_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    if id != next_id(ctx) { return Error(StaleAttempt) }
+    let request = keyed_request(ctx.index, a, f, Resend)
+    keyed_outside(mut ctx, take a, take request, f)
+}
+
+pub fn resolve_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    if id != next_id(ctx) { return Error(StaleAttempt) }
+    let request = keyed_request(ctx.index, a, f, Lookup)
+    keyed_outside(mut ctx, take a, take request, lookup)
+}
+
+fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: store.Tx, t: Tables, app: App, a: triggers.Attempt, take request: TxRequest, f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]]) -> Result[Reply, store.Error] {
     let index = request.index
     if capped(mut tx, t, a, index)? { return Ok(Capped) }
     let ca: std.codec.Codec[A] = std.codec.of()
@@ -274,7 +297,7 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     let ce: std.codec.Codec[E] = std.codec.of()
     let encoded = fingerprint(TRANSACTION, code.identity(f), ca, cr, ce, request.arg) ?=> |_| Limit(Value)
     let row = row_key(a, index)?
-    match store.fetch(tx, store.shape(t.rows), row)? {
+    match store.fetch(tx, t.rows, row)? {
         Some(Finished(take saved, take raw)) => {
             if saved.contract != encoded.contract { return hold(mut tx, t, a, index, saved, encoded) }
             return Ok(Replay(take raw))
@@ -284,31 +307,33 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     }
     let arg: A = decode(request.arg)?
     let body = code.callable(f)
-    let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] { body(mut draft, arg) })
+    let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] { body(mut draft, app, arg) })
     let raw = encode(result)?
     let data: Bytes = clone(raw)
     store.put(mut tx, t.rows, row, Finished(take encoded, take raw))?
     Ok(Replay(take data))
 }
 
-pub fn register_transaction[G: send, H: send, A: codec, R: codec, E: codec](mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let made = fn(mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest) -> Result[Reply, store.Error] {
-        transaction_body(mut tx, a, take request, f)
-    }
-    let entry = take made
-    runner.register_attempt(mut r, f, take entry, encoded, steps)
+pub fn register_transaction[G: send, H: shareable + inert + send, App: inert + send, A: codec, R: codec, E: codec](
+    mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]],
+    select: fn(H) -> Tables, select_app: fn(H) -> App, encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    let env = (f, select, select_app)
+    runner.register_attempt(mut r, f, env, fn(mut tx: store.Tx, h: H, a: triggers.Attempt, take request: TxRequest,
+        callbacks: (StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]], fn(H) -> Tables, fn(H) -> App)) -> Result[Reply, store.Error] {
+        transaction_body(mut tx, (callbacks.1)(h), (callbacks.2)(h), a, take request, callbacks.0)
+    }, encoded, steps)
 }
 
-pub fn transaction[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]]) -> Result[R, StepError[E]] waits {
+pub fn transaction[G: send, App: inert + send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]]) -> Result[R, StepError[E]] waits {
     let request = TxRequest(index: ctx.index, arg: must(encode(a)))
     let result: Result[Reply, StepError[E]] = dispatch(ctx.route, f, request)
     reply_value(mut ctx, (take result)?)
 }
 
-pub fn recorded[R: codec, E: codec](db: store.Db, id: StepId) -> Result[Option[Result[R, E]], store.Error] {
-    let t = store.with_schema(db, code.describe(tables))?
+pub fn recorded[R: codec, E: codec](db: store.Db, t: Tables, id: StepId) -> Result[Option[Result[R, E]], store.Error] waits {
+    let snapshot = store.snapshot(db)
     let index = encode(id)?
-    match store.get(store.snapshot(db), store.shape(t.rows), index)? {
+    match store.get(result.unwrap(store.reader(db, 0u64)), snapshot, t.rows, index)? {
         Some(Finished(_, take raw)) => {
             let result: Result[R, E] = decode(raw)?
             Ok(Some(take result))

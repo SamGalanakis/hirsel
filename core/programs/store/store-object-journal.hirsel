@@ -1,0 +1,243 @@
+type ObjectJournalStart: send {
+    requests: std.object.Requests,
+    register: HistoryRegister,
+    authority: Bytes,
+    buffers: HistoryBuffers,
+    op_ms: u64,
+    failed_polls: u32,
+    sweep: SweepCursor,
+    issued_generation: u64,
+    next_pack: u64,
+    export_lease: Option[ObjectExportLease],
+    reclaim: Option[ObjectReclaimCapture],
+    weak: Option[WeakPublisher]
+}
+
+type ObjectJournalTask: send {
+    ready: Receiver[ObjectJournalStart],
+    receive: Receiver[JournalMsg],
+    acks: Sender[Ack],
+    notices: Sender[WriteNotice],
+    synced: Sender[()],
+    group_bytes: u64,
+    group_commits: u64,
+    idle: Option[Sender[()]],
+    health_signal: Option[ObjectHealthSignal]
+}
+
+fn history_group_context(head: HistoryHead) -> Result[DiskContext, Error] {
+    let seq = history_next_id(head.entry.seq)?
+    Ok(DiskContext(store: head.store, role: 2, seq))
+}
+
+fn history_group_append(mut packet: Bytes, ctx: DiskContext, frame: Bytes) -> Result[(), Error] {
+    let at = list.len(packet)
+    list.append(mut packet, frame)
+    let kind: u16 = int.narrow(read_le(frame, 0, 2))
+    capacity(history_seal(mut packet, ctx, at, kind))
+}
+
+fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    let result = history_probe_head(mut client, register.tag, mut workspace.witness, deadline)?
+    if let Some((capture, _)) = result {
+        check_expected_store(Some(register.head.store), capture.head.store)?
+        if !history_pair_matches(capture.head.pair, register.head.pair) {
+            let fenced: Error = Fenced(register.head.pair.epoch)
+            register.terminal = Some(HistoryFault(clone(fenced)))
+            return Error(fenced)
+        }
+    }
+    Ok(())
+}
+
+type ObjectJournalSession {
+    client: std.object.Client,
+    register: HistoryRegister,
+    authority: Bytes,
+    buffers: HistoryBuffers,
+    op_ms: u64,
+    failed_polls: u32,
+    sweep: SweepCursor,
+    issued_generation: u64,
+    next_pack: u64,
+    export_lease: Option[ObjectExportLease],
+    reclaim: Option[ObjectReclaimCapture],
+    weak: Option[WeakPublisher]
+}
+
+fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take input
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
+}
+
+fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take active
+    let (take requests, _) = std.object.split(take client)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
+}
+
+fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
+    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    let mut candidate = lane.register.head
+    let next_position = history_next_id(candidate.entry.seq)?
+    candidate.entry = history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
+    let weak_barrier = view lane.weak
+    let advanced = history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due,
+        scoped fn(created: u64) {
+            if let Some(publisher) = weak_barrier { weak_publish(publisher, candidate, created, sequence) }
+        })
+    match take advanced {
+        Ok(HistoryApplied(_)) => Ok(()),
+        Error(take e) => Error(take e),
+        _ => Error(Undecided),
+    }
+}
+
+fn object_journal_add(mut lane: ObjectJournalSession, ctx: DiskContext, frame: Bytes) -> Result[(), Error] {
+    let bytes_wanted = list.len(frame)
+    capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + BINDING_BYTES))?
+    history_group_append(mut lane.buffers.packet, ctx, frame)
+}
+
+fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJournalStart) -> Result[(), Error] waits {
+    let mut lane = object_journal_begin(take initial)
+    let mut written = 0u64
+    let mut deferred: Option[JournalMsg] = None
+    let mut idle_position: Option[u64] = None
+    loop {
+        if let Some(terminal) = lane.register.terminal {
+            return match terminal {
+                HistoryFault(problem) => Error(clone(problem)),
+                HistoryUnknown => Error(Undecided),
+            }
+        }
+        let selected = match replace(mut deferred, None) {
+            Some(take pending) => take pending,
+            None => match channel.try_receive(input.receive) {
+                Ok(take queued) => take queued,
+                Error(Empty) => {
+                    if let Some(pending_reclaim) = replace(mut lane.reclaim, None) {
+                        if let Error(Fenced(e)) = history_execute_reclaim(mut lane, pending_reclaim) {
+                            return Error(Fenced(e))
+                        }
+                        continue
+                    }
+                    if idle_position == None {
+                        if let Some(timer) = input.idle {
+                            if let Ok(()) = channel.try_send(timer, ()) { idle_position = Some(written) }
+                        }
+                    }
+                    match channel.receive(input.receive) {
+                        Ok(take received) => take received,
+                        Error(_) => return Ok(()),
+                    }
+                },
+                Error(Closed) => return Ok(()),
+            },
+        }
+        match take selected {
+            Frame(take raw, sequence) => {
+                let ctx = history_group_context(lane.register.head)?
+                history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
+                object_journal_add(mut lane, ctx, raw)?
+                let mut group_size = list.len(raw)
+                let mut last_sequence = sequence
+                for _ in 1u64 .. input.group_commits {
+                    match channel.try_receive(input.receive) {
+                        Ok(Frame(take follower_frame, following)) => {
+                            let width = list.len(follower_frame)
+                            if group_size + width > input.group_bytes {
+                                deferred = Some(Frame(take follower_frame, following))
+                                break
+                            }
+                            object_journal_add(mut lane, ctx, follower_frame)?
+                            group_size += width
+                            last_sequence = following
+                        },
+                        Ok(take control) => {
+                            deferred = Some(take control)
+                            break
+                        },
+                        Error(_) => break,
+                    }
+                }
+                list.clear(mut lane.buffers.compare)
+                capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet)))?
+                object_journal_advance(mut lane, last_sequence)?
+                written += group_size
+                if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
+                    return Ok(())
+                }
+                if let Some(publisher) = lane.weak { weak_notify_strong(publisher.notices) }
+                let _ = channel.try_send(input.synced, ())
+                if lane.failed_polls != 0 {
+                    lane.failed_polls = 0
+                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(0)) }
+                }
+            },
+            Barrier => {
+                let _ = channel.try_send(input.notices, Written)
+            },
+            IdleCheck => {
+                let armed_at = replace(mut idle_position, None)
+                if armed_at != None && armed_at != Some(written) { continue }
+                let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+                let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+                let previous = lane.failed_polls
+                match take observed {
+                    Ok(()) => { lane.failed_polls = 0 },
+                    Error(Fenced(e)) => return Error(Fenced(e)),
+                    Error(_) => { lane.failed_polls = int.saturating_add(lane.failed_polls, 1) },
+                }
+                if previous != lane.failed_polls {
+                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(lane.failed_polls)) }
+                }
+            },
+            ObjectFresh(take destination, deadline) => {
+                let due = order.min(deadline, std.object.deadline_after_ms(lane.client, lane.op_ms))
+                let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+                let terminal = match observed { Error(Fenced(e)) => Some(e), _ => None }
+                let _ = channel.send(destination, take observed)
+                if let Some(e) = terminal { return Error(Fenced(e)) }
+            },
+            ObjectExportRead(take request) => {
+                let ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
+                let read = object_export_read(mut lane, key, reference, take buffer)
+                let _ = channel.send(outlet, take read)
+            },
+            ObjectPause(take pause_response, take resuming) => {
+                let owner = object_journal_pause(take lane)
+                if let Error(_) = channel.send(pause_response, take owner) {
+                    return Ok(())
+                }
+                match channel.receive(resuming) {
+                    Ok(take restored) => { lane = object_journal_begin(take restored) },
+                    _ => return Ok(()),
+                }
+            },
+            Rotate(..) => fail("object journal received a segment rotation"),
+        }
+    }
+}
+
+fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] waits {
+    let initial = match channel.receive(input.ready) {
+        Ok(take ready) => take ready,
+        Error(_) => return Ok(()),
+    }
+    let signals = match input.health_signal {
+        Some(signal) => Some(ObjectHealthSignal(value: latest.handle(signal.value), terminal: channel.sender(signal.terminal))),
+        None => None,
+    }
+    let acks = channel.sender(input.acks)
+    let synced = channel.sender(input.synced)
+    let weak_wakes = weak_notice_senders(initial.weak)
+    let failure = object_journal_loop(take input, take initial)
+    if let Error(problem) = failure {
+        if let Some(signal) = signals { emit_health(signal, health_failure(problem)) }
+        let _ = channel.send(acks, ObjectBroken(clone(problem)))
+        weak_notify_strong(weak_wakes)
+        let _ = channel.try_send(synced, ())
+    }
+    take failure
+}

@@ -1,6 +1,6 @@
 // Session authorization and the active run's pending approvals.
 
-pub fn cold_reader_allowed(reader: store.ReadOnly, caller: store.Caller) -> Result[bool, store.Error] {
+pub fn cold_reader_allowed(reader: store.ReadOnly, caller: store.Caller) -> Result[bool, store.Error] waits {
     let key = reader_key(caller) ?=> |_| Missing("reader identity")
     let readers = store.read_only_table(reader, "harness.readers", std.codec.key_bytes(), std.codec.of_bool())?
     Ok(store.read_only_get(reader, readers, key)? == Some(true))
@@ -8,21 +8,27 @@ pub fn cold_reader_allowed(reader: store.ReadOnly, caller: store.Caller) -> Resu
 
 // Pending decisions belong to the active run's caller. The HTTP view
 // includes only Open rows from this cover.
-pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
-    let waits = store.shape(h.waits)
+fn wait_table(h: Handles) -> store.Table[WaitKey, Wait] { clone(h.waits) }
+
+pub fn wait_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("waits", code.describe(wait_table))
+}
+
+pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused: ()) -> Result[runner.Answer[()], Capacity] {
+    let waits = view h.waits
     let zero = first_wait(0u64)
     if reader_allowed(tx, h, caller)? {
-        if let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) {
+        if let Ok(Some(s)) = store.fetch(tx, h.session, 0u64) {
             if let Some(id) = s.active_run {
-                if let Ok(Some(r)) = store.fetch(tx, store.shape(h.runs), id) {
+                if let Ok(Some(r)) = store.fetch(tx, h.runs, id) {
                     if r.caller.issuer == caller.issuer && r.caller.subject == caller.subject {
-                        return runner.cover(waits, Included(first_wait(id)), Included(last_wait(id)))
+                        return runner.table_answer("waits", waits, Included(first_wait(id)), Included(last_wait(id)))
                     }
                 }
             }
         }
     }
-    runner.cover(waits, Included(zero), Excluded(zero))
+    runner.table_answer("waits", waits, Included(zero), Excluded(zero))
 }
 
 fn first_wait(id: u64) -> WaitKey {
@@ -37,7 +43,7 @@ pub type PendingWait: codec + send { run: u64, round: u64, ordinal: u64, key: By
 
 pub fn open_wait(k: WaitKey, take w: Wait) -> Option[PendingWait] {
     if k.kind == APPROVAL {
-        if let Open(take key, expires) = take w {
+        if let Open(take key, expires, _) = take w {
             return Some(PendingWait(run: k.run, round: k.generation, ordinal: k.slot, key: take key, expires: expires))
         }
     }
@@ -45,20 +51,20 @@ pub fn open_wait(k: WaitKey, take w: Wait) -> Option[PendingWait] {
 }
 
 // The same pending decisions for a trusted application with a local snapshot.
-pub fn pending_approvals(snap: store.Snapshot, h: Handles, caller: store.Caller) -> Result[List[PendingWait], Refused] {
+pub fn pending_approvals(read_handle: store.Reader, snap: store.Snapshot, h: Handles, caller: store.Caller) -> Result[List[PendingWait], Refused] waits {
     let mut pending: List[PendingWait] = list.new()
     let key = reader_key(caller) ?=> |_| NotAllowed
-    if kept(store.get(snap, store.shape(h.readers), key))? != Some(true) {
+    if kept(store.get(read_handle, snap, h.readers, key))? != Some(true) {
         return Error(NotAllowed)
     }
-    let Some(s) = kept(store.get(snap, store.shape(h.session), 0u64))? else { return Ok(take pending) }
+    let Some(s) = kept(store.get(read_handle, snap, h.session, 0u64))? else { return Ok(take pending) }
     let Some(id) = s.active_run else { return Ok(take pending) }
-    let Some(r) = kept(store.get(snap, store.shape(h.runs), id))? else { return Ok(take pending) }
+    let Some(r) = kept(store.get(read_handle, snap, h.runs, id))? else { return Ok(take pending) }
     if r.caller.issuer != caller.issuer || r.caller.subject != caller.subject {
         return Ok(take pending)
     }
-    let mut rows = kept(store.scan(snap, store.shape(h.waits), Included(first_wait(id)), Included(last_wait(id))))?
-    while let Some((k, take w)) = kept(store.next(mut rows))? {
+    let mut rows = kept(store.scan(read_handle, snap, h.waits, Included(first_wait(id)), Included(last_wait(id))))?
+    while let Some((k, take w)) = kept(store.next(read_handle, mut rows))? {
         if let Some(take row) = open_wait(k, take w) {
             list.push(mut pending, take row)
         }
@@ -67,7 +73,6 @@ pub fn pending_approvals(snap: store.Snapshot, h: Handles, caller: store.Caller)
 }
 
 pub fn pending_waits_entry[G: send](mut r: runner.Registry[G, Handles], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let codec: std.codec.Codec[Wait] = std.codec.of()
-    runner.query_as(mut r, code.describe(pending_waits), wait_key(), codec, n, steps)
+    runner.query_as(mut r, code.describe(pending_waits), wait_slots()?, n, steps)
 }
 

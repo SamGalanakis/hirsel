@@ -1,0 +1,17 @@
+pub type Suite13 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
+
+pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13) | QuicMultipath(Suite13)
+
+pub opaque resource type Schedule
+
+pub type Side = Client | Server
+
+pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
+
+pub fn quic_initial(side: Side, dcid: Bytes) -> Result[Schedule, ScheduleError]
+
+pub fn sealer(mut s: Schedule, space: packet.Space, domain: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
+
+pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]
+
+pub fn header_mask(s: Schedule, space: packet.Space, local: bool) -> Result[packet.HeaderMask, ScheduleError]

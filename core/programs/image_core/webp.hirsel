@@ -1,0 +1,186 @@
+fn u24le(input: Bytes, at: u64) -> u32 {
+    let a: u32 = int.widen(input[at])
+    let b: u32 = int.widen(input[at + 1])
+    let c: u32 = int.widen(input[at + 2])
+    a | (b << 8) | (c << 16)
+}
+
+fn webp_extent(input: Bytes, start: u64, limit: u64) -> Result[(u32, u64, u64), Error] {
+    if limit - start < 8 {
+        return Error(Truncated)
+    }
+    let name: u32 = list.word_be(input, start)
+    let size: u32 = list.word_le(input, start + 4)
+    let n: u64 = int.widen(size)
+    let at = start + 8
+    if n + n % 2 > limit - at {
+        return Error(Truncated)
+    }
+    let end = at + n
+    if n % 2 != 0 && input[end] != 0 {
+        return Error(Malformed)
+    }
+    Ok((name, end, end + n % 2))
+}
+
+fn webp_bitstream(input: Bytes, name: u32, at: u64, end: u64) -> Result[(u32, u32, bool), Error] {
+    if name == 0x5650384c {
+        if end - at < 5 || input[at] != 0x2f {
+            return Error(Malformed)
+        }
+        let flags: u32 = list.word_le(input, at + 1)
+        if flags >> 29 != 0 {
+            return Error(Malformed)
+        }
+        return Ok(((flags & 0x3fff) + 1, ((flags >> 14) & 0x3fff) + 1, (flags >> 28) & 1 != 0))
+    }
+    if end - at < 10 || input[at] & 1 != 0 || u24le(input, at + 3) != 0x2a019d {
+        return Error(Malformed)
+    }
+    let w: u32 = int.widen(tiff_short(input, at + 6, true) & 0x3fff)
+    let h: u32 = int.widen(tiff_short(input, at + 8, true) & 0x3fff)
+    Ok((w, h, false))
+}
+
+fn webp_frame(input: Bytes, start: u64, end: u64, canvas: ImageInfo) -> Result[bool, Error] {
+    if end - start < 16 {
+        return Error(Truncated)
+    }
+    let x = 2 * u24le(input, start)
+    let y = 2 * u24le(input, start + 3)
+    let w = 1 + u24le(input, start + 6)
+    let h = 1 + u24le(input, start + 9)
+    if x >= canvas.width || y >= canvas.height || w > canvas.width - x || h > canvas.height - y || input[start + 15] & 0xfc != 0 {
+        return Error(Malformed)
+    }
+    let mut at = start + 16
+    let mut alpha = false
+    let mut found = false
+    while at < end {
+        let (name, body_end, next) = webp_extent(input, at, end)?
+        if name == 0x414c5048 {
+            if alpha || found || body_end == at + 8 {
+                return Error(Malformed)
+            }
+            alpha = true
+        } else if name == 0x56503820 || name == 0x5650384c {
+            if found || (alpha && name == 0x5650384c) {
+                return Error(Malformed)
+            }
+            let (bw, bh, bit_alpha) = webp_bitstream(input, name, at + 8, body_end)?
+            if w != bw || h != bh {
+                return Error(Malformed)
+            }
+            found = true
+            alpha = alpha || bit_alpha
+        }
+        at = next
+    }
+    if !found {
+        return Error(Malformed)
+    }
+    Ok(alpha)
+}
+
+fn probe_webp(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    if n < 12 {
+        return Error(Truncated)
+    }
+    let size: u32 = list.word_le(input, 4)
+    let riff_end: u64 = int.widen(size)
+    let signature: u32 = list.word_be(input, 8)
+    if signature != 0x57454250 || riff_end != n - 8 {
+        return Error(Malformed)
+    }
+    let mut at = 12u64
+    let mut header = info(Webp, 0, 0, 8, false)
+    let mut extended = false
+    let mut flags = 0u8
+    let mut anim = false
+    let mut image = false
+    let mut alpha = false
+    let mut exif = false
+    let mut frames = 0u32
+    while at < n {
+        let (name, end, next) = webp_extent(input, at, n)?
+        let start = at + 8
+        if name == 0x56503858 {
+            if at != 12 || end - start != 10 {
+                return Error(Malformed)
+            }
+            let control: u32 = list.word_le(input, start)
+            if control & 0xffffffc1 != 0 {
+                return Error(Malformed)
+            }
+            flags = input[start]
+            header.width = u24le(input, start + 4) + 1
+            header.height = u24le(input, start + 7) + 1
+            check_size(header.width, header.height, 1, limits)?
+            extended = true
+        } else if name == 0x56503820 || name == 0x5650384c {
+            if image || flags & 2 != 0 || (alpha && name == 0x5650384c) {
+                return Error(Malformed)
+            }
+            let (w, h, transparent) = webp_bitstream(input, name, start, end)?
+            check_size(w, h, 1, limits)?
+            if extended && (w != header.width || h != header.height) {
+                return Error(Malformed)
+            }
+            header.width = w
+            header.height = h
+            alpha = alpha || transparent
+            image = true
+            if !extended && (at != 12 || next != n) {
+                return Error(Malformed)
+            }
+        } else if name == 0x414c5048 {
+            if !extended || alpha || image || end == start || flags & 2 != 0 {
+                return Error(Malformed)
+            }
+            alpha = true
+        } else if name == 0x414e494d {
+            if flags & 2 == 0 || anim || end - start != 6 {
+                return Error(Malformed)
+            }
+            anim = true
+        } else if name == 0x414e4d46 {
+            if !anim {
+                return Error(Malformed)
+            }
+            if frames == limits.max_frames {
+                return Error(FrameLimit)
+            }
+            frames += 1
+            check_size(header.width, header.height, frames, limits)?
+            let transparent = webp_frame(input, start, end, header)?
+            alpha = alpha || transparent
+        } else if name == 0x49434350 {
+            if flags & 0x20 == 0 || image || anim || has_icc(header) {
+                return Error(Malformed)
+            }
+            header.color_space = raw_icc_color(input, start, end)?
+            header.icc_profile = Some(IccProfile(start: start, end: end, storage: Raw))
+        } else if name == 0x45584946 {
+            if flags & 8 == 0 || exif {
+                return Error(Malformed)
+            }
+            let tiff = if end - start >= 6 && exif_signature(input, start) {
+                start + 6
+            } else {
+                start
+            }
+            header.orientation = exif_orientation(input, tiff, end)?
+            exif = true
+        }
+        at = next
+    }
+    if (!image && frames == 0) || (extended && (flags & 8 != 0) != exif) || (flags & 0x20 != 0) != has_icc(header) {
+        return Error(Malformed)
+    }
+    header.has_alpha = alpha || flags & 0x10 != 0
+    if frames != 0 {
+        header.frame_count = frames
+    }
+    Ok(header)
+}

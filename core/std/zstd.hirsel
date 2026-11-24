@@ -7,18 +7,18 @@ pub type Error = Data(ZstdError)
 
 const BLOCK_LIMIT: u64 = 131072
 
-type Fse {
+type Fse: send {
     log: u64,
     present: bool,
     entries: Inline[u32, 512]
 }
 
-type Huffman {
+type Huffman: send {
     log: u64,
     entries: Inline[u16, 2048]
 }
 
-type Tables {
+type Tables: send {
     literals: Fse,
     offsets: Fse,
     matches: Fse,
@@ -657,7 +657,7 @@ pub fn dictionary(data: Bytes) -> Result[Dictionary, Error] {
 // xxhash.go:72-109 and xxhash_other.go:64-75 (MIT): XXH64, a fast non-cryptographic hash
 // for checksums, deduplication and hash tables. It is not collision resistant
 // against an adversary. Multiplications wrap at 64 bits.
-type Xxh64 {
+type Xxh64: send {
     lanes: Inline[u64, 4],
     total: u64,
     mem: Inline[u8, 32],
@@ -798,11 +798,11 @@ fn xxh_finish(state: Xxh64) -> u32 {
     int.truncate(h ^ (h >> 32))
 }
 
-type Phase = Magic | SkipSize | Skip(u64) | Header | BlockHeader | Payload(u64, u64, u64) | Flush | Check
+type Phase: send = Magic | SkipSize | Skip(u64) | Header | BlockHeader | Payload(u64, u64, u64) | Flush | Check
 
 type Stop = Continue | Input | Output | Done
 
-type Frame {
+type Frame: send {
     window: u64,
     size: u64,
     declared: Option[u64],
@@ -811,14 +811,14 @@ type Frame {
     last: bool
 }
 
-type Scratch {
+type Scratch: send {
     history: Bytes,
     pending: Bytes,
     literals: Bytes,
     tables: List[Tables]
 }
 
-pub opaque type Decoder {
+pub opaque type Decoder: send {
     max_window: u64,
     max_output: u64,
     total: u64,
@@ -839,7 +839,7 @@ fn smaller(a: u64, b: u64) -> u64 {
     }
 }
 
-fn new_decoder(max_window: u64, max_output: u64) -> Decoder {
+pub fn decoder_bounded(max_window: u64, max_output: u64) -> Decoder {
     let block_size = smaller(BLOCK_LIMIT, max_window)
     let history: Bytes = list.with_capacity(smaller(max_window, max_output))
     let pending: Bytes = list.with_capacity(smaller(block_size, max_output))
@@ -860,7 +860,7 @@ fn new_decoder(max_window: u64, max_output: u64) -> Decoder {
 /// Start a frame decoder. The history and fixed block buffers are admitted
 /// up front, and step calls use only their existing capacity.
 pub fn decoder(max_window: u64) -> Decoder {
-    new_decoder(max_window, 0xffffffffffffffff)
+    decoder_bounded(max_window, 0xffffffffffffffff)
 }
 
 fn emit(mut f: Frame, mut s: Scratch, value: u8) {
@@ -1292,7 +1292,7 @@ fn decode_frames(data: Bytes, max_output: u64, max_window: u64, dict: Option[Vie
     if list.len(data) == 0 {
         return Error(Data(Truncated()))
     }
-    let mut d = new_decoder(max_window, max_output)
+    let mut d = decoder_bounded(max_window, max_output)
     let mut out: Bytes = list.new()
     let mut at: u64 = 0
     while true {

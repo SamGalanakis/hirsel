@@ -218,6 +218,7 @@ def supervise(command, *, raw_json=False):
             binary = os.environ.get('HIRSEL_TEST_BINARY')
             discovery = any(arg in ('--list', '--help', '-h') for arg in command)
             if (status == 0 and binary and not discovery and not progress.empty_partition
+                    and not os.environ.get('HIRSEL_TEST_FILTER_CASES')  # Launcher verified the logfile.
                     and not any(result in ('ok', 'failed') for result in progress.finished.values())):
                 target = os.environ.get('TEST_TARGET', binary)
                 print(f'test_launcher.sh: {target} executed zero test bodies', file=sys.stderr, flush=True)

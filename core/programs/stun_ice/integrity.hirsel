@@ -1,0 +1,21 @@
+// RFC 2104 over the STUN prefix with its length field ending at the tag.
+fn sha1_prefix(key: Bytes, packet: Bytes, at: u64, mut scratch: Bytes) -> Inline[u8, 20] {
+    let length = at + 4
+    let mut mac = std.hmac.start_sha1(key)
+    std.hmac.add_sha1(mut mac, packet, 0, 2)
+    std.hmac.add_sha1_byte(mut mac, int.truncate(length >> 8))
+    std.hmac.add_sha1_byte(mut mac, int.truncate(length))
+    std.hmac.add_sha1(mut mac, packet, 4, at)
+    list.fill_slice(mut scratch, 0, 64 + at, 0)
+    std.hmac.finish_sha1(mac)
+}
+
+fn sha256_prefix(key: Bytes, packet: Bytes, at: u64) -> Inline[u8, 32] {
+    let length = at + 16
+    let mut mac = std.hmac.start(key)
+    std.hmac.add(mut mac, packet, 0, 2)
+    std.hmac.add_byte(mut mac, int.truncate(length >> 8))
+    std.hmac.add_byte(mut mac, int.truncate(length))
+    std.hmac.add(mut mac, packet, 4, at)
+    std.hmac.finish(mac)
+}

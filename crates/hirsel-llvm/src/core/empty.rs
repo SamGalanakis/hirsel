@@ -48,6 +48,91 @@ pub(super) fn loop_free(body: &Body) -> bool {
     }
     true
 }
+/// The blocks of `body` that lie on a control-flow cycle (a strongly connected
+/// component with an edge inside it).
+fn looped(body: &Body) -> Vec<bool> {
+    let n = body.blocks.len();
+    let next: Vec<Vec<usize>> = (0..n)
+        .map(|b| successors(body, b).unwrap_or_default())
+        .collect();
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0; n];
+    let mut on = vec![false; n];
+    let mut stack = Vec::new();
+    let mut looped = vec![false; n];
+    let mut counter = 0;
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        let mut frames = vec![(root, 0usize)];
+        index[root] = counter;
+        low[root] = counter;
+        counter += 1;
+        stack.push(root);
+        on[root] = true;
+        while let Some(&mut (v, ref mut at)) = frames.last_mut() {
+            if let Some(&w) = next[v].get(*at) {
+                *at += 1;
+                if index[w] == usize::MAX {
+                    index[w] = counter;
+                    low[w] = counter;
+                    counter += 1;
+                    stack.push(w);
+                    on[w] = true;
+                    frames.push((w, 0));
+                } else if on[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut members = Vec::new();
+                loop {
+                    let w = stack.pop().unwrap();
+                    on[w] = false;
+                    members.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                if members.len() > 1 || next[v].contains(&v) {
+                    for m in members {
+                        looped[m] = true;
+                    }
+                }
+            }
+        }
+    }
+    looped
+}
+
+/// Per function, whether some body in `module` calls it directly from a block
+/// on a loop.
+pub(super) fn called_in_loop(module: &Module) -> Vec<bool> {
+    let mut called = vec![false; module.functions.len()];
+    for f in &module.functions {
+        let Some(body) = &f.body else { continue };
+        let looped = looped(body);
+        for (b, block) in body.blocks.iter().enumerate() {
+            if !looped[b] {
+                continue;
+            }
+            for inst in block.insts.get(&body.insts).unwrap_or_default() {
+                if let Inst::Call { call } = inst
+                    && let Some(Callee::Direct(id)) = body.calls.get(call.index()).map(|c| c.callee)
+                {
+                    called[id.index()] = true;
+                }
+            }
+        }
+    }
+    called
+}
 fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
     match inst {
         Inst::Binary {

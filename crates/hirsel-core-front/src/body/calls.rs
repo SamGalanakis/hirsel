@@ -301,12 +301,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let g = &p.fns[f];
         self.diagnostic_callee = Some(DiagnosticCallee::Named(f));
-        // A callee that failed to parse is refused and never built (PROG-8),
-        // whatever its header declares. Library rows were all accepted.
-        if mentions_error(&self.t, g.callable)
-            || (f >= p.fns.base_len() && p.item(g.at).range.has_errors)
-        {
-            // The callee's signature or syntax owns the diagnostic.
+        if mentions_error(&self.t, g.callable) {
+            // The callee's signature owns the diagnostic.
             self.inherited_refusal = true;
             self.halt();
             return (ERROR, None);
@@ -327,27 +323,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if g.path.0.name == "callable" && g.path.is_core("code.callable") {
             self.flow_callable(n);
-        }
-        // PROG-9 is decided at the argument even when a generic function item
-        // cannot otherwise be materialized without an expected callable type.
-        // Keep this refusal ahead of function-value inference so the diagnostic
-        // names the offending generic item rather than cascading LANG-12.
-        if g.path.0.name == "describe"
-            && g.path.is_core("code.describe")
-            && let Some(argument) = args.first()
-            && let Some(Target::Definition(id)) = p.target(self.at, *argument)
-            && let Some(Def::Fn(item)) = p.by_definition[id.0 as usize]
-            && p.fns[item as usize]
-                .generics
-                .iter()
-                .any(|generic| !generic.region)
-        {
-            self.refuse(
-                "PROG-9",
-                *argument,
-                "code.describe requires a top-level non-generic function name",
-            );
-            return (ERROR, None);
         }
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
@@ -415,6 +390,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if !self.mapper_mode(n, g.params.first().map(|q| q.mode)) {
             return (ERROR, None);
+        }
+        if g.path.is_core("code.describe") {
+            self.builtin_use(f, n);
+            let want = want.and_then(|w| self.expected_part(g.result, w).map(|_| w.ty));
+            return self.code_describe(g.result, args[0], want, n);
         }
         if g.waits {
             self.waited = true;
@@ -1266,14 +1246,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             checked[i] = true;
             if crate::foreign::holds_raw_handle(&p.decls, &self.t, t) {
-                self.refuse(
-                    "FFI-6",
-                    use_site,
-                    "a raw handle cannot be an inferred type argument",
-                );
+                let message = "a raw handle cannot be an inferred type argument";
+                self.refuse("FFI-6", use_site, message);
                 return;
             }
-            if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR {
+            // MEM-29 holds at every call, also for a parameter absent from the result.
+            if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR
+                || crate::element::parameter(&p.fns[f].path, i) && self.element_refused(n, t)
+            {
                 return;
             }
             if !p.fns[f].generics[i].region && self.type_kind(t) == Kind::Scoped {
@@ -1294,6 +1274,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_compared("OWN-19", n, a, "not scoped", message);
                     return;
                 }
+            }
+            if ordered_codec::is_key_of(&p.fns[f].path)
+                && !ordered_codec::admitted(&p.decls, &mut self.t, t)
+            {
+                self.refuse("LANG-12", use_site, "the type has no ordered key codec");
+                return;
             }
             let g = &p.fns[f].generics[i];
             let missing =
@@ -1612,6 +1598,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.frame_string_copy(vals[0]?, len, result, n);
         }
         let codec = is_codec_of(&g.path);
+        let ordered = ordered_codec::is_key_of(&g.path);
+        if ordered && !has_param(&self.t, types[0]) {
+            let ty = types[0];
+            let Some(row) = self.e.type_row(self.p, &mut self.t, ty) else {
+                self.gap(n, "ordered key type layout is not built");
+                return None;
+            };
+            let Ok((signature, abi)) = self.e.signature_inst(self.p, &mut self.t, f, types) else {
+                self.gap(n, "ordered key codec layout is not built");
+                return None;
+            };
+            let signature = self.e.sig_abi(signature, abi);
+            return match ordered_codec::maker(&mut self.e.module, &g.path, row, signature) {
+                Ok(maker) => self.call_maker(maker, result, n),
+                Err(_) => {
+                    self.refuse("LANG-12", n, "the type has no ordered key codec");
+                    None
+                }
+            };
+        }
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
             return value;
         }
@@ -1631,14 +1637,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        if codec {
+        if codec || ordered {
             // `of` at a type parameter P: the instance's P chooses the maker (9.1).
             let Some(row) = self.e.type_row(self.p, &mut self.t, types[0]) else {
                 self.gap(n, "codec type layout is not built");
                 return None;
             };
             if let Some(call) = self.e.generic_calls.get_mut(&func) {
-                call.operation = Some(CallOperation::CodecOf(row));
+                call.operation = Some(if ordered {
+                    CallOperation::KeyCodecOf(row)
+                } else {
+                    CallOperation::CodecOf(row)
+                });
             }
         }
         if !g.generics.is_empty() && g.body.is_none() && g.path.package_is("core", "1") {
@@ -1769,7 +1779,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
             match self.role_of(part) {
-                Some((Role::Box | Role::Rc | Role::Arc, args)) => part = self.bare(args[0]),
+                Some((Role::Box | Role::Rc | Role::Arc | Role::Shared, args)) => {
+                    part = self.bare(args[0])
+                }
                 _ => return Some("no part of this value is the expected type"),
             }
         }
@@ -2256,7 +2268,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(yes);
     }
     /// The overflow flag decides which ordinary Option variant is constructed.
-    fn numeric_option(
+    pub(super) fn numeric_option(
         &mut self,
         ty: TyId,
         payload: TyId,

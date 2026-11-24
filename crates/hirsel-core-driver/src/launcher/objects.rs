@@ -3,8 +3,8 @@
 //! identity. A writer holds `LOCK`; a reader opened with `read_only` relies on its caller to
 //! exclude writers.
 use crate::AssemblyRecord;
+use crate::package_content::Sha256Writer;
 use hirsel_core_ids::ContentHash;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, Permissions};
 use std::io::{self, Read, Write};
@@ -77,9 +77,9 @@ impl Records {
 
     pub(crate) fn open_image(&self, digest: ContentHash) -> io::Result<File> {
         let mut file = File::open(self.image_path(digest))?;
-        let mut hash = Sha256::new();
+        let mut hash = Sha256Writer::default();
         io::copy(&mut file, &mut hash)?;
-        if <[u8; 32]>::from(hash.finalize()) != digest.0 {
+        if hash.finish() != digest.0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "image digest"));
         }
         Ok(file)

@@ -1,0 +1,75 @@
+type SlotLawHandles: shareable + send {
+    primary: store.Table[u64, u64],
+    other: store.Table[u64, u64]
+}
+
+fn slot_law_table(h: SlotLawHandles) -> store.Table[u64, u64] { clone(h.primary) }
+
+fn slot_law_schema(mut d: store.Declare) -> Result[SlotLawHandles, store.Error] {
+    let first = store.declare_table(mut d, "primary", std.codec.key_u64(), std.codec.of_u64())?
+    let primary = store.finish(mut d, take first)?
+    let second = store.declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let other = store.finish(mut d, take second)?
+    Ok(SlotLawHandles(primary: take primary, other: take other))
+}
+
+fn slot_law_answer(tx: store.Tx, h: SlotLawHandles, take wrong: bool) -> Result[Answer[u64], Capacity] {
+    let mut selected = covers()
+    let chosen: store.Table[u64, u64] = if wrong { clone(h.other) } else { clone(h.primary) }
+    result.unwrap(cover(mut selected, "left", chosen, Included(1u64), Included(2u64)))
+    result.unwrap(cover(mut selected, "left", h.primary, Included(2u64), Included(2u64)))
+    result.unwrap(cover(mut selected, "right", h.primary, Included(2u64), Included(2u64)))
+    Ok(Answer(value: 42u64, covers: take selected))
+}
+
+fn slot_law_place(mut r: Registry[(), SlotLawHandles]) -> Result[(), RegisterError] {
+    let mut declared: Slots[SlotLawHandles] = slots()
+    slot(mut declared, "left", code.describe(slot_law_table))?
+    slot(mut declared, "right", code.describe(slot_law_table))?
+    query(mut r, code.describe(slot_law_answer), take declared, 1048576u64, DEFAULT_STEPS)
+}
+
+@test
+fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let h = result.unwrap(slot_law_schema(mut d))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    let committed = store.run(mut db, None, store.copy_env(h.primary), fn(mut tx, table) -> Result[(), store.Error] {
+        store.put(mut tx, table, 1u64, 8u64)?
+        store.put(mut tx, table, 2u64, 9u64)
+    })
+    if let Ok(Committed(_)) = committed {} else { return Error("fixture write refused") }
+    let mut r = result.unwrap(placed(code.describe(slot_law_place), 1048576u64))
+    result.unwrap(bind_query_slots(mut r, h))
+    let entry = view r.exported[0u64]
+    let key = entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
+    let base = store.snapshot(db)
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let access = publisher_reads()
+    let output = result.unwrap(row_log())
+    let mut arg: Bytes = list.new()
+    list.push(mut arg, 0u8)
+    let good = SubscriptionInput(room: None, key: clone(key), arg: take arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
+    let observed = run_query(r, h, access, read_handle, base, good, base, None, output)
+    let Covered(projected) = observed else { return Error("matching slots did not project") }
+    let mut expected: Bytes = list.new()
+    list.push(mut expected, 42u8)
+    for _ in 0u64 .. 7u64 { list.push(mut expected, 0u8) }
+    if projected.value != expected { return Error("query value differs") }
+    let rows = slot_rows(take output)
+    if list.len(rows) != 3u64 { return Error("slot spans did not form a union") }
+    if rows[0u64].slot != 0u16 || rows[1u64].slot != 0u16 || rows[2u64].slot != 1u16 { return Error("row names the wrong slot") }
+    if rows[1u64].key != rows[2u64].key { return Error("the second slot missed the shared row") }
+    let mut bad_arg: Bytes = list.new()
+    list.push(mut bad_arg, 1u8)
+    let wrong = SubscriptionInput(room: None, key: take key, arg: take bad_arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
+    let refused = result.unwrap(row_log())
+    match run_query(r, h, access, read_handle, base, wrong, base, None, refused) {
+        Faulted(Failed(Raised(5u32)), _) => (),
+        _ => return Error("another table satisfied the slot"),
+    }
+    if list.len(slot_rows(take refused)) != 0u64 { return Error("wrong cover published rows") }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

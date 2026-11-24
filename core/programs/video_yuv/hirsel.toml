@@ -1,0 +1,15 @@
+[package]
+name = "video_yuv"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"video_yuv.hirsel" = "video_yuv"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hyuv_"
+archives = [
+  { target = "aarch64-unknown-linux-gnu", file = "libhirsel_yuv-aarch64.a", sha256 = "87ddea6715b4fda6525023945ebb7e8e4e1f8c3c2186b9cf01f00961c60e3c58" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_yuv-x86_64.a", sha256 = "258200a55c5cae5e450146f09371f28927e98e292aeafaba1f80741d63d663ae" },
+]

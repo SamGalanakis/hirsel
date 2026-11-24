@@ -6,6 +6,7 @@ pub opaque type Remote: codec + send {
     about: String,
     input: String,
     fingerprint: Bytes,
+    deferred: bool,
 }
 
 pub type Peer {
@@ -24,16 +25,10 @@ fn table_spec() -> store.TableSpec[String, Remote] {
     store.spec(table_name(), std.codec.key_string(), row_codec)
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    match store.migration_create_table(mut phase, table_spec()) {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
-}
-
-pub fn catalog(schema: store.Schema) -> Result[store.Table[String, Remote], store.Error] {
+pub fn declare_catalog(mut d: store.Declare) -> Result[store.Table[String, Remote], store.Error] {
     let row_codec: std.codec.Codec[Remote] = std.codec.of()
-    store.schema_table(schema, table_name(), std.codec.key_string(), row_codec)
+    let table = store.declare_table(mut d, table_name(), std.codec.key_string(), row_codec)?
+    store.finish(mut d, take table)
 }
 
 pub fn reserved(name: String) -> bool {
@@ -74,6 +69,10 @@ pub fn input(remote: Remote) -> View[String] in remote {
 
 pub fn fingerprint(remote: Remote) -> View[Bytes] in remote {
     view remote.fingerprint
+}
+
+pub fn deferred(remote: Remote) -> bool {
+    remote.deferred
 }
 
 pub opaque type Listing: send {
@@ -125,17 +124,28 @@ pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
             let mut fingerprint_bytes: Bytes = list.new()
             std.codec.put_key_string(server, mut fingerprint_bytes)
             list.append(mut fingerprint_bytes, string.as_bytes(raw))
-            map.insert(mut rows, take key, Remote(server: clone(server), definition: clone(raw), about: take description, input: string.from(mcp.metadata.tool_schema(tool)), fingerprint: harness.digest(fingerprint_bytes)))
+            map.insert(mut rows, take key, Remote(server: clone(server), definition: clone(raw), about: take description, input: string.from(mcp.metadata.tool_schema(tool)), fingerprint: harness.digest(fingerprint_bytes), deferred: false))
         }
     }
     Ok(Listing(server: clone(server), rows: take rows))
 }
 
+// Deferral is chosen by the trusted importer. The name is the server's wire name.
+pub fn defer(mut next: Listing, name: String) -> bool {
+    let key = offered_name(next.server, name)
+    match map.update(mut next.rows, key, scoped fn(mut remote: Remote) {
+        remote.deferred = true
+    }) {
+        Some(()) => true,
+        None => false,
+    }
+}
+
 pub fn replace(mut tx: store.Tx, table: store.Table[String, Remote], next: Listing) -> Result[(), store.Error] {
     let mut removed: List[String] = list.new()
     {
-        let mut old = store.range(tx, store.shape(table), Unbounded, Unbounded)?
-        while let Some((take key, remote)) = store.next_range(mut old)? {
+        let mut old = store.range(tx, table, Unbounded, Unbounded)?
+        while let Some((take key, remote)) = store.next_in(tx, mut old)? {
             if remote.server == next.server && !map.contains(next.rows, key) {
                 list.push(mut removed, take key)
             }
@@ -145,9 +155,9 @@ pub fn replace(mut tx: store.Tx, table: store.Table[String, Remote], next: Listi
         let _ = store.delete(mut tx, table, key)?
     }
     for (key, remote) in next.rows {
-        let prior = store.fetch(tx, store.shape(table), key)?
+        let prior = store.fetch(tx, table, key)?
         if let Some(row) = prior {
-            if row.fingerprint == remote.fingerprint {
+            if row.fingerprint == remote.fingerprint && row.deferred == remote.deferred {
                 continue
             }
         }

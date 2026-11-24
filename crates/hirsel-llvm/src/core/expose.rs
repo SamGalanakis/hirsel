@@ -572,6 +572,26 @@ fn price(b: &Body) -> usize {
 /// +3% cycles at 128; Richards and Permute run 1-3% fewer instructions at 128.
 const EXPOSE_BUDGET: usize = 128;
 
+/// Spend exposure first where a literal can specialize a short helper.
+fn literal_calls(body: &Body) -> Vec<bool> {
+    let mut literal = vec![false; body.values.len()];
+    for inst in &body.insts {
+        if let Inst::Const { result, .. } = *inst {
+            literal[result.index()] = true;
+        }
+    }
+    body.calls
+        .iter()
+        .map(|call| {
+            call.args
+                .get(&body.pools.args)
+                .unwrap()
+                .iter()
+                .any(|arg| matches!(arg, Arg::Value(value) if literal[value.index()]))
+        })
+        .collect()
+}
+
 pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
@@ -598,6 +618,10 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         .map(|(i, f)| {
             f.body.as_ref().filter(|b| {
                 !step_entry(i)
+                    && !(module.law_observation
+                        && hirsel_core_ir::law::observes(
+                            &module.instances[f.instance.index()].definition,
+                        ))
                     && price(b) <= 192
                     && b.blocks.len() <= 24
                     && b.insts.iter().all(supported)
@@ -646,6 +670,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
         let mut budget = EXPOSE_BUDGET;
+        let literal_calls = literal_calls(original);
         // A recursive callee unrolls at most 8 copies deep along one chain of
         // expansions (GCC's max-inline-recursive-depth-auto), as LLVM's loop
         // helpers do after O3: unbounded, Havlak's loop nesting pass spent the
@@ -672,6 +697,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         // copies of itself, each with its comparator calls.
         let mut recursive_growth = std::collections::BTreeMap::<usize, usize>::new();
         loop {
+            let mut fallback = None;
             let selected = hot.iter().find_map(|&b| {
                 body.blocks[b]
                     .insts
@@ -686,6 +712,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                         if forwarded.contains(&call) {
                             return None;
                         }
+                        let literal = literal_calls.get(call.index()).copied().unwrap_or(false);
                         let call = &body.calls[call.index()];
                         let Callee::Direct(f) = call.callee else {
                             return None;
@@ -696,17 +723,23 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
                         }
                         let size = price(callee).max(1);
                         let within = depth(&copies, chain[b], f.index());
-                        (!call.cold
+                        let site = (!call.cold
                             && f.index() != i
                             && size <= budget
                             && within < 8
                             && (within == 0
                                 || recursive_growth.get(&f.index()).copied().unwrap_or(0) + size
                                     <= 450))
-                            .then_some((b, offset, callee))
+                            .then_some((b, offset, callee))?;
+                        if literal && size <= 64 {
+                            Some(site)
+                        } else {
+                            fallback.get_or_insert(site);
+                            None
+                        }
                     })
             });
-            let Some((b, offset, callee)) = selected else {
+            let Some((b, offset, callee)) = selected.or(fallback) else {
                 break;
             };
             budget -= price(callee).max(1);

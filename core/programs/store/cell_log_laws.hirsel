@@ -1,0 +1,657 @@
+fn descriptor_fixture(kind: u8, tail: u64, stamp: u64, rows: u64, charge: u64) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(56 + tail)
+    list.fill(mut wire, 56 + tail, 0u8)
+    list.set_word_le(mut wire, 28, stamp)
+    list.set_word_le(mut wire, 36, rows)
+    list.set_word_le(mut wire, 44, charge)
+    wire[52] = kind
+    take wire
+}
+
+// A one-row map leaf, built independently of the page encoder. The four-byte
+// id is the page prefix and the row's stored key suffix is empty.
+fn descriptor_page(wire: Bytes) -> Bytes {
+    let mut page: Bytes = list.with_capacity(35 + list.len(wire))
+    list.fill(mut page, 33, 0u8)
+    list.set_word_le(mut page, 2, 1u16)
+    list.set_word_le(mut page, 4, 4u16)
+    list.set_word_le(mut page, 8, 1u64)
+    let heap: u32 = int.truncate(33 + list.len(wire))
+    let width: u16 = int.truncate(list.len(wire))
+    list.set_word_le(mut page, 16, heap)
+    page[27] = 7
+    list.set_word_le(mut page, 31, width)
+    list.append(mut page, wire)
+    list.put_word_le(mut page, 28u16)
+    take page
+}
+
+fn valid_descriptor(wire: Bytes) -> bool {
+    match std.page.decode(descriptor_page(wire), CollectionMap) {
+        Ok(_) => true,
+        _ => false,
+    }
+}
+
+fn malformed_descriptor(wire: Bytes) -> bool {
+    match std.page.decode(descriptor_page(wire), CollectionMap) {
+        Error(MalformedPage) => true,
+        _ => false,
+    }
+}
+
+fn cell_descriptor_cases() -> bool {
+    let empty = std.page.empty(0, 0, Collection)
+    let empty_wire = descriptor_fixture(3, 2, 0, 0, 0)
+    if !valid_descriptor(empty_wire) || result.unwrap(cell_record(empty, None)) != empty_wire {
+        return false
+    }
+    let spilled = descriptor_fixture(3, 2, 9, 1, 334)
+    if !valid_descriptor(spilled) || !malformed_descriptor(descriptor_fixture(3, 2, 9, 2, 334)) {
+        return false
+    }
+    let sizes: Inline[(u64, u64), 3] = [(2, 78), (255, 326), (256, 326)]
+    for (width, charge) in sizes {
+        let mut wire = descriptor_fixture(3, 2 + width, 0, 1, charge)
+        let ilen: u16 = int.truncate(width)
+        list.set_word_le(mut wire, 56, ilen)
+        {
+            let value = list.slice(wire, 58, 58 + width)
+            if !valid_descriptor(wire) || result.unwrap(cell_record(empty, Some(value))) != wire {
+                return false
+            }
+        }
+        wire[53] = 1
+        if !malformed_descriptor(wire) {
+            return false
+        }
+        wire[53] = 0
+        wire[44] += 1
+        if !malformed_descriptor(wire) {
+            return false
+        }
+    }
+    let mut one = descriptor_fixture(3, 3, 0, 1, 78)
+    list.set_word_le(mut one, 56, 1u16)
+    let mut oversized = descriptor_fixture(3, 259, 0, 1, 334)
+    list.set_word_le(mut oversized, 56, 257u16)
+    malformed_descriptor(one) && malformed_descriptor(oversized) && malformed_descriptor(descriptor_fixture(3, 0, 0, 0, 0))
+}
+
+fn log_descriptor_cases() -> bool {
+    let empty = std.page.empty(0, 0, Collection)
+    let mut wire = descriptor_fixture(4, 16, 0, 0, 0)
+    list.set_word_le(mut wire, 56, 257u64)
+    list.set_word_le(mut wire, 64, 257u64)
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 0)) != wire {
+        return false
+    }
+    wire[53] = 1
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 1)) != wire {
+        return false
+    }
+    list.set_word_le(mut wire, 64, 258u64)
+    if !malformed_descriptor(wire) {
+        return false
+    }
+    let mut dense = descriptor_fixture(4, 16, 9, 3, 258)
+    list.set_word_le(mut dense, 56, 10u64)
+    list.set_word_le(mut dense, 64, 7u64)
+    if !valid_descriptor(dense) {
+        return false
+    }
+    list.set_word_le(mut dense, 36, 4u64)
+    malformed_descriptor(dense) && malformed_descriptor(descriptor_fixture(4, 15, 0, 0, 0))
+}
+
+fn collection_catalog_fixture(kind: u8, key: Bytes) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(54 + list.len(key))
+    list.fill(mut wire, 21, 0u8)
+    wire[0] = kind
+    wire[1] = 7
+    wire[9] = 1
+    let key_width: u32 = int.truncate(list.len(key))
+    list.set_word_le(mut wire, 17, key_width)
+    list.append(mut wire, key)
+    list.put_word_le(mut wire, 1u16)
+    list.put_word_le(mut wire, 0u16)
+    let mut schema: Bytes = list.new()
+    list.put_word_le(mut schema, 3u32)
+    list.put_word_le(mut schema, 0x0600u16)
+    list.put_word_le(mut wire, std.codec.fingerprint_of(schema))
+    list.put_word_le(mut wire, 6u32)
+    list.append(mut wire, schema)
+    list.put_word_le(mut wire, 1u16)
+    list.fill(mut wire, 8, 0u8)
+    take wire
+}
+
+fn collection_catalog_cases() -> bool {
+    let mut key_u64: Bytes = list.new()
+    list.put_word_le(mut key_u64, 4u32)
+    list.put_word_le(mut key_u64, 0x0600u16)
+    let cell = collection_catalog_fixture(3, list.new())
+    let log = collection_catalog_fixture(4, key_u64)
+    let cell_meta = result.unwrap(decode_catalog(cell))
+    let log_meta = result.unwrap(decode_catalog(log))
+    if cell_meta.kind != 3 || cell_meta.id != 7 || log_meta.kind != 4 || log_meta.id != 7 || log_meta.key != key_u64 ||
+        result.unwrap(encode_catalog(cell_meta)) != cell || result.unwrap(encode_catalog(log_meta)) != log {
+        return false
+    }
+    match (decode_catalog(collection_catalog_fixture(3, key_u64)), decode_catalog(collection_catalog_fixture(4, list.new()))) {
+        (Error(Corrupt(_)), Error(Corrupt(_))) => true,
+        _ => false,
+    }
+}
+
+fn cell_log_frame_case() -> bool {
+    let trim_array: Inline[u8, 42] = [
+        3, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 4, 6,
+        3, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    let mut trims: Bytes = list.with_capacity(42)
+    for byte in trim_array {
+        list.push(mut trims, byte)
+    }
+    let seven = result.unwrap(prefix(7))
+    let eight = result.unwrap(prefix(8))
+    let mut encoded: Bytes = list.new()
+    encode_log_trim(mut encoded, seven, 258, 1030)
+    encode_log_trim(mut encoded, eight, 513, 0)
+    if encoded != trims {
+        return false
+    }
+
+    let mut payload: Bytes = list.new()
+    list.fill(mut payload, 20, 0u8)
+    let sections: Inline[u8, 6] = [2, 0, 2, 0, 0, 0]
+    for byte in sections {
+        list.push(mut payload, byte)
+    }
+    list.append(mut payload, trims)
+    // Section 1.8: issuer, subject length and subject, then two BE u64s.
+    let reply_header: Inline[u8, 13] = [1, 1, 0, 0, 0, 3, 19, 0, 0, 0, 0, 1, b's']
+    for byte in reply_header {
+        list.push(mut payload, byte)
+    }
+    list.put_word_be(mut payload, 1u64)
+    list.put_word_be(mut payload, 2u64)
+    list.put_word_le(mut payload, 41u32)
+    list.fill(mut payload, 40, 0u8)
+    list.push(mut payload, 2u8)
+    list.fill(mut payload, 12, 0u8)
+    list.put_word_le(mut payload, 16u32)
+    list.fill(mut payload, 17, 0u8)
+    let frame_ops = result.unwrap(journal_decode_commit("frame", payload))
+    let Some(call) = view frame_ops.call else { return false }
+    let stream = StreamKey(caller: Caller(issuer: 0, subject: clone(string.as_bytes("s"))), id: StreamId(t: 1, n: 2))
+    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream != stream ||
+        frame_ops.data[0].key != seven || frame_ops.data[1].key != eight {
+        return false
+    }
+    if let Some(_) = frame_ops.streams[0].trim {
+        return false
+    }
+    let Some(one) = frame_ops.data[0].trim else { return false }
+    let Some(two) = frame_ops.data[1].trim else { return false }
+    if one.floor != 258 || one.dropped != 1030 || two.floor != 513 || two.dropped != 0 {
+        return false
+    }
+    list.truncate(mut payload, 46)
+    match journal_decode_commit("frame", payload) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => true,
+        _ => false,
+    }
+}
+
+@test
+fn cell_log_format_l79_l77_l78() -> Result[(), ()] {
+    if !cell_descriptor_cases() || !log_descriptor_cases() || !collection_catalog_cases() || !cell_log_frame_case() {
+        return Error(())
+    }
+    Ok(())
+}
+
+fn cell_law_value(width: u64, byte: u8) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, byte)
+    take raw
+}
+
+fn cell_law_require(condition: bool, message: String) -> Result[(), Error] {
+    if !condition {
+        return Error(Missing(string.from(message)))
+    }
+    Ok(())
+}
+
+fn cell_law_commit[V: inert](mut db: Db, c: Cell[V], value: V) -> Result[Ticket, Error] waits {
+    let outcome = run(mut db, None, (copy_env(c), copy_env(value)), fn(mut tx: Tx, env: (Cell[V], V)) -> Result[(), Error] { cell_set(mut tx, env.0, env.1) })?
+    match take outcome {
+        Committed(done) => Ok(done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("cell commit")),
+    }
+}
+
+fn cell_law_nested(mut db: Db, target: Cell[Bytes], head_value: Bytes, outer_value: Bytes, expect_overrun: bool) -> Result[Ticket, Error] waits {
+    let outcome = run(mut db, None, (copy_env(target), copied(head_value)?, copied(outer_value)?, expect_overrun), fn(mut tx: Tx, env: (Cell[Bytes], Bytes, Bytes, bool)) -> Result[(), Error] {
+        let c = view env.0
+        let a = view env.1
+        let b = view env.2
+        let overrun = env.3
+        cell_set(mut tx, c, b)?
+        if overrun {
+            let stopped = rollback_writes_on_overrun(mut tx, 65536, scoped fn(mut middle: Tx) -> Result[(), Error] {
+                rollback_writes_on_error(mut middle, scoped fn(mut inner: Tx) -> Result[(), Error] { cell_set(mut inner, c, a) })?
+                cell_law_require(cell_fetch(middle, c)? == Some(copied(a)?), "reverted middle value")?
+                loop {}
+            })
+            match stopped {
+                Error(_) => (),
+                _ => return Error(Missing("bounded middle must overrun")),
+            }
+            cell_law_require(cell_fetch(tx, c)? == Some(copied(b)?), "outer value after overrun")
+        } else {
+            rollback_writes_on_error(mut tx, scoped fn(mut middle: Tx) -> Result[(), Error] {
+                rollback_writes_on_error(mut middle, scoped fn(mut inner: Tx) -> Result[(), Error] { cell_set(mut inner, c, a) })?
+                cell_law_require(cell_fetch(middle, c)? == Some(copied(a)?), "reverted middle value")
+            })?
+            cell_law_require(cell_fetch(tx, c)? == Some(copied(a)?), "folded outer value")
+        }
+    })?
+    match take outcome {
+        Committed(done) => Ok(done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("nested cell commit")),
+    }
+}
+
+@test
+fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let cell = declare_cell(mut declaring, "one", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    let baseline = db.resident
+    let cell_reader = reader(db, 0)?
+    let a = cell_law_value(194, 1)
+    let b = cell_law_value(294, 2)
+    let _ = cell_law_commit(mut db, cell, a)?
+    cell_law_require(db.resident == baseline + 270, "200-byte cell charge")?
+    let from = snapshot(db)
+    let size = db.file_end
+    let _ = cell_law_nested(mut db, cell, a, b, false)?
+    cell_law_require(db.file_end == size + 42, "net-zero cell has no op")?
+    cell_law_require(tree_stamp(snapshot(db).roots.collections) == tree_stamp(from.roots.collections), "net-zero cell stamp")?
+    cell_law_require(list.len((changes(cell_reader, from, snapshot(db))?).rows) == 0, "net-zero cell diff")?
+    let held_a = snapshot(db)
+    let _ = pin(mut db, "a", held_a)?
+    let _ = pin(mut db, "same-a", held_a)?
+    let _ = cell_law_nested(mut db, cell, a, b, true)?
+    cell_law_require(cell_get(cell_reader, snapshot(db), cell)? == Some(b), "outer write committed after overrun")?
+    let _ = checkpoint(mut db)?
+    cell_law_require(db.resident == baseline + 270 + 374, "distinct pinned cell versions")?
+    let _ = cell_law_commit(mut db, cell, a)?
+    let _ = checkpoint(mut db)?
+    cell_law_require(db.resident == baseline + 270, "same pinned cell version")?
+    let key = prefix(cell.binding.id)?
+    let sizes: Inline[u64, 6] = [255, 257, 256, 1025, 256, 255]
+    for width in sizes {
+        let value = cell_law_value(width - 6, 9)
+        let old = snapshot(db)
+        let receipt = cell_law_commit(mut db, cell, value)?
+        let current = snapshot(db)
+        let descriptor = option.unwrap(std.page.lookup(current.roots.collections.root, key))
+        let expected = if width <= 256 { 58 + width } else { 58u64 }
+        cell_law_require(list.len(descriptor) == expected, "cell inline width")?
+        cell_law_require(read_le(descriptor, 44, 8) == 70 + round8(width), "cell row charge")?
+        cell_law_require(cell_get(cell_reader, current, cell)? == Some(value), "cell value after transition")?
+        cell_law_require(list.len((changes(cell_reader, old, current)?).rows) == 1, "cell diff after transition")?
+        durable(mut db, receipt)?
+    }
+    let mut family = followers()
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let replica = follower(mut family, follower_slot(follower_owner(service)?, plan)?, log_authority(dir), c, options.expect)?
+    let mut declarations = declare_follower(replica)
+    let followed_cell = declare_cell(mut declarations, "one", std.codec.of_bytes())?
+    seal_follower(replica, take declarations)?
+    let following_reader = follower_reader(replica, 0)?
+    let following_snapshot = snapshot_follower(replica, follower_main(replica))?
+    cell_law_require(cell_get(following_reader, following_snapshot, followed_cell)? == Some(cell_law_value(249, 9)), "follower cell value")?
+    close(take db)?
+    let reopened = open(tasks, dir, c, r, options)?
+    let reopened_reader = reader(reopened, 0)?
+    cell_law_require(cell_get(reopened_reader, snapshot(reopened), cell)? == Some(cell_law_value(249, 9)), "inline cell replay")?
+    let Some(held) = pinned(reopened, "same-a") else { return Error(Missing("cell pin after replay")) }
+    cell_law_require(cell_get(reopened_reader, held, cell)? == Some(a), "pinned cell after replay")?
+    close(take reopened)
+}
+
+fn append_law_batch(mut db: Db, log_handle: Log[Bytes], start: u64, batch_size: u64) -> Result[Ticket, Error] waits {
+    let outcome = run(mut db, None, (copy_env(log_handle), start, batch_size), fn(mut tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[(), Error] {
+        let target = view env.0
+        for offset in 0u64 .. env.2 {
+            let seq = env.1 + offset
+            let byte: u8 = int.truncate(seq)
+            let value = cell_law_value(24, byte)
+            cell_law_require(append(mut tx, target, value)? == seq, "dense append sequence")?
+        }
+        let limits = bounds(tx, target)?
+        cell_law_require(limits.first == 0 && limits.next == env.1 + env.2, "staged log bounds")?
+        let expected = limits.next - 1
+        let Some((tail, value)) = last(tx, target)? else { return Error(Missing("staged last")) }
+        cell_law_require(tail == expected && value[0] == int.truncate(expected), "staged last value")?
+        let mut rows = log_range(tx, target, Included(env.1 - 1), Excluded(env.1 + 2))?
+        for seq in env.1 - 1 .. env.1 + 2 {
+            let Some((observed, row_value_bytes)) = next_in(tx, mut rows)? else { return Error(Missing("staged range")) }
+            cell_law_require(observed == seq && row_value_bytes[0] == int.truncate(seq), "staged range row")?
+        }
+        if let Some(_) = next_in(tx, mut rows)? {
+            return Error(Missing("staged range exhaustion"))
+        }
+        Ok(())
+    })?
+    match take outcome {
+        Committed(done) => Ok(done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("log batch")),
+    }
+}
+
+fn log_rollback_law(mut db: Db, target: Log[Bytes]) -> Result[(), Error] waits {
+    let outcome = run(mut db, None, copy_env(target), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
+        let value = cell_law_value(24, 0)
+        let aborted = rollback_writes_on_error(mut tx, scoped fn(mut child: Tx) -> Result[(), Error] {
+            cell_law_require(append(mut child, l, value)? == 0, "aborted append sequence")?
+            Error(Missing("abort"))
+        })
+        match aborted {
+            Error(Missing(reason)) if reason == "abort" => (),
+            _ => return Error(Missing("typed rollback")),
+        }
+        let stopped = rollback_writes_on_overrun(mut tx, 8192, scoped fn(mut child: Tx) -> Result[(), Error] {
+            cell_law_require(append(mut child, l, value)? == 0, "overrun append sequence")?
+            loop {}
+        })
+        match stopped {
+            Error(_) => (),
+            _ => return Error(Missing("append overrun")),
+        }
+        cell_law_require(append(mut tx, l, value)? == 0, "sequence reused after rollback")
+    })?
+    match take outcome {
+        Committed(done) => durable(mut db, done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("log rollback commit")),
+    }
+}
+
+fn append_fill_law(s: Snapshot, id: u32) -> Result[(), Error] {
+    let map_key = prefix(id)?
+    let Some(root) = std.page.collection_child(s.roots.collections.root, map_key) else {
+        return Error(Missing("log root"))
+    }
+    let root_image = std.page.image_of(root)
+    // Stored 30-byte values, 4 bytes of slots and suffix length, 3 bytes of
+    // value tag and length, and (8 - prefix) bytes of sequence suffix.
+    let counts: Inline[u64, 4] = [106, 106, 104, 1]
+    let starts: Inline[u64, 4] = [0, 106, 212, 316]
+    cell_law_require(std.page.level(root_image) == 1 && std.page.count(root_image) == 4, "append branch shape")?
+    for slot in 0u64 .. 4 {
+        let leaf = option.unwrap(std.page.child(root, slot))
+        let image = std.page.image_of(leaf)
+        let lo = option.unwrap(std.page.key_at(image, 0))
+        cell_law_require(std.page.count(image) == counts[slot] && decode_word(lo) == starts[slot], "append leaf boundary")?
+    }
+    Ok(())
+}
+
+@test
+fn log_dense_and_append_fill(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let target = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    let baseline = db.resident
+    log_rollback_law(mut db, target)?
+    let receipt = append_law_batch(mut db, target, 1, 316)?
+    durable(mut db, receipt)?
+    let before = snapshot(db)
+    append_fill_law(before, target.binding.id)?
+    cell_law_require(db.resident == baseline + 317 * 110, "live log charge")?
+    close(take db)?
+    let replayed = open(tasks, dir, c, r, options)?
+    let current = snapshot(replayed)
+    append_fill_law(current, target.binding.id)?
+    let reading_log = reader(replayed, 0)?
+    let limits = log_bounds(reading_log, current, target)?
+    cell_law_require(limits.first == 0 && limits.next == 317, "replayed log bounds")?
+    cell_law_require(replayed.resident == baseline + 317 * 110, "replayed log charge")?
+    let mut rows = log_scan(reading_log, current, target, Included(314), Excluded(317))?
+    for seq in 314u64 .. 317 {
+        let Some((found_seq, value)) = next(reading_log, mut rows)? else { return Error(Missing("replayed log row")) }
+        cell_law_require(seq == found_seq && value[0] == int.truncate(seq), "replayed log bytes")?
+    }
+    close(take replayed)
+}
+
+fn trim_law_nested(mut tx: Tx, target: Log[Bytes]) -> Result[(), Error] {
+    let value = cell_law_value(24, 8)
+    cell_law_require(append(mut tx, target, value)? == 0, "outer append before trim")?
+    rollback_writes_on_error(mut tx, scoped fn(mut layer: Tx) -> Result[(), Error] {
+        rollback_writes_on_error(mut layer, scoped fn(mut inside: Tx) -> Result[(), Error] {
+            trim_before(mut inside, target, 1)?
+            cell_law_require(append(mut inside, target, value)? == 1, "inner append after trim")
+        })?
+        cell_law_require(log_fetch(layer, target, 0)? == None, "nested trim masks outer append")
+    })?
+    let limits = bounds(tx, target)?
+    cell_law_require(limits.first == 1 && limits.next == 2, "nested trim bounds")
+}
+
+fn trim_law_receipt(take outcome: Outcome[(), Error]) -> Result[Ticket, Error] {
+    match take outcome {
+        Committed(done) => Ok(done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("trim commit")),
+    }
+}
+
+fn trim_law_min_children(root: Arc[std.page.Page]) -> bool {
+    let image = std.page.image_of(root)
+    if std.page.level(image) == 0 {
+        return true
+    }
+    if std.page.count(image) < 2 {
+        return false
+    }
+    for slot in 0u64 .. std.page.count(image) {
+        if !trim_law_min_children(option.unwrap(std.page.child(root, slot))) {
+            return false
+        }
+    }
+    true
+}
+
+@test
+fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let target = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    let baseline = db.resident
+    let start = db.file_end
+    let receipt = trim_law_receipt(run(mut db, None, copy_env(target), trim_law_nested)?)?
+    durable(mut db, receipt)?
+    cell_law_require(db.resident == baseline + 110 && db.file_end == start + 42 + 21 + 55, "masked append charge and frame")?
+    let path = capacity(disk_path("j-", db.file_seq, ""))?
+    let wire = read_journal_prefix(dir, path, db.file_end)?
+    cell_law_require(wire[start + 42] == 3 && word_be(wire, start + 47) == 1 &&
+        word_be(wire, start + 55) == 0 && wire[start + 63] == 1, "trim sorts before append and drops zero head rows")?
+
+    let written = run(mut db, None, copy_env(target), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
+        let payload = cell_law_value(994, 9)
+        for seq in 2u64 .. 602 {
+            cell_law_require(append(mut tx, l, payload)? == seq, "trim join fixture sequence")?
+        }
+        Ok(())
+    })?
+    durable(mut db, trim_law_receipt(take written)?)?
+    let id_key = prefix(target.binding.id)?
+    let held = snapshot(db)
+    let Some(before) = std.page.collection_child(held.roots.collections.root, id_key) else { return Error(Missing("pretrim root")) }
+    let before_image = std.page.image_of(before)
+    cell_law_require(std.page.level(before_image) == 2, "trim join fixture needs a branch donor")?
+    let left = option.unwrap(std.page.child(before, 0))
+    let left_image = std.page.image_of(left)
+    let final_leaf = option.unwrap(std.page.child(left, std.page.count(left_image) - 1))
+    let trim_key = option.unwrap(std.page.key_at(std.page.image_of(final_leaf), 0))
+    let floor = decode_word(trim_key)
+    let offset = db.file_end
+    let changed = run(mut db, None, (copy_env(target), floor), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1 - 1)?
+        trim_before(mut tx, env.0, env.1)
+    })?
+    durable(mut db, trim_law_receipt(take changed)?)?
+    cell_law_require(db.file_end == offset + 63, "replacement trims seal one op")?
+    let captured = snapshot(db)
+    let Some(root) = std.page.collection_child(captured.roots.collections.root, id_key) else { return Error(Missing("trim root")) }
+    cell_law_require(trim_law_min_children(root), "trim left no unary branch")?
+    cell_law_require(db.resident == baseline + (602 - floor) * 1078, "trim subtracted exactly once")?
+    let suffix_wire = read_journal_prefix(dir, path, db.file_end)?
+    cell_law_require(word_be(suffix_wire, offset + 55) == 110 + (floor - 2) * 1078, "trim dropped wire charge")?
+    let mut bad = share_page_tree(held.roots.collections)
+    let mut draw = db.next_node + 1
+    match trim_log_page(mut bad, id_key, floor, Some(1), 0, mut draw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("wrong dropped charge refused")),
+    }
+    close(take db)?
+    let reopened = open(tasks, dir, c, r, options)?
+    let seen = reader(reopened, 0)?
+    let now = snapshot(reopened)
+    let limits = log_bounds(seen, now, target)?
+    cell_law_require(limits.first == floor && limits.next == 602, "replayed trim bounds")?
+    cell_law_require(reopened.resident == baseline + (602 - floor) * 1078, "replayed trim charge")?
+    cell_law_require(log_get(seen, now, target, floor - 1)? == None, "replayed trim removed prefix")?
+    let Some(value) = log_get(seen, now, target, floor)? else { return Error(Missing("replayed trim boundary")) }
+    cell_law_require(value == cell_law_value(994, 9), "replayed trim kept boundary")?
+    close(take reopened)
+}
+
+fn published_test_word(word: u64) -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_le(mut raw, word)
+    take raw
+}
+
+fn publish_law_key(id: u32, seq: u64) -> Bytes {
+    let mut key: Bytes = list.new()
+    list.put_word_be(mut key, id)
+    list.put_word_be(mut key, seq)
+    take key
+}
+
+fn log_diff_write(mut db: Db, b: Option[Branch], l: Log[u64], first: u64, end: u64, offset: u64, cut: u64) -> Result[(), Error] waits {
+    let line = match b { Some(selected) => selected, None => Branch(store: db.store, id: 0) }
+    let outcome = run_on(mut db, line, None, (copy_env(l), first, end, offset, cut), fn(mut tx: Tx, args: (Log[u64], u64, u64, u64, u64)) -> Result[(), Error] {
+        for seq in args.1 .. args.2 {
+            cell_law_require(append(mut tx, args.0, seq + args.3)? == seq, "diff law append sequence")?
+        }
+        trim_before(mut tx, args.0, args.4)
+    })?
+    let _ = trim_law_receipt(take outcome)?
+    Ok(())
+}
+
+fn log_diff_pages(r: Reader, a: Snapshot, b: Snapshot, id: u32) -> Result[(), Error] waits {
+    let low = publish_law_key(id, 1)
+    let high = publish_law_key(id, 5)
+    let limit = Limits(rows: 2, byte_limit: 24)
+    let page = changes_page(r, Some(clone(a)), b, low, high, limit)?
+    cell_law_require(list.len(page.trimmed) == 1 && list.len(page.changes) == 0 && list.len(page.bounds) == 0, "clipped span page")?
+    cell_law_require(page.trimmed[0].lo == low && page.trimmed[0].hi == publish_law_key(id, 3), "clipped span endpoints")?
+    cell_law_require(page.next == Some(publish_law_key(id, 4)), "resume at insertion")?
+    let rest = changes_page(r, Some(clone(a)), b, option.unwrap(clone(page.next)), high, limit)?
+    cell_law_require(list.len(rest.changes) == 1 && list.len(rest.trimmed) == 0 && rest.next == None, "resume excludes returned span")?
+    let inside = changes_page(r, Some(clone(a)), b, low, publish_law_key(id, 2), Limits(rows: 1, byte_limit: 1))?
+    cell_law_require(list.len(inside.trimmed) == 1 && inside.trimmed[0].hi == publish_law_key(id, 2) && inside.next == None, "oversize first span inside range")?
+    let bounds_page = changes_page(r, Some(clone(a)), b, prefix(id)?, high, Limits(rows: 1, byte_limit: 4))?
+    cell_law_require(list.len(bounds_page.bounds) == 1 && bounds_page.next == Some(publish_law_key(id, 0)), "bounds precedes span")?
+    Ok(())
+}
+
+@test
+fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let undeclared = snapshot(db)
+    let mut declaring = declare(db, Migrate)?
+    let cell = declare_cell(mut declaring, "setting", std.codec.of_u64())?
+    let log_handle = declare_log(mut declaring, "events", std.codec.of_u64())?
+    let _ = seal(mut db, take declaring)?
+    let empty = snapshot(db)
+    let reading = reader(db, 0)?
+    let id = log_handle.binding.id
+    let initialized = changes(reading, undeclared, empty)?
+    cell_law_require(list.len(initialized.bounds) == 1 && initialized.bounds[0] == prefix(id)? && list.len(initialized.rows) == 0, "one-sided log bounds")?
+
+    let cell_commit = run(mut db, None, copy_env(cell), fn(mut tx: Tx, target: Cell[u64]) -> Result[(), Error] {
+        cell_set(mut tx, target, 42u64)
+    })?
+    let _ = trim_law_receipt(take cell_commit)?
+    let cell_low = prefix(cell.binding.id)?
+    let cell_high = prefix(cell.binding.id + 1)?
+    let cell_span = span_changes(reading, snapshot(db), cell_low, cell_high)?
+    cell_law_require(list.len(cell_span) == 1 && cell_span[0].tree_key == cell_low && published_cell(cell, cell_span[0])? == Some(published_test_word(42)), "published inline cell")?
+    let mut streamed = open_span_changes(reading, snapshot(db), cell_low, cell_high)?
+    cell_law_require(option.unwrap(next_span_change(reading, mut streamed)?).tree_key == cell_low, "streamed inline cell")?
+    if let Some(_) = next_span_change(reading, mut streamed)? { return Error(Missing("duplicate streamed cell")) }
+    let mut backwards = reverse_byte_cursor(snapshot(db).roots.collections, cell_low, cell_high)?
+    let Some((reverse_key, _)) = next_bytes(mut backwards)? else {
+        return Error(Missing("inline cell on reverse lower bound"))
+    }
+    cell_law_require(reverse_key == cell_low, "reverse cell key")?
+
+    let before_appends = snapshot(db)
+    log_diff_write(mut db, None, log_handle, 0, 4, 0, 0)?
+    let a = snapshot(db)
+    let (side, _) = fork(mut db, "other", a)?
+    log_diff_write(mut db, None, log_handle, 4, 5, 0, 3)?
+    let b = snapshot(db)
+    let delta = changes(reading, a, b)?
+    cell_law_require(list.len(delta.bounds) == 1 && delta.bounds[0] == prefix(id)? && list.len(delta.trimmed) == 1 && list.len(delta.rows) == 1, "bounds span and row")?
+    cell_law_require(delta.trimmed[0].lo == publish_law_key(id, 0) && delta.trimmed[0].hi == publish_law_key(id, 3), "trim span")?
+    cell_law_require(delta.rows[0].tree_key == publish_law_key(id, 4) && published_log(log_handle, delta.rows[0])? == Some(published_test_word(4)), "published appended row")?
+    log_diff_pages(reading, a, b, id)?
+
+    let tail = tail_window(reading, b, log_handle, 10)?
+    cell_law_require(tail.first == 3 && tail.next == 5, "tail clamps to retained rows")?
+    match tail_window(reading, b, log_handle, 0) {
+        Error(Missing(n)) if n == "n" => (),
+        _ => return Error(Missing("zero tail")),
+    }
+    let moving = window_changes(reading, a, b, log_handle, 2)?
+    cell_law_require(list.len(moving) == 2 && moving[0].tree_key == publish_law_key(id, 2) && moving[0].value == None && moving[1].tree_key == publish_law_key(id, 4), "same branch window")?
+
+    log_diff_write(mut db, Some(side), log_handle, 4, 5, 100, 0)?
+    let forked = snapshot_of(db, side)?
+    let cross = window_changes(reading, b, forked, log_handle, 2)?
+    cell_law_require(list.len(cross) == 1 && cross[0].tree_key == publish_law_key(id, 4) && published_log(log_handle, cross[0])? == Some(published_test_word(104)), "fork overlap replacement")?
+    let reverse = changes(reading, b, forked)?
+    cell_law_require(list.len(reverse.trimmed) == 0 && list.len(reverse.rows) == 4 && reverse.rows[0].tree_key == publish_law_key(id, 0), "fork inserts below old floor")?
+
+    log_diff_write(mut db, None, log_handle, 5, 7, 0, 7)?
+    let emptied = snapshot(db)
+    let all_trimmed = changes(reading, b, emptied)?
+    cell_law_require(list.len(all_trimmed.trimmed) == 1 && all_trimmed.trimmed[0].hi == publish_law_key(id, 5), "span stops at old next")?
+    let now_empty = changes(reading, before_appends, emptied)?
+    cell_law_require(list.len(now_empty.bounds) == 1 && now_empty.bounds[0] == prefix(id)? && list.len(now_empty.trimmed) == 0 && list.len(now_empty.rows) == 0, "equal empty roots with different bounds")
+}

@@ -1,0 +1,99 @@
+type TieredTarget: shareable + send = TieredPage(std.page.PagePtr) | TieredBlob(std.page.BlobRef)
+
+type TieredFrameId: key {
+    pack: u64,
+    offset: u64,
+    kind: u16,
+    len: u64,
+    checksum: u64,
+    stamp: u64
+}
+
+type TieredPayload: shareable + send = TieredImage(Arc[std.page.Page]) | TieredValue(Arc[Bytes])
+
+type TieredFrame: shareable + send {
+    identity: TieredFrameId,
+    payload: TieredPayload
+}
+
+fn tiered_frame_id(target: TieredTarget) -> TieredFrameId {
+    match target {
+        TieredPage(ptr) => TieredFrameId(pack: ptr.pack, offset: ptr.offset, kind: 0x0021, len: int.widen(ptr.len), checksum: ptr.checksum, stamp: ptr.stamp),
+        TieredBlob(reference) => TieredFrameId(pack: reference.pack, offset: reference.offset, kind: 0x0022, len: 8 + reference.len, checksum: reference.checksum, stamp: reference.stamp),
+    }
+}
+
+fn verify_tiered_edge(path: String, target: TieredTarget, found: TieredFrameId) -> Result[(), Error] {
+    let expected = tiered_frame_id(target)
+    if found != expected {
+        return Error(disk_fault(path, expected.offset, Checksum))
+    }
+    Ok(())
+}
+
+// `raw` may hold several frames. The offset in the authenticity check
+// remains absolute within the pack even when a range starts there.
+fn read_tiered_frame(path: String, id: StoreId, target: TieredTarget, raw: Bytes, start: u64, next_stamp: u64) -> Result[Arc[TieredFrame], Error] {
+    let expected = tiered_frame_id(target)
+    let offset = expected.offset
+    if offset < 72 || start > offset || offset - start > list.len(raw) || list.len(raw) - (offset - start) < 16 {
+        return Error(disk_fault(path, offset, Dangling(expected.stamp)))
+    }
+    let at = offset - start
+    let head = list.slice(raw, at, at + 16)
+    let kind: u16 = list.word_le(head, 0)
+    let flags: u16 = list.word_le(head, 2)
+    let size = read_le(head, 4, 4)
+    let Some(maximum) = disk_kind_limit(expected.kind) else {
+        fail("store: unknown Tiered frame kind")
+    }
+    let minimum = if expected.kind == 0x0021 {
+        24u64
+    } else {
+        8u64
+    }
+    if kind != expected.kind || size != expected.len || size < minimum || size > maximum || size > list.len(raw) - at - 16 {
+        return Error(disk_fault(path, offset, Checksum))
+    }
+    if flags & 65534 != 0 {
+        return Error(disk_fault(path, offset, Flags))
+    }
+    let body_start = at + 16
+    let body_end = body_start + size
+    let body_bytes = list.slice(raw, body_start, body_end)
+    let context = DiskContext(store: id, role: 3, seq: expected.pack)
+    let bound_check: u64 = list.word_le(head, 8)
+    if capacity(disk_check(context, offset, head, body_bytes))? != bound_check {
+        return Error(disk_fault(path, offset, Checksum))
+    }
+    let stamp_at = if kind == 0x0021 {
+        8u64
+    } else {
+        0u64
+    }
+    let stamp: u64 = list.word_le(body_bytes, stamp_at)
+    let value_start = if kind == 0x0021 {
+        0u64
+    } else {
+        8u64
+    }
+    let digest = std.check.xxh3(body_bytes, value_start, size)
+    let found = TieredFrameId(pack: expected.pack, offset: offset, kind: kind, len: size, checksum: digest, stamp: stamp)
+    verify_tiered_edge(path, target, found)?
+    if stamp == 0 || stamp >= next_stamp {
+        return Error(disk_fault(path, offset, Malformed))
+    }
+    let payload = match target {
+        TieredPage(ptr) => {
+            let image = decode_located_page(path, offset, copied(body_bytes)?, Collection)?
+            for slot in 0u64 .. std.page.count(image) {
+                if let Some(PageEdge(child_ptr)) = std.page.owning_edge(image, slot) {
+                    page_edge_order(path, ptr, child_ptr)?
+                }
+            }
+            TieredImage(std.page.attach_cold(take image) ?=> |_| disk_fault(path, offset, Malformed))
+        },
+        TieredBlob(_) => TieredValue(arc.new(copied(list.slice(body_bytes, 8, size))?)),
+    }
+    Ok(arc.new(TieredFrame(identity: found, payload: take payload)))
+}

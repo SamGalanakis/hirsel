@@ -36,6 +36,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     vals[0]?,
                     result,
                     AllocPlace::ByteHead,
+                    8,
                     n,
                 )),
                 "from_tail" => Some(self.bytes_from_tail(vals[0]?, vals[1]?, result, n)),
@@ -132,21 +133,41 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["sha1"] && name == "blocks" {
             return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));
         }
-        if module == ["sha256"] {
+        if let Some(op) = match module {
+            [m] if m == "sha256" => Some(RtOp::Sha256Blocks),
+            [m] if m == "sha1" => Some(RtOp::Sha1Compress),
+            [m] if m == "sha512" => Some(RtOp::Sha512Blocks),
+            _ => None,
+        } {
             return match name {
-                "blocks" => Some(self.sha256_blocks(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
-                "block" => Some(self.sha256_block(vals[0]?, vals[1]?, n)),
+                "blocks" | "compress" => {
+                    Some(self.sha_blocks(op, vals[0]?, vals[1]?, vals[2]?, vals[3]?, n))
+                }
+                "block" => Some(self.sha_block(op, vals[0]?, vals[1]?, n)),
                 _ => None,
             };
+        }
+        if module == ["argon2"] && name == "id" {
+            return Some(self.argon2id(g.params[4].ty, vals, result, n));
         }
         let verifier = match (module, name) {
             ([m], "verify") if m == "ed25519" => Some(hirsel_core_ir::RtOp::Ed25519Verify),
             ([m], "verify") if m == "p256" => Some(hirsel_core_ir::RtOp::P256Verify),
             ([m], "verify_der") if m == "p256" => Some(hirsel_core_ir::RtOp::P256VerifyDer),
+            ([m], "verify") if m == "p384" => Some(hirsel_core_ir::RtOp::P384Verify),
+            ([m], "verify_der") if m == "p384" => Some(hirsel_core_ir::RtOp::P384VerifyDer),
             _ => None,
         };
         if let Some(op) = verifier {
             return Some(self.verify_signature(op, [vals[0]?, vals[1]?, vals[2]?], n));
+        }
+        if module == ["rsa"] {
+            let op = match name {
+                "verify_pkcs1_sha256" => hirsel_core_ir::RtOp::RsaVerifyPkcs1Sha256,
+                "verify_pss_sha256" => hirsel_core_ir::RtOp::RsaVerifyPssSha256,
+                _ => return None,
+            };
+            return Some(self.verify_signature(op, [vals[0]?, vals[1]?, vals[2]?, vals[3]?], n));
         }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
@@ -163,6 +184,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(self.unwrap_value(input, result, vals[0], module == ["option"], n));
         }
         None
+    }
+
+    fn verify_signature<const N: usize>(
+        &mut self,
+        op: RtOp,
+        carriers: [ValueId; N],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let args = carriers.map(|carrier| {
+            [
+                Arg::Value(self.read_sequence_word(carrier, 0, Ty::Ptr, n)),
+                Arg::Value(self.read_sequence_word(carrier, 8, u64_, n)),
+            ]
+        });
+        let word = self.runtime_row(op, args.as_flattened(), n)?[0];
+        self.runtime_nonzero(u64_, word, n)
     }
 
     /// Shared class-A carrier lowering, also used by string rows at T = u8.
@@ -222,6 +260,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "with_capacity" => {
                 return Some(self.list_with_capacity(item, vals[0]?, result, n));
+            }
+            "with_capacity_aligned" => {
+                let value = vals[1]?;
+                let align = self.open.iter().rev().find_map(|inst| match *inst {
+                    Inst::Const { result, bits } if result == value => Some(bits),
+                    _ => None,
+                });
+                return Some(match align {
+                    Some(align) if align.is_power_of_two() && align <= i64::MAX as u64 => self
+                        .list_with_capacity_at(
+                            item,
+                            vals[0]?,
+                            result,
+                            AllocPlace::Current,
+                            align.max(8),
+                            n,
+                        ),
+                    _ => {
+                        self.refuse("SEM-4", n, "alignment must be a constant power of two");
+                        None
+                    }
+                });
             }
             "len" | "capacity" => {
                 let word = if name == "len" {

@@ -1,0 +1,203 @@
+fn l88_leaf_pack(d: Dir, owner: StoreId, seq: u64) -> Result[std.page.PagePtr, Error] waits {
+    let mut rows: List[std.page.Entry] = list.with_capacity(3)
+    for row in 0u64 .. 3 {
+        list.push(mut rows, std.page.Entry(key: key_word(row), cell: InlineValue(string.into_bytes(string.from("stored")))))
+    }
+    let image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    l68_write_page_pack(d, owner, seq, 40, std.page.payload(image))
+}
+
+fn l88_share_source(source: TieredPageSource) -> TieredPageSource {
+    TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
+}
+
+fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr, old: std.page.PagePtr, moved: std.page.PagePtr, sibling: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut map_stamp = 80u64
+    let head = l79_cut_table(moved, 3, 258, mut map_stamp)?
+    let Some(take lookup_root) = promotion_collection_root(head.collections, 9)? else {
+        fail("L88(a): the candidate must include the head's Tiered collection")
+    }
+    let mut lookup_roots: List[TieredPromotionRoot] = list.with_capacity(1)
+    list.push(mut lookup_roots, PromotionPage(take lookup_root))
+    let cut = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: take lookup_roots, probed_through: map.new())
+    let HotPage(take revised) = promotion_resolve_page(cut, 9, ColdPage(parent))? else {
+        fail("L88(a): moving one child must re-emit the captured parent")
+    }
+    let image = std.page.image_of(revised)
+    let Some(ColdPage(found)) = std.page.child_slot(revised, 0) else {
+        fail("L88(a): the resolved parent must retain a Cold edge")
+    }
+    let Some(ColdPage(unchanged)) = std.page.child_slot(revised, 1) else {
+        fail("L88(a): the other child was still listed")
+    }
+    if found != moved || unchanged != sibling || std.page.stamp(image) != parent.stamp {
+        fail("L88(a): the parent must keep its stamp and name the installed copy")
+    }
+    let input = fold_frame_at(captured, TieredPage(old))?
+    let ColdPage(converged) = promotion_resolve_page(cut, 9, HotPage(arc.share(fold_page(input))))? else {
+        fail("L88(c): a Hot capture slot must match the already sealed stamp")
+    }
+    if converged != moved {
+        fail("L88(c): the Hot page resolves to the installed Cold copy")
+    }
+    let mut ids = 0u64
+    let mut retired = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    retired.installed.packs = std.omap.remove(mut ids, retired.installed.packs, 8u64)
+    let HotPage(take first) = promotion_resolve_page(retired, 9, ColdPage(old))? else {
+        fail("L88(d): the first promotion must copy from the leased pack")
+    }
+    list.push(mut retired.lookup, PromotionPage(HotPage(arc.share(first))))
+    let HotPage(take second) = promotion_resolve_page(retired, 9, ColdPage(old))? else {
+        fail("L88(d): the second promotion must use the first copy")
+    }
+    list.clear(mut retired.lookup)
+    if let Ok(_) = arc.try_unwrap(take first) {
+        fail("L88(d): both promotions must share the first copy")
+    }
+    if std.page.stamp(std.page.image_of(second)) != 40 {
+        fail("L88(d): promotion must keep the copied page's stamp")
+    }
+    let mut prefix_only = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    map.insert(mut prefix_only.probed_through, old.pack, old.offset)
+    let HotPage(take copied_leaf) = promotion_resolve_page(prefix_only, 9, ColdPage(old))? else {
+        fail("L88(b): a listed page behind the installed cursor must still be copied")
+    }
+    if std.page.stamp(std.page.image_of(copied_leaf)) != old.stamp || map.get_or(prefix_only.probed_through, old.pack, 0u64) != old.offset {
+        fail("L88(b): promotion must retain the stamp and leave the installed cursor in place")
+    }
+    list.push(mut prefix_only.lookup, PromotionPage(HotPage(arc.share(copied_leaf))))
+    let HotPage(take later_leaf) = promotion_resolve_page(prefix_only, 9, ColdPage(moved))? else {
+        fail("L88(e): a second capture must take the earlier promotion's location")
+    }
+    list.clear(mut prefix_only.lookup)
+    if let Ok(_) = arc.try_unwrap(take copied_leaf) {
+        fail("L88(e): captures from two generations must share the same promoted copy")
+    }
+    if std.page.stamp(std.page.image_of(later_leaf)) != old.stamp {
+        fail("L88(e): the second capture must keep the shared stamp")
+    }
+    Ok(())
+}
+
+@test
+fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let old = l88_leaf_pack(fixtures, owner, 8)?
+    let moved = l88_leaf_pack(fixtures, owner, 11)?
+    let (parent, sibling) = l79_fold_parent(fixtures, owner, old)?
+    let (probe_pack, probed_leaf) = l88_probe_pack(fixtures, owner)?
+    let mut ids = 0u64
+    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    for ptr in[old, moved, parent, sibling] {
+        let width: u64 = int.widen(ptr.len)
+        let metadata = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let (take revised, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: metadata, object: None))
+        packs = take revised
+    }
+    let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, TieredPagerPack(inventory: probe_pack, object: None))
+    let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
+    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
+    let captured = TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
+    let first_check = l88_converges_locations(captured, parent, old, moved, sibling)
+    let checked = match take first_check {
+        Ok(()) => l88_probe_keeps_progress(captured, probe_pack, probed_leaf),
+        Error(take problem) => Error(take problem),
+    }
+    let _ = take captured
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}
+
+fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr), Error] waits {
+    let mut draft = begin_tiered_pack(owner, 7, 3, 4096)?
+    let mut first = std.page.unlocated(0)
+    for slot in 0u64 .. 4 {
+        let mut rows: List[std.page.Entry] = list.with_capacity(1)
+        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(key_word(slot))))
+        let image = page_result(std.page.encode(rows, 0, 30 + slot, Collection))?
+        let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+        let width = std.page.sealed_size(std.page.image_of(page))
+        let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
+        let key = logical_key(9, key_word(slot))?
+        let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr { std.page.unlocated(stamp) })? else {
+            fail("L88(f): the four leaves must fit the fixture pack")
+        }
+        if slot == 0 {
+            first = ptr
+        }
+    }
+    let (take raw, pack) = finish_tiered_pack(take draft)?
+    disk_write_synced(d, paged_pack_path(7)?, raw)?
+    Ok((pack, first))
+}
+
+fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut cursor = start_tiered_probe(pack)
+    let mut promotion = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    for cut in 0u64 .. 4 {
+        if cut != 0 {
+            let HotPage(take copied_leaf) = promotion_resolve_page(promotion, 9, ColdPage(original))? else {
+                fail("L88(f): a historical pin may not reference the first frame behind the cursor")
+            }
+            list.clear(mut promotion.lookup)
+            list.push(mut promotion.lookup, PromotionPage(HotPage(take copied_leaf)))
+        }
+        let finished = probe_tiered_index(captured, 7, mut cursor, 1, scoped fn(row: PackIndexRow) -> Result[(), Error] {
+            if row.stamp != 30 + cut {
+                fail("L88(f): the probe must visit the next index row after each promotion")
+            }
+            Ok(())
+        })?
+        if finished != (cut == 3) || cursor.rows != cut + 1 {
+            fail("L88(f): a four-row probe at budget one must finish at cut four")
+        }
+        map.insert(mut promotion.probed_through, 7u64, cursor.next_data - 1)
+    }
+    Ok(())
+}
+
+fn l88_assert_current_pin(mut db: Db, name: String, captured: Snapshot, current: std.page.PagePtr) -> Result[(), Error] waits {
+    let _ = pin(mut db, name, captured)?
+    let retained = option.unwrap(pinned(db, name))
+    let key = prefix(9)?
+    let (edge, _) = option.unwrap(std.page.collection_slot(retained.roots.collections.root, key))
+    let ColdPage(found) = edge else {
+        fail("L88(h): a stamp-equal pin must use the sealed head, even when the capture is Hot")
+    }
+    if found != current {
+        fail("L88(h): a stamp-equal pin kept a location behind the installed probe cursor")
+    }
+    if retained.watermark != captured.watermark || retained.head != captured.head {
+        fail("L88(h): pinning the head's shares must retain the capture's identity")
+    }
+    Ok(())
+}
+
+@test
+fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] waits {
+    let mut db = memory_at(c, StoreId(hi: 3, lo: 4), result.unwrap(sized(Memory, 1074790400u64)))
+    let old = std.page.PagePtr(pack: 7, offset: 72, len: 128, checksum: 19, stamp: 40)
+    let current_location = std.page.PagePtr(pack: 11, offset: 72, len: 128, checksum: 19, stamp: 40)
+    let mut draw = 80u64
+    db.heads[0u64].roots = l79_cut_table(old, 3, 258, mut draw)?
+    db.next_node = draw - 1
+    let old_capture = snapshot(db)
+    draw = 80
+    let current = l79_cut_table(current_location, 3, 258, mut draw)?
+    db.heads[0u64].roots = share_roots(current)
+    l88_assert_current_pin(mut db, "relocated", old_capture, current_location)?
+
+    let mut rows: List[std.page.Entry] = list.with_capacity(3)
+    for slot in 0u64 .. 3 {
+        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
+    }
+    let image = page_result(std.page.encode(rows, 0, old.stamp, Collection))?
+    let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+    draw = 80
+    page_result(std.page.install_tiered_root(mut db.heads[0u64].roots.collections.root, prefix(9)?, HotPage(take page), mut draw))?
+    let hot_capture = snapshot(db)
+    db.heads[0u64].roots = take current
+    l88_assert_current_pin(mut db, "sealed", hot_capture, current_location)?
+    close(take db)
+}

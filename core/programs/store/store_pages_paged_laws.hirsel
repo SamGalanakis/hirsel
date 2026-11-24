@@ -21,19 +21,19 @@ fn test_paged_row_account() -> Result[(), Error] {
     put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp)?
     let mut participants: List[PageRoots] = list.with_capacity(3)
     list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // One descriptor at 126, one logical 12-byte key and a one-byte value.
     if page_row_account(participants) != 212 { return Error(Foreign) }
     let changed_from = next_stamp
     put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp)?
     define_collection(mut collections, 9, 2, changed_from, mut next_stamp)?
     list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // The same value is written under a new blob stamp.
     let rewritten_from = next_stamp
     put_page_row(mut collections, key, string.as_bytes("B"), rewritten_from, mut next_stamp)?
     list.push(mut participants, PageRoots(collections: take collections,
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // Two distinct descriptors and two byte-distinct versions of key 1.
     if page_row_account(participants) != 424 { return Error(Foreign) }
     Ok(())
@@ -82,7 +82,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     let mut reverse = open_page_range(tree, Some(logical_key(7, key_word(111))?), false, true, None)?
     let Some((key, _)) = next_page_range(mut reverse)? else { return Error(Missing("reverse row")) }
     if key != logical_key(7, key_word(110))? { return Error(Foreign) }
-    let delta = compare_page_collections(earlier, tree)?
+    let delta = (compare_page_collections(earlier, tree)?).rows
     if list.len(delta) != 41 { return Error(Foreign) }
     for row in 0u64 .. 40 {
         if delta[row].tree_key != logical_key(7, key_word(row))? { return Error(Foreign) }
@@ -98,7 +98,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     Ok(())
 }
 
-fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] {
+fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] waits {
     let tree = db.heads[0u64].roots.collections
     let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else { return Error(Missing("collection")) }
     let image = std.page.image_of(root)
@@ -106,10 +106,10 @@ fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: 
         return Error(Missing("merged root leaf"))
     }
     let s = snapshot(db)
-    let reader = shape(rows)
-    if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
+    let read_source = view rows
+    if get(result.unwrap(reader(db, 0u64)), s, read_source, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
     for key in 1u64 .. 5 {
-        if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
+        if get(result.unwrap(reader(db, 0u64)), s, read_source, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
     }
     Ok(())
 }
@@ -117,7 +117,7 @@ fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: 
 @test
 fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let dir = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 4096
     let mut db = open(tasks, dir, c, r, options)?
     create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
@@ -130,8 +130,8 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
     // including its one-byte key suffix. A typed value adds six bytes.
     // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
-    let filled = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        for key in 0u64 .. 5 { put(mut tx, rows, key, wide)? }
+    let filled = run(mut db, None, (copy_env(rows), copy_env(wide)), fn(mut tx, call_env) -> Result[(), Error] {
+        for key in 0u64 .. 5 { put(mut tx, call_env.0, key, call_env.1)? }
         Ok(())
     })?
     if let Committed(_) = take filled {} else { return Error(Missing("initial commit")) }
@@ -153,7 +153,8 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     // The overwrite leaves the left leaf at 31 + 2*8 + 920 + 7 = 974,
     // below 1024. AP3 joins it with the right leaf and collapses the root:
     // 31 + 5*8 + 4*920 + 7 = 3758 bytes, within 4096.
-    let shrunk = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 0, short) })?
+    let shrunk = run(mut db, None, (copy_env(rows), copy_env(short)), fn(mut tx, call_env) -> Result[(), Error] {
+    put(mut tx, call_env.0, 0, call_env.1) })?
     let Committed(done) = take shrunk else { return Error(Missing("overwrite commit")) }
     durable(mut db, done.ticket)?
     if db.file_seq != seq { return Error(Missing("uncovered journal")) }

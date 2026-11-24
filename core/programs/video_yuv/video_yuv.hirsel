@@ -1,0 +1,154 @@
+pub opaque type Yuv {}
+
+pub type Format = I420 | Nv12 | P010
+
+pub type Order = Rgba | Abgr
+
+/// Limited-range BT.601, BT.709 and BT.2020 non-constant luminance.
+pub type Matrix = Bt601 | Bt709 | Bt2020
+
+pub type Filter = Nearest | Linear | Bilinear | Box
+
+/// Clockwise rotation.
+pub type Rotation = Clockwise90 | Clockwise180 | Clockwise270
+
+pub type YuvError = Dimensions | BufferSize | Alignment | Native
+
+fn format_code(format: Format) -> u32 {
+    match format {
+        I420 => 0u32,
+        Nv12 => 1u32,
+        P010 => 2u32,
+    }
+}
+
+fn order_code(order: Order) -> u32 {
+    match order {
+        Rgba => 0u32,
+        Abgr => 1u32,
+    }
+}
+
+fn matrix_code(matrix: Matrix) -> u32 {
+    match matrix {
+        Bt601 => 0u32,
+        Bt709 => 1u32,
+        Bt2020 => 2u32,
+    }
+}
+
+fn status(code: i32) -> Result[(), YuvError] {
+    match code {
+        0 => Ok(()),
+        - 1 => Error(Dimensions),
+        - 2 => Error(BufferSize),
+        - 3 => Error(Alignment),
+        _ => Error(Native),
+    }
+}
+
+fn pixels(width: u32, height: u32) -> Result[u64, YuvError] {
+    if width == 0 || height == 0 || width > 8192 || height > 8192 {
+        return Error(Dimensions)
+    }
+    let count: u64 = int.widen(width * height)
+    if count > 33554432u64 {
+        Error(Dimensions)
+    } else {
+        Ok(count)
+    }
+}
+
+fn chroma(width: u32, height: u32) -> u64 {
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    ((w + 1) / 2) * ((h + 1) / 2)
+}
+
+/// Packed allocation size in bytes. I420 has Y, U and V planes. NV12 and P010
+/// have a Y plane followed by interleaved UV. Chroma rounds each dimension up.
+/// P010 puts the 10 sample bits in the high bits of each little-endian word.
+pub fn yuv_size(format: Format, width: u32, height: u32) -> Result[u64, YuvError] {
+    let count = pixels(width, height)?
+    let samples = count + 2 * chroma(width, height)
+    match format {
+        P010 => Ok(2 * samples),
+        _ => Ok(samples),
+    }
+}
+
+pub fn rgb_size(width: u32, height: u32) -> Result[u64, YuvError] {
+    Ok(4 * pixels(width, height)?)
+}
+
+fn scratch(size: u64) -> Bytes {
+    let mut work: Bytes = list.with_capacity(size)
+    list.fill(mut work, size, 0)
+    work
+}
+
+/// Converts to four 8-bit channels in the named byte order, with opaque alpha.
+/// P010 input uses the selected matrix without transfer-function tone mapping.
+pub fn to_rgb(f: Foreign[Yuv], format: Format, order: Order, matrix: Matrix, width: u32, height: u32, src: Bytes, mut dst: Bytes) -> Result[(), YuvError] {
+    status(native.to_rgb(f, format_code(format), order_code(order), matrix_code(matrix), width, height, src, mut dst))
+}
+
+/// Converts four 8-bit channels in the named byte order. Alpha is ignored.
+/// libyuv expands the 8-bit matrix result to P010 when requested.
+pub fn from_rgb(f: Foreign[Yuv], format: Format, order: Order, matrix: Matrix, width: u32, height: u32, src: Bytes, mut dst: Bytes) -> Result[(), YuvError] {
+    let out_size = yuv_size(format, width, height)?
+    if list.len(src) != rgb_size(width, height)? || list.len(dst) != out_size {
+        return Error(BufferSize)
+    }
+    let w: u64 = int.widen(width)
+    let mut work = scratch(match format {
+        I420 => 0u64,
+        _ => 4 * w + 256,
+    })
+    status(native.from_rgb(f, format_code(format), order_code(order), matrix_code(matrix), width, height, src, mut dst, mut work))
+}
+
+/// Scales the luma and chroma planes in the original format.
+pub fn scale(f: Foreign[Yuv], format: Format, filter: Filter, width: u32, height: u32, out_width: u32, out_height: u32, src: Bytes, mut dst: Bytes) -> Result[(), YuvError] {
+    let in_size = yuv_size(format, width, height)?
+    let out_size = yuv_size(format, out_width, out_height)?
+    if list.len(src) != in_size || list.len(dst) != out_size {
+        return Error(BufferSize)
+    }
+    let w: u64 = int.widen(width)
+    let dw: u64 = int.widen(out_width)
+    let rows = 32 * (w + dw) + 2048
+    let code = format_code(format)
+    let mut work = scratch(if code == 2 && (width != out_width || height != out_height) {
+        rows + in_size + 4 * chroma(out_width, out_height)
+    } else {
+        rows
+    })
+    let mode = match filter {
+        Nearest => 0u32,
+        Linear => 1u32,
+        Bilinear => 2u32,
+        Box => 3u32,
+    }
+    status(native.scale(f, code, mode, width, height, out_width, out_height, src, mut dst, mut work))
+}
+
+/// Swaps the output dimensions for quarter-turns.
+pub fn rotate(f: Foreign[Yuv], format: Format, rotation: Rotation, width: u32, height: u32, src: Bytes, mut dst: Bytes) -> Result[(), YuvError] {
+    let size = yuv_size(format, width, height)?
+    if list.len(src) != size || list.len(dst) != size {
+        return Error(BufferSize)
+    }
+    let mode = match rotation {
+        Clockwise90 => 90u32,
+        Clockwise180 => 180u32,
+        Clockwise270 => 270u32,
+    }
+    let w: u64 = int.widen(width)
+    let mut work = scratch(if mode == 180 {
+        2 * w + 192
+    } else {
+        0u64
+    })
+    status(native.rotate(f, format_code(format), mode, width, height, src, mut dst, mut work))
+}

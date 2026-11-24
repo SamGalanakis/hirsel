@@ -1,0 +1,113 @@
+// RFC 6716 §3. Frame durations are in samples at the RTP clock rate of 48 kHz.
+pub type Mode = Silk | Hybrid | Celt
+
+pub type Error = Truncated | InvalidFraming
+
+pub type Packet {
+    config: u8,
+    mode: Mode,
+    stereo: bool,
+    samples_per_frame: u64,
+    frames: u64,
+    variable_rate: bool,
+    payload_start: u64,
+    payload_end: u64
+}
+
+fn frame_size(packet: Bytes, mut at: u64, end: u64) -> Result[u64, Error] {
+    if at == end {
+        return Error(Truncated)
+    }
+    let first: u64 = int.widen(packet[at])
+    at += 1
+    if first < 252 {
+        return Ok(first)
+    }
+    if at == end {
+        return Error(Truncated)
+    }
+    let second: u64 = int.widen(packet[at])
+    at += 1
+    Ok(first + 4 * second)
+}
+
+// Parse one ordinary (not Appendix B self-delimited) packet. The result
+// describes the wire framing. The codec frames themselves stay opaque.
+pub fn parse(packet: Bytes) -> Result[Packet, Error] {
+    let size = list.len(packet)
+    if size == 0 {
+        return Error(Truncated)
+    }
+    let toc = packet[0]
+    let config = toc >> 3
+    let config_bits: u64 = int.widen(config)
+    let (mode, samples): (Mode, u64) = if config >= 16 {
+        (Celt, 120u64 << (config_bits & 3))
+    } else if config >= 12 {
+        (Hybrid, 480u64 << (config_bits & 1))
+    } else if (config & 3) == 3 {
+        (Silk, 2880u64)
+    } else {
+        (Silk, 480u64 << (config_bits & 3))
+    }
+    let code = toc & 3
+    let mut at: u64 = 1
+    let mut end = size
+    let mut frames: u64 = if code == 0 {
+        1
+    } else {
+        2
+    }
+    let mut variable = code == 2
+    if code == 3 {
+        if at == end {
+            return Error(Truncated)
+        }
+        let control = packet[at]
+        at += 1
+        frames = int.widen(control & 63)
+        if frames == 0 || frames * samples > 5760 {
+            return Error(InvalidFraming)
+        }
+        variable = (control & 128) != 0
+        if (control & 64) != 0 {
+            let mut more = true
+            while more {
+                if at == end {
+                    return Error(Truncated)
+                }
+                let pad = packet[at]
+                at += 1
+                more = pad == 255
+                let count: u64 = if more {
+                    254
+                } else {
+                    int.widen(pad)
+                }
+                if count > end - at {
+                    return Error(Truncated)
+                }
+                end -= count
+            }
+        }
+    }
+    if variable {
+        let mut explicit: u64 = 0
+        for _ in 1u64 .. frames {
+            explicit += frame_size(packet, mut at, end)?
+        }
+        let remaining = end - at
+        if explicit > remaining {
+            return Error(Truncated)
+        }
+        if remaining - explicit > 1275 {
+            return Error(InvalidFraming)
+        }
+    } else {
+        let remaining = end - at
+        if remaining % frames != 0 || remaining / frames > 1275 {
+            return Error(InvalidFraming)
+        }
+    }
+    Ok(Packet(config: config, mode: mode, stereo: (toc & 4) != 0, samples_per_frame: samples, frames: frames, variable_rate: variable, payload_start: at, payload_end: end))
+}

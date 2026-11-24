@@ -1,0 +1,257 @@
+// Shared compiled pattern and position sets for path.matches and dir.glob.
+type Range {
+    lo: u32,
+    hi: u32
+}
+
+type Token = Literal(u32) | Any | Star | Class(u64, u64, bool)
+
+type Component = Recursive | Tokens(u64, u64)
+
+pub opaque type Pattern {
+    parts: List[Component],
+    tokens: List[Token],
+    ranges: List[Range],
+    base: u64
+}
+
+fn scalar(s: String, at: u64) -> (u32, u64) {
+    let (c, after) = option.unwrap(string.next_scalar(s, at))
+    (char.to_u32(c), after)
+}
+
+fn class_at(p: String, mut ranges: List[Range], open: u64) -> Result[(Token, u64), path.PatternError] {
+    let b = string.as_bytes(p)
+    let n = list.len(b)
+    let mut at = open + 1
+    let negated = at < n && (b[at] == b'!' || b[at] == b'^')
+    if negated {
+        at += 1
+    }
+    let start = list.len(ranges)
+    while at < n {
+        if b[at] == b']' && list.len(ranges) > start {
+            return Ok((Class(start, list.len(ranges), negated), at + 1))
+        }
+        if b[at] == b'-' {
+            return Error(Syntax(at))
+        }
+        let (lo, after) = class_scalar(p, at)?
+        at = after
+        let mut hi = lo
+        if at < n && b[at] == b'-' {
+            if at + 1 == n || b[at + 1] == b']' || b[at + 1] == b'-' {
+                return Error(Syntax(at))
+            }
+            let (end, next) = class_scalar(p, at + 1)?
+            if end < lo {
+                return Error(Syntax(at + 1))
+            }
+            hi = end
+            at = next
+        }
+        list.push(mut ranges, Range(lo: lo, hi: hi))
+    }
+    Error(Syntax(open))
+}
+
+fn class_scalar(p: String, at: u64) -> Result[(u32, u64), path.PatternError] {
+    let b = string.as_bytes(p)
+    let i = if b[at] == b'\\' {
+        at + 1
+    } else {
+        at
+    }
+    if i == list.len(b) {
+        return Error(Syntax(at))
+    }
+    if b[i] == b'/' || b[i] == 0 {
+        return Error(Syntax(i))
+    }
+    Ok(scalar(p, i))
+}
+
+fn separator(b: Bytes, at: u64) -> u64 {
+    if at == list.len(b) {
+        0
+    } else if b[at] == b'/' {
+        1
+    } else if b[at] == b'\\' && at + 1 < list.len(b) && b[at + 1] == b'/' {
+        2
+    } else {
+        0
+    }
+}
+
+/// Validates the entire pattern and builds its component and scalar positions.
+pub fn compile(p: String) -> Result[Pattern, path.PatternError] {
+    let mut m = Pattern(parts: list.new(), tokens: list.new(), ranges: list.new(), base: 0)
+    let b = string.as_bytes(p)
+    let n = list.len(b)
+    let mut at: u64 = 0
+    let mut literal_base = true
+    loop {
+        let begin = at
+        let start = list.len(m.tokens)
+        let recursive = at + 1 < n && b[at] == b'*' && b[at + 1] == b'*' && (at + 2 == n || separator(b, at + 2) > 0)
+        if recursive {
+            at += 2
+            literal_base = false
+            list.push(mut m.parts, Recursive)
+        } else {
+            while at < n && separator(b, at) == 0 {
+                let (token, after) = match b[at] {
+                    0 => return Error(Syntax(at)),
+                    b'*' => {
+                        if at + 1 < n && b[at + 1] == b'*' {
+                            return Error(Syntax(at))
+                        }
+                        literal_base = false
+                        (Star, at + 1)
+                    }
+                    b'?' => {
+                        literal_base = false
+                        (Any, at + 1)
+                    }
+                    b'[' => {
+                        literal_base = false
+                        class_at(p, mut m.ranges, at)?
+                    }
+                    b'\\' => {
+                        literal_base = false
+                        if at + 1 == n {
+                            return Error(Syntax(at))
+                        }
+                        if b[at + 1] == 0 {
+                            return Error(Syntax(at + 1))
+                        }
+                        let (c, after) = scalar(p, at + 1)
+                        (Literal(c), after)
+                    }
+                    _ => {
+                        let (c, after) = scalar(p, at)
+                        (Literal(c), after)
+                    }
+                }
+                list.push(mut m.tokens, token)
+                at = after
+            }
+            let part = string.slice(p, begin, at)
+            if part == "" || part == "." || part == ".." {
+                return Error(Syntax(begin))
+            }
+            if literal_base {
+                m.base = at
+            }
+            list.push(mut m.parts, Tokens(start, list.len(m.tokens)))
+        }
+        if at == n {
+            return Ok(take m)
+        }
+        let slash = separator(b, at)
+        if slash == 2 {
+            literal_base = false
+        }
+        at += slash
+    }
+}
+
+/// The end byte offset of the literal base in the pattern source.
+pub fn base(m: Pattern) -> u64 {
+    m.base
+}
+
+fn class_has(ranges: List[Range], lo: u64, hi: u64, c: u32) -> bool {
+    for i in lo .. hi {
+        if ranges[i].lo <= c && c <= ranges[i].hi {
+            return true
+        }
+    }
+    false
+}
+
+fn component_accepts(m: Pattern, mut live: List[bool], lo: u64, hi: u64, part: String) -> bool {
+    list.fill_slice(mut live, lo, hi - lo + 1, false)
+    live[lo] = true
+    for i in lo .. hi {
+        if live[i] {
+            if let Star = m.tokens[i] {
+                live[i + 1] = true
+            }
+        }
+    }
+    let mut at: u64 = 0
+    while let Some((c, after)) = string.next_scalar(part, at) {
+        let value = char.to_u32(c)
+        let mut i = hi
+        while i > lo {
+            i -= 1
+            live[i + 1] = match m.tokens[i] {
+                Star => live[i + 1] || live[i],
+                Any => live[i],
+                Literal(x) => live[i] && x == value,
+                Class(start, end, negated) => live[i] && class_has(m.ranges, start, end, value) != negated,
+            }
+        }
+        live[lo] = false
+        for j in lo .. hi {
+            if live[j] {
+                if let Star = m.tokens[j] {
+                    live[j + 1] = true
+                }
+            }
+        }
+        at = after
+    }
+    live[hi]
+}
+
+fn close_components(m: Pattern, mut live: List[bool]) {
+    for i in 0u64 .. list.len(m.parts) {
+        if live[i] {
+            if let Recursive = m.parts[i] {
+                live[i + 1] = true
+            }
+        }
+    }
+}
+
+/// Reports whether p matches and whether a path strictly below it can match.
+pub fn test(m: Pattern, p: String) -> (bool, bool) {
+    let n = list.len(m.parts)
+    let mut live: List[bool] = list.with_capacity(n + 1)
+    list.fill(mut live, n + 1, false)
+    let mut scalars: List[bool] = list.with_capacity(list.len(m.tokens) + 1)
+    list.fill(mut scalars, list.len(m.tokens) + 1, false)
+    live[0] = true
+    close_components(m, mut live)
+    let mut at: u64 = 0
+    while let Some((part, after)) = string.next_split(p, at, "/") {
+        let mut i = n
+        // A recursive component consumes into itself. The epsilon pass also
+        // makes the next position live, including the accepting position.
+        let mut stays = false
+        while i > 0 {
+            i -= 1
+            match m.parts[i] {
+                Recursive => {
+                    live[i + 1] = stays
+                    stays = live[i]
+                }
+                Tokens(lo, hi) => {
+                    live[i + 1] = stays || (live[i] && component_accepts(m, mut scalars, lo, hi, part))
+                    stays = false
+                }
+            }
+        }
+        live[0] = stays
+        close_components(m, mut live)
+        at = after
+    }
+    for i in 0u64 .. n {
+        if live[i] {
+            return (live[n], true)
+        }
+    }
+    (live[n], false)
+}

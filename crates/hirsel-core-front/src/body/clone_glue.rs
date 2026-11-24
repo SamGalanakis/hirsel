@@ -65,6 +65,7 @@ impl Derive<'_> {
                 | FieldTy::Box(t)
                 | FieldTy::Rc(t)
                 | FieldTy::Arc(t)
+                | FieldTy::Shared(t)
                 | FieldTy::RegionRef(t)
                 | FieldTy::Link(t) => row(types, t.0, seen, allow_hooks),
                 FieldTy::Seq(x)
@@ -158,6 +159,7 @@ impl Derive<'_> {
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
             | FieldTy::Map(..)
             | FieldTy::OwnFn => true,
             FieldTy::Array(item, _) => self.owns(item, seen),
@@ -294,8 +296,13 @@ impl Derive<'_> {
                     kind: counted(field),
                 });
             }
+            FieldTy::Shared(_) => {
+                let node = c.read(from, Ty::Ptr);
+                self.runtime(c, hirsel_core_ir::RtOp::SharedShare, &[node]);
+            }
             FieldTy::Seq(_) | FieldTy::FrozenBytes => {
                 let u = Ty::Scalar(Scalar::U64);
+                let done = c.block(&[]);
                 let byte = FieldTy::Scalar(Scalar::U8);
                 let (item, len) = if let FieldTy::Seq(item) = field {
                     let at = c.offset(from, 8);
@@ -303,6 +310,17 @@ impl Derive<'_> {
                 } else {
                     let at = c.offset(from, 8);
                     let meta = c.read(at, u);
+                    // A native static carrier is immutable and owns no charge.
+                    // The evaluator's charged static carrier takes the copy path.
+                    let uncharged = c.constant(hirsel_core_layout::FROZEN_STATIC_UNCHARGED);
+                    let shareable = c.compare(CompareOp::Eq, meta, uncharged);
+                    let (share, copy) = (c.block(&[]), c.block(&[]));
+                    c.branch(shareable, share, copy);
+                    c.start(share);
+                    let carrier_bytes = c.constant(24);
+                    copy_value(c, to, from, carrier_bytes);
+                    c.jump(done, &[]);
+                    c.start(copy);
                     let one = c.constant(1);
                     let tag = c.binary(BinaryOp::BitAnd, meta, one);
                     let zero = c.constant(0);
@@ -321,7 +339,7 @@ impl Derive<'_> {
                 };
                 let zero = c.constant(0);
                 let empty = c.compare(CompareOp::Eq, len, zero);
-                let (none, some, done) = (c.block(&[]), c.block(&[]), c.block(&[]));
+                let (none, some) = (c.block(&[]), c.block(&[]));
                 c.branch(empty, none, some);
                 // An empty copy allocates nothing (budgets.md).
                 c.start(none);
@@ -473,6 +491,14 @@ impl Derive<'_> {
                 });
                 let charge = c.constant(self.box_charge(t));
                 c.inst(Inst::Free { block, charge });
+            }
+            FieldTy::Shared(t) => {
+                let node = c.read(at, Ty::Ptr);
+                self.runtime(
+                    c,
+                    hirsel_core_ir::RtOp::SharedRelease { item: TypeId(t.0) },
+                    &[node],
+                );
             }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = c.read(at, Ty::Ptr);
@@ -661,7 +687,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let skip = match self.p.decls[d.index()].role {
                 Some(Role::Box) => 0,
-                Some(Role::Rc | Role::Arc) => 8,
+                Some(Role::Rc | Role::Arc | Role::Shared) => 8,
                 _ => break,
             };
             let block = self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?;
@@ -742,6 +768,7 @@ mod kernel_clone_tests {
                 finalizer,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,

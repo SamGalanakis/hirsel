@@ -771,13 +771,12 @@ mod tests {
     /// key type and the type it is queried by; a new pair belongs here.
     #[test]
     fn queries_encode_as_their_stored_keys() {
-        use bincode::Options;
         use hirsel_core_front::{TyId, TyKind};
         use hirsel_core_ids::published::with_lookup_key;
         use hirsel_core_resolve::ModuleId;
         use hirsel_core_syntax::Symbol;
         fn same<K: Serialize, Q: Serialize + ?Sized>(stored: &K, query: &Q) {
-            let bytes = bincode::DefaultOptions::new().serialize(stored).unwrap();
+            let bytes = encode_row(stored).unwrap();
             assert_eq!(with_lookup_key(stored, <[u8]>::to_vec), bytes);
             assert_eq!(with_lookup_key(query, <[u8]>::to_vec), bytes);
         }

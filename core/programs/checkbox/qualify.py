@@ -77,10 +77,13 @@ def scratch_sources(work, case, mutant):
     if mutant in SERVER_EDITS:
         module, before, after = SERVER_EDITS[mutant]
         changed[module] = replace(changed.get(module, paths[module].read_text()), before, after)
+    overrides = {}
     for module, text in changed.items():
-        paths[module] = work / (module + ".hirsel")
-        paths[module].write_text(text)
-    return paths.pop("main"), paths
+        replacement = work / (module + ".hirsel")
+        replacement.write_text(text)
+        overrides[paths[module]] = replacement
+    main = paths["main"]
+    return overrides.pop(main, main), overrides or None
 
 
 def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
@@ -91,8 +94,8 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
     origin = f"http://{listen}/"
     web = work / "web"
     web.mkdir()
-    source, store = scratch_sources(work, case, mutant)
-    executable = build(compiler, work, web, listen, source, store)
+    source, overrides = scratch_sources(work, case, mutant)
+    executable = build(compiler, work, web, listen, source, overrides)
     prepare_web(compiler, executable, web)
     if case in BROWSER:
         law = ["browser-laws.mjs", case, origin]

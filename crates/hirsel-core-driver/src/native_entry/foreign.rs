@@ -246,15 +246,7 @@ fn slot(
         Return::Scalar(s) => (vec![Ty::Scalar(s)], None),
         Return::New(_) => (vec![], Some(TypeId(0))),
     };
-    let sig = NativeSignature::foreign(
-        &Signature {
-            params,
-            results,
-            dest,
-            never: false,
-        },
-        object,
-    );
+    let sig = NativeSignature::foreign(&Signature::new(params, results, dest), object);
     let mut context = object.make_context();
     context.func.signature = sig.clif.clone();
     let id = object
@@ -352,6 +344,7 @@ fn option(f: &mut Code<'_, '_>, dest: Value, bits: Value) -> Result<()> {
         finalizer: None,
         clone: None,
         codec: None,
+        key_codec: None,
         grant: 0,
         send: true,
         held: None,

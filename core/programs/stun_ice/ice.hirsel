@@ -1,0 +1,493 @@
+/// One signaled remote candidate, or the address and priority of a local candidate.
+pub type Candidate {
+    component: u16,
+    address: Addr,
+    foundation: u64,
+    priority: u32
+}
+
+/// Socket address from which checks for this local candidate are sent.
+pub type LocalCandidate {
+    candidate: Candidate,
+    base: Addr
+}
+
+/// A nominated route. mapped is the address that the peer observed for base.
+pub type Route {
+    path: Path,
+    mapped: Addr
+}
+
+pub type Poll = Send(Path, u64) | WakeAt(u64) | Idle
+
+pub type Receive = Reply(u64) | Processed | Ignored
+
+/// Fresh cryptographic randomness from the host for each call that can start a transaction.
+/// The host must never expose outstanding transaction IDs outside the STUN datagrams.
+pub type Entropy {
+    transaction: Transaction,
+    jitter: u32
+}
+
+pub opaque type Agent {
+    local: Credentials,
+    remote: Option[Remote],
+    candidates: List[LocalCandidate],
+    pairs: List[Pair],
+    triggered: List[u64],
+    pending: List[Early],
+    seats: List[Seat],
+    role: Role,
+    tie: u64,
+    paced_at: u64,
+    pair_limit: u64
+}
+
+type Remote {
+    credentials: Credentials,
+    username: Bytes
+}
+
+type Early {
+    path: Path,
+    priority: u32,
+    role: IceRole,
+    nominate: bool,
+    ufrag: Inline[u8, 256],
+    len: u64
+}
+
+type PairState: key = Frozen | Waiting | Running | Valid | Failed
+
+type Pair {
+    path: Path,
+    local_priority: u32,
+    remote_priority: u32,
+    local_foundation: u64,
+    remote_foundation: Option[u64],
+    state: PairState,
+    nominate: bool,
+    mapped: Option[Addr],
+    flight: Option[Flight],
+    valid_until: u64
+}
+
+type Flight {
+    transaction: Transaction,
+    check: Check,
+    attempt: u64,
+    rto: u64,
+    due: u64
+}
+
+type Probe {
+    tx: Transaction,
+    sent: u64
+}
+
+type Active {
+    route: Route,
+    expires: u64,
+    due: u64,
+    probes: Inline[Option[Probe], 8]
+}
+
+type Seat {
+    component: u16,
+    selected: Option[Active]
+}
+
+fn seat_index(seats: List[Seat], component: u16) -> Option[u64] {
+    for i in 0u64 .. list.len(seats) {
+        if seats[i].component == component {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn known_candidate(c: Candidate) -> bool {
+    c.component > 0 && c.component <= 256 && c.address.port != 0 && c.priority > 0 && c.priority <= 0x7effffff
+}
+
+fn same_family(a: Ip, b: Ip) -> bool {
+    match (a, b) {
+        (V4(_), V4(_)) => true,
+        (V6(ah, _), V6(bh, _)) => (ah >> 54 == 0x3fa) == (bh >> 54 == 0x3fa),
+        _ => false,
+    }
+}
+
+/// Start one full UDP ICE checklist. Locals contain gathered candidates.
+/// Supply the initial role from signaling and a random tiebreaker.
+/// RFC 8445's default pair_limit is 100. Overflow is returned to the caller.
+pub fn full(take local: Credentials, take candidates: List[LocalCandidate], role: Role, tie: u64, pair_limit: u64) -> Result[Agent, IceError] {
+    if pair_limit == 0 || list.len(candidates) == 0 {
+        return Error(BadCandidate)
+    }
+    let mut seats: List[Seat] = list.new()
+    for i in 0u64 .. list.len(candidates) {
+        let c = candidates[i]
+        if !known_candidate(c.candidate) || c.base.port == 0 || !same_family(c.base.ip, c.candidate.address.ip) {
+            return Error(BadCandidate)
+        }
+        for j in 0u64 .. i {
+            let previous = candidates[j]
+            if same_address(c.base, previous.base) && c.candidate.component != previous.candidate.component {
+                return Error(BadCandidate)
+            }
+        }
+        if let None = seat_index(seats, c.candidate.component) {
+            list.push(mut seats, Seat(component: c.candidate.component, selected: None))
+        }
+    }
+    let mut pairs: List[Pair] = list.new()
+    let mut triggered: List[u64] = list.new()
+    let mut pending: List[Early] = list.new()
+    if let Error(e) = list.try_reserve(mut pairs, pair_limit) {
+        return Error(Resources(e))
+    }
+    if let Error(e) = list.try_reserve(mut triggered, pair_limit) {
+        return Error(Resources(e))
+    }
+    if let Error(e) = list.try_reserve(mut pending, pair_limit) {
+        return Error(Resources(e))
+    }
+    Ok(Agent(local: take local, remote: None, candidates: take candidates, pairs: take pairs, triggered: take triggered, pending: take pending, seats: take seats, role: role, tie: tie, paced_at: 0, pair_limit: pair_limit))
+}
+
+fn path_for(c: LocalCandidate, peer: Addr) -> Path {
+    Path(component: c.candidate.component, base: c.base, peer: peer)
+}
+
+fn find_pair(pairs: List[Pair], path: Path) -> Option[u64] {
+    for i in 0u64 .. list.len(pairs) {
+        let p = pairs[i].path
+        if p.component == path.component && same_address(p.base, path.base) && same_address(p.peer, path.peer) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn new_pair(local: LocalCandidate, peer: Addr, priority: u32, foundation: Option[u64]) -> Pair {
+    Pair(path: path_for(local, peer), local_priority: local.candidate.priority, remote_priority: priority, local_foundation: local.candidate.foundation, remote_foundation: foundation, state: Frozen, nominate: false, mapped: None, flight: None, valid_until: 0)
+}
+
+/// Add a signaled candidate. Pairs with the same base and remote address are pruned.
+/// When the configured limit is reached, the add fails without changing the checklist.
+pub fn full_add_remote(mut agent: Agent, candidate: Candidate) -> Result[(), IceError] {
+    if !known_candidate(candidate) {
+        return Error(BadCandidate)
+    }
+    let mut count = list.len(agent.pairs)
+    for i in 0u64 .. list.len(agent.candidates) {
+        let local = agent.candidates[i]
+        if local.candidate.component != candidate.component || !same_family(local.base.ip, candidate.address.ip) {
+            continue
+        }
+        let path = path_for(local, candidate.address)
+        if let Some(_) = find_pair(agent.pairs, path) {
+            continue
+        }
+        let mut earlier = false
+        for j in 0u64 .. i {
+            if same_address(local.base, agent.candidates[j].base) {
+                earlier = true
+            }
+        }
+        if !earlier {
+            if count == agent.pair_limit {
+                return Error(PairLimit)
+            }
+            count += 1
+        }
+    }
+    for local in agent.candidates {
+        if local.candidate.component != candidate.component || !same_family(local.base.ip, candidate.address.ip) {
+            continue
+        }
+        let path = path_for(local, candidate.address)
+        if let Some(i) = find_pair(agent.pairs, path) {
+            let old = agent.pairs[i]
+            let mut next = old
+            if local.candidate.priority > old.local_priority {
+                next.local_priority = local.candidate.priority
+                next.local_foundation = local.candidate.foundation
+            }
+            if candidate.priority >= old.remote_priority {
+                next.remote_priority = candidate.priority
+                next.remote_foundation = Some(candidate.foundation)
+            }
+            agent.pairs[i] = next
+        } else {
+            list.push(mut agent.pairs, new_pair(local, candidate.address, candidate.priority, Some(candidate.foundation)))
+        }
+    }
+    Ok(())
+}
+
+/// Install remote credentials once the signaling answer arrives.
+/// Replay any pre-answer checks for this username into the triggered checklist.
+pub fn full_remote_credentials(mut agent: Agent, take remote: Credentials, now: u64, jitter: u32) -> Result[(), IceError] {
+    if let Some(_) = agent.remote {
+        return Error(BadCredentials)
+    }
+    let n = list.len(remote.ufrag) + list.len(agent.local.ufrag) + 1
+    if n > 508 {
+        return Error(BadCredentials)
+    }
+    let mut projected = list.len(agent.pairs)
+    let mut role_after = agent.role
+    for pending in agent.pending {
+        if !early_matches(pending, remote.ufrag) {
+            continue
+        }
+        if let Some(next) = resolve_role(role_after, agent.tie, pending.role) {
+            if let None = find_pair(agent.pairs, pending.path) {
+                if projected == agent.pair_limit {
+                    return Error(PairLimit)
+                }
+                projected += 1
+            }
+            role_after = next
+        }
+    }
+    let mut username: Bytes = list.with_capacity(n)
+    list.append(mut username, remote.ufrag)
+    list.push(mut username, b':')
+    list.append(mut username, agent.local.ufrag)
+    for i in 0u64 .. list.len(agent.pending) {
+        let pending = agent.pending[i]
+        if !early_matches(pending, remote.ufrag) {
+            continue
+        }
+        if let Some(local) = best_base(agent.candidates, pending.path.base) {
+            if let Some(role) = resolve_role(agent.role, agent.tie, pending.role) {
+                apply_check(mut agent, local, pending.path.peer, pending.priority, pending.nominate, role, now, jitter)?
+            }
+        }
+    }
+    agent.pending = list.new()
+    agent.remote = Some(Remote(credentials: take remote, username: take username))
+    Ok(())
+}
+
+fn early_matches(pending: Early, ufrag: Bytes) -> bool {
+    if pending.len != list.len(ufrag) {
+        return false
+    }
+    for i in 0u64 .. pending.len {
+        if pending.ufrag[i] != ufrag[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn best_base(candidates: List[LocalCandidate], base: Addr) -> Option[LocalCandidate] {
+    let mut best: Option[LocalCandidate] = None
+    let mut priority = 0u32
+    for c in candidates {
+        if c.candidate.priority > priority && same_address(c.base, base) {
+            best = Some(c)
+            priority = c.candidate.priority
+        }
+    }
+    best
+}
+
+fn reverse(role: Role) -> Role {
+    if role == Controlling {
+        Controlled
+    } else {
+        Controlling
+    }
+}
+
+fn resolve_role(role: Role, tie: u64, peer: IceRole) -> Option[Role] {
+    if role != peer.role {
+        return Some(role)
+    }
+    if (role == Controlling && tie >= peer.tie) || (role == Controlled && tie < peer.tie) {
+        None
+    } else {
+        Some(reverse(role))
+    }
+}
+
+fn enqueue(mut agent: Agent, index: u64) {
+    for i in agent.triggered {
+        if i == index {
+            return
+        }
+    }
+    list.push(mut agent.triggered, index)
+}
+
+fn switch_role(mut agent: Agent, next: Role) {
+    agent.role = next
+    for i in 0u64 .. list.len(agent.pairs) {
+        let mut p = agent.pairs[i]
+        if let Some(_) = p.flight {
+            p.flight = None
+            p.state = Waiting
+            p.mapped = None
+        }
+        p.nominate = false
+        agent.pairs[i] = p
+    }
+}
+
+fn has_selection(seats: List[Seat], component: u16) -> bool {
+    if let Some(i) = seat_index(seats, component) {
+        if let Some(_) = seats[i].selected {
+            return true
+        }
+    }
+    false
+}
+
+fn apply_check(mut agent: Agent, local: LocalCandidate, peer: Addr, priority: u32, nominate: bool, role: Role, now: u64, jitter: u32) -> Result[(), IceError] {
+    let path = path_for(local, peer)
+    if has_selection(agent.seats, path.component) {
+        return Ok(())
+    }
+    let index = if let Some(i) = find_pair(agent.pairs, path) {
+        i
+    } else {
+        let n = list.len(agent.pairs)
+        if n == agent.pair_limit {
+            return Error(PairLimit)
+        }
+        list.push(mut agent.pairs, new_pair(local, peer, priority, None))
+        n
+    }
+    if role != agent.role {
+        switch_role(mut agent, role)
+    }
+    let mut pair = agent.pairs[index]
+    pair.nominate = pair.nominate || (nominate && agent.role == Controlled)
+    if pair.state == Valid && now < pair.valid_until {
+        if pair.nominate {
+            if let Some(mapped) = pair.mapped {
+                select(mut agent, pair.path, mapped, now, pair.valid_until, jitter)
+            }
+        }
+    } else {
+        pair.state = Waiting
+        pair.flight = None
+        pair.mapped = None
+        enqueue(mut agent, index)
+    }
+    agent.pairs[index] = pair
+    Ok(())
+}
+
+fn request_username(user: Option[Range], local_len: u64) -> Option[Range] {
+    if let Some(r) = user {
+        Some(Range(lo: r.lo + local_len + 1, hi: r.hi))
+    } else {
+        None
+    }
+}
+
+fn remember_early(mut agent: Agent, path: Path, packet: Bytes, ufrag: Range, priority: u32, role: IceRole, nominate: bool) -> Result[(), IceError] {
+    let supplied = list.slice(packet, ufrag.lo, ufrag.hi)
+    let len = list.len(supplied)
+    for i in 0u64 .. list.len(agent.pending) {
+        let old = agent.pending[i]
+        if same_address(old.path.base, path.base) && same_address(old.path.peer, path.peer) && early_matches(old, supplied) {
+            let mut updated = old
+            updated.nominate = old.nominate || nominate
+            updated.role = role
+            updated.priority = priority
+            agent.pending[i] = updated
+            return Ok(())
+        }
+    }
+    if list.len(agent.pending) == agent.pair_limit {
+        return Error(PairLimit)
+    }
+    let mut fragment: Inline[u8, 256] =[0; 256]
+    for i in 0u64 .. len {
+        fragment[i] = supplied[i]
+    }
+    list.push(mut agent.pending, Early(path: path, priority: priority, role: role, nominate: nominate, ufrag: fragment, len: len))
+    Ok(())
+}
+
+fn full_request(mut agent: Agent, local: LocalCandidate, peer: Addr, packet: Bytes, now: u64, entropy: Entropy, mut out: Bytes, mut scratch: Bytes) -> Result[Receive, IceError] {
+    let msg = incoming_check(agent.local, packet, mut scratch)?
+    let Some(user) = request_username(msg.username, list.len(agent.local.ufrag)) else {
+        return Error(BadCredentials)
+    }
+    let signaled = match agent.remote {
+        Some(remote) => {
+            if list.compare_bytes(list.slice(packet, user.lo, user.hi), remote.credentials.ufrag) != Equal {
+                return Error(BadCredentials)
+            }
+            true
+        },
+        None => false,
+    }
+    if signaled {
+        if let (Some(priority), Some(peer_role)) = (msg.priority, msg.role) {
+            let Some(role) = resolve_role(agent.role, agent.tie, peer_role) else {
+                return match binding_error(msg.transaction, 487, Sha1, true, agent.local.password, mut out, mut scratch) {
+                    Ok(n) => Ok(Reply(n)),
+                    Error(e) => Error(Wire(e)),
+                }
+            }
+            let n = reply_success(msg.transaction, peer, agent.local.password, mut out, mut scratch)?
+            apply_check(mut agent, local, peer, priority, msg.nominate, role, now, entropy.jitter)?
+            return Ok(Reply(n))
+        }
+    } else if let (Some(priority), Some(peer_role)) = (msg.priority, msg.role) {
+        let n = reply_success(msg.transaction, peer, agent.local.password, mut out, mut scratch)?
+        remember_early(mut agent, path_for(local, peer), packet, user, priority, peer_role, msg.nominate)?
+        return Ok(Reply(n))
+    }
+    Ok(Reply(reply_success(msg.transaction, peer, agent.local.password, mut out, mut scratch)?))
+}
+
+/// Handle a datagram with explicit destination, source, and time.
+/// Reply(n) asks the caller to send out[0,n) from base to peer.
+pub fn full_receive(mut agent: Agent, base: Addr, peer: Addr, packet: Bytes, now: u64, entropy: Entropy, mut out: Bytes, mut scratch: Bytes) -> Result[Receive, IceError] {
+    let Some(local) = best_base(agent.candidates, base) else {
+        return Error(UnknownBase)
+    }
+    if !same_family(base.ip, peer.ip) || peer.port == 0 {
+        return Error(BadCandidate)
+    }
+    if list.len(packet) >= 2 {
+        let kind: u16 = list.word_be(packet, 0)
+        if kind == 0x0001 {
+            return full_request(mut agent, local, peer, packet, now, entropy, mut out, mut scratch)
+        }
+    }
+    let authenticated = match agent.remote {
+        Some(remote) => verify(packet, remote.credentials.password, mut scratch),
+        None => {
+            return match decode(packet) {
+                Ok(_) => Ok(Ignored),
+                Error(e) => Error(Wire(e)),
+            }
+        },
+    }
+    let msg = match authenticated {
+        Ok(m) => m,
+        Error(e) => {
+            return Error(Wire(e))
+        },
+    }
+    if !msg.fingerprint || msg.integrity != Sha1 || (msg.class != Success && msg.class != Failure) {
+        return Error(BadCheck)
+    }
+    full_response(mut agent, base, peer, msg, now, entropy)
+}
+
+/// Inspect the role after RFC 8445 role conflict resolution.
+pub fn full_role(agent: Agent) -> Role {
+    agent.role
+}

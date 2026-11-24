@@ -1,16 +1,17 @@
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64) | ObjectExportRead(ObjectExportFetch)
 
 type WriteNotice: send = Written | WriteFailed(IoError)
 
 type JournalIdleTimer: send {
     clock: Clock,
     requests: Receiver[()],
-    journal: Sender[JournalMsg]
+    journal: Sender[JournalMsg],
+    interval_ns: u64
 }
 
 fn journal_idle_timer(take timer: JournalIdleTimer) waits {
     while let Ok(()) = channel.receive(timer.requests) {
-        std.clock.sleep_ns(timer.clock, 100000000)
+        std.clock.sleep_ns(timer.clock, timer.interval_ns)
         if let Error(_) = channel.send(timer.journal, IdleCheck) {
             return
         }
@@ -24,6 +25,7 @@ type JournalWorker: send {
     end_file: HostFile,
     group_commits: u32,
     group_bytes: u32,
+    zero_extension: bool,
     receive: Receiver[JournalMsg],
     send: Sender[Ack],
     ready: Sender[Result[(), Capacity]],
@@ -35,7 +37,8 @@ type JournalWorker: send {
 type JournalBuffers {
     group: Bytes,
     end_bytes: Bytes,
-    binding: Bytes
+    binding: Bytes,
+    zeros: Bytes
 }
 
 fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
@@ -44,9 +47,9 @@ fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
     }
 }
 
-fn journal_fixed_check(binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
+fn journal_fixed_check(schema_binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
     let mut state = std.check.start()
-    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, schema_binding, 0, 33)
     std.check.add(mut state, raw, at, at + 8)
     std.check.add(mut state, raw, at + 16, at + 16 + length)
     std.check.finish(state)
@@ -56,21 +59,23 @@ fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
     let group: Bytes = list.with_capacity(reserve)
     let mut end_bytes: Bytes = list.with_capacity(96)
     list.fill(mut end_bytes, 96, 0u8)
-    let mut binding: Bytes = list.with_capacity(33)
-    list.fill(mut binding, 33, 0u8)
-    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding))
+    let mut schema_binding: Bytes = list.with_capacity(33)
+    list.fill(mut schema_binding, 33, 0u8)
+    let mut zeros: Bytes = list.with_capacity(JOURNAL_ZERO_CHUNK)
+    list.fill(mut zeros, JOURNAL_ZERO_CHUNK, 0u8)
+    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take schema_binding, zeros: take zeros))
 }
 
 // END's bytes and checksum binding reuse storage admitted at spawn. The END
 // file is a fixed 96 bytes, rewritten in place through the handle opened when
 // its segment was created; a torn rewrite fails its checksum like a torn
 // truncate-and-write would, and only loses detection (§3.4 step 5).
-fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut binding: Bytes) -> Result[(), Error] waits {
-    journal_set(mut binding, 0, id.hi, 8)
-    journal_set(mut binding, 8, id.lo, 8)
-    journal_set(mut binding, 16, 4, 1)
-    journal_set(mut binding, 17, seq, 8)
-    journal_set(mut binding, 25, 0, 8)
+fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut schema_binding: Bytes) -> Result[(), Error] waits {
+    journal_set(mut schema_binding, 0, id.hi, 8)
+    journal_set(mut schema_binding, 8, id.lo, 8)
+    journal_set(mut schema_binding, 16, 4, 1)
+    journal_set(mut schema_binding, 17, seq, 8)
+    journal_set(mut schema_binding, 25, 0, 8)
     journal_set(mut raw, 0, 1, 2)
     journal_set(mut raw, 2, 1, 2)
     journal_set(mut raw, 4, 56, 4)
@@ -83,14 +88,14 @@ fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mu
     journal_set(mut raw, 32, id.hi, 8)
     journal_set(mut raw, 40, id.lo, 8)
     journal_set(mut raw, 56, seq, 8)
-    let header_check = journal_fixed_check(binding, raw, 0, 56)
+    let header_check = journal_fixed_check(schema_binding, raw, 0, 56)
     journal_set(mut raw, 8, header_check, 8)
     journal_set(mut raw, 72, 0x0012, 2)
     journal_set(mut raw, 74, 1, 2)
     journal_set(mut raw, 76, 8, 4)
     journal_set(mut raw, 88, end, 8)
-    journal_set(mut binding, 25, 72, 8)
-    let end_check = journal_fixed_check(binding, raw, 72, 8)
+    journal_set(mut schema_binding, 25, 72, 8)
+    let end_check = journal_fixed_check(schema_binding, raw, 72, 8)
     journal_set(mut raw, 80, end_check, 8)
     match host.write_at(mut end_file, 0, raw) {
         Ok(()) => {},
@@ -99,21 +104,48 @@ fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mu
     disk_io(host.sync(mut end_file))
 }
 
+fn journal_window_target(end: u64, limit: u64) -> u64 {
+    order.min(limit, (end - 72) / 4096 * 4096)
+}
+
+fn journal_window_step(mut segment: HostFile, at: u64, size: u64, zeros: Bytes) -> Result[(), Error] waits {
+    let mut written = 0u64
+    while written < size {
+        let width = order.min(JOURNAL_ZERO_CHUNK, size - written)
+        match host.write_at(mut segment, at + written, list.slice(zeros, 0, width)) {
+            Ok(()) => (),
+            Error(e) => return Error(Io(e.error)),
+        }
+        written += width
+    }
+    disk_io(host.sync(mut segment))
+}
+
 fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
-    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced, idle: take idle_timer) = take input
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, zero_extension: zero_extension, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced, idle: take idle_timer) = take input
     let mut segment_file = take segment
     let mut end_handle = take end_file
     let mut seq = initial_seq
     let mut end = 72u64
+    let mut window = 72u64
     // The d the END file holds: 72 from segment creation.
     let mut end_named = 72u64
     let mut written = 0u64
     let mut groups = 0u64
-    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
+    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding, zeros: take zeros) = take scratch
     let mut buffer = take reserved
     let mut end_bytes = take initial_end
-    let mut binding = take initial_binding
+    let mut schema_binding = take initial_binding
     let group_limit: u64 = int.widen(max_bytes)
+    let window_limit = if zero_extension {
+        order.max(JOURNAL_WINDOW_STEP, (group_limit + JOURNAL_WINDOW_STEP - 1) / JOURNAL_WINDOW_STEP * JOURNAL_WINDOW_STEP)
+    } else {
+        0u64
+    }
+    // Groups since the last one of JOURNAL_BULK_GROUP bytes or more. A
+    // group that large amortizes its own extension, so zero steps wait until
+    // 64 smaller groups in a row (§3.3a Bulk).
+    let mut small_groups = 64u64
     let mut deferred: Option[JournalMsg] = None
     let mut idle_at: Option[u64] = None
     loop {
@@ -127,12 +159,29 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     },
                     Error(Empty) => {
                         if end != end_named {
-                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
                             end_named = end
                         }
                         groups = 0
                     },
                     Error(Closed) => {}
+                }
+            }
+            if let None = next_message {
+                let target = if small_groups >= 64 { journal_window_target(end, window_limit) } else { 0u64 }
+                while window - end < target / 2 {
+                    match channel.try_receive(receive) {
+                        Ok(take msg) => {
+                            next_message = Some(take msg)
+                            break
+                        },
+                        Error(Empty) => {
+                            let width = order.min(JOURNAL_WINDOW_STEP, target - (window - end))
+                            journal_window_step(mut segment_file, window, width, zeros)?
+                            window += width
+                        },
+                        Error(Closed) => break,
+                    }
                 }
             }
             if let None = next_message {
@@ -199,6 +248,9 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     answering = true;
                     break
                 },
+                Some(ObjectPause(..)) => fail("log journal received an object cut"),
+                Some(ObjectFresh(..)) => fail("log journal received an object head probe"),
+                Some(ObjectExportRead(..)) => fail("log journal received an object export read"),
                 Some(IdleCheck) => {
                     if frames == 0 && idle_at == Some(written) {
                         buffer = list.new()
@@ -224,8 +276,8 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             // A lone frame keeps its handoff allocation. A batch uses the
             // worker's reserved buffer while the source frames are still charged.
             let write = match take first {
-                Some(take raw) => host.write(mut segment_file, raw),
-                None => host.write(mut segment_file, buffer)
+                Some(take raw) => host.write_at(mut segment_file, end, raw),
+                None => host.write_at(mut segment_file, end, buffer)
             }
             match write {
                 Ok(()) => {},
@@ -238,6 +290,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
         if frames != 0 {
             disk_io(host.sync(mut segment_file))?
             end += group_bytes
+            window = order.max(window, end)
             written += group_bytes
             if let Error(_) = channel.send(send, Journaled(last_frame, written)) {
                 return Ok(())
@@ -245,16 +298,24 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             // After the ack, so a writer woken by this notice finds it.
             let _ = channel.try_send(synced, ())
             groups += 1
+            small_groups = if group_bytes >= JOURNAL_BULK_GROUP { 0u64 } else { order.min(64u64, small_groups + 1) }
         }
         let rotate_now = match rotating {
             Some(_) => true,
             None => false
         }
         // An END that would repeat the d already named writes nothing.
-        if (idle || closing || rotate_now || groups == 64) && end != end_named {
-            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+        let load_end = groups == 64
+        if (idle || closing || rotate_now || load_end) && end != end_named {
+            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
             end_named = end
             groups = 0
+            let target = journal_window_target(end, window_limit)
+            if load_end && small_groups >= 64 && window - end < target / 2 {
+                let width = order.min(JOURNAL_WINDOW_STEP, target - (window - end))
+                journal_window_step(mut segment_file, window, width, zeros)?
+                window += width
+            }
         }
         if let Some((take new_file, take new_end)) = take rotating {
             disk_io(host.close(take segment_file))?
@@ -262,6 +323,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             segment_file = take new_file
             seq += 1
             end = 72
+            window = 72
             end_named = 72
         }
         if closing {

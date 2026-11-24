@@ -6,7 +6,7 @@ fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: b
         Some(given) => given,
         None => info(mut tx),
     }
-    let before = match result.unwrap(fetch(tx, shape(t), 9)) {
+    let before = match result.unwrap(fetch(tx, t, 9)) {
         Some(n) => n,
         None => 0u64,
     }
@@ -24,8 +24,8 @@ fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: b
 }
 
 fn set_row(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
-    match result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, k, v)
+    match result.unwrap(run(mut db, None, (copy_env(k), copy_env(t), copy_env(v)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
     })) {
         Committed(_) => true,
         _ => false,
@@ -47,9 +47,9 @@ fn verdict_code(v: Verdict) -> u8 {
 }
 
 fn reexecute_admit(mut db: Db, stream: u64) -> (Completion, CallRecord) waits {
-    let key = key_word(stream)
+    let key = law_stream_bytes(key_word(stream), keyed_time(db))
     let record = call_for(key, 32)
-    let admitted = result.unwrap(admit(mut db, key, 0, request_digest(record.key, record.args)))
+    let admitted = result.unwrap(admit(mut db, record.stream, 0, request_digest(record.key, record.args)))
     let Admitted(take complete) = take admitted else {
         fail("re-execution law: expected an admitted call")
     }
@@ -65,28 +65,28 @@ fn reexecute_error_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes]
 // §7 Kept: the error reply survives with its CALL, and the staged row does not.
 fn reexecute_kept(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     let (take complete, take record) = reexecute_admit(mut db, 56)
-    let served = serve(mut db, take complete, plan, Some(take record), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-        reexecute_error_entry(mut tx, t)
+    let served = serve(mut db, take complete, plan, Some(take record), t, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        reexecute_error_entry(mut tx, call_env)
     })
     let Ok(Kept(receipt)) = take served else {
         return false
     }
     result.unwrap(durable(mut db, receipt.ticket))
-    if result.unwrap(get(snapshot(db), shape(t), 9)) != Some(8u64) {
+    if result.unwrap(get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 9)) != Some(8u64) {
         return false
     }
     let v = version(snapshot(db))
     let line = main_branch(db)
-    let failed = scoped fn(_stop: Stop) -> Bytes {
+    let failed = fn(_stop: Stop) -> Bytes {
         key_word(0)
     }
-    let kept = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        reexecute_error_entry(mut tx, t)
+    let kept = result.unwrap(reexecute(db, line, v, plan, failed, t, fn(_call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        reexecute_error_entry(mut tx, call_env)
     }))
-    let same_without_writes = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+    let same_without_writes = result.unwrap(reexecute(db, line, v, plan, failed, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
         Ok(key_word(17))
     }))
-    let changed = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+    let changed = result.unwrap(reexecute(db, line, v, plan, failed, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
         Error(key_word(18))
     }))
     verdict_is(kept, Same) && verdict_is(same_without_writes, Same) && verdict_is(changed, Different(Reply))
@@ -100,7 +100,7 @@ fn reexecute_fault_bytes(stop: Stop) -> Bytes {
 }
 
 fn reexecute_fault_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes] {
-    if result.unwrap(fetch(tx, shape(t), 9)) == Some(8u64) {
+    if result.unwrap(fetch(tx, t, 9)) == Some(8u64) {
         result.unwrap(put(mut tx, t, 10, 1))
         fail("re-execution law: raised from the attempted base")
     }
@@ -111,15 +111,15 @@ fn reexecute_fault_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes]
 // The re-run must use that base and CallInfo, and must raise the same fault.
 fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     let (take complete, take record) = reexecute_admit(mut db, 57)
-    let served = serve(mut db, take complete, plan, Some(take record), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-        reexecute_fault_entry(mut tx, t)
+    let served = serve(mut db, take complete, plan, Some(take record), t, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        reexecute_fault_entry(mut tx, call_env)
     })
     // RUNNER-SPEC §1.1 assigns 5 to Fail.
     let Ok(Failed(take pending_run, Raised(5))) = take served else {
         return false
     }
     let attempted = pending_run.attempted
-    if result.unwrap(get(snapshot(db), shape(t), 10)) != None {
+    if result.unwrap(get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 10)) != None {
         return false
     }
     if !set_row(mut db, t, 9, 10) || !set_row(mut db, t, 9, 11) {
@@ -132,19 +132,19 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     result.unwrap(durable(mut db, receipt.ticket))
     let v = version(snapshot(db))
     let line = main_branch(db)
-    let fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+    let fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (copy_env(t), copy_env(attempted)), fn(_call, mut tx, call_env) -> Result[Bytes, Bytes] {
         let ci = info(mut tx)
-        let same_id = same(ci.id.store, attempted.id.store) && ci.id.branch == attempted.id.branch && ci.id.version == attempted.id.version
-        if !same_id || ci.at != attempted.at || ci.seed != attempted.seed {
+        let same_id = same(ci.id.store, call_env.1.id.store) && ci.id.branch == call_env.1.id.branch && ci.id.version == call_env.1.id.version
+        if !same_id || ci.at != call_env.1.at || ci.seed != call_env.1.seed {
             return Error(key_word(1))
         }
-        reexecute_fault_entry(mut tx, t)
+        reexecute_fault_entry(mut tx, call_env.0)
     }))
-    let different_fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+    let different_fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
         let absent: Option[Bytes] = None
         Ok(option.unwrap(take absent))
     }))
-    let returned = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+    let returned = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (), fn(_call, mut tx, unused_env) -> Result[Bytes, Bytes] {
         Ok(key_word(5))
     }))
     verdict_is(fault, Same) && verdict_is(different_fault, Different(Reply)) && verdict_is(returned, Different(Reply))
@@ -157,7 +157,7 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
 // Oracle: the recorded run's own reply and frame.
 pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
-    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     result.unwrap(create_table(mut db, spec("info", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "info", std.codec.key_u64(), std.codec.of_u64()))
     if !set_row(mut db, t, 9, 7) {
@@ -165,8 +165,8 @@ pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     }
     let (take complete, take rec) = reexecute_admit(mut db, 55)
     let plan = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
-    let served = serve(mut db, take complete, plan, Some(take rec), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, None, false)
+    let served = serve(mut db, take complete, plan, Some(take rec), t, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env, None, false)
     })
     let Ok(Committed(receipt)) = take served else {
         return false
@@ -179,30 +179,30 @@ pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let head = snapshot(db)
     let (probe, _) = result.unwrap(fork(mut db, "probe", head))
     let forked = call_info(db.store, probe.id, version(snapshot(db)) + 1, 0, 0)
-    let failed = scoped fn(_stop: Stop) -> Bytes {
+    let failed = fn(_stop: Stop) -> Bytes {
         key_word(0)
     }
     let line = main_branch(db)
-    let honest = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, None, false)
+    let honest = result.unwrap(reexecute(db, line, v, plan, failed, t, fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env, None, false)
     }))
-    let moved = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, Some(forked), false)
+    let moved = result.unwrap(reexecute(db, line, v, plan, failed, (copy_env(t), copy_env(forked)), fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env.0, Some(call_env.1), false)
     }))
-    let wider = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, None, true)
+    let wider = result.unwrap(reexecute(db, line, v, plan, failed, t, fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env, None, true)
     }))
     if !verdict_is(honest, Same) || !verdict_is(moved, Different(Reply)) || !verdict_is(wider, Different(Writes)) {
         return false
     }
     result.unwrap(close(take db))
-    let mut reopened = result.unwrap(open(tasks, dir, c, r, defaults()))
-    let again = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, None, false)
+    let mut reopened = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
+    let again = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, t, fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env, None, false)
     }))
     let _ = result.unwrap(checkpoint(mut reopened))
-    let gone = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
-        info_entry(mut tx, t, None, false)
+    let gone = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, t, fn(call, mut tx, call_env) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, call_env, None, false)
     }))
     let replayed = verdict_is(again, Same) && verdict_is(gone, Unknown(StateGone))
     let cases = replayed && reexecute_kept(mut reopened, t, plan) && reexecute_failed(mut reopened, t, plan)
@@ -217,4 +217,64 @@ fn disk_test_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     } else {
         Error(())
     }
+}
+
+// L62(d): all settlements and reruns encode the same reply bytes.
+@test
+fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
+    let ample = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
+    let short = Plan(n_e: 65536, s_e: 1, reply_max: 4096)
+    let return_reply = fn(mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
+        Ok(key_word(17))
+    }
+    let replay_reply = fn(call: Recorded, mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
+        Ok(key_word(17))
+    }
+    let failed = fn(stop: Stop) -> Bytes {
+        key_word(17)
+    }
+    let line = main_branch(db)
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 71)
+        let Ok(Failed(take pending_steps, OutOfSteps(_))) = serve(mut db, take complete, short, Some(take record), (), return_reply) else {
+            fail("L62(d): expected a recorded step stop")
+        }
+        let Committed(steps_receipt) = result.unwrap(conclude(mut db, take pending_steps, key_word(17), Resident)) else {
+            fail("L62(d): step stop did not settle")
+        }
+        result.unwrap(durable(mut db, steps_receipt.ticket))
+        let steps_version = version(snapshot(db))
+        let Unknown(Residency) = result.unwrap(reexecute(db, line, steps_version, ample, failed, (), replay_reply)) else {
+            fail("L62(d): a recorded step stop reran to success")
+        }
+    }
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 72)
+        let Committed(receipt) = result.unwrap(serve(mut db, take complete, ample, Some(take record), (), return_reply)) else {
+            fail("L62(d): expected a recorded success")
+        }
+        result.unwrap(durable(mut db, receipt.ticket))
+        let Unknown(Residency) = result.unwrap(reexecute(db, line, version(snapshot(db)), short, failed, (), replay_reply)) else {
+            fail("L62(d): a recorded success reran to a step stop")
+        }
+    }
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 73)
+        let raised = serve(mut db, take complete, ample, Some(take record), (), fn(mut tx, env) -> Result[Bytes, Bytes] {
+            fail("L62(d): body fault")
+        })
+        let Ok(Failed(take pending_raise, Raised(_))) = take raised else {
+            fail("L62(d): expected a recorded raise")
+        }
+        let Committed(raised_receipt) = result.unwrap(conclude(mut db, take pending_raise, key_word(17), Resident)) else {
+            fail("L62(d): raise did not settle")
+        }
+        result.unwrap(durable(mut db, raised_receipt.ticket))
+        let Different(Reply) = result.unwrap(reexecute(db, line, version(snapshot(db)), ample, failed, (), replay_reply)) else {
+            fail("L62(d): a raise reran to success with the same reply")
+        }
+    }
+    close(take db)
 }

@@ -64,11 +64,9 @@ impl FunctionEmitter<'_> {
         );
         self.br(done);
         self.block(inline);
-        let memory = Memory {
-            ordering: Some(Ordering::Monotonic),
-            ..Memory::aligned(8)
-        };
-        self.store_with(&Type::I64, &int(1), node, &memory);
+        // Arc counts are plain words: an Arc never leaves the thread running
+        // its unit (CONC-2).
+        self.store(&Type::I64, &int(1), node, 8);
         self.arc_event("hirsel_core_arc_initialized", &[]);
         self.br(done);
         self.block(done);
@@ -151,11 +149,17 @@ impl FunctionEmitter<'_> {
         (fits, available)
     }
     pub(super) fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
-        let left = self.bin(Binary::Sub, &Type::I64, available, charge);
-        self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
+        self.debit_room(payer, charge, available);
         let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, Type::I64);
         let used = self.bin(Binary::Add, &Type::I64, &outstanding, charge);
         self.store_native(payer, LIMIT_OUTSTANDING, Type::I64, &used);
+        self.observe_admission();
+    }
+    fn debit_room(&mut self, payer: &Value, charge: &Value, available: &Value) {
+        let left = self.bin(Binary::Sub, &Type::I64, available, charge);
+        self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
+    }
+    fn observe_admission(&mut self) {
         if self.observe_charge {
             self.cold_void("hirsel_core_observe_charge", &[]);
         }
@@ -290,10 +294,10 @@ impl FunctionEmitter<'_> {
     }
     /// Admit `charge` for the frame bytes at `frame` (`alloc .. frame`): the own
     /// allocation's inline admission with nothing allocated. A refusal, overflow
-    /// or test probe takes `hirsel_core_admit`, which keeps the Capacity event.
+    /// or test probe takes `hirsel_core_frame_admit`, which keeps the Capacity event.
+    /// Frame charges move only the room: no block names the record.
     pub(super) fn frame_admit(
         &mut self,
-        frame: &Value,
         charge: &Value,
         overflow: Option<ValueId>,
     ) -> (Value, Value) {
@@ -320,11 +324,12 @@ impl FunctionEmitter<'_> {
         let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
         self.likely(&fits, if self.test_hooks { slow } else { debit }, slow);
         self.block(debit);
-        self.admit_balance(&payer, charge, &available);
+        self.debit_room(&payer, charge, &available);
+        self.observe_admission();
         self.br(done);
         self.block(slow);
         let (admitted, room) = self.allocation_cold(
-            "hirsel_core_admit",
+            "hirsel_core_frame_admit",
             &[
                 ptr(CONTEXT),
                 word(charge.clone()),
@@ -332,16 +337,20 @@ impl FunctionEmitter<'_> {
             ],
         );
         let present = self.cmp(Predicate::Ne, &Type::Ptr, &admitted, &Value::Null);
-        let slow_frame = self.emit(Operation::Select(&Type::Ptr, &present, frame, &Value::Null));
         self.br(done);
         self.block(done);
-        let pointer = self.emit(Operation::Phi(
-            &Type::Ptr,
-            &[(frame.clone(), debit), (slow_frame, slow)],
+        let admitted = self.emit(Operation::Phi(
+            &Type::I1,
+            &[(true.into(), debit), (present, slow)],
         ));
         let room = self.emit(Operation::Phi(&i64, &[(int(0), debit), (room, slow)]));
-        (pointer, room)
+        (admitted, room)
     }
+    pub(super) fn refund_frame_charge(&mut self, slot: &Value) {
+        let charge = self.load(&Type::I64, slot, 8);
+        self.runtime_void("hirsel_core_frame_refund", &[ptr(CONTEXT), word(charge)]);
+    }
+
     fn fast_region(
         &mut self,
         slot: &Value,
@@ -465,7 +474,7 @@ impl FunctionEmitter<'_> {
         let stop = Label::new("count_stop", n);
         let retained = Label::new("retained", n);
         let done = Label::new("arc_share_done", n);
-        let next = if atomic {
+        if atomic {
             let inline = Label::new("inline_arc_share", n);
             let replay = Label::new("replay_arc_share", n);
             self.branch_on_arc_replay(inline, replay);
@@ -476,20 +485,10 @@ impl FunctionEmitter<'_> {
             );
             self.br(done);
             self.block(inline);
-            let old = self.emit(Operation::AtomicRmw(
-                Rmw::Add,
-                node,
-                &i64,
-                &int(1),
-                Ordering::Monotonic,
-            ));
-            self.bin(Binary::Add, &i64, &old, &int(1))
-        } else {
-            let count = self.load(&i64, node, 8);
-            let next = self.bin(Binary::Add, &i64, &count, &int(1));
-            self.store(&i64, &next, node, 8);
-            next
-        };
+        }
+        let count = self.load(&i64, node, 8);
+        let next = self.bin(Binary::Add, &i64, &count, &int(1));
+        self.store(&i64, &next, node, 8);
         let fits = self.cmp(Predicate::Ne, &i64, &next, &int(0));
         self.likely(&fits, retained, stop);
         self.block(stop);
@@ -525,11 +524,7 @@ impl FunctionEmitter<'_> {
         );
         self.br(done);
         self.block(inline);
-        let memory = Memory {
-            ordering: Some(Ordering::Acquire),
-            ..Memory::aligned(8)
-        };
-        let count = self.load_with(&Type::I64, node, &memory);
+        let count = self.load(&Type::I64, node, 8);
         let unique = self.cmp(Predicate::Eq, &Type::I64, &count, &int(1));
         self.arc_poll_event(
             "hirsel_core_arc_unwrapped",
@@ -545,7 +540,6 @@ impl FunctionEmitter<'_> {
         ))
     }
     pub(super) fn decrement_node(&mut self, node: &Value, atomic: bool) -> Value {
-        let i64 = Type::I64;
         if atomic {
             let n = self.counter();
             let inline = Label::new("inline_arc_decrement", n);
@@ -564,14 +558,7 @@ impl FunctionEmitter<'_> {
             );
             self.br(done);
             self.block(inline);
-            let old = self.emit(Operation::AtomicRmw(
-                Rmw::Sub,
-                node,
-                &i64,
-                &int(1),
-                Ordering::Release,
-            ));
-            let last = self.cmp(Predicate::Eq, &i64, &old, &int(1));
+            let last = self.plain_decrement(node);
             self.br(done);
             self.block(done);
             self.emit(Operation::Phi(
@@ -579,11 +566,15 @@ impl FunctionEmitter<'_> {
                 &[(runtime, replay), (last, inline)],
             ))
         } else {
-            let old = self.load_native(node, NODE_COUNT, Type::I64);
-            let next = self.bin(Binary::Sub, &i64, &old, &int(1));
-            self.store_native(node, NODE_COUNT, Type::I64, &next);
-            self.cmp(Predicate::Eq, &i64, &next, &int(0))
+            self.plain_decrement(node)
         }
+    }
+    fn plain_decrement(&mut self, node: &Value) -> Value {
+        let i64 = Type::I64;
+        let old = self.load_native(node, NODE_COUNT, Type::I64);
+        let next = self.bin(Binary::Sub, &i64, &old, &int(1));
+        self.store_native(node, NODE_COUNT, Type::I64, &next);
+        self.cmp(Predicate::Eq, &i64, &next, &int(0))
     }
     /// Every release site keeps only the decrement, its branch and the
     /// non-last event guard. The last holder's cleanup is one cold call to the
@@ -615,7 +606,7 @@ impl FunctionEmitter<'_> {
         self.block(released);
     }
     /// The body of a last release: the holder that took the count to zero
-    /// observes every other holder's writes, reports the event, then frees.
+    /// reports the event, then frees.
     pub(super) fn release_last_body(
         &mut self,
         node: &Value,
@@ -624,7 +615,6 @@ impl FunctionEmitter<'_> {
         atomic: bool,
     ) {
         if atomic {
-            self.effect(Operation::Fence(Ordering::Acquire));
             self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
         }
         if let Some(recipe) = recipe {

@@ -1,0 +1,96 @@
+pub type Health = status.Health
+
+type ObjectHealthSignal: send {
+    value: Latest[Health],
+    terminal: Sender[()]
+}
+
+fn health_failure(problem: Error) -> Health {
+    match problem {
+        Fenced(e) => Fenced(e),
+        Undecided => Undecided,
+        Remote(cause) => Remote(clone(cause)),
+        Poisoned(io) => Poisoned(io),
+        Io(io) => Poisoned(io),
+        _ => Poisoned(Closed),
+    }
+}
+
+fn health_is_working(value: Health) -> bool {
+    if let Ok(_) = value { true } else { false }
+}
+
+fn copy_health(value: Health) -> Health {
+    clone(value)
+}
+
+fn emit_health(signal: ObjectHealthSignal, take value: Health) {
+    let previous = latest.read(signal.value)
+    if health_is_working(previous) {
+        let asked = !health_is_working(value)
+        latest.publish(signal.value, arc.new(take value))
+        if asked {
+            let _ = channel.try_send(signal.terminal, ())
+        }
+    }
+}
+
+pub fn health(db: Db) -> Health {
+    if let Some(connection) = db.disk {
+        if let Some(writer) = connection.object {
+            let current = latest.read(writer.health)
+            return copy_health(current)
+        }
+    }
+    match journal_poison(db) {
+        Some(problem) => Poisoned(problem),
+        None => Ok(0),
+    }
+}
+
+type HealthNotice[M: send]: send {
+    ready: Receiver[()],
+    output: Sender[M],
+    message: M
+}
+
+fn wait_unhealthy[M: send](take notice: HealthNotice[M]) waits {
+    let HealthNotice(ready: take ready, output: take output, message: take message) = take notice
+    if let Ok(()) = channel.receive(ready) {
+        let _ = channel.try_send(output, take message)
+    }
+}
+
+pub fn on_unhealthy[M: send](mut db: Db, take to: Sender[M], take m: M) -> Result[(), Error] {
+    if !object_writer_open(db) { return Error(Missing("head")) }
+    write_disk(mut db.disk, (take to, take m), scoped fn(mut state: DiskState, take supplied: (Sender[M], M)) -> Result[(), Error] {
+        if let Some(mut writer) = state.object {
+            let Some(take ready) = replace(mut writer.unhealthy, None) else { return Error(Held) }
+            let (take destination, take message) = take supplied
+            let notice = HealthNotice(ready: take ready, output: take destination, message: take message)
+            match task.try_spawn(writer.tasks, bytes 4096, take notice, wait_unhealthy) {
+                Ok(take started) => {
+                    writer.watch = Some(take started)
+                    Ok(())
+                },
+                Error((problem, take returned)) => {
+                    let HealthNotice(ready: take returned_receiver, ..) = take returned
+                    writer.unhealthy = Some(take returned_receiver)
+                    Error(Full(Allocation(problem)))
+                },
+            }
+        } else {
+            Error(Missing("head"))
+        }
+    })
+}
+
+fn health_result(value: Health) -> Result[(), Error] {
+    match value {
+        Ok(_) => Ok(()),
+        Fenced(e) => Error(Fenced(e)),
+        Undecided => Error(Undecided),
+        Poisoned(problem) => Error(Poisoned(problem)),
+        Remote(problem) => Error(Remote(clone(problem))),
+    }
+}

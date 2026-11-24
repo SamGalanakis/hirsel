@@ -297,8 +297,16 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     if !invocation.arguments.is_empty() {
         return Err("deploy takes no program arguments; a group's arguments are registered".into());
     }
+    let has_decision = decision != Grants::default();
+    let submission_options =
+        code.is_some() || name.is_some() || !grants.foreign.is_empty() || !grants.exec.is_empty();
     if let Some(text) = status {
-        if invocation.positional.is_some() || name.is_some() || d.is_some() {
+        if invocation.positional.is_some()
+            || d.is_some()
+            || submission_options
+            || refuse
+            || has_decision
+        {
             return Err("deploy --status takes only --state".into());
         }
         let d = unhex(&text)
@@ -310,9 +318,15 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     decision.added.dedup();
     decision.removed.sort();
     decision.removed.dedup();
-    if invocation.positional.is_none() && (refuse || decision != Grants::default()) {
-        if refuse && decision != Grants::default() {
-            return Err("--refuse-grants takes no --approve-grant".into());
+    if refuse && has_decision {
+        return Err("--refuse-grants takes no --approve-grant".into());
+    }
+    if refuse && invocation.positional.is_some() {
+        return Err("deploy with a recipe takes no --refuse-grants".into());
+    }
+    if invocation.positional.is_none() && (refuse || has_decision) {
+        if submission_options {
+            return Err("deploy decisions take only --state and --request-id".into());
         }
         let d = unhex(&d.ok_or("a decision requires --request-id HEX")?)
             .filter(|d| d.len() == 16)
@@ -362,6 +376,51 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let mut exchange = Exchange::new(&state, d, "deploy", Some(upload), approvals);
     exchange.decision = Some(decision);
     exchange.run(ask)
+}
+
+#[test]
+fn contradictory_deploy_actions_refuse_before_io() {
+    let recipe = "ab".repeat(32);
+    let request = "01".repeat(16);
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("no-host");
+    let invoke = |extra: &[&str]| {
+        let arguments = ["deploy", "--state", state.to_str().unwrap()]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(str::to_owned);
+        let crate::cli::Action::Invoke(invocation) = crate::cli::parse(arguments).unwrap() else {
+            panic!("expected a deploy invocation");
+        };
+        deploy(invocation)
+    };
+    for (args, want) in [
+        (
+            &["--status", &request, "--refuse-grants"][..],
+            "deploy --status takes only --state",
+        ),
+        (
+            &["--status", &request, "--approve-grant", "+Clock"],
+            "deploy --status takes only --state",
+        ),
+        (
+            &[&recipe, "--refuse-grants"],
+            "deploy with a recipe takes no --refuse-grants",
+        ),
+        (
+            &[&recipe, "--refuse-grants", "--approve-grant", "+Clock"],
+            "--refuse-grants takes no --approve-grant",
+        ),
+    ] {
+        assert_eq!(invoke(args).unwrap_err().to_string(), want);
+    }
+    assert_eq!(invoke(&["--status", &request]).unwrap(), UNAVAILABLE);
+    assert_eq!(
+        invoke(&["--request-id", &request, "--refuse-grants"]).unwrap(),
+        UNAVAILABLE
+    );
+    let error = invoke(&[&recipe, "--approve-grant", "+Clock"]).unwrap_err();
+    assert_eq!(error.to_string(), "requires --code-store DIR");
 }
 
 /// One request and its one reply, on a fresh connection.

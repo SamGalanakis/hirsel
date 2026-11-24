@@ -20,16 +20,18 @@ pub type Refused: send = Unknown | Full | Asleep | Denied | Place(platform.local
 // `place_bytes` is the budget every live session's place shares, and `idle_ms` the idle
 // time each place stops after (the host's Config, §14.2, §14.4).
 pub type GatewayConfig[T: send]: send {
-    root: Dir, options: store.Options, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
+    root: Dir, options: store.Options,
     factory: platform.local.Factory[T], max_sessions: u64, idle_ms: u64, place_bytes: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[platform.local.Change]], seed: T,
 }
 
-pub opaque type Gateway { host: platform.local.Local }
-pub opaque type Door: send { host: platform.local.Door }
+pub opaque type Gateway { host: platform.local.Local, schema: Schema }
+type Schema = fn(mut store.Declare) -> Result[harness.Handles, store.Error]
+
+pub opaque type Door: send { host: platform.local.Door, schema: Schema }
 // A gateway's inbox, made before the gateway so that its seed can hold a door to it
 // (a session's subagent tool starts its child through that door).
-pub opaque type Doorway: send { way: platform.local.Doorway }
+pub opaque type Doorway: send { way: platform.local.Doorway, schema: Schema }
 
 fn refused(take r: platform.local.Refused) -> Refused {
     match take r {
@@ -47,15 +49,15 @@ fn mapped[A](take r: Result[A, platform.local.Refused]) -> Result[A, Refused] {
 }
 
 // Seeds a session's store with its harness session and, for a visible one, its reader.
-fn seeder(take seeding: Seeding, take reader: Option[store.Caller]) -> platform.local.Seed {
+fn seeder(schema: Schema, take seeding: Seeding, take reader: Option[store.Caller]) -> platform.local.Seed {
     fn(mut db: store.Db) -> Result[(), String] waits {
-        let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error(string.from("harness schema")) }
-        let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-            match seeding {
-                Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),
-                Adopt(prefix) => harness.adopt(mut tx, h, clone(prefix)),
+        let Ok(h) = store.bind_declaration(mut db, Migrate, schema) else { return Error(string.from("harness schema")) }
+        let ran = store.run(mut db, None, (store.copy_env(reader), store.copy_env(seeding), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+            match call_env.1 {
+                Fresh(model, narrow) => harness.open_session(mut tx, call_env.2, clone(model), clone(narrow)),
+                Adopt(prefix) => harness.adopt(mut tx, call_env.2, clone(prefix)),
             }?
-            if let Some(caller) = reader { harness.set_reader(mut tx, h, caller, true)? }
+            if let Some(caller) = call_env.0 { harness.set_reader(mut tx, call_env.2, caller, true)? }
             Ok(())
         })
         match take ran {
@@ -68,22 +70,22 @@ fn seeder(take seeding: Seeding, take reader: Option[store.Caller]) -> platform.
 
 // ---- the API ----
 
-pub fn doorway() -> Doorway { Doorway(way: platform.local.doorway()) }
+pub fn doorway(schema: Schema) -> Doorway { Doorway(way: platform.local.doorway(), schema: schema) }
 
-pub fn door_of(w: Doorway) -> Door { Door(host: platform.local.door_of(w.way)) }
+pub fn door_of(w: Doorway) -> Door { Door(host: platform.local.door_of(w.way), schema: w.schema) }
 
-pub fn copy_door(d: Door) -> Door { Door(host: platform.local.copy_door(d.host)) }
+pub fn copy_door(d: Door) -> Door { Door(host: platform.local.copy_door(d.host), schema: d.schema) }
 
 pub fn gateway[T: send](take way: Doorway, take config: GatewayConfig[T]) -> Result[Gateway, Refused] waits {
-    let GatewayConfig(root: root, options: take options, migrate: migrate, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes,
+    let GatewayConfig(root: root, options: take options, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes,
         tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
-    let lconfig = platform.local.Config(root: root, options: take options, migrate: migrate, factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
+    let lconfig = platform.local.Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
         place_bytes: place_bytes, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
-    let Doorway(way: take w) = take way
-    match platform.local.local(take w, take lconfig) { Ok(take host) => Ok(Gateway(host: take host)), Error(take why) => Error(refused(take why)) }
+    let Doorway(way: take w, schema: schema) = take way
+    match platform.local.local(take w, take lconfig) { Ok(take host) => Ok(Gateway(host: take host, schema: schema)), Error(take why) => Error(refused(take why)) }
 }
 
-pub fn door(g: Gateway) -> Door { Door(host: platform.local.door(g.host)) }
+pub fn door(g: Gateway) -> Door { Door(host: platform.local.door(g.host), schema: g.schema) }
 
 pub fn create(d: Door, take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
     create_with(d, take key, take seeding, None)
@@ -98,20 +100,22 @@ pub fn create_visible(d: Door, key: Bytes, take seeding: Seeding, take caller: s
 }
 
 fn create_with(d: Door, take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
-    mapped(platform.local.create(d.host, take key, seeder(take seeding, take reader)))
+    mapped(platform.local.create(d.host, take key, seeder(d.schema, take seeding, take reader)))
 }
 
 // Exports a cold session's prefix up to the cut `arg` encodes.
-fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] {
+fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] waits {
+    let read_handle = store.read_only_reader(reader, store.VALUE_LIMIT) ?=> |_| string.from("fork read")
     let c_cut: std.codec.Codec[u64] = std.codec.of()
     let Ok(upto) = std.codec.decode(c_cut, arg) else {
         return Error(string.from("fork cut"))
     }
     let snap = store.read_only_snapshot(reader)
-    let Ok(h) = harness.handles(store.snapshot_schema(snap)) else {
+    let mut declaration = store.declare_read_only(reader)
+    let Ok(h) = harness.declare_tables(mut declaration) else {
         return Error(string.from("harness schema"))
     }
-    let Ok(prefix) = harness.export(snap, h, upto) else {
+    let Ok(prefix) = harness.export(read_handle, snap, h, upto) else {
         return Error(string.from("fork cut"))
     }
     let c_prefix: std.codec.Codec[harness.Prefix] = std.codec.of()
@@ -177,7 +181,7 @@ pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits { 
 
 // Stops every live session through its graceful stop and answers how each ended.
 pub fn stop(take g: Gateway) -> List[platform.local.Unloaded] waits {
-    let Gateway(host: take host) = take g
+    let Gateway(host: take host, schema: schema) = take g
     platform.local.stop(take host)
 }
 
@@ -273,7 +277,7 @@ fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harne
 // a repeated attempt reaches the same child and the same run.
 pub fn ask(d: Door, take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
     let credential = child_credential(key)
-    let Ok(take caller) = runner.ingress.caller((), credential) else { return Error(Unavailable) }
+    let Ok(runner.BoundCaller(caller: take caller, ..)) = runner.ingress.caller((), credential) else { return Error(Unavailable) }
     let id = match create_with(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }
     let mut submit: Option[harness.Submit] = Some(harness.Submit(client_key: "parent", text: take text))
     let mut before: Option[(String, u64)] = None

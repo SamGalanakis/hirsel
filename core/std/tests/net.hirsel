@@ -147,12 +147,25 @@ fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
 }
 
 // expect: run socket_served_by_receiving_unit(network) = true
-fn socket_served_by_receiving_unit(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
+fn socket_served_by_receiving_unit(n: Net, clock: Clock, tasks: Tasks) -> bool waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let owner = result.unwrap(task.spawn_unit(tasks, bytes 4096, take listening, return_listener))
     let mut listener = result.unwrap(task.join(take owner))
-    let client = result.unwrap(host.connect(n, addr, Never))
-    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let loopback = V4(2130706433)
+    let narrower = result.unwrap(net.narrow(n, Rule(dir: Listen, prefix: loopback, bits: 32, ports: (80u16, 80u16))))
+    match host.listen(narrower, Addr(ip: loopback, port: 0), 8) {
+        Error(EphemeralOutsideNetGrant) => {},
+        _ => return false
+    }
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    let stray = result.unwrap(host.connect(n, addr, until))
+    let client = result.unwrap(host.connect(n, addr, until))
+    let expected = result.unwrap(net.local_addr(client))
+    let socket = result.unwrap(net.accept_from(mut listener, expected, until))
+    if addr.port == 0 || result.unwrap(net.listener_addr(listener)) != addr || result.unwrap(net.peer_addr(client)) != addr || result.unwrap(net.local_addr(socket)) != addr || result.unwrap(net.peer_addr(socket)) != expected || result.unwrap(net.local_addr(stray)) == expected {
+        return false
+    }
+    let _ = take stray
     let (ready, inbox): (Client[Client[Socket]], Inbox[Client[Socket]]) = result.unwrap(conn.new(1, bytes 0))
     let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, take ready, serve_crossed_socket))
     let sockets = result.unwrap(conn.receive(inbox))
@@ -173,7 +186,7 @@ fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits 
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let client = result.unwrap(host.connect(n, addr, Never))
-    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let socket = result.unwrap(net.accept_from(mut listener, result.unwrap(net.local_addr(client)), Never))
     let (sockets, inbox): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(1, bytes 0))
     result.unwrap(conn.send(sockets, take socket))
     let _ = take inbox
@@ -181,4 +194,274 @@ fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits 
     let mut r = take read
     let mut data: Bytes = list.with_capacity(1)
     result.unwrap(host.recv_bounded(mut r, mut data, 1, Never)) == 0
+}
+
+// expect: run udp_gro_first_truncates(network) = true
+fn udp_gro_first_truncates(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let (take socket, addr) = result.unwrap(host.udp_bind(n, Addr(ip: V4(0x7f000001), port: 0), UdpOptions(slots: 2, slot_bytes: 65792)))
+    let mut receiver = take socket
+    let mut sender = result.unwrap(host.udp_open(n, false, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let mut data: Bytes = list.with_capacity(2400)
+    for _ in 0u64 .. 1200u64 {
+        list.push(mut data, 65u8)
+    }
+    for _ in 0u64 .. 1200u64 {
+        list.push(mut data, 66u8)
+    }
+    let mut tx: List[UdpTx] = list.with_capacity(2)
+    list.push(mut tx, UdpTx(to: addr, at: 0, len: 1200, ecn: 1))
+    list.push(mut tx, UdpTx(to: addr, at: 1200, len: 1200, ecn: 1))
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    if result.unwrap(host.udp_send(mut sender, data, tx, until)) != 2 {
+        return false
+    }
+    let local = result.unwrap(host.udp_local_addr(sender))
+    let peer = Addr(ip: V4(0x7f000001), port: local.port)
+    let mut prefix: Bytes = list.with_capacity(100)
+    let mut packets: List[UdpPacket] = list.with_capacity(2)
+    if result.unwrap(host.udp_recv(mut receiver, mut prefix, mut packets, until)) != 1 || list.len(prefix) != 100 {
+        return false
+    }
+    let UdpPacket(peer: first_peer, at: first_at, len: first_len, truncated: first_truncated, ecn: first_ecn) = packets[0]
+    if first_peer != peer || first_at != 0 || first_len != 1200 || !first_truncated || first_ecn != 1 {
+        return false
+    }
+    for b in prefix {
+        if b != 65u8 {
+            return false
+        }
+    }
+    list.clear(mut packets)
+    let mut reply: Bytes = list.with_capacity(2400)
+    if result.unwrap(host.udp_recv(mut receiver, mut reply, mut packets, until)) != 1 || list.len(reply) != 1200 {
+        return false
+    }
+    let UdpPacket(peer: second_peer, at: second_at, len: second_len, truncated: second_truncated, ecn: second_ecn) = packets[0]
+    if second_peer != peer || second_at != 0 || second_len != 1200 || second_truncated || second_ecn != 1 {
+        return false
+    }
+    for b in reply {
+        if b != 66u8 {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run udp_group_recycles_a_full_member_capture(network) = true
+fn udp_group_recycles_a_full_member_capture(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let opts = UdpOptions(slots: 1, slot_bytes: 1536)
+    let mut members: List[UdpSocket] = list.with_capacity(2)
+    let addr = result.unwrap(host.udp_bind_group(n, Addr(ip: V4(0x7f000001), port: 0), opts, 2, Quic, mut members))
+    let mut one = option.unwrap(list.pop(mut members))
+    let mut zero = option.unwrap(list.pop(mut members))
+    let mut sender = result.unwrap(host.udp_open(n, false, opts))
+    let mut data: Bytes = list.with_capacity(15)
+    for byte in[0x40u8, 0u8, 0u8, 0u8, 17u8, 0x40u8, 0u8, 0u8, 0u8, 18u8, 0x40u8, 0u8, 0u8, 1u8, 19u8] {
+        list.push(mut data, byte)
+    }
+    let mut tx: List[UdpTx] = list.with_capacity(3)
+    list.push(mut tx, UdpTx(to: addr, at: 0, len: 5, ecn: 0))
+    list.push(mut tx, UdpTx(to: addr, at: 5, len: 5, ecn: 1))
+    list.push(mut tx, UdpTx(to: addr, at: 10, len: 5, ecn: 2))
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    if result.unwrap(host.udp_send(mut sender, data, tx, until)) != 3 {
+        return false
+    }
+    let mut received: Bytes = list.with_capacity(5)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    if result.unwrap(host.udp_recv(mut one, mut received, mut packets, until)) != 1 || received[4] != 19u8 {
+        return false
+    }
+    list.clear(mut received)
+    list.clear(mut packets)
+    result.unwrap(host.udp_recv(mut zero, mut received, mut packets, until)) == 1 && received[4] == 17u8
+}
+
+fn udp_room() -> u64 {
+    match (bound bytes 0xffffffffffffffffu64 {
+        ()
+    }) {
+        Error(capacity) => capacity.available,
+        Ok(()) => fail("capacity probe admitted"),
+    }
+}
+
+fn udp_helper_bind(take n: Net) -> UdpSocket waits {
+    let (take socket, _) = result.unwrap(host.udp_bind(n, Addr(ip: V4(0x7f000001), port: 0), UdpOptions(slots: 1, slot_bytes: 1536)))
+    take socket
+}
+
+// expect: run udp_pool_charge_outlives_its_helper(network) = true
+fn udp_pool_charge_outlives_its_helper(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
+    let before = udp_room()
+    let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, n, udp_helper_bind))
+    let socket = result.unwrap(task.join(take helper))
+    let charged = udp_room()
+    if charged != before - 1544 {
+        fail("join changed the live UDP socket charge")
+    }
+    let endpoint = result.unwrap(host.udp_local_addr(socket))
+    let _ = take socket
+    let retired = udp_room()
+    if retired != before {
+        fail("retirement did not refund the UDP socket charge")
+    }
+    endpoint.ip == V4(0x7f000001) && endpoint.port != 0
+}
+
+type UdpSettlement = ReplyAndReuse | RoomDebited | RoomFull | InvalidReply | DropAndReuse | SealWhileStaged | WithdrawAndReuse
+
+fn udp_staging_server(take job: (Served[NetOp], UdpSettlement, ClockHand, Receiver[()])) -> bool waits {
+    let (take input, settlement, take clock_hand, take ack) = take job
+    let mut served = take input
+    let mut hand = take clock_hand
+    let sock_addr = Addr(ip: V4(0x7f000001), port: 4000)
+    let peer = Addr(ip: V4(0x7f000001), port: 5000)
+    let Some(take bind) = provide.next(mut served) else {
+        return false
+    }
+    let UdpBind(addr: addr, slots: 1, slot_bytes: 1536, members: 1, steer: Hash) = provide.net_op(bind) else {
+        return false
+    }
+    if addr != sock_addr {
+        return false
+    }
+    result.unwrap(provide.reply(mut served, take bind, provide.net_reply(UdpSockets(first: 17, count: 1, addr: sock_addr))))
+    for index in 0u64 .. 2u64 {
+        let Some(take incoming) = provide.next(mut served) else {
+            return false
+        }
+        let mut call = take incoming
+        let UdpRecv(socket: 17, room: 1, entries: 1) = provide.net_op(call) else {
+            return false
+        }
+        let mut records: List[UdpStaged] = list.with_capacity(1)
+        list.push(mut records, UdpStaged(peer: peer, len: 0, appended: 0, ecn: 3))
+        if let RoomFull = settlement {
+            provide.fill_packets(mut served, mut call, take records)
+            return false
+        }
+        let staged = result.unwrap(bound bytes 0 {
+            provide.fill_packets(mut served, mut call, take records)
+        })
+        if staged != 1 {
+            return false
+        }
+        match settlement {
+            RoomDebited => {
+                provide.fill(mut served, mut call, string.as_bytes("x"))
+                return false
+            },
+            InvalidReply => {
+                let _ = provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 2)))
+                return false
+            },
+            DropAndReuse if index == 0 => {
+                let _ = take call
+            },
+            WithdrawAndReuse if index == 0 => {
+                clock.advance_to(mut hand, 1)
+                result.unwrap(channel.receive(ack))
+                let Error(Withdrawn) = provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 1))) else {
+                    return false
+                }
+            },
+            SealWhileStaged => {
+                let _ = take served
+                let _ = take call
+                return true
+            },
+            _ => result.unwrap(provide.reply(mut served, take call, provide.net_reply(UdpPackets(count: 1)))),
+        }
+    }
+    let Some(take released) = provide.next(mut served) else {
+        return false
+    }
+    match provide.net_op(released) {
+        Released(id: 17, part: Whole) => true,
+        _ => false,
+    }
+}
+
+fn udp_staging_case(tasks: Tasks, settlement: UdpSettlement) -> bool waits {
+    let room: u64 = match settlement {
+        RoomFull => 32,
+        _ => 80
+    }
+    let (net, take served) = provide.net(bytes room)
+    let (clock, take hand) = provide.clock(0, 0)
+    let (ack, receive): (Sender[()], Receiver[()]) = channel.new(1)
+    let server = task.spawn(tasks, bytes 4096, (take served, settlement, take hand, take receive), udp_staging_server)
+    let endpoint = Addr(ip: V4(0x7f000001), port: 4000)
+    let (take socket, addr) = result.unwrap(host.udp_bind(net, endpoint, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let mut receiver = take socket
+    let mut same = addr == endpoint
+    let mut incoming: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    for index in 0u64 .. 2u64 {
+        let should_deliver = match settlement {
+            ReplyAndReuse => true,
+            DropAndReuse => index == 1,
+            WithdrawAndReuse => index == 1,
+            _ => false,
+        }
+        let withdraw = match settlement {
+            WithdrawAndReuse => index == 0,
+            _ => false
+        }
+        let until: Until = if withdraw {
+            At(clock, 1)
+        } else {
+            Never
+        }
+        let outcome = host.udp_recv(mut receiver, mut incoming, mut packets, until)
+        match outcome {
+            Ok(1) => {
+                let UdpPacket(peer, at, len, truncated, ecn) = packets[0]
+                same = same && should_deliver && list.len(incoming) == 0 && list.len(packets) == 1 && peer.port == 5000 && at == 0 && len == 0 && !truncated && ecn == 3
+                list.clear(mut packets)
+            },
+            Error(Reset) => {
+                same = same && !withdraw && !should_deliver && list.len(incoming) == 0 && list.len(packets) == 0
+            },
+            Error(TimedOut) => {
+                same = same && withdraw && list.len(incoming) == 0 && list.len(packets) == 0
+            },
+            _ => {
+                same = false
+            },
+        }
+        if withdraw {
+            result.unwrap(channel.send(ack, ()))
+        }
+    }
+    let _ = take receiver
+    let settled = match task.join(take server) {
+        Ok(ok) => ok && match settlement {
+            ReplyAndReuse => true,
+            DropAndReuse => true,
+            SealWhileStaged => true,
+            WithdrawAndReuse => true,
+            _ => false,
+        },
+        Error(Failed(causes)) => {
+            for cause in causes {
+                return same && match (settlement, cause.kind) {
+                    (RoomDebited, Capacity(c)) => c.requested == 1 && c.available == 0,
+                    (RoomFull, Capacity(c)) => c.requested == 48 && c.available == 0,
+                    (InvalidReply, Fail(_)) => true,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+    same && settled
+}
+
+// expect: run served_staging_has_one_payer(tasks) = true
+fn served_staging_has_one_payer(tasks: Tasks) -> bool waits {
+    udp_staging_case(tasks, ReplyAndReuse) && udp_staging_case(tasks, RoomDebited) && udp_staging_case(tasks, RoomFull) && udp_staging_case(tasks, InvalidReply) && udp_staging_case(tasks, DropAndReuse) && udp_staging_case(tasks, SealWhileStaged) && udp_staging_case(tasks, WithdrawAndReuse)
 }

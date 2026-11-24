@@ -30,12 +30,12 @@ type Services: send {
 }
 
 type Grants: send {
-    context: runner.TriggerContext,
+    handles: harness.Handles, context: runner.TriggerContext,
     s: Services
 }
 
 fn usage() -> harness.Usage {
-    harness.Usage(input: 10u64, output: 5u64)
+    harness.Usage(input: 10u64, output: 5u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)
 }
 
 fn call_of(take name: String) -> harness.Call {
@@ -72,14 +72,14 @@ fn ask_service(to: Sender[Sender[()]]) -> Result[(), harness.Fault] waits {
 
 // The script: once a tool has answered, end with "done"; before that, call the tool the
 // user's message names ("bump it", "tally it", "delegate it").
-fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     if g.s.chunks > 0u64 {
         return streaming_model(g, take r, mut sink)
     }
     let mut tool = "bump"
     for e in r.messages {
         match e {
-            ToolResult(_, _) => return Ok(finished()),
+            ToolResult(_, _, _) => return Ok(finished()),
             User(text) => if text == "tally it" {
                 tool = "tally"
             } else if text == "delegate it" {
@@ -88,7 +88,7 @@ fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.p
             _ => (),
         }
     }
-    ask_service(g.s.model)?
+    ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
     Ok(asking(string.from(tool)))
 }
 
@@ -100,16 +100,16 @@ fn preview_answer() -> harness.Answer {
     harness.Answer(text: take text, calls: list.new(), stop: "end", usage: usage())
 }
 
-fn streaming_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn streaming_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let answer = preview_answer()
     let width = 10000u64 / g.s.chunks
-    ask_service(g.s.model)?
+    ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
     for i in 0u64 .. g.s.chunks {
         if let Some(mut p) = sink {
             harness.preview.delta(mut p, string.slice(answer.text, i * width, (i + 1u64) * width))
         }
         if i == 0u64 {
-            ask_service(g.s.model)?
+            ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
         }
     }
     Ok(take answer)
@@ -132,7 +132,7 @@ fn tally(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
 
 fn child_of(s: Services) -> harness.gateway.Child {
     let views: std.codec.Codec[harness.View] = std.codec.of()
-    harness.gateway.Child(submit: runner.client.transact_entry(code.describe(submit_entry)), shown: runner.client.query_as_entry(code.describe(harness.window), std.codec.key_u64(), views), keys: result.unwrap(runner.client.entry_keys(code.describe(place))), socket: wire().socket, authority: string.into_bytes("localhost"), tasks: s.tasks, clock: s.clock, random: s.random, net: s.net, within_ms: WITHIN_MS)
+    harness.gateway.Child(submit: runner.client.transact_entry(code.describe(submit_entry)), shown: runner.client.query_as_entry(code.describe(harness.window), result.unwrap(harness.window_slots())), keys: result.unwrap(runner.client.entry_keys(code.describe(place))), socket: wire().socket, authority: string.into_bytes("localhost"), tasks: s.tasks, clock: s.clock, random: s.random, net: s.net, within_ms: WITHIN_MS)
 }
 
 // The subagent: a child session, keyed by this place and this effect's trigger run,
@@ -142,7 +142,7 @@ fn delegate(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
     harness.gateway.ask(g.s.door, take key, Fresh("scripted", All), child_of(g.s), "tally it")
 }
 
-fn hold_bump(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+fn hold_bump(tx: store.Tx, h: harness.Handles, app: (), ask: harness.Ask) -> harness.Verdict {
     if ask.call.name == "bump" {
         Hold("bump needs approval")
     } else {
@@ -151,8 +151,8 @@ fn hold_bump(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
 }
 
 // ---- the session place: the agent, its trigger entries and its wire entries ----
-fn gated_agent() -> harness.Agent[Grants] {
-    let mut a = harness.agent("gated", "scripted", code.describe(scripted_model))
+fn gated_agent() -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("gated", "scripted", code.describe(scripted_model), ())
     list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
     list.push(mut a.tools, harness.outside("tally", "counts one", "{}", Once, code.describe(tally)))
     list.push(mut a.tools, harness.outside("delegate", "asks a subagent", "{}", Once, code.describe(delegate)))
@@ -164,9 +164,9 @@ fn wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(advance), code.describe(effect))
 }
 
-fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = wired()?
-    harness.advance(mut tx, h, gated_agent(), w, take wake)
+    harness.advance_park(mut tx, h, gated_agent(), w, take wake)
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
@@ -174,19 +174,19 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
         Some(p) => Some(harness.preview.target(p, g.s.name, g.s.clock)),
         None => None,
     }
-    harness.effect(g.context, g, take key, gated_agent(), code.describe(settle), take target)
+    harness.effect(g.context, g.handles, g, take key, gated_agent(), code.describe(settle), take target)
 }
 
-fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = wired() else {
         return Error(Missing("harness: wiring"))
     }
-    harness.settle(mut tx, gated_agent(), w, a, take m)
+    harness.settle(mut tx, h, gated_agent(), w, a, take m)
 }
 
 fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
     let w = wired()?
-    harness.submit(mut tx, h, gated_agent(), w, caller, take m)
+    harness.submit(mut tx, h, gated_agent(), w, caller, NextTurn, take m)
 }
 
 fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
@@ -199,14 +199,14 @@ fn revoke_reader(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, EFFECT_BYTES)?
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness.select_handles, BYTES, EFFECT_BYTES)?
     runner.transact(mut r, code.describe(submit_entry), BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(decide_entry), BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(revoke_reader), BYTES, runner.DEFAULT_STEPS)?
     harness.pending_waits_entry(mut r, BYTES, runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.window), harness.window_slots()?, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(harness.history_cuts), harness.cut_slots()?, BYTES, runner.DEFAULT_STEPS)
 }
 
 fn services_of(s: Services, take name: String) -> Services {
@@ -216,12 +216,12 @@ fn services_of(s: Services, take name: String) -> Services {
     }, chunks: s.chunks)
 }
 
-fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
-    Ok(Grants(context: take ctx, s: services_of(s, string.from(s.name))))
+fn make_grants(s: Services, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: take ctx, s: services_of(s, string.from(s.name))))
 }
 
 fn wire() -> runner.WireConfig {
-    let mut w = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut w = runner.wire_defaults(65536u64)
     w.n_pool = 4194304u64
     w
 }
@@ -231,7 +231,7 @@ fn wire() -> runner.WireConfig {
 fn session_place(take supplied: platform.local.Supplied, s: Services) -> Result[runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let w = result.unwrap(wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: services_of(s, string.from(supplied.name)), grant: make_grants, grant_bytes: EFFECT_GRANT)
-    Ok(runner.PlaceConfig(backing: Memory, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
+    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
 }
 
 fn session_factory() -> platform.local.Factory[Services] {
@@ -289,13 +289,13 @@ fn stopped(changes: Receiver[platform.local.Change]) -> bool waits {
 }
 
 fn transcript_of(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> List[Bytes] waits {
-    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let snap = store.snapshot(db)
     let mut out: List[Bytes] = list.new()
-    if let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) {
+    if let Ok(Some(s)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64) {
         for p in 0u64 .. s.next_pos {
-            if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), p) {
+            if let Ok(Some(e)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, p) {
                 list.push(mut out, bytes_of(e))
             }
         }
@@ -321,7 +321,7 @@ fn log_of(take tool: String, take outcome: harness.Outcome) -> List[Bytes] {
     list.push(mut entries_want, User(take said))
     list.push(mut entries_want, System(harness.Patch(baseline: true, changes: list.new(), tools: Some(take defs))))
     list.push(mut entries_want, Assistant(asking(take tool)))
-    list.push(mut entries_want, ToolResult("c1", take outcome))
+    list.push(mut entries_want, ToolResult("c1", clone(outcome), harness.worded(outcome)))
     list.push(mut entries_want, Assistant(finished()))
     let mut log: List[Bytes] = list.new()
     for e in entries_want {
@@ -342,10 +342,10 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (watch, changes): (Sender[platform.local.Change], Receiver[platform.local.Change]) = channel.new(64u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -467,10 +467,10 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (watch, changes): (Sender[platform.local.Change], Receiver[platform.local.Change]) = channel.new(256u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -771,7 +771,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (tallies, held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let worker_port = if enabled {
         Some(harness.preview.door(hub))
@@ -779,7 +779,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         None
     }
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: if fork { 2u64 } else { 1u64 }, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: if fork { 2u64 } else { 1u64 }, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -857,22 +857,22 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if mid_run != 200u16 {
             return 19u64
         }
-        // A message during the run is answered at once: the session has one active run,
-        // so the place says Busy rather than holding the request until the turn ends.
+        // A message during the run is answered at once: it is queued in the session's
+        // ingress (Queued at seq 1) and becomes the next turn when this one ends.
         let (busy, said) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 2u64), json(harness.Submit(client_key: "k2", text: "again")))
-        if busy != 202u16 || said != json((Busy : harness.Disposition)) {
+        if busy != 202u16 || said != json((Queued(1u64) : harness.Disposition)) {
             return 20u64
         }
         let _ = channel.send(let_go, ())
     }
-    let r2 = read_until(mut stream, mut decoder, mut rows, "answered")
+    let r2 = read_until_row(mut stream, mut decoder, mut rows, "answered", if enabled { 7u64 } else { 5u64 })
     if !r2 {
         return 13u64
     }
-    if !same_rows(rows, rows_want("answered", true)) {
+    if !same_rows(rows, tool_finished_rows(enabled)) {
         return 14u64
     }
-    let paged = tail_and_history(net, clock, port, me)
+    let paged = tail_and_history(net, clock, port, me, enabled)
     if paged != 0u64 {
         return 40u64 + paged
     }
@@ -903,63 +903,6 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
 // last two entries (positions 3 and 4). Paging back from its oldest row with a pinned
 // cutoff gives the rest, and the stream and pages together are the whole transcript,
 // as the hand-derived rows say. The answer is the first check that failed, or 0.
-fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
-    let Ok(take opened) = browser_at(net, clock, port, me, "/sessions/0/events?tail=2") else {
-        return 1u64
-    }
-    let mut fresh = take opened
-    let mut decoder = std.sse.decoder(65536u64)
-    let mut rows: List[(u64, Bytes)] = list.new()
-    if !read_until_row(mut fresh, mut decoder, mut rows, "answered", 5u64) {
-        return 2u64
-    }
-    let _ = take fresh
-    let mut tail: List[(u64, Bytes)] = list.new()
-    list.push(mut tail, row_of(0u64, Status("answered")))
-    list.push(mut tail, row_of(4u64, Line("tool", "c1")))
-    list.push(mut tail, row_of(5u64, Line("assistant", "done")))
-    if !same_rows(rows, tail) {
-        return 3u64
-    }
-    let format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
-    let mut before = 4u64
-    let mut pages = 0u64
-    while before > 1u64 {
-        let mut target = string.from("/sessions/0/history?before=")
-        string.push_u64(mut target, before)
-        string.push(mut target, "&lines=2")
-        let (status, body) = http(net, clock, port, "GET", target, person(me, 0u64), list.new())
-        if status != 200u16 {
-            return 4u64
-        }
-        let Ok(page) = std.json.decode_typed(format, clone(body), 65536u64) else {
-            return 5u64
-        }
-        if page.from >= before {
-            return 6u64
-        }
-        for r in page.rows {
-            if r.at < page.from || r.at >= before {
-                return 7u64
-            }
-            list.push(mut rows, (r.at, bytes_of(r.line)))
-        }
-        before = page.from
-        pages += 1u64
-    }
-    if pages != 2u64 {
-        return 8u64
-    }
-    if !same_rows(rows, rows_want("answered", true)) {
-        return 9u64
-    }
-    let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me, 0u64), list.new())
-    if refused != 400u16 {
-        return 10u64
-    }
-    0u64
-}
-
 // The source's five entries come from the scripted tool round. The fork reads
 // them through the host, which waits for the source's place, still live after
 // its turn, to stop first. A fork owns that pinned prefix even after the
@@ -1167,7 +1110,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let worker_port = if enabled {
         Some(harness.preview.door(hub))
@@ -1175,7 +1118,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         None
     }
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: chunks)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return Error(10u64)
     }
@@ -1296,7 +1239,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
                 return Error(30u64)
             }
             let d = harness.preview.door(hub)
-            let owner = result.unwrap(runner.ingress.caller((), me))
+            let owner = result.unwrap(runner.ingress.caller((), me)).caller
             let (posted_next, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 1u64), json(harness.Submit(client_key: "p2", text: "preview it")))
             if posted_next != 202u16 {
                 return Error(2200u64 + int.widen(posted_next))

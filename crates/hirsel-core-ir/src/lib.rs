@@ -457,12 +457,12 @@
 //!
 //! # SHA-1
 //!
-//! `rt.sha1_blocks(state, data, len)` applies RFC 3174 block compression in
-//! order to `len` readable bytes and their SHA-1 padding. It updates five
-//! `u32` state words in place. An empty span only compresses the padding.
-//! The call admits no bytes and costs one step (MEM-30). The portable and
-//! instruction kernels update the same state (SEM-8). Engines map the row to
-//! `void hirsel_core_sha1_blocks(uint32_t *, const uint8_t *, uint64_t)`.
+//! `rt.sha1_blocks(state, data, len)` compresses `len` readable bytes and
+//! their RFC 3174 padding. `rt.sha1_compress(state, data, blocks)` compresses
+//! `blocks` complete 64-byte blocks without padding. Both update five `u32`
+//! state words in one step, admit no bytes (MEM-30), and use the same
+//! portable and instruction kernels (SEM-8). Engines map both rows to
+//! `hirsel_core_sha1_*` with `(uint32_t *, const uint8_t *, uint64_t)`.
 //!
 //! # SHA-256
 //!
@@ -476,6 +476,12 @@
 //! is the same bytes, so nothing observable names the choice (SEM-8). Engines map
 //! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
 //! with no context or status.
+//!
+//! # SHA-512
+//!
+//! `rt.sha512_blocks` has the SHA-256 row's range, admission and step rules,
+//! with 128-byte blocks and eight `u64` state words. Engines map it to
+//! `void hirsel_core_sha512_blocks(uint64_t *, const uint8_t *, uint64_t)`.
 //!
 //! # CRC
 //!
@@ -669,21 +675,12 @@
 //!
 //! # Logs (FORM #101, MEM-29)
 //!
-//! `Log[E]` adds no form. Its row is `own "Log[E]" { node: box L }` with `L` the
-//! `List[E]` row: the 8-byte handle is a box pointer, the node is the box's 24-byte
-//! payload, the `List` carrier, charged 24 (`log.new`), and the entries' storage is
-//! that carrier's, admitted and grown by the list kernels as `list.push` would, so a
-//! `Log` is cleaned by its existing box and sequence classes (entries in index order,
-//! which is append order, then the node). `log.append` takes `&view` of the handle,
-//! loads the node pointer, and writes only behind it: wf refuses a body that writes
-//! its `view` place, and a node reached through a loaded pointer is not that place
-//! (Loans: places behind the parameter carry no loan). `log.finish` moves the
-//! carrier out of the node and frees the box. `noalias readonly` on the view stays
-//! valid: LLVM's `readonly` is about memory reached through pointers based on the
-//! argument, and a pointer loaded from the handle is not based on it; no write
-//! reaches the handle's 8 bytes during the call, which is all `noalias` claims; and
-//! [`roles::Facts`] gives addresses through a loaded pointer no role, so no alias
-//! scope covers the node. `samples/log.core` is the oracle.
+//! `Log[E]` adds no form and no row: it is the `log` module's opaque library type
+//! over a `Cell[List[E]]`, so its node is the cell's box node (the 24-byte `List`
+//! carrier) and its entries are that carrier's storage, grown as `list.push` grows
+//! it. `log.append` is a `cell.with` whose callback is `list.push`, and
+//! `log.finish` is `cell.into_inner`. `samples/log.core` stays as an oracle for a
+//! write behind a loaded pointer under a `noalias readonly` view.
 //!
 //! # Storage and admission (FORM v1a)
 //!
@@ -704,9 +701,9 @@
 //! payload. A counted payload holds no resource, so a release runs no user code.
 //! Every counted row names its kind: `alloc for rc|arc` and `share`,
 //! `release` and `try_unwrap` with `rc|arc`, so each row alone says whether its
-//! count operations are atomic. An `arc` node is made and counted atomically, and
-//! each of these rows is an event in the run's order (MEM-15); `rc` never crosses
-//! a task (Rc is not `send`). The producer takes the kind from the core type the
+//! count operations are events. Counts are plain words (an `arc` never leaves
+//! its unit, CONC-2); each `arc` row is an event in the run's order (MEM-15) and
+//! `rc` never crosses a task. The producer takes the kind from the core type the
 //! source operation is on, `rc.*` or `Rc[T]` gives `rc`, `arc.*` or `Arc[T]`
 //! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
 //! allocation is malformed (the evaluator stops on it).
@@ -1121,9 +1118,9 @@ pub mod extent;
 pub mod failure;
 pub mod fills;
 mod ir;
+pub mod law;
 pub mod native_layout;
 pub mod normal;
-pub mod receive_loops;
 pub mod release_recipe;
 pub mod returnable;
 pub mod roles;

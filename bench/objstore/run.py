@@ -3,7 +3,6 @@
 import argparse
 from contextlib import ExitStack, contextmanager
 import datetime as dt
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'core/tools'))
 from loopback_peer import accept_from
+from timing_shield import BOARD, REGIMES, hold
 
 BODY = 8 * 1024 * 1024
 PUT_START = b"PUT /object HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8388608\r\n\r\n\xa5"
@@ -137,9 +138,7 @@ def timing_window():
 
 
 def lock_timing(stack):
-    for name in ("hirsel-mc-regimes.lock", "hirsel-board.lock"):
-        lock = stack.enter_context((Path("/run/user") / str(os.getuid()) / name).open("a"))
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    stack.enter_context(hold(REGIMES, BOARD))
     timing_window()
 
 

@@ -1,7 +1,10 @@
-//! Closed runtime rows bind the published task and provider C ABI. Provider
-//! carriers stay run-owned; only waiting host operations observe failure status.
-use super::function::Function;
-use super::*;
+//! Closed runtime rows bind the published task and provider C ABI.
+mod argon2;
+mod host;
+mod map_placement;
+mod signature;
+
+use super::{abi::op_signature, function::Function, *};
 use cranelift_codegen::ir::{MemFlagsData, Value};
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -10,10 +13,6 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
-        let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
-        self.describe(storage, types, task_input)
-    }
     /// An explicit stack slot of its own, for a descriptor passed by pointer
     /// beside an indirect result that shares the call scratch.
     fn own_slot(&mut self, size: u32) -> Value {
@@ -126,16 +125,11 @@ impl Function<'_, '_, '_> {
         }
         Ok(storage)
     }
-    pub fn runtime_call(&mut self, op: RtOp, call: &CallSite, fused_receive: bool) -> Result<()> {
-        let mut args = [Value::from_u32(0); 9];
-        for (i, arg) in call
-            .args
-            .get(&self.body.pools.args)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            args[i] = match *arg {
+    pub fn runtime_call(&mut self, op: RtOp, call: &CallSite) -> Result<()> {
+        let mut args = [Value::from_u32(0); 13];
+        let inputs = call.args.get(&self.body.pools.args).unwrap();
+        for (operand, arg) in args[..inputs.len()].iter_mut().zip(inputs) {
+            *operand = match *arg {
                 Arg::Value(v) => self.get(v),
                 Arg::Address(a) => self.addr(a),
             };
@@ -220,6 +214,10 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
+            RtOp::RootLimit => {
+                outputs[0] = self.c_call("hirsel_core_root_limit", &[P], &[U], &[self.context])?[0];
+                1
+            }
             RtOp::LaunchWord => {
                 outputs[0] = self.c_call(
                     "hirsel_core_launch_word",
@@ -274,10 +272,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::Read
                     | HostOp::Write
                     | HostOp::OpenDir
+                    | HostOp::Entries
                     | HostOp::Stat
                     | HostOp::NextEntries
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
+                    | HostOp::Mkstemp
                     | HostOp::Remove
                     | HostOp::RemoveTree
                     | HostOp::Stdout
@@ -286,12 +286,13 @@ impl Function<'_, '_, '_> {
                     _ => null,
                 };
                 let mode = if op == HostOp::Open { args[2] } else { no_mode };
-                // The C outcome is always 32 bytes: value at 0, error.tag at 8,
-                // error.code at 12, written at 16, status at 24.
+                // C outcome fields: value at 0, error at 8, written at 16, status at 24.
                 let values = match op {
                     HostOp::Connect
                     | HostOp::Listen
                     | HostOp::Accept
+                    | HostOp::LocalAddr
+                    | HostOp::PeerAddr
                     | HostOp::RecvBounded
                     | HostOp::RecvReady
                     | HostOp::SendPair
@@ -308,6 +309,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::DatagramSend
                     | HostOp::DatagramSendTo
                     | HostOp::DatagramRecv
+                    | HostOp::UdpOpen
+                    | HostOp::UdpBind
+                    | HostOp::UdpBindGroup
+                    | HostOp::UdpRecv
+                    | HostOp::UdpSend
+                    | HostOp::UdpLocalAddr
                     | HostOp::NetNarrowUnix
                     | HostOp::Resolve
                     | HostOp::CredFetch
@@ -320,10 +327,31 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
                     | HostOp::SecretDeriveHmac
+                    | HostOp::SecretDeriveHkdf
+                    | HostOp::SecretDeriveArgon2id
                     | HostOp::SecretVerifyHmac
+                    | HostOp::SecretHmacSha384
+                    | HostOp::SecretHmacSha512
+                    | HostOp::SecretVerifyHmacSha384
+                    | HostOp::SecretVerifyHmacSha512
+                    | HostOp::SecretJwsHmacSign
+                    | HostOp::SecretJwsHmacVerify
                     | HostOp::SecretWrap
                     | HostOp::SecretUnwrap
                     | HostOp::SecretSign
+                    | HostOp::SecretP256Key
+                    | HostOp::SecretKeyShare
+                    | HostOp::ScheduleQuicInitial
+                    | HostOp::ScheduleSealer
+                    | HostOp::ScheduleOpener
+                    | HostOp::ScheduleHeaderMask
+                    | HostOp::PacketSeal
+                    | HostOp::PacketSealInto
+                    | HostOp::PacketOpen
+                    | HostOp::PacketOpenInto
+                    | HostOp::PacketMask
+                    | HostOp::SecretAeadSeal
+                    | HostOp::SecretAeadOpen
                     | HostOp::StdinRead
                     | HostOp::StreamTerminal
                     | HostOp::EnvGet
@@ -332,6 +360,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::EnvNarrow
                     | HostOp::ProvideClock
                     | HostOp::ProvideRandom
+                    | HostOp::ProvideRandomTape
                     | HostOp::ProvideProcess
                     | HostOp::ClockAdvance
                     | HostOp::ClockSetWall
@@ -343,37 +372,18 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallWord
                     | HostOp::CallSecret
                     | HostOp::CallPayload
+                    | HostOp::CallPayloadPrefix
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::ProvideNet
                     | HostOp::ProvideExec
                     | HostOp::PortFill
+                    | HostOp::UdpFillPackets
                     | HostOp::NetJoin
                     | HostOp::ExecSpawn
                     | HostOp::ExecWait
                     | HostOp::ExecSignal
-                    | HostOp::NetSplit => {
-                        let signature = op_signature(op);
-                        let count = signature.len();
-                        let mut params = vec![P];
-                        params.extend(signature);
-                        params.push(U);
-                        let mut operands = vec![self.context];
-                        operands.extend_from_slice(&args[..count]);
-                        operands.push(site);
-                        let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
-                        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
-                            results[0] = P;
-                        }
-                        if matches!(op, HostOp::Listen | HostOp::Accept) {
-                            results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
-                        } else if op == HostOp::TlsConnect {
-                            results.extend([U; 4]);
-                        } else if op == HostOp::ExecSpawn {
-                            results.extend([U; 3]);
-                        }
-                        self.c_call(op.adapter_symbol(), &params, &results, &operands)?
-                    }
+                    | HostOp::NetSplit => self.host_adapter(op, &args, site)?,
                     HostOp::ReadAt | HostOp::WriteAt => self.c_call(
                         "hirsel_core_host_at",
                         &[P, K, U, U, P, U],
@@ -412,6 +422,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Unlock
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
+                    | HostOp::Mkstemp
                     | HostOp::Remove
                     | HostOp::RemoveTree
                     | HostOp::WallMs
@@ -420,6 +431,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Stderr
                     | HostOp::Sync
                     | HostOp::SyncDir
+                    | HostOp::ZeroExtension
                     | HostOp::Random
                     | HostOp::Stopped
                     | HostOp::OpenDir
@@ -443,7 +455,7 @@ impl Function<'_, '_, '_> {
                 for i in 0..n {
                     outputs[i] = values[i];
                 }
-                if matches!(op, HostOp::Listen | HostOp::Accept | HostOp::TlsConnect) {
+                if op.address_outcome() || op == HostOp::TlsConnect {
                     for i in 4..8 {
                         outputs[i] = values[i + 1];
                     }
@@ -653,16 +665,19 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_xxh3_stripes", &[P, P, P, U], &[], &args[..4])?;
                 0
             }
-            RtOp::Sha1Blocks => {
-                self.c_call("hirsel_core_sha1_blocks", &[P, P, U], &[], &args[..3])?;
+            RtOp::Sha1Blocks | RtOp::Sha1Compress | RtOp::Sha256Blocks | RtOp::Sha512Blocks => {
+                let symbol = match op {
+                    RtOp::Sha1Blocks => "hirsel_core_sha1_blocks",
+                    RtOp::Sha1Compress => "hirsel_core_sha1_compress",
+                    RtOp::Sha256Blocks => "hirsel_core_sha256_blocks",
+                    RtOp::Sha512Blocks => "hirsel_core_sha512_blocks",
+                    _ => unreachable!(),
+                };
+                self.c_call(symbol, &[P, P, U], &[], &args[..3])?;
                 0
             }
             RtOp::ZeroBytes => {
                 self.c_call("hirsel_core_zero_bytes", &[P, P, U], &[], &args[..3])?;
-                0
-            }
-            RtOp::Sha256Blocks => {
-                self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
                 0
             }
             RtOp::Crc32c => {
@@ -687,16 +702,17 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
-                let name = match op {
-                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
-                    RtOp::P256Verify => "hirsel_core_p256_verify",
-                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
-                    _ => unreachable!(),
-                };
-                outputs[0] = self.c_call(name, &[P, U, P, U, P, U], &[U], &args[..6])?[0];
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer
+            | RtOp::RsaVerifyPkcs1Sha256
+            | RtOp::RsaVerifyPssSha256 => {
+                outputs[0] = self.signature_call(op, &args)?;
                 1
             }
+            RtOp::Argon2id => self.argon2id(&args, call.fail, &mut outputs)?,
             RtOp::CauseNext | RtOp::CauseValue => {
                 let name = if op == RtOp::CauseNext {
                     "hirsel_core_cause_next"
@@ -871,8 +887,6 @@ impl Function<'_, '_, '_> {
             RtOp::Send { .. } | RtOp::Receive { .. } => {
                 let name = if matches!(op, RtOp::Send { .. }) {
                     "hirsel_core_send"
-                } else if fused_receive {
-                    "hirsel_core_receive_in_loop"
                 } else {
                     "hirsel_core_receive"
                 };
@@ -919,6 +933,31 @@ impl Function<'_, '_, '_> {
                 outputs[1] = values[1];
                 2
             }
+            RtOp::SharedNew { item } => {
+                let cross = self.cross(item, 0)?;
+                let values = self.c_call(
+                    "hirsel_core_shared_new",
+                    &[P, P, P, U],
+                    &[P, U],
+                    &[self.context, args[0], cross, args[1]],
+                )?;
+                outputs[0] = values[0];
+                outputs[1] = values[1];
+                2
+            }
+            RtOp::SharedShare => {
+                outputs[0] = self.c_call("hirsel_core_shared_share", &[P], &[P], &[args[0]])?[0];
+                1
+            }
+            RtOp::SharedRelease { .. } => {
+                self.c_call(
+                    "hirsel_core_shared_release",
+                    &[P, P],
+                    &[],
+                    &[self.context, args[0]],
+                )?;
+                0
+            }
             RtOp::LatestHandle | RtOp::LatestRead => {
                 let name = if op == RtOp::LatestHandle {
                     "hirsel_core_latest_handle"
@@ -957,129 +996,5 @@ impl Function<'_, '_, '_> {
             self.set(id, value);
         }
         Ok(())
-    }
-}
-
-fn op_signature(op: HostOp) -> Vec<Ty> {
-    hirsel_core_ir::RtOp::Host(op)
-        .signature()
-        .params
-        .into_iter()
-        .map(|p| match p {
-            hirsel_core_ir::Param::Value(t) => t,
-            _ => unreachable!(),
-        })
-        .collect()
-}
-
-impl Function<'_, '_, '_> {
-    fn map_fast_salt(&mut self, index: i32) -> Value {
-        let at = memory_layout::CONTEXT_MAP_FAST_SALT as i32 + index * 8;
-        self.b
-            .ins()
-            .load(types::I64, MemFlagsData::new(), self.context, at)
-    }
-
-    fn map_fold(&mut self, a: Value, b: Value) -> Value {
-        let lo = self.b.ins().imul(a, b);
-        let hi = self.b.ins().umulhi(a, b);
-        self.b.ins().bxor(lo, hi)
-    }
-
-    fn map_place_bytes(&mut self, bytes: Value, len: Value) -> Value {
-        let s0 = self.map_fast_salt(0);
-        let s1 = self.map_fast_salt(1);
-        let head = self.b.create_block();
-        let chunk = self.b.create_block();
-        let tail = self.b.create_block();
-        for _ in 0..3 {
-            self.b.append_block_param(head, types::I64);
-        }
-        self.b
-            .ins()
-            .jump(head, &[bytes.into(), len.into(), s0.into()]);
-        self.b.switch_to_block(head);
-        let p = self.b.block_params(head)[0];
-        let n = self.b.block_params(head)[1];
-        let z = self.b.block_params(head)[2];
-        let more = self
-            .b
-            .ins()
-            .icmp_imm_u(ir::condcodes::IntCC::UnsignedGreaterThan, n, 16);
-        self.b.ins().brif(more, chunk, &[], tail, &[]);
-        self.b.switch_to_block(chunk);
-        let low = self.b.ins().load(types::I64, MemFlagsData::new(), p, 0);
-        let high = self.b.ins().load(types::I64, MemFlagsData::new(), p, 8);
-        let a = self.b.ins().bxor(z, low);
-        let b = self.b.ins().bxor(s1, high);
-        let next_z = self.map_fold(a, b);
-        let next_p = self.b.ins().iadd_imm_s(p, 16);
-        let next_n = self.b.ins().iadd_imm_s(n, -16);
-        self.b
-            .ins()
-            .jump(head, &[next_p.into(), next_n.into(), next_z.into()]);
-        self.b.switch_to_block(tail);
-
-        let zero = self.b.ins().iconst(types::I64, 0);
-        let eight = self.b.ins().iconst(types::I64, 8);
-        let above_eight = self
-            .b
-            .ins()
-            .icmp_imm_u(ir::condcodes::IntCC::UnsignedGreaterThan, n, 8);
-        let low_len = self.b.ins().select(above_eight, eight, n);
-        let high_len = self.b.ins().iadd_imm_s(n, -8);
-        let high_len = self.b.ins().select(above_eight, high_len, zero);
-        let w0 = self.map_place_tail(p, low_len);
-        let high = self.b.ins().iadd_imm_s(p, 8);
-        let w1 = self.map_place_tail(high, high_len);
-        let a = self.b.ins().bxor(z, w0);
-        let b = self.b.ins().bxor(s1, w1);
-        let b = self.b.ins().iadd(b, len);
-        let t = self.map_fold(a, b);
-        let mix = self
-            .b
-            .ins()
-            .iconst(types::I64, hirsel_core_layout::map_index::MIX as i64);
-        self.map_fold(t, mix)
-    }
-
-    fn map_place_tail(&mut self, p: Value, n: Value) -> Value {
-        let mut word = self.b.ins().iconst(types::I64, 0);
-        let mut consumed = word;
-        for (bytes, ty) in [
-            (8, types::I64),
-            (4, types::I32),
-            (2, types::I16),
-            (1, types::I8),
-        ] {
-            let next = self.b.ins().iadd_imm_s(consumed, bytes);
-            let enough =
-                self.b
-                    .ins()
-                    .icmp(ir::condcodes::IntCC::UnsignedGreaterThanOrEqual, n, next);
-            let load = self.b.create_block();
-            let done = self.b.create_block();
-            self.b.append_block_param(done, types::I64);
-            self.b.append_block_param(done, types::I64);
-            self.b
-                .ins()
-                .brif(enough, load, &[], done, &[consumed.into(), word.into()]);
-            self.b.switch_to_block(load);
-            let at = self.b.ins().iadd(p, consumed);
-            let element = self.b.ins().load(ty, MemFlagsData::new(), at, 0);
-            let element = if bytes == 8 {
-                element
-            } else {
-                self.b.ins().uextend(types::I64, element)
-            };
-            let shift = self.b.ins().ishl_imm(consumed, 3);
-            let part = self.b.ins().ishl(element, shift);
-            let combined = self.b.ins().bor(word, part);
-            self.b.ins().jump(done, &[next.into(), combined.into()]);
-            self.b.switch_to_block(done);
-            consumed = self.b.block_params(done)[0];
-            word = self.b.block_params(done)[1];
-        }
-        word
     }
 }

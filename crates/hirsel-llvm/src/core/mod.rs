@@ -23,7 +23,10 @@ mod expose;
 mod fast;
 mod flow;
 mod forward;
+mod frame;
 mod growth;
+mod inlining;
+mod law;
 mod scalar;
 mod simd;
 mod sink;
@@ -44,8 +47,8 @@ use std::fmt::{self, Write};
 
 use sink::{
     Binary, CONTEXT, CallAttrs, Cast, Extension, FnAttrs, FnSig, Global, Inline, Label, Linkage,
-    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Rmw, Scoped, Sink,
-    Type, Value,
+    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Scoped, Sink, Type,
+    Value,
 };
 
 use hirsel_core_ir::failure;
@@ -99,11 +102,6 @@ type Result<T> = std::result::Result<T, Error>;
 /// The FORM instance link name, shared by declarations, definitions and callers.
 pub fn symbol(module: &Module, function: FuncId) -> String {
     hirsel_core_ir::symbol(module.code_identity(function))
-}
-
-/// The link name of `function`'s static descriptor (`Inst::DescriptorRef`).
-fn descriptor_symbol(function: &str) -> String {
-    format!("{function}$static")
 }
 
 /// The `"hirsel-carriers"` marker: each LLVM parameter whose place the bridge
@@ -281,6 +279,7 @@ struct Items {
     versioned: Option<Vec<bool>>,
     /// The free body each selecting entry chooses with no step bound current.
     step_dispatch: Vec<Option<FuncId>>,
+    callback_sites: Option<inlining::CallbackSites>,
     pending: std::collections::BTreeMap<String, Item>,
     release_sites: Option<ReleaseSites>,
     /// The types ordinary glue cleans with `core_direct_T` (cleanup::direct_types).
@@ -307,6 +306,7 @@ impl Items {
             function_symbols: module.link_symbols(),
             versioned: None,
             step_dispatch: vec![None; module.functions.len()],
+            callback_sites: None,
             pending: Default::default(),
             release_sites: None,
             direct: BTreeSet::new(),
@@ -455,6 +455,8 @@ fn emit_module(
     }
     let step_variants = hirsel_core_ir::step_contexts::variants(module);
     let batch_steps = source.batch_steps;
+    items.callback_sites =
+        batch_steps.then(|| inlining::CallbackSites::new(module, &step_variants));
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
         0,
@@ -489,7 +491,7 @@ fn emit_module(
     }
     // Each function a body of this unit describes, its descriptor `{code,
     // length, revision}` then the identity bytes, defined weak beside the
-    // function's code identity: every unit that describes it defines it, and
+    // described instance: every unit that describes it defines it, and
     // the linker keeps one per program, as it keeps one body. `revision`
     // addresses its revision root's carrier (`Module::revision_root`): an
     // item's is defined here plain weak as `{0, 0, 0}` so that a link that
@@ -505,7 +507,7 @@ fn emit_module(
                 continue;
             };
             let function_symbol = items.function_symbol(function);
-            let name = descriptor_symbol(function_symbol);
+            let name = module.descriptor_symbol(function, function_symbol);
             if !described.insert(name.clone()) {
                 continue;
             }
@@ -573,6 +575,7 @@ fn emit_module(
     }
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
+    let called_in_loop = empty::called_in_loop(module);
     let step_neutral = steps::neutral_functions(module, provided.neutral);
     let neutral_functions = step_neutral.as_slice();
     let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
@@ -749,7 +752,7 @@ fn emit_module(
                 failures: &failures,
                 constants: &failures.constants[i],
                 observe_charge,
-                receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops::new(body),
+                law: hirsel_core_ir::law::Hooks::pick(module, f, body, &recipes),
                 facts,
                 empty_bounds: if observe_charge {
                     empty::EmptyBounds::default()
@@ -771,72 +774,26 @@ fn emit_module(
             };
             let body_name = format!("{body_base}{suffix}");
             let attrs = FnAttrs {
-            linkage: if private {
-                Linkage::Internal
-            } else {
-                Linkage::WeakOdr
-            },
-            // Inline the reserved ASCII append and share the UTF-8/growth body.
-            // A loop-free callable variant exists only to bind its call site's
-            // closure, so it is inlined there unless that site is cold. A variant
-            // with a loop amortizes its call and stays out of line. Single-call adapters
-            // expose their result staging and cleanup to the caller's optimizer.
-            inline: match definition.as_str() {
-                "core@1/string/push_char" => Inline::Always,
-                "core@1/string/push_scalar" => Inline::Never,
-                "core@1/map/placement" | "core@1/map/probe" => Inline::Always,
-                // pivot.rs leaves the recursive sample to the inliner.
-                "core@1/list/median3_rec" => Inline::Default,
-                "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
-                "std@1/float/shortest_decimal64" | "std@1/float/push_fixed_decimal64" => Inline::Never,
-                // Share the argument reducers across the three trigonometric entries.
-                "std@1/float/trig_reduce" | "std@1/float/trig_reduce_large" => Inline::Never,
-                // Share regex construction across call sites. The parser and
-                // translator each have a fixed workspace and independent error paths.
-                "std@1/regex/read"
-                | "std@1/regex/write"
-                | "std@1/regex/insert"
-                | "std@1/regex/ast"
-                | "std@1/regex/check_depth"
-                | "std@1/regex/translate"
-                | "std@1/regex/translate_atom"
-                | "std@1/regex/compile_hir"
-                | "std@1/regex/sized_alts"
-                | "std@1/regex/emit_alts"
-                | "std@1/regex/choose_prefilter"
-                | "std@1/regex/names_size"
-                | "std@1/regex/write_names"
-                | "std@1/regex/compile_new" => Inline::Never,
-                // Keep lazy DFA misses off the cached transition path.
-                "std@1/regex/dfa_transition" => Inline::Never,
-                // Revisit bounded mutable loops after borrow-scope emission.
-                // LLVM inlining carries their parameter scopes into the caller.
-                _ if source.batch_steps
-                    && body.insts.len() <= 4096
-                    && sig.params.iter().any(|p| {
-                        matches!(p, Param::Address { place, loan: Loan::Mut }
-                            if matches!(place, PlaceTy::Value(Ty::Scalar(_)))
-                                || matches!(place, PlaceTy::Declared(t) if hirsel_core_ir::roles::carrier(module, *t)))
-                    })
-                    && !empty::loop_free(body) =>
-                {
-                    Inline::Always
-                }
-                _ if ((module.code_variants.contains_key(&FuncId(i as u32))
-                    && !step_variants.contains_key(&FuncId(i as u32)))
-                    || body.calls.len() <= 1)
-                    && empty::loop_free(body) =>
-                {
-                    Inline::Always
-                }
-                _ => Inline::Default,
-            },
-            map_probe: definition == "core@1/map/probe",
-            carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
-            subprogram: function_debug.map(|d| d.scope),
-            level,
-            ..FnAttrs::default()
-        };
+                linkage: if private {
+                    Linkage::Internal
+                } else {
+                    Linkage::WeakOdr
+                },
+                inline: inlining::definition(
+                    &definition,
+                    module,
+                    sig,
+                    body,
+                    batch_steps,
+                    called_in_loop[i],
+                    inlining::specialized(module, &step_variants, FuncId(i as u32)),
+                ),
+                map_probe: definition == "core@1/map/probe",
+                carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
+                subprogram: function_debug.map(|d| d.scope),
+                level,
+                ..FnAttrs::default()
+            };
             let signature = e.abi.signature(signature_params);
             e.sink
                 .begin_function(&body_name, &signature, &locals, &attrs);
@@ -883,11 +840,7 @@ fn emit_module(
                     e.sink.alloca(Local::Value(i), &ty(*t), 0);
                 }
             }
-            for (i, t) in body.slots.iter().enumerate() {
-                let (bytes, align) = e.place_layout(*t);
-                e.sink
-                    .alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
-            }
+            e.allocate_storage();
             for i in 0..body.addresses.len() {
                 if e.address_slots[i] {
                     e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
@@ -985,9 +938,7 @@ fn emit_module(
             for (i, b) in body.blocks.iter().enumerate() {
                 e.block(Label::block(i));
                 e.enter_block(i);
-                if e.receive_loops.exit(i) {
-                    e.native_call("hirsel_core_receive_loop_end", &[], &[]);
-                }
+                e.law_enter(i);
                 if let Some((number, plan)) = step_loops
                     .iter()
                     .enumerate()
@@ -1028,7 +979,8 @@ fn emit_module(
                         })?;
                         continue;
                     }
-                    if let Some(ending) = &ending
+                    if e.law.is_none()
+                        && let Some(ending) = &ending
                         && offset == ending.prefix
                         && {
                             e.anchor = body.inst_anchors[b.insts.start as usize + offset];
@@ -1587,7 +1539,7 @@ struct FunctionEmitter<'a> {
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,
     observe_charge: bool,
-    receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops,
+    law: Option<hirsel_core_ir::law::Hooks>,
     facts: bool,
     aliases: Option<alias::Scopes>,
     pointer_origins: Box<[Option<storage::PointerOrigin>]>,
@@ -2138,7 +2090,10 @@ impl FunctionEmitter<'_> {
                 result, function, ..
             } => self.put(
                 result,
-                &Value::global(descriptor_symbol(self.items.function_symbol(function))),
+                &Value::global(
+                    self.module
+                        .descriptor_symbol(function, self.items.function_symbol(function)),
+                ),
             ),
             Inst::CompactWidth { result, word, .. } => {
                 let x = self.numeric(word);
@@ -2337,13 +2292,18 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => {
+                let site = &self.body.calls[call.index()];
+                if self
+                    .law
+                    .as_ref()
+                    .is_some_and(|law| law.delegates(self.module, site.callee))
+                {
+                    self.law_hook(None, hirsel_core_layout::law::DELEGATE, None);
+                }
                 self.neutral_step_call = self.step_neutral.is_some_and(|neutral| {
                     steps::neutral_inst(self.module, self.body, inst, neutral)
                 });
-                let result = self.call_site(
-                    &self.body.calls[call.index()],
-                    self.receive_loops.call(call),
-                );
+                let result = self.call_site(site);
                 self.neutral_step_call = false;
                 result?;
             }

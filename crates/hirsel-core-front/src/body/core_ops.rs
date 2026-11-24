@@ -4,8 +4,21 @@
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
+mod argon2;
+mod cell;
+mod charge;
 mod conn;
+#[cfg(test)]
+mod declarations;
 mod flow;
+mod media;
+mod net_error;
+mod provide;
+mod secret_kdf;
+mod secret_key;
+mod udp_runtime;
+#[cfg(test)]
+pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
@@ -19,8 +32,10 @@ pub(crate) enum Kernel {
     Host(HostOp),
     ReadOnlyDir,
     Net(HostOp),
+    Media(HostOp),
     SecretSeal,
     SecretRender,
+    RootLimit,
     ArgsLen,
     ArgsGet,
     Env(HostOp),
@@ -49,23 +64,24 @@ pub(crate) enum Kernel {
     LatestHandle,
     LatestPublish,
     LatestRead,
+    SharedNew,
+    SharedShare,
     ChannelSender,
     Send,
     TrySend,
     Receive,
     TryReceive,
-    LogNew,
-    LogAppend,
-    LogFinish,
     CodeIdentity,
     CodeRevision,
     CodeCallable,
     CodeDescribe,
     Flow(FlowOp),
+    Cell(cell::CellOp),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lane {
+    Charge(charge::Price),
     Numeric,
     Value,
     Language,
@@ -90,7 +106,17 @@ macro_rules! operations {
 }
 
 operations! {
-
+    ("charge", "round", Lane::Charge(charge::Price::Round), "A", "bytes-charge-2132", false),
+    ("charge", "boxed", Lane::Charge(charge::Price::Round), "A", "bytes-charge-2132", false),
+    ("charge", "counted", Lane::Charge(charge::Price::Counted), "A", "bytes-charge-2132", false),
+    ("charge", "shared", Lane::Charge(charge::Price::Shared), "A", "bytes-charge-2132", false),
+    ("charge", "seq", Lane::Charge(charge::Price::Seq), "A", "bytes-charge-2132", false),
+    ("charge", "map", Lane::Charge(charge::Price::Map), "A", "bytes-charge-2132", false),
+    ("charge", "channel", Lane::Charge(charge::Price::Channel), "A", "bytes-charge-2132", false),
+    ("charge", "task", Lane::Charge(charge::Price::Task), "A", "bytes-charge-2132", false),
+    ("charge", "block", Lane::Charge(charge::Price::Block), "A", "bytes-charge-2132", false),
+    ("charge", "port", Lane::Charge(charge::Price::Port), "A", "bytes-charge-2132", false),
+    ("charge", "latest", Lane::Charge(charge::Price::Latest), "A", "writer-plan-2134", false),
     ("bytebuf", "append_inline", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "freeze", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "as_bytes", Lane::Value, "A", "http-b1-1204", false),
@@ -108,9 +134,13 @@ operations! {
     ("latest", "handle", Lane::Runtime(Kernel::LatestHandle), "A", "core-ops-914", false),
     ("latest", "publish", Lane::Runtime(Kernel::LatestPublish), "A", "core-ops-914", false),
     ("latest", "read", Lane::Runtime(Kernel::LatestRead), "A", "core-ops-914", false),
-    ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
-    ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
-    ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
+    ("shared", "new", Lane::Runtime(Kernel::SharedNew), "A", "conc-shared-1993", false),
+    ("shared", "share", Lane::Runtime(Kernel::SharedShare), "A", "conc-shared-1993", false),
+    ("cell", "new", Lane::Runtime(Kernel::Cell(cell::CellOp::New)), "B", "cell-2140", false),
+    ("cell", "get", Lane::Runtime(Kernel::Cell(cell::CellOp::Get)), "B", "cell-2140", false),
+    ("cell", "replace", Lane::Runtime(Kernel::Cell(cell::CellOp::Replace)), "B", "cell-2140", false),
+    ("cell", "with", Lane::Runtime(Kernel::Cell(cell::CellOp::With)), "B", "cell-2140", false),
+    ("cell", "into_inner", Lane::Runtime(Kernel::Cell(cell::CellOp::IntoInner)), "B", "cell-2140", false),
     ("code", "describe", Lane::Runtime(Kernel::CodeDescribe), "A", "core-check-callables-913", false),
     ("code", "identity", Lane::Runtime(Kernel::CodeIdentity), "A", "core-ops-914", false),
     ("code", "revision", Lane::Runtime(Kernel::CodeRevision), "A", "core-ops-914", false),
@@ -121,12 +151,14 @@ operations! {
     ("host", "sleep_until_wall", Lane::Runtime(Kernel::Host(HostOp::SleepUntilWall)), "B", "clock-fixture-1738", false),
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
+    ("host", "zero_extension", Lane::Runtime(Kernel::Host(HostOp::ZeroExtension)), "B", "journal-prealloc-impl-2177", false),
     ("host", "random", Lane::Runtime(Kernel::Host(HostOp::Random)), "B", "core-ops-914", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "with_unique", Lane::Runtime(Kernel::WithUnique(Counted::Arc)), "A", "core-ops-914", false),
+    ("runtime", "root_limit", Lane::Runtime(Kernel::RootLimit), "A", "w3a-b-sized-2009", false),
     ("args", "len", Lane::Runtime(Kernel::ArgsLen), "B", "core-ops-914", false),
     ("args", "get", Lane::Runtime(Kernel::ArgsGet), "B", "core-ops-914", false),
     ("box", "new", Lane::Runtime(Kernel::NewOwner(None)), "A", "core-ops-914", false),
@@ -147,7 +179,7 @@ operations! {
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),
     ("core", "replace", Lane::Value, "A", "core-check-calls-910", false),
-    ("core", "site_word", Lane::Value, "A", "property-corpus-sites-1fd44b742", false),
+    ("core", "site_word", Lane::Value, "A", "property-corpus", false),
     ("core", "clone", Lane::Language, "A", "core-check-895", false),
     ("core", "clone_in", Lane::Language, "A", "core-check-895", false),
     ("core", "build_in", Lane::Language, "A", "core-check-895", false),
@@ -187,6 +219,7 @@ operations! {
     ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
     ("host", "mkdir", Lane::Runtime(Kernel::Host(HostOp::Mkdir)), "B", "core-ops-914", false),
     ("host", "mkdtemp", Lane::Runtime(Kernel::Host(HostOp::Mkdtemp)), "B", "core-ops-914", false),
+    ("host", "mkstemp", Lane::Runtime(Kernel::Host(HostOp::Mkstemp)), "B", "std2-host-2117", false),
     ("host", "remove", Lane::Runtime(Kernel::Host(HostOp::Remove)), "B", "core-ops-914", false),
     ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
     ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
@@ -216,6 +249,10 @@ operations! {
     ("simd", "wrapping_sub", Lane::Simd(SimdCall::Value(SimdOp::WrappingSub)), "A", "simd-impl-1344", false),
     ("simd", "saturating_add", Lane::Simd(SimdCall::Value(SimdOp::SaturatingAdd)), "A", "simd-impl-1344", false),
     ("simd", "saturating_sub", Lane::Simd(SimdCall::Value(SimdOp::SaturatingSub)), "A", "simd-impl-1344", false),
+    ("simd", "wrapping_mul", Lane::Simd(SimdCall::Value(SimdOp::WrappingMul)), "A", "sem11-int-simd-2229", false),
+    ("simd", "madd_i16", Lane::Simd(SimdCall::Value(SimdOp::MaddI16)), "A", "sem11-int-simd-2229", false),
+    ("simd", "mulhi_i16", Lane::Simd(SimdCall::Value(SimdOp::MulhiI16)), "A", "sem11-int-simd-2229", false),
+    ("simd", "pack_saturating", Lane::Simd(SimdCall::Value(SimdOp::PackSaturating)), "A", "sem11-int-simd-2229", false),
     ("simd", "eq", Lane::Simd(SimdCall::Value(SimdOp::Eq)), "A", "simd-impl-1344", false),
     ("simd", "lt", Lane::Simd(SimdCall::Value(SimdOp::Lt)), "A", "simd-impl-1344", false),
     ("simd", "splat", Lane::Simd(SimdCall::Value(SimdOp::Splat)), "A", "simd-impl-1344", false),
@@ -276,6 +313,7 @@ operations! {
     ("list", "slots_free", Lane::Value, "A", "core-collections-918", true),
     ("list", "new", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "with_capacity", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "with_capacity_aligned", Lane::Value, "A", "store-ring-build-2285", false),
     ("list", "len", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "capacity", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
@@ -312,9 +350,16 @@ operations! {
     ("sha1", "blocks", Lane::Value, "A", "sha1-hardware", false),
     ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
+    ("sha512", "blocks", Lane::Value, "A", "sha512-hardware", false),
+    ("sha512", "block", Lane::Value, "A", "sha512-hardware", false),
+    ("argon2", "id", Lane::Value, "A", "crypto-argon2-2130", false),
     ("ed25519", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify_der", Lane::Value, "A", "crypto-verify-impl-1595", false),
+    ("p384", "verify", Lane::Value, "A", "crypto-sr-2122", false),
+    ("p384", "verify_der", Lane::Value, "A", "crypto-sr-2122", false),
+    ("rsa", "verify_pkcs1_sha256", Lane::Value, "A", "crypto-sr-2122", false),
+    ("rsa", "verify_pss_sha256", Lane::Value, "A", "crypto-sr-2122", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "try_regrow", Lane::Value, "A", "capacity-unwind-1492", true),
@@ -397,20 +442,45 @@ operations! {
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
+    ("secret", "hmac_sha384", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha384)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "hmac_sha512", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha512)), "B", "secret-hmac-sha2-2277", false),
     ("secret", "derive_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHmac)), "B", "secret-kdf-signer-1816", false),
+    ("secret", "derive_hkdf_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHkdf)), "B", "crypto-derive-2137", false),
+    ("secret", "derive_argon2id", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveArgon2id)), "B", "crypto-derive-2137", false),
     ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
+    ("secret", "verify_hmac_sha384", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmacSha384)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "verify_hmac_sha512", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmacSha512)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "jws_hmac_sign", Lane::Runtime(Kernel::Net(HostOp::SecretJwsHmacSign)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "jws_hmac_verify", Lane::Runtime(Kernel::Net(HostOp::SecretJwsHmacVerify)), "B", "secret-hmac-sha2-2277", false),
     ("secret", "scram_sha256", Lane::Runtime(Kernel::Net(HostOp::ScramSha256)), "B", "small-host-impl-1576", false),
     ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
     ("secret", "scram_verify", Lane::Runtime(Kernel::Net(HostOp::ScramVerify)), "B", "small-host-impl-1576", false),
     ("secret", "wrap", Lane::Runtime(Kernel::Net(HostOp::SecretWrap)), "B", "secret-wrap-sign-1781", false),
     ("secret", "unwrap", Lane::Runtime(Kernel::Net(HostOp::SecretUnwrap)), "B", "secret-wrap-sign-1781", false),
     ("secret", "sign", Lane::Runtime(Kernel::Net(HostOp::SecretSign)), "B", "secret-wrap-sign-1781", false),
+    ("secret", "p256_key", Lane::Runtime(Kernel::Net(HostOp::SecretP256Key)), "B", "media-w0-crypto-build-2282", false),
+    ("secret", "key_share", Lane::Runtime(Kernel::Net(HostOp::SecretKeyShare)), "B", "media-w0-crypto-build-2282", false),
+    ("schedule", "quic_initial", Lane::Runtime(Kernel::Media(HostOp::ScheduleQuicInitial)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "sealer", Lane::Runtime(Kernel::Media(HostOp::ScheduleSealer)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleOpener)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "header_mask", Lane::Runtime(Kernel::Media(HostOp::ScheduleHeaderMask)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "seal", Lane::Runtime(Kernel::Media(HostOp::PacketSeal)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "seal_into", Lane::Runtime(Kernel::Media(HostOp::PacketSealInto)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "open", Lane::Runtime(Kernel::Media(HostOp::PacketOpen)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "open_into", Lane::Runtime(Kernel::Media(HostOp::PacketOpenInto)), "A", "media-w0-crypto-build-2282", false),
+    ("packet", "mask", Lane::Runtime(Kernel::Media(HostOp::PacketMask)), "A", "media-w0-crypto-build-2282", false),
+    ("secret", "aead_seal", Lane::Runtime(Kernel::Net(HostOp::SecretAeadSeal)), "B", "crypto-aead-2123", false),
+    ("secret", "aead_open", Lane::Runtime(Kernel::Net(HostOp::SecretAeadOpen)), "B", "crypto-aead-2123", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
     ("secret", "share", Lane::Runtime(Kernel::SecretShare), "B", "secret-resource-1737", false),
+    ("net", "local_addr", Lane::Runtime(Kernel::Net(HostOp::LocalAddr)), "B", "std-net-addr-1984", false),
+    ("net", "peer_addr", Lane::Runtime(Kernel::Net(HostOp::PeerAddr)), "B", "std-net-addr-1984", false),
+    ("net", "listener_addr", Lane::Runtime(Kernel::Net(HostOp::LocalAddr)), "B", "std-net-addr-1984", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("net", "join", Lane::Runtime(Kernel::Net(HostOp::NetJoin)), "B", "small-host-impl-1576", false),
     ("provide", "clock", Lane::Runtime(Kernel::Provide(HostOp::ProvideClock)), "B", "provide-r8a-1533", false),
     ("provide", "random", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandom)), "B", "provide-r8a-1533", false),
+    ("provide", "random_tape", Lane::Runtime(Kernel::Provide(HostOp::ProvideRandomTape)), "B", "media-w0-crypto-build-2282", false),
     ("provide", "process", Lane::Runtime(Kernel::Provide(HostOp::ProvideProcess)), "B", "provide-r8a-1533", false),
     ("clock", "advance_to", Lane::Runtime(Kernel::Provide(HostOp::ClockAdvance)), "B", "provide-r8a-1533", false),
     ("clock", "set_wall", Lane::Runtime(Kernel::Provide(HostOp::ClockSetWall)), "B", "provide-r8a-1533", false),
@@ -421,11 +491,13 @@ operations! {
     ("provide", "dir", Lane::Runtime(Kernel::Provide(HostOp::ProvideDir)), "B", "provide-r8a-1533", false),
     ("provide", "net", Lane::Runtime(Kernel::Provide(HostOp::ProvideNet)), "B", "provide-r8a-1533", false),
     ("provide", "exec", Lane::Runtime(Kernel::Provide(HostOp::ProvideExec)), "B", "exec-unix-impl-c-1627", false),
+    ("provide", "fill_packets", Lane::Runtime(Kernel::Provide(HostOp::UdpFillPackets)), "B", "media-w0-udp-build-2280", false),
     ("provide", "fill", Lane::Runtime(Kernel::Provide(HostOp::PortFill)), "B", "provide-r8a-1533", false),
     ("provide", "next", Lane::Runtime(Kernel::Provide(HostOp::PortNext)), "B", "provide-r8a-1533", false),
     ("provide", "word", Lane::Runtime(Kernel::Provide(HostOp::CallWord)), "B", "provide-r8a-1533", false),
     ("provide", "secret", Lane::Runtime(Kernel::Provide(HostOp::CallSecret)), "B", "provide-r8a-1533", false),
     ("provide", "payload", Lane::Runtime(Kernel::Provide(HostOp::CallPayload)), "B", "provide-r8a-1533", false),
+    ("provide", "payload_prefix", Lane::Runtime(Kernel::Provide(HostOp::CallPayloadPrefix)), "B", "checkpoint-copy-2105", false),
     ("provide", "commit", Lane::Runtime(Kernel::Provide(HostOp::PortReply)), "B", "provide-r8a-1533", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
@@ -465,6 +537,14 @@ operations! {
     ("host", "send_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramSend)), "B", "exec-unix-impl-c-1627", false),
     ("host", "send_to", Lane::Runtime(Kernel::Net(HostOp::DatagramSendTo)), "B", "exec-unix-impl-c-1627", false),
     ("host", "recv_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramRecv)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "udp_open", Lane::Runtime(Kernel::Net(HostOp::UdpOpen)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_bind", Lane::Runtime(Kernel::Net(HostOp::UdpBind)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_bind_group", Lane::Runtime(Kernel::Net(HostOp::UdpBindGroup)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_recv", Lane::Runtime(Kernel::Net(HostOp::UdpRecv)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_send", Lane::Runtime(Kernel::Net(HostOp::UdpSend)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_local_addr", Lane::Runtime(Kernel::Net(HostOp::UdpLocalAddr)), "B", "media-w0-udp-build-2280", false),
+    ("sha1", "compress", Lane::Value, "A", "sha1-hardware", false),
+    ("sha1", "block", Lane::Value, "A", "sha1-hardware", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
@@ -497,7 +577,7 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         for (i, entry) in OPERATIONS.iter().enumerate() {
             if matches!(
                 entry.lane,
-                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
+                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_) | Lane::Charge(_)
             ) {
                 bound.entry((entry.module, entry.name)).or_insert(i as u16);
             }
@@ -585,6 +665,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let entry = &OPERATIONS[binding as usize];
         match entry.lane {
+            Lane::Charge(price) => Some(self.charge_value(price, vals, result, n)),
             Lane::Runtime(kernel) => Some(self.runtime_kernel(kernel, f, types, vals, result, n)),
             Lane::PendingCode => self.pending_code(entry, f, types, vals, result, n),
             _ => None,
@@ -641,34 +722,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => None,
         }
-    }
-
-    /// The function item `code.describe` names, refused unless it is a top-level
-    /// function whose generics are all regions (PROG-9).
-    fn code_describe_target(&mut self, n: NodeId) -> Option<usize> {
-        let argument = self.kids(n).get(1).copied().unwrap_or(n);
-        let item = self.p.target(self.at, argument).and_then(|target| {
-            let Target::Definition(id) = target else {
-                return None;
-            };
-            let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
-                return None;
-            };
-            let function = &self.p.fns[index as usize];
-            function
-                .generics
-                .iter()
-                .all(|generic| generic.region)
-                .then_some(index as usize)
-        });
-        if item.is_none() {
-            self.refuse(
-                "PROG-9",
-                argument,
-                "code.describe requires a top-level non-generic function name",
-            );
-        }
-        item
     }
 
     /// Lower `core.isolate`'s value boundary (FORM #101).  The callback's failure
@@ -866,7 +919,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Env(op) => self.runtime_env(op, vals, result, n),
-            Kernel::Provide(op) => self.runtime_provide(op, vals, result, n),
+            Kernel::Provide(op) => self.runtime_provide(f, op, vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::StreamTerminal(stream) => {
                 let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
@@ -895,6 +948,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(output)
             }
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
+            Kernel::Media(op) => self.runtime_media(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_secret_seal(f, vals, result, n),
             Kernel::SecretRender => self.static_string(b"[secret]", self.bare(result), n),
             Kernel::Spawn | Kernel::TrySpawn => self.runtime_spawn(
@@ -954,6 +1008,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Kernel::ChannelNew => self.runtime_channel(types[0], vals[0]?, result, n),
             Kernel::LatestNew => self.runtime_latest_new(types[0], vals[0], result, n),
+            Kernel::SharedNew => self.runtime_shared_new(types[0], vals[0], result, n),
+            Kernel::SharedShare => {
+                let node = self.runtime_handle(vals[0]?, n);
+                let [node, ..] = self.runtime_row(RtOp::SharedShare, &[Arg::Value(node)], n)?;
+                self.runtime_carrier(result, node, n)
+            }
             Kernel::LatestHandle => {
                 let handle = self.runtime_handle(vals[0]?, n);
                 let [handle, ..] =
@@ -982,14 +1042,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Receive => self.runtime_receive(types[0], vals[0]?, result, n),
             Kernel::TryReceive => self.runtime_try_receive(types[0], vals[0]?, result, n),
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
-            Kernel::LogNew => self.runtime_log_new(types[0], result, n),
-            Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], n),
-            Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
+            Kernel::RootLimit => self.runtime_row(RtOp::RootLimit, &[], n).map(|v| v[0]),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
-            Kernel::CodeDescribe => self.runtime_code_describe(result, n),
+            Kernel::CodeDescribe => {
+                self.refuse(
+                    "PROG-9",
+                    n,
+                    "code.describe requires the name of a top-level function",
+                );
+                None
+            }
             Kernel::Flow(op) => self.runtime_flow(op, types, vals, result, n),
+            Kernel::Cell(op) => self.runtime_cell(op, types, vals, result, n),
         }
     }
 
@@ -1002,23 +1068,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<[ValueId; 4]> {
         self.runtime_outputs(op, args, n)
-    }
-
-    pub(super) fn verify_signature(
-        &mut self,
-        op: RtOp,
-        carriers: [ValueId; 3],
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u64_ = Ty::Scalar(Scalar::U64);
-        let args = carriers.map(|carrier| {
-            [
-                Arg::Value(self.read_sequence_word(carrier, 0, Ty::Ptr, n)),
-                Arg::Value(self.read_sequence_word(carrier, 8, u64_, n)),
-            ]
-        });
-        let word = self.runtime_row(op, args.as_flattened(), n)?[0];
-        self.runtime_nonzero(u64_, word, n)
     }
 
     fn runtime_outputs<const N: usize>(
@@ -1164,7 +1213,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
-    fn runtime_nonzero(&mut self, ty: Ty, value: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn runtime_nonzero(&mut self, ty: Ty, value: ValueId, n: NodeId) -> Option<ValueId> {
         let right = self.konst(ty, 0, n)?;
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
@@ -1305,6 +1354,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         })
     }
 
+    /// `shared.new`: the runtime admits the node, `charge::shared(size(T))`,
+    /// from the current limit and moves the taken value into it; a refusal
+    /// raises with the value still the caller's (CONC-15).
+    fn runtime_shared_new(
+        &mut self,
+        item: TyId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let size = self.layout_size(item, true, n)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let one = self.konst(u, 1, n)?;
+        let base = self.konst(u, hirsel_core_layout::charge::SHARED_NODE + 7, n)?;
+        let (requested, _) = self.runtime_charge_parts(one, size, base, true, n)?;
+        let (id, input) = self.runtime_place(item, value, n)?;
+        let [node, available, ..] = self.runtime_row(
+            RtOp::SharedNew { item: id },
+            &[Arg::Address(input), Arg::Value(requested)],
+            n,
+        )?;
+        let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
+        self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
+            cx.consume(value, n);
+            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
+        })
+    }
+
     fn runtime_channel(
         &mut self,
         item: TyId,
@@ -1331,101 +1408,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         })
-    }
-
-    /// Saturated exact charge. Overflow is a recoverable refusal by the runtime;
-    /// it is not a source Overflow failure while building the Capacity record.
-    fn runtime_charge(
-        &mut self,
-        count: ValueId,
-        size: ValueId,
-        base: ValueId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        self.runtime_charge_parts(count, size, base, false, n)
-            .map(|p| p.0)
-    }
-
-    fn runtime_charge_parts(
-        &mut self,
-        count: ValueId,
-        size: ValueId,
-        base: ValueId,
-        round: bool,
-        n: NodeId,
-    ) -> Option<(ValueId, ValueId)> {
-        let u = Ty::Scalar(Scalar::U64);
-        let product = self.value(u);
-        let mul_overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::IntArith {
-                result: product,
-                flag: Some(mul_overflow),
-                op: ArithOp::Mul,
-                mode: ArithMode::Checked,
-                left: count,
-                right: size,
-            },
-            n,
-        );
-        let total = self.value(u);
-        let add_overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::IntArith {
-                result: total,
-                flag: Some(add_overflow),
-                op: ArithOp::Add,
-                mode: ArithMode::Checked,
-                left: product,
-                right: base,
-            },
-            n,
-        );
-        let overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Binary {
-                result: overflow,
-                op: BinaryOp::BitOr,
-                left: mul_overflow,
-                right: add_overflow,
-                fail: None,
-            },
-            n,
-        );
-        let total = if round {
-            let mask = self.konst(u, !7, n)?;
-            let aligned = self.value(u);
-            self.inst(
-                Inst::Binary {
-                    result: aligned,
-                    op: BinaryOp::BitAnd,
-                    left: total,
-                    right: mask,
-                    fail: None,
-                },
-                n,
-            );
-            aligned
-        } else {
-            total
-        };
-        let max = self.konst(u, u64::MAX, n)?;
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[u]);
-        self.runtime_branch(overflow, yes, no, n);
-        self.start(yes);
-        self.jump(join, &[max], n);
-        self.start(no);
-        self.jump(join, &[total], n);
-        self.start(join);
-        Some((
-            self.b.blocks[join.index()]
-                .params
-                .get(&self.b.pools.values)
-                .expect("the join block just built holds its parameter")[0],
-            overflow,
-        ))
     }
 
     pub(super) fn runtime_capacity(
@@ -1500,27 +1482,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-
-    fn runtime_case_payload(
-        &mut self,
-        to: AddressId,
-        case: u32,
-        ty: TyId,
-        value: Option<ValueId>,
-        n: NodeId,
-    ) {
-        self.inst(Inst::SetCase { address: to, case }, n);
-        let rep = match self.rep(ty) {
-            Ok(r) => r,
-            Err(what) => {
-                self.gap(n, what);
-                return;
-            }
-        };
-        if let Some(at) = self.runtime_field(to, &[Step::CaseField { case, field: 0 }], ty, n) {
-            self.install(at, rep, value, n);
-        }
     }
 
     fn runtime_closed(&mut self, to: AddressId, ty: TyId, value: Option<ValueId>, n: NodeId) {
@@ -1689,135 +1650,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
-/// CAP-6: a kernel that observes outside its operands (the host, the standard streams,
-/// the process arguments) is reached only through an operation with an authority
-/// operand: a capability, `Args`, or a core resource made from one (CAP-7). The match
-/// has no wildcard, so a new kernel is classified before it can bind.
-#[cfg(test)]
-pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
-    fn ambient(k: Kernel) -> bool {
-        match k {
-            Kernel::Stream(_)
-            | Kernel::StreamTerminal(_)
-            | Kernel::Host(_)
-            | Kernel::Net(_)
-            | Kernel::ArgsLen
-            | Kernel::ArgsGet
-            | Kernel::Env(_) => true,
-            // A virtual provider observes only run state the program made.
-            Kernel::Provide(_)
-            | Kernel::ReadOnlyDir
-            | Kernel::CarrierMove
-            | Kernel::CarrierView
-            | Kernel::SecretSeal
-            | Kernel::SecretRender
-            | Kernel::StringShorten
-            | Kernel::StringList(_)
-            | Kernel::Unique
-            | Kernel::NewOwner(_)
-            | Kernel::Share(_)
-            | Kernel::TryUnwrap(_)
-            | Kernel::WithUnique(_)
-            | Kernel::Unbox
-            | Kernel::Spawn
-            | Kernel::TrySpawn
-            | Kernel::CheckCancel
-            | Kernel::Cancel
-            | Kernel::Join
-            | Kernel::ChannelNew
-            | Kernel::SpawnUnit
-            | Kernel::ConnNew
-            | Kernel::ConnClient
-            | Kernel::SecretShare
-            | Kernel::ConnSend
-            | Kernel::ConnTrySend
-            | Kernel::ConnReceive
-            | Kernel::ConnTryReceive
-            | Kernel::LatestNew
-            | Kernel::LatestHandle
-            | Kernel::LatestPublish
-            | Kernel::LatestRead
-            | Kernel::ChannelSender
-            | Kernel::Send
-            | Kernel::TrySend
-            | Kernel::TryReceive
-            | Kernel::Receive
-            | Kernel::LogNew
-            | Kernel::LogAppend
-            | Kernel::LogFinish
-            | Kernel::CodeIdentity
-            | Kernel::CodeRevision
-            | Kernel::CodeCallable
-            | Kernel::CodeDescribe
-            | Kernel::Flow(_) => false,
-        }
-    }
-    for (f, fd) in p.fns.iter().enumerate() {
-        let Some(i) = p.core_operations[f] else {
-            continue;
-        };
-        if i >= u16::MAX - 4 {
-            continue;
-        }
-        let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {
-            continue;
-        };
-        if !ambient(kernel) {
-            continue;
-        }
-        let authority = fd.params.iter().any(|param| match p.types.kind(param.ty) {
-            TyKind::Adt(d, _) => {
-                let decl = &p.decls[d.index()];
-                crate::layout::handle(decl)
-                    || decl.repr == crate::decls::Repr::Resource
-                        && decl.path.package_is("core", "1")
-            }
-            _ => false,
-        });
-        assert!(
-            authority,
-            "CAP-6: {} observes outside its operands without an authority operand",
-            fd.path
-        );
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn assert_declarations(p: &Program<'_>) {
-    use std::collections::BTreeSet;
-    let actual: BTreeSet<_> = p
-        .fns
-        .iter()
-        .filter(|f| f.path.package_is("core", "1") && f.body.is_none())
-        .map(|f| (f.path.0.modules[0].as_str(), f.path.0.name.as_str()))
-        .collect();
-    for entry in OPERATIONS {
-        assert!(matches!(entry.class, "A" | "B" | "C"));
-        if entry.private {
-            assert!(
-                entry.module == "string"
-                    && matches!(
-                        entry.name,
-                        "of_bytes" | "to_bytes" | "view_string" | "shorten"
-                    )
-                    || entry.module == "map"
-                    || entry.module == "list" && entry.name.starts_with("slots_")
-                    || matches!(entry.module, "deque" | "heap")
-            );
-        }
-    }
-    let recorded: BTreeSet<_> = OPERATIONS.iter().map(|e| (e.module, e.name)).collect();
-    assert_eq!(
-        recorded.len(),
-        OPERATIONS.len(),
-        "duplicate core operation binding"
-    );
-    assert_eq!(
-        actual, recorded,
-        "assign each bodiless core function to its owning lane"
-    );
-}
-
 impl<'c, 'a> Cx<'c, 'a, '_> {
     #[allow(clippy::too_many_arguments)]
     fn runtime_spawn(
@@ -1979,209 +1811,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.t.mk(TyKind::Adt(list, vec![item])))
     }
 
-    fn log_ty(&mut self, item: TyId, n: NodeId) -> Option<TyId> {
-        let log = self
-            .p
-            .decls
-            .iter()
-            .position(|d| d.role == Some(crate::decls::Role::Log) && d.path.0.name == "Log");
-        let log = self.named(log, "a log without the prelude's Log is not built", n)?;
-        Some(
-            self.t
-                .mk(TyKind::Adt(crate::types::DeclId(log as u32), vec![item])),
-        )
-    }
-
-    /// MEM-29: the log node is a box allocation whose payload is the List carrier.
-    fn runtime_log_new(&mut self, item: TyId, result: TyId, n: NodeId) -> Option<ValueId> {
-        let list = self.list_ty(item, n)?;
-        let (charge, overflow) = self.owner_charge(list, None, n)?;
-        let id = self.runtime_type(list, n)?;
-        let carrier = self.list_carrier(item, n)?;
-        let payload = self.layout_size(list, false, n)?;
-        // A log whose node never leaves this body keeps it in the frame, charged
-        // as on the heap (frame_logs.rs).
-        let framed = self.frame_log_next.take();
-        let place = if framed.is_some() {
-            AllocPlace::Frame(self.frame_log_bytes(n)?)
-        } else {
-            AllocPlace::Current
-        };
-        let node = self.value(Ty::Ptr);
-        let available = self.value(Ty::Scalar(Scalar::U64));
-        let edge = FieldTy::Box(TypeRef(id.0));
-        self.inst(
-            Inst::Alloc {
-                result: node,
-                available,
-                region_entry: None,
-                kind: AllocKind::Own { edge },
-                place,
-                charge,
-                overflow: Some(overflow),
-                size: payload,
-                align: 8,
-            },
-            n,
-        );
-        let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
-        let data = if framed == Some(true) && item == scalar(Scalar::U64) {
-            self.frame_log_entries(n)?
-        } else {
-            self.konst(Ty::Ptr, 0, n)?
-        };
-        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        let log = self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
-            // The node itself is the List carrier: {data, len, capacity}.
-            cx.set_carrier_word(node, carrier, SeqWord::Data, data, n);
-            cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
-            cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
-            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
-        })?;
-        if framed.is_some() {
-            self.frame_logs.insert(log, item);
-        }
-        Some(log)
-    }
-
-    /// Append through the pointer loaded from the Log carrier. A refused reserve
-    /// raises with the taken element still the caller's, so cleanup drops it.
-    fn runtime_log_append(
-        &mut self,
-        item: TyId,
-        log: ValueId,
-        value: Option<ValueId>,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let log_ty = self.log_ty(item, n)?;
-        let log_id = self.runtime_type(log_ty, n)?;
-        let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
-        let node_at = self.address(
-            AddressBase::Address(log_base),
-            &[Step::Field(0)],
-            PlaceTy::Value(Ty::Ptr),
-            n,
-        );
-        let node = self.read_bits(node_at, Ty::Ptr, n);
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        self.log_reserve(item, node, one, n)?;
-        let item_rep = self.rep_at(item, n)?;
-        let carrier = self.list_carrier(item, n)?;
-        let len = self.carrier_word(node, carrier, SeqWord::Len, n);
-        let element = self.list_element(item, node, len, n)?;
-        if let Some(place) = item_rep.stored() {
-            let at = self.address(AddressBase::Value(element), &[], place, n);
-            self.install(at, item_rep, value, n);
-        }
-        let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
-        self.set_carrier_word(node, carrier, SeqWord::Len, new_len, n);
-        self.consume(value, n);
-        None
-    }
-
-    fn runtime_log_finish(
-        &mut self,
-        item: TyId,
-        log: ValueId,
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let log_ty = self.log_ty(item, n)?;
-        let log_id = self.runtime_type(log_ty, n)?;
-        let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
-        let node_at = self.address(
-            AddressBase::Address(log_base),
-            &[Step::Field(0)],
-            PlaceTy::Value(Ty::Ptr),
-            n,
-        );
-        let node = self.read_bits(node_at, Ty::Ptr, n);
-        let list = self.list_ty(item, n)?;
-        let list_id = self.runtime_type(list, n)?;
-        let to = self.new_slot(PlaceTy::Declared(list_id), n);
-        self.copy_to(to, node, list_id, n);
-        self.consume(Some(log), n);
-        let (charge, _) = self.owner_charge(list, None, n)?;
-        if self.frame_logs.contains_key(&log) {
-            self.inst(Inst::FrameRefund { charge }, n);
-        } else {
-            self.inst(
-                Inst::Free {
-                    block: node,
-                    charge,
-                },
-                n,
-            );
-        }
-        let value = self.pointer(to, n);
-        self.temp(result, Some(value));
-        Some(value)
-    }
-
-    /// PROG-9: a StaticFn is the address of its function's static descriptor,
-    /// `{code, length, revision}` then the identity bytes (`Inst::DescriptorRef`). The
-    /// described function is the item's closed adapter, whatever body describes
-    /// it, so a program has one descriptor per function and StaticFn equality is
-    /// word equality.
-    fn runtime_code_describe(&mut self, result: TyId, n: NodeId) -> Option<ValueId> {
-        let item = self.code_describe_target(n)?;
-        let regions = (0..self.p.fns[item].generics.len())
-            .map(|i| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
-            .collect::<Vec<_>>();
-        let callable = subst(&mut self.t, self.p.fns[item].callable, &regions);
-        let function = self.item_adapter_closed(item, &regions, callable, n)?;
-        // A closed adapter is no template of an enclosing generic body: carried
-        // under it, specialization would make a fresh row per instance.
-        self.nested.remove(&function);
-        let Some(bytes) = self.code_identity_bytes(function) else {
-            self.gap(n, "StaticFn identity source is not built");
-            return None;
-        };
-        let identity = self.e.static_bytes(&bytes);
-        let descriptor = self.value(Ty::Ptr);
-        self.inst(
-            Inst::DescriptorRef {
-                result: descriptor,
-                function,
-                identity,
-            },
-            n,
-        );
-        let word = self.reinterpret(descriptor, Ty::Ptr, Ty::Scalar(Scalar::U64), n);
-        if let Some(word) = word {
-            self.static_fns
-                .insert(word, (function, identity, bytes.len() as u64));
-        }
-        self.temp(result, word);
-        word
-    }
-
-    /// The descriptor of `value`, a StaticFn, and its identity length: a
-    /// StaticFn this body described has both here; any other has them in its
-    /// word.
-    fn code_descriptor(&mut self, value: ValueId, n: NodeId) -> Option<(ValueId, ValueId)> {
-        if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
-            let descriptor = self.value(Ty::Ptr);
-            self.inst(
-                Inst::DescriptorRef {
-                    result: descriptor,
-                    function,
-                    identity,
-                },
-                n,
-            );
-            return Some((descriptor, self.konst(Ty::Scalar(Scalar::U64), length, n)?));
-        }
-        let Some(descriptor) = self.static_fn_pointer(value, n) else {
-            self.gap(n, "StaticFn identity carriage is not built");
-            return None;
-        };
-        let length = self.descriptor_word(descriptor, 8, Ty::Scalar(Scalar::U64), n)?;
-        Some((descriptor, length))
-    }
-
     /// The word at `offset` in `descriptor`.
-    fn descriptor_word(
+    pub(super) fn descriptor_word(
         &mut self,
         descriptor: ValueId,
         offset: u64,
@@ -2277,26 +1908,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    fn code_identity_bytes(&self, function: FuncId) -> Option<Vec<u8>> {
-        let instance = self.e.module.functions[function.index()].instance;
-        let path = &self.e.module.instances[instance.index()].definition;
-        // Function items pass through a callable adapter before reaching this
-        // kernel. Its `$callable[...]` definition is an ABI row, not the source
-        // item whose PROG-9 identity is published.
-        let source_name = path
-            .0
-            .name
-            .split_once("$callable")
-            .map_or(path.0.name.as_str(), |(name, _)| name);
-        let f = self.p.fns.iter().position(|fd| {
-            fd.path.0.package == path.0.package
-                && fd.path.0.modules == path.0.modules
-                && fd.path.0.name == source_name
-        })?;
-        let fd = &self.p.fns[f];
-        crate::identity::code_identity(&self.p.decls, &self.t, fd)
-    }
-
     /// A `Bytes` view `{bytes, length, 0}` of static identity bytes.
     fn identity_carrier(
         &mut self,
@@ -2363,27 +1974,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// A StaticFn's descriptor address: the value itself when it is carried as a
     /// pointer, else its word reinterpreted.
-    fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
         (self.b.values.get(value.index()) == Some(&Ty::Ptr))
             .then_some(value)
             .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))
-    }
-
-    fn reinterpret(&mut self, value: ValueId, from: Ty, to: Ty, n: NodeId) -> Option<ValueId> {
-        if self.b.values.get(value.index()) != Some(&from) {
-            return None;
-        }
-        let slot = self.new_slot(PlaceTy::Value(from), n);
-        self.inst(
-            Inst::Store {
-                address: slot,
-                value,
-            },
-            n,
-        );
-        let pointer = self.pointer(slot, n);
-        let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(to), n);
-        Some(self.read_bits(at, to, n))
     }
 
     fn owner_payload(
@@ -2629,156 +2223,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// `provide.clock/random/process/stdout/stderr`, the hand operations and
-    /// the served-port operations (core.md, Provide). A constructor's pair is
-    /// (value, written): the capability and its hand or `Served` end.
-    fn runtime_provide(
-        &mut self,
-        op: HostOp,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let hand = matches!(
-            op,
-            HostOp::ClockAdvance
-                | HostOp::ClockSetWall
-                | HostOp::ClockIdle
-                | HostOp::ProcessTrigger
-                | HostOp::PortNext
-                | HostOp::PortReply
-                | HostOp::PortFill
-        );
-        // A resource operand arrives as its key, or as a pointer to it when the
-        // caller lends or hands over a place.
-        let mut args = Vec::new();
-        for (i, v) in vals.iter().enumerate() {
-            let v = (*v)?;
-            let resource = (i == 0
-                && (hand
-                    || matches!(
-                        op,
-                        HostOp::CallWord | HostOp::CallSecret | HostOp::CallPayload
-                    )))
-                || (i == 1 && matches!(op, HostOp::PortReply | HostOp::PortFill));
-            let by_place = resource && self.b.values[v.index()] == Ty::Ptr;
-            args.push(Arg::Value(if by_place {
-                self.runtime_key(v, n)
-            } else {
-                v
-            }));
-        }
-        if op == HostOp::PortReply {
-            // The commit consumes the Call even when the reply fails the server.
-            self.consume(vals[1], n);
-        }
-        let [value, error, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
-        if matches!(
-            op,
-            HostOp::ProvideClock | HostOp::ProvideRandom | HostOp::ProvideProcess
-        ) {
-            // A cell's charge (MEM-24): a refusal answers grant 0 with the
-            // available bytes in `written`.
-            let requested = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
-            let ok = self.runtime_nonzero(u, value, n)?;
-            self.raise_unless(ok, requested, written, n);
-        }
-        if matches!(
-            op,
-            HostOp::ProvideStdout
-                | HostOp::ProvideStderr
-                | HostOp::ProvideDir
-                | HostOp::ProvideNet
-                | HostOp::ProvideExec
-        ) {
-            // A port's room, with its own record, saturating as the run time's.
-            let cell = self.konst(u, hirsel_core_layout::charge::PROVIDE_CELL, n)?;
-            let requested = self.value(u);
-            self.inst(
-                Inst::IntArith {
-                    result: requested,
-                    flag: None,
-                    op: ArithOp::Add,
-                    mode: ArithMode::Saturating,
-                    left: cell,
-                    right: vals[0]?,
-                },
-                n,
-            );
-            let ok = self.runtime_nonzero(u, value, n)?;
-            self.raise_unless(ok, requested, written, n);
-        }
-        match op {
-            HostOp::ProvideClock
-            | HostOp::ProvideProcess
-            | HostOp::ProvideStdout
-            | HostOp::ProvideStderr
-            | HostOp::ProvideDir
-            | HostOp::ProvideNet
-            | HostOp::ProvideExec => {
-                let id = self.runtime_type(result, n)?;
-                let to = self.new_slot(PlaceTy::Declared(id), n);
-                self.runtime_store(to, &[Step::Field(0)], u, value, n);
-                self.runtime_store(to, &[Step::Field(1)], u, written, n);
-                Some(self.pointer(to, n))
-            }
-            HostOp::ProvideRandom => Some(value),
-            HostOp::ClockIdle => {
-                let zero = self.konst(u, 0, n)?;
-                let some = self.test(CompareOp::Ne, written, zero, n);
-                self.runtime_result(
-                    result,
-                    some,
-                    n,
-                    |cx, to, ty| cx.runtime_case_payload(to, 1, ty, Some(value), n),
-                    |_, _, _| {},
-                )
-            }
-            HostOp::PortNext => {
-                // The Call is a resource place holding its key, as `host.open`'s file.
-                let zero = self.konst(u, 0, n)?;
-                let some = self.test(CompareOp::Ne, written, zero, n);
-                self.runtime_result(
-                    result,
-                    some,
-                    n,
-                    |cx, to, ty| {
-                        if let Some(to) =
-                            cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                        {
-                            cx.runtime_store(to, &[], u, value, n);
-                        }
-                    },
-                    |_, _, _| {},
-                )
-            }
-            HostOp::CallWord => Some(value),
-            HostOp::CallSecret => {
-                // A refused charge answers a nonzero error: the requested
-                // bytes in `value` and the available in `written`.
-                let u8_ = Ty::Scalar(Scalar::U8);
-                let ok = self.runtime_compare(u8_, error, 0, n)?;
-                self.raise_unless(ok, value, written, n);
-                self.secret_carrier(result, value, n)
-            }
-            HostOp::PortReply | HostOp::PortFill => {
-                // A room refusal answers error tag 1: the requested bytes in
-                // `value` and the available in `written` (MEM-21).
-                let u8_ = Ty::Scalar(Scalar::U8);
-                let ok = self.runtime_compare(u8_, error, 0, n)?;
-                self.raise_unless(ok, value, written, n);
-                Some(value)
-            }
-            HostOp::ProcessTrigger => {
-                self.consume(vals[0], n);
-                None
-            }
-            HostOp::ClockAdvance | HostOp::ClockSetWall | HostOp::CallPayload => None,
-            _ => unreachable!(),
-        }
-    }
-
     fn runtime_optional_view(
         &mut self,
         value: ValueId,
@@ -2923,7 +2367,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let file = matches!(
+        let handle = if matches!(
             op,
             HostOp::Read
                 | HostOp::Write
@@ -2935,8 +2379,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::TryLock
                 | HostOp::Unlock
                 | HostOp::Sync
-        );
-        let handle = if file {
+        ) {
             self.runtime_key(vals[0]?, n)
         } else {
             vals[0]?
@@ -2957,6 +2400,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 args[2] = Arg::Value(self.runtime_mode(f, 2, vals[2]?, n)?);
                 3
             }
+            HostOp::Entries => {
+                let option = self.p.fns[f].params[1].ty;
+                let TyKind::Adt(_, types) = self.t.kind(option) else {
+                    return None;
+                };
+                let string = types[0];
+                let (_, at) = self.runtime_place(option, vals[1], n)?;
+                let tag = self.net_case(at, n);
+                let some = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
+                let yes = self.new_block(&[]);
+                let no = self.new_block(&[]);
+                let join = self.new_block(&[Ty::Ptr]);
+                self.runtime_branch(some, yes, no, n);
+                self.start(yes);
+                let path =
+                    self.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], string, n)?;
+                let path = self.pointer(path, n);
+                self.jump(join, &[path], n);
+                self.start(no);
+                let null = self.konst(Ty::Ptr, 0, n)?;
+                self.jump(join, &[null], n);
+                self.start(join);
+                args[1] = Arg::Value(self.block_params(join)[0]);
+                2
+            }
             HostOp::Read
             | HostOp::Write
             | HostOp::OpenDir
@@ -2964,6 +2432,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             | HostOp::Stat
             | HostOp::Mkdir
             | HostOp::Mkdtemp
+            | HostOp::Mkstemp
             | HostOp::Remove
             | HostOp::RemoveTree
             | HostOp::Stdout
@@ -2975,8 +2444,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => 1,
         };
         if matches!(op, HostOp::Random | HostOp::Stopped) {
-            let _ = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
-            return None;
+            return self.runtime_host_void(op, &args[..len], n);
         }
         if op == HostOp::Close {
             // Explicit CLOSE consumes on error and pre-issue cancellation too.
@@ -3002,7 +2470,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| match op {
-                HostOp::Open | HostOp::Entries => {
+                HostOp::Open | HostOp::Entries | HostOp::Mkstemp => {
                     if let Some(to) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                     {
@@ -3022,7 +2490,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_stat(ty, at, kind.unwrap(), value, written, n);
                     }
                 }
-                HostOp::TryLock => {
+                HostOp::TryLock | HostOp::ZeroExtension => {
                     if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
                         cx.runtime_case_payload(to, 0, ty, Some(boolean), n);
                     }
@@ -3097,37 +2565,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64t = Ty::Scalar(Scalar::U64);
         let at = self.address(AddressBase::Value(value), &[], PlaceTy::Value(u64t), n);
         self.read_bits(at, u64t, n)
-    }
-
-    /// A fieldless enum operand (`OpenMode`) passes its case as a u8.
-    fn runtime_mode(
-        &mut self,
-        f: usize,
-        param: usize,
-        value: ValueId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let id = self.runtime_type(self.p.fns[f].params[param].ty, n)?;
-        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let mode = self.value(Ty::Scalar(Scalar::U8));
-        self.inst(
-            Inst::Convert {
-                result: mode,
-                flag: None,
-                operand: tag,
-                mode: ConvertMode::Truncate,
-            },
-            n,
-        );
-        Some(mode)
     }
 }
 
@@ -3849,22 +3286,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        if hirsel_core_ids::host_op::udp_operation(op.code()) {
+            return self.runtime_udp(op, f, vals, result, n);
+        }
         if matches!(
             op,
             HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal
         ) {
             return self.runtime_exec(op, f, vals, result, n);
         }
-        if op == HostOp::SecretDeriveHmac {
-            return self.runtime_secret_derive(vals, result, n);
-        }
-        if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
-            return self.runtime_secret_mac(op, vals, result, n);
+        if matches!(
+            op,
+            HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id
+        ) {
+            return self.runtime_secret_derive(op, f, vals, result, n);
         }
         if matches!(
             op,
-            HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign
+            HostOp::SecretHmac
+                | HostOp::SecretHmacSha384
+                | HostOp::SecretHmacSha512
+                | HostOp::SecretVerifyHmacSha384
+                | HostOp::SecretVerifyHmacSha512
+                | HostOp::SecretVerifyHmac
+                | HostOp::SecretJwsHmacSign
+                | HostOp::SecretJwsHmacVerify
         ) {
+            return self.runtime_secret_mac(op, f, vals, result, n);
+        }
+        if op.is_secret_key() {
             return self.runtime_secret_key(op, f, vals, result, n);
         }
         if matches!(
@@ -3880,6 +3330,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let key = if matches!(
             op,
             HostOp::Accept
+                | HostOp::LocalAddr
+                | HostOp::PeerAddr
                 | HostOp::UnixAccept
                 | HostOp::DatagramConnect
                 | HostOp::DatagramSend
@@ -3969,7 +3421,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
                 HostOp::SecretNarrow | HostOp::EnvNarrow => operands.push(vals[1]?),
-                HostOp::NetSplit => {}
+                HostOp::NetSplit | HostOp::LocalAddr | HostOp::PeerAddr => {}
                 HostOp::NetJoin => operands.push(self.runtime_key(vals[1]?, n)),
                 _ => unreachable!(),
             }
@@ -4098,6 +3550,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 } else if op == HostOp::TlsConnect {
                     cx.runtime_tls_result(to, ty, value, written, &values[4..], n);
+                } else if matches!(op, HostOp::LocalAddr | HostOp::PeerAddr) {
+                    if let Some(addr) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.net_store_address(addr, ty, &values[4..], n);
+                    }
                 } else if matches!(op, HostOp::Listen | HostOp::Accept) {
                     if let Some(pair) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
@@ -4256,272 +3714,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    fn runtime_secret_seal(
-        &mut self,
-        f: usize,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let bytes = self.p.fns[f].params[0].ty;
-        let rep = self.rep_at(bytes, n)?;
-        let source = vals[0]?;
-        let [value, tag, _, available] = self.runtime_row(
-            RtOp::Host(HostOp::SecretSeal),
-            &[Arg::Value(source), Arg::Value(vals[1]?)],
-            n,
-        )?;
-        let byte = Ty::Scalar(Scalar::U8);
-        let ok = self.runtime_compare(byte, tag, 0, n)?;
-        // Success drops the wiped source. The error arm moves its carrier.
-        self.consume(Some(source), n);
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                cx.drop_field(Some(source), bytes, n);
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
-                }
-            },
-            |cx, to, pair| {
-                let TyKind::Tuple(fields) = cx.t.kind(pair) else {
-                    unreachable!("secret.seal returns its error and source as a tuple");
-                };
-                let error_ty = fields[0];
-                let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
-                else {
-                    return;
-                };
-                let Some(returned) = cx.runtime_field(to, &[Step::Field(1)], bytes, n) else {
-                    return;
-                };
-                cx.install(returned, rep, Some(source), n);
-                let Some(error) = cx.runtime_field(to, &[Step::Field(0)], error_ty, n) else {
-                    return;
-                };
-                cx.runtime_secret_error(error, tag, value, available, n);
-            },
-        )
-    }
-
-    fn runtime_secret_error(
-        &mut self,
-        error: AddressId,
-        tag: ValueId,
-        value: ValueId,
-        available: ValueId,
-        n: NodeId,
-    ) {
-        let Some(invalid) = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 1, n) else {
-            return;
-        };
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[]);
-        self.runtime_branch(invalid, yes, no, n);
-        self.start(yes);
-        self.runtime_case_payload(error, 0, UNIT, None, n);
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: error,
-                case: 1,
-            },
-            n,
-        );
-        let capacity = self.capacity_ty(n);
-        if let Some(at) =
-            self.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
-        {
-            self.runtime_capacity(at, value, available, n);
-        }
-        self.jump(join, &[], n);
-        self.start(join);
-    }
-
-    fn runtime_secret_derive(
-        &mut self,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let secret = self.runtime_key(vals[0]?, n);
-        let [value, tag, _, available] = self.runtime_row(
-            RtOp::Host(HostOp::SecretDeriveHmac),
-            &[
-                Arg::Value(secret),
-                Arg::Value(vals[1]?),
-                Arg::Value(vals[2]?),
-                Arg::Value(vals[3]?),
-            ],
-            n,
-        )?;
-        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
-                }
-            },
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                {
-                    cx.runtime_secret_error(at, tag, value, available, n);
-                }
-            },
-        )
-    }
-
-    /// `secret.wrap`, `unwrap` and `sign`: the runtime's error tag is the
-    /// `KeyError` case plus one; `Capacity` carries requested and available.
-    fn runtime_secret_key(
-        &mut self,
-        op: HostOp,
-        f: usize,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let mut operands = vec![self.runtime_key(vals[0]?, n)];
-        match op {
-            HostOp::SecretWrap => operands.extend([self.runtime_key(vals[1]?, n), vals[2]?]),
-            HostOp::SecretUnwrap => operands.extend([vals[1]?, vals[2]?]),
-            HostOp::SecretSign => {
-                let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, vals[1], n)?;
-                let tag = self.net_case(at, n);
-                let alg = self.value(u);
-                self.inst(
-                    Inst::Convert {
-                        result: alg,
-                        flag: None,
-                        operand: tag,
-                        mode: ConvertMode::Widen,
-                    },
-                    n,
-                );
-                operands.extend([alg, vals[2]?, vals[3]?]);
-            }
-            _ => unreachable!(),
-        }
-        let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
-        let [value, error, _, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
-        let byte = Ty::Scalar(Scalar::U8);
-        let ok = self.runtime_compare(byte, error, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[], u, value, n);
-                }
-            },
-            |cx, to, ty| {
-                let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                else {
-                    return;
-                };
-                let join = cx.new_block(&[]);
-                for case in 0..3 {
-                    let Some(this) = cx.runtime_compare(byte, error, case as u64 + 1, n) else {
-                        return;
-                    };
-                    let yes = cx.new_block(&[]);
-                    let no = cx.new_block(&[]);
-                    cx.runtime_branch(this, yes, no, n);
-                    cx.start(yes);
-                    cx.inst(Inst::SetCase { address: at, case }, n);
-                    cx.jump(join, &[], n);
-                    cx.start(no);
-                }
-                cx.inst(
-                    Inst::SetCase {
-                        address: at,
-                        case: 3,
-                    },
-                    n,
-                );
-                let capacity = cx.capacity_ty(n);
-                if let Some(field) =
-                    cx.runtime_field(at, &[Step::CaseField { case: 3, field: 0 }], capacity, n)
-                {
-                    cx.runtime_capacity(field, value, written, n);
-                }
-                cx.jump(join, &[], n);
-                cx.start(join);
-            },
-        )
-    }
-
-    fn runtime_secret_mac(
-        &mut self,
-        op: HostOp,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let signing = op == HostOp::SecretHmac;
-        let third = if signing {
-            let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
-                unreachable!("the MAC builtin returns a Result")
-            };
-            let id = self.runtime_type(arguments[0], n)?;
-            let output = self.new_slot(PlaceTy::Declared(id), n);
-            self.pointer(output, n)
-        } else {
-            vals[2]?
-        };
-        let secret = self.runtime_key(vals[0]?, n);
-        let [value, error, ..] = self.runtime_row(
-            RtOp::Host(op),
-            &[Arg::Value(secret), Arg::Value(vals[1]?), Arg::Value(third)],
-            n,
-        )?;
-        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                let value = if signing {
-                    Some(third)
-                } else {
-                    cx.runtime_nonzero(u, value, n)
-                };
-                cx.runtime_case_payload(to, 0, ty, value, n);
-            },
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                {
-                    cx.inst(
-                        Inst::SetCase {
-                            address: at,
-                            case: 0,
-                        },
-                        n,
-                    );
-                }
-            },
-        )
-    }
     fn runtime_tls_result(
         &mut self,
         to: AddressId,
@@ -4599,188 +3791,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Step::CaseField { case: 1, field: 0 }],
             u,
             index,
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
-    }
-    fn runtime_stdin_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
-        let join = self.new_block(&[]);
-        for (tag, case) in [(7, 0), (6, 1)] {
-            let on = self
-                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
-                .unwrap();
-            let yes = self.new_block(&[]);
-            let no = self.new_block(&[]);
-            self.runtime_branch(on, yes, no, n);
-            self.start(yes);
-            self.inst(Inst::SetCase { address: to, case }, n);
-            self.jump(join, &[], n);
-            self.start(no);
-        }
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 2,
-            },
-            n,
-        );
-        self.runtime_store(
-            to,
-            &[Step::CaseField { case: 2, field: 0 }],
-            Ty::Scalar(Scalar::U32),
-            code,
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
-    }
-    fn runtime_net_error(
-        &mut self,
-        to: AddressId,
-        ty: TyId,
-        error: ValueId,
-        code: ValueId,
-        n: NodeId,
-    ) {
-        let join = self.new_block(&[]);
-        for case in 0..7 {
-            let Some(on) =
-                self.runtime_compare(Ty::Scalar(Scalar::U8), error, u64::from(case + 1), n)
-            else {
-                return;
-            };
-            let yes = self.new_block(&[]);
-            let no = self.new_block(&[]);
-            self.runtime_branch(on, yes, no, n);
-            self.start(yes);
-            self.inst(Inst::SetCase { address: to, case }, n);
-            self.jump(join, &[], n);
-            self.start(no);
-        }
-        let tls = self
-            .runtime_compare(Ty::Scalar(Scalar::U8), error, 9, n)
-            .unwrap();
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        self.runtime_branch(tls, yes, no, n);
-        self.start(yes);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 8,
-            },
-            n,
-        );
-        if let Some((ty, field)) = self.net_case_field(ty, to, 8, 0, n) {
-            self.runtime_tls_error(ty, field, code, n);
-        }
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 7,
-            },
-            n,
-        );
-        self.runtime_store(
-            to,
-            &[Step::CaseField { case: 7, field: 0 }],
-            Ty::Scalar(Scalar::U32),
-            code,
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
-    }
-    fn runtime_tls_error(&mut self, ty: TyId, to: AddressId, code: ValueId, n: NodeId) {
-        let k = Ty::Scalar(Scalar::U8);
-        let word = Ty::Scalar(Scalar::U32);
-        let case = self.value(k);
-        self.inst(
-            Inst::Convert {
-                result: case,
-                flag: None,
-                operand: code,
-                mode: ConvertMode::Truncate,
-            },
-            n,
-        );
-        let divisor = self.konst(word, 256, n).unwrap();
-        let shifted = self.value(word);
-        let flag = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::IntArith {
-                result: shifted,
-                flag: Some(flag),
-                op: ArithOp::Div,
-                mode: ArithMode::Checked,
-                left: code,
-                right: divisor,
-            },
-            n,
-        );
-        let detail = self.value(k);
-        self.inst(
-            Inst::Convert {
-                result: detail,
-                flag: None,
-                operand: shifted,
-                mode: ConvertMode::Truncate,
-            },
-            n,
-        );
-        let join = self.new_block(&[]);
-        for i in 0..6 {
-            let on = self.runtime_compare(k, case, u64::from(i), n).unwrap();
-            let yes = self.new_block(&[]);
-            let no = self.new_block(&[]);
-            self.runtime_branch(on, yes, no, n);
-            self.start(yes);
-            self.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: i,
-                },
-                n,
-            );
-            if i == 0 {
-                let (_, certificate) = self.net_case_field(ty, to, 0, 0, n).unwrap();
-                for case in 0..4 {
-                    let on = self.runtime_compare(k, detail, u64::from(case), n).unwrap();
-                    let yes = self.new_block(&[]);
-                    let no = self.new_block(&[]);
-                    self.runtime_branch(on, yes, no, n);
-                    self.start(yes);
-                    self.inst(
-                        Inst::SetCase {
-                            address: certificate,
-                            case,
-                        },
-                        n,
-                    );
-                    self.jump(join, &[], n);
-                    self.start(no);
-                }
-                self.inst(
-                    Inst::SetCase {
-                        address: certificate,
-                        case: 4,
-                    },
-                    n,
-                );
-            } else if i == 4 {
-                self.runtime_store(to, &[Step::CaseField { case: 4, field: 0 }], k, detail, n);
-            }
-            self.jump(join, &[], n);
-            self.start(no);
-        }
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 6,
-            },
             n,
         );
         self.jump(join, &[], n);

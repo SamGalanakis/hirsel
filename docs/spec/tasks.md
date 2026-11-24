@@ -26,6 +26,7 @@ scoped values, builders and task handles. The check reads declarations and captu
 plain types, except those that hold a raw foreign handle; a tuple or array whose element
 types are `cross`; `String`;
 `List[T]` when `T` is plain and `cross`; `Client[T]` ([CONC-17](#conc-17-connections));
+`Shared[T]` ([CONC-15](#conc-15-units));
 `Socket` and `Listener`; the capability types; `Args`, `Child`, `Unique`, `Site` and
 `StaticFn`; and plain `fn`s. An own or resource record is `cross` when it declares the bound
 and each field type is `cross`; a nominal variant type is `cross` only when it is plain.
@@ -261,7 +262,8 @@ test after every other holder's release ([MEM-15](memory.md#mem-15-arc)).
 ### CONC-12: No shared mutable state
 
 v1 has no mutable value reachable from two tasks, except a `Latest` root (CONC-13), which
-holds an `Arc`: no mutable statics, no cells, no mutexes, no atomics, and no write through
+holds an `Arc`: no mutable statics, no cell reachable from two tasks (a `Cell`,
+[MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells), is never `send`), no mutexes, no atomics, and no write through
 the view an `Arc` gives ([OWN-12](ownership.md#own-12-assignment)). `arc.with_unique`
 writes an `Arc` payload only while its count is 1, when no other task reaches it
 ([MEM-15](memory.md#mem-15-arc)). Top-level `const` values are plain and immutable.
@@ -416,9 +418,10 @@ reaches another unit only as the `x` of a `spawn_unit`, as a helper's result at 
 as an item of a connection ([CONC-17](#conc-17-connections)), and each of these has a
 `cross` type ([CONC-2](#conc-2-the-send-bound)). A plain value is copied. A `List` or
 `String` crosses as a copy of its content: its old storage is refunded where it was charged,
-and the copy is charged where it arrives. A client, socket, listener or `Secret` moves as a handle.
+and the copy is charged where it arrives. A client, socket, listener, `Secret` or `Shared`
+holder moves as a handle.
 The **content charge** of a value is the sum, over the lists and strings it holds, of
-length × element size rounded up to 8.
+length × element size rounded up to 8; a `Shared` holder's payload is not part of it.
 
 `task.spawn_unit(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]`, where
 `X` and `R` are `cross` and `f: fn(take X) -> R waits` is a plain callable as in
@@ -441,9 +444,31 @@ and the root observes the request at a cancellation point
 helper, waits for its end with cancellation shielded, and drops its result or causes. Once
 `join` returns or that cleaning ends, all of the task charge has been refunded to the limit
 that admitted it, except the charges for the result's content, any delivered causes, and
-each connection the helper made that is still open (CONC-17) and each `Secret` designation
-it made that is still held ([TLS-5](tls.md#tls-5-secrets)). These charges are refunded
-when their owners are cleaned.
+each connection the helper made that is still open (CONC-17), each `Secret` designation
+it made that is still held ([TLS-5](tls.md#tls-5-secrets)), each `Shared` node it made
+that another unit still holds, and each `UdpSocket` pool and group queue it paid for that
+has not yet retired ([NET-16](net.md#net-16-udp-sockets-and-batches)). The last covers a
+socket whatever route its handle left by, and one whose drop has started a retirement that
+is still pending at the join. These charges are refunded when their owners are cleaned; a
+UDP charge is refunded at its recorded retirement, to the limit its record then leads to
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
+
+`Shared[T]`, where `T` is `shareable` ([OWN-4](ownership.md#own-4-bounds)) and `cross`,
+holds one value that every unit holding it may read and none may change: being shareable,
+it holds no resource and no mutable cell. `shared.new(take x)` moves `x` into a new node,
+admitting the payload's size + 40, rounded up to 8 ([MEM-24](budgets.md#mem-24-logical-charges)),
+from the current limit; a refusal raises `Capacity` with `x` still the caller's. The
+lists and strings `x` holds keep the charges they already had. `shared.share(h)` returns
+another holder and admits nothing. A holder crosses as a handle, so the payload is
+neither copied nor charged again where it arrives. The unit that made the node is its
+**home**, and the node and its payload's storage stay charged to the limits in home that
+paid for them until the last holder, in any unit, is dropped. That drop sends the node
+home, a refund that home takes as an input; home cleans the payload and refunds each
+charge at that take, or at the drop itself when the drop is in home. When home is a helper
+that ends while another unit still holds a node it made, its owner keeps that node's
+charges from the task charge, as for a connection still open, and the last drop refunds
+them to the owner. Reading a payload and sharing or dropping a holder that is not the last
+are not events.
 
 A unit's **entry** is its function `f`, its argument `x`, its root limit `n` and its root
 step bound or the absence of one; the first unit's entry is `main` with its grants, the run's
@@ -453,8 +478,8 @@ reaches it from outside: the items and close of each inbox it holds and the outc
 its root, refunds sent to its limits by other units, and its providers' results. Two units
 with the same entry that receive the same inputs in the same order behave the same. The order
 in which inputs from different senders reach a unit is free. How many workers run the
-units, which worker or thread runs a unit at any moment, and whether a spare thread takes
-the place of a worker blocked in a host call are not observable.
+units, which worker or thread runs a unit at any moment, and which thread carries out a
+host call while its unit waits are not observable.
 
 Every charged byte has one payer, a limit, at each moment, and each reservation is released
 at one point. A limit's spendable balance changes only at an operation of its own unit or
@@ -469,8 +494,8 @@ action in one unit becomes visible in another.
 
 **Unbuilt.** These are not built, and no program or test may rely on them:
 
-- `Shared` payloads and boards, which would let units read one immutable payload by
-  reference and publish its latest version to many units; no program can name them.
+- Boards, which would publish the latest version of a `Shared` payload to many units; no
+  program can name them.
 - A recording of a unit other than the run's first: a recorded run records its first unit
   and not its helpers, so no replay of a helper, and no equality of recordings made at
   different worker counts for a program with helpers, is promised.
@@ -485,6 +510,15 @@ fn grow(tasks: Tasks, take t: Table) -> Result[Task[Table], (Capacity, Table)] {
     let mut u = take v
     list.push(mut u.rows, 1)
     take u
+  })
+}
+```
+```hirsel
+type Routes: shareable + cross { hosts: List[u64] }
+fn fan(tasks: Tasks, take r: Routes) -> Result[Task[u64], (Capacity, Shared[Routes])] {
+  let s = shared.new(take r)                               // one node, charged here once
+  task.spawn_unit(tasks, bytes 0, shared.share(s), fn(take c: Shared[Routes]) -> u64 {
+    list.len(c.hosts)                                      // read in place: no copy, no charge
   })
 }
 ```

@@ -1,0 +1,238 @@
+// Cell[T] (MEM-29): a task-local owner of one value, written through a view.
+fn add(mut n: u64, take by: u64) -> u64 {
+    n += by;
+    n
+}
+
+// Pushes 1 ..= k after reserving exactly k entries.
+fn fill(mut xs: List[u64], take k: u64) -> bool {
+    if let Error(_) = list.try_reserve(mut xs, k) {
+        return false
+    }
+    for i in 1u64 .. k + 1 {
+        list.push(mut xs, i)
+    }
+    true
+}
+
+fn digits(xs: List[u64]) -> u64 {
+    let mut seen = 0u64
+    for x in xs {
+        seen = 10 * seen + x
+    }
+    seen
+}
+
+fn put(c: Cell[u64], v: u64) {
+    cell.set(c, v)
+}
+
+fn swap_in[T: inert](c: Cell[T], take v: T) -> T {
+    cell.replace(c, take v)
+}
+
+fn refused[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+// Each operation reads or writes the payload behind the handle: get after with, set and
+// replace sees the last value installed, and into_inner returns it.
+// expect: run operations() = 1042
+fn operations() -> u64 {
+    let c = cell.new(1u64)
+    let r = cell.with(c, 2u64, add)
+    cell.set(c, 40)
+    let old = cell.replace(c, 1000)
+    let now = cell.get(c)
+    let last = cell.into_inner(take c)
+    if r == 3 && old == 40 && now == 1000 {
+        last + old + 2
+    } else {
+        0
+    }
+}
+
+// A write through a view in a separate function is seen by the next get, every time.
+// engine-fact: cell payload writes behind a view stay visible under LLVM alias and load facts
+// expect: run reread_after_helper_write() = 8
+fn reread_after_helper_write() -> u64 {
+    let c = cell.new(0u64)
+    let mut fresh = true
+    for i in 0u64 .. 8 {
+        let before = cell.get(c)
+        put(c, before + 1)
+        fresh = fresh && before == i && cell.get(c) == i + 1
+    }
+    if fresh {
+        cell.into_inner(take c)
+    } else {
+        0
+    }
+}
+
+// MEM-24: a Cell[List[u64]] node is round8(24) = 24 bytes; an empty list holds no
+// storage. 24 bytes admit it; 23 refuse it with Capacity(24, 23), before the list is
+// taken, and the list stays the caller's.
+// expect: run node_charge_exact_and_one_below() = true
+fn node_charge_exact_and_one_below() -> bool {
+    let fits = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 24 {
+            let c: Cell[List[u64]] = cell.new(list.new())
+            list.len(cell.into_inner(take c))
+        }
+    })
+    let below = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 23 {
+            let c: Cell[List[u64]] = cell.new(list.new())
+            list.len(cell.into_inner(take c))
+        }
+    })
+    let admitted = match take fits {
+        Ok(Ok(Ok(0))) => true,
+        _ => false,
+    }
+    let charge = match refused(take below) {
+        Some(c) => c.requested == 24 && c.available == 23,
+        None => false,
+    }
+    admitted && charge
+}
+
+// MEM-24: a bool payload's node is 8 bytes and a unit payload's is 0.
+// expect: run small_nodes() = true
+fn small_nodes() -> bool {
+    let flag = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 8 {
+            let c = cell.new(true)
+            cell.set(c, false)
+            cell.into_inner(take c)
+        }
+    })
+    let unit = isolate(fn() -> Result[(), Capacity] {
+        bound bytes 0 {
+            let c = cell.new(())
+            cell.set(c, ())
+            cell.into_inner(take c)
+        }
+    })
+    let short = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 7 {
+            cell.into_inner(cell.new(true))
+        }
+    })
+    let f = match take flag {
+        Ok(Ok(Ok(false))) => true,
+        _ => false,
+    }
+    let u = match take unit {
+        Ok(Ok(Ok(()))) => true,
+        _ => false,
+    }
+    let s = match refused(take short) {
+        Some(c) => c.requested == 8 && c.available == 7,
+        None => false,
+    }
+    f && u && s
+}
+
+// MEM-26: growth inside a callback charges the current limit. A cell made outside an
+// inner 32-byte bound grows by exactly four u64 entries inside it, and the entries stay
+// in the cell after the bound ends (MEM-20). Under a 31-byte bound the reserve refuses
+// and the payload is unchanged.
+// expect: run growth_under_inner_bound() = 1234
+fn growth_under_inner_bound() -> u64 {
+    let c: Cell[List[u64]] = cell.new(list.new())
+    let short = bound bytes 31 {
+        cell.with(c, 4u64, fill)
+    }
+    match short {
+        Ok(false) => {},
+        _ => return 0,
+    }
+    let grown = bound bytes 32 {
+        cell.with(c, 4u64, fill)
+    }
+    match grown {
+        Ok(true) => {},
+        _ => return 0,
+    }
+    digits(cell.into_inner(take c))
+}
+
+// A list moved out by replace and into_inner outlives the frame that owned the cell,
+// with its entries.
+// expect: run moved_past_owner() = 12312
+fn moved_past_owner() -> u64 {
+    let (old, rest) = lists_from_a_cell()
+    digits(old) * 100 + digits(rest)
+}
+
+fn lists_from_a_cell() -> (List[u64], List[u64]) {
+    let c: Cell[List[u64]] = cell.new(list.new())
+    let _ = cell.with(c, 3u64, fill)
+    let old = cell.replace(c, list.new())
+    let _ = cell.with(c, 2u64, fill)
+    (old, cell.into_inner(take c))
+}
+
+// A rigid `T: inert` meets the element condition, for a scalar and an owning payload.
+// expect: run rigid_inert_payload() = 7123
+fn rigid_inert_payload() -> u64 {
+    let n = cell.new(5u64)
+    let five = swap_in(n, 7)
+    let xs: Cell[List[u64]] = cell.new(list.new())
+    let _ = cell.with(xs, 3u64, fill)
+    let first = swap_in(xs, list.new())
+    let seven = cell.into_inner(take n)
+    let empty = list.len(cell.into_inner(take xs))
+    if five == 5 && empty == 0 {
+        seven * 1000 + digits(first)
+    } else {
+        0
+    }
+}
+
+fn filled_then_dropped() -> bool {
+    let c: Cell[List[u64]] = cell.new(list.new())
+    cell.with(c, 4u64, fill)
+}
+
+// MEM-24: into_inner and drop refund the node, and drop refunds the payload's storage. A
+// cell of four u64 entries costs 24 + 32 = 56 bytes, so a 56-byte bound admits two in
+// turn only if the first is fully refunded; a second 24-byte node fits after into_inner.
+// expect: run node_refunded() = true
+fn node_refunded() -> bool {
+    let dropped = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 56 {
+            filled_then_dropped() && filled_then_dropped()
+        }
+    })
+    let extracted = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 24 {
+            let a: Cell[List[u64]] = cell.new(list.new())
+            let first = list.len(cell.into_inner(take a))
+            let b: Cell[List[u64]] = cell.new(list.new())
+            first + list.len(cell.into_inner(take b))
+        }
+    })
+    let d = match take dropped {
+        Ok(Ok(Ok(true))) => true,
+        _ => false,
+    }
+    let e = match take extracted {
+        Ok(Ok(Ok(0))) => true,
+        _ => false,
+    }
+    d && e
+}

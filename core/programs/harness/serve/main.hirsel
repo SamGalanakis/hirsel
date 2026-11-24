@@ -2,7 +2,7 @@ const LIMIT: u64 = 536870912u64
 const PLACE_POOL: u64 = 134217728u64
 const HELPER_BYTES: u64 = 67108864u64
 
-fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
     let live = match s.live {
         Some(l) => Some(notes.main.copy_live(l, supplied.name)),
         None => None,
@@ -24,11 +24,11 @@ fn listen(h: Host, hub: harness.preview.Hub, model: String, take live: Option[no
     }
     let (ask, asks): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(h.tasks, bytes HELPER_BYTES, notes.main.HelperSeed(inbox: take asks, dir: helper_dir, clock: h.clock, random: h.random, tasks: h.tasks, net: h.net), notes.main.helper_service)
-    let way = harness.gateway.doorway()
+    let way = harness.gateway.doorway(notes.main.seed_schema)
     let d = harness.gateway.door_of(way)
     let stream = Some(notes.main.Stream(door: harness.preview.door(hub), group: ""))
     let seed = notes.main.Services(helper: channel.sender(ask), clock: h.clock, live: take live, stream: take stream)
-    let config = harness.gateway.GatewayConfig(root: h.data, options: notes.main.options(), migrate: code.describe(notes.main.migrate), factory: platform.local.seeded_factory(session), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: PLACE_POOL, tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: h.data, options: notes.main.options(), factory: platform.local.seeded_factory(session), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: PLACE_POOL, tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, watch: None, seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take started) => take started,
         Error(Full) => return notes.main.quit(h.out, "Gateway capacity exhausted. Rebuild with --limit 536870912."),
@@ -113,13 +113,13 @@ fn cache_diff(h: Host, d: harness.gateway.Door, id: u64) -> Result[harness.Cache
         Error(_) => return Error("Wait for the fork's reply, then try the cache diff again."),
     }
     let dir = std.dir.narrow(h.data, platform.local.name_of(id)) ?=> |_| "Could not find the fork's store."
-    let db = store.open(h.tasks, dir, h.clock, h.random, notes.main.options()) ?=> |_| "Close the fork's stream before running the cache diff."
-    let diff = diff_recorded(db)
+    let mut db = store.open(h.tasks, dir, h.clock, h.random, notes.main.options()) ?=> |_| "Close the fork's stream before running the cache diff."
+    let diff = diff_recorded(mut db)
     store.close(take db) ?=> |_| "Could not close the fork's store."
     take diff
 }
 
-fn diff_recorded(db: store.Db) -> Result[harness.CacheDiff, String] waits {
+fn diff_recorded(mut db: store.Db) -> Result[harness.CacheDiff, String] waits {
     let branch = store.main_branch(db)
     let entry = runner.client.transact_entry(code.describe(notes.main.submit_entry))
     let key = runner.client.entry_key(entry)
@@ -127,12 +127,12 @@ fn diff_recorded(db: store.Db) -> Result[harness.CacheDiff, String] waits {
     while version > 0u64 {
         if let Some(call) = store.recorded(db, branch, version) ?=> |_| "Could not read the fork's recorded calls." {
             if call.record.key == key {
-                let h = store.with_schema(db, code.describe(harness.handles)) ?=> |_| "Could not read the fork's harness schema."
+                let h = store.bind_declaration(mut db, Open, notes.main.schema) ?=> |_| "Could not read the fork's harness schema."
                 let limits = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
-                let live = notes.main.notes_agent()
-                let mut candidate = notes.main.notes_agent()
+                let live = notes.main.notes_agent(h.tables)
+                let mut candidate = notes.main.notes_agent(h.tables)
                 list.push(mut candidate.sections, harness.Section(key: "release-preview", render: code.describe(candidate_section)))
-                return Ok(harness.fork_cache_diff(db, branch, version, limits, h, live, candidate) ?=> |_| "Could not project the recorded fork call.")
+                return Ok(harness.fork_cache_diff(db, branch, version, limits, h.harness, live, candidate) ?=> |_| "Could not project the recorded fork call.")
             }
         }
         version -= 1u64
@@ -140,6 +140,6 @@ fn diff_recorded(db: store.Db) -> Result[harness.CacheDiff, String] waits {
     Error("Send a message to the fork before running the cache diff.")
 }
 
-fn candidate_section(tx: store.Tx) -> Result[Option[String], store.Error] {
+fn candidate_section(tx: store.Tx, h: harness.Handles, app: notes.main.Tables) -> Result[Option[String], store.Error] {
     Ok(Some("In a draft release, summarize the changed notes."))
 }

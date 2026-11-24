@@ -2,7 +2,7 @@ use super::*;
 use crate::{source::SourceMap, text, wf};
 
 fn decode(bytes: &[u8]) -> DecodeResult<Module> {
-    super::decode(bytes, &mut DecodeBudget::unlimited()).map(|body| body.module)
+    super::decode(bytes, &Debit::unlimited()).map(|body| body.module)
 }
 
 fn checked(source: &str) -> Module {
@@ -160,7 +160,7 @@ fn hints_only_change_the_annex() {
         );
         let bytes = annex.encode();
         let decoded_body = round_trip(&b);
-        let decoded = Annex::decode(&bytes, &decoded_body, &mut DecodeBudget::unlimited()).unwrap();
+        let decoded = Annex::decode(&bytes, &decoded_body, &Debit::unlimited()).unwrap();
         assert_eq!(decoded.encode(), bytes);
         let facts = decoded.0[0].as_ref().unwrap();
         assert_eq!(facts.cold_calls, vec![hint == 1]);
@@ -346,14 +346,35 @@ fn f0 = n0 g0 {
 fn explicit_closure_tuples_preserve_published_identity() {
     let module = text::parse(include_str!("../../samples/failure.core")).unwrap();
     let closure = module.closure(TypeId(0));
-    // Fixed-width v1 tuple for Temp with a finalizer, hand-framed with hashlib.
+    // PROG-10's fixed-width v1 tuple for Temp, with a finalizer and no codecs.
+    let expected = hex(concat!(
+        "0100000000000000",                     // one row
+        "040000000000000054656d70",             // Temp
+        "010000000000000000000000",             // resource, address, record
+        "0100000000000000",                     // one field
+        "020000000000000069640000000009000000", // id: scalar u64
+        "00000000000000000000000000",           // no shape hooks, grant, send, held
+        "01",                                   // finalizer hook present
+        "070000000000000073616d706c6573",       // samples
+        "010000000000000030",                   // package version 0
+        "0100000000000000",                     // one module component
+        "07000000000000006661696c757265",       // failure
+        "090000000000000054656d702e64726f70",   // Temp.drop
+        "00000000000000000000000000000000",     // no dictionaries or type arguments
+        "01000000000000000000000001000000",     // one value parameter, ptr
+        "00000000000000000000",                 // no results, dest, or never
+        "0000",                                 // no clone or codec hooks
+    ));
+    let empty = Module::default();
+    let mut order = ModuleOrder::new(&empty);
+    let mut out = Write::module(&mut order);
+    wire::encode_closure(&closure.rows, &mut out);
+    assert_eq!(out.bytes, expected);
+
+    // SHA-256 over the length-framed domain and tuple above.
     assert_eq!(
         closure.hash.0.as_slice(),
         hex("9debaf6b4ea25b29f5812ee89b1043a97472e3787299e459bf95c5ee563c5254")
-    );
-    assert_eq!(
-        closure.hash,
-        ContentHash::of_encoded("hirsel.core-closure.v1", &closure.rows),
     );
 }
 
@@ -512,13 +533,13 @@ fn source_position_changes_only_the_matching_annex() {
     assert_eq!((line(&sites_a), line(&sites_b)), (1, 2));
     let decoded = round_trip(&b);
     assert_eq!(
-        Annex::decode(&sites_b.encode(), &decoded, &mut DecodeBudget::unlimited()).unwrap(),
+        Annex::decode(&sites_b.encode(), &decoded, &Debit::unlimited()).unwrap(),
         sites_b
     );
     let mut wrong = sites_b;
     wrong.0[0].as_mut().unwrap().cold_calls.clear();
     assert!(
-        Annex::decode(&wrong.encode(), &decoded, &mut DecodeBudget::unlimited()).is_err(),
+        Annex::decode(&wrong.encode(), &decoded, &Debit::unlimited()).is_err(),
         "annex must cover the body's calls"
     );
 }
@@ -661,10 +682,15 @@ fn retained_assembly_is_the_original_assembly() {
     let (code, retained) = retain(&module, FuncId(0));
     let (_, annex, decoded) = prepare_assembly(&module, FuncId(0), &sources);
     assert_eq!(
-        prepare_retained_assembly(&code.bytes, &retained, &sources),
+        prepare_retained_assembly(&retained, &sources),
         (annex, decoded),
         "a retained module's annex is read off in canonical order"
     );
+    let named = crate::source::anchored_items(&retained);
+    let sites = RetainedSites::take(retained.clone());
+    assert_eq!(sites.anchored_items(), named);
+    assert_eq!(sites.annex(&sources), retained_annex(&retained, &sources));
+    assert_eq!(sites.restore(&code.bytes), retained);
 }
 
 fn local_row_permutation() {
@@ -784,5 +810,74 @@ fn versioned_flag_enters_the_body_and_release_copies_do_not() {
         encode(&module, FuncId(0)).hash(),
         first,
         "D12 the checked versioned flag enters the body"
+    );
+}
+
+/// A body whose `n` callees each take a wrapper of one `depth`-deep record chain, so
+/// decoding hashes `n` closures that each walk the whole chain.
+fn wrapped_chain(n: usize, depth: usize) -> Vec<u8> {
+    let mut text = String::from("core v1\n");
+    for i in 0..depth {
+        let field = if i + 1 < depth {
+            format!("t{}", i + 1)
+        } else {
+            "u64".into()
+        };
+        text += &format!("type t{i} = own \"Chain{i}\" {{ x: {field} }}\n");
+    }
+    for j in 0..n {
+        text += &format!("type t{} = own \"Wrap{j}\" {{ x: t0 }}\n", depth + j);
+    }
+    text += "sig g0 = () -> ()\ninst n0 = app@1/main/root [] []\n";
+    for j in 0..n {
+        text += &format!("inst n{} = app@1/main/take [t{}] []\n", j + 1, depth + j);
+    }
+    text += "fn f0 = n0 g0 {\nb0:\n";
+    for j in 0..n {
+        text += &format!("call f{} g0 ()\n", j + 1);
+    }
+    text += "return\n}\n";
+    for j in 0..n {
+        text += &format!("fn f{} = n{} g0 extern\n", j + 1, j + 1);
+    }
+    encode(&checked(&text), FuncId(0)).bytes
+}
+
+/// The fewest decoded bytes `bytes` decodes within.
+fn decode_bytes(bytes: &[u8]) -> usize {
+    let within = |limit| {
+        let budget = crate::decode::DecodeBudget::new(crate::decode::DecodeLimits {
+            bytes: limit,
+            members: usize::MAX,
+            slots: usize::MAX,
+            depth: usize::MAX,
+            deadline: None,
+        });
+        super::decode(bytes, &budget.debit()).is_ok()
+    };
+    let (mut low, mut high) = (0, 1 << 30);
+    assert!(within(high));
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if within(mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    low
+}
+
+#[test]
+fn decoded_bytes_bound_held_memory_not_hashing_work() {
+    // launch.md "Admission" step 3 limits the memory decoded objects hold. A closure is
+    // hashed and dropped, so another wrapper of the chain costs its own rows whatever the
+    // chain's depth; charging each closure walk for good costs it the chain again.
+    let extra =
+        |depth| decode_bytes(&wrapped_chain(65, depth)) - decode_bytes(&wrapped_chain(1, depth));
+    let (shallow, deep) = (extra(64), extra(256));
+    assert!(
+        deep < shallow + shallow / 4,
+        "64 wrappers cost {shallow} at depth 64, {deep} at 256"
     );
 }

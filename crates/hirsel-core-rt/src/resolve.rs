@@ -100,7 +100,7 @@ pub unsafe extern "C" fn hirsel_core_host_resolve(
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 0,
                 os: &crate::os_resolve::OPERATIONS,
                 tls: ptr::null_mut(),

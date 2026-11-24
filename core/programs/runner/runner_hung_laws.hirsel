@@ -1,0 +1,83 @@
+// A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
+// its writes absent. The second session's compute call also receives its answer.
+fn drive_deadline_hung(take d: Drive, steps: u64) -> () waits {
+    let s0 = conn(d, 1u64)
+    let s1 = conn(d, 1u64)
+    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
+    let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
+    ask(s0, d.clock, 0u64, 0u64, clone(kh), u64_arg(5u64), LATER)
+    ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
+    let computed = frame(s1)
+    match computed.outcome {
+        Returned(b) => {
+            let c: std.codec.Codec[u64] = std.codec.of()
+            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
+        },
+        _ => fail("hung: compute faulted"),
+    }
+    let stopped = frame(s0)
+    want(is(stopped.outcome, Failed(OutOfTime(steps))), "hung: wrong stop")
+    want(stopped.version == 3u64, "hung: stop is not a reply-only commit")
+    ask(s0, d.clock, 0u64, 0u64, take kh, u64_arg(5u64), LATER)
+    want(is(frame(s0).outcome, stopped.outcome), "hung: duplicate reran")
+    // The next admitted position still runs after the reply-only stop.
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(5u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(5u64), "hung: next position did not run")
+    hang(take s0)
+    hang(take s1)
+}
+
+const HUNG_STEPS: u64 = 65538u64
+
+fn place_hung_extra(mut r: Calls) -> Result[(), runner.RegisterError] {
+    place_with_hung_steps(mut r, HUNG_STEPS + 2)
+}
+
+fn drive_hung_base(take d: Drive) -> () waits {
+    drive_deadline_hung(take d, HUNG_STEPS)
+}
+
+fn drive_hung_extra(take d: Drive) -> () waits {
+    drive_deadline_hung(take d, HUNG_STEPS + 2)
+}
+
+pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    let mut token: Bytes = list.new()
+    served(c, r, tasks, n, drive_hung_base) &&
+        served_on_with_place(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
+}
+
+@test
+fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
+}
+
+fn drain_id(label: String, birth: u64) -> store.StreamId {
+    let mut raw: Bytes = list.with_capacity(8u64)
+    list.append(mut raw, string.as_bytes(label))
+    let padding = 8u64 - list.len(raw)
+    list.fill(mut raw, padding, 0u8)
+    store.StreamId(t: birth, n: list.word_le(raw, 0u64))
+}
+
+fn drain_caller() -> store.Caller { store.Caller(issuer: 1u8, subject: list.new()) }
+
+fn drain_stream(label: String, birth: u64) -> store.StreamKey {
+    store.StreamKey(caller: drain_caller(), id: drain_id(label, birth))
+}
+
+fn drain_send(to: Sender[runner.HeadInput], stream: String, birth: u64, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
+    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(2u64)
+    let req = runner.head_request(drain_caller(), drain_id(stream, birth), position, k_write(), u64_arg(argument), take reply_to)
+    result.unwrap(channel.send(to, RunRequest(take req)))
+    take reply_from
+}
+
+fn drain_answer(from: Receiver[runner.WireEvent], stream: String, birth: u64, position: u64) -> runner.Outcome {
+    let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
+    let received = option.unwrap(runner.head_outcome(take event))
+    want(received.stream == result.unwrap(store.stream_key_bytes(drain_stream(stream, birth))) && received.p == position, "drain: answer to wrong send")
+    if let Ok(_) = channel.try_receive(from) { fail("drain: send answered twice") }
+    let runner.KeyedDone(outcome: take outcome, ..) = take received
+    take outcome
+}

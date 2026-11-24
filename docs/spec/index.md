@@ -57,7 +57,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18, MEM-29; performance targets MEM-31 to MEM-32 |
-| [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30 |
+| [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30, MEM-33 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |

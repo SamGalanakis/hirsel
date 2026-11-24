@@ -147,8 +147,8 @@ fn prog3_startup_refusals_llvm() {
 
 #[test]
 fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
+    use crate::package_content::{archive_digest, hex};
     use hirsel_core_net::exec::{PinnedImage, Request};
-    use sha2::{Digest, Sha256};
     use std::io::Read;
     use std::os::fd::AsFd;
 
@@ -162,7 +162,16 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
         let name = interpreter.to_bytes_with_nul();
         let dylinker = (12 + name.len()).next_multiple_of(8);
         let mut image = Vec::new();
-        for word in [0xfeed_facfu32, 0x0100_000c, 0, 2, 2, (dylinker + 24) as u32, 0, 0] {
+        for word in [
+            0xfeed_facfu32,
+            0x0100_000c,
+            0,
+            2,
+            2,
+            (dylinker + 24) as u32,
+            0,
+            0,
+        ] {
             image.extend(word.to_le_bytes());
         }
         // LC_LOAD_DYLINKER naming the interpreter, then LC_MAIN.
@@ -204,10 +213,10 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
         executable.to_vec()
     };
     std::fs::write(&image, &executable).unwrap();
+    let pin = hex(&archive_digest(&executable));
     let policy = format!(
-        "[git]\nimage = {:?}\nsha256 = \"{:x}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
+        "[git]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
         image.to_str().unwrap(),
-        Sha256::digest(&executable),
         dir.path().to_str().unwrap(),
     );
     std::fs::write(&profile, &policy).unwrap();
@@ -218,9 +227,8 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     assert_eq!(
         lines,
         [format!(
-            "exec: git: image {}, sha256 {:x}, interpreter /oracle/loader, policy {}\n",
+            "exec: git: image {}, sha256 {pin}, interpreter /oracle/loader, policy {}\n",
             image.display(),
-            Sha256::digest(&executable),
             hirsel_core_net::exec::hex(&expected),
         )]
     );
@@ -281,10 +289,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     );
     std::fs::write(
         &profile,
-        policy.replace(
-            &format!("{:x}", Sha256::digest(&executable)),
-            &format!("{:x}", Sha256::digest(b"#!/bin/sh\n")),
-        ),
+        policy.replace(&pin, &hex(&archive_digest(b"#!/bin/sh\n"))),
     )
     .unwrap();
     let script = request.load().unwrap();

@@ -1,22 +1,8 @@
 // Bucket authority laws on std.sim.s3, against the real store writer.
-//
-// L4: a writer that loses its connection at any wire cut leaves a bucket that
-// a fresh directory recovers to the last checkpoint it acknowledged, or with
-// an applied but unanswered final request, to the next one. Recovery leaves
-// no pending upload, and the cut writer's directory is then fenced. Wrong
-// writers caught: publishing a MANIFEST before its packs complete (the cut
-// between leaves a generation whose pack is missing, so recovery fails),
-// recovering a lower generation than the newest (an acknowledged checkpoint
-// is lost), a publish that skips the If-None-Match fence (the fenced writer
-// below overwrites the new writer's generation, and its rows appear), and a
-// reopen that skips the holder check (the stale directory opens).
-//
-// Reopen: at every cut, the writer's own directory reopens with every row
-// its journal acknowledged, and its next checkpoint carries them to a fresh
-// directory. The soak runs one seeded cut per seed under retriable faults.
 
 type BucketSim {
     network: Net,
+    endpoint: std.sim.s3.Endpoint,
     time: Clock,
     server: Task[std.sim.s3.Report],
     driver: Task[()],
@@ -29,24 +15,11 @@ type BucketSimClock: send {
     real: Clock
 }
 
-type BucketSimServer: send {
-    config: std.sim.s3.Config,
-    plan: std.sim.world.Plan,
-    time: Clock,
-    port: core.Served[NetOp]
-}
-
 const BUCKET_LAW_OP_MS: u64 = 30000
 
 const BUCKET_LAW_ROUNDS: u64 = 3
 
 const BUCKET_LAW_CUTS: u64 = 40
-
-fn bucket_law_server(take input: BucketSimServer) -> std.sim.s3.Report waits {
-    let BucketSimServer(config: take config, plan: take initial, time, port: take port) = take input
-    let mut plan = take initial
-    std.sim.s3.serve(config, mut plan, time, take port)
-}
 
 // Advances virtual time until the law stops it and no virtual timer is
 // left. `clock.idle` also answers None while the store waits on its real
@@ -84,23 +57,31 @@ fn bucket_law_spare() -> Addr {
 
 // Requests to s3.test may be cut. Requests to spare.test never are.
 fn bucket_law_sim(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault]) -> BucketSim {
+    bucket_law_sim_plan(tasks, real, seed, cut, take faults, std.sim.world.plan(seed))
+}
+
+fn bucket_law_sim_plan(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take plan: std.sim.world.Plan) -> BucketSim {
+    bucket_law_sim_holds(tasks, real, seed, cut, take faults, list.new(), take plan)
+}
+
+fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan) -> BucketSim {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut net_model = std.sim.net.new(std.sim.net.defaults())
     let mut primary: List[Ip] = list.with_capacity(1)
     list.push(mut primary, address.ip)
     std.sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take primary)
+    std.sim.net.handshake_as(mut net_model, string.from("bucket.s3.test"), Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
     let mut spare: List[Ip] = list.with_capacity(1)
     list.push(mut spare, bucket_law_spare().ip)
     std.sim.net.resolve_as(mut net_model, string.from("bucket.spare.test"), take spare)
     let key = bucket_law_signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
-    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
+    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
     let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
-    let (network, port) = provide.net(bytes 1048576)
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
-    let server = task.spawn(tasks, bytes 33554432, BucketSimServer(config: take config, plan: std.sim.world.plan(seed), time, port: take port), bucket_law_server)
-    BucketSim(network, time, server: take server, driver: take driver, stop: take stop)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, take plan, time, 1048576, 33554432)
+    BucketSim(network: std.sim.s3.endpoint_network(endpoint), endpoint, time, server: take server, driver: take driver, stop: take stop)
 }
 
 fn bucket_law_place(host_name: String) -> std.object.Bucket {
@@ -111,20 +92,57 @@ fn bucket_law_place(host_name: String) -> std.object.Bucket {
 }
 
 fn bucket_law_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[std.object.Client, Error] waits {
+    bucket_law_client_with(s, tasks, host_name, seed, false)
+}
+
+fn bucket_law_lanes(lanes: u64) -> std.object.LaneConfig {
+    std.object.LaneConfig(requested_lanes: lanes, lane_bytes: 1048576)
+}
+
+fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool) -> Result[std.object.Client, Error] waits {
+    bucket_law_client_lanes(s, tasks, host_name, seed, typed, 0)
+}
+
+fn bucket_law_client_lanes(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool, lanes: u64) -> Result[std.object.Client, Error] waits {
+    bucket_endpoint_client(s.endpoint, s.network, s.time, tasks, host_name, seed, typed, lanes)
+}
+
+fn bucket_endpoint_client(endpoint: std.sim.s3.Endpoint, network: Net, time: Clock, tasks: Tasks, host_name: String, seed: u64, typed: bool, lanes: u64) -> Result[std.object.Client, Error] waits {
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(time), BUCKET_LAW_OP_MS)
+    let place = bucket_law_place(host_name)
+    let random = provide.random(seed)
+    let connected = if typed {
+        std.object.start_simulated(endpoint, tasks, take place, take credentials_set, time, random, bucket_law_lanes(lanes), deadline)
+    } else {
+        std.object.start(network, tasks, take place, take credentials_set, None, System, time, random, bucket_law_lanes(lanes), deadline)
+    }
+    match take connected {
+        Ok(take client) => Ok(take client),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn bucket_law_https_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[std.object.Client, Error] waits {
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
     let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
-    match std.object.start(s.network, tasks, bucket_law_place(host_name), take credentials_set, None, System, s.time, provide.random(seed), 0, 1048576, deadline) {
+    let mut endpoint = string.from("https://")
+    string.push(mut endpoint, host_name)
+    string.push(mut endpoint, ":8080")
+    let place = std.object.Bucket(endpoint: take endpoint, aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    match std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, provide.random(seed), bucket_law_lanes(1), deadline) {
         Ok(take client) => Ok(take client),
         Error(take e) => Error(Remote(take e)),
     }
 }
 
 fn bucket_law_options(create: bool) -> Options {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.create = create
-    options.authority = Bucket(bucket_law_place("s3.test"))
     options
 }
 
@@ -144,12 +162,12 @@ fn bucket_law_rows_table(mut db: Db) -> Result[Table[u64, Bytes], Error] waits {
     }
 }
 
-// Commits row k and waits for it to be durable in the local journal.
+// Commits row k and waits for the bucket register to publish its group.
 fn bucket_law_commit(mut db: Db, k: u64) -> Result[(), Error] waits {
     let rows = bucket_law_rows_table(mut db)?
     let value = bucket_law_value(k)
-    let done = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, k, value)
+    let done = run(mut db, None, (copy_env(k), copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
     })?
     let Committed(take receipt) = take done else {
         return Error(Foreign)
@@ -167,40 +185,37 @@ fn bucket_law_round(mut db: Db, k: u64) -> Result[(), Error] waits {
     bucket_law_checkpoint(mut db)
 }
 
-// What the writer was told: whether it opened, the last row the journal
-// acknowledged, and the last row whose checkpoint the bucket acknowledged.
-type BucketLawWrite {
-    opened: bool,
-    durable: u64,
-    checkpointed: u64
+fn bucket_law_authority(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[Authority, Error] waits {
+    let client = bucket_law_client_with(s, tasks, host_name, seed, true)?
+    Ok(object_authority(take client, "bucket", BUCKET_LAW_OP_MS))
 }
 
-// Opens a fresh Bucket store in `w` and checkpoints each round.
-fn bucket_law_write(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, rounds: u64) -> BucketLawWrite waits {
-    let mut told = BucketLawWrite(opened: false, durable: 0, checkpointed: 0)
-    let Ok(take client) = bucket_law_client(s, tasks, "s3.test", 1) else {
-        return told
+// The acknowledged row prefix and whether every checkpoint completed.
+fn bucket_law_write(tasks: Tasks, r: Random, s: BucketSim, rounds: u64) -> (u64, bool) waits {
+    let Ok(take authority) = bucket_law_authority(s, tasks, "s3.test", 1) else {
+        return (0, false)
     }
-    let Ok(take opened) = open_bucket(tasks, w, c, r, bucket_law_options(true), take client, BUCKET_LAW_OP_MS) else {
-        return told
+    let Ok(take opened) = open_authority(tasks, take authority, s.time, r, bucket_law_options(true)) else {
+        return (0, false)
     }
-    told.opened = true
     let mut db = take opened
+    let mut acked = 0u64
+    let mut cut = 0u64
     for k in 1u64 .. rounds + 1 {
         if let Error(_) = bucket_law_commit(mut db, k) {
             break
         }
-        told.durable = k
+        acked = k
         if let Error(_) = bucket_law_checkpoint(mut db) {
             break
         }
-        told.checkpointed = k
+        cut = k
     }
     let _ = close(take db)
-    told
+    (acked, cut == rounds)
 }
 
-// The rounds a fresh directory recovers: k when rows 1..k hold their values.
+// The recovered rounds: k when rows 1..k hold their values.
 fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
     let rows = match table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes()) {
         Ok(take found) => take found,
@@ -210,7 +225,7 @@ fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
     let s = snapshot(db)
     let mut got = 0u64
     loop {
-        match get(s, shape(rows), got + 1)? {
+        match get(result.unwrap(reader(db, 0u64)), s, rows, got + 1)? {
             Some(value) => {
                 if value != bucket_law_value(got + 1) {
                     return Error(Foreign)
@@ -222,43 +237,26 @@ fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
     }
 }
 
-// Opens `w` through the uncut address. None when the bucket holds no store.
-fn bucket_law_open(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[Db], Error] waits {
-    let client = bucket_law_client(s, tasks, "spare.test", seed)?
-    match open_bucket(tasks, w, c, r, bucket_law_options(false), take client, BUCKET_LAW_OP_MS) {
-        Ok(take opened) => Ok(Some(take opened)),
-        Error(NotFound) => Ok(None),
-        Error(take e) => Error(take e),
+// Recovers through the uncut address. Zero when the bucket holds no store.
+fn bucket_law_recover(tasks: Tasks, r: Random, s: BucketSim, host_name: String, seed: u64) -> Result[u64, Error] waits {
+    let authority = bucket_law_authority(s, tasks, host_name, seed)?
+    let mut db = match open_authority(tasks, take authority, s.time, r, bucket_law_options(false)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: NotFound, ..)) => return Ok(0),
+        Error(Refusal(error: take e, ..)) => return Error(take e),
     }
-}
-
-// Recovers through the uncut address into a fresh directory. None when the
-// bucket holds no store.
-fn bucket_law_recover(tasks: Tasks, d: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[u64], Error] waits {
-    let Some(take opened) = bucket_law_open(tasks, disk_test_directory(d), c, r, s, seed)? else {
-        return Ok(None)
-    }
-    let mut db = take opened
     let got = bucket_law_rows(mut db)
     close(take db)?
-    Ok(Some(got?))
-}
-
-// Reopens the writer's own directory, checks what it kept and carries it
-// to the bucket with one checkpoint. None when the bucket holds no store.
-fn bucket_law_reopen(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[u64], Error] waits {
-    let Some(take opened) = bucket_law_open(tasks, w, c, r, s, seed)? else {
-        return Ok(None)
-    }
-    let mut db = take opened
-    let got = bucket_law_rows(mut db)
-    let carried = bucket_law_checkpoint(mut db)
-    close(take db)?
-    carried?
-    Ok(Some(got?))
+    got
 }
 
 fn bucket_law_finish(take s: BucketSim) -> std.sim.s3.Report waits {
+    let report = bucket_law_report(take s)
+    result.unwrap(bucket_law_head_history(report))
+    take report
+}
+
+fn bucket_law_report(take s: BucketSim) -> std.sim.s3.Report waits {
     let BucketSim(server: take server, driver: take driver, stop: take stop, ..) = take s
     result.unwrap(channel.send(stop, ()))
     let report = result.unwrap(task.join(take server))
@@ -266,180 +264,737 @@ fn bucket_law_finish(take s: BucketSim) -> std.sim.s3.Report waits {
     take report
 }
 
-fn bucket_law_count(found: Option[u64]) -> u64 {
-    match found {
-        Some(n) => n,
-        None => 0,
-    }
-}
-
-// One cut, then recovery into a fresh directory. The writer's directory is
-// then fenced: the fresh directory's holder took the store.
-fn bucket_law_fresh(d: Dir, c: Clock, r: Random, tasks: Tasks, s: BucketSim, told: BucketLawWrite, w: Dir, apply: bool, seed: u64) -> Result[(), Error] waits {
-    let got = bucket_law_count(bucket_law_recover(tasks, d, c, r, s, seed)?)
-    let acked = told.checkpointed
-    if got != acked && !(apply && got == acked + 1) {
-        fail("bucket L4: recovery lost or invented a checkpoint")
-    }
-    if told.opened {
-        match bucket_law_open(tasks, w, c, r, s, seed + 1) {
-            Error(Fenced(_)) => {},
-            Ok(Some(take stale)) => {
-                let _ = close(take stale)
-                fail("bucket L4: the cut writer's directory reopened past a foreign holder")
-            },
-            _ => fail("bucket L4: the cut writer's directory was not fenced"),
-        }
-    }
-    Ok(())
-}
-
-// One cut, then the writer's own directory reopens. It keeps every row the
-// journal acknowledged and invents none, and its next checkpoint carries
-// them all to a fresh directory.
-fn bucket_law_same(d: Dir, c: Clock, r: Random, tasks: Tasks, s: BucketSim, told: BucketLawWrite, w: Dir, seed: u64, rounds: u64) -> Result[(), Error] waits {
-    let kept = bucket_law_count(bucket_law_reopen(tasks, w, c, r, s, seed)?)
-    if kept < told.durable || kept > rounds {
-        fail("bucket reopen: the writer's directory lost an acknowledged row")
-    }
-    let got = bucket_law_count(bucket_law_recover(tasks, d, c, r, s, seed + 1)?)
-    if got != kept {
-        fail("bucket reopen: the reopened directory's checkpoint did not reach the bucket")
-    }
-    Ok(())
-}
-
-// One cut. True when the writer ran every round uncut.
-fn bucket_law_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, cut: std.sim.s3.Cut, take faults: List[std.sim.s3.Fault], same_directory: bool) -> Result[bool, Error] waits {
+// At most one serial GROUP can apply without an answer. Cold recovery has
+// no directory of its own and must recover the register's durable prefix.
+fn bucket_law_cut(c: Clock, r: Random, tasks: Tasks, seed: u64, cut: std.sim.s3.Cut, take faults: List[std.sim.s3.Fault]) -> Result[bool, Error] waits {
     let apply = cut.apply
     let s = bucket_law_sim(tasks, c, seed, Some(cut), take faults)
-    let w = disk_test_directory(d)
-    let told = bucket_law_write(tasks, w, c, r, s, BUCKET_LAW_ROUNDS)
-    let checked = if same_directory {
-        bucket_law_same(d, c, r, tasks, s, told, w, seed + 7, BUCKET_LAW_ROUNDS)
-    } else {
-        bucket_law_fresh(d, c, r, tasks, s, told, w, apply, seed + 7)
+    let (acked, finished) = bucket_law_write(tasks, r, s, BUCKET_LAW_ROUNDS)
+    let recovered = bucket_law_recover(tasks, r, s, "spare.test", seed + 7)
+    let _ = bucket_law_finish(take s)
+    let got = recovered?
+    if got != acked && !(apply && got == acked + 1) {
+        fail("bucket wire cut: recovery lost or invented a durable row")
     }
-    let report = bucket_law_finish(take s)
-    checked?
-    if list.len(report.pending) != 0 {
-        fail("bucket L4: recovery left a pending upload")
-    }
-    Ok(told.checkpointed == BUCKET_LAW_ROUNDS)
+    Ok(finished)
 }
 
 fn bucket_law_wire_cut(after: u64, apply: bool) -> std.sim.s3.Cut {
     std.sim.s3.Cut(after, apply, spare: bucket_law_spare())
 }
 
-fn bucket_law_seed(e: Env) -> u64 {
+fn bucket_law_seed(e: Env, fallback: u64) -> u64 {
     match std.sim.world.test_seed(e) {
         Some(active) => active,
-        None => 0,
+        None => fallback,
     }
 }
 
-// Every wire cut in one process, in each of the four modes: the request
-// applied or dropped, and recovery into a fresh directory or a reopen of the
-// writer's own. Each checkpoint takes at least four requests (begin, part,
-// complete and the MANIFEST), so a writer done before request 12 was not
-// cut. The sweep ends at the first cut every mode outlives, which covers
-// every cut that matters.
+// Allow room for the objects@1 bootstrap, three groups and their checkpoints.
+// Hold the simulation seed fixed across wire positions and modes.
 @test
-fn bucket_test_l4_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    for after in 0u64 .. BUCKET_LAW_CUTS {
-        let mut uncut = true
-        for mode in 0u64 .. 4 {
-            let apply = mode % 2 == 0
-            let same_directory = mode >= 2
-            if !bucket_law_cut(d, c, r, tasks, after, bucket_law_wire_cut(after, apply), list.new(), same_directory)? {
-                uncut = false
-            }
-        }
-        if uncut {
+fn bucket_test_l4_cuts(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    for after in 0u64 .. 128 {
+        let finished_applied = bucket_law_cut(c, r, tasks, 0, bucket_law_wire_cut(after, true), list.new())?
+        let finished_dropped = bucket_law_cut(c, r, tasks, 0, bucket_law_wire_cut(after, false), list.new())?
+        if finished_applied && finished_dropped {
             if after < 4 * BUCKET_LAW_ROUNDS {
-                fail("bucket L4: the cut never reached the writer")
+                fail("bucket wire cut: the cut never reached the writer")
             }
             return Ok(())
         }
     }
-    fail("bucket L4: the writer never finished uncut")
+    fail("bucket wire cut: the writer never finished the durable row groups")
 }
 
-// The soak: one cut per seed at a seeded request, both recoveries, with
-// retriable faults on every connection the seed's plan picks.
+// One cut per seed with retriable faults on the connections the plan picks.
 @test
-fn bucket_test_soak(d: Dir, c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(e)
+fn bucket_test_soak(c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(e, 0)
     let after = seed % BUCKET_LAW_CUTS
     let apply = (seed / BUCKET_LAW_CUTS) % 2 == 0
-    let same_directory = (seed / (2 * BUCKET_LAW_CUTS)) % 2 == 0
     let mut faults: List[std.sim.s3.Fault] = list.with_capacity(10)
     for _ in 0u64 .. 8 {
         list.push(mut faults, Clean)
     }
     list.push(mut faults, ResetBeforeBody)
     list.push(mut faults, InternalError)
-    let _ = bucket_law_cut(d, c, r, tasks, seed, bucket_law_wire_cut(after, apply), take faults, same_directory)?
+    let _ = bucket_law_cut(c, r, tasks, seed, bucket_law_wire_cut(after, apply), take faults)?
     Ok(())
 }
 
-// The fence. A opens and checkpoints round 1. B opens a fresh directory and
-// claims the next generation. A's next checkpoint halts with Fenced, B's
-// checkpoints go on from round 1, and recovery sees exactly B's rows.
-@test
-fn bucket_test_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    // A cut that never fires, so that recovery can use the spare address.
-    let s = bucket_law_sim(tasks, c, 5, Some(bucket_law_wire_cut(0xffffffffffffffff, false)), list.new())
-    let mut a = open_bucket(tasks, disk_test_directory(d), c, r, bucket_law_options(true), bucket_law_client(s, tasks, "s3.test", 1)?, BUCKET_LAW_OP_MS)?
+fn bucket_law_fence(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error] waits {
+    let first = bucket_law_authority(s, tasks, "s3.test", 1)?
+    let mut a = open_authority(tasks, take first, s.time, r, bucket_law_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
     bucket_law_round(mut a, 1)?
-    let mut b = open_bucket(tasks, disk_test_directory(d), c, r, bucket_law_options(false), bucket_law_client(s, tasks, "s3.test", 2)?, BUCKET_LAW_OP_MS)?
-    match bucket_law_round(mut a, 2) {
-        Error(Fenced(_)) => {},
+    let second = bucket_law_authority(s, tasks, "s3.test", 2)?
+    let mut b = open_authority(tasks, take second, s.time, r, bucket_law_options(false)) ?=> |Refusal(error: take problem, ..)| take problem
+    match bucket_law_round(mut a, 4) {
+        Error(Fenced(1)) => {},
         _ => fail("bucket fence: the old writer published past the new claim"),
     }
     if let Ok(_) = healthy(a) {
         fail("bucket fence: the fenced writer stayed healthy")
     }
     let _ = close(take a)
-    // B's next pack number is the one A's late pack took.
     bucket_law_round(mut b, 2)?
     bucket_law_round(mut b, 3)?
+    let rows = bucket_law_rows_table(mut b)?
+    if get(reader(b, 0u64)?, snapshot(b), rows, 4)? != None {
+        fail("bucket fence: the stale writer's row became visible")
+    }
     close(take b)?
-    let got = bucket_law_recover(tasks, d, c, r, s, 3)?
-    let report = bucket_law_finish(take s)
-    if got != Some(3) {
+    if bucket_law_recover(tasks, r, s, "s3.test", 3)? != 3 {
         fail("bucket fence: recovery did not see the new writer's rounds")
     }
+    Ok(())
+}
+
+@test
+fn bucket_test_fence(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 5, None, list.new())
+    let checked = bucket_law_fence(r, tasks, s)
+    let report = bucket_law_finish(take s)
+    checked?
     if list.len(report.pending) != 0 {
         fail("bucket fence: a pending upload survived recovery")
     }
     Ok(())
 }
 
-@test
-fn bucket_test_read_only_mirror(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, 6, None, list.new())
-    let local = disk_test_directory(d)
-    let mut writer = open_bucket(tasks, local, c, r, bucket_law_options(true), bucket_law_client(sim, tasks, "s3.test", 1)?, BUCKET_LAW_OP_MS)?
+fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error] waits {
+    // The successor and follower are live together, so both use the small-history sizing.
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_law_options(true))
+    let mut options: Options = clone(plan.options)
+    options.create = true
+    let first = bucket_law_authority(s, tasks, "s3.test", 1)?
+    let mut writer = open_authority(tasks, take first, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     bucket_law_round(mut writer, 1)?
     bucket_law_commit(mut writer, 2)?
+    let rows = bucket_law_rows_table(mut writer)?
     close(take writer)?
-    let options = bucket_law_options(false)
-    let mut client = bucket_law_client(sim, tasks, "s3.test", 2)?
-    let before = read_page_manifest_bytes(local)?
-    let reader = open_bucket_read_only(local, options, mut client, BUCKET_LAW_OP_MS)?
-    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    if read_only_get(reader, rows, 2)? != Some(bucket_law_value(2)) || read_page_manifest_bytes(local)? != before {
-        fail("read-only Bucket open lost the local journal or replaced the mirror")
+    options.create = false
+    let source = bucket_law_authority(s, tasks, "s3.test", 2)?
+    let mut wrong_activation: Options = clone(options)
+    wrong_activation.activation = Some(1u64)
+    let Error(Refusal(error: NotCurrent(0), authority: take returned)) =
+        open_authority(tasks, take source, s.time, r, wrong_activation) else {
+        fail("L61: the writer open did not refuse the wrong activation")
     }
-    // Opening a fresh writer against the Bucket advances its generation.
-    let successor = open_bucket(tasks, disk_test_directory(d), c, r, options, bucket_law_client(sim, tasks, "s3.test", 3)?, BUCKET_LAW_OP_MS)?
+    let mut process = followers()
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut mirror = follower(mut process, follower_slot(follower_owner(service)?, plan)?, take returned, s.time, options.expect)?
+    let Some(main) = follower_branch(mirror, "main") else {
+        fail("the follower did not recover main")
+    }
+    let before = snapshot_follower(mirror, main)?
+    let read_handle = follower_reader(mirror, 0u64)?
+    if get(read_handle, before, rows, 2)? != Some(bucket_law_value(2)) || follower_head(mirror)?.claim.epoch != 1 {
+        fail("the follower missed the durable group or claimed the register")
+    }
+    let successor_grant = bucket_law_authority(s, tasks, "s3.test", 3)?
+    let mut successor = open_authority(tasks, take successor_grant, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    bucket_law_commit(mut successor, 3)?
     close(take successor)?
-    if let Error(Held) = open_bucket_read_only(local, options, mut client, BUCKET_LAW_OP_MS) {} else {
-        fail("read-only Bucket open accepted a stale local mirror")
+    let deadline = clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
+    let current = fresh(mut mirror, deadline)?
+    if get(read_handle, current, rows, 3)? != Some(bucket_law_value(3)) || follower_head(mirror)?.claim.epoch != 2 {
+        fail("the refreshed follower missed the successor's durable group")
     }
-    let _ = take client
-    let _ = bucket_law_finish(take sim)
+    if get(read_handle, before, rows, 2)? != Some(bucket_law_value(2)) || get(read_handle, before, rows, 3)? != None {
+        fail("refresh changed the previous capture")
+    }
     Ok(())
+}
+
+@test
+fn bucket_test_read_only_capture(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 6, None, list.new())
+    let checked = bucket_law_capture(r, tasks, s)
+    let _ = bucket_law_finish(take s)
+    checked
+}
+
+// STORE L60. Little-endian fields and XXH3 frame checks were derived
+// independently of the store encoder.
+// L60 wire vectors use the §2.1 and §12.2 layouts and libxxhash.
+@test
+fn bucket_test_m2_head_vectors() -> Result[(), Error] {
+    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
+    let payload = history_config_bytes(config)?
+    let test_id = StoreId(hi: 9, lo: 10)
+    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
+    let first = HistoryHead(authority_kind: 1, store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_head(mut raw, first, payload)?
+    history_check_vector(raw, "AQABADgAAAATDx3sxKx4R0hJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let second = history_claim_head(first, StoreId(hi: 13, lo: 14))?
+    history_encode_head(mut raw, second, payload)?
+    history_check_vector(raw, "AQABADgAAAA1ZbzsaE9zjUhJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABeIDePuXa+GQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let mut group = second
+    group.entry = HistoryRef(seq: 3, epoch: 2, len: 130, digest: 0x2702)
+    history_encode_head(mut raw, group, payload)?
+    history_check_vector(raw, "AQABADgAAABvZOJkrveNrUhJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAALx/4qAwqAEQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let third = history_claim_head(group, StoreId(hi: 15, lo: 16))?
+    history_encode_head(mut raw, third, payload)?
+    history_check_vector(raw, "AQABADgAAAD292eVXNAfoEhJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAwAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAA0iG7/ROpScQMAAAAAAAAADwAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let fourth = history_claim_head(third, StoreId(hi: 17, lo: 18))?
+    history_encode_head(mut raw, fourth, payload)?
+    history_check_vector(raw, "AQABADgAAADunqZaiL2C0khJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAABAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAACx56qhmzpHHwQAAAAAAAAAEQAAAAAAAAASAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let recovered = history_decode_head(raw)?
+    if !history_pair_matches(recovered.head.pair, fourth.pair) || history_key("e-", recovered.head.entry) != "e-00000000000000000003-00000000000000000002-0000000000002702" {
+        fail("a claim changed the inherited entry's name")
+    }
+    history_check_malformed("AQABADgAAACxE07ql8GsJkhJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAACAAAAAAAAAAAAAAAAAAAAoAABAIgAAADfrRWEjxyTawEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAAQr6FCUN8o3ARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 72, "entry from a future epoch")
+    history_check_malformed("AQABADgAAAATDx3sxKx4R0hJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABjPXt4CtsV3wEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 72, "equal positions with different refs")
+    history_check_malformed("AQABADgAAAATDx3sxKx4R0hJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAANPXKYV31wksAhgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 224, "unknown authority style")
+    let retired = option.unwrap(std.base64.decode(string.as_bytes("AQABADgAAAATDx3sxKx4R0hJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAEAMAAAAJSyN5T/H7WmARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAA")))
+    match history_decode_head(retired) {
+        Error(Unsupported(0x0050)) => Ok(()),
+        _ => fail("the retired AUTHORITY kind was accepted"),
+    }
+}
+
+fn history_check_malformed(encoded: String, expected_at: u64, take description: String) {
+    let raw = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
+    if let Error(Corrupt(Fault(file: bad_file, offset: at, why: Malformed))) = history_decode_head(raw) {
+        if bad_file == "head" && at == expected_at { return }
+    }
+    fail(take description)
+}
+
+fn history_check_vector(raw: Bytes, expected: String) {
+    if raw != option.unwrap(std.base64.decode(string.as_bytes(expected))) {
+        fail("the HEAD wire bytes differ from the L60 vector")
+    }
+}
+
+fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
+    let seq = history_next_id(head.entry.seq)?
+    let ctx = DiskContext(store: head.store, role: 2, seq)
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    list.put_word_le(mut raw, version_number)
+    list.put_word_le(mut raw, 0u64)
+    list.push(mut raw, 1u8)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    capacity(history_seal(mut raw, ctx, 112, 0x0011))
+}
+
+fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, HistoryRef), Error] waits {
+    let mut first = bucket_law_client(sim, tasks, "s3.test", 1)?
+    let mut second = bucket_law_client(sim, tasks, "s3.test", 2)?
+    let config = object_history_config(std.object.bucket_config(first), "bucket")
+    let metadata = history_config_bytes(config)?
+    let mut a_buffers = history_buffers(1024)?
+    let mut b_buffers = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buffers, due)?
+    history_claim_packet(mut a_buffers.packet, a.head)?
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+        fail("genesis CLAIM did not advance")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+        fail("first commit did not advance")
+    }
+    let _ = history_fetch(mut second, "head", mut b_buffers.witness, due)?
+    let captured = history_decode_head(b_buffers.witness)?
+    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), mut b_buffers, due)? else {
+        fail("second holder failed to claim")
+    }
+    let mut b = take claimed
+    history_claim_packet(mut b_buffers.packet, b.head)?
+    let HistoryApplied(_) = history_register_advance(mut second, mut b, metadata, mut b_buffers, due)? else {
+        fail("second holder's CLAIM did not advance")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 2)?
+    let orphan = history_new_ref(4, 1, a_buffers.packet)
+    let refused = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)
+    if let Error(Fenced(1)) = refused {} else {
+        fail("the stale holder's advance did not return Fenced")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 3)?
+    if let Error(Fenced(1)) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due) {} else {
+        fail("the stale holder lost its terminal error")
+    }
+    Ok((b.head.entry, orphan))
+}
+
+// L53 register portion. An obsolete If-Match may leave immutable debris.
+// Head names only the new holder's chain.
+@test
+fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks, seed_grant: Env, out: Stdout) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let observed = bucket_m2_law_register(tasks, sim)
+    let report = bucket_law_finish(take sim)
+    let mut trace = string.from("trace ")
+    string.push_u64(mut trace, report.fragment_trace)
+    string.push(mut trace, "\n")
+    result.unwrap(stdout.write(out, trace))
+    let (committed, orphan) = observed?
+    let published = option.unwrap(map.get(report.objects, "head"))
+    let final_capture = history_decode_head(published.data)?
+    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history_key("e-", orphan)) || report.writes != 11 {
+        fail("the fenced advance appeared in the register")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let _ = bucket_m2_law_register(tasks, sim)?
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut head_buf: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let _ = history_fetch(mut client, "head", mut head_buf, due)?
+    let captured = history_decode_head(head_buf)?
+    let history_head = captured.head
+    let mut source = history_reader(take client, due)
+    let replay = history_paged_capture(mut source, history_head, 1048576)?
+    if replay.state.tips[0].head != 1 {
+        fail("recovery did not apply exactly the published suffix")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let recovered = bucket_m2_law_recover(tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    recovered?
+    // Format 5 adds 164 fixed bytes to AP14's 152. Add 16 MiB of
+    // records, the 88-byte envelope and the optional 20-byte FENCE.
+    let wire_limit = 152u64 + 164 + 16777216 + 88 + 20
+    let test_id = StoreId(hi: 9, lo: 10)
+    let mut raw: Bytes = list.with_capacity(1024)
+    let largest = HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
+    let fitted = history_genesis_packet(mut raw, test_id, 1, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
+    if admitted.manifest.len != wire_limit {
+        fail("the max legal MANIFEST wire length was refused")
+    }
+    let excess = HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
+    let too_large = history_genesis_packet(mut raw, test_id, 1, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
+        fail("one byte above the wire limit was admitted for GET")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_retained() -> Result[(), Error] {
+    let ten = HistoryRef(seq: 10, epoch: 1, len: 189, digest: 10)
+    let twenty = HistoryRef(seq: 20, epoch: 1, len: 189, digest: 20)
+    let twenty_four = HistoryRef(seq: 24, epoch: 2, len: 189, digest: 24)
+    let mut earlier: List[HistoryRef] = list.with_capacity(1)
+    list.push(mut earlier, ten)
+    let before = HistoryMark(manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
+    let cut = history_retain(before, twenty, 24, 1)?
+    if cut.floor != 24 || list.len(cut.earlier) != 0 {
+        fail("retain 1 kept an older checkpoint")
+    }
+    let short = HistoryMark(manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
+    let widened = history_retain(short, twenty_four, 28, 3)?
+    if widened.floor != 24 || list.len(widened.earlier) != 1 || widened.earlier[0].seq != 24 {
+        fail("raising retain revived a checkpoint")
+    }
+    Ok(())
+}
+
+// L58 rule 2, with c0=20: the retiring holder has no authority to erase an
+// orphan at 15 even though it has names for every entry from 21 up to P=24.
+@test
+fn bucket_test_m2_reclaim_candidates() -> Result[(), Error] {
+    bucket_m2_law_retained()?
+    let mut chain: List[HistoryLink] = list.with_capacity(4)
+    list.push(mut chain, HistoryLink(epoch: 1, len: 42, digest: 21))
+    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 22))
+    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 23))
+    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 24))
+    let mut live_bytes: Map[String, ()] = map.new()
+    map.insert(mut live_bytes, string.from("p-00000000000000000002-00000000000000000001-0000000000000002"), ())
+    let mut leased: Map[String, ()] = map.new()
+    map.insert(mut leased, string.from("e-00000000000000000009-00000000000000000001-0000000000000009"), ())
+    let pass = ReclaimPass(epoch: 2, recovered_checkpoint: 20, position: 24, checkpoint: 24, floor: 10, generation: 4, next_pack: 100, chain: take chain, live: take live_bytes, leased: take leased)
+    if history_dead_key(pass, "e-00000000000000000015-00000000000000000001-000000000000ffff") || history_dead_key(pass, "e-00000000000000000021-00000000000000000001-0000000000000015") || history_dead_key(pass, "e-00000000000000000025-00000000000000000002-000000000000ffff") || history_dead_key(pass, "e-00000000000000000009-00000000000000000001-0000000000000009") || history_dead_key(pass, "p-00000000000000000002-00000000000000000001-0000000000000002") || history_dead_key(pass, "p-00000000000000000003-00000000000000000003-0000000000000003") || history_dead_key(pass, "p-00000000000000000100-00000000000000000002-0000000000000003") || history_dead_upload(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") {
+        fail("the pass selected a live, leased or later name")
+    }
+    if !history_dead_key(pass, "e-00000000000000000008-00000000000000000001-0000000000000008") || !history_dead_key(pass, "e-00000000000000000021-00000000000000000001-000000000000ffff") || !history_dead_key(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") || !history_dead_upload(pass, "p-00000000000000000099-00000000000000000001-0000000000000003") {
+        fail("the pass retained a name known to be dead")
+    }
+    Ok(())
+}
+
+fn bucket_m2_pack_value() -> Bytes {
+    let mut out: Bytes = list.with_capacity(2048)
+    list.fill(mut out, 2048, 70u8)
+    take out
+}
+
+fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let data = bucket_m2_pack_value()
+    let outcome = run(mut db, None, (copy_env(rows), copy_env(data)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 7, call_env.1)
+    })?
+    if let Committed(_) = outcome {} else {
+        fail("the checkpoint fixture refused its row")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> Result[(), Error] {
+    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    capacity(history_append_header(mut header, DiskContext(store: id, role, seq), 1, 1))?
+    for at in 0u64 .. 72 {
+        raw[at] = header[at]
+    }
+    Ok(())
+}
+
+fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs: List[HistoryRef]) -> Result[HistoryRef, Error] {
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let empty = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
+    history_packet_header(mut raw, ctx, 1, 1, empty)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, manifest.seq)
+    list.put_word_le(mut raw, manifest.epoch)
+    list.put_word_le(mut raw, manifest.digest)
+    list.put_word_le(mut raw, manifest.len)
+    list.put_word_le(mut raw, 1u64)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    let at = list.len(raw)
+    list.fill(mut raw, 16, 0u8)
+    for item in refs {
+        history_ref_encode(mut raw, item)
+    }
+    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    Ok(history_new_ref(1, 1, raw))
+}
+
+fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(ObjectPackRead, HistoryHead), Error] waits {
+    let (id, take selected) = read_page_manifest_file(d)?
+    let validated = validate_page_manifest(d, id, take selected)?
+    let ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
+    let mut manifest = take initial
+    manifest.first_live = 1
+    manifest.prev_first = 1
+    manifest.retirement_root = std.page.unlocated(0)
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
+    let mut kinds = 0u8
+    for (seq, pack) in inventory {
+        kinds |= 1u8 << pack.class
+        let file = paged_pack_path(seq)?
+        let mut raw = disk_read_paged_file(d, file, 1048576)?
+        bucket_m2_object_header(mut raw, id, 3, seq)?
+        let item = history_new_ref(seq, 1, raw)
+        let name = history_key("p-", item)
+        let mut buffer: Bytes = list.with_capacity(item.len)
+        history_create(mut client, name, mut raw, mut buffer, due)?
+        list.push(mut refs, item)
+    }
+    if kinds != 7 {
+        fail("the checkpoint fixture missed a pack class")
+    }
+    list.sort(mut refs, fn(a: HistoryRef, b: HistoryRef) -> Order {
+        order.compare(a.seq, b.seq)
+    })
+    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
+    bucket_m2_object_header(mut raw_manifest, id, 1, manifest.generation)?
+    let base = history_new_ref(manifest.generation, 1, raw_manifest)
+    let mut compare: Bytes = list.with_capacity(65536)
+    history_create(mut client, history_key("m-", base), mut raw_manifest, mut compare, due)?
+    let mut raw_entry: Bytes = list.with_capacity(65536)
+    let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
+    history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
+    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
+    let source = history_reader(take client, due)
+    Ok((take source, head))
+}
+
+fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
+    let mut source = take loaded
+    let id = head.store
+    let replay = history_paged_capture(mut source, head, 1048576)?
+    let root = view replay.state.tips[0]
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1)
+    let rows = catalog_handle(id, root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
+    if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
+        fail("the object checkpoint did not reconstruct its row")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
+    let recovered = bucket_m2_read_packs(directory, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    recovered
+}
+
+// Q5 shares one attempt budget and the client's backoff even when every
+// conditional response is SlowDown.
+@test
+fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, SlowDown)
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 39), None, take faults)
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let mut body = string.into_bytes(string.from("proposed head"))
+    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let start = host.mono_ns(sim.time)
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let outcome = history_write_head(mut client, Absent, mut body, mut witness, due)
+    let elapsed = host.mono_ns(sim.time) - start
+    let _ = take client
+    let report = bucket_law_finish(take sim)
+    if let HistoryUndecided = outcome {} else {
+        fail("a throttled register reached a terminal verdict without evidence")
+    }
+    if elapsed < 1500000000 || report.attempts > 5 || report.writes != 0 || body != string.as_bytes("proposed head") {
+        fail("conditional retries escaped the client's backoff or attempt budget")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut old = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut new_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut endpoint_only = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let deadline = std.object.deadline_after_ms(old, BUCKET_LAW_OP_MS)
+    if let Error(Endpoint(Insecure)) = history_check_endpoint(mut endpoint_only, deadline) {} else {
+        fail("a plain-http endpoint that is not the simulator was accepted")
+    }
+    let _ = take endpoint_only
+    // STORE §12.2: any https endpoint is accepted, whoever runs it.
+    let mut elsewhere = bucket_law_https_client(sim, tasks, "s3.test", 4)?
+    history_check_endpoint(mut elsewhere, deadline)?
+    let _ = take elsewhere
+    history_check_endpoint(mut old, deadline)?
+    history_check_endpoint(mut new_client, deadline)?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(old), "bucket"))?
+    let mut first = history_buffers(1024)?
+    let mut successor = history_buffers(1024)?
+    let id = StoreId(hi: 9, lo: 10)
+    let holder = StoreId(hi: 13, lo: 14)
+    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), 1, metadata, mut first, deadline)?
+    let unchanged = history_probe_head(mut old, previous.tag, mut first.witness, deadline)?
+    if let Some(_) = unchanged {
+        fail("unchanged conditional head probe returned a body")
+    }
+    if list.len(first.witness) != 0 {
+        fail("304 returned head bytes")
+    }
+    let _ = history_fetch(mut new_client, "head", mut successor.witness, deadline)?
+    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, mut successor, deadline)? else {
+        fail("second holder failed to claim")
+    }
+    let mut active = take claimed
+    history_claim_packet(mut successor.packet, active.head)?
+    let HistoryApplied(_) = history_register_advance(mut new_client, mut active, metadata, mut successor, deadline)? else {
+        fail("second holder's claim did not advance")
+    }
+    let Some((take capture, tag)) = history_probe_head(mut old, previous.tag, mut first.witness, deadline)? else {
+        fail("conditional head probe hid a foreign advance")
+    }
+    if capture.head.pair.epoch != 2 || !same(capture.head.pair.holder, holder) || capture.head.entry.seq != 2 || tag == previous.tag {
+        fail("conditional head probe returned the wrong capture")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 17), None, list.new())
+    let probed = bucket_m2_law_probe(tasks, sim)
+    let report = bucket_law_finish(take sim)
+    probed?
+    if report.writes != 6 {
+        fail("head probes wrote to the register")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
+    let mut source = take loaded
+    let mut workspace = history_buffers(1024)?
+    let cfg = object_history_config(std.object.bucket_config(source.client), "bucket")
+    let authority = history_config_bytes(cfg)?
+    history_encode_head(mut workspace.body, head, authority)?
+    let HistoryApplied(tag) = history_write_head(mut source.client, Absent, mut workspace.body, mut workspace.witness, source.deadline) else {
+        fail("could not publish the checkpoint fixture")
+    }
+    let mut incumbent = HistoryRegister(head, tag, terminal: None)
+    let mut requested = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    requested.create = false
+    requested.expect = Some(head.store)
+    requested.resident_limit = 0
+    let small = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
+    if let Error(Full(Resident(_))) = small {} else {
+        fail("the claim did not admit the restored state before fencing")
+    }
+    requested.resident_limit = 1048576
+    requested.activation = Some(3)
+    let stale = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
+    if let Error(NotCurrent(0)) = stale {} else {
+        fail("the claim ignored the requested activation")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 3)?
+    let HistoryApplied(_) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline)? else {
+        fail("the refused open fenced the incumbent")
+    }
+    requested.activation = Some(0)
+    let (take claimed, take loaded_state) = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    if claimed.head.pair.epoch != 2 || claimed.head.entry.seq != 3 || loaded_state.state.tips[0].head != 3 {
+        fail("open did not serve the admitted suffix after advancing CLAIM")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 4)?
+    if let Error(Fenced(1)) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline) {} else {
+        fail("a fenced holder advanced after the admitted claim")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 42), None, list.new())
+    let admitted = bucket_m2_law_admit(directory, tasks, r, sim)
+    let report = bucket_law_finish(take sim)
+    admitted?
+    let visible = option.unwrap(map.get(report.objects, "head"))
+    let selected = history_decode_head(visible.data)?
+    if selected.head.entry.seq != 3 || selected.head.pair.epoch != 2 {
+        fail("a refused claim or fenced advance changed the visible head")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let read_source = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut writer = history_reader(take initial_client, 0)
+    let mut workspace = history_buffers(1024)?
+    let authority = history_config_bytes(object_history_config(std.object.bucket_config(writer.client), "bucket"))?
+    let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let mut source = followers()
+    let mut settings = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    settings.expect = Some(held.head.store)
+    // Writer selection never constrains a read-only follower.
+    settings.activation = Some(17)
+    settings.binding = Some(list.new())
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), settings)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut followed = follower(mut source, follower_slot(follower_owner(service)?, plan)?, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings.expect)?
+    let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
+    let genesis = fresh(mut followed, deadline)?
+    let genesis_head = follower_head(followed)?
+    if version(genesis) != 0 || genesis_head.claim.epoch != 1 || genesis_head.activation != 0 || list.len(genesis_head.binding) != 32 {
+        fail("fresh did not preserve the initial capture")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the first group did not advance")
+    }
+    let advanced = at_least(mut followed, Position(store: held.head.store, branch: 0, version: 1), deadline)?
+    if version(advanced) != 1 || version(genesis) != 0 {
+        fail("catch-up did not publish its applied version privately")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 2)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the second group did not advance")
+    }
+    let final_item = history_key("e-", held.head.entry)
+    match std.object.erase(mut writer.client, final_item, deadline) {
+        Error(take problem) => return Error(Remote(take problem)),
+        Ok(()) => (),
+    }
+    if let Error(Corrupt(Fault(file: gone, why: Absent, ..))) = fresh(mut followed, deadline) {
+        if gone != final_item { fail("witness named another object") }
+    } else {
+        fail("a missing live entry was accepted or classified as reclaimed")
+    }
+    let current = applied(followed, Branch(store: held.head.store, id: 0))?
+    if current.version != 1 {
+        fail("failed catch-up changed the published state")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 773), None, list.new())
+    let followed = bucket_m2_law_follow(tasks, r, sim)
+    let _ = bucket_law_finish(take sim)
+    followed
+}
+
+
+@test
+fn bucket_test_m2_fresh_order(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 571)
+    bucket_order_fresh_case(tasks, c, r, seed, LostReply)?
+    bucket_order_fresh_case(tasks, c, r, seed, Overtaken)?
+    bucket_order_fresh_case(tasks, c, r, seed, FencedAfterRead)
+}
+
+@test
+fn bucket_test_m2_ack_history(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 581)
+    for replaced in [false, true] {
+        let sim = bucket_ack_fixture(tasks, c, seed)
+        let tested = bucket_ack_commits(tasks, r, sim, replaced)
+        let report = bucket_law_finish(take sim)
+        tested?
+        bucket_ack_history(report, if replaced { 4 } else { 8 })?
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 521)
+    witness_case(tasks, c, r, seed, false)?
+    witness_case(tasks, c, r, seed, true)
+}
+
+@test
+fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
+    let seed = bucket_law_seed(seed_grant, 541)
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
+    let writes: Inline[Q5Operation, 3] = [GenesisWrite, ClaimWrite, ActivationWrite]
+    let schedules: Inline[Q5Fault, 6] = [AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+        for operation in writes {
+            let site = result.unwrap(q5_clean_site(d, c, r, tasks, seed, operation))
+            for fault in schedules {
+                result.unwrap(q5_case(d, c, r, tasks, seed, operation, site, fault, plan))
+            }
+        }
+        Ok(())
+    }, "L54-M Q5 matrix fixture")
+}
+
+@test
+fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
+    let seed = bucket_law_seed(seed_grant, 542)
+    genesis_debris_case(d, c, tasks, seed, AfterManifest)?
+    genesis_debris_case(d, c, tasks, seed, AfterCheckpoint)?
+    genesis_debris_case(d, c, tasks, seed, ConcurrentList)
 }

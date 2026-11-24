@@ -5,13 +5,13 @@
 extern size_t hirsel_core_test_replay_provider_calls(void);
 extern uint8_t __real_hirsel_core_os_replay(const HirselCoreOsConfig *, const HirselCoreView *,
     const HirselCoreSourceTable *, HirselCoreEntry, const char *, uint64_t, const char *,
-    const uint8_t revision[32]);
+    const uint8_t revision[32], const uint8_t build[32]);
 
 uint8_t __wrap_hirsel_core_os_replay(const HirselCoreOsConfig *config, const HirselCoreView *names,
     const HirselCoreSourceTable *sources, HirselCoreEntry entry, const char *path, uint64_t mode,
-    const char *identity, const uint8_t revision[32]) {
+    const char *identity, const uint8_t revision[32], const uint8_t build[32]) {
     uint8_t status = __real_hirsel_core_os_replay(config, names, sources, entry, path, mode,
-        identity, revision);
+        identity, revision, build);
     fprintf(stderr, "inner calls: %zu\n", hirsel_core_test_replay_provider_calls());
     return status;
 }

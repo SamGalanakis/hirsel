@@ -95,7 +95,7 @@ fn http_request_policy_refusals() -> bool {
 }
 
 fn bad_path(s: String) -> bool {
-    match segments_of(string.as_bytes(s)) {
+    match router.request_segments(string.as_bytes(s)) {
         Error(BadTarget) => true,
         _ => false,
     }
@@ -105,7 +105,7 @@ fn bad_path(s: String) -> bool {
 // and invalid UTF-8 are not. A decoded slash does not create another segment.
 // expect: run http_segment_boundaries() = true
 fn http_segment_boundaries() -> bool {
-    let decoded = result.unwrap(segments_of(string.as_bytes("/a%2fb/%C3%A9/")))
+    let decoded = result.unwrap(router.request_segments(string.as_bytes("/a%2fb/%C3%A9/")))
     list.len(decoded) == 3 && decoded[0] == "a/b" && decoded[1] == "é" && decoded[2] == "" && bad_path("//") && bad_path("/./") && bad_path("/.%2e/") && bad_path("/%c0%80") && bad_path("/%2")
 }
 
@@ -136,4 +136,98 @@ fn http_cached_date_capacity() -> bool {
         return exact == string.as_bytes(wire)
     }
     false
+}
+
+fn query_lookup(raw_target: Bytes, key: String) -> Result[Option[String], QueryError] {
+    let mut input = b"GET "
+    list.append(mut input, raw_target)
+    list.append(mut input, b" HTTP/1.1\r\nHost: a\r\n\r\n")
+    let mut h = http1.head()
+    let parsed = http1.request(input, mut h)
+    option.unwrap(if parsed == Complete {
+        Some(())
+    } else {
+        None
+    })
+    let (meta, _) = result.unwrap(request_policy(input, view h))
+    let mut configured: router.Builder[()] = router.builder()
+    result.unwrap(router.add(mut configured, "GET", "/", router.raw(query_noop)))
+    let routing = result.unwrap(router.build(take configured))
+    let entry = option.unwrap(router.select(routing, b"GET", list.new()))
+    let req = Request(input: view input, head: view h, meta, segments: list.new(), route: view entry.pattern, route_tag: 0, inline_body: None, deadline: 0, stop: None, state_max: 0, out_cap: 0)
+    query_param(req, key)
+}
+
+fn query_noop(req: Request, scratch: Region, mut out: Responder, state: ()) -> Result[Outcome, HandlerError] {
+    Ok(Reply(response(204, b"", false)?))
+}
+
+// HTTP B-4. Compare decoded keys and use URI decoding for text values.
+// expect: run http_query_param_contract() = true
+fn http_query_param_contract() -> bool {
+    let duplicate = match query_lookup(b"/?a=1&a=2", "a") {
+        Error(Repeated) => true,
+        _ => false,
+    }
+    let escaped_duplicate = match query_lookup(b"/?a=1&%61=2", "a") {
+        Error(Repeated) => true,
+        _ => false,
+    }
+    let invalid = match query_lookup(b"/?a=%ed%a0%80", "a") {
+        Error(Utf8) => true,
+        _ => false,
+    }
+    let escape = match query_lookup(b"/?a=%2x", "a") {
+        Error(Escape) => true,
+        _ => false,
+    }
+    let plus = match query_lookup(b"http://a/?&&%61=a+b=c;d&&", "a") {
+        Ok(Some(text)) => text == "a+b=c;d",
+        _ => false,
+    }
+    let empty = match query_lookup(b"/?a=", "a") {
+        Ok(Some(text)) => text == "",
+        _ => false,
+    }
+    let absent = match query_lookup(b"/?b=1", "a") {
+        Ok(None) => true,
+        _ => false,
+    }
+    duplicate && escaped_duplicate && invalid && escape && plus && empty && absent
+}
+
+fn typed_response_matches[T: codec](format: json.Format[T], value: T, expected: String) -> bool waits {
+    let shared: Arc[json.Format[T]] = arc.new(clone(format))
+    let manual_json = result.unwrap(json.to_string(format, value))
+    let mut manual = result.unwrap(response(200, copy_bytes(string.as_bytes(manual_json)), false))
+    result.unwrap(content_type(mut manual, ApplicationJson))
+    let typed = result.unwrap(response_typed(200, shared, value))
+    let mut manual_head: Bytes = list.with_capacity(256)
+    let mut typed_head: Bytes = list.with_capacity(256)
+    let mut cache = date_cache()
+    result.unwrap(response_head(mut manual_head, manual, 1, false, 0, mut cache))
+    result.unwrap(response_head(mut typed_head, typed, 1, false, 0, mut cache))
+    let mut body: Bytes = list.new()
+    let mut chunk: Bytes = list.with_capacity(8)
+    match typed.body {
+        JsonBody(binary, plan, root, offset, length) => {
+            let written = result.unwrap(json.write_wire(plan, root, list.slice(binary, offset, list.len(binary)), mut chunk, scoped fn(data: Bytes) -> bool {
+                list.append(mut body, data)
+                true
+            }))
+            written && length == list.len(body) && typed_head == manual_head && body == string.as_bytes(manual_json) && body == string.as_bytes(expected)
+        },
+        _ => false,
+    }
+}
+
+// Canonical escaping, base64, wide integers and floats from the B-4 JSON corpus.
+// expect: run http_typed_response_contract() = true
+fn http_typed_response_contract() -> bool waits {
+    let text: json.Format[String] = result.unwrap(json.typed())
+    let payload: json.Format[Bytes] = result.unwrap(json.typed())
+    let wide: json.Format[u64] = result.unwrap(json.typed())
+    let real: json.Format[f64] = result.unwrap(json.typed())
+    let interop: json.Format[u64] = result.unwrap(json.interop())
+    typed_response_matches(text, "é\n/\"\\\u{001f}", "\"é\\u000A/\\\"\\\\\\u001F\"") && typed_response_matches(payload, b"M", "\"TQ==\"") && typed_response_matches(wide, 18446744073709551615u64, "\"18446744073709551615\"") && typed_response_matches(real, float.from_bits64(0x8000000000000000), "-0") && typed_response_matches(interop, 18446744073709551615u64, "18446744073709551615")
 }

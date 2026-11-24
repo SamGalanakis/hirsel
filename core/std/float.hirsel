@@ -1435,7 +1435,7 @@ const POW5: Inline[(u64, u64), 651] =[
 /// Alloc: GROWTH of s only. Cost: O(digits of x).
 /// Ex: `float.push_f64(mut line, 0.1)` appends "0.1"
 pub fn push_f64(mut s: String, x: f64) {
-    push_shortest(mut s, x, false)
+    push_shortest(mut s, x, false, string.push, string.push_u64)
 }
 
 /// Appends the shortest round-trip number with serde_json's spelling. Finite
@@ -1444,15 +1444,15 @@ pub fn push_f64(mut s: String, x: f64) {
 /// Fails: Error(c); s then holds a prefix of the text. Alloc: GROWTH of s only.
 /// Cost: O(digits).
 pub fn push_json_f64(mut s: String, x: f64) {
-    push_shortest(mut s, x, true)
+    write_json_f64(mut s, x, string.push, string.push_u64)
 }
 
-// The text goes straight into s, as push_scaled writes it: the digits through push_u64
-// and the zeros, point and exponent as literal slices. Every layout is
-// whole [. zeros fraction] [zeros] [.0] [e+-exponent]: 0.000ddd and d.ddd/dd.ddd split c
-// at a point, ddd000 keeps c whole and pads p zeros. A zero whole part (0.000ddd only)
-// goes out with its point as one "0." literal.
-fn push_shortest(mut s: String, x: f64, json: bool) {
+/// Writes the JSON number using callbacks for literal text and unpadded decimal digits.
+pub fn write_json_f64[T](mut out: T, x: f64, text: scoped fn(mut T, String), digits: scoped fn(mut T, u64)) {
+    push_shortest(mut out, x, true, text, digits)
+}
+
+fn push_shortest[T](mut s: T, x: f64, json: bool, text: scoped fn(mut T, String), digits: scoped fn(mut T, u64)) {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
         let representation = if json {
@@ -1460,14 +1460,14 @@ fn push_shortest(mut s: String, x: f64, json: bool) {
         } else {
             special(bits)
         }
-        return string.push(mut s, representation)
+        return text(mut s, representation)
     }
     if bits >> 63 != 0 {
-        string.push(mut s, "-")
+        text(mut s, "-")
     }
     let (c, p) = shortest64(x)
     if c == 0 {
-        return string.push(mut s, if json {
+        return text(mut s, if json {
             "0.0"
         } else {
             "0"
@@ -1496,10 +1496,10 @@ fn push_shortest(mut s: String, x: f64, json: bool) {
         fraction = c % scale
     }
     if whole != 0 {
-        string.push_u64(mut s, whole)
+        digits(mut s, whole)
     }
     let zeros: u64 = if places != 0 {
-        string.push(mut s, if whole == 0 {
+        text(mut s, if whole == 0 {
             "0."
         } else {
             "."
@@ -1510,23 +1510,23 @@ fn push_shortest(mut s: String, x: f64, json: bool) {
     } else {
         int.narrow(p)
     }
-    push_zeros(mut s, zeros)
+    push_zeros(mut s, zeros, text)
     if places != 0 {
-        string.push_u64(mut s, fraction)
+        digits(mut s, fraction)
     } else if json && !scientific {
-        string.push(mut s, ".0")
+        text(mut s, ".0")
     }
     if !scientific {
         return
     }
     // serde_json 1.0.154 uses Zmij's signed exponent spelling.
     let exponent = point - 1
-    string.push(mut s, if exponent < 0 {
+    text(mut s, if exponent < 0 {
         "e-"
     } else {
         "e+"
     })
-    string.push_u64(mut s, int.narrow(if exponent < 0 {
+    digits(mut s, int.narrow(if exponent < 0 {
         -exponent
     } else {
         exponent
@@ -1548,17 +1548,17 @@ fn decimal_len(v: u64) -> u64 {
     }
 }
 
-fn push_zeros(mut s: String, n: u64) {
+fn push_zeros[T](mut s: T, n: u64, text: scoped fn(mut T, String)) {
     let zeros = "00000000000000000000000000000000"
     let mut left = n
     while left > 32 {
-        string.push(mut s, zeros)
+        text(mut s, zeros)
         left -= 32
     }
     if left == 0 {
         return
     }
-    string.push(mut s, string.slice(zeros, 0, left))
+    text(mut s, string.slice(zeros, 0, left))
 }
 
 /// Appends x rounded to `digits` places after the point, as Rust's `{:.N}` prints an f64:

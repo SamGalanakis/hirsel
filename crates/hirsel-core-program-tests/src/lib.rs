@@ -116,6 +116,8 @@ impl Checked {
 }
 
 #[cfg(test)]
+mod bytes_charge;
+#[cfg(test)]
 mod cases;
 #[cfg(test)]
 mod spec_tests;

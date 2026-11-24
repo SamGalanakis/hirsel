@@ -1,0 +1,13 @@
+fn normalized(p: LinearPixel) -> LinearPixel {
+    let rounded: Inline[i32, 4] =[int.narrow((p.r + 8192) >> 14), int.narrow((p.g + 8192) >> 14), int.narrow((p.b + 8192) >> 14), int.narrow((p.a + 8192) >> 14)]
+    let values = simd.from(rounded)
+    let result: Simd[u16, 8] = simd.pack_saturating(values, values)
+    let raw: Simd[u8, 16] = simd.cast(result)
+    let mut parts: Inline[u8, 16] =[0; 16]
+    inline.set_lanes(mut parts, 0, raw)
+    let r: u16 = inline.word_le(parts, 0)
+    let g: u16 = inline.word_le(parts, 2)
+    let b: u16 = inline.word_le(parts, 4)
+    let a: u16 = inline.word_le(parts, 6)
+    LinearPixel(r: int.widen(r), g: int.widen(g), b: int.widen(b), a: int.widen(a))
+}

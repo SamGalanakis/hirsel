@@ -161,18 +161,12 @@ impl Function<'_, '_, '_> {
                         edge: hirsel_core_layout::FieldTy::FrozenBytes
                     }
                 ) {
-                    let r = self.c_call(
-                        "hirsel_core_admit_frozen_bytes",
-                        &[p, u],
-                        &[p, u, u],
-                        &[ctx, charge],
-                    )?;
-                    [r[0], r[1], r[2]]
-                } else if let AllocPlace::Frame(frame) = place {
-                    let frame = self.get(frame);
-                    let overflow = overflow.map(|v| self.get(v));
-                    let values = self.frame_admit(frame, charge, overflow)?;
-                    [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
+                    let tag = self.b.ins().iconst(
+                        types::I64,
+                        hirsel_core_layout::FROZEN_STATIC_UNCHARGED as i64,
+                    );
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    [tag, zero, zero]
                 } else if let AllocPlace::LentFrame(frame) = place {
                     let frame = self.get(frame);
                     let overflow = overflow.map_or_else(
@@ -288,19 +282,15 @@ impl Function<'_, '_, '_> {
                         )?;
                         self.b.ins().jump(ready, &[]);
                         self.b.switch_to_block(inline);
-                        self.b.ins().atomic_store(
-                            cranelift_codegen::ir::MemFlagsData::trusted(),
-                            one,
-                            values[0],
-                        );
+                    }
+                    self.b.ins().store(
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        one,
+                        values[0],
+                        memory_layout::NODE_COUNT as i32,
+                    );
+                    if count == Counted::Arc {
                         self.arc_event("hirsel_core_arc_initialized", &[], &[])?;
-                    } else {
-                        self.b.ins().store(
-                            cranelift_codegen::ir::MemFlagsData::trusted(),
-                            one,
-                            values[0],
-                            memory_layout::NODE_COUNT as i32,
-                        );
                     }
                     self.b.ins().jump(ready, &[]);
                     self.b.switch_to_block(ready);
@@ -363,10 +353,11 @@ impl Function<'_, '_, '_> {
                     )?[0];
                     self.b.ins().jump(done, &[unique.into()]);
                     self.b.switch_to_block(inline);
-                    let count = self.b.ins().atomic_load(
+                    let count = self.b.ins().load(
                         types::I64,
                         cranelift_codegen::ir::MemFlagsData::trusted(),
                         node,
+                        memory_layout::NODE_COUNT as i32,
                     );
                     let unique = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
                     self.arc_poll_event("hirsel_core_arc_unwrapped", &[boolean], &[unique])?;
@@ -469,15 +460,44 @@ impl Function<'_, '_, '_> {
                     self.store_word(at, 0, promoted);
                 }
             }
-            Inst::FrameRefund { charge } => {
+            Inst::FrameAdmit {
+                storage,
+                admitted,
+                available,
+                charge,
+                overflow,
+                replace,
+            } => {
+                let obligation = self.frame_obligations[&storage];
                 let charge = self.get(charge);
-                let payer = self.current_limit();
-                self.c_call(
-                    "hirsel_core_refund_in",
-                    &[p, p, u],
-                    &[],
-                    &[self.context, payer, charge],
-                )?;
+                let overflow = overflow.map(|v| self.get(v));
+                let [ok, room] = self.frame_admit(charge, overflow)?;
+                if replace {
+                    let update = self.b.create_block();
+                    let done = self.b.create_block();
+                    self.b.ins().brif(ok, update, &[], done, &[]);
+                    self.b.switch_to_block(update);
+                    self.refund_frame_charge(obligation)?;
+                    self.b.ins().stack_store(types::I64, charge, obligation, 0);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(done);
+                } else {
+                    self.b.ins().stack_store(types::I64, charge, obligation, 0);
+                    self.b.ins().stack_store(types::I8, ok, obligation, 8);
+                }
+                self.set(admitted, ok);
+                self.set(available, room);
+            }
+            Inst::FrameActive { storage, result } => {
+                let obligation = self.frame_obligations[&storage];
+                let live = self.b.ins().stack_load(types::I8, types::I8, obligation, 8);
+                self.set(result, live);
+            }
+            Inst::FrameRefund { storage } => {
+                let obligation = self.frame_obligations[&storage];
+                self.refund_frame_charge(obligation)?;
+                let inactive = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().stack_store(types::I8, inactive, obligation, 8);
             }
             Inst::Copy { to, from, bytes } => {
                 let to = self.addr(to);

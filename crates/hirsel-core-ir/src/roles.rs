@@ -770,7 +770,15 @@ impl<'a> Seal<'a> {
                 self.used(block, Use::Block);
                 self.used(charge, Use::Other);
             }
-            Inst::FrameRefund { charge } => self.used(charge, Use::Other),
+            Inst::FrameAdmit {
+                charge, overflow, ..
+            } => {
+                self.used(charge, Use::Other);
+                if let Some(v) = overflow {
+                    self.used(v, Use::Other);
+                }
+            }
+            Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {}
             Inst::PromoteFrame { carrier } => self.whole(carrier),
             Inst::Alloc {
                 region_entry,
@@ -784,10 +792,9 @@ impl<'a> Seal<'a> {
                 }
                 match place {
                     AllocPlace::Like(v) => self.used(v, Use::Block),
-                    AllocPlace::Region(v)
-                    | AllocPlace::Frame(v)
-                    | AllocPlace::LentFrame(v)
-                    | AllocPlace::ByteTail(v) => self.used(v, Use::Other),
+                    AllocPlace::Region(v) | AllocPlace::LentFrame(v) | AllocPlace::ByteTail(v) => {
+                        self.used(v, Use::Other)
+                    }
                     AllocPlace::Current | AllocPlace::ByteHead => {}
                 }
                 self.used(charge, Use::Other);

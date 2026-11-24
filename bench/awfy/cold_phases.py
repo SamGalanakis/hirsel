@@ -25,6 +25,11 @@ STAGES = (
     ("ir-emit", r"hirsel_llvm::core::.*(emit_module|emit_body|native_module)|native::emit_unit"),
     ("reach", r"reachable_for|build_reachable|reach::|instances::"),
     ("check/lower", r"check_lower|hirsel_core_front|hirsel_core_check|hirsel_core_resolve"),
+    # Pre-LLVM driver work outside the phases above.
+    ("std-load", r"hirsel_core_driver::(native::)?std_release::|decompress_std_record|llvm::compression::"),
+    ("code-store", r"hirsel_core_driver::(code_store|code_admission)::|CheckProduct>::(release_units|publish_release)"),
+    ("request-store", r"hirsel_core_driver::(store|request_record)::"),
+    ("tool-inputs", r"hirsel_core_driver::tool_inputs::"),
 )
 RULES = [(stage, re.compile(pattern)) for stage, pattern in STAGES]
 PERIOD = 20_000_003
@@ -178,7 +183,7 @@ def collect(args, scratch):
     prepare_env = build.capped_env(directory, "8G", str(min(2, len(args.build_cpus)))) | ld
     command, exe = prepare(directory, artifacts, prepare_env)
 
-    with receipt.measurement_slot(args.lock):
+    with receipt.hold(args.lock):
         try:
             os.sched_setaffinity(0, {args.measure_cpus[0]})
             env = build.capped_env(directory) | ld
@@ -242,9 +247,10 @@ def main():
         if args.build_cpus is not None or args.measure_cpus is not None:
             parser.error("--cpus cannot be combined with --build-cpus or --measure-cpus")
         args.build_cpus, args.measure_cpus = args.cpus, args.cpus[:1]
-        args.siblings = validate_cpu_sets(parser, args, sequential=True)
+        args.siblings = validate_cpu_sets(parser, args, sequential=True,
+                                         measure_affinity=receipt.measurement_affinity(args.lock))
     else:
-        validate_cpu_sets(parser, args)
+        validate_cpu_sets(parser, args, measure_affinity=receipt.measurement_affinity(args.lock))
         args.siblings = sibling_cpus(args.measure_cpus[:1])
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")

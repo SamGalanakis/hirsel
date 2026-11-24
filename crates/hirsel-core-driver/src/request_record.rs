@@ -354,7 +354,7 @@ impl Value {
             column: site.column,
             line_text: site.line_text.clone(),
         };
-        Some(Self {
+        let value = Self {
             limits: Limits::current(),
             root: product.root,
             check_accepted: product.accepted(),
@@ -441,14 +441,20 @@ impl Value {
                     })
                     .collect(),
             }),
-            native: answer.native.map(|n| Native {
-                private_variants: n.private_variants,
-                identity: n.identity,
-                address: n.address,
-                observation_mode: n.observation_mode,
-                debug_lines: n.debug_lines,
-            }),
-        })
+            native: None,
+        };
+        Some(value.with_native(answer.native))
+    }
+
+    pub(crate) fn with_native(mut self, native: Option<&BuildProduct>) -> Self {
+        self.native = native.map(|n| Native {
+            private_variants: n.private_variants,
+            identity: n.identity,
+            address: n.address,
+            observation_mode: n.observation_mode,
+            debug_lines: n.debug_lines,
+        });
+        self
     }
 }
 

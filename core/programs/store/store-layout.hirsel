@@ -3,7 +3,11 @@
 fn canonical_roots(mut roots: Roots) -> Result[(), Error] {
     page_result(std.page.canonicalize(mut roots.collections.root))?
     page_result(std.page.canonicalize(mut roots.streams.root))?
-    page_result(std.page.canonicalize(mut roots.catalog.root))
+    page_result(std.page.canonicalize(mut roots.catalog.root))?
+    for slot in 0u64 .. list.len(roots.keyed) {
+        page_result(std.page.canonicalize(mut roots.keyed[slot].root))?
+    }
+    Ok(())
 }
 
 fn canonical_tree(mut tree: PageTree) -> Result[(), Error] {

@@ -13,11 +13,11 @@ pub type Projection: codec + send {
     prefix: Bytes
 }
 
-pub fn project[G: send](tx: store.Tx, h: Handles, a: Agent[G]) -> Result[Projection, Refused] {
+pub fn project[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App]) -> Result[Projection, Refused] {
     let s = session_of(tx, h)?
     let mut sections: List[SectionHash] = list.new()
     for sec in a.sections {
-        match render(tx, sec, a.limits) {
+        match render(tx, h, a.app, sec, a.limits) {
             Text(take text) => list.push(mut sections, SectionHash(key: clone(sec.key), hash: digest(string.as_bytes(text)))),
             Absent => (),
             Kept => if let Some(take hash) = hash_of(s.active_sections_hashes, sec.key) {
@@ -30,9 +30,15 @@ pub fn project[G: send](tx: store.Tx, h: Handles, a: Agent[G]) -> Result[Project
         return Error(Malformed("tool definitions"))
     }
     let mut messages: Bytes = list.new()
-    let mut p = s.head_pos
+    if s.frame > 0u64 {
+        let Some(f) = kept(store.fetch(tx, h.frames, s.frame))? else {
+            return Error(Malformed("frame"))
+        }
+        std.codec.put_key_bytes(string.as_bytes(f.seed), mut messages)
+    }
+    let mut p = s.frame
     while p < s.next_pos {
-        match kept(store.fetch(tx, store.shape(h.entries), p))? {
+        match kept(store.fetch(tx, h.entries, p))? {
             Some(System(_)) => (),
             Some(Note(_, _)) => (),
             Some(entry) => {
@@ -92,36 +98,20 @@ pub type ForkDiffError: send = Unrecorded(store.UnknownReason) | Overran | Store
 // the store's recorded-call re-execution on a private copy of that call's base (RUNNER-SPEC
 // §7), then `cache_diff`. Nothing either side writes is kept. A base the store cannot
 // rebuild, a projection over `bounds`, or a refused projection has no diff.
-pub fn fork_cache_diff[G: send, N: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, live: Agent[G], next: Agent[N]) -> Result[CacheDiff, ForkDiffError] waits {
+pub fn fork_cache_diff[G: send, App: inert + send, N: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, live: Agent[G, App], next: Agent[N, App]) -> Result[CacheDiff, ForkDiffError] waits {
     let before = projected_at(db, b, v, bounds, h, live)?
     let after = projected_at(db, b, v, bounds, h, next)?
     Ok(cache_diff(before, after))
 }
 
-fn projected_at[G: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G]) -> Result[Projection, ForkDiffError] waits {
-    let seen: Log[Result[Projection, Refused]] = log.new()
-    let halted: Log[bool] = log.new()
-    let ran = store.reexecute(db, b, v, bounds, scoped fn(_stop: store.Stop) -> Bytes {
-        log.append(halted, true)
-        list.new()
-    }, scoped fn(_call: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
-        log.append(seen, project(tx, h, a))
-        Ok(list.new())
-    })
-    let outcome = match take ran {
-        Ok(take done) => take done,
-        Error(take e) => return Error(Store(take e)),
-    }
-    if let Unknown(reason) = outcome {
-        return Error(Unrecorded(reason))
-    }
-    if list.len(log.finish(take halted)) > 0u64 {
-        return Error(Overran)
-    }
-    let mut got = log.finish(take seen)
-    match list.pop(mut got) {
-        Some(Ok(take p)) => Ok(take p),
-        Some(Error(take r)) => Error(Projection(take r)),
-        None => Error(Overran),
+fn projected_at[G: send, App: inert + send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G, App]) -> Result[Projection, ForkDiffError] waits {
+    let attempt = store.project_recorded(db, b, v, bounds, (store.copy_env(h), store.copy_env(a)), fn(tx, env) -> Result[Projection, Refused] {
+        project(tx, env.0, env.1)
+    }) ?=> Store
+    match take attempt {
+        Projected(Ok(take answer)) => Ok(take answer),
+        Projected(Error(take refusal)) => Error(Projection(take refusal)),
+        ProjectionUnavailable(reason) => Error(Unrecorded(reason)),
+        ProjectionStopped => Error(Overran),
     }
 }

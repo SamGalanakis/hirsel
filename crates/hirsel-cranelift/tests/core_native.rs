@@ -8,14 +8,11 @@ include!("support/native.rs");
 mod providers;
 
 #[test]
-fn map_placement_operations_match_prog_11() {
+fn map_placement_operations_match_fixed_key_vectors() {
     mod vectors {
-        include!("../../hirsel-core-ir/samples/map-placement-vectors.rs");
+        include!("support/map-placement-vectors.rs");
     }
-    let module = text::parse(include_str!(
-        "../../hirsel-core-ir/samples/map-placement.core"
-    ))
-    .unwrap();
+    let module = text::parse(include_str!("support/map-placement.core")).unwrap();
     let arguments: Vec<_> = vectors::CASES.iter().map(|&(_, arg, _)| [arg]).collect();
     let reports: Vec<_> = vectors::CASES
         .iter()
@@ -45,7 +42,7 @@ fn map_placement_operations_match_prog_11() {
         &cases,
         false,
         "#define hirsel_core_test_context_new hirsel_core_test_context_new_map_vectors\n",
-        false,
+        NativeCheck::Exact,
     );
 }
 
@@ -831,8 +828,8 @@ fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
 
 #[test]
 fn maps_clean_live_entries_in_order_and_continue_after_finalizer_failure() {
-    // The evaluator does not model Map entries. This independent C producer
-    // writes FORM's frozen layout, including poisoned removed entries.
+    // The C producer writes four 24-byte grouped Map entries and poisons the
+    // removed payloads and unused index. Cleanup reads the live entry prefix.
     let module = text::parse(
         r#"core v1
 type t0 = resource "R" drop f2 { id: u64 }
@@ -902,10 +899,10 @@ static void *leaf(HirselCoreContext *ctx, bool atomic) {{
 }}
 int main(void) {{
   HirselCoreContext *ctx=hirsel_core_test_context_new(10000);
-  uint64_t *entries=allocate(ctx,4*32+8,128,HIRSEL_CORE_NATIVE_GRAPH);
-  memset(entries,0xcc,4*32+8);
-  for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)resource(ctx,10*i+1); entries[4*i+3]=(uintptr_t)resource(ctx,10*i+2); }}
-  entries[5]=0;
+  uint64_t *entries=allocate(ctx,4*24+32+80,128,HIRSEL_CORE_NATIVE_GRAPH);
+  memset(entries,0xcc,4*24+32+80);
+  for(size_t i=0;i<3;i+=2) {{ entries[3*i]=1; entries[3*i+1]=(uintptr_t)resource(ctx,10*i+1); entries[3*i+2]=(uintptr_t)resource(ctx,10*i+2); }}
+  entries[3]=0;
   uint64_t carrier[]={{(uintptr_t)entries,3,4}};
   hirsel_core_test_inject(ctx,1,true);
   size_t attempts=hirsel_core_test_attempts(ctx);
@@ -919,11 +916,11 @@ int main(void) {{
   hirsel_core_context_free(ctx);
 
   ctx=hirsel_core_test_context_new(10000);
-  entries=allocate(ctx,4*32+8,128,HIRSEL_CORE_NATIVE_GRAPH);
-  memset(entries,0xcc,4*32+8);
-  for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)leaf(ctx,false); entries[4*i+3]=(uintptr_t)leaf(ctx,true); }}
-  entries[5]=0;
-  /* Count, carrier and one spare frame word: the map keeps pointer and length. */
+  entries=allocate(ctx,4*24+32+80,128,HIRSEL_CORE_NATIVE_GRAPH);
+  memset(entries,0xcc,4*24+32+80);
+  for(size_t i=0;i<3;i+=2) {{ entries[3*i]=1; entries[3*i+1]=(uintptr_t)leaf(ctx,false); entries[3*i+2]=(uintptr_t)leaf(ctx,true); }}
+  entries[3]=0;
+  /* Count, carrier and one spare frame word. */
   uint64_t *root=allocate(ctx,40,32,HIRSEL_CORE_NATIVE_PLAIN); hirsel_core_counted_init(root,false);
   root[1]=(uintptr_t)entries; root[2]=3; root[3]=4;
   hirsel_core_test_inject(ctx,1,true); attempts=hirsel_core_test_attempts(ctx);

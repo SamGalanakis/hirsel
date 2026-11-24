@@ -139,3 +139,14 @@ pub fn strip_base(p: String, base: String) -> Option[View[String]] in p {
     }
     None
 }
+
+/// The byte offset where a path pattern stops being valid.
+pub type PatternError = Syntax(u64)
+
+/// Matches a path against a validated pattern. A whole ** component matches zero or more
+/// components. Within a component, * matches a run, ? one scalar, and [] a scalar class.
+pub fn matches(pattern: String, p: String) -> Result[bool, PatternError] {
+    let compiled = path_pattern.compile(pattern)?
+    let (matched, _) = path_pattern.test(compiled, p)
+    Ok(matched)
+}

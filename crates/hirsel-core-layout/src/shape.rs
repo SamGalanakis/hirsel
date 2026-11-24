@@ -262,6 +262,8 @@ pub enum Handle {
     Flow,
     /// One holder of a `Secret` designation (TLS-5): cleaning it releases the holder.
     Secret,
+    /// A move-only media resource (TLS-8).
+    Media,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -332,6 +334,10 @@ pub enum FieldTy {
     /// Read-only Bytes storage. The third word is capacity, with the usual
     /// sequence niches. The second word is a doubled length or an odd payer token.
     FrozenBytes,
+    /// `Shared[T]` (CONC-15): a pointer to a node read by many units. The
+    /// runtime shares and releases it with an atomic count; its payload sits at
+    /// the node's word 1, as an `Arc`'s does.
+    Shared(TypeRef),
 }
 
 impl FieldTy {
@@ -342,6 +348,7 @@ impl FieldTy {
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
             | FieldTy::RegionRef(_)
             | FieldTy::Link(_) => true,
             FieldTy::Seq(ty)
@@ -368,6 +375,7 @@ impl FieldTy {
             | FieldTy::Box(id)
             | FieldTy::Rc(id)
             | FieldTy::Arc(id)
+            | FieldTy::Shared(id)
             | FieldTy::RegionRef(id)
             | FieldTy::Link(id) => *id = f(*id),
             FieldTy::Seq(ty)
@@ -431,6 +439,8 @@ pub struct Shape {
     /// `std.codec.of` calls at it. Unlike the finalizer it is no dependency of a unit
     /// that only holds the row; only a call reaches it.
     pub codec: Option<FuncRef>,
+    /// The ordered key maker that `std.codec.key_of` selects for this row.
+    pub key_codec: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
     /// The row has the `send` bound (CONC-2): a value of it may arrive from
@@ -458,6 +468,7 @@ impl Shape {
         self.finalizer.is_some()
             || self.clone.is_some()
             || self.codec.is_some()
+            || self.key_codec.is_some()
             || self.held.as_ref().is_some_and(FieldTy::names_row)
             || match &self.body {
                 Body::Record(fields) => fields.iter().any(|x| x.ty.names_row()),

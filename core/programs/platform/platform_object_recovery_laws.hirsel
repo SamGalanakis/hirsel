@@ -1,0 +1,525 @@
+type RecoveryBucket {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    server: Task[std.sim.s3.Report],
+    clock_task: Task[()],
+    stopping: Sender[()]
+}
+
+type RecoveryBucketClock: send {
+    world: std.sim.world.World,
+    stop_from: Receiver[()],
+    real: Clock
+}
+
+fn recovery_bucket_clock(take fixture: RecoveryBucketClock) waits {
+    let RecoveryBucketClock(world: take initial, stop_from: take stop_from, real) = take fixture
+    let mut world = take initial
+    loop {
+        if std.sim.world.step(mut world) { continue }
+        if let Ok(()) = channel.try_receive(stop_from) { return }
+        host.sleep_until(real, clock.deadline_after_ms(host.mono_ns(real), 1))
+    }
+}
+
+fn recovery_bucket(tasks: Tasks, real: Clock) -> RecoveryBucket {
+    recovery_bucket_with(tasks, real, 1123u64, list.new())
+}
+
+fn recovery_bucket_with(tasks: Tasks, real: Clock, seed: u64, take request_holds: List[std.sim.s3.Hold]) -> RecoveryBucket {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut peers: List[Ip] = list.with_capacity(1)
+    list.push(mut peers, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
+    // Public AWS SigV4 documentation example.
+    let sample: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing_bytes: Bytes = list.with_capacity(32)
+    let _ = bytebuf.append_inline(mut signing_bytes, sample, 0, 32)
+    let signing_key = result.unwrap(secret.seal(take signing_bytes, "verify"))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take signing_key,
+        faults: list.new(), holds: take request_holds, exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (take world, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (stopping, stop_from): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_task = task.spawn(tasks, bytes 65536, RecoveryBucketClock(world: take world, stop_from: take stop_from, real), recovery_bucket_clock)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576, 16777216)
+    RecoveryBucket(endpoint, time, server: take server, clock_task: take clock_task, stopping: take stopping)
+}
+
+fn recovery_bucket_client(s: RecoveryBucket, tasks: Tasks, seed: u64) -> store.Authority waits {
+    recovery_bucket_endpoint_client(s.endpoint, s.time, tasks, seed)
+}
+
+fn recovery_bucket_endpoint_client(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, seed: u64) -> store.Authority waits {
+    store.object_authority(recovery_bucket_wire_client(endpoint, time, tasks, seed), "bucket", 30000)
+}
+
+fn recovery_bucket_wire_client(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, seed: u64) -> std.object.Client waits {
+    let sample = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take sample, "kdf"))
+    let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let opts = std.object.Bucket(endpoint: "http://s3.test:8080", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let deadline = clock.deadline_after_ms(host.mono_ns(time), 30000)
+    result.unwrap(std.object.start_simulated(endpoint, tasks, take opts, take credentials, time, provide.random(seed), lanes, deadline))
+}
+
+fn object_install_noop(mut _phase: store.Migration) -> Result[(), store.Error] {
+    Ok(())
+}
+
+fn object_install_at(mut db: store.Db, tasks: Tasks, activation: u64, description: runner.Describe) -> Result[Bytes, store.Error] waits {
+    object_install_record(mut db, tasks, activation, description, list.new())
+}
+
+fn object_install_record(mut db: store.Db, tasks: Tasks, activation: u64, description: runner.Describe, take attempt_digest: Bytes) -> Result[Bytes, store.Error] waits {
+    let identity = result.unwrap(runner.identity_digest(description))
+    let mut encoded: Bytes = list.new()
+    let description_codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    std.codec.encode(description_codec, description, mut encoded) ?=> |_| Limit(Value)
+    let record = runner.ReleaseRecord(release: list.new(), digest: clone(description.digest), binding: clone(identity), n_place: description.n_place, prepared: take attempt_digest)
+    let mut staged = store.stage_migration(db, tasks, code.describe(object_install_noop))?
+    let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+    store.stage_activation(mut staged, activation, None, encoded, release_codec, record)?
+    store.install_bound_activation(mut db, take staged, activation, identity)?
+    Ok(take identity)
+}
+
+fn read_bucket_activation(mut readers: store.Followers, tasks: Tasks, fixture: RecoveryBucket, seed: u64,
+    owner: store.FollowerOwner, plan: store.FollowerPlan, expected: Option[store.StoreId]) -> Result[(u64, Bytes), store.Error] waits {
+    let slot = store.follower_slot(owner, plan)?
+    let f = store.follower(mut readers, take slot, recovery_bucket_client(fixture, tasks, seed), fixture.time, expected)?
+    runner.follower_release(f, 10)
+}
+
+fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -> Result[(), store.Error] waits {
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let mut options = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64,
+        store.Overrides(resident_limit: Some(1048576), journal_limit: None,
+            checkpoint_bytes: Some(65536), pack_bytes: Some(65536),
+            group_bytes: Some(65536), group_commits: None, lock_wait_ms: None,
+            cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)))
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
+    let owner = store.follower_owner(service)?
+    options.head_poll_ms = 10000
+    let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let _ = store.create_table(mut bare, store.spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = store.table(mut bare, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 9 {
+        let wrote = store.run(mut bare, None, (store.copy_env(rows), k), fn(mut tx, env) -> Result[(), store.Error] { store.put(mut tx, env.0, env.1, env.1) })?
+        if let Committed(_) = wrote {} else { fail("T1 bucket fixture put was refused") }
+    }
+    let mut description = describe_of(image())
+    description.n_place = 524288
+    let _ = object_install_at(mut bare, tasks, 11, description)?
+    let store_id = store.identity(bare)
+    store.close(take bare)?
+    options.expect = Some(store_id)
+    options.create = false
+    let mut readers = store.followers()
+    let (unmatched, take first_read) = read_bucket_activation(mut readers, tasks, sim, 2, owner, plan, options.expect)?
+    description.n_place = 1048576
+    let binding = result.unwrap(runner.identity_digest(description))
+    // Preparing pinned OLD's claim. Neither hand-install writer holds it (their holders are
+    // random), so each read's claim differs from it and an absent witness is final.
+    let old_claim: Option[(u64, Bytes)] = Some((0u64, bytes_of(16u64, 0u8)))
+    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), binding, binding, old_claim, false)
+    trace_current(mut host_test, unmatched, take first_read)
+    expect(unmatched == 11 && rooted_at(host_test, image(), 3), "T1 bucket: the unmatched release moved the host")
+    expect(collection_keeps(mut host_test, true, true), "T1 bucket: an unmatched release lost a candidate")
+
+    let mut hand = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let _ = object_install_at(mut hand, tasks, 12, description)?
+    store.close(take hand)?
+    let (adopted, take installed_read) = read_bucket_activation(mut readers, tasks, sim, 4, owner, plan, options.expect)?
+    trace_current(mut host_test, adopted, take installed_read)
+    expect(adopted == 12 && rooted_at(host_test, image(), 12) && last_activation(host_test) == Some(12), "T1 bucket: OLD was not relaunched at 12")
+    expect(collection_keeps(mut host_test, false, true), "T1 bucket: adoption did not leave OLD as the only root")
+    store.close_follower_service(take service)
+}
+
+@test
+fn bucket_hand_install_adopts_at_12(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let fixture = recovery_bucket(tasks, c)
+    let outcome = object_adoption_trace(c, rnd, tasks, fixture)
+    let RecoveryBucket(server: take server, clock_task: take clock_task, stopping: take stopping, ..) = take fixture
+    result.unwrap(channel.send(stopping, ()))
+    let _ = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_task))
+    outcome
+}
+
+// One genesis GET and seven reclaim probes precede the racing client's head GET.
+const WITNESS_PROBE_GET: u64 = 9
+const WITNESS_ACTIVATION_PUT: u64 = 12
+
+type WitnessHistory = EarlierPrepared | DifferentPrepared | StandaloneAtTen | SameClaimAbsent
+
+fn witness_store_options() -> store.Options {
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let limits = store.Overrides(resident_limit: Some(1048576), journal_limit: None,
+        checkpoint_bytes: Some(65536), pack_bytes: Some(65536), group_bytes: Some(65536), group_commits: Some(1),
+        lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    let mut plan = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64, limits))
+    plan.head_poll_ms = 600000
+    take plan
+}
+
+fn witness_empty_commits(mut writer: store.Db, commits: u64) -> Result[(), store.Error] waits {
+    for _ in 0u64 .. commits {
+        let put = store.run(mut writer, None, (), fn(mut tx, unused_env) -> Result[(), store.Error] { Ok(()) })?
+        let Committed(store.Done(ticket: receipt, ..)) = put else { fail("L54-W: the fixture did not commit") }
+        store.durable(mut writer, receipt)?
+    }
+    Ok(())
+}
+
+fn witness_law_case(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, wanted: WitnessHistory) -> Result[(), store.Error] waits {
+    if let EarlierPrepared = wanted {
+        return witness_overtaken(c, rnd, tasks, sim)
+    }
+    let authority = recovery_bucket_client(sim, tasks, 1)
+    let (take opened, take base, take new_description) = witness_base(tasks, rnd, sim.time, take authority, false)?
+    let mut writer = take opened
+    match wanted {
+        SameClaimAbsent => (),
+        _ => {
+            let prepared_digest = match wanted {
+                DifferentPrepared => bytes_of(32, 5u8),
+                _ => list.new(),
+            }
+            let _ = object_install_record(mut writer, tasks, 10, new_description, take prepared_digest)?
+        },
+    }
+    store.close(take writer)?
+
+    witness_observe(c, rnd, tasks, sim, base, wanted)
+}
+
+fn witness_observe(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, base: ActivationAttempt, wanted: WitnessHistory) -> Result[(), store.Error] waits {
+    let options = witness_store_options()
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
+    let mut readers = store.followers()
+    let (actual, take encoded) = read_bucket_activation(mut readers, tasks, sim, 2, store.follower_owner(service)?, plan, Some(base.id))?
+    store.close_follower_service(take service)?
+    let mut host_test = trace_probe_authority(c, rnd, (base.id.hi, base.id.lo), base.old_binding, base.new_binding, Some(clone(base.pair)), false)
+    trace_current(mut host_test, actual, take encoded)
+    match wanted {
+        EarlierPrepared => expect(actual == 10 && installed_new(host_test, 10), "L54-W: prepared D did not prove activation 10"),
+        DifferentPrepared => expect(actual == 10 && failed_with(host_test, "not installed after recovery"), "L54-W: prepared D prime proved D"),
+        StandaloneAtTen => expect(actual == 10 && failed_with(host_test, "not installed after recovery"), "L54-W: standalone at 10 proved D"),
+        SameClaimAbsent => {
+            if let Some(Undecided(ProbeOld)) = deploy_outcome(host_test.h, "g") {} else { fail("L54-W: absence under OLD's claim decided the attempt") }
+            expect(actual == 3 && rooted_at(host_test, image(), 3) && collection_keeps(mut host_test, true, true), "L54-W: an unknown attempt lost a root")
+        },
+    }
+    Ok(())
+}
+
+@test
+fn bucket_activation_witness_distinguishes_prepared(c: Clock, rnd: Random, tasks: Tasks, env_seed: Env) -> Result[(), store.Error] waits {
+    let seed = match std.sim.world.test_seed(env_seed) { Some(active) => active, None => 1123u64 }
+    let histories: Inline[WitnessHistory, 4] = [EarlierPrepared, DifferentPrepared, StandaloneAtTen, SameClaimAbsent]
+    for history in histories {
+        let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+        if let EarlierPrepared = history {
+            list.push(mut request_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1,
+                until: Requested("GET", "head", WITNESS_PROBE_GET), then: ApplyLoseReply))
+        }
+        let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
+        let seen = witness_law_case(c, rnd, tasks, sim, history)
+        let report = finish_recovery_bucket(take sim)
+        seen?
+        // The register stores activation at HEAD payload offset 24.
+        let final_head = view report.head_writes[list.len(report.head_writes) - 1]
+        let want = match history { SameClaimAbsent => 3u64, _ => 10u64 }
+        let authority_version = result.unwrap(std.codec.decode(std.codec.of_u64(), list.slice(final_head.data, 112, 120)))
+        if authority_version != want { fail("L54-W: the register missed the fixture activation") }
+    }
+    Ok(())
+}
+
+type ActivationAttempt: send {
+    id: store.StoreId,
+    pair: (u64, Bytes),
+    old_binding: Bytes,
+    new_binding: Bytes,
+}
+
+type ActivationWriter: send {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    rnd: Random,
+    tasks: Tasks,
+    ready: Sender[ActivationAttempt],
+}
+
+fn witness_base(tasks: Tasks, rnd: Random, time: Clock, take authority: store.Authority, one_identity: bool) -> Result[(store.Db, ActivationAttempt, runner.Describe), store.Error] waits {
+    let mut writer = store.open_authority(tasks, take authority, time, rnd, witness_store_options()) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let mut old_description = describe_of(image())
+    old_description.n_place = 1048576
+    witness_empty_commits(mut writer, 2)?
+    let old_binding = object_install_at(mut writer, tasks, 3, old_description)?
+    witness_empty_commits(mut writer, 6)?
+    let mut next_description: runner.Describe = if one_identity { clone(old_description) } else { describe_of(image_two()) }
+    next_description.n_place = 1048576
+    // The release's executable digest I and the prepared digest D differ.
+    next_description.digest = bytes_of(32, 3u8)
+    let new_binding = result.unwrap(runner.identity_digest(next_description))
+    let store.Claim(epoch, holder: take holder) = store.claim_of(writer)?
+    let base = ActivationAttempt(id: store.identity(writer), pair: (epoch, take holder), old_binding: take old_binding, new_binding: take new_binding)
+    Ok((take writer, take base, take next_description))
+}
+
+fn write_prepared_ten(take trial: ActivationWriter) -> Result[(), store.Error] waits {
+    let authority = recovery_bucket_endpoint_client(trial.endpoint, trial.time, trial.tasks, 1)
+    let (take opened, take base, take next_description) = witness_base(trial.tasks, trial.rnd, trial.time, take authority, false)?
+    let mut writer = take opened
+    result.unwrap(channel.send(trial.ready, take base))
+    let _ = object_install_record(mut writer, trial.tasks, 10, next_description, image_two())?
+    store.close(take writer)
+}
+
+fn witness_overtaken(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -> Result[(), store.Error] waits {
+    let (report_ready, await_ready): (Sender[ActivationAttempt], Receiver[ActivationAttempt]) = channel.new(1)
+    let trial = ActivationWriter(endpoint: sim.endpoint, time: sim.time, rnd, tasks, ready: take report_ready)
+    let writer = task.spawn(tasks, bytes 33554432, take trial, write_prepared_ten)
+    let base = result.unwrap(channel.receive(await_ready))
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", WITNESS_ACTIVATION_PUT))
+    let mut opts = witness_store_options()
+    opts.create = false
+    opts.expect = Some(base.id)
+    let successor = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 2), sim.time, rnd, opts) ?=> |store.Refusal(error: take problem, ..)| take problem
+    if let Ok(Error(Fenced(1))) = task.join(take writer) {} else {
+        fail("L54-W: the lost reply did not resolve against the overtaking claim")
+    }
+    store.close(take successor)?
+    witness_observe(c, rnd, tasks, sim, base, EarlierPrepared)
+}
+
+fn finish_recovery_bucket(take sim: RecoveryBucket) -> std.sim.s3.Report waits {
+    let RecoveryBucket(server: take server, clock_task: take clock_task, stopping: take stopping, ..) = take sim
+    result.unwrap(channel.send(stopping, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_task))
+    take report
+}
+
+type MovedActivation {
+    prepared_applies: bool,
+    one_identity: bool,
+    allow_other: bool,
+}
+
+fn moved_activation_case(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, schedule: MovedActivation) -> Result[(), store.Error] waits {
+    let options = witness_store_options()
+    let authority = recovery_bucket_client(sim, tasks, 1)
+    let (take opened, take base, take new_description) = witness_base(tasks, rnd, sim.time, take authority, schedule.one_identity)?
+    let mut incumbent = take opened
+    let store_id = base.id
+    let tried = object_install_record(mut incumbent, tasks, 10, new_description, image_two())
+    match (schedule.prepared_applies, view tried) {
+        (true, Ok(_)) => (),
+        (false, Error(Undecided)) => (),
+        _ => fail("L54-H: the prepared install did not take the scripted cut"),
+    }
+    let _ = take incumbent
+
+    let mut reopen: store.Options = clone(options)
+    reopen.expect = Some(store_id)
+    reopen.create = false
+    let mut standalone = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 2), sim.time, rnd, reopen) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let active = if schedule.allow_other {
+        let mut bare: runner.Describe = clone(new_description)
+        bare.n_place = 524288
+        let _ = object_install_at(mut standalone, tasks, 10, bare)?
+        10u64
+    } else {
+        if !schedule.prepared_applies { let _ = object_install_at(mut standalone, tasks, 10, new_description)? }
+        let _ = object_install_at(mut standalone, tasks, 11, new_description)?
+        11u64
+    }
+    store.close(take standalone)?
+
+    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), base.old_binding, base.new_binding, Some(clone(base.pair)), false)
+    reopen.activation = Some(10u64)
+    reopen.binding = Some(clone(base.new_binding))
+    let probed = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), sim.time, rnd, reopen)
+    let Error(store.Refusal(error: NotCurrent(observed), authority: take returned)) = take probed else {
+        fail("L54-H: NEW's probe proceeded to claim")
+    }
+    expect(observed == active, "L54-H: the refused probe reported the wrong activation")
+    let report = recovery_read_authority(tasks, sim.time, take returned, options, store_id)?
+    let (seen, take raw) = take report
+    expect(seen == active, "L54-H: the follower read another activation")
+    trace_current(mut host_test, seen, take raw)
+    let group = option.unwrap(must(group_row(host_test.h, "g"), "L54-H: the group disappeared"))
+    let snapshot = store.snapshot(host_test.h.db)
+    let reader = store.reader(host_test.h.db, 0)?
+    let at_ten = store.get(reader, snapshot, host_test.h.t.activations, (group.incarnation, 10u64))?
+    let expected = if schedule.prepared_applies { Some(image_two()) } else { None }
+    expect(at_ten == expected, "L54-H: the catalog index disagreed with the prepared outcome")
+    if schedule.allow_other {
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image(), 3), "L54-H: an unmatched release changed the selection")
+        if let Some(Unmatched(_, 10, _, Some(524288))) = group.recovery {} else {
+            fail("L54-H: refusal did not record the unmatched binding")
+        }
+        let mut bare: runner.Describe = clone(new_description)
+        bare.n_place = 524288
+        let identity = result.unwrap(runner.identity_digest(bare))
+        let expected_cause = moved_unmatched_cause(identity, base.old_binding, base.new_binding)
+        expect(failing_cause(host_test, "g") == Some(take expected_cause), "L54-H: the unmatched status changed the probe's cause")
+        expect(collection_keeps(mut host_test, true, true), "L54-H: wrong allowance lost a candidate")
+    } else if schedule.prepared_applies {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched below the applied activation")
+        expect(installed_new(host_test, 11) && collection_keeps(mut host_test, true, true), "L54-H: the applied attempt did not select NEW at 11")
+    } else if schedule.one_identity {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched the shared identity below 11")
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image(), 11), "L54-H: shared identity did not follow the failed attempt's OLD selection")
+        expect(collection_keeps(mut host_test, false, true), "L54-H: shared identity did not collect NEW")
+    } else {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched the distinct identity below 11")
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image_two(), 11), "L54-H: distinct identity did not select NEW at 11")
+        expect(collection_keeps(mut host_test, true, true), "L54-H: distinct identity lost OLD")
+    }
+    Ok(())
+}
+
+fn moved_unmatched_cause(id: Bytes, old_binding: Bytes, new_binding: Bytes) -> String {
+    let mut text = string.from("No recovery candidate matches the store at activation 10: its release identity is ")
+    string.push(mut text, std.hex.encode(id))
+    string.push(mut text, " at n_place 524288; candidates: ")
+    string.push(mut text, std.hex.encode(image()))
+    string.push(mut text, " with identity ")
+    string.push(mut text, std.hex.encode(old_binding))
+    string.push(mut text, " at n_place 1048576, ")
+    string.push(mut text, std.hex.encode(image_two()))
+    string.push(mut text, " with identity ")
+    string.push(mut text, std.hex.encode(new_binding))
+    string.push(mut text, " at n_place 1048576; last start: NotCurrent: the store's release identity at activation 10 is not that of assembly ")
+    string.push(mut text, std.hex.encode(image_two()))
+    string.push(mut text, ", which this start ran")
+    take text
+}
+
+fn recovery_read_authority(tasks: Tasks, time: Clock, take authority: store.Authority, options: store.Options, id: store.StoreId) -> Result[(u64, Bytes), store.Error] waits {
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
+    let mut readers = store.followers()
+    let slot = store.follower_slot(store.follower_owner(service)?, plan)?
+    let mut mirror = store.follower(mut readers, take slot, take authority, time, Some(id))?
+    let _ = store.fresh(mut mirror, clock.deadline_after_ms(host.mono_ns(time), 30000))?
+    let read = runner.follower_release(mirror, 10)
+    let _ = take mirror
+    store.close_follower_service(take service)?
+    take read
+}
+
+fn observe_moved_activation(c: Clock, rnd: Random, tasks: Tasks, seed: u64, schedule: MovedActivation) -> Result[(), store.Error] waits {
+    let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    let rule: std.sim.s3.Hold = if schedule.prepared_applies {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1, until: At(50000000), then: ApplyLoseReply)
+    } else {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1, until: Never, then: Drop)
+    }
+    list.push(mut request_holds, take rule)
+    let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
+    let observed = moved_activation_case(c, rnd, tasks, sim, schedule)
+    let report = finish_recovery_bucket(take sim)
+    observed?
+    let mut prepared_at_ten = false
+    for applied_head in report.head_writes {
+        if applied_head.data[88] == 1 && applied_head.data[112] == 10 { prepared_at_ten = true }
+    }
+    expect(prepared_at_ten == schedule.prepared_applies, "L54-H: register history disagreed with the prepared outcome")
+    Ok(())
+}
+
+@test
+fn bucket_moved_activation_recovery(c: Clock, rnd: Random, tasks: Tasks, env_seed: Env) -> Result[(), store.Error] waits {
+    let seed = match std.sim.world.test_seed(env_seed) { Some(active) => active, None => 1123u64 }
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: true, one_identity: false, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: false, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: false, allow_other: true))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: true, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: true, one_identity: true, allow_other: false))?
+    refusal_write_follower(c, rnd, tasks, seed, false)?
+    refusal_write_follower(c, rnd, tasks, seed, true)
+}
+
+fn refusal_write_follower(c: Clock, rnd: Random, tasks: Tasks, seed: u64, follower_fails: bool) -> Result[(), store.Error] waits {
+    let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    if follower_fails {
+        list.push(mut request_holds, std.sim.s3.Hold(method: "GET", key: "head", from: WITNESS_PROBE_GET + 1, count: 5,
+            until: Requested("GET", "after-probe", 1), then: Apply))
+    }
+    list.push(mut request_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1,
+        until: Requested("GET", "after-probe", 1), then: ApplyLoseReply))
+    let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
+    let (report_ready, await_ready): (Sender[ActivationAttempt], Receiver[ActivationAttempt]) = channel.new(1)
+    let trial = ActivationWriter(endpoint: sim.endpoint, time: sim.time, rnd, tasks, ready: take report_ready)
+    let writer = task.spawn(tasks, bytes 33554432, take trial, write_prepared_ten)
+    let base = result.unwrap(channel.receive(await_ready))
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", WITNESS_ACTIVATION_PUT))
+
+    let mut host_test = trace_probe_authority(c, rnd, (base.id.hi, base.id.lo), base.old_binding, base.new_binding, Some(clone(base.pair)), false)
+    if follower_fails { trace_current(mut host_test, 3, list.new()) }
+    let mut opts = witness_store_options()
+    opts.expect = Some(base.id)
+    opts.activation = Some(10u64)
+    opts.binding = Some(clone(base.new_binding))
+    opts.create = false
+    let client = recovery_bucket_wire_client(sim.endpoint, sim.time, tasks, 2)
+    let authority = store.object_authority(take client, "bucket", if follower_fails { 10u64 } else { 30000u64 })
+    let probe = store.open_authority(tasks, take authority, sim.time, rnd, opts)
+    let Error(store.Refusal(error: NotCurrent(3), authority: take returned)) = take probe else {
+        fail("L54-H: the held install did not leave the probe at activation 3")
+    }
+    let mut recovery: Option[store.Authority] = Some(take returned)
+    if follower_fails {
+        let returned_probe = option.unwrap(replace(mut recovery, None))
+        let observed_read = recovery_read_authority(tasks, sim.time, take returned_probe, opts, base.id)
+        match take observed_read {
+            Error(Remote(_)) => {
+                trace_current(mut host_test, 3, list.new())
+                if let Some(Undecided(_)) = deploy_outcome(host_test.h, "g") {} else { fail("L54-H: a failed follower read decided the deploy") }
+                expect(rooted_at(host_test, image(), 3), "L54-H: a failed follower read moved the group")
+                let cause = failing_cause(host_test, "g")
+                if cause != Some("NotCurrent: the store is at activation 3; this start requested 10") {
+                    let found = match cause { Some(text) => string.from(text), None => string.from("no failing row") }
+                    fail(joined("L54-H expected the probe's own cause, found ", found))
+                }
+            },
+            Error(take issue) => return Error(take issue),
+            Ok(_) => fail("L54-H: the held follower read returned a value"),
+        }
+    }
+    {
+        let mut marker = recovery_bucket_wire_client(sim.endpoint, sim.time, tasks, 3)
+        let deadline = std.object.deadline_after_ms(marker, 30000)
+        let (response, _) = std.object.fetch(mut marker, "after-probe", list.new(), deadline)
+        if let Error(NotFound) = response {} else { fail("L54-H: the release marker did not reach S3") }
+    }
+    result.unwrap(task.join(take writer))?
+    if let Some(take remaining) = take recovery {
+        let (seen, take raw) = recovery_read_authority(tasks, sim.time, take remaining, opts, base.id)?
+        expect(seen == 10, "L54-H: the separate follower read missed the activation")
+        trace_current(mut host_test, seen, take raw)
+        expect(installed_new(host_test, 10) && collection_keeps(mut host_test, true, true), "L54-H: the follower evidence did not decide the attempt")
+    }
+
+    let report = finish_recovery_bucket(take sim)
+    let last_write = view report.head_writes[list.len(report.head_writes) - 1]
+    expect(last_write.data[88] == 1 && last_write.data[112] == 10, "L54-H: the refused probe wrote a claim")
+    Ok(())
+}

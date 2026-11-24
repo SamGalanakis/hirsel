@@ -1,0 +1,132 @@
+const MAX_NAME: u64 = 255
+
+const MAX_COMPONENTS: u64 = 16
+
+const MAX_DATABASE: u64 = 1048576
+
+const DATABASE_ROW: u64 = 16
+
+pub opaque type Database: send {
+    raw: Bytes
+}
+
+fn validate_name(name: Bytes) -> Result[(), Error] {
+    let n = list.len(name)
+    if n == 0 {
+        return Error(InvalidName)
+    }
+    if n > MAX_NAME {
+        return Error(Limit)
+    }
+    let mut depth = 1u64
+    let mut start = 0u64
+    for i in 0u64 .. n {
+        let byte = name[i]
+        if byte == b'/' {
+            if i == start {
+                return Error(InvalidName)
+            }
+            depth += 1
+            start = i + 1
+        } else if !int.is_ascii_alpha(byte) && !int.is_ascii_digit(byte) && byte != b'_' && byte != b'+' && byte != b'-' {
+            return Error(InvalidName)
+        }
+    }
+    if depth > MAX_COMPONENTS {
+        return Error(Limit)
+    }
+    if start == n {
+        return Error(InvalidName)
+    }
+    Ok(())
+}
+
+/// Version of the IANA data in embedded().
+pub fn version() -> String {
+    data_version()
+}
+
+/// Inflate the pinned database once for repeated lookups. Its decompressed
+/// size is bounded at 1 MiB.
+pub fn embedded() -> Result[Database, Error] {
+    let decoded: Result[Result[Bytes, std.flate.Error], Capacity] = bound bytes (5 * MAX_DATABASE) {
+        std.flate.decode(Zlib, compressed_data(), MAX_DATABASE)
+    }
+    match take decoded {
+        Ok(Ok(take raw)) => Ok(Database(raw: take raw)),
+        Ok(Error(e)) => Error(DatabaseData(e)),
+        Error(e) => Error(Allocation(e)),
+    }
+}
+
+fn db_word(raw: Bytes, at: u64) -> u64 {
+    int.widen(word32(raw, at))
+}
+
+/// Find a canonical IANA name or alias in the embedded data, then parse
+/// only its TZif record. The database is read-only and may be reused.
+pub fn lookup(database: Database, name: String) -> Result[Zone, Error] {
+    let key = string.as_bytes(name)
+    validate_name(key)?
+    let mut lo = 0u64
+    let mut hi = db_word(database.raw, 0)
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        let row = 4 + mid * DATABASE_ROW
+        let start = db_word(database.raw, row)
+        let size = db_word(database.raw, row + 4)
+        match list.compare_bytes(key, list.slice(database.raw, start, start + size)) {
+            Less => {
+                hi = mid
+            },
+            Greater => {
+                lo = mid + 1
+            },
+            Equal => {
+                let from = db_word(database.raw, row + 8)
+                let len = db_word(database.raw, row + 12)
+                return parse(list.slice(database.raw, from, from + len))
+            },
+        }
+    }
+    Error(MissingZone)
+}
+
+/// Read a zone from a caller-supplied zoneinfo directory. Path components
+/// are restricted to IANA name characters, with no empty components.
+/// A MAX_FILE+1 buffer detects files beyond the parser's size limit even
+/// if the file grows after stat. Reads and close go through replayable std.file.
+pub fn load(directory: Dir, name: String) -> Result[Zone, Error] waits {
+    validate_name(string.as_bytes(name))?
+    let mut file = match std.file.open(directory, name, Read) {
+        Ok(take file) => take file,
+        Error(e) => return Error(Io(e)),
+    }
+    let status = match std.file.stat(mut file) {
+        Ok(status) => status,
+        Error(e) => return Error(Io(e)),
+    }
+    match status.kind {
+        File => {},
+        _ => return Error(InvalidName),
+    }
+    if status.size > MAX_FILE {
+        return Error(Limit)
+    }
+    let mut raw: Bytes = list.new()
+    match list.try_reserve(mut raw, MAX_FILE + 1) {
+        Ok(()) => {},
+        Error(e) => return Error(Allocation(e)),
+    }
+    while list.len(raw) <= MAX_FILE {
+        match std.file.read_into(mut file, mut raw) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(e) => return Error(Io(e)),
+        }
+    }
+    match std.file.close(take file) {
+        Ok(()) => parse(raw),
+        Error(e) => Error(Io(e)),
+    }
+}

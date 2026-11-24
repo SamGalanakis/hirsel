@@ -20,15 +20,23 @@ failure or cancellation. The runner calls `hello_accepted` only after decoding
 and admitting Hello; `welcomed` clears the separate Hello deadline.
 
 `server` consumes a Socket and pending lease, validates the bounded request
-and source, writes the 101 response and returns `Upgraded`. Its reader keeps
+and source, writes the 101 response and returns `Upgraded` with the selected protocol and
+read-ahead length. Its reader keeps
 only the request's frame read-ahead, copied into storage of exactly its length
 and charged to the connection; the 8192-byte request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a
 source policy after sanitization and before 101, under the original accept
 deadline; refusal is 503. `hello_deadline` exposes the fixed Hello deadline to
 the runner owner. `refuse_socket` sends a bounded HTTP refusal while keeping
 its socket halves inside wsock. `client` uses sixteen
-bytes from host.random for its challenge, requires hirsel.2, rejects extensions,
+bytes from host.random for its challenge, requires hirsel.4, rejects extensions,
 and keeps response read-ahead the same way. It returns `Connected` and a client encoder.
+
+`server_with_site` serves GET and HEAD on the listener before upgrading.
+It passes the path without query or fragment to the site selector and uses the
+same path for upgrade routing. It streams regular files with one buffer of at
+most 8192 bytes, capped by `Config.max_frame`. HEAD sends the GET headers with
+no body. `server_with_site_report` accepts stderr authority for one diagnostic
+per asset failure. Runner supplies it through `operate_report`.
 
 `read` drives the pure decoder over the ReadHalf. An idle reader holds no
 receive buffer: `refill` returns its input, waits with `host.recv_ready`
@@ -55,8 +63,9 @@ buffer reserves exactly payload+14 capacity, at most round8(max_frame+14)
 charged bytes. `try_encode_with` is the server's encode for a codec value of known
 exact length: `websocket.binary_head` writes the header and the codec writes the
 payload behind it in the same buffer, so the payload is never copied. The initial reservation returns Allocation
-on refusal. A codec
-that writes any other length fails closed with 1011. `stage` moves one such buffer to the sole Writer. Busy returns
+on refusal. `try_encode_parts` writes already encoded components through an
+append callback in the same buffer. A writer that produces any other length
+fails closed with 1011. `stage` moves one such buffer to the sole Writer. Busy returns
 the offered bytes unchanged. `flush` commits send prefixes and retains its
 cursor across TimedOut. Completion frees the buffer before the next encode.
 `pong` records an inline control debt, even while a frame is blocked. It drains

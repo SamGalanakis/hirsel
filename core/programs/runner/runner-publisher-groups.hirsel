@@ -1,0 +1,36 @@
+type OwedGroup: send { sub: u32, payload: Arc[Bytes] }
+
+fn pack_group(value: Bytes, projected: List[Row]) -> Result[Arc[Bytes], Capacity] {
+    let requested = int.saturating_add(8u64, slot_payload_size(list.len(value), projected))
+    let packed = isolate(scoped fn() -> Result[Arc[Bytes], std.codec.EncodeError] {
+        let mut body_bytes: Bytes = list.with_capacity(requested)
+        std.codec.encode(std.codec.of_bytes(), value, mut body_bytes)?
+        let row_codec: std.codec.Codec[List[Row]] = std.codec.of_list()
+        std.codec.encode(row_codec, projected, mut body_bytes)?
+        Ok(arc.new(take body_bytes))
+    })
+    match take packed {
+        Ok(Ok(Ok(take body))) => Ok(take body),
+        Ok(Ok(Error(CountOverflow(n)))) => Error(Capacity(requested: n, available: 4294967295u64)),
+        Ok(Error(_)) => Error(Capacity(requested: requested, available: 0u64)),
+        Error(problem) => Error(problem),
+    }
+}
+
+fn complete_group(limit: u64, value: Bytes, projected: List[Row]) -> Result[Arc[Bytes], Capacity] {
+    let available = int.saturating_sub(limit, 40u64)
+    let requested = slot_payload_size(list.len(value), projected)
+    if requested > available { return Error(Capacity(requested: requested, available: available)) }
+    pack_group(value, projected)
+}
+
+fn deliver_round_group(mut subs: Subscriptions, mut owes: List[Owe], id: SubId, version: u64,
+    generation: u64, limit: u64, projected: List[Row], packed: Result[Arc[Bytes], Capacity]) {
+    let k = owe(mut owes, id.who, version)
+    match packed {
+        Ok(body) => if !append_round_group(mut owes[k], id, generation, projected, body, limit) {
+            reset_session(mut subs, mut owes, id.who, version)
+        },
+        Error(problem) => end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(room(problem)))),
+    }
+}

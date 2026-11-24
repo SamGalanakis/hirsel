@@ -4,6 +4,7 @@
 //! executable does (request_sequences.rs compares their outputs).
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::Publication;
+use crate::product::ProductLibraries;
 use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions,
@@ -12,6 +13,9 @@ use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+mod lean;
+mod release;
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -81,6 +85,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
         _ => {}
     }
+    if invocation.command.name.starts_with("lean ") {
+        lean::run(invocation)?;
+        return conclude(Outcome::Exit(0));
+    }
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
@@ -100,6 +108,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     if command == "register" {
         return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?));
+    }
+    match command {
+        "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
+        "dry-run" => return conclude(Outcome::Exit(launch::dry_run::run(invocation)?)),
+        _ => {}
     }
     if command == "deploy" {
         return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?));
@@ -284,6 +297,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut product_name = None;
     let mut entry = None;
     let test_command = command == "test";
+    let static_laws = matches!(command, "laws check" | "laws write");
     let recipe_command = matches!(command, "build" | "publish");
     let native_command = recipe_command || command == "run" || replay_command || test_command;
     let mut recipe_root = None;
@@ -292,6 +306,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut n_place = None;
     let mut place_timeout = Duration::from_secs(10);
     let mut test_filter = None;
+    let mut test_exact = Vec::new();
     let mut test_jobs = None;
     let mut test_timeout = None;
     let mut test_sim = false;
@@ -332,6 +347,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
+    let mut test_laws = false;
+    let mut test_write_laws = false;
+    let mut law_baseline = None;
     let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
@@ -365,6 +383,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
+            Opt::Laws => test_laws = true,
+            Opt::WriteLaws => test_write_laws = true,
+            Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
@@ -395,6 +416,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Dir => grants.directories.push(value),
             Opt::Grant => grants.grant(&value)?,
             Opt::Filter => test_filter = Some(value),
+            Opt::TestExact => test_exact.push(
+                hirsel_core_ids::DefPath::from_full(&value)
+                    .ok_or("--exact expects a full definition path")?,
+            ),
             Opt::TestJobs => {
                 test_jobs = Some(
                     value
@@ -485,6 +510,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::GroupName
             | Opt::Tenant
             | Opt::GroupStore
+            | Opt::DryRunExe
             | Opt::NetRule
             | Opt::Uncontained
             | Opt::Trusted
@@ -495,6 +521,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::MaxMemory
             | Opt::Stop
             | Opt::CallTimeout
+            | Opt::CallStream
             | Opt::ProfOut
             | Opt::ProfTasks
             | Opt::ProfMem
@@ -515,6 +542,34 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 unreachable!("CLI early command option")
             }
         }
+    }
+    if test_filter.is_some() && !test_exact.is_empty() {
+        return Err("test: --filter and --exact cannot be combined".into());
+    }
+    if law_baseline.is_some() {
+        for (narrowed, option) in [
+            (test_filter.is_some(), "--filter"),
+            (!test_exact.is_empty(), "--exact"),
+            (test_seed.is_some(), "--seed"),
+            (test_sim, "--sim"),
+            (test_seeds.is_some(), "--seeds"),
+            (corpus_path.is_some(), "--property-corpus"),
+            (test_replay, "--replay"),
+        ] {
+            if narrowed {
+                return Err(
+                    format!("test: --laws-baseline compares a full run; drop {option}").into(),
+                );
+            }
+        }
+    }
+    let law_baseline = law_baseline
+        .as_deref()
+        .map(crate::law_lock::Baseline::read)
+        .transpose()?;
+    test_laws |= test_write_laws || law_baseline.is_some();
+    if test_write_laws && manifest.is_some() {
+        return Err("test: --write-laws requires a package directory".into());
     }
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
@@ -553,7 +608,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     .or_else(|| {
         (manifest.is_none()
             && recipe_root.is_none()
-            && matches!(command, "check" | "build" | "publish" | "run" | "test"))
+            && (static_laws || matches!(command, "check" | "build" | "publish" | "run" | "test")))
         .then(|| PathBuf::from("."))
     });
     let mut workspace_app = None;
@@ -574,10 +629,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )?);
         }
         workspace_app = Some(crate::package_dir::PackageDir::from_archive(&archive)?);
-    } else if matches!(
-        command,
-        "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
-    ) {
+    } else if static_laws
+        || matches!(
+            command,
+            "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+        )
+    {
         if let Some(directory) = &app_directory {
             if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
                 let member = workspace.selected()?;
@@ -607,9 +664,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         path,
                     )?);
                 }
-                crate::package_lock::Lock::compare(&resolved, package_mode)?
-                    .commit(&resolved.workspace)?;
-                let include_tests = matches!(command, "check" | "test")
+                if !static_laws || package_mode.flag().is_some() {
+                    crate::package_lock::Lock::compare(&resolved, package_mode)?
+                        .commit(&resolved.workspace)?;
+                }
+                let include_tests = static_laws
+                    || matches!(command, "check" | "test")
                     || inspection
                         .as_ref()
                         .is_some_and(|option| option.includes_tests());
@@ -660,7 +720,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .to_owned();
         }
     }
-    let needs_recording = recording_build || record_path.is_some() || replay_command || test_replay;
+    let needs_recording =
+        recording_build || record_path.is_some() || replay_command || test_replay || test_laws;
     let stored_recipe = if let Some(root) = recipe_root {
         if dir.is_some()
             || manifest.is_some()
@@ -697,7 +758,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         _ => return Err("--emulator and --sysroot must be supplied together".into()),
     };
     if test_command && entry.is_some() {
-        return Err("test selects marked functions with --filter, not --entry".into());
+        return Err("test selects marked functions with --filter or --exact, not --entry".into());
     }
     let executable = std::env::current_exe()?;
     let installed = crate::installation::Installed::discover(&executable)?;
@@ -708,8 +769,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let env_recording_runtime = installed
         .as_ref()
         .and_then(|installed| installed.recording_runtime(&target));
+    let source_tree = libraries.is_some();
+    let source_libraries = source_core || source_std || source_tree;
     if let Some(installed) = &installed {
-        if core_product.is_none() {
+        if core_product.is_none() && !source_tree {
             core_product = Some(installed.cache());
         }
         if runtime.is_none() {
@@ -810,13 +873,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if profile_front {
         meter.profile_image_index();
     }
-    let installed_std = if installed.is_some()
-        && libraries.is_none()
-        && !source_std
-        && !source_core
+    let installed_std = if !source_libraries
+        && image_path.is_none()
         && workspace_app.as_ref().is_none_or(|app| app.needs_std())
+        && let Some(installed) = &installed
     {
-        installed.as_ref().unwrap().product("std")?
+        installed.product("std")?
     } else {
         None
     };
@@ -824,24 +886,24 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         meter.result.image_selection = Some("image used: explicit image".into());
     } else if installed_std.is_some() {
         meter.result.image_selection = Some("image used: installed std product".into());
-    } else if source_std || libraries.is_some() {
+    } else if source_libraries {
         meter.result.image_selection = Some("source checked: explicit library source".into());
     } else if installed.is_some() {
         meter.result.image_selection = Some("source checked: no registered std product".into());
     } else {
         meter.result.image_selection = Some("source checked: no installed image".into());
     }
-    // An uninstalled compiler can use the current checkout for source checks.
+    // A checkout supplies sources when requested. Default native builds
+    // use the bundled libraries even when invoked from the checkout.
     let libraries = libraries.as_deref().or_else(|| {
-        (installed.is_none() && Path::new("core/std").is_dir()).then_some(Path::new("core"))
+        ((source_libraries || installed.is_none()) && Path::new("core/std").is_dir())
+            .then_some(Path::new("core"))
     });
     let directory = dir.as_deref().unwrap_or(Path::new("."));
-    let test_store = crate::store::temporary_test_store(test_command && store.is_none())?;
     let store = store
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
-        .or_else(|| test_store.as_ref().map(|scratch| scratch.path().to_owned()))
-        .unwrap_or_else(|| directory.join(".hirsel-core"));
-    let code_store = CodeStore::for_request(command, code_store, &store);
+        .unwrap_or_else(|| crate::store::default_path(directory));
+    let code_store = CodeStore::for_request(command, code_store, &store)?;
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
             (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),
@@ -1066,12 +1128,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         test_owner = Some(app.package.package.clone());
         manifest_runs = app.tests.take();
-        CheckRequest::from_app(
-            app,
-            libraries,
-            &store,
-            native_command || installed.is_some() || inspection.is_some() || image.is_some(),
-        )?
+        let program =
+            native_command || installed.is_some() || inspection.is_some() || image.is_some();
+        let libraries = if source_libraries || !program {
+            libraries
+        } else {
+            None
+        };
+        CheckRequest::from_app(app, libraries, &store)?
     };
     if entry.is_some() {
         request.entry = entry;
@@ -1087,7 +1151,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
-    let test_runs = if test_command {
+    let test_runs = if test_command || static_laws {
         request.entry = None;
         Some(match manifest_runs {
             Some(runs) => {
@@ -1100,7 +1164,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 runs
             }
             None => {
-                if !explicit_limit {
+                if test_command && !explicit_limit {
                     return Err("test requires an explicit --limit <bytes> for each run".into());
                 }
                 // A test runs in a working directory of its own; a directory
@@ -1131,6 +1195,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     let selected_entry = request.entry.clone();
     request.capture_sources()?;
+    let law_files = (static_laws || test_write_laws).then(|| crate::law_lock::test_files(&request));
+    let law_directory = dir.as_deref().unwrap_or(Path::new("."));
     let sources = crate::SourceFiles::of(&request);
     if let Some(owner) = &test_owner {
         if let Some(image) = image {
@@ -1142,7 +1208,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .into());
             }
         } else if let Some(image) = installed_std {
-            request.use_image(image)?;
+            if !request.use_image(image)? {
+                return Err("installed std product does not match the bundled libraries".into());
+            }
         } else if request.manifest.is_some()
             && !source_core
             && !source_std
@@ -1171,7 +1239,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
     }
     meter.finish("startup/discovery");
-    let run_output = (command == "run" && output_path.is_none())
+    // Concurrent requests share keyed artifacts. Their launch paths are private.
+    let temporary_output = (matches!(command, "run" | "test") && output_path.is_none())
         .then(|| crate::Store::new(&native_store)?.scratch())
         .transpose()?;
     // Native options come before the reach: a Cranelift development build
@@ -1179,13 +1248,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     // error is reported only for a request check accepts.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
-            let default_output = if let Some(scratch) = &run_output {
-                scratch.path().join("program")
-            } else if test_command {
-                native_store.join("tests")
-            } else {
-                PathBuf::from("program")
-            };
+            let default_output = temporary_output.as_ref().map_or_else(
+                || PathBuf::from("program"),
+                |scratch| scratch.path().join("program"),
+            );
             let publishing = command == "publish";
             let link = if publishing {
                 Link::Driver(PathBuf::new())
@@ -1231,6 +1297,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let record = match &mut prepared {
         _ if command == "image"
             || test_command
+            || static_laws
             || recipe_command
             || !grants.foreign.is_empty()
             || inspection.is_some()
@@ -1259,13 +1326,23 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         (crate::Checked::Product(product, None), image)
     } else {
         (
-            if !source_core && (native_command || core_product.is_some()) {
+            if !source_core
+                && !(source_tree && source_std)
+                && (native_command || core_product.is_some())
+            {
                 let root = core_product.unwrap_or_else(crate::PackageProduct::default_cache);
+                let libraries = if source_tree {
+                    ProductLibraries::SourceTree
+                } else if source_std {
+                    ProductLibraries::Core
+                } else {
+                    ProductLibraries::BundledStd
+                };
                 driver.check_package_product(
                     request,
                     &root,
                     &mut meter,
-                    (native_command, !source_std),
+                    (native_command, libraries),
                     record.as_ref(),
                 )?
             } else {
@@ -1288,7 +1365,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 run_args,
                 record_path.as_deref(),
                 profile.as_ref(),
-                run_output,
+                temporary_output,
                 &mut meter,
                 metrics,
             );
@@ -1321,7 +1398,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
-    let reach = if native_command && !test_command {
+    let mut reach = if native_command && !test_command {
         Some({
             let entry = selected_entry
                 .as_ref()
@@ -1330,7 +1407,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 Some(Ok(options))
                     if recipe_command || (command == "run" && !grants.foreign.is_empty()) =>
                 {
-                    product.reachable_recipe(entry, options.instance_limit)?
+                    product.reachable_recipe(entry, options)?
                 }
                 Some(Ok(options)) => product.reachable_for(entry, options)?,
                 _ => product.reachable(entry, 65_536)?,
@@ -1342,6 +1419,30 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
+    if static_laws && accepted {
+        let tests = product
+            .tests()
+            .filter(|path| {
+                test_owner
+                    .as_ref()
+                    .is_none_or(|owner| &path.0.package == owner)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let runs = test_runs.as_ref().unwrap();
+        runs.check_names(&tests.iter().collect())?;
+        let current =
+            crate::law_lock::Inventory::of(&product, &tests, law_files.as_ref().unwrap(), runs)?;
+        if command == "laws write" {
+            crate::law_lock::update(law_directory, |lock| lock.refresh(current))?;
+            return conclude(Outcome::Exit(0));
+        }
+        let differences = crate::law_lock::read(law_directory)?.differences(&current);
+        for difference in &differences {
+            println!("{difference}");
+        }
+        return conclude(Outcome::Exit(i32::from(!differences.is_empty())));
+    }
     if accepted && let Some(inspection) = inspection {
         inspection.write(&product, selected_entry.as_ref(), json)?;
         return conclude(Outcome::Exit(0));
@@ -1353,7 +1454,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
             );
         }
-
         Some(options)
     } else {
         None
@@ -1375,9 +1475,16 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 test_filter
                     .as_ref()
                     .is_none_or(|filter: &String| path.to_string().contains(filter.as_str()))
+                    && (test_exact.is_empty() || test_exact.contains(path))
             })
             .cloned()
             .collect();
+        let law_inventory = law_files
+            .as_ref()
+            .map(|files| crate::law_lock::Inventory::of(&product, &tests, files, &test_runs))
+            .transpose()?;
+        let mut observations =
+            std::collections::BTreeMap::<String, crate::test_run::LawReport>::new();
         let corpus = corpus_path
             .as_deref()
             .map(crate::property_corpus::Corpus::open)
@@ -1406,9 +1513,17 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 timeout: test_timeout,
                 runner: &runner,
                 replay: test_replay,
+                laws: test_laws,
+                plain_runtime: installed.as_ref().and_then(|i| {
+                    if charge_observation {
+                        i.observed_runtime(&target, false)
+                    } else {
+                        i.runtime(&target)
+                    }
+                }),
                 expect_verdict: expect_verdict.as_deref(),
                 cache: cache.as_ref(),
-                rerun: test_rerun,
+                rerun: test_rerun || test_write_laws,
                 seed,
                 corpus: corpus.as_ref(),
             };
@@ -1424,10 +1539,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     let corpus_note = outcome.corpus.map_or_else(String::new, |state| {
                         format!(" [property corpus {state}]")
                     });
+                    let strength = test_laws.then(|| outcome.laws.strength());
+                    let laws_note = strength.map_or_else(String::new, |class| format!(" {class}"));
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
-                                println!("pass {source} {label}{corpus_note} ({wall_ms:.3} ms)");
+                                println!("pass {source} {label}{corpus_note}{laws_note} ({wall_ms:.3} ms)");
                             } else {
                                 let mut reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
@@ -1443,24 +1560,41 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                                             .join(" | "),
                                     );
                                 }
-                                println!("fail {source} {label}{corpus_note}: {reason} ({wall_ms:.3} ms)");
+                                println!("fail {source} {label}{corpus_note}{laws_note}: {reason} ({wall_ms:.3} ms)");
                                 for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
                                     println!("  stdout: {line}");
                                 }
                             }
                         } else {
-                            println!("pass {source} {label}");
+                            println!("pass {source} {label}{laws_note}");
                         }
                     }
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
                     if let Some(state) = outcome.corpus {
                         row["property_corpus"] = state.into();
                     }
+                    if let Some(strength) = strength {
+                        if !json {
+                            outcome.laws.print();
+                        }
+                        row["law_strength"] = strength.into();
+                        row["laws"] = outcome.laws.json_rows();
+                    }
+                    if test_write_laws || law_baseline.is_some() {
+                        match observations.entry(test.to_string()) {
+                            std::collections::btree_map::Entry::Occupied(mut held) => held.get_mut().merge(outcome.laws),
+                            std::collections::btree_map::Entry::Vacant(slot) => { slot.insert(outcome.laws); }
+                        }
+                    }
                     row
                 }
                 Err(error) => {
                     failed = true;
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null});
+                    if test_laws {
+                        row["law_strength"] = if matches!(error, crate::NativeStop::ForeignRecording { .. }) { "unobserved (FFI-8)" } else { "unobserved" }.into();
+                        row["laws"] = serde_json::json!([]);
+                    }
                     if let crate::NativeStop::ForeignRecording { site, .. } = &error {
                         row["site"] = site.as_str().into();
                         if !json {
@@ -1479,9 +1613,25 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             rows.push(row);
         });
         }
+        if let Some(current) = law_inventory {
+            crate::law_lock::update(law_directory, |lock| lock.record(&current, &observations))?;
+        }
+        let regressions = law_baseline
+            .as_ref()
+            .map(|baseline| baseline.compare(&observations));
+        let law_red = regressions.as_ref().is_some_and(|rows| !rows.is_empty());
+        failed |= law_red;
         let passed = !tests.is_empty() && !failed;
         if json {
-            println!("{}", serde_json::json!({"passed":passed,"tests":rows}));
+            let mut report = serde_json::json!({"passed":passed,"tests":rows});
+            if let Some(regressions) = regressions {
+                report["law_regressions"] = serde_json::json!(regressions);
+            }
+            println!("{report}");
+        } else if let Some(regressions) = regressions {
+            for red in regressions {
+                println!("{red}");
+            }
         }
         if tests.is_empty() && !json {
             eprintln!("no tests found");
@@ -1490,8 +1640,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if let Some(path) = metrics {
             meter.write_metrics(path)?;
         }
-        drop(test_store);
-        return conclude(Outcome::Exit(if tests.is_empty() {
+        drop(temporary_output);
+        return conclude(Outcome::Exit(if tests.is_empty() && !law_red {
             2
         } else {
             i32::from(failed)
@@ -1506,7 +1656,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         let entry = selected_entry
             .as_ref()
             .ok_or("build/run requires an entry")?;
-        let reached = reach.as_ref().unwrap();
+        let reached = reach.as_mut().unwrap();
         let grant_lines = command == "run" && !grants.foreign.is_empty();
         let assembled = if recipe_command || grant_lines {
             match product.publish_release(
@@ -1529,10 +1679,46 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         }
                         return conclude(Outcome::Exit(0));
                     }
+                    if command == "build"
+                        && matches!(options.backend, Backend::Llvm)
+                        && options.optimize
+                    {
+                        let mut report = release::Report::new(&product, reached, key, json);
+                        let counters = reached.finish();
+                        let library = product
+                            .image
+                            .as_ref()
+                            .map(|image| image.store_root().to_owned());
+                        drop(reach);
+                        drop(product);
+                        let output = report.assemble(
+                            publication,
+                            options,
+                            counters,
+                            library.as_deref(),
+                            release_manifest.as_deref(),
+                            place_timeout,
+                            &store_root,
+                            &mut meter,
+                        )?;
+                        return finish(
+                            &output,
+                            command,
+                            json,
+                            &sources,
+                            &runner,
+                            run_args,
+                            record_path.as_deref(),
+                            profile.as_ref(),
+                            temporary_output,
+                            &mut meter,
+                            metrics,
+                        );
+                    }
                     let recipe = (release_manifest.is_some() || grant_lines)
                         .then(|| publication.recipe.clone());
                     let built =
-                        publication.assemble_with(options, reached.counters, Some(&product), None);
+                        publication.assemble_with(options, reached.finish(), Some(&product), None);
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, &recipe)
                     {
@@ -1652,7 +1838,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         run_args,
         record_path.as_deref(),
         profile.as_ref(),
-        run_output,
+        temporary_output,
         &mut meter,
         metrics,
     )
@@ -1744,119 +1930,6 @@ fn answer_hit(
         metrics,
     )
 }
-/// Print `output`, run a `run` request's executable, and exit with the
-/// request's status.
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    output: &Output<'_>,
-    command: &str,
-    json: bool,
-    sources: &crate::SourceFiles,
-    runner: &crate::Runner,
-    run_args: Vec<String>,
-    record_path: Option<&str>,
-    profile: Option<&crate::prof_command::Run>,
-    mut run_output: Option<crate::store::Scratch>,
-    meter: &mut Meter,
-    metrics: Option<PathBuf>,
-) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if json {
-        println!("{}", serde_json::to_string(output)?);
-    } else {
-        for d in &output.diagnostics {
-            eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
-            for cause in &d.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
-            {
-                eprintln!("  {suggestion}");
-            }
-        }
-        for g in &output.incomplete {
-            eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
-            for cause in &g.causal {
-                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
-            }
-        }
-        for r in &output.resources {
-            eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
-        }
-        // Behind a printed refusal an instance stop is its consequence.
-        if let Some(stop) = &output.stopped
-            && (output.diagnostics.is_empty() && output.incomplete.is_empty()
-                || !stop.starts_with("instances: "))
-        {
-            eprintln!("{stop}");
-        }
-        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
-        {
-            println!(
-                "{}: {} files, {} checked definitions",
-                if output.accepted {
-                    "accepted"
-                } else {
-                    "not accepted"
-                },
-                output.files,
-                output.checked_definitions
-            );
-        }
-    }
-    let mut launch = None;
-    let run_exit = if command == "run" || command == "replay" {
-        if let Some(native) = &output.native {
-            let path = std::fs::canonicalize(&native.executable)?;
-            if let Some(profile) = profile {
-                let status = profile.capture(&path, &run_args, record_path)?;
-                if !status.success() {
-                    eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
-                }
-                Some(status.code().unwrap_or(102))
-            } else {
-                let program = runner.command(&path);
-                let mut argv = vec![program.get_program().to_owned()];
-                argv.extend(program.get_args().map(ToOwned::to_owned));
-                argv.extend(run_args.into_iter().map(Into::into));
-                let env = (command == "run")
-                    .then_some(record_path)
-                    .flatten()
-                    .map(|record| ("HIRSEL_RECORD".into(), record.into()))
-                    .into_iter()
-                    .collect();
-                launch = Some(Launch {
-                    argv,
-                    env,
-                    keep: run_output.take(),
-                });
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let exit = if let Some(code) = run_exit {
-        code
-    } else if !output.incomplete.is_empty() || !output.resources.is_empty() {
-        2
-    } else if !output.diagnostics.is_empty() {
-        1
-    } else {
-        i32::from(output.stopped.is_some()) * 2
-    };
-    meter.finish("output/render");
-    if let Some(path) = metrics {
-        meter.write_metrics(path)?;
-    }
-    if let Some(profile) = profile {
-        profile.cleanup();
-    }
-    drop(run_output);
-    conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
-}
-
 /// What a request leaves for its caller: an exit status, or the program it
 /// built for `run` or `replay`, which the caller runs and whose status is the
 /// request's. A resident compiler's client runs the program itself, so it has
@@ -1865,52 +1938,10 @@ pub enum Outcome {
     Exit(i32),
     Launch(Launch),
 }
-/// The program a `run` or `replay` request built: its argument vector (the
-/// runner's, then the executable's, then the request's), the variables it runs
-/// with besides the caller's environment, and the scratch directory that holds
-/// it until it has run.
-pub struct Launch {
-    pub argv: Vec<std::ffi::OsString>,
-    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-    pub(crate) keep: Option<crate::store::Scratch>,
-}
-impl Launch {
-    /// Run the program and return the request's exit status: the program's,
-    /// or 102 when a signal ended it.
-    pub fn execute(
-        argv: &[std::ffi::OsString],
-        env: &[(std::ffi::OsString, std::ffi::OsString)],
-    ) -> Result<i32, Box<dyn std::error::Error>> {
-        let status = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .status()
-            .map_err(|e| format!("run execution {:?}: {e}", argv[0]))?;
-        if !status.success() {
-            eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
-        }
-        Ok(status.code().unwrap_or(102))
-    }
-}
-
-/// End a request with `outcome`. A one-shot process exits here, running the
-/// program first for a launch: the in-memory graphs are the OS's to reclaim,
-/// with no teardown. A resident compiler answers its client here, before the
-/// request's frames unwind, and the request returns its outcome to the server.
-fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if crate::resident::serving() {
-        crate::resident::answer(&outcome);
-        return Ok(outcome);
-    }
-    match outcome {
-        Outcome::Exit(code) => std::process::exit(code),
-        Outcome::Launch(launch) => {
-            let code = Launch::execute(&launch.argv, &launch.env)?;
-            drop(launch);
-            std::process::exit(code)
-        }
-    }
-}
+#[path = "request_launch.rs"]
+mod launch;
+pub use launch::Launch;
+use launch::{conclude, finish};
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the
@@ -1946,17 +1977,4 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
 }
 
 #[cfg(test)]
-mod net_grant_tests {
-    #[test]
-    fn bare_net_grant_is_refused_before_discovery_with_the_rule_syntax() {
-        let result = super::run(
-            ["run", "unused", "--grant", "Net"]
-                .map(str::to_owned)
-                .to_vec(),
-        );
-        let error = result
-            .err()
-            .expect("a bare Net grant cannot confer authority");
-        assert!(error.to_string().contains(hirsel_core_net::RULE_SYNTAX));
-    }
-}
+mod net_grant_tests;

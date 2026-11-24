@@ -1,0 +1,231 @@
+type TieredEmitFrame: send {
+    collection: u32,
+    stamp_in_image: u64,
+    key: Bytes,
+    frame: PackFrame
+}
+
+type TieredCutFrames: send {
+    pages: List[TieredEmitFrame],
+    blobs: List[TieredEmitFrame],
+    seen: Map[u64, ()]
+}
+
+fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.page.Slot) -> Result[(), Error] {
+    let HotPage(page) = view root else {
+        return Ok(())
+    }
+    let image = std.page.image_of(page)
+    let stamp = std.page.stamp(image)
+    if stamp == 0 || map.contains(pending.seen, stamp) {
+        return Ok(())
+    }
+    capacity(map.try_reserve(mut pending.seen, 1))?
+    map.insert(mut pending.seen, stamp, ())
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(edge) = std.page.child_slot(page, slot) {
+            tiered_emit_tree(mut pending, collection, edge)?
+        } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+            if let Some(HotBlob(body)) = std.page.blob_slot(page, reference.body) {
+                if !map.contains(pending.seen, reference.stamp) {
+                    let suffix = option.unwrap(std.page.key_at(image, slot))
+                    let key = logical_key(collection, suffix)?
+                    let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
+                    capacity(map.try_reserve(mut pending.seen, 1))?
+                    capacity(list.try_reserve(mut pending.blobs, 1))?
+                    map.insert(mut pending.seen, reference.stamp, ())
+                    list.push(mut pending.blobs, TieredEmitFrame(collection: collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
+                }
+            }
+        }
+    }
+    let key = tiered_page_index_key(collection, image)?
+    let frame = PackFrame(stamp: stamp, size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
+    capacity(list.try_reserve(mut pending.pages, 1))?
+    list.push(mut pending.pages, TieredEmitFrame(collection: collection, stamp_in_image: stamp, key: take key, frame: take frame))
+    Ok(())
+}
+
+fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    let leaf = std.page.level(image) == 0
+    for slot in 0u64 .. std.page.count(image) {
+        if !leaf {
+            let Some(HotPage(child)) = std.page.child_slot(root, slot) else {
+                fail("store: a collection map has Hot children")
+            }
+            tiered_emit_map(mut pending, child)?
+        } else if let Some(_) = std.page.tiered_root_at(image, slot) {
+            let key = option.unwrap(std.page.key_at(image, slot))
+            let collection: u32 = list.word_be(key, 0)
+            let edge = option.unwrap(std.page.child_slot(root, slot))
+            tiered_emit_tree(mut pending, collection, edge)?
+        }
+    }
+    Ok(())
+}
+
+fn tiered_cut_frames(roots: List[Roots]) -> Result[TieredCutFrames, Error] {
+    let mut pending = TieredCutFrames(pages: list.new(), blobs: list.new(), seen: map.new())
+    for held in roots {
+        tiered_emit_map(mut pending, held.collections.root)?
+    }
+    Ok(take pending)
+}
+
+type TieredPackRun: send {
+    class: u8,
+    frames: List[TieredEmitFrame],
+    packs: List[PlannedPack],
+    next_pack: u64
+}
+
+fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack: u64, cap: u64) -> Result[TieredPackRun, Error] {
+    let mut packs: List[PlannedPack] = list.new()
+    let mut seq = first_pack
+    let mut first = 0u64
+    let mut extent = 72u64
+    let mut index_room = 0u64
+    let mut payload = 0u64
+    for slot in 0u64 .. list.len(frames) {
+        let item = view frames[slot]
+        let width = item.frame.size
+        let key_width = list.len(item.key)
+        let (following, room) = tiered_frame_extent(extent, index_room, width, key_width)?
+        if slot != first && (following > cap || slot - first == 4294967295) {
+            capacity(list.try_reserve(mut packs, 1))?
+            list.push(mut packs, PlannedPack(seq: seq, first: first, end: slot, size: extent, payload_bytes: payload))
+            seq = stamp_after(seq)?
+            first = slot
+            let (fresh_extent, fresh_room) = tiered_frame_extent(72, 0, width, key_width)?
+            extent = fresh_extent
+            index_room = fresh_room
+            payload = width
+        } else {
+            extent = following
+            index_room = room
+            payload += width
+        }
+    }
+    let end = list.len(frames)
+    if end != first {
+        capacity(list.try_reserve(mut packs, 1))?
+        list.push(mut packs, PlannedPack(seq: seq, first: first, end: end, size: extent, payload_bytes: payload))
+        seq = stamp_after(seq)?
+    }
+    Ok(TieredPackRun(class: class, frames: take frames, packs: take packs, next_pack: seq))
+}
+
+// PACK_INDEX frame boundaries use the worst-case width. The pack-list
+// row records the actual front-coded width and is known before emission.
+fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> PagePack {
+    let total = pack.end - pack.first
+    let index_at = 72 + 16 * total + pack.payload_bytes
+    let mut room = 0u64
+    let mut index_bytes = 0u64
+    for slot in pack.first .. pack.end {
+        let key = view layout.frames[slot].key
+        let width = PACK_INDEX_ROW + list.len(key)
+        if room == 0 || width > PACK_INDEX_LIMIT - room {
+            room = PACK_INDEX_PREFIX + width
+            index_bytes += 16 + room
+        } else {
+            room += width
+            let common = std.page.common_prefix(layout.frames[slot - 1].key, key)
+            index_bytes += width - common
+        }
+    }
+    PagePack(class: layout.class, frames: int.truncate(total), live: pack.payload_bytes, payload_bytes: index_at + index_bytes, index: index_at)
+}
+
+fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, PagePack), Error] {
+    let mut draft = begin_tiered_pack(id, pack.seq, layout.class, pack.size)?
+    let room = pack.size - list.len(draft.raw)
+    capacity(list.try_reserve(mut draft.raw, room))?
+    capacity(map.try_reserve(mut emitted, pack.end - pack.first))?
+    for slot in pack.first .. pack.end {
+        let item = view layout.frames[slot]
+        let Some(place) = add_tiered_pack_frame(mut draft, item.frame, item.collection, item.key, scoped fn(stamp: u64) -> std.page.PagePtr {
+            let Some(place) = map.get(emitted, stamp) else {
+                fail("store: missing emitted Tiered child")
+            }
+            place
+        })? else {
+            fail("store: Tiered pack layout omitted a frame")
+        }
+        map.insert(mut emitted, item.stamp_in_image, place)
+    }
+    finish_tiered_pack(take draft)
+}
+
+fn seal_tiered_map_slot(root: Arc[std.page.Page], image: std.page.Image, slot: u64, emitted: Map[u64, std.page.PagePtr]) -> Result[Option[std.page.Slot], Error] {
+    let child = option.unwrap(std.page.child_slot(root, slot))
+    if std.page.level(image) != 0 {
+        let HotPage(page) = view child else {
+            fail("store: a collection map has Hot children")
+        }
+        if let Some(take ready) = seal_tiered_map(page, emitted)? {
+            return Ok(Some(HotPage(take ready)))
+        }
+    } else if let Some(_) = std.page.tiered_root_at(image, slot) {
+        if let HotPage(page) = view child {
+            let stamp = std.page.stamp(std.page.image_of(page))
+            if stamp != 0 {
+                let Some(place) = map.get(emitted, stamp) else {
+                    fail("store: the cut omitted a Hot Tiered root")
+                }
+                return Ok(Some(ColdPage(place)))
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn seal_tiered_map(root: Arc[std.page.Page], emitted: Map[u64, std.page.PagePtr]) -> Result[Option[Arc[std.page.Page]], Error] {
+    let image = std.page.image_of(root)
+    let width = std.page.count(image)
+    let height = std.page.level(image)
+    let mut changed: Map[u64, std.page.Slot] = map.new()
+    for slot in 0u64 .. width {
+        if let Some(take updated) = seal_tiered_map_slot(root, image, slot, emitted)? {
+            capacity(map.try_reserve(mut changed, 1))?
+            map.insert(mut changed, slot, take updated)
+        }
+    }
+    if map.len(changed) == 0 {
+        return Ok(None)
+    }
+    disk_allocation(scoped fn() -> Result[Option[Arc[std.page.Page]], Error] {
+        let mut rows: List[std.page.Entry] = list.with_capacity(width)
+        let mut kids: List[std.page.Slot] = list.with_capacity(width)
+        for slot in 0u64 .. width {
+            let old = option.unwrap(std.page.child_slot(root, slot))
+            let mut row = option.unwrap(std.page.entry(image, slot))
+            let child: std.page.Slot = match map.get(changed, slot) {
+                Some(updated) => clone(updated),
+                None => clone(old),
+            }
+            if let ColdPage(ptr) = view child {
+                if let InlineValue(mut descriptor) = row.cell {
+                    list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(ptr))
+                } else {
+                    fail("store: a Tiered collection map entry must hold its inline descriptor")
+                }
+            }
+            list.push(mut kids, take child)
+            list.push(mut rows, take row)
+        }
+        let ready = page_result(std.page.encode(rows, height, std.page.stamp(image), CollectionMap))?
+        Ok(Some(page_result(std.page.attach(take ready, take kids, list.new()))?))
+    })
+}
+
+// The Memory map frames were already assigned stamps in the cut plan.
+// Installing Tiered locations changes only the physical references.
+fn seal_holder_tiered(tree: PageTree, emitted: Map[u64, std.page.PagePtr]) -> Result[PageTree, Error] {
+    let mut ready = share_page_tree(tree)
+    if let Some(take sealed) = seal_tiered_map(tree.root, emitted)? {
+        ready.root = take sealed
+    }
+    Ok(take ready)
+}

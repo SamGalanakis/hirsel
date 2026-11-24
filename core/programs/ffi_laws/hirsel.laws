@@ -1,0 +1,13 @@
+hirsel.laws 1
+ffi_laws@1/tests/fl16_cancelled_release src=d3e7d7a5830afe9b sig=71321ac2c7fd215a run=bc7e1d596239accb bug=- oracle=- rows=-
+ffi_laws@1/tests/fl16_failed_finalizer src=62d9276caa71c39e sig=4b0ab00c9b694a4a run=bc7e1d596239accb bug=- oracle=- rows=pending
+ffi_laws@1/tests/fl17_address_reuse src=5f104a0d5a50b1f0 sig=2cce791ec82b49bc run=bc7e1d596239accb bug=- oracle=- rows=pending
+ffi_laws@1/tests/fl18_full_helper_pool src=88c5744a40b3d2aa sig=9470908e69c9038e run=bc7e1d596239accb bug=- oracle=- rows=-
+ffi_laws@1/tests/fl3_double_release src=c2f25c4872568402 sig=f9073f0c09eca204 run=bc7e1d596239accb bug=- oracle=- rows=pending
+ffi_laws@1/tests/fl4_racing_release src=47aacab045a98d47 sig=f9073f0c09eca204 run=bc7e1d596239accb bug=- oracle=- rows=pending
+ffi_laws@1/tests/fl5_immutable_slice src=38cbd135e03bfcab sig=aa7938c77c3edbbe run=b12efc28613e4e4b bug=- oracle=- rows=-
+ffi_laws@1/tests/fl5_mutable_loan src=2c5bd7bd0bd6c853 sig=80c942bfefdd96aa run=bc7e1d596239accb bug=- oracle=- rows=-
+ffi_laws@1/tests/fl5_stack_loan src=10d093a2e1d3c2d3 sig=c138e4b85a6c1247 run=b12efc28613e4e4b bug=- oracle=- rows=-
+ffi_laws@1/tests/fl6_parameterless_control src=5dd48cc64ca34d9c sig=716f2328614aecda run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
+ffi_laws@1/tests/fl6_reaches_in_finalizer src=33d4b94cebd60d74 sig=8dcc6b3ce37fdb67 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+ffi_laws@1/tests/fl6_reaches_without_calling src=55633fb8949c6c48 sig=8dcc6b3ce37fdb67 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

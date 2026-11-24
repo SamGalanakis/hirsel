@@ -1,0 +1,676 @@
+// An index owns only the moov and the top-level file ranges. All table
+// positions are offsets into its moov; all sample positions are file offsets.
+pub type VodError = Framing(Error) | BadMovie | BadTable | UnsupportedVod | ResourceLimit | ReadFailed
+
+pub type VodLimits {
+    metadata_bytes: u64,
+    top_boxes: u64,
+    tracks: u64
+}
+
+pub type FileRange {
+    start: u64,
+    end: u64
+}
+
+pub type MovieInfo {
+    timescale: u32,
+    duration: u64,
+    file_size: u64,
+    presentation_duration_us: u64
+}
+
+pub type TrackIndex {
+    id: u32,
+    handler: u32,
+    codec: u32,
+    timescale: u32,
+    media_duration: u64,
+    presentation_duration: u64,
+    movie_duration: u64,
+    sample_count: u32,
+    decode_duration: u64,
+    width: u16,
+    height: u16,
+    channels: u16,
+    sample_rate: u32,
+    matrix: Inline[u32, 9],
+    rotation: Option[i32]
+}
+
+pub type Colour {
+    primaries: u16,
+    transfer: u16,
+    matrix: u16,
+    full_range: Option[bool]
+}
+
+pub type ContentLight {
+    max_content: u16,
+    max_frame_average: u16
+}
+
+pub type MasteringDisplay {
+    // In mdcv wire order: green, blue, red.
+    primaries: Inline[(u16, u16), 3],
+    white_point: (u16, u16),
+    max_luminance: u32,
+    min_luminance: u32
+}
+
+pub type Hdr {
+    colour: Option[Colour],
+    content_light: Option[ContentLight],
+    mastering_display: Option[MasteringDisplay]
+}
+
+pub type Edit {
+    duration: u64,
+    media_time: i64,
+    rate_integer: i16,
+    rate_fraction: i16
+}
+
+type Table {
+    at: u64,
+    count: u64
+}
+
+type SampleTables {
+    times: Table,
+    composition: Table,
+    signed_composition: bool,
+    sync: Option[Table],
+    mapping: Table,
+    sizes: Table,
+    fixed_size: u32,
+    chunks: Table,
+    chunk_width: u64
+}
+
+type VodTrack {
+    info: TrackIndex,
+    entry: FileRange,
+    edits: Table,
+    edit_width: u64,
+    presentation_start_us: u64,
+    presentation_duration_us: u64,
+    hdr: Hdr,
+    tables: SampleTables
+}
+
+type VodLayout {
+    moov: FileRange,
+    first_mdat: Option[u64],
+    has_relative_index: bool
+}
+
+pub opaque type Vod {
+    movie: MovieInfo,
+    layout: VodLayout,
+    metadata: Bytes,
+    tracks: List[VodTrack],
+    media: List[FileRange]
+}
+
+type TopBox {
+    kind: u32,
+    body: u64,
+    end: u64
+}
+
+fn vod_box(input: Bytes, at: u64, limit: u64) -> Result[BoxHeader, VodError] {
+    match read_box(input, at, limit, true) {
+        Ok(b) => Ok(b),
+        Error(e) => Error(Framing(e)),
+    }
+}
+
+fn fetch_range(at: u64, n: u64, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[Bytes, VodError] waits {
+    let raw = read(at, n)?
+    if list.len(raw) != n {
+        return Error(ReadFailed)
+    }
+    Ok(take raw)
+}
+
+fn top_box(at: u64, end: u64, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[TopBox, VodError] waits {
+    if end - at < 8 {
+        return Error(BadMovie)
+    }
+    let h = fetch_range(at, 8, read)?
+    let short_size: u32 = list.word_be(h, 0)
+    let kind: u32 = list.word_be(h, 4)
+    let mut header = 8u64
+    let mut n: u64 = int.widen(short_size)
+    if short_size == 1 {
+        if end - at < 16 {
+            return Error(BadMovie)
+        }
+        let extended = fetch_range(at + 8, 8, read)?
+        n = list.word_be(extended, 0)
+        header = 16
+    } else if short_size == 0 {
+        n = end - at
+    }
+    if kind == 0x75756964 {
+        header += 16
+    }
+    if n < header || n > end - at {
+        return Error(BadMovie)
+    }
+    Ok(TopBox(kind: kind, body: at + header, end: at + n))
+}
+
+fn maybe_child(input: Bytes, parent: BoxHeader, kind: u32) -> Result[Option[BoxHeader], VodError] {
+    let mut at = parent.body
+    let mut found: Option[BoxHeader] = None
+    while at < parent.next {
+        let b = vod_box(input, at, parent.next)?
+        if b.kind == kind {
+            if let Some(_) = found {
+                return Error(BadMovie)
+            }
+            found = Some(b)
+        }
+        at = b.next
+    }
+    Ok(found)
+}
+
+fn require_child(input: Bytes, parent: BoxHeader, kind: u32) -> Result[BoxHeader, VodError] {
+    let Some(b) = maybe_child(input, parent, kind)? else {
+        return Error(BadMovie)
+    }
+    Ok(b)
+}
+
+fn media_clock(input: Bytes, b: BoxHeader) -> Result[(u32, u64), VodError] {
+    let n = b.next - b.body
+    if n >= 20 && input[b.body] == 0 {
+        let scale: u32 = list.word_be(input, b.body + 12)
+        let duration: u32 = list.word_be(input, b.body + 16)
+        if scale != 0 {
+            return Ok((scale, int.widen(duration)))
+        }
+    }
+    if n >= 32 && input[b.body] == 1 {
+        let scale: u32 = list.word_be(input, b.body + 20)
+        let duration: u64 = list.word_be(input, b.body + 24)
+        if scale != 0 {
+            return Ok((scale, duration))
+        }
+    }
+    Error(BadMovie)
+}
+
+fn tkhd_fields(input: Bytes, b: BoxHeader) -> Result[(u32, u64, Inline[u32, 9]), VodError] {
+    let n = b.next - b.body
+    if n == 0 {
+        return Error(BadMovie)
+    }
+    let (id, duration, start) = match input[b.body] {
+        0 => {
+            if n < 84 {
+                return Error(BadMovie)
+            }
+            let id: u32 = list.word_be(input, b.body + 12)
+            let duration: u32 = list.word_be(input, b.body + 20)
+            let ticks: u64 = int.widen(duration)
+            (id, ticks, b.body + 40)
+        },
+        1 => {
+            if n < 96 {
+                return Error(BadMovie)
+            }
+            let id: u32 = list.word_be(input, b.body + 20)
+            let duration: u64 = list.word_be(input, b.body + 28)
+            (id, duration, b.body + 52)
+        },
+        _ => return Error(BadMovie),
+    }
+    if id == 0 {
+        return Error(BadMovie)
+    }
+    let mut matrix: Inline[u32, 9] =[0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for i in 0u64 .. 9 {
+        matrix[i] = list.word_be(input, start + 4 * i)
+    }
+    Ok((id, duration, matrix))
+}
+
+// atan on [0, 1], with argument reduction so the series always converges
+// on [-sqrt(2)+1, sqrt(2)-1].
+fn atan_ratio(ratio: f64) -> f64 {
+    let reduced = float.gt(ratio, 0.41421356237309505)
+    let x = if reduced {
+        (ratio - 1.0) / (ratio + 1.0)
+    } else {
+        ratio
+    }
+    let factor = -x * x
+    let mut sum = x
+    let mut term = x
+    for i in 1u64 .. 22 {
+        term *= factor
+        let denominator: f64 = float.from_int(2 * i + 1)
+        sum += term / denominator
+    }
+    if reduced {
+        0.7853981633974483 + sum
+    } else {
+        sum
+    }
+}
+
+fn matrix_rotation(m: Inline[u32, 9]) -> Option[i32] {
+    let a: i32 = int.truncate(m[0])
+    let b: i32 = int.truncate(m[1])
+    let c: i32 = int.truncate(m[3])
+    let d: i32 = int.truncate(m[4])
+    if (a == 0 && c == 0) || (b == 0 && d == 0) {
+        return None
+    }
+    if b == 0 {
+        return Some(if a < 0 {
+            -180
+        } else {
+            0
+        })
+    }
+    if a == 0 {
+        return Some(if b < 0 {
+            90
+        } else {
+            -90
+        })
+    }
+    let ax: f64 = float.from_int(a)
+    let bx: f64 = float.from_int(b)
+    let cx: f64 = float.from_int(c)
+    let dx: f64 = float.from_int(d)
+    let x = float.abs(ax) / float.sqrt(ax * ax + cx * cx)
+    let y = float.abs(bx) / float.sqrt(bx * bx + dx * dx)
+    let acute = if float.le(y, x) {
+        atan_ratio(y / x)
+    } else {
+        1.5707963267948966 - atan_ratio(x / y)
+    }
+    let angle = if a < 0 {
+        3.141592653589793 - acute
+    } else {
+        acute
+    }
+    let direction: f64 = if b < 0 {
+        1.0
+    } else {
+        -1.0
+    }
+    let to_degrees: f64 = 180.0 / 3.141592653589793
+    let degrees = direction * angle * to_degrees
+    let converted: Result[i32, FloatError] = float.to_int(degrees)
+    match converted {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+fn entries(input: Bytes, b: BoxHeader, start: u64, stride: u64) -> Result[Table, VodError] {
+    if b.next - b.body < start {
+        return Error(BadTable)
+    }
+    let count: u32 = list.word_be(input, b.body + start - 4)
+    let n: u64 = int.widen(count)
+    if b.next - b.body - start != n * stride {
+        return Error(BadTable)
+    }
+    Ok(Table(at: b.body + start, count: n))
+}
+
+fn read_edits(input: Bytes, trak: BoxHeader) -> Result[(Table, u64), VodError] {
+    let Some(edts) = maybe_child(input, trak, 0x65647473)? else {
+        return Ok((Table(at: 0, count: 0), 12))
+    }
+    let b = require_child(input, edts, 0x656c7374)?
+    if b.next - b.body < 8 {
+        return Error(BadTable)
+    }
+    let version_flags: u32 = list.word_be(input, b.body)
+    let width = match version_flags {
+        0 => 12u64,
+        0x01000000 => 20u64,
+        _ => return Error(BadTable),
+    }
+    Ok((entries(input, b, 8, width)?, width))
+}
+
+fn edit_at(input: Bytes, table: Table, width: u64, i: u64) -> Edit {
+    let at = table.at + i * width
+    let (duration, media_time) = if width == 12 {
+        let n: u32 = list.word_be(input, at)
+        let raw: u32 = list.word_be(input, at + 4)
+        let signed: i32 = int.truncate(raw)
+        let ticks: u64 = int.widen(n)
+        let when: i64 = int.widen(signed)
+        (ticks, when)
+    } else {
+        let raw: u64 = list.word_be(input, at + 8)
+        (list.word_be(input, at), int.truncate(raw))
+    }
+    let rate_hi: u16 = list.word_be(input, at + width - 4)
+    let rate_lo: u16 = list.word_be(input, at + width - 2)
+    Edit(duration: duration, media_time: media_time, rate_integer: int.truncate(rate_hi), rate_fraction: int.truncate(rate_lo))
+}
+
+fn nearest_ticks(value: u64, from: u32, to: u32) -> Result[u64, VodError] {
+    let a: u64 = int.widen(from)
+    let b: u64 = int.widen(to)
+    let Some(whole) = int.checked_mul(value / a, b) else {
+        return Error(BadMovie)
+    }
+    let fraction = ((value % a) * b + a / 2) / a
+    let Some(ticks) = int.checked_add(whole, fraction) else {
+        return Error(BadMovie)
+    }
+    Ok(ticks)
+}
+
+// mdhd is in the track clock; edits are in the movie clock. A trailing
+// rounding tick in mvhd or tkhd cannot extend the available media.
+fn track_presentation(input: Bytes, edits: Table, edit_width: u64, movie_scale: u32, media_scale: u32, raw_duration: u64) -> Result[(u64, u64), VodError] {
+    let mut shown = 0u64
+    let mut start = 0u64
+    let mut visible = false
+    for i in 0u64 .. edits.count {
+        let edit = edit_at(input, edits, edit_width, i)
+        if edit.media_time < -1 {
+            return Error(BadMovie)
+        }
+        if edit.media_time == -1 && !visible {
+            let Some(next) = int.checked_add(start, edit.duration) else {
+                return Error(BadMovie)
+            }
+            start = next
+        } else {
+            visible = true
+            let length = nearest_ticks(edit.duration, movie_scale, media_scale)?
+            let Some(next) = int.checked_add(shown, length) else {
+                return Error(BadMovie)
+            }
+            shown = next
+        }
+    }
+    let duration = if edits.count == 0 || raw_duration < shown {
+        raw_duration
+    } else {
+        shown
+    }
+    Ok((nearest_ticks(start, movie_scale, 1000000)?, duration))
+}
+
+fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
+    let mut at = start
+    let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
+    while at < end {
+        let child = vod_box(input, at, end)?
+        let off = child.body
+        let n = child.next - off
+        match child.kind {
+            0x636f6c72 => {
+                if let Some(_) = hdr.colour {
+                    return Error(BadMovie)
+                }
+                if n < 4 {
+                    return Error(BadMovie)
+                }
+                let kind: u32 = list.word_be(input, off)
+                if kind == 0x6e636c78 || kind == 0x6e636c63 {
+                    let full = if kind == 0x6e636c78 {
+                        if n != 11 || (input[off + 10] & 127) != 0 {
+                            return Error(BadMovie)
+                        }
+                        Some((input[off + 10] & 128) != 0)
+                    } else {
+                        if n != 10 {
+                            return Error(BadMovie)
+                        }
+                        None
+                    }
+                    hdr.colour = Some(Colour(primaries: list.word_be(input, off + 4), transfer: list.word_be(input, off + 6), matrix: list.word_be(input, off + 8), full_range: full))
+                }
+            },
+            0x636c6c69 => {
+                if let Some(_) = hdr.content_light {
+                    return Error(BadMovie)
+                }
+                if n != 4 {
+                    return Error(BadMovie)
+                }
+                hdr.content_light = Some(ContentLight(max_content: list.word_be(input, off), max_frame_average: list.word_be(input, off + 2)))
+            },
+            0x6d646376 => {
+                if let Some(_) = hdr.mastering_display {
+                    return Error(BadMovie)
+                }
+                if n != 24 {
+                    return Error(BadMovie)
+                }
+                let mut primaries: Inline[(u16, u16), 3] =[(0, 0), (0, 0), (0, 0)]
+                for i in 0u64 .. 3 {
+                    primaries[i] = (list.word_be(input, off + i * 4), list.word_be(input, off + i * 4 + 2))
+                }
+                hdr.mastering_display = Some(MasteringDisplay(primaries: primaries, white_point: (list.word_be(input, off + 12), list.word_be(input, off + 14)), max_luminance: list.word_be(input, off + 16), min_luminance: list.word_be(input, off + 20)))
+            },
+            _ => {},
+        }
+        at = child.next
+    }
+    Ok(hdr)
+}
+
+fn self_contained(input: Bytes, minf: BoxHeader) -> Result[(), VodError] {
+    let dinf = require_child(input, minf, 0x64696e66)?
+    let dref = require_child(input, dinf, 0x64726566)?
+    if dref.next - dref.body < 8 {
+        return Error(BadMovie)
+    }
+    let count: u32 = list.word_be(input, dref.body + 4)
+    if count != 1 {
+        return Error(UnsupportedVod)
+    }
+    let location = vod_box(input, dref.body + 8, dref.next)?
+    if location.next != dref.next || location.kind != 0x75726c20 || location.next - location.body != 4 {
+        return Error(UnsupportedVod)
+    }
+    let flags: u32 = list.word_be(input, location.body)
+    if flags != 1 {
+        return Error(UnsupportedVod)
+    }
+    Ok(())
+}
+
+fn read_vod_track(input: Bytes, trak: BoxHeader, movie_scale: u32) -> Result[VodTrack, VodError] {
+    let tkhd = require_child(input, trak, 0x746b6864)?
+    let (id, movie_duration, matrix) = tkhd_fields(input, tkhd)?
+    let mdia = require_child(input, trak, 0x6d646961)?
+    let (timescale, media_duration) = media_clock(input, require_child(input, mdia, 0x6d646864)?)?
+    let hdlr = require_child(input, mdia, 0x68646c72)?
+    if hdlr.next - hdlr.body < 12 {
+        return Error(BadMovie)
+    }
+    let handler: u32 = list.word_be(input, hdlr.body + 8)
+    let minf = require_child(input, mdia, 0x6d696e66)?
+    self_contained(input, minf)?
+    let stbl = require_child(input, minf, 0x7374626c)?
+    let stsd = require_child(input, stbl, 0x73747364)?
+    let _ = table_header(input, stsd, 0)?
+    let count: u32 = list.word_be(input, stsd.body + 4)
+    if count != 1 {
+        return Error(UnsupportedVod)
+    }
+    let start = stsd.body + 8
+    let entry = vod_box(input, start, stsd.next)?
+    if entry.next != stsd.next || entry.next - entry.body < 8 {
+        return Error(BadMovie)
+    }
+    let reference: u16 = list.word_be(input, entry.body + 6)
+    if reference != 1 {
+        return Error(UnsupportedVod)
+    }
+    let (tables, sample_count, decode_duration) = read_tables(input, stbl)?
+    let (edits, edit_width) = read_edits(input, trak)?
+    let (start_us, duration) = track_presentation(input, edits, edit_width, movie_scale, timescale, media_duration)?
+    let duration_us = nearest_ticks(duration, timescale, 1000000)?
+    let mut info = TrackIndex(id: id, handler: handler, codec: entry.kind, timescale: timescale, media_duration: media_duration, presentation_duration: duration, movie_duration: movie_duration, sample_count: sample_count, decode_duration: decode_duration, width: 0, height: 0, channels: 0, sample_rate: 0, matrix: matrix, rotation: None)
+    let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
+    if handler == 0x76696465 {
+        if entry.next - entry.body < 78 {
+            return Error(BadMovie)
+        }
+        info.width = list.word_be(input, entry.body + 24)
+        info.height = list.word_be(input, entry.body + 26)
+        info.rotation = matrix_rotation(matrix)
+        hdr = read_hdr(input, entry.body + 78, entry.next)?
+    } else if handler == 0x736f756e {
+        let (rate, channels) = audio_format(input, entry)?
+        info.sample_rate = rate
+        info.channels = channels
+    }
+    Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, presentation_start_us: start_us, presentation_duration_us: duration_us, hdr: hdr, tables: tables))
+}
+
+fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], track_limit: u64, layout: VodLayout) -> Result[Vod, VodError] {
+    let moov = vod_box(metadata, 0, list.len(metadata))?
+    if moov.kind != MOOV || moov.next != list.len(metadata) {
+        return Error(BadMovie)
+    }
+    let (scale, duration) = media_clock(metadata, require_child(metadata, moov, 0x6d766864)?)?
+    let mut tracks: List[VodTrack] = list.new()
+    let mut earliest = 0xffffffffffffffffu64
+    let mut latest = 0u64
+    let mut longest = 0u64
+    let mut ids: Map[u32, bool] = map.new()
+    let mut at = moov.body
+    while at < moov.next {
+        let b = vod_box(metadata, at, moov.next)?
+        if b.kind == 0x6d766578 {
+            return Error(UnsupportedVod)
+        }
+        if b.kind == 0x7472616b {
+            if list.len(tracks) == track_limit {
+                return Error(ResourceLimit)
+            }
+            let track = read_vod_track(metadata, b, scale)?
+            let start = track.presentation_start_us
+            let span = track.presentation_duration_us
+            let Some(stop) = int.checked_add(start, span) else {
+                return Error(BadMovie)
+            }
+            if start < earliest {
+                earliest = start
+            }
+            if stop > latest {
+                latest = stop
+            }
+            if span > longest {
+                longest = span
+            }
+            let id = track.info.id
+            if let Some(_) = map.get(ids, id) {
+                return Error(BadMovie)
+            }
+            map.insert(mut ids, id, true)
+            list.push(mut tracks, take track)
+        }
+        at = b.next
+    }
+    if list.len(tracks) == 0 {
+        return Error(BadMovie)
+    }
+    let span = latest - earliest
+    let presentation_us = if longest > span {
+        longest
+    } else {
+        span
+    }
+    Ok(Vod(movie: MovieInfo(timescale: scale, duration: duration, file_size: file_size, presentation_duration_us: presentation_us), layout: layout, metadata: take metadata, tracks: take tracks, media: take media))
+}
+
+// Reads box headers and the moov only. The reader must supply exactly the
+// requested bytes from one immutable file snapshot.
+pub fn video_probe(file_size: u64, limits: VodLimits, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[Vod, VodError] waits {
+    let mut at = 0u64
+    let mut inspected = 0u64
+    let mut moov: Option[FileRange] = None
+    let mut first_mdat: Option[u64] = None
+    let mut has_relative_index = false
+    let mut media: List[FileRange] = list.new()
+    while at < file_size {
+        if inspected == limits.top_boxes {
+            return Error(ResourceLimit)
+        }
+        inspected += 1
+        let b = top_box(at, file_size, read)?
+        if b.kind == MOOV {
+            if let Some(_) = moov {
+                return Error(BadMovie)
+            }
+            moov = Some(FileRange(start: at, end: b.end))
+        } else if b.kind == MDAT {
+            if let None = first_mdat {
+                first_mdat = Some(at)
+            }
+            list.push(mut media, FileRange(start: b.body, end: b.end))
+        } else if b.kind == 0x73696478 || b.kind == 0x6d667261 || b.kind == 0x6d657461 {
+            has_relative_index = true
+        } else if b.kind == MOOF {
+            return Error(UnsupportedVod)
+        }
+        at = b.end
+    }
+    let Some(range) = moov else {
+        return Error(BadMovie)
+    }
+    let n = range.end - range.start
+    if n > limits.metadata_bytes {
+        return Error(ResourceLimit)
+    }
+    let metadata = fetch_range(range.start, n, read)?
+    let layout = VodLayout(moov: range, first_mdat: first_mdat, has_relative_index: has_relative_index)
+    read_moov(take metadata, file_size, take media, limits.tracks, layout)
+}
+
+pub fn vod_info(vod: Vod) -> MovieInfo {
+    vod.movie
+}
+
+pub fn vod_tracks(vod: Vod) -> u64 {
+    list.len(vod.tracks)
+}
+
+pub fn vod_track(vod: Vod, track: u64) -> Result[(TrackIndex, Hdr), VodError] {
+    if track >= list.len(vod.tracks) {
+        return Error(BadMovie)
+    }
+    Ok((vod.tracks[track].info, vod.tracks[track].hdr))
+}
+
+pub fn vod_sample_entry(vod: Vod, track: u64, receive: scoped fn(Bytes)) -> Result[(), VodError] {
+    if track >= list.len(vod.tracks) {
+        return Error(BadMovie)
+    }
+    let range = vod.tracks[track].entry
+    receive(list.slice(vod.metadata, range.start, range.end))
+    Ok(())
+}
+
+pub fn vod_edits(vod: Vod, track: u64, receive: scoped fn(Edit)) -> Result[(), VodError] {
+    if track >= list.len(vod.tracks) {
+        return Error(BadMovie)
+    }
+    let t = vod.tracks[track]
+    for i in 0u64 .. t.edits.count {
+        receive(edit_at(vod.metadata, t.edits, t.edit_width, i))
+    }
+    Ok(())
+}

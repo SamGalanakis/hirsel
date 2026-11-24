@@ -8,7 +8,18 @@
 //! memory: a read names no "reaching version", so a producer need not build SSA for
 //! slots or prove liveness before emitting.
 
-use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
+mod flow;
+pub(crate) use flow::for_each_successor;
+#[cfg(any(test, feature = "wf"))]
+pub(crate) use flow::successors;
+mod host_op;
+mod runtime_types;
+mod simd;
+pub use host_op::{HostOp, host_drop_symbol};
+pub use runtime_types::Wait;
+pub use simd::SimdOp;
+
+use crate::decode::{Debit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Row, Scalar, Shape, Ty, Vector};
 use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, RecipeRow, TypeRef, cleanup_class};
@@ -343,99 +354,6 @@ pub enum ReadMode {
 /// An instruction. A `fail` block is the failure successor of an operation that
 /// can fail; the block takes no parameters in FORM v0 and what it does (cause
 /// storage, cleanup, propagation) is FORM v1.
-/// The vector value operations of SEM-11.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum SimdOp {
-    WrappingAdd,
-    WrappingSub,
-    SaturatingAdd,
-    SaturatingSub,
-    Eq,
-    Lt,
-    Splat,
-    From,
-    Swizzle,
-    Cast,
-    Any,
-    Bitmask,
-    BitAnd,
-    BitOr,
-    BitXor,
-    BitNot,
-    Shl,
-    Shr,
-    Lanes,
-}
-impl SimdOp {
-    pub const ALL: [Self; 19] = [
-        Self::WrappingAdd,
-        Self::WrappingSub,
-        Self::SaturatingAdd,
-        Self::SaturatingSub,
-        Self::Eq,
-        Self::Lt,
-        Self::Splat,
-        Self::From,
-        Self::Swizzle,
-        Self::Cast,
-        Self::Any,
-        Self::Bitmask,
-        Self::BitAnd,
-        Self::BitOr,
-        Self::BitXor,
-        Self::BitNot,
-        Self::Shl,
-        Self::Shr,
-        Self::Lanes,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::WrappingAdd => "wrapping_add",
-            Self::WrappingSub => "wrapping_sub",
-            Self::SaturatingAdd => "saturating_add",
-            Self::SaturatingSub => "saturating_sub",
-            Self::Eq => "eq",
-            Self::Lt => "lt",
-            Self::Splat => "splat",
-            Self::From => "from",
-            Self::Swizzle => "swizzle",
-            Self::Cast => "cast",
-            Self::Any => "any",
-            Self::Bitmask => "bitmask",
-            Self::BitAnd => "bit_and",
-            Self::BitOr => "bit_or",
-            Self::BitXor => "bit_xor",
-            Self::BitNot => "bit_not",
-            Self::Shl => "shl",
-            Self::Shr => "shr",
-            Self::Lanes => "lanes",
-        }
-    }
-
-    pub const fn binary(self) -> bool {
-        matches!(
-            self,
-            Self::WrappingAdd
-                | Self::WrappingSub
-                | Self::SaturatingAdd
-                | Self::SaturatingSub
-                | Self::Eq
-                | Self::Lt
-                | Self::Swizzle
-                | Self::BitAnd
-                | Self::BitOr
-                | Self::BitXor
-                | Self::Shl
-                | Self::Shr
-        )
-    }
-
-    pub const fn can_fail(self) -> bool {
-        matches!(self, Self::Shl | Self::Shr)
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Inst {
     /// The bits of a scalar of the result's type (floats by their IEEE bits,
@@ -580,10 +498,28 @@ pub enum Inst {
         block: ValueId,
         charge: ValueId,
     },
-    /// Refund `charge`, which an `alloc .. frame` admitted, to the current limit; the
-    /// frame bytes stay where they are. Never fails.
-    FrameRefund {
+    /// Admit room for a lexical frame slot. On success the slot owes the
+    /// admitted charge. With `replace`, success also refunds the previous
+    /// charge, after admitting the whole new charge. Refusal leaves it alone.
+    /// The block branches directly on `admitted`.
+    FrameAdmit {
+        storage: AddressId,
+        admitted: ValueId,
+        available: ValueId,
         charge: ValueId,
+        overflow: Option<ValueId>,
+        replace: bool,
+    },
+    /// Test whether the frame slot owes a refund. The block branches directly
+    /// on this result, so the verifier can refine the obligation on each edge.
+    FrameActive {
+        storage: AddressId,
+        result: ValueId,
+    },
+    /// Return the charge admitted for this frame slot to the lexical limit.
+    /// Consumes the obligation and leaves the storage in place.
+    FrameRefund {
+        storage: AddressId,
     },
     /// Copy `bytes` bytes from the place `from` to the place `to`. The two ranges
     /// are the same or do not overlap (the evaluator stops the run otherwise). A move of a non-plain value is this copy; the source is then moved
@@ -795,9 +731,8 @@ pub enum AllocKind {
     /// Own storage for the owning edge that will hold it (crate docs, "Cleanup
     /// classes"): `box tN`, `seq E`, `map K V`, or
     /// `rc tN` / `arc tN`, a counted node: the count (u64, starting at 1) at offset 0,
-    /// the payload at 8. `arc` makes the node with the atomic count every later
-    /// `share`, `release` and `try_unwrap` of it uses (MEM-15); its operations name the
-    /// same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
+    /// the payload at 8. `arc` makes a node whose every later `share`, `release`
+    /// and `try_unwrap` is an event (MEM-15); its operations name the same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
     /// native prefix.
     Own { edge: FieldTy },
     /// An `own fn` environment (`alloc env tN`, crate docs "Callable
@@ -868,9 +803,6 @@ pub enum AllocPlace {
     Like(ValueId),
     /// FORM v1b: in this region, charged to the current limit until it closes (MEM-1).
     Region(ValueId),
-    /// Charged like `Current`, with the bytes at this pointer, the caller's frame, as
-    /// the block: nothing is allocated, and `FrameRefund` later returns the charge.
-    Frame(ValueId),
     /// Frame storage with a live allocation record understood by lent callees.
     /// The aligned slot includes FRAME_LIST_LINK_BYTES after its payload.
     LentFrame(ValueId),
@@ -963,6 +895,20 @@ pub enum RtOp {
     LatestPublish,
     /// The root's node, which the caller shares before any other event.
     LatestRead,
+    /// `shared.new` (CONC-15): `(x, charge) -> (node, available)`; the runtime
+    /// admits `charge` and moves `x` into a new node. A null node is `Capacity`,
+    /// with `x` still in its place.
+    SharedNew {
+        item: TypeId,
+    },
+    /// `shared.share`: one more holder of the node, counted atomically and not
+    /// an event (CONC-15).
+    SharedShare,
+    /// One holder of a `Shared[item]` node fewer; the last one cleans the payload
+    /// and refunds the node through its own record (CONC-15).
+    SharedRelease {
+        item: TypeId,
+    },
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
@@ -981,6 +927,7 @@ pub enum RtOp {
     MapStrongStart,
     /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
     Sha256Blocks,
+    Sha512Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
     CauseNext,
     /// A cause cell's `Cause`, in core's layout (crate docs, "Causes").
@@ -1004,6 +951,8 @@ pub enum RtOp {
     StepLeave,
     /// Close a failed step scope, catching only its own OutOfTime causes.
     StepCatch,
+    /// The current task's original allowance.
+    RootLimit,
     /// Private immutable launch metadata: `(field, index) -> word`.
     LaunchWord,
     /// Private launch target as a borrowed String carrier, anchored to this run.
@@ -1038,6 +987,16 @@ pub enum RtOp {
     P256Verify,
     /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
     P256VerifyDer,
+    /// Verify a fixed-width P-384 ECDSA signature over a message with SHA-384.
+    P384Verify,
+    /// Verify a DER P-384 ECDSA signature over a message with SHA-384.
+    P384VerifyDer,
+    /// Verify an RSA PKCS#1 v1.5 signature over a message with SHA-256.
+    RsaVerifyPkcs1Sha256,
+    /// Verify an RSA-PSS signature with SHA-256 and a 32-byte salt.
+    RsaVerifyPssSha256,
+    /// Argon2id v0x13 with block steps and temporary working-memory admission.
+    Argon2id,
     /// The running task's frame record (`crate::returnable`). Takes the area
     /// size and `u8` flags for network and connection-send state. Allocated
     /// on first entry, reused on resume, and freed when the root ends.
@@ -1064,484 +1023,8 @@ pub enum RtOp {
         x: TypeId,
         r: TypeId,
     },
-}
-
-/// The waits with a returnable row ([`RtOp::Returnable`]), each the stackful
-/// row [`Wait::row`] with the child word in front.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Wait {
-    /// An owned provider wait (one with [`HostOp::returnable_symbol`]).
-    Host(HostOp),
-    Join {
-        r: TypeId,
-    },
-    ConnSend {
-        item: TypeId,
-    },
-    ConnReceive {
-        item: TypeId,
-    },
-}
-
-impl Wait {
-    /// The stackful row this wait wraps.
-    pub fn row(self) -> RtOp {
-        match self {
-            Wait::Host(op) => RtOp::Host(op),
-            Wait::Join { r } => RtOp::Join { r },
-            Wait::ConnSend { item } => RtOp::ConnSend { item },
-            Wait::ConnReceive { item } => RtOp::ConnReceive { item },
-        }
-    }
-
-    /// The returnable wait of a stackful row, if it has one.
-    pub fn of(row: RtOp) -> Option<Wait> {
-        Some(match row {
-            RtOp::Host(op) if op.returnable_symbol().is_some() => Wait::Host(op),
-            RtOp::Join { r } => Wait::Join { r },
-            RtOp::ConnSend { item } => Wait::ConnSend { item },
-            RtOp::ConnReceive { item } => Wait::ConnReceive { item },
-            _ => return None,
-        })
-    }
-}
-
-/// The provider operations, numbered as the run time's `HirselCoreHostRequest`
-/// operation codes ([`HostOp::code`]).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum HostOp {
-    Open,
-    Read,
-    Write,
-    Close,
-    TryLock,
-    Unlock,
-    Mkdir,
-    Mkdtemp,
-    Remove,
-    RemoveTree,
-    WallMs,
-    MonoNs,
-    Stdout,
-    Stderr,
-    Rename,
-    SleepUntil,
-    /// Flush a file's data and read-visible metadata with fdatasync.
-    Sync,
-    /// Flush directory entries with fsync.
-    SyncDir,
-    /// Fill a Bytes carrier's spare capacity from the Random capability.
-    Random,
-    Connect,
-    Listen,
-    Accept,
-    RecvBounded = 27,
-    /// Wait until a read half's next receive has something to report.
-    RecvReady = hirsel_core_ids::host_op::RECV_READY as isize,
-    SendPair = 26,
-    NetNarrow = 24,
-    NetSplit = 25,
-    Stopped = 28,
-    TlsConnect = 22,
-    NetNarrowTls = 29,
-    SendSecret = 23,
-    SecretSeal = 30,
-    SecretNarrow = 31,
-    OpenDir = hirsel_core_ids::host_op::OPEN_DIR as isize,
-    Entries = hirsel_core_ids::host_op::ENTRIES as isize,
-    NextEntries = hirsel_core_ids::host_op::NEXT_ENTRIES as isize,
-    Stat = hirsel_core_ids::host_op::STAT as isize,
-    StatFile = hirsel_core_ids::host_op::STAT_FILE as isize,
-    ReadAt = 37,
-    WriteAt = 38,
-    SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
-    SecretVerifyHmac = 42,
-    SecretDeriveHmac = hirsel_core_ids::host_op::SECRET_KDF as isize,
-    SecretWrap = 99,
-    SecretUnwrap = 100,
-    SecretSign = 101,
-    Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
-    CredFetch = hirsel_core_ids::host_op::CRED_FETCH as isize,
-    NetNarrowResolve = 41,
-    StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
-    EnvGet = 33,
-    EnvLen = 34,
-    EnvName = 35,
-    EnvNarrow = 36,
-    ProvideClock = hirsel_core_ids::host_op::PROVIDE_CLOCK as isize,
-    ProvideRandom = hirsel_core_ids::host_op::PROVIDE_RANDOM as isize,
-    ProvideProcess = hirsel_core_ids::host_op::PROVIDE_PROCESS as isize,
-    ClockAdvance = hirsel_core_ids::host_op::CLOCK_ADVANCE as isize,
-    ClockSetWall = hirsel_core_ids::host_op::CLOCK_SET_WALL as isize,
-    ClockIdle = hirsel_core_ids::host_op::CLOCK_IDLE as isize,
-    ProcessTrigger = hirsel_core_ids::host_op::PROCESS_TRIGGER as isize,
-    ProvideStdout = hirsel_core_ids::host_op::PROVIDE_STDOUT as isize,
-    ProvideStderr = hirsel_core_ids::host_op::PROVIDE_STDERR as isize,
-    PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
-    CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
-    CallSecret = hirsel_core_ids::host_op::CALL_SECRET as isize,
-    ExecSpawn = hirsel_core_ids::host_op::EXEC_SPAWN as isize,
-    ExecWait = hirsel_core_ids::host_op::EXEC_WAIT as isize,
-    ExecSignal = hirsel_core_ids::host_op::EXEC_SIGNAL as isize,
-    CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
-    PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
-    ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
-    ProvideNet = hirsel_core_ids::host_op::PROVIDE_NET as isize,
-    ProvideExec = hirsel_core_ids::host_op::PROVIDE_EXEC as isize,
-    PortFill = hirsel_core_ids::host_op::PORT_FILL as isize,
-    ScramSha256 = hirsel_core_ids::host_op::SCRAM as isize,
-    ScramVerify = hirsel_core_ids::host_op::SCRAM_VERIFY as isize,
-    StreamTerminal = 96,
-    NetJoin = 97,
-    ScramFinalLen = 98,
-    ExecNarrow = hirsel_core_ids::host_op::EXEC_NARROW as isize,
-    UnixConnect = hirsel_core_ids::host_op::UNIX_CONNECT as isize,
-    UnixListen = hirsel_core_ids::host_op::UNIX_LISTEN as isize,
-    UnixAccept = hirsel_core_ids::host_op::UNIX_ACCEPT as isize,
-    DatagramOpen = hirsel_core_ids::host_op::DATAGRAM_OPEN as isize,
-    DatagramBind = hirsel_core_ids::host_op::DATAGRAM_BIND as isize,
-    DatagramConnect = hirsel_core_ids::host_op::DATAGRAM_CONNECT as isize,
-    DatagramSend = hirsel_core_ids::host_op::DATAGRAM_SEND as isize,
-    DatagramSendTo = hirsel_core_ids::host_op::DATAGRAM_SEND_TO as isize,
-    DatagramRecv = hirsel_core_ids::host_op::DATAGRAM_RECV as isize,
-    NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
-    /// Wait until the clock's wall time reaches an absolute millisecond reading.
-    SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
-}
-
-impl HostOp {
-    /// Native entry for rows that use the common operand signature.
-    pub fn io_symbol(self) -> &'static str {
-        match self {
-            Self::WallMs | Self::MonoNs => "hirsel_core_host_clock",
-            Self::Stat | Self::StatFile => "hirsel_core_host_stat",
-            Self::Random | Self::Stdout | Self::Stderr | Self::Stopped => "hirsel_core_host_io",
-            _ => "hirsel_core_host_op",
-        }
-    }
-
-    pub const ALL: &[HostOp] = &[
-        HostOp::Open,
-        HostOp::Read,
-        HostOp::Write,
-        HostOp::Close,
-        HostOp::TryLock,
-        HostOp::Unlock,
-        HostOp::Mkdir,
-        HostOp::Mkdtemp,
-        HostOp::Remove,
-        HostOp::RemoveTree,
-        HostOp::WallMs,
-        HostOp::MonoNs,
-        HostOp::Stdout,
-        HostOp::Stderr,
-        HostOp::Rename,
-        HostOp::SleepUntil,
-        HostOp::SleepUntilWall,
-        HostOp::Sync,
-        HostOp::SyncDir,
-        HostOp::Random,
-        HostOp::Connect,
-        HostOp::Listen,
-        HostOp::Accept,
-        HostOp::TlsConnect,
-        HostOp::SendSecret,
-        HostOp::SecretSeal,
-        HostOp::SecretNarrow,
-        HostOp::SecretHmac,
-        HostOp::SecretVerifyHmac,
-        HostOp::SecretDeriveHmac,
-        HostOp::SecretWrap,
-        HostOp::SecretUnwrap,
-        HostOp::SecretSign,
-        HostOp::RecvBounded,
-        HostOp::RecvReady,
-        HostOp::SendPair,
-        HostOp::NetNarrow,
-        HostOp::NetNarrowTls,
-        HostOp::NetSplit,
-        HostOp::Stopped,
-        HostOp::OpenDir,
-        HostOp::Entries,
-        HostOp::NextEntries,
-        HostOp::Stat,
-        HostOp::StatFile,
-        HostOp::ReadAt,
-        HostOp::WriteAt,
-        HostOp::Resolve,
-        HostOp::CredFetch,
-        HostOp::NetNarrowResolve,
-        HostOp::UnixConnect,
-        HostOp::UnixListen,
-        HostOp::UnixAccept,
-        HostOp::DatagramOpen,
-        HostOp::DatagramBind,
-        HostOp::DatagramConnect,
-        HostOp::DatagramSend,
-        HostOp::DatagramSendTo,
-        HostOp::DatagramRecv,
-        HostOp::NetNarrowUnix,
-        HostOp::StdinRead,
-        HostOp::EnvGet,
-        HostOp::EnvLen,
-        HostOp::EnvName,
-        HostOp::EnvNarrow,
-        HostOp::ProvideClock,
-        HostOp::ProvideRandom,
-        HostOp::ProvideProcess,
-        HostOp::ClockAdvance,
-        HostOp::ClockSetWall,
-        HostOp::ClockIdle,
-        HostOp::ProcessTrigger,
-        HostOp::ProvideStdout,
-        HostOp::ProvideStderr,
-        HostOp::PortNext,
-        HostOp::CallWord,
-        HostOp::CallSecret,
-        HostOp::ExecSpawn,
-        HostOp::ExecWait,
-        HostOp::ExecSignal,
-        HostOp::CallPayload,
-        HostOp::PortReply,
-        HostOp::ProvideDir,
-        HostOp::PortFill,
-        HostOp::StreamTerminal,
-        HostOp::NetJoin,
-        HostOp::ScramSha256,
-        HostOp::ScramFinalLen,
-        HostOp::ScramVerify,
-        HostOp::ProvideNet,
-        HostOp::ProvideExec,
-        HostOp::ExecNarrow,
-    ];
-    /// The run time's operation code (`hirsel_core_rt_host.h`).
-    pub const fn code(self) -> u8 {
-        self as u8
-    }
-    /// The row's name after `rt.`.
-    pub const fn name(self) -> &'static str {
-        match self {
-            HostOp::Open => "host_open",
-            HostOp::Read => "host_read",
-            HostOp::OpenDir => "host_open_dir",
-            HostOp::Entries => "host_entries",
-            HostOp::NextEntries => "host_next_entries",
-            HostOp::Stat => "host_stat",
-            HostOp::StatFile => "host_stat_file",
-            HostOp::ReadAt => "host_read_at",
-            HostOp::WriteAt => "host_write_at",
-            HostOp::Write => "host_write",
-            HostOp::Close => "host_close",
-            HostOp::TryLock => "host_try_lock",
-            HostOp::Unlock => "host_unlock",
-            HostOp::Mkdir => "host_mkdir",
-            HostOp::Mkdtemp => "host_mkdtemp",
-            HostOp::Remove => "host_remove",
-            HostOp::RemoveTree => "host_remove_tree",
-            HostOp::WallMs => "host_wall_ms",
-            HostOp::MonoNs => "host_mono_ns",
-            HostOp::Stdout => "stdout_write",
-            HostOp::Stderr => "stderr_write",
-            HostOp::Rename => "host_rename",
-            HostOp::SleepUntil => "host_sleep_until",
-            HostOp::SleepUntilWall => "host_sleep_until_wall",
-            HostOp::Sync => "host_sync",
-            HostOp::SyncDir => "host_sync_dir",
-            HostOp::Random => "host_random",
-            HostOp::Connect => "host_connect",
-            HostOp::Resolve => "host_resolve",
-            HostOp::CredFetch => "cred_fetch",
-            HostOp::Listen => "host_listen",
-            HostOp::Accept => "host_accept",
-            HostOp::RecvBounded => "host_recv_bounded",
-            HostOp::RecvReady => "host_recv_ready",
-            HostOp::SendPair => "host_send_pair",
-            HostOp::NetNarrow => "net_narrow",
-            HostOp::ExecNarrow => "exec_narrow",
-            HostOp::NetNarrowTls => "net_narrow_tls",
-            HostOp::NetNarrowResolve => "net_narrow_resolve",
-            HostOp::UnixConnect => "host_connect_unix",
-            HostOp::UnixListen => "host_listen_unix",
-            HostOp::UnixAccept => "host_accept_unix",
-            HostOp::DatagramOpen => "host_open_datagram",
-            HostOp::DatagramBind => "host_bind_datagram",
-            HostOp::DatagramConnect => "host_connect_datagram",
-            HostOp::DatagramSend => "host_send_datagram",
-            HostOp::DatagramSendTo => "host_send_to",
-            HostOp::DatagramRecv => "host_recv_datagram",
-            HostOp::NetNarrowUnix => "net_narrow_unix",
-            HostOp::TlsConnect => "tls_connect",
-            HostOp::SendSecret => "send_secret",
-            HostOp::SecretSeal => "secret_seal",
-            HostOp::SecretNarrow => "secret_narrow",
-            HostOp::SecretHmac => "secret_hmac_sha256",
-            HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
-            HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
-            HostOp::SecretWrap => "secret_wrap",
-            HostOp::SecretUnwrap => "secret_unwrap",
-            HostOp::SecretSign => "secret_sign",
-            HostOp::NetSplit => "net_split",
-            HostOp::NetJoin => "net_join",
-            HostOp::ScramSha256 => "scram_sha256",
-            HostOp::ScramFinalLen => "scram_final_len",
-            HostOp::ScramVerify => "scram_verify",
-            HostOp::Stopped => "host_stopped",
-            HostOp::StdinRead => "stdin_read",
-            HostOp::EnvGet => "env_get",
-            HostOp::EnvLen => "env_len",
-            HostOp::EnvName => "env_name",
-            HostOp::EnvNarrow => "env_narrow",
-            HostOp::ProvideClock => "provide_clock",
-            HostOp::ProvideRandom => "provide_random",
-            HostOp::ProvideProcess => "provide_process",
-            HostOp::ClockAdvance => "clock_advance_to",
-            HostOp::ClockSetWall => "clock_set_wall",
-            HostOp::ClockIdle => "clock_idle",
-            HostOp::ProcessTrigger => "process_trigger",
-            HostOp::ProvideStdout => "provide_stdout",
-            HostOp::ProvideStderr => "provide_stderr",
-            HostOp::PortNext => "port_next",
-            HostOp::CallWord => "call_word",
-            HostOp::CallSecret => "call_secret",
-            HostOp::ExecSpawn => "exec_spawn",
-            HostOp::ExecWait => "exec_wait",
-            HostOp::ExecSignal => "exec_signal",
-            HostOp::CallPayload => "call_payload",
-            HostOp::PortReply => "port_reply",
-            HostOp::ProvideDir => "provide_dir",
-            HostOp::ProvideNet => "provide_net",
-            HostOp::ProvideExec => "provide_exec",
-            HostOp::PortFill => "port_fill",
-            HostOp::StreamTerminal => "stream_is_terminal",
-        }
-    }
-    /// C entry of a host operation that has its own adapter.
-    pub const fn adapter_symbol(self) -> &'static str {
-        match self {
-            Self::Connect => "hirsel_core_host_connect",
-            Self::Resolve => "hirsel_core_host_resolve",
-            Self::CredFetch => "hirsel_core_cred_fetch",
-            Self::Listen => "hirsel_core_host_listen",
-            Self::Accept => "hirsel_core_host_accept",
-            Self::RecvBounded => "hirsel_core_host_recv_bounded",
-            Self::RecvReady => "hirsel_core_host_recv_ready",
-            Self::SendPair => "hirsel_core_host_send_pair",
-            Self::NetNarrow => "hirsel_core_net_narrow",
-            Self::ExecNarrow => "hirsel_core_exec_narrow",
-            Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
-            Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
-            Self::UnixConnect => "hirsel_core_host_connect_unix",
-            Self::UnixListen => "hirsel_core_host_listen_unix",
-            Self::UnixAccept => "hirsel_core_host_accept_unix",
-            Self::DatagramOpen => "hirsel_core_host_open_datagram",
-            Self::DatagramBind => "hirsel_core_host_bind_datagram",
-            Self::DatagramConnect => "hirsel_core_host_connect_datagram",
-            Self::DatagramSend => "hirsel_core_host_send_datagram",
-            Self::DatagramSendTo => "hirsel_core_host_send_to",
-            Self::DatagramRecv => "hirsel_core_host_recv_datagram",
-            Self::NetNarrowUnix => "hirsel_core_net_narrow_unix",
-            Self::TlsConnect => "hirsel_core_tls_connect",
-            Self::SendSecret => "hirsel_core_host_send_secret",
-            Self::SecretSeal => "hirsel_core_secret_seal",
-            Self::SecretNarrow => "hirsel_core_secret_narrow",
-            Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
-            Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
-            Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
-            Self::SecretWrap => "hirsel_core_secret_wrap",
-            Self::SecretUnwrap => "hirsel_core_secret_unwrap",
-            Self::SecretSign => "hirsel_core_secret_sign",
-            Self::NetSplit => "hirsel_core_net_split",
-            Self::NetJoin => "hirsel_core_net_join",
-            Self::ScramSha256 => "hirsel_core_scram_sha256",
-            Self::ScramFinalLen => "hirsel_core_scram_final_len",
-            Self::ScramVerify => "hirsel_core_scram_verify",
-            Self::StdinRead => "hirsel_core_stdin_read",
-            Self::EnvGet => "hirsel_core_env_get",
-            Self::EnvLen => "hirsel_core_env_len",
-            Self::EnvName => "hirsel_core_env_name",
-            Self::EnvNarrow => "hirsel_core_env_narrow",
-            Self::ProvideClock => "hirsel_core_provide_clock",
-            Self::ProvideRandom => "hirsel_core_provide_random",
-            Self::ProvideProcess => "hirsel_core_provide_process",
-            Self::ClockAdvance => "hirsel_core_clock_advance_to",
-            Self::ClockSetWall => "hirsel_core_clock_set_wall",
-            Self::ClockIdle => "hirsel_core_clock_idle",
-            Self::ProcessTrigger => "hirsel_core_process_trigger",
-            Self::ProvideStdout => "hirsel_core_provide_stdout",
-            Self::ProvideStderr => "hirsel_core_provide_stderr",
-            Self::PortNext => "hirsel_core_port_next",
-            Self::CallWord => "hirsel_core_call_word",
-            Self::CallSecret => "hirsel_core_call_secret",
-            Self::ExecSpawn => "hirsel_core_exec_spawn",
-            Self::ExecWait => "hirsel_core_exec_wait",
-            Self::ExecSignal => "hirsel_core_exec_signal",
-            Self::CallPayload => "hirsel_core_call_payload",
-            Self::PortReply => "hirsel_core_port_reply",
-            Self::ProvideDir => "hirsel_core_provide_dir",
-            Self::ProvideNet => "hirsel_core_provide_net",
-            Self::ProvideExec => "hirsel_core_provide_exec",
-            Self::PortFill => "hirsel_core_port_fill",
-            Self::StreamTerminal => "hirsel_core_stream_is_terminal",
-            _ => unreachable!(),
-        }
-    }
-
-    /// The adapter for an owned wait that can return its native stack.
-    pub const fn returnable_symbol(self) -> Option<&'static str> {
-        match self {
-            Self::RecvBounded => Some("hirsel_core_host_recv_bounded_rec"),
-            Self::RecvReady => Some("hirsel_core_host_recv_ready_rec"),
-            Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
-            _ => None,
-        }
-    }
-
-    /// Whether the operation waits (a cancellation point, so it can fail).
-    pub const fn waits(self) -> bool {
-        !matches!(
-            self,
-            HostOp::WallMs
-                | HostOp::MonoNs
-                | HostOp::Random
-                | HostOp::NetNarrow
-                | HostOp::ExecNarrow
-                | HostOp::NetNarrowTls
-                | HostOp::NetNarrowResolve
-                | HostOp::NetNarrowUnix
-                | HostOp::SecretSeal
-                | HostOp::SecretNarrow
-                | HostOp::SecretHmac
-                | HostOp::SecretDeriveHmac
-                | HostOp::SecretVerifyHmac
-                | HostOp::SecretWrap
-                | HostOp::SecretUnwrap
-                | HostOp::SecretSign
-                | HostOp::NetSplit
-                | HostOp::NetJoin
-                | HostOp::ScramFinalLen
-                | HostOp::ScramVerify
-                | HostOp::EnvGet
-                | HostOp::EnvLen
-                | HostOp::EnvName
-                | HostOp::EnvNarrow
-                | HostOp::ProvideClock
-                | HostOp::ProvideRandom
-                | HostOp::ProvideProcess
-                | HostOp::ClockAdvance
-                | HostOp::ClockSetWall
-                | HostOp::ProcessTrigger
-                | HostOp::ProvideStdout
-                | HostOp::ProvideStderr
-                | HostOp::CallWord
-                | HostOp::CallSecret
-                | HostOp::PortReply
-                | HostOp::ProvideDir
-                | HostOp::ProvideNet
-                | HostOp::ProvideExec
-                | HostOp::PortFill
-                | HostOp::StreamTerminal
-        )
-    }
+    /// SHA-1 compression of complete blocks, without padding.
+    Sha1Compress,
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -1589,13 +1072,16 @@ impl RtOp {
     /// | `xxh3_short` | `data: ptr`, `len: u64` | `u64`: XXH3-64 (crate docs, "XXH3") |
     /// | `xxh3_stripes` | `acc: ptr`, `data: ptr`, `secret: ptr`, `count: u64` | (crate docs, "XXH3") |
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
+    /// | `sha1_compress` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-1") |
     /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `sha512_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-512") |
     /// | `crc32c` | `crc: u32`, `data: ptr`, `len: u64` | `u32`: updated CRC-32C |
     /// | `crc64nvme` | `crc: u64`, `data: ptr`, `len: u64` | `u64`: updated CRC-64/NVME |
     /// | `crc32c_combine` | `a: u32`, `b: u32`, `len_b: u64` | `u32`: concatenated CRC-32C |
     /// | `crc64nvme_combine` | `a: u64`, `b: u64`, `len_b: u64` | `u64`: concatenated CRC-64/NVME |
-    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
+    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der`, `p384_verify`, `p384_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
+    /// | `rsa_verify_pkcs1_sha256`, `rsa_verify_pss_sha256` | modulus, exponent, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1603,9 +1089,8 @@ impl RtOp {
     /// | `host_open` | `Dir: u64`, path `ptr`, `mode: u8` | outcome |
     /// | `host_read` | `HostFile: u64`, buffer `ptr` | outcome |
     /// | `host_write` | `HostFile: u64`, bytes `ptr` | outcome |
-    /// | `host_close`, `host_try_lock`, `host_unlock` | `HostFile: u64` | outcome |
-    /// | `host_sync` | `HostFile: u64` | outcome |
-    /// | `host_sync_dir` | `Dir: u64` | outcome |
+    /// | `host_close`, `host_try_lock`, `host_unlock`, `host_sync` | `HostFile: u64` | outcome |
+    /// | `host_sync_dir`, `host_zero_extension` | `Dir: u64` | outcome |
     /// | `host_random` | `Random: u64`, buffer `ptr` | |
     /// | `host_mkdir`, `host_remove`, `host_remove_tree` | `Dir: u64`, path `ptr` | outcome |
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
@@ -1673,7 +1158,9 @@ impl RtOp {
             RtOp::SpawnUnit { x, .. } => {
                 (vec![V(u64_), take(x), V(p), V(u64_)], vec![p, u64_, u64_])
             }
-            RtOp::LatestHandle | RtOp::LatestRead => (vec![V(p)], vec![p]),
+            RtOp::LatestHandle | RtOp::LatestRead | RtOp::SharedShare => (vec![V(p)], vec![p]),
+            RtOp::SharedNew { item } => (vec![take(item), V(u64_)], vec![p, u64_]),
+            RtOp::SharedRelease { .. } => (vec![V(p)], vec![]),
             RtOp::LatestPublish => (vec![V(p), V(p)], vec![]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
@@ -1692,9 +1179,9 @@ impl RtOp {
             RtOp::MapHashFinish => (vec![V(p)], vec![u64_]),
             RtOp::Xxh3Short => (vec![V(p), V(u64_)], vec![u64_]),
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
-            RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha1Blocks | RtOp::Sha1Compress => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
-            RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha256Blocks | RtOp::Sha512Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Crc32c => {
                 let u32_ = Ty::Scalar(Scalar::U32);
                 (vec![V(u32_), V(p), V(u64_)], vec![u32_])
@@ -1705,13 +1192,43 @@ impl RtOp {
                 (vec![V(u32_), V(u32_), V(u64_)], vec![u32_])
             }
             RtOp::Crc64NvmeCombine => (vec![V(u64_), V(u64_), V(u64_)], vec![u64_]),
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer => (
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
                 vec![u64_],
             ),
+            RtOp::RsaVerifyPkcs1Sha256 | RtOp::RsaVerifyPssSha256 => (
+                vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
+                vec![u64_],
+            ),
+            RtOp::Argon2id => {
+                let u32_ = Ty::Scalar(Scalar::U32);
+                (
+                    vec![
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(u32_),
+                        V(u32_),
+                        V(u32_),
+                        V(u64_),
+                        V(p),
+                    ],
+                    vec![u64_, u64_, u8_],
+                )
+            }
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
+            RtOp::RootLimit => (vec![], vec![u64_]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_), V(u8_), V(u8_)], vec![p]),
@@ -1726,438 +1243,13 @@ impl RtOp {
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
-            RtOp::StepLeave => (vec![], vec![]),
+            RtOp::StepLeave | RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
-            RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::IsolateCatch => (vec![], vec![p]),
-            RtOp::Host(op) => {
-                let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
-                match op {
-                    HostOp::Connect => (
-                        vec![
-                            V(u64_),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                        ],
-                        outcome,
-                    ),
-                    HostOp::Listen => (
-                        vec![
-                            V(u64_),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(Ty::Scalar(Scalar::U16)),
-                        ],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u8_,
-                            u64_,
-                            u64_,
-                            Ty::Scalar(Scalar::U16),
-                        ],
-                    ),
-                    HostOp::Accept => (
-                        vec![V(u64_), V(u8_), V(u64_), V(u64_)],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u8_,
-                            u64_,
-                            u64_,
-                            Ty::Scalar(Scalar::U16),
-                        ],
-                    ),
-                    HostOp::RecvBounded => (
-                        vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
-                        outcome,
-                    ),
-                    HostOp::Resolve | HostOp::CredFetch => {
-                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
-                    HostOp::ExecNarrow => (
-                        vec![V(u64_), V(Ty::Scalar(Scalar::U32)), V(p), V(p)],
-                        outcome,
-                    ),
-                    HostOp::UnixConnect => {
-                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::UnixListen => (
-                        vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
-                        outcome,
-                    ),
-                    HostOp::UnixAccept | HostOp::RecvReady => {
-                        (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::DatagramOpen => (vec![V(u64_)], outcome),
-                    HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::DatagramSend => {
-                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::DatagramSendTo => (
-                        vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
-                        outcome,
-                    ),
-                    HostOp::DatagramRecv => {
-                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
-                    HostOp::SendPair => {
-                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::NetNarrow => (
-                        vec![
-                            V(u64_),
-                            V(u8_),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                            V(u8_),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(Ty::Scalar(Scalar::U16)),
-                        ],
-                        outcome,
-                    ),
-                    HostOp::TlsConnect => (
-                        vec![
-                            V(u64_),
-                            V(u64_),
-                            V(p),
-                            V(u8_),
-                            V(p),
-                            V(p),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                        ],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u64_,
-                            u64_,
-                            u64_,
-                            u64_,
-                        ],
-                    ),
-                    HostOp::SendSecret => (
-                        vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
-                        outcome,
-                    ),
-                    HostOp::ScramSha256 => (
-                        vec![
-                            V(u64_),
-                            V(u64_),
-                            V(p),
-                            V(p),
-                            V(p),
-                            V(p),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                        ],
-                        outcome,
-                    ),
-                    HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
-                    // The source carrier stays with the caller. Success wipes its
-                    // owned bytes. Tags 1 (invalid) and 2 (capacity) leave it intact.
-                    HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
-                    HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
-                    HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
-                    HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
-                        (vec![V(u64_), V(p), V(p)], outcome)
-                    }
-                    // `out` is appended in its spare capacity; tag 4 (capacity)
-                    // carries the bytes needed and the spare.
-                    HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::SecretUnwrap => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
-                    HostOp::NetNarrowTls => (
-                        vec![
-                            V(u64_),
-                            V(p),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(u8_),
-                            V(p),
-                        ],
-                        outcome,
-                    ),
-                    HostOp::NetSplit
-                    | HostOp::EnvLen
-                    | HostOp::ProvideRandom
-                    | HostOp::ClockIdle
-                    | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
-                    HostOp::ProvideProcess => (vec![], outcome),
-                    HostOp::ProvideDir
-                    | HostOp::ProvideNet
-                    | HostOp::ProvideExec
-                    | HostOp::PortNext => (vec![V(u64_)], outcome),
-                    HostOp::ProvideStdout | HostOp::ProvideStderr => {
-                        (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
-                    }
-                    HostOp::StreamTerminal => (vec![V(u64_), V(u8_)], outcome),
-                    HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
-                        (vec![V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::PortReply => (vec![V(u64_); 9], outcome),
-                    HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
-                        (vec![V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::EnvGet | HostOp::EnvName => {
-                        let input = if op == HostOp::EnvGet { p } else { u64_ };
-                        (
-                            vec![V(u64_), V(input)],
-                            vec![p, u8_, Ty::Scalar(Scalar::U32), u64_],
-                        )
-                    }
-                    HostOp::ExecSpawn => {
-                        let mut results = outcome;
-                        results.extend([u64_; 3]);
-                        (
-                            vec![
-                                V(u64_),
-                                V(p),
-                                V(p),
-                                V(p),
-                                V(p),
-                                V(p),
-                                V(u8_),
-                                V(u8_),
-                                V(u8_),
-                            ],
-                            results,
-                        )
-                    }
-                    HostOp::ExecWait => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
-                    HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
-                    HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
-                    HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
-                    HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::SleepUntil | HostOp::SleepUntilWall => {
-                        (vec![V(u64_), V(u64_)], outcome)
-                    }
-                    HostOp::Stat | HostOp::StatFile => {
-                        let mut metadata = outcome;
-                        metadata[3] = Ty::Scalar(Scalar::I64);
-                        metadata.push(u8_);
-                        let params = if op == HostOp::Stat {
-                            vec![V(u64_), V(p)]
-                        } else {
-                            vec![V(u64_)]
-                        };
-                        (params, metadata)
-                    }
-                    HostOp::Close
-                    | HostOp::Entries
-                    | HostOp::TryLock
-                    | HostOp::Unlock
-                    | HostOp::Sync
-                    | HostOp::SyncDir => (vec![V(u64_)], outcome),
-                    HostOp::Random => (vec![V(u64_), V(p)], vec![]),
-                    HostOp::Stopped => (vec![V(u64_)], vec![]),
-                    HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
-                    _ => (vec![V(u64_), V(p)], outcome),
-                }
-            }
+            RtOp::Host(op) => op.operand_signature(),
         };
-        Signature {
-            params,
-            results,
-            dest: None,
-            never: false,
-        }
-    }
-
-    /// Whether a call of this row can fail, and so returns the failure status
-    /// (crate docs, "Native ABI").
-    pub fn fails(self) -> bool {
-        matches!(
-            self,
-            RtOp::Join { .. }
-                | RtOp::Spawn { .. }
-                | RtOp::CheckCancel
-                | RtOp::ChannelNew { .. }
-                | RtOp::Send { .. }
-                | RtOp::Receive { .. }
-                | RtOp::ReceiveRec { .. }
-                | RtOp::ConnNew { .. }
-                | RtOp::ConnSend { .. }
-                | RtOp::ConnTrySend { .. }
-                | RtOp::ConnReceive { .. }
-                | RtOp::SpawnUnit { .. }
-                | RtOp::IsolateCatch
-                | RtOp::Flow(_)
-        ) || matches!(self, RtOp::Host(_) | RtOp::Returnable(_))
-    }
-
-    pub fn types(self) -> Vec<TypeId> {
-        match self {
-            RtOp::Returnable(wait) => wait.row().types(),
-            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } | RtOp::Transfer { x, r } => vec![x, r],
-            RtOp::Join { r } => vec![r],
-            RtOp::ConnNew { item }
-            | RtOp::ConnSend { item }
-            | RtOp::ConnTrySend { item }
-            | RtOp::ConnReceive { item }
-            | RtOp::ConnTryReceive { item }
-            | RtOp::ChannelNew { item }
-            | RtOp::Send { item }
-            | RtOp::TrySend { item }
-            | RtOp::Receive { item }
-            | RtOp::ReceiveRec { item }
-            | RtOp::TryReceive { item }
-            | RtOp::LatestNew { item } => vec![item],
-            RtOp::LaunchTarget { view } => vec![view],
-            RtOp::Cancel
-            | RtOp::CheckCancel
-            | RtOp::ChannelSender
-            | RtOp::ConnClient
-            | RtOp::LatestHandle
-            | RtOp::LatestPublish
-            | RtOp::LatestRead
-            | RtOp::DestId
-            | RtOp::CompareBytes
-            | RtOp::MapHashBytes
-            | RtOp::MapHashWord
-            | RtOp::MapHashStart
-            | RtOp::MapHashAddWord
-            | RtOp::MapHashAddBytes
-            | RtOp::MapHashFinish
-            | RtOp::MapPlaceWord
-            | RtOp::MapPlaceBytes
-            | RtOp::MapStrongWord
-            | RtOp::MapStrongBytes
-            | RtOp::MapStrongStart
-            | RtOp::Xxh3Short
-            | RtOp::Xxh3Stripes
-            | RtOp::Sha1Blocks
-            | RtOp::ZeroBytes
-            | RtOp::Sha256Blocks
-            | RtOp::Crc32c
-            | RtOp::Crc64Nvme
-            | RtOp::Crc32cCombine
-            | RtOp::Crc64NvmeCombine
-            | RtOp::Ed25519Verify
-            | RtOp::P256Verify
-            | RtOp::P256VerifyDer
-            | RtOp::CauseNext
-            | RtOp::CauseValue
-            | RtOp::ArgsLen
-            | RtOp::ArgsGet
-            | RtOp::LaunchWord
-            | RtOp::LaunchHandle
-            | RtOp::SecretShare
-            | RtOp::DescribeEmit
-            | RtOp::Flow(_)
-            | RtOp::Host(_)
-            | RtOp::FrameRecord
-            | RtOp::IsolateEnter
-            | RtOp::IsolateLeave
-            | RtOp::IsolateCatch
-            | RtOp::StepEnter
-            | RtOp::StepLeave
-            | RtOp::StepCatch => vec![],
-        }
-    }
-}
-
-impl Inst {
-    /// Whether the instruction can fail; it may name a failure block exactly then.
-    pub fn can_fail(&self, b: &Body) -> bool {
-        let ty = |v: ValueId| b.values.get(v.index()).copied();
-        match *self {
-            Inst::Unary { op, operand, .. } => {
-                op == UnaryOp::Neg && ty(operand).is_some_and(|t| t.int().is_some())
-            }
-            Inst::Binary { op, left, .. } => ty(left).is_some_and(|t| op.can_fail(t)),
-            Inst::Simd { op, .. } => op.can_fail(),
-            Inst::Address { address, .. } => b.addresses.get(address.index()).is_some_and(|a| {
-                a.steps
-                    .get(&b.pools.steps)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|s| matches!(s, Step::Element(_)))
-            }),
-            Inst::Call { call } => b.calls.get(call.index()).is_none_or(|c| match c.callee {
-                Callee::Runtime(op) => op.fails(),
-                Callee::Direct(_) | Callee::Indirect(_) => true,
-            }),
-            Inst::Step { .. } | Inst::Drop { .. } => true,
-            _ => false,
-        }
-    }
-
-    /// The failure block the instruction names, if any.
-    pub fn fail(&self, b: &Body) -> Option<BlockId> {
-        match *self {
-            Inst::Step { fail }
-            | Inst::Unary { fail, .. }
-            | Inst::Binary { fail, .. }
-            | Inst::Simd { fail, .. }
-            | Inst::Address { fail, .. }
-            | Inst::Drop { fail, .. } => fail,
-            Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
-            _ => None,
-        }
-    }
-}
-
-/// The blocks control leaves `bi` for: its instructions' failure blocks and its
-/// terminator's targets.
-#[cfg(any(test, feature = "wf"))]
-pub(crate) fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
-    let mut successors = Vec::new();
-    for_each_successor(b, bi, |next| successors.push(next));
-    successors
-}
-
-pub(crate) fn for_each_successor(b: &Body, bi: usize, mut visit: impl FnMut(BlockId)) {
-    b.blocks[bi]
-        .insts
-        .get(&b.insts)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|i| i.fail(b))
-        .for_each(&mut visit);
-    let edge = |e: &EdgeId| b.edges[e.index()].target;
-    match &b.terminators[bi] {
-        Terminator::Jump(e) => visit(edge(e)),
-        Terminator::Branch { yes, no, .. } => {
-            visit(edge(yes));
-            visit(edge(no));
-        }
-        Terminator::Switch {
-            arms, otherwise, ..
-        } => {
-            arms.get(&b.pools.arms)
-                .unwrap_or_default()
-                .iter()
-                .map(|a| edge(&a.edge))
-                .for_each(&mut visit);
-            visit(edge(otherwise));
-        }
-        Terminator::Raise { cleanup, .. } => cleanup.iter().copied().for_each(visit),
-        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
+        Signature::new(params, results, None)
     }
 }
 
@@ -2292,6 +1384,21 @@ pub struct Body {
     pub compact_roots: Vec<CompactRoot>,
 }
 
+impl Body {
+    /// The storage addresses with a lexical frame obligation in this body.
+    pub fn frame_obligations(&self) -> std::collections::BTreeSet<AddressId> {
+        self.insts
+            .iter()
+            .filter_map(|inst| match *inst {
+                Inst::FrameAdmit { storage, .. }
+                | Inst::FrameActive { storage, .. }
+                | Inst::FrameRefund { storage } => Some(storage),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// One blob root a body creates: `build_in` or `build_stream_in` of `ty`, whose
 /// blob records `width` (2, 4 or 8) as its `W`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -2341,10 +1448,25 @@ pub struct Signature {
     pub params: Vec<Param>,
     pub results: Vec<Ty>,
     pub dest: Option<TypeId>,
+    /// The parameters (indices into `params`, ascending) a `dest` result is a view
+    /// anchored on (OWN-20): the destination borrows their places, so it dangles
+    /// once one of them is dropped. Empty for an owned result or no `dest`.
+    pub anchors: Vec<u32>,
     pub never: bool,
 }
 
 impl Signature {
+    /// A signature that returns, with no dest view.
+    pub fn new(params: Vec<Param>, results: Vec<Ty>, dest: Option<TypeId>) -> Self {
+        let (anchors, never) = (vec![], false);
+        Signature {
+            params,
+            results,
+            dest,
+            anchors,
+            never,
+        }
+    }
     pub fn has_vectors(&self) -> bool {
         self.results.iter().any(|t| matches!(t, Ty::Vector(_)))
             || self.params.iter().any(|p| {
@@ -2432,65 +1554,6 @@ impl Identity {
         symbol(self.digest())
     }
 }
-/// The link name of the revision carrier of the root whose identity digest is
-/// `digest` ([`Module::revision_root`]): a `Bytes` carrier `{bytes, 32, 0}` of
-/// its code revision. Each unit that describes an item's function defines it
-/// weak as `{0, 0, 0}` (no revision), and a link that knows the program's
-/// reach defines it; an intrinsic's carrier holds [`intrinsic_revision`].
-pub fn revision_symbol(digest: ContentHash) -> String {
-    symbol(digest) + "$revision"
-}
-/// Whose code revision a described function has (PROG-9 `code.revision`):
-/// the code a call through the `StaticFn` runs.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum RevisionRoot {
-    /// A reached instance: the described item, which a `$callable` adapter
-    /// calls.
-    Item(Identity),
-    /// A core item without a body, which the adapter computes itself: no
-    /// checked IR reaches out of it ([`intrinsic_revision`]).
-    Intrinsic(Identity),
-}
-impl RevisionRoot {
-    pub fn identity(&self) -> &Identity {
-        match self {
-            Self::Item(identity) | Self::Intrinsic(identity) => identity,
-        }
-    }
-}
-impl Module {
-    /// The revision root of described function `function`: itself, or for a
-    /// `$callable` adapter the item it calls. `code.describe` names a
-    /// non-generic item, so an item without a callee is a plain intrinsic.
-    pub fn revision_root(&self, function: FuncId) -> RevisionRoot {
-        let f = &self.functions[function.index()];
-        let identity = self.identity(f.instance);
-        let Some((source, _)) = identity.definition.0.name.split_once("$callable[") else {
-            return RevisionRoot::Item(identity);
-        };
-        let mut item = identity.definition.clone();
-        item.0.name = source.to_owned();
-        let callee = f
-            .body
-            .iter()
-            .flat_map(|b| &b.calls)
-            .find_map(|c| match c.callee {
-                Callee::Direct(g) => {
-                    let callee = self.identity(self.functions[g.index()].instance);
-                    (callee.definition == item).then_some(callee)
-                }
-                _ => None,
-            });
-        match callee {
-            Some(callee) => RevisionRoot::Item(callee),
-            None => RevisionRoot::Intrinsic(Identity::plain(item)),
-        }
-    }
-}
-/// The code revision of a compiler-implemented core definition.
-pub fn intrinsic_revision(root: &Identity) -> ContentHash {
-    crate::code_revision(crate::builtin_address(root).expect("intrinsic has a semantics number"))
-}
 /// `h` and the 64 hex digits of `digest`.
 pub fn symbol(digest: ContentHash) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2502,6 +1565,9 @@ pub fn symbol(digest: ContentHash) -> String {
     }
     name
 }
+
+mod revision;
+pub use revision::{RevisionRoot, intrinsic_revision, revision_symbol};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Function {
@@ -2551,6 +1617,9 @@ pub struct Module {
     /// condition derived from the launch, outside the checked body encoding.
     #[serde(skip)]
     pub external_call_sites: bool,
+    /// Insert engine observations only while emitting a recording build.
+    #[serde(skip)]
+    pub law_observation: bool,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.
@@ -2573,6 +1642,9 @@ impl Module {
     pub fn passes_caller_site(&self, function: FuncId) -> bool {
         let function = &self.functions[function.index()];
         crate::source::inherits_site(&self.instances[function.instance.index()])
+            || (self.law_observation
+                && crate::law::callee(&self.instances[function.instance.index()].definition)
+                    .is_some())
             || (self.external_call_sites && function.body.is_none())
     }
 
@@ -2670,7 +1742,7 @@ pub struct ClosureHook {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClosureRow {
     pub shape: Shape,
-    pub hooks: [Option<ClosureHook>; 3],
+    pub hooks: [Option<ClosureHook>; 4],
 }
 
 /// The rows a root row reaches, independent of any module's numbering: positions are
@@ -2703,42 +1775,34 @@ impl Module {
             .expect("unmetered closure")
     }
 
-    pub(crate) fn decoded_closure(
-        &self,
-        root: TypeId,
-        budget: &mut DecodeBudget,
-    ) -> DecodeResult<Closure> {
-        self.closure_impl(root, ClosureKind::Full, Some(budget))
-    }
-
     pub(crate) fn closure_impl(
         &self,
         root: TypeId,
         kind: ClosureKind,
-        mut budget: Option<&mut DecodeBudget>,
+        budget: Option<&Debit<'_>>,
     ) -> DecodeResult<Closure> {
         use std::collections::hash_map::Entry;
         let mut order = HashMap::<u32, u32>::new();
+        let mut held = 0; // What `budget` holds for the table of `order`.
         let mut rows: Vec<Option<ClosureRow>> = Vec::new();
         let mut pending = Vec::new();
         let visit = |r: u32,
                      order: &mut HashMap<u32, u32>,
                      rows: &mut Vec<Option<ClosureRow>>,
                      pending: &mut Vec<u32>,
-                     budget: &mut Option<&mut DecodeBudget>| {
+                     held: &mut usize| {
             if let Some(&number) = order.get(&r) {
                 return Ok(number);
             }
-            if let Some(budget) = budget.as_deref_mut() {
+            if let Some(budget) = budget {
                 budget.reserve(rows, 1)?;
                 budget.reserve(pending, 1)?;
                 if order.len() == order.capacity() {
                     // This accounts for the growing hash table, including
                     // bucket control bytes and unused load-factor capacity.
-                    budget.charge_bytes(order.capacity().max(4).saturating_mul(32))?;
-                    order
-                        .try_reserve(1)
-                        .map_err(|_| DecodeError::Limit(DecodeLimit::Bytes))?;
+                    let bytes = order.capacity().max(4).saturating_mul(32);
+                    budget.regrow(*held, bytes, || order.try_reserve(1).is_ok())?;
+                    *held = bytes;
                 }
             }
             let next = order.len() as u32;
@@ -2750,27 +1814,23 @@ impl Module {
             pending.push(r);
             Ok(next)
         };
-        visit(root.0, &mut order, &mut rows, &mut pending, &mut budget)?;
+        visit(root.0, &mut order, &mut rows, &mut pending, &mut held)?;
         while let Some(t) = pending.pop() {
             let original = &self.types[t as usize];
-            if let Some(budget) = budget.as_deref_mut() {
+            if let Some(budget) = budget {
                 crate::normal::charge_shape(original, budget)?;
             }
             let mut shape = Shape::clone(original);
             let mut error = None;
-            shape.map_refs(&mut |r| match visit(
-                r.0,
-                &mut order,
-                &mut rows,
-                &mut pending,
-                &mut budget,
-            ) {
-                Ok(number) => TypeRef(number),
-                Err(refused) => {
-                    error = Some(refused);
-                    r
-                }
-            });
+            shape.map_refs(
+                &mut |r| match visit(r.0, &mut order, &mut rows, &mut pending, &mut held) {
+                    Ok(number) => TypeRef(number),
+                    Err(refused) => {
+                        error = Some(refused);
+                        r
+                    }
+                },
+            );
             if let Some(error) = error {
                 return Err(error);
             }
@@ -2779,7 +1839,7 @@ impl Module {
                 let f = &self.functions[f.0 as usize];
                 let key = &self.instances[f.instance.index()];
                 let original = &self.signatures[f.signature.index()];
-                if let Some(budget) = budget.as_deref_mut() {
+                if let Some(budget) = budget {
                     crate::normal::charge_identity(&key.definition, &key.dictionaries, budget)?;
                     budget.allocation::<u32>(key.arguments.len())?;
                     budget.allocation::<Param>(original.params.len())?;
@@ -2792,7 +1852,7 @@ impl Module {
                         &mut order,
                         &mut rows,
                         &mut pending,
-                        &mut budget,
+                        &mut held,
                     )?);
                 }
                 let mut signature = original.clone();
@@ -2802,23 +1862,11 @@ impl Module {
                         ..
                     } = param
                     {
-                        *id = TypeId(visit(
-                            id.0,
-                            &mut order,
-                            &mut rows,
-                            &mut pending,
-                            &mut budget,
-                        )?);
+                        *id = TypeId(visit(id.0, &mut order, &mut rows, &mut pending, &mut held)?);
                     }
                 }
                 if let Some(id) = &mut signature.dest {
-                    *id = TypeId(visit(
-                        id.0,
-                        &mut order,
-                        &mut rows,
-                        &mut pending,
-                        &mut budget,
-                    )?);
+                    *id = TypeId(visit(id.0, &mut order, &mut rows, &mut pending, &mut held)?);
                 }
                 Ok(Some(ClosureHook {
                     definition: key.definition.clone(),
@@ -2830,6 +1878,7 @@ impl Module {
             // A codec maker is selected by the checking context. It is type
             // metadata and contributes no layout or calling-convention facts.
             let codec = shape.codec.take();
+            let key_codec = shape.key_codec.take();
             let hooks = [
                 hook(shape.finalizer.take())?,
                 hook(shape.clone.take())?,
@@ -2837,10 +1886,14 @@ impl Module {
                     ClosureKind::Full => hook(codec)?,
                     ClosureKind::Abi => None,
                 },
+                match kind {
+                    ClosureKind::Full => hook(key_codec)?,
+                    ClosureKind::Abi => None,
+                },
             ];
             rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }
-        if let Some(budget) = budget.as_deref_mut() {
+        if let Some(budget) = budget {
             budget.allocation::<ClosureRow>(rows.len())?;
         }
         let rows: Vec<_> = rows

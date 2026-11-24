@@ -1,0 +1,546 @@
+// RFC 6184 packetization mode 0 and 1. Each input starts at the NAL or RTP
+// payload header. Offsets are in bytes relative to that input.
+pub type Error = Truncated | InvalidNal | InvalidRbsp | UnsupportedPacket | WrongParameterSet
+
+pub type Nal {
+    kind: u8,
+    reference: u8,
+    idr: bool
+}
+
+pub type Fragment {
+    nal: Nal,
+    reconstructed_header: u8,
+    first: bool,
+    last: bool
+}
+
+pub type RtpPayload = Single(Nal) | StapA(bool) | FuA(Fragment)
+
+pub type StapUnit {
+    nal: Nal,
+    start: u64,
+    end: u64
+}
+
+fn nal_octet(header: u8) -> Result[Nal, Error] {
+    let kind = header & 31
+    if (header & 128) != 0 || kind == 0 || kind >= 24 {
+        return Error(InvalidNal)
+    }
+    Ok(Nal(kind: kind, reference: header >> 5, idr: kind == 5))
+}
+
+pub fn nal(unit: Bytes) -> Result[Nal, Error] {
+    if list.len(unit) == 0 {
+        return Error(Truncated)
+    }
+    nal_octet(unit[0])
+}
+
+// Initialize at to 1 for a STAP-A packet. Call again with the updated offset.
+pub fn stap_next(packet: Bytes, mut at: u64) -> Result[Option[StapUnit], Error] {
+    let end = list.len(packet)
+    if end == 0 {
+        return Error(Truncated)
+    }
+    if (packet[0] & 159) != 24 || at == 0 || at > end {
+        return Error(InvalidNal)
+    }
+    if at == end {
+        return Ok(None)
+    }
+    if end - at < 2 {
+        return Error(Truncated)
+    }
+    let length: u16 = list.word_be(packet, at)
+    let size: u64 = int.widen(length)
+    let start = at + 2
+    if size == 0 {
+        return Error(InvalidNal)
+    }
+    if size > end - start {
+        return Error(Truncated)
+    }
+    let header = nal_octet(packet[start])?
+    at = start + size
+    Ok(Some(StapUnit(nal: header, start: start, end: at)))
+}
+
+pub fn parse_rtp(packet: Bytes) -> Result[RtpPayload, Error] {
+    let end = list.len(packet)
+    if end == 0 {
+        return Error(Truncated)
+    }
+    let header = packet[0]
+    if (header & 128) != 0 {
+        return Error(InvalidNal)
+    }
+    let kind = header & 31
+    if kind == 28 {
+        if end < 2 {
+            return Error(Truncated)
+        }
+        let fu = packet[1]
+        if (fu & 192) == 192 {
+            return Error(InvalidNal)
+        }
+        let restored = (header & 96) | (fu & 31)
+        let unit = nal_octet(restored)?
+        return Ok(FuA(Fragment(nal: unit, reconstructed_header: restored, first: (fu & 128) != 0, last: (fu & 64) != 0)))
+    }
+    if kind == 24 {
+        if end == 1 {
+            return Error(Truncated)
+        }
+        let mut at: u64 = 1
+        let mut idr = false
+        let mut reference: u8 = 0
+        while at < end {
+            match stap_next(packet, mut at)? {
+                Some(unit) => {
+                    idr = idr || unit.nal.idr
+                    if unit.nal.reference > reference {
+                        reference = unit.nal.reference
+                    }
+                },
+                None => {}
+            }
+        }
+        if reference != header >> 5 {
+            return Error(InvalidNal)
+        }
+        return Ok(StapA(idr))
+    }
+    if kind > 24 {
+        return Error(UnsupportedPacket)
+    }
+    Ok(Single(nal_octet(header)?))
+}
+
+type Rbsp {
+    at: u64,
+    current: u8,
+    left: u64,
+    zeros: u8
+}
+
+fn rbsp() -> Rbsp {
+    Rbsp(at: 1, current: 0, left: 0, zeros: 0)
+}
+
+fn bit(unit: Bytes, mut cursor: Rbsp) -> Result[u64, Error] {
+    if cursor.left == 0 {
+        let end = list.len(unit)
+        if cursor.at == end {
+            return Error(Truncated)
+        }
+        let mut byte = unit[cursor.at]
+        cursor.at += 1
+        if cursor.zeros == 2 {
+            if byte < 3 {
+                return Error(InvalidRbsp)
+            }
+            if byte == 3 {
+                if cursor.at == end {
+                    return Error(Truncated)
+                }
+                byte = unit[cursor.at]
+                if byte > 3 {
+                    return Error(InvalidRbsp)
+                }
+                cursor.at += 1
+            }
+            cursor.zeros = 0
+        }
+        cursor.zeros = if byte == 0 {
+            cursor.zeros + 1
+        } else {
+            0
+        }
+        cursor.current = byte
+        cursor.left = 8
+    }
+    cursor.left -= 1
+    let value: u64 = int.widen(cursor.current)
+    Ok((value >> cursor.left) & 1)
+}
+
+fn bits(unit: Bytes, mut cursor: Rbsp, width: u64) -> Result[u64, Error] {
+    let mut value: u64 = 0
+    for _ in 0u64 .. width {
+        value = (value << 1) | bit(unit, mut cursor)?
+    }
+    Ok(value)
+}
+
+fn ue(unit: Bytes, mut cursor: Rbsp, max: u64) -> Result[u64, Error] {
+    let mut zeros: u64 = 0
+    while bit(unit, mut cursor)? == 0 {
+        zeros += 1
+        if zeros > 32 || (1u64 << zeros) - 1 > max {
+            return Error(InvalidRbsp)
+        }
+    }
+    let value = (1u64 << zeros) - 1 + bits(unit, mut cursor, zeros)?
+    if value > max {
+        return Error(InvalidRbsp)
+    }
+    Ok(value)
+}
+
+fn se(unit: Bytes, mut cursor: Rbsp) -> Result[i64, Error] {
+    let value = ue(unit, mut cursor, 4294967295)?
+    let half: i64 = int.narrow(value / 2)
+    Ok(if (value & 1) == 0 {
+        -half
+    } else {
+        half + 1
+    })
+}
+
+fn more_rbsp(unit: Bytes, cursor: Rbsp) -> bool {
+    let end = list.len(unit)
+    if cursor.at < end {
+        // With no buffered bits, the stop bit can occupy a whole final byte.
+        return cursor.left != 0 || end - cursor.at != 1 || unit[cursor.at] != 128
+    }
+    if cursor.left == 0 {
+        return false
+    }
+    let value: u64 = int.widen(cursor.current)
+    (value & ((1u64 << cursor.left) - 1)) != (1u64 << (cursor.left - 1))
+}
+
+fn trailing(unit: Bytes, mut cursor: Rbsp) -> Result[(), Error] {
+    if bit(unit, mut cursor)? != 1 {
+        return Error(InvalidRbsp)
+    }
+    let left = cursor.left
+    if bits(unit, mut cursor, left)? != 0 || cursor.at != list.len(unit) {
+        return Error(InvalidRbsp)
+    }
+    Ok(())
+}
+
+fn scaling_lists(unit: Bytes, mut cursor: Rbsp, count: u64) -> Result[(), Error] {
+    for index in 0u64 .. count {
+        if bit(unit, mut cursor)? == 1 {
+            let size: u64 = if index < 6 {
+                16
+            } else {
+                64
+            }
+            let mut scale: i64 = 8
+            for _ in 0u64 .. size {
+                let delta = se(unit, mut cursor)?
+                if delta < -128 || delta > 127 {
+                    return Error(InvalidRbsp)
+                }
+                let next = (scale + delta + 256) % 256
+                if next == 0 {
+                    break
+                }
+                scale = next
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hrd(unit: Bytes, mut cursor: Rbsp) -> Result[bool, Error] {
+    if bit(unit, mut cursor)? == 0 {
+        return Ok(false)
+    }
+    let count = ue(unit, mut cursor, 31)? + 1
+    let _ = bits(unit, mut cursor, 8)?
+    for _ in 0u64 .. count {
+        let _ = ue(unit, mut cursor, 4294967295)?
+        let _ = ue(unit, mut cursor, 4294967295)?
+        let _ = bit(unit, mut cursor)?
+    }
+    let _ = bits(unit, mut cursor, 20)?
+    Ok(true)
+}
+
+fn vui(unit: Bytes, mut cursor: Rbsp) -> Result[(), Error] {
+    if bit(unit, mut cursor)? == 1 {
+        let aspect = bits(unit, mut cursor, 8)?
+        if aspect == 255 {
+            let _ = bits(unit, mut cursor, 32)?
+        }
+    }
+    if bit(unit, mut cursor)? == 1 {
+        let _ = bit(unit, mut cursor)?
+    }
+    if bit(unit, mut cursor)? == 1 {
+        let _ = bits(unit, mut cursor, 4)?
+        if bit(unit, mut cursor)? == 1 {
+            let _ = bits(unit, mut cursor, 24)?
+        }
+    }
+    if bit(unit, mut cursor)? == 1 {
+        let _ = ue(unit, mut cursor, 5)?
+        let _ = ue(unit, mut cursor, 5)?
+    }
+    if bit(unit, mut cursor)? == 1 {
+        let ticks = bits(unit, mut cursor, 32)?
+        let scale = bits(unit, mut cursor, 32)?
+        if ticks == 0 || scale == 0 {
+            return Error(InvalidRbsp)
+        }
+        let _ = bit(unit, mut cursor)?
+    }
+    let nal_hrd = hrd(unit, mut cursor)?
+    let vcl_hrd = hrd(unit, mut cursor)?
+    if nal_hrd || vcl_hrd {
+        let _ = bit(unit, mut cursor)?
+    }
+    let _ = bit(unit, mut cursor)?
+    if bit(unit, mut cursor)? == 1 {
+        let _ = bit(unit, mut cursor)?
+        for _ in 0u64 .. 4 {
+            let _ = ue(unit, mut cursor, 16)?
+        }
+        let reorder = ue(unit, mut cursor, 16)?
+        let buffering = ue(unit, mut cursor, 16)?
+        if reorder > buffering {
+            return Error(InvalidRbsp)
+        }
+    }
+    Ok(())
+}
+
+pub opaque type Sps {
+    id: u64,
+    profile: u64,
+    constraints: u64,
+    level: u64,
+    chroma: u64,
+    depth_minus_8: u64,
+    chroma_depth_minus_8: u64,
+    width_in_mbs: u64,
+    map_units: u64,
+    frame_factor: u64,
+    width: u64,
+    height: u64
+}
+
+pub type Sequence {
+    id: u64,
+    profile: u64,
+    constraints: u64,
+    level: u64,
+    width: u64,
+    height: u64
+}
+
+pub fn sequence(sps: Sps) -> Sequence {
+    Sequence(id: sps.id, profile: sps.profile, constraints: sps.constraints, level: sps.level, width: sps.width, height: sps.height)
+}
+
+/// Coded width and height before cropping, and whether the stream is progressive 8-bit 4:2:0.
+pub fn coded_format(sps: Sps) -> (u64, u64, bool) {
+    (sps.width_in_mbs * 16, sps.map_units / sps.width_in_mbs * sps.frame_factor * 16,
+        sps.frame_factor == 1 && sps.chroma == 1 && sps.depth_minus_8 == 0 && sps.chroma_depth_minus_8 == 0)
+}
+
+fn extended_profile(profile: u64) -> bool {
+    profile == 100 || profile == 110 || profile == 122 || profile == 244 || profile == 44 || profile == 83 || profile == 86 || profile == 118 || profile == 128 || profile == 138 || profile == 139 || profile == 134 || profile == 135 || profile == 144
+}
+
+pub fn parse_sps(unit: Bytes) -> Result[Sps, Error] {
+    if nal(unit)?.kind != 7 {
+        return Error(WrongParameterSet)
+    }
+    let mut cursor = rbsp()
+    let profile = bits(unit, mut cursor, 8)?
+    let constraints = bits(unit, mut cursor, 8)?
+    if (constraints & 3) != 0 {
+        return Error(InvalidRbsp)
+    }
+    let level = bits(unit, mut cursor, 8)?
+    let id = ue(unit, mut cursor, 31)?
+    let mut chroma: u64 = 1
+    let mut separate = false
+    let mut depth: u64 = 0
+    let mut chroma_depth: u64 = 0
+    if extended_profile(profile) {
+        chroma = ue(unit, mut cursor, 3)?
+        if chroma == 3 {
+            separate = bit(unit, mut cursor)? == 1
+        }
+        depth = ue(unit, mut cursor, 6)?
+        chroma_depth = ue(unit, mut cursor, 6)?
+        let _ = bit(unit, mut cursor)?
+        if bit(unit, mut cursor)? == 1 {
+            scaling_lists(unit, mut cursor, if chroma == 3 {
+                12
+            } else {
+                8
+            })?
+        }
+    }
+    let _ = ue(unit, mut cursor, 12)?
+    let order = ue(unit, mut cursor, 2)?
+    if order == 0 {
+        let _ = ue(unit, mut cursor, 12)?
+    } else if order == 1 {
+        let _ = bit(unit, mut cursor)?
+        let _ = se(unit, mut cursor)?
+        let _ = se(unit, mut cursor)?
+        let count = ue(unit, mut cursor, 255)?
+        for _ in 0u64 .. count {
+            let _ = se(unit, mut cursor)?
+        }
+    }
+    let _ = ue(unit, mut cursor, 16)?
+    let _ = bit(unit, mut cursor)?
+    let width_mbs = ue(unit, mut cursor, 139263)? + 1
+    let height_units = ue(unit, mut cursor, 139263)? + 1
+    let frame_factor = 2 - bit(unit, mut cursor)?
+    let map_units = width_mbs * height_units
+    if map_units * frame_factor > 139264 {
+        return Error(InvalidRbsp)
+    }
+    if frame_factor == 2 {
+        let _ = bit(unit, mut cursor)?
+    }
+    let _ = bit(unit, mut cursor)?
+    let mut width = width_mbs * 16
+    let mut height = height_units * 16 * frame_factor
+    if bit(unit, mut cursor)? == 1 {
+        let left = ue(unit, mut cursor, width)?
+        let right = ue(unit, mut cursor, width)?
+        let top = ue(unit, mut cursor, height)?
+        let bottom = ue(unit, mut cursor, height)?
+        let chroma_array: u64 = if separate {
+            0
+        } else {
+            chroma
+        }
+        let x: u64 = if chroma_array == 1 || chroma_array == 2 {
+            2
+        } else {
+            1
+        }
+        let y = if chroma_array == 1 {
+            2 * frame_factor
+        } else {
+            frame_factor
+        }
+        let crop_x = (left + right) * x
+        let crop_y = (top + bottom) * y
+        if crop_x >= width || crop_y >= height {
+            return Error(InvalidRbsp)
+        }
+        width -= crop_x
+        height -= crop_y
+    }
+    if bit(unit, mut cursor)? == 1 {
+        vui(unit, mut cursor)?
+    }
+    trailing(unit, mut cursor)?
+    Ok(Sps(id: id, profile: profile, constraints: constraints, level: level, chroma: chroma, depth_minus_8: depth, chroma_depth_minus_8: chroma_depth, width_in_mbs: width_mbs, map_units: map_units, frame_factor: frame_factor, width: width, height: height))
+}
+
+pub type Picture {
+    id: u64,
+    sequence_id: u64,
+    entropy_coding: bool,
+    bottom_field_order_present: bool,
+    transform_8x8: bool
+}
+
+fn slice_groups(unit: Bytes, mut cursor: Rbsp, sps: Sps) -> Result[(), Error] {
+    let groups = ue(unit, mut cursor, 7)? + 1
+    if groups == 1 {
+        return Ok(())
+    }
+    let map_type = ue(unit, mut cursor, 6)?
+    let max_unit = sps.map_units - 1
+    if map_type == 0 {
+        for _ in 0u64 .. groups {
+            let _ = ue(unit, mut cursor, max_unit)?
+        }
+    } else if map_type == 2 {
+        for _ in 1u64 .. groups {
+            let first = ue(unit, mut cursor, max_unit)?
+            let last = ue(unit, mut cursor, max_unit)?
+            if first > last || first % sps.width_in_mbs > last % sps.width_in_mbs {
+                return Error(InvalidRbsp)
+            }
+        }
+    } else if map_type >= 3 && map_type <= 5 {
+        if groups != 2 {
+            return Error(InvalidRbsp)
+        }
+        let _ = bit(unit, mut cursor)?
+        let _ = ue(unit, mut cursor, max_unit)?
+    } else if map_type == 6 {
+        let count = ue(unit, mut cursor, max_unit)? + 1
+        let width: u64 = if groups <= 2 {
+            1
+        } else if groups <= 4 {
+            2
+        } else {
+            3
+        }
+        for _ in 0u64 .. count {
+            if bits(unit, mut cursor, width)? >= groups {
+                return Error(InvalidRbsp)
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn parse_pps(unit: Bytes, sps: Sps) -> Result[Picture, Error] {
+    if nal(unit)?.kind != 8 {
+        return Error(WrongParameterSet)
+    }
+    let mut cursor = rbsp()
+    let id = ue(unit, mut cursor, 255)?
+    let sequence_id = ue(unit, mut cursor, 31)?
+    if sequence_id != sps.id {
+        return Error(WrongParameterSet)
+    }
+    let entropy = bit(unit, mut cursor)? == 1
+    let field_order = bit(unit, mut cursor)? == 1
+    slice_groups(unit, mut cursor, sps)?
+    let _ = ue(unit, mut cursor, 31)?
+    let _ = ue(unit, mut cursor, 31)?
+    let _ = bit(unit, mut cursor)?
+    if bits(unit, mut cursor, 2)? == 3 {
+        return Error(InvalidRbsp)
+    }
+    let qp = se(unit, mut cursor)?
+    let qs = se(unit, mut cursor)?
+    let chroma_offset = se(unit, mut cursor)?
+    let depth: i64 = int.narrow(sps.depth_minus_8)
+    if qp < -26 - 6 * depth || qp > 25 || qs < -26 || qs > 25 || chroma_offset < -12 || chroma_offset > 12 {
+        return Error(InvalidRbsp)
+    }
+    let _ = bits(unit, mut cursor, 3)?
+    let mut transform = false
+    if more_rbsp(unit, cursor) {
+        transform = bit(unit, mut cursor)? == 1
+        if bit(unit, mut cursor)? == 1 {
+            let mut count: u64 = 6
+            if transform {
+                count += if sps.chroma == 3 {
+                    6u64
+                } else {
+                    2u64
+                }
+            }
+            scaling_lists(unit, mut cursor, count)?
+        }
+        let second_chroma_offset = se(unit, mut cursor)?
+        if second_chroma_offset < -12 || second_chroma_offset > 12 {
+            return Error(InvalidRbsp)
+        }
+    }
+    trailing(unit, mut cursor)?
+    Ok(Picture(id: id, sequence_id: sequence_id, entropy_coding: entropy, bottom_field_order_present: field_order, transform_8x8: transform))
+}

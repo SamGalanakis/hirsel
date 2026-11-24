@@ -1,0 +1,213 @@
+pub opaque type H264 {}
+
+pub opaque type DecoderHandle {}
+
+pub opaque type EncoderHandle {}
+
+pub type Error = InvalidConfig | Capacity | InvalidNal | Limit | ShortBuffer | Finished | CodecError(i32)
+
+pub type Profile = Baseline | Main
+
+pub type Frame {
+    width: u32,
+    height: u32,
+    timestamp: u64
+}
+
+const MAX_DIMENSION: u32 = 4096
+const MAX_PIXELS: u64 = 9437184
+const MAX_NAL: u64 = 16777216
+
+// Every native call runs on a helper (FFI-7 `waits`): no coded size keeps one under the 50 us
+// host-stack budget. Measured directly against OpenH264 on one Zen 3 core, a 16x16 CABAC
+// stream peaks at 148 us per decode call, decoder creation takes 160 us and encoder
+// teardown at 1280x720 takes 534 us.
+
+// MEM-27 holds this reservation for as long as the native session is live.
+resource type CodecHeap: send grant bytes 268435456 {}
+
+pub opaque resource type Decoder: send {
+    f: Foreign[H264],
+    p: foreign.Ptr[DecoderHandle],
+    max_width: u32,
+    max_height: u32,
+    heap: CodecHeap
+} drop(d) {
+    native.decoder_destroy(d.f, d.p)
+}
+
+pub opaque resource type Encoder: send {
+    f: Foreign[H264],
+    p: foreign.Ptr[EncoderHandle],
+    heap: CodecHeap
+} drop(e) {
+    native.encoder_destroy(e.f, e.p)
+}
+
+fn pixels(width: u32, height: u32) -> u64 {
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    w * h
+}
+
+fn valid_size(width: u32, height: u32) -> bool {
+    width >= 16 && height >= 16 && width <= MAX_DIMENSION && height <= MAX_DIMENSION &&
+        width % 2 == 0 && height % 2 == 0 && pixels(width, height) <= MAX_PIXELS
+}
+
+/// Opens a decoder for progressive 8-bit 4:2:0 AVC streams. The limits apply to
+/// coded dimensions, including macroblock padding such as 1088 for 1080p.
+pub fn decoder(f: Foreign[H264], max_width: u32, max_height: u32) -> Result[Decoder, Error] waits {
+    if !valid_size(max_width, max_height) {
+        return Error(InvalidConfig)
+    }
+    let Ok(take heap) = CodecHeap() else { return Error(Capacity) }
+    let Some(p) = native.decoder_create(f) else { return Error(Capacity) }
+    match Decoder(f: f, p: p, max_width: max_width, max_height: max_height, heap: take heap) {
+        Ok(take d) => Ok(take d),
+        Error((_, (grant, handle, _, _, _))) => {
+            native.decoder_destroy(grant, handle)
+            Error(Capacity)
+        },
+    }
+}
+
+/// Minimum output buffer size for decode and finish, including the timestamp.
+pub fn decoded_capacity(d: Decoder) -> u64 {
+    8 + pixels(d.max_width, d.max_height) * 3 / 2
+}
+
+fn check_nal(nal: Bytes, max_width: u32, max_height: u32) -> Result[(), Error] {
+    let end = list.len(nal)
+    if end > MAX_NAL {
+        return Error(Limit)
+    }
+    if end < 4 || nal[0] != 0 || nal[1] != 0 {
+        return Error(InvalidNal)
+    }
+    let mut start = 3u64
+    if nal[2] != 1 {
+        if nal[2] != 0 || end < 5 || nal[3] != 1 {
+            return Error(InvalidNal)
+        }
+        start = 4
+    }
+    let header = nal[start]
+    if header & 128 != 0 {
+        return Error(InvalidNal)
+    }
+    let kind = header & 31
+    if kind != 1 && kind != 5 && (kind < 6 || kind > 12) {
+        return Error(InvalidNal)
+    }
+
+    // A view must contain one NAL. Otherwise a second SPS could bypass the
+    // validation below and go straight to the decoder.
+    let mut at = start + 1
+    while let Some(one) = std.list.find_byte(nal, at, end, 1) {
+        if one >= start + 2 && nal[one - 1] == 0 && nal[one - 2] == 0 {
+            return Error(InvalidNal)
+        }
+        at = one + 1
+    }
+    if kind == 7 {
+        let mut last = end
+        while last > start + 1 && nal[last - 1] == 0 {
+            last -= 1
+        }
+        let Ok(sps) = media_bits.h264.parse_sps(list.slice(nal, start, last)) else { return Error(InvalidNal) }
+        let (width, height, progressive_420) = media_bits.h264.coded_format(sps)
+        if !progressive_420 {
+            return Error(InvalidNal)
+        }
+        if width > int.widen(max_width) || height > int.widen(max_height) {
+            return Error(Limit)
+        }
+    }
+    Ok(())
+}
+
+fn codec_error(code: i32) -> Error {
+    match code {
+        -1 => InvalidConfig,
+        -2 => ShortBuffer,
+        -3 => Capacity,
+        -4 => Finished,
+        _ => CodecError(-code - 16),
+    }
+}
+
+fn frame(code: i64, out: Bytes) -> Result[Option[Frame], Error] {
+    if code < 0 {
+        return Error(codec_error(int.narrow(code)))
+    }
+    if code == 0 {
+        return Ok(None)
+    }
+    let bits: u64 = int.narrow(code)
+    let timestamp: u64 = list.word_le(out, 0)
+    Ok(Some(Frame(width: int.narrow(bits >> 32), height: int.narrow(bits & 0xffffffff), timestamp: timestamp)))
+}
+
+/// Feeds one NAL with a three- or four-byte Annex B start code. Use the same
+/// timestamp for each NAL of a picture. A returned frame starts at out[8],
+/// with unpadded Y, U and V planes in that order.
+pub fn decode(mut d: Decoder, nal: Bytes, timestamp: u64, mut out: Bytes) -> Result[Option[Frame], Error] waits {
+    check_nal(nal, d.max_width, d.max_height)?
+    if list.len(out) < decoded_capacity(d) {
+        return Error(ShortBuffer)
+    }
+    let code = native.decode(d.f, d.p, nal, timestamp, mut out)
+    frame(code, out)
+}
+
+/// Drains the last picture and any delayed B-frame output. Call until None.
+/// A decoder can only be fed before draining begins.
+pub fn finish(mut d: Decoder, mut out: Bytes) -> Result[Option[Frame], Error] waits {
+    if list.len(out) < decoded_capacity(d) {
+        return Error(ShortBuffer)
+    }
+    let code = native.finish(d.f, d.p, mut out)
+    frame(code, out)
+}
+
+/// Opens a single-layer encoder for packed I420 input, at 1 through 60 fps.
+pub fn encoder(f: Foreign[H264], width: u32, height: u32, fps: u32, bitrate: u32, profile: Profile) -> Result[Encoder, Error] waits {
+    if !valid_size(width, height) || fps == 0 || fps > 60 || bitrate == 0 || bitrate > 100000000 {
+        return Error(InvalidConfig)
+    }
+    let Ok(take heap) = CodecHeap() else { return Error(Capacity) }
+    let mode = match profile {
+        Baseline => 0u8,
+        Main => 1u8,
+    }
+    let Some(p) = native.encoder_create(f, width, height, fps, bitrate, mode) else {
+        return Error(Capacity)
+    }
+    match Encoder(f: f, p: p, heap: take heap) {
+        Ok(take e) => Ok(take e),
+        Error((_, (grant, handle, _))) => {
+            native.encoder_destroy(grant, handle)
+            Error(Capacity)
+        },
+    }
+}
+
+fn packet_size(code: i32) -> Result[u32, Error] {
+    if code < 0 {
+        Error(codec_error(code))
+    } else {
+        Ok(int.narrow(code))
+    }
+}
+
+/// Encodes one unpadded I420 picture. The timestamp is in milliseconds.
+/// Returns the number of Annex B bytes available through copy_packet.
+pub fn encode(mut e: Encoder, i420: Bytes, timestamp: u64) -> Result[u32, Error] waits {
+    packet_size(native.encode(e.f, e.p, i420, timestamp))
+}
+
+/// Copies the latest encoded access unit. A short output can be retried.
+pub fn copy_packet(e: Encoder, mut out: Bytes) -> Result[u32, Error] waits {
+    packet_size(native.copy_packet(e.f, e.p, mut out))
+}

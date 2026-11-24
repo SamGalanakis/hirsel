@@ -21,8 +21,7 @@
 //! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
     Capacity, Context, block,
-    causes::{self, Cause, Causes, Cell, StringMessage},
-    limit::Payer,
+    causes::{self, Cause, Causes, Cell},
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
@@ -30,7 +29,7 @@ use crate::{
 };
 use hirsel_core_layout::{
     charge,
-    cross::{CLIENT, SEQ, SOCKET},
+    cross::{CLIENT, SEQ, SHARED, SOCKET},
 };
 use std::{
     collections::HashMap,
@@ -39,45 +38,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Bytes admitted from `payer` and held for the unit runtime; the limit
-/// record stays live while they are outstanding. Dropping a part refunds it
-/// at the unit.
-struct Held {
-    payer: Payer,
-    bytes: u64,
-}
-
-impl Held {
-    fn admit(context: &Context, bytes: u64) -> Result<Self, Capacity> {
-        let payer = context.payer();
-        payer.admit(Some(bytes))?;
-        Ok(Held { payer, bytes })
-    }
-
-    /// A part of at most `bytes`, refunded on its own.
-    fn split(&mut self, bytes: u64) -> Held {
-        let bytes = bytes.min(self.bytes);
-        self.bytes -= bytes;
-        Held {
-            payer: self.payer,
-            bytes,
-        }
-    }
-
-    /// Hand `bytes` to an owner that refunds them itself.
-    fn partition(&mut self, bytes: u64) -> Payer {
-        self.bytes -= bytes;
-        self.payer
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        if self.bytes != 0 {
-            self.payer.settle_at_unit(self.bytes);
-        }
-    }
-}
+mod held;
+use held::Held;
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -96,7 +58,7 @@ pub struct Cross {
 }
 
 impl Cross {
-    fn owners(&self) -> &[[u64; 4]] {
+    pub(crate) fn owners(&self) -> &[[u64; 4]] {
         if self.count == 0 {
             return &[];
         }
@@ -397,6 +359,11 @@ unsafe fn drop_packed_owners(
             if !h.is_null() {
                 unit.drop_client(unsafe { Box::from_raw(h) }.client);
             }
+        } else if o[1] == SHARED {
+            // SAFETY: the item moved this holder here and no one received it.
+            unsafe {
+                crate::shared::release(unit, context, word(flat.add(o[0] as usize)) as *mut u8)
+            };
         }
     }
 }
@@ -428,8 +395,11 @@ pub(crate) struct LangUnit {
     inboxes: Map<usize, *mut InboxH>,
     sends: Map<u32, *mut SendWait>,
     helpers: Map<usize, *mut HelperH>,
-    /// Header and unused room of cleaned connections, until the last release.
+    /// Header and unused room of cleaned connections, until the last release;
+    /// likewise the bytes of an ended helper's live `Shared` nodes.
     retained: Map<usize, Held>,
+    /// Each live `Shared` node made here, with the bytes it holds (CONC-15).
+    pub(crate) homed: Map<usize, u64>,
     /// Run-owned grants paid from helper reservations, held until this unit ends.
     run_grants: Vec<Held>,
     /// Tasks waiting on something another unit settles: the scheduler does
@@ -465,7 +435,7 @@ impl LangUnit {
         unsafe { pump(self) };
     }
 
-    fn refund_retained(&mut self, id: usize) {
+    pub(crate) fn refund_retained(&mut self, id: usize) {
         self.retained.remove(&id);
     }
 
@@ -501,6 +471,7 @@ impl LangUnit {
             sends: map(),
             helpers: map(),
             retained: map(),
+            homed: map(),
             run_grants: Vec::new(),
             waits: 0,
             root: ptr::null_mut(),
@@ -596,6 +567,7 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
             }
             Took::LastRelease => u.refund_retained(id),
             Took::Credits => {}
+            Took::SharedRelease => crate::shared::clean(u, tasks::current_context(), id as *mut u8),
             Took::Cancel => {
                 if !u.root.is_null() {
                     tasks::hirsel_core_cancel(ptr::null_mut(), u.root);
@@ -707,7 +679,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             Ok(held) => held,
             Err(e) => return refused(e.available),
         };
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let u = unit();
         let owners = (*item).owners();
         let (inbox, client) = u
@@ -718,7 +690,11 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             files: (*context).host_files,
             inbox,
             waiters: Waiters::default(),
-            owners: owners.iter().copied().filter(|o| o[1] == CLIENT).collect(),
+            owners: owners
+                .iter()
+                .copied()
+                .filter(|o| o[1] == CLIENT || o[1] == SHARED)
+                .collect(),
             charge: Some(held),
         }));
         u.inboxes.insert(key, ih);
@@ -751,7 +727,7 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
     // SAFETY: the caller transfers the handle.
     unsafe {
         let h = Box::from_raw(client);
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         unit().drop_client(h.client);
     }
 }
@@ -844,12 +820,10 @@ unsafe fn conn_send<const REC: bool>(
         // The returnable form's state is in the record; the fast path that
         // never waits leaves it untouched.
         let mut state: *mut SendRec = local.as_mut_ptr();
-        let mut commit = if REC && resumed {
+        if REC && resumed {
             state = tasks::held_wait();
-            // As the stackful form's commit after `park_for`.
-            crate::sequencer::enter()
         } else {
-            let commit = tasks::before_commit_for(task);
+            tasks::before_commit_for(task);
             if wait && tasks::check_cancel_for(context, site, task) != 0 {
                 return failed;
             }
@@ -898,8 +872,7 @@ unsafe fn conn_send<const REC: bool>(
             let unit = tasks::lang_unit_for(task);
             (*unit).sends.insert(id, &raw mut (*state).frame);
             (*unit).waits += 1;
-            commit
-        };
+        }
         let unit = tasks::lang_unit_for(task);
         let st = &mut *state;
         loop {
@@ -935,14 +908,13 @@ unsafe fn conn_send<const REC: bool>(
                 }
                 continue;
             }
-            drop(commit);
             if tasks::park_unit_alone(task, || {
                 (*unit)
                     .ctx
                     .port
                     .spin_before_park(Some(client.receiver_port()))
             }) {
-                commit = tasks::before_commit_for(task);
+                tasks::before_commit_for(task);
                 continue;
             }
             if REC {
@@ -954,7 +926,7 @@ unsafe fn conn_send<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park_for(
+            tasks::park_for(
                 task,
                 &raw mut st.frame.waiters,
                 #[cfg(feature = "prof")]
@@ -1037,12 +1009,9 @@ unsafe fn conn_receive<const REC: bool>(
         let c = &input.0;
         let task = tasks::current_task();
         let waited_before = REC && resumed;
-        let mut commit = if waited_before {
-            // As the stackful form's commit after `park_for`.
-            crate::sequencer::enter()
-        } else {
-            tasks::before_commit_for(task)
-        };
+        if !waited_before {
+            tasks::before_commit_for(task);
+        }
         let unit = tasks::lang_unit_for(task);
         let mut waited = waited_before;
         loop {
@@ -1101,9 +1070,8 @@ unsafe fn conn_receive<const REC: bool>(
                 waited = true;
                 u.waits += 1;
             }
-            drop(commit);
             if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
-                commit = tasks::before_commit_for(task);
+                tasks::before_commit_for(task);
                 continue;
             }
             if REC {
@@ -1115,7 +1083,7 @@ unsafe fn conn_receive<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park_for(
+            tasks::park_for(
                 task,
                 &raw mut (*inbox).waiters,
                 #[cfg(feature = "prof")]
@@ -1134,7 +1102,7 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
     // SAFETY: the caller transfers the handle; it stays pinned while it waits.
     unsafe {
         let h = &mut *inbox;
-        let mut commit = tasks::before_commit();
+        tasks::before_commit();
         (*context).cancel_shield += 1;
         let u = unit();
         u.ctx.seal(&h.inbox);
@@ -1144,12 +1112,11 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
             if h.inbox.0.side().seal_taken {
                 break;
             }
-            drop(commit);
             if tasks::park_unit_alone(tasks::current_task(), || false) {
-                commit = tasks::before_commit();
+                tasks::before_commit();
                 continue;
             }
-            commit = tasks::park(
+            tasks::park(
                 &raw mut h.waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::Join, 0),
@@ -1181,7 +1148,6 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
             u.on_released(took);
         }
         pump(u);
-        drop(commit);
         0
     }
 }
@@ -1221,78 +1187,9 @@ struct Ended {
     /// one's key and its retained charge, part of `n`.
     survivors: Vec<(usize, u64)>,
     run_grants: u64,
-    /// The charges of `Secret` designations it paid for that are still held
-    /// (TLS-5): its owner pays them from the end take on.
-    secrets: crate::secret::HandedOver,
-}
-
-struct CrossedCause {
-    cause: Cause,
-    owned_message: Vec<u8>,
-    message_charge: u64,
-}
-
-// SAFETY: owned bytes are copied into the Vec, and the remaining cause pointer
-// is either null, run-lived immutable storage or a scalar payload.
-unsafe impl Send for CrossedCause {}
-
-impl CrossedCause {
-    fn pack(cause: &Cause) -> Self {
-        let StringMessage {
-            data,
-            len,
-            capacity,
-        } = cause.message;
-        let (data, owned_message, message_charge) = if cause.kind() == causes::FAIL && capacity != 0
-        {
-            let content = if len == 0 {
-                Vec::new()
-            } else {
-                // SAFETY: the live cause owns this initialized String prefix.
-                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
-            };
-            (ptr::null_mut(), content, charge::seq(capacity, 1).unwrap())
-        } else {
-            // Static message bytes live through the run. Other causes carry
-            // scalar payloads in these words.
-            (data, Vec::new(), 0)
-        };
-        Self {
-            cause: Cause {
-                message: StringMessage {
-                    data,
-                    len,
-                    capacity,
-                },
-                site: cause.site,
-            },
-            owned_message,
-            message_charge,
-        }
-    }
-
-    fn unpack(self, context: &Context, held: &mut Held) -> Cause {
-        let mut cause = self.cause;
-        if self.message_charge != 0 {
-            let data = block::allocate_admitted(
-                context,
-                held.partition(self.message_charge),
-                cause.message.capacity as usize,
-                8,
-                block::PLAIN,
-            );
-            // SAFETY: the copied prefix fits in the new buffer at the original capacity.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    self.owned_message.as_ptr(),
-                    data.as_ptr(),
-                    self.owned_message.len(),
-                );
-            }
-            cause.message.data = data.as_ptr();
-        }
-        cause
-    }
+    /// Live charges for Secret designations and UDP pools paid by this helper.
+    /// Its owner pays them from the end take on.
+    charges: crate::secret::HandedOver,
 }
 
 /// A tagged task handle names a helper.
@@ -1360,7 +1257,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             drop(held);
             return refused(xs, n);
         }
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let u = unit();
         let (k, hctx) = u.ctx.spawn_unit();
         let data = pack(input, x.bytes, x.owners());
@@ -1520,16 +1417,14 @@ fn helper_main(
         // Each connection still retained has its last client in another unit;
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.
-        let survivors = lu.retained.drain().map(|(k, h)| (k, h.bytes)).collect();
-        // Likewise each Secret designation still held elsewhere.
-        let (secrets, refunds) = files
-            .registry
-            .run_grants()
-            .secrets
-            .lock()
-            .unwrap()
-            .hand_over(context.payer());
-        drop(refunds);
+        // So does each `Shared` node made here that another unit still holds.
+        let survivors = lu
+            .retained
+            .drain()
+            .map(|(k, h)| (k, h.bytes))
+            .chain(lu.homed.drain())
+            .collect();
+        let charges = files.registry.run_grants().hand_over(context.payer());
         let ended = Ended {
             failed: failed != 0,
             causes: context.causes.iter().map(CrossedCause::pack).collect(),
@@ -1541,7 +1436,7 @@ fn helper_main(
             survivors,
             run_grants: context.payer().run_owned()
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
-            secrets,
+            charges,
         };
         let mut ret = Value::empty();
         if failed == 0 {
@@ -1596,7 +1491,7 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));
     }
-    crate::secret::take_over(&ended.secrets, |bytes| held.partition(bytes));
+    crate::secret::take_over(&ended.charges, |bytes| held.partition(bytes));
     let causes = ended
         .causes
         .iter()
@@ -1618,12 +1513,9 @@ unsafe fn wait_end<const REC: bool>(
 ) -> Option<bool> {
     // SAFETY: the handle is pinned by its owner through the wait.
     unsafe {
-        let mut commit = if REC && resumed {
-            // As the stackful form's commit after `park`.
-            crate::sequencer::enter()
-        } else {
-            tasks::before_commit()
-        };
+        if !(REC && resumed) {
+            tasks::before_commit();
+        }
         loop {
             if !shielded && tasks::check_cancel(context, site) != 0 {
                 return Some(false);
@@ -1635,7 +1527,6 @@ unsafe fn wait_end<const REC: bool>(
             if (*h).ended {
                 return Some(true);
             }
-            drop(commit);
             if REC {
                 tasks::park_returning(
                     tasks::current_task(),
@@ -1645,7 +1536,7 @@ unsafe fn wait_end<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park(
+            tasks::park(
                 &raw mut (*h).waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::Join, 0),
@@ -1730,7 +1621,7 @@ pub(crate) unsafe fn join<const REC: bool>(
                 status: 1,
             });
         }
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let (failed, chain) = consume(context, h, Some(result));
         let cancelled = chain
             .iter()
@@ -1763,13 +1654,16 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
     unsafe {
         cancel(task);
         wait_end::<false>(context, helper_of(task), 0, true, false);
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         consume(context, helper_of(task), None);
         0
     }
 }
 
 #[doc(hidden)]
+#[path = "units_lang_cause.rs"]
+mod cause;
+use cause::CrossedCause;
 #[path = "units_lang_bench.rs"]
 pub mod bench;
 

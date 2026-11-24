@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """Run disjoint sim.world seed ranges on Boat using a prebuilt Hirsel test.
 
-Dispatch exits 0 for a complete passing campaign, 1 for failing seeds, and 2
+Dispatch exits 0 for a complete passing campaign, 1 for a failed law, and 2
 for an incomplete campaign or dispatch error. A batch denied a spare start
 exits 75. Call dispatch directly when its verdict determines the caller's status.
 """
 import argparse
 from bisect import bisect_right
+from collections import defaultdict
 from contextlib import closing
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+
+
+TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class Law:
+    name: str
+    binary: Path
+    seeds: int
+    seed_zero: dict | None
+    min_traces: int = 0
 
 
 def allocate(db, campaign, shards, count):
@@ -34,6 +49,21 @@ def allocate_ranges(db, campaign, laws):
         PRIMARY KEY (campaign, shard),
         FOREIGN KEY (campaign, shard) REFERENCES shards (campaign, shard)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS seed_replays (
+        campaign TEXT, seed INTEGER, same_build_nondeterminism INTEGER NOT NULL,
+        status INTEGER NOT NULL, stdout TEXT NOT NULL, stderr TEXT NOT NULL,
+        PRIMARY KEY (campaign, seed)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS seed_failure_classes (
+        campaign TEXT, seed INTEGER, failure_class TEXT NOT NULL,
+        PRIMARY KEY (campaign, seed)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS law_trace_counts (
+        campaign TEXT, shard INTEGER, distinct_hashes INTEGER NOT NULL,
+        minimum INTEGER NOT NULL, failed INTEGER NOT NULL,
+        PRIMARY KEY (campaign, shard),
+        FOREIGN KEY (campaign, shard) REFERENCES shard_laws (campaign, shard)
+    )""")
     with db:
         db.execute("BEGIN IMMEDIATE")
         first = db.execute("SELECT coalesce(max(stop_seed), 1) FROM shards").fetchone()[0]
@@ -49,20 +79,74 @@ def allocate_ranges(db, campaign, laws):
     return ranges
 
 
-def run_shard(executable, start, stop):
+def outcome(ran):
+    return {"status": ran.returncode, "stdout": ran.stdout.decode(errors="replace"),
+            "stderr": ran.stderr.decode(errors="replace")}
+
+
+# A law's message names its class; the exit contract stays nonzero for any red.
+# "bounded progress:" is the VP2 post-heal convergence epilogue
+# (core/programs/store/follower_laws.hirsel).
+FAILURE_CLASSES = (("bounded progress:", "bounded_progress"),)
+
+
+def failure_class(row):
+    if row["status"] == 0:
+        return None
+    text = row["stdout"] + row["stderr"]
+    return next((name for marker, name in FAILURE_CLASSES if marker in text), None)
+
+
+def run_seed(executable, seed, diagnose_red=False):
+    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+        inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
+                  "env": {"HIRSEL_TEST_SIM_SEED": str(seed)}, "capture_output": True}
+        ran = subprocess.run([executable], **inputs)
+        row = {"seed": seed, **outcome(ran)}
+        row["failure_class"] = failure_class(row)
+        if diagnose_red and ran.returncode != 0:
+            # Recreate the empty directory at the same path the first run saw.
+            shutil.rmtree(directory)
+            Path(directory).mkdir(mode=0o700)
+            replay = subprocess.run([executable], **inputs)
+            row["diagnostic_replay"] = outcome(replay)
+            row["same_build_nondeterminism"] = (ran.returncode, ran.stdout, ran.stderr) != (
+                replay.returncode, replay.stdout, replay.stderr)
+    return row
+
+
+def run_shard(executable, start, stop, diagnose_red=False):
     for seed in range(start, stop):
-        with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
-            ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
-                                 env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
-        print(json.dumps({"seed": seed, "status": ran.returncode,
-                          "stdout": ran.stdout.decode(errors="replace"),
-                          "stderr": ran.stderr.decode(errors="replace"),
-                          "replay": shlex.join([sys.argv[0], "run", str(executable),
-                                                str(seed), str(seed + 1)])}), flush=True)
+        row = run_seed(executable, seed, diagnose_red)
+        row["replay"] = shlex.join([sys.argv[0], "run", str(executable), str(seed), str(seed + 1)])
+        print(json.dumps(row), flush=True)
+
+
+def seed_zero_failed(db, campaign, law, results):
+    verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
+    if verdict["status"] == 0:
+        return False
+    row = {**verdict, "law": law.name, "seed": 0, "kind": "deterministic_red",
+           "failure_class": failure_class(verdict)}
+    line = json.dumps(row)
+    with db:
+        db.execute("""CREATE TABLE IF NOT EXISTS deterministic_reds (
+            campaign TEXT, law TEXT, status INTEGER, stdout TEXT, stderr TEXT,
+            PRIMARY KEY (campaign, law)
+        )""")
+        db.execute("INSERT INTO deterministic_reds VALUES (?, ?, ?, ?, ?)",
+                   (campaign, law.name, row["status"], row["stdout"], row["stderr"]))
+    print(line, file=results, flush=True)
+    print(f"{law.name}: deterministic red at seed 0", file=sys.stderr)
+    return True
 
 
 def record(db, campaign, ranges, output, results, executable, laws=None):
     observed = {}
+    replays = []
+    classes = []
+    traces = defaultdict(set)
+    trace_reds = []
     malformed = False
     stops = [stop for _, stop in ranges]
     for line in output:
@@ -72,23 +156,51 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             if (type(seed) is not int or type(status) is not int or seed in observed
                     or not ranges[0][0] <= seed < ranges[-1][1]):
                 raise ValueError("unexpected seed result")
+            if "diagnostic_replay" in row:
+                replay = row["diagnostic_replay"]
+                changed = row["same_build_nondeterminism"]
+                if status == 0 or type(changed) is not bool or type(replay["status"]) is not int:
+                    raise ValueError("unexpected diagnostic replay")
+                replays.append((campaign, seed, changed, replay["status"], replay["stdout"], replay["stderr"]))
+            row["failure_class"] = failure_class(row)
+            if row["failure_class"] is not None:
+                classes.append((campaign, seed, row["failure_class"]))
         except (ValueError, KeyError, TypeError):
             malformed = True
             print(line, end="", file=sys.stderr)
             continue
         if laws is not None:
-            row["law"], executable, _ = laws[bisect_right(stops, seed)]
+            shard = bisect_right(stops, seed)
+            law = laws[shard]
+            row["law"], executable = law.name, law.binary
+            hashes = TRACE.findall(row.get("stdout", ""))
+            if len(hashes) == 1:
+                traces[shard].add(hashes[0])
         row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
                                     str(seed), str(seed + 1)])
         print(json.dumps(row), file=results, flush=True)
         observed[seed] = status
     with db:
+        db.executemany("INSERT INTO seed_replays VALUES (?, ?, ?, ?, ?, ?)", replays)
+        db.executemany("INSERT INTO seed_failure_classes VALUES (?, ?, ?)", classes)
         for shard, (start, stop) in enumerate(ranges):
             statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
             db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",
                        (len(statuses), sum(status != 0 for status in statuses), campaign, shard))
+            if laws is not None:
+                law = laws[shard]
+                distinct = len(traces[shard])
+                failed = len(statuses) == stop - start and distinct < law.min_traces
+                db.execute("INSERT INTO law_trace_counts VALUES (?, ?, ?, ?, ?)",
+                           (campaign, shard, distinct, law.min_traces, failed))
+                if failed:
+                    trace_reds.append({"law": law.name, "kind": "trace_diversity_red", "distinct_hashes": distinct,
+                                       "minimum": law.min_traces})
+    for red in trace_reds:
+        print(json.dumps(red), file=results, flush=True)
+        print(f"{red['law']}: {red['distinct_hashes']} distinct trace hashes, need {red['minimum']}", file=sys.stderr)
     complete = not malformed and len(observed) == ranges[-1][1] - ranges[0][0]
-    return complete, sum(status != 0 for status in observed.values())
+    return complete, sum(status != 0 for status in observed.values()) + len(trace_reds)
 
 
 def dispatch(args):
@@ -108,6 +220,16 @@ def dispatch_campaign(args, executable=None, laws=None):
     with (closing(sqlite3.connect(args.ledger)) as db,
           tempfile.TemporaryDirectory(prefix="sim-campaign-", dir=Path.cwd()) as directory,
           args.results.open("x") as results):
+        deterministic_red = False
+        if laws is None:
+            if seed_zero_failed(db, args.campaign, Law(executable.name, executable, 0, None), results):
+                return 1
+        else:
+            passing = [law for law in laws if not seed_zero_failed(db, args.campaign, law, results)]
+            deterministic_red = len(passing) != len(laws)
+            laws = passing
+            if not laws:
+                return 1
         root = Path(directory)
         bundle = root / "bundle"
         bundle.mkdir()
@@ -117,14 +239,14 @@ def dispatch_campaign(args, executable=None, laws=None):
             shutil.copy2(executable, bundle / "law")
             jobs = [{"lane": f"vopr-{args.campaign}-{shard}", "bundle": "bundle",
                      "seconds": args.shard_seconds,
-                     "command": f"./sim-campaign run ./law {start} {stop}"}
+                     "command": f"./sim-campaign run ./law {start} {stop} --diagnose-red"}
                     for shard, (start, stop) in enumerate(ranges)]
         else:
-            ranges = allocate_ranges(db, args.campaign, [(law, count) for law, _, count in laws])
+            ranges = allocate_ranges(db, args.campaign, [(law.name, law.seeds) for law in laws])
             remote = []
-            for index, ((_, binary, _), (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
+            for index, (law, (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
                 name = f"law-{index}"
-                shutil.copy2(binary, bundle / name)
+                shutil.copy2(law.binary, bundle / name)
                 remote.append((name, start, stop))
             (bundle / "ranges.json").write_text(json.dumps(remote))
             jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
@@ -143,7 +265,7 @@ def dispatch_campaign(args, executable=None, laws=None):
     if not complete:
         print("sim-campaign: dispatch did not deliver every reserved result", file=sys.stderr)
         return 2
-    return int(failed > 0)
+    return int(deterministic_red or failed > 0)
 
 
 def positive(value):
@@ -163,7 +285,14 @@ def read_laws(path):
         law, binary, count = entry["law"], entry["executable"], entry["seeds"]
         if not isinstance(law, str) or not law or law in names or type(count) is not int or count < 1:
             raise ValueError(f"invalid campaign law: {entry!r}")
-        laws.append((law, local_executable(path.parent / binary), count))
+        seed_zero = entry.get("seed_zero")
+        if "seed_zero" in entry and (not isinstance(seed_zero, dict) or type(seed_zero.get("status")) is not int
+                                     or not all(isinstance(seed_zero.get(stream), str) for stream in ("stdout", "stderr"))):
+            raise ValueError(f"invalid seed 0 verdict for {law}")
+        minimum = entry.get("min_traces", 0)
+        if type(minimum) is not int or not 0 <= minimum <= count:
+            raise ValueError(f"invalid trace diversity floor for {law}")
+        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero, minimum))
         names.add(law)
     return laws
 
@@ -182,6 +311,7 @@ def main():
     run.add_argument("executable", type=Path)
     run.add_argument("start", type=int)
     run.add_argument("stop", type=int)
+    run.add_argument("--diagnose-red", action="store_true", help=argparse.SUPPRESS)
     remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
     remote.add_argument("ranges", type=Path)
     campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
@@ -198,11 +328,11 @@ def main():
         if args.command == "run":
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")
-            run_shard(args.executable.resolve(strict=True), args.start, args.stop)
+            run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red)
             return 0
         if args.command == "run-batch":
             for executable, start, stop in json.loads(args.ranges.read_text()):
-                run_shard(local_executable(args.ranges.parent / executable), start, stop)
+                run_shard(local_executable(args.ranges.parent / executable), start, stop, diagnose_red=True)
             return 0
         if args.command == "batch":
             return dispatch_campaign(args, laws=read_laws(args.manifest))

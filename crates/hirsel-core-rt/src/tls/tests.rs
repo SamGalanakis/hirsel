@@ -75,6 +75,7 @@ impl Run {
             exec_bindings: std::ptr::null(),
             exec_bindings_len: 0,
             exec_ops: std::ptr::null(),
+            revision: std::ptr::null(),
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
             target: view(b"test-target"),
@@ -100,7 +101,6 @@ impl Run {
             }
         }
     }
-
     fn grant(&mut self, rule: &str) -> u64 {
         let storage = RulesStorage::new([GrantRule::parse(rule).unwrap()]);
         let handle = storage.handle();
@@ -1509,7 +1509,7 @@ fn scram_checks(run: &mut Run) {
         let context = &raw mut *run.context;
         // The compiler charges the call before entering the adapter.
         assert!(unsafe { crate::steps::hirsel_core_step_enter(context, 1) });
-        assert!(unsafe { crate::steps::scram_iterations(context, 1, 1) });
+        assert!(unsafe { crate::steps::take_many(context, 1, 1) });
         let refused = run.scram_send(key, secret, CLIENT_FIRST, &server);
         assert_eq!((refused.status, refused.error.tag), (0, tag));
         unsafe { crate::steps::hirsel_core_step_leave(context) };
@@ -1581,7 +1581,7 @@ fn scram_iteration_steps(run: &mut Run) {
         );
         let context = &raw mut *run.context;
         assert!(unsafe { crate::steps::hirsel_core_step_enter(context, budget) });
-        assert!(unsafe { crate::steps::scram_iterations(context, 1, 1) });
+        assert!(unsafe { crate::steps::take_many(context, 1, 1) });
         let result = run.scram_send(key, secret, CLIENT_FIRST, SERVER_FIRST);
         if budget == 4097 {
             assert_eq!((result.status, result.error), (0, IoError::OK));

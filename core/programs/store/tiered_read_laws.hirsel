@@ -1,0 +1,949 @@
+fn l62_point_path_fixture() -> Result[(std.page.Slot, Arc[TieredFrame], Arc[TieredFrame]), Error] {
+    let mut value: Bytes = list.with_capacity(1025)
+    list.fill(mut value, 1025, 106u8)
+    let stored_ref = std.page.BlobRef(stamp: 39, len: 1025, checksum: 0x8234157262b2bd3d, pack: 7, offset: 72, body: 0)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: key_word(42), cell: BlobValue(stored_ref)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let digest = std.check.xxh3(std.page.payload(leaf_image), 0, 79)
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 79, checksum: digest, stamp: 40)
+    let leaf = page_result(std.page.attach_cold(take leaf_image))?
+    let mut branches: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 1110))))
+    let parent = page_result(std.page.encode(branches, 1, 41, Collection))?
+    let root = page_result(std.page.attach_cold(take parent))?
+    let page_frame = TieredFrame(identity: tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))
+    let blob_frame = TieredFrame(identity: tiered_frame_id(TieredBlob(stored_ref)), payload: TieredValue(arc.new(take value)))
+    Ok((HotPage(take root), arc.new(take page_frame), arc.new(take blob_frame)))
+}
+
+@test
+fn test_l62_tiered_point_path() -> Result[(), Error] {
+    // Hot parent: 80 + 16. Cold leaf: 79 + 16. BLOB: 1025 + 8 + 16.
+    let (take root, take leaf, take cached_blob) = l62_point_path_fixture()?
+    let key = key_word(42)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let first = tiered_attempt(1240, 0)
+    let Error(Missed) = tiered_point_path(first, visible, root, None, key) else {
+        fail("L62: an unpinned leaf did not miss")
+    }
+    let Some(AttemptMiss(TieredPage(ptr))) = tiered_attempt_state(first).stopped else {
+        fail("L62: the first miss did not name a PAGE")
+    }
+    if ptr.stamp != 40 || tiered_attempt_state(first).touched_bytes != 191 {
+        fail("L62: point lookup did not count the Hot parent before the Cold leaf")
+    }
+    map.insert(mut visible, tiered_cache_key(leaf.identity), take leaf)
+    let second = tiered_attempt(1240, 0)
+    let Error(Missed) = tiered_point_path(second, visible, root, None, key) else {
+        fail("L62: an unpinned body did not miss")
+    }
+    let Some(AttemptMiss(TieredBlob(reference))) = tiered_attempt_state(second).stopped else {
+        fail("L62: the second miss did not name a BLOB")
+    }
+    if reference.stamp != 39 || tiered_attempt_state(second).touched_bytes != 1240 {
+        fail("L62: point lookup did not count the full BLOB frame")
+    }
+    map.insert(mut visible, tiered_cache_key(cached_blob.identity), take cached_blob)
+    let admitted = tiered_attempt(1240, 0)
+    let Some(value) = tiered_point_path(admitted, visible, root, None, key)? else {
+        fail("L62: an admitted pinned row was not read")
+    }
+    if list.len(value) != 1025 || value[1024u64] != 106 || tiered_attempt_state(admitted).touched_bytes != 1240 || map.len(tiered_attempt_state(admitted).stamps) != 3 {
+        fail("L62: pin-only lookup did not return the selected BLOB")
+    }
+    let refused = tiered_attempt(1239, 0)
+    let Error(Missed) = tiered_point_path(refused, visible, root, None, key) else {
+        fail("L62: a warm pin bypassed the physical limit")
+    }
+    let Some(AttemptPinLimit(problem)) = tiered_attempt_state(refused).stopped else {
+        fail("L62: the limit did not take precedence over the pin hit")
+    }
+    if problem.requested != 1240 || problem.available != 1239 {
+        fail("L62: invalid capacity for the selected path")
+    }
+    Ok(())
+}
+
+fn l62_deliver_branch(requests: Sender[TieredPagerMessage], target: std.page.PagePtr, leaf: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let mut ids = 0u64
+    for ptr in[target, leaf] {
+        let width: u64 = int.widen(ptr.len)
+        let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: inventory, object: None))
+        packs = take next_packs
+    }
+    let demand = TieredPointDemand(target: TieredPage(target), key: key_word(42), direction: TieredPoint, siblings: list.new(), packs: take packs, next_stamp: 51, deadline: 0, grant: None)
+    let TieredPointDelivery(frames: take path, ..) = tiered_point_delivery(requests, take demand)?
+    if list.len(path) != 2 || path[0u64].identity.stamp != 50 || path[1u64].identity.stamp != 49 {
+        fail("L62: point batch must deliver the parent and selected leaf in order")
+    }
+    let TieredImage(selected) = view path[1u64].payload else {
+        fail("L62: point batch returned a BLOB for its leaf")
+    }
+    let Some(raw) = std.page.lookup(selected, key_word(42)) else {
+        fail("L62: point batch delivered a leaf for the wrong key")
+    }
+    if list.len(raw) != 1 || raw[0u64] != 106 {
+        fail("L62: point batch did not carry the selected leaf's value")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    let mut value: Bytes = list.with_capacity(1)
+    list.push(mut value, 106u8)
+    list.push(mut rows, std.page.Entry(key: key_word(42), cell: InlineValue(take value)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 49, Collection))?
+    let leaf = l68_write_page_pack(fixtures, owner, 8, 49, std.page.payload(leaf_image))?
+    // The left child is deliberately not in the inventory. The key path
+    // only reaches the right child, so it must never request the left.
+    let left = std.page.PagePtr(pack: 7, offset: 72, len: 40, checksum: 11, stamp: 48)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 1, charge: 86))))
+    list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: leaf, rows: 1, charge: 86))))
+    let branch_image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let root = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(branch_image))?
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let delivered = l62_deliver_branch(requests, root, leaf)
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
+    delivered
+}
+
+fn l62_grant_cache_frames(owner: StoreId, retain_all: bool) -> Result[(), Error] {
+    let mut cache_state = new_tiered_cache(96 * 1048576)
+    let original = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 32 * 1048576))?
+    let mut held: List[Arc[TieredFrame]] = list.with_capacity(7)
+    for slot in 0u64 .. 7 {
+        let value_len = 8 * 1048576u64 - 24
+        let mut stored: Bytes = list.with_capacity(value_len)
+        list.fill(mut stored, value_len, 106u8)
+        let reference = std.page.BlobRef(stamp: slot + 1, len: value_len, checksum: 0, pack: slot + 1, offset: 72, body: 0)
+        let frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take stored))))
+        if slot == 0 || retain_all {
+            list.push(mut held, arc.share(frame))
+        }
+        tiered_cache_admit(mut cache_state, frame)
+    }
+    if !capacity(tiered_cache_evict(mut cache_state))? || cache_state.cached_bytes != 48 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
+        fail("L62: expected 48 MiB cached and 8 MiB of overlap")
+    }
+    let admission = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 24 * 1048576))
+    if retain_all {
+        let Error(Full(Cache(problem))) = take admission else {
+            fail("L62: overlap must leave the grant too little room")
+        }
+        if problem.requested != 24 * 1048576 || problem.available != 8 * 1048576 || cache_state.reader_reserved != 32 * 1048576 {
+            fail("L62: refusal did not report the reclaimable shared room")
+        }
+    } else {
+        let added = admission?
+        if added.pin_bytes != 24 * 1048576 || cache_state.cached_bytes != 32 * 1048576 || cache_state.reader_reserved != 56 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
+            fail("L62: a 24 MiB grant must evict exactly 16 MiB")
+        }
+    }
+    let _ = take original
+    let _ = take held
+    Ok(())
+}
+
+fn l62_reader_grants(db: Db) -> Result[(), Error] waits {
+    let Error(Missing(field)) = reader(db, 0) else {
+        fail("L62: Tiered Readers must request at least a blob and a path")
+    }
+    if field != "pin_bytes" {
+        fail("L62: wrong field for a short Reader reservation")
+    }
+    {
+        let held = reader(db, 32 * 1048576)?
+        let Some(pool) = view held.pool else {
+            fail("L62: Reader must own its reservation")
+        }
+        let grant = view pool.grant
+        if !same(grant.store, db.store) || grant.opened != open_number(db) || grant.pin_bytes != 32 * 1048576 {
+            fail("L62: grant does not belong to this open")
+        }
+        let Error(Full(Cache(problem))) = reader(db, 24 * 1048576) else {
+            fail("L62: another Reader charged the writer's partition")
+        }
+        if problem.requested != 24 * 1048576 || problem.available != 0 {
+            fail("L62: a live reservation did not consume all shared room")
+        }
+    }
+    // The marker for an abandoned reply must also be reclaimable.
+    let (answer, abandoned): (Sender[Result[Arc[TieredReaderGrant], Error]], Receiver[Result[Arc[TieredReaderGrant], Error]]) = channel.new(1)
+    let _ = take abandoned
+    let Some(requests) = view db.pager else {
+        fail("L62: fixture pager is missing")
+    }
+    channel.send(requests, PagerReserve(32 * 1048576, take answer)) ?=> |_| Io(Closed)
+    let _ = reader(db, 32 * 1048576)?
+    Ok(())
+}
+
+@test
+fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 2147483648)
+    {
+        let memory_reader = reader(db, 0)?
+        if let Some(_) = view memory_reader.pool {
+            fail("L62: a Memory open reserved shared bytes")
+        }
+    }
+    l62_grant_cache_frames(db.store, false)?
+    l62_grant_cache_frames(db.store, true)?
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    db.pager = Some(take requests)
+    let admitted = l62_reader_grants(db)
+    let _ = take db
+    let _ = result.unwrap(task.join(take worker))
+    admitted
+}
+
+@test
+fn test_l68_fold_reuses_cold_edges() -> Result[(), Error] {
+    let dropped = std.page.BlobRef(stamp: 31, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let retained = std.page.BlobRef(stamp: 32, len: 1025, checksum: 102, pack: 7, offset: 1121, body: 1)
+    let mut rows: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(dropped)))
+    list.push(mut rows, std.page.Entry(key: key_word(2), cell: BlobValue(retained)))
+    let formed = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let original = page_result(std.page.attach_cold(take formed))?
+    let mut edited = arc.share(original)
+    let mut next_stamp = 41u64
+    if !page_result(std.page.remove(mut edited, key_word(1), 0, mut next_stamp))? {
+        fail("L68: a fold delete must find a Cold BLOB row by key")
+    }
+    page_result(std.page.canonicalize(mut edited))?
+    let Some(ColdBlob(after)) = std.page.blob_slot(edited, 0) else {
+        fail("L68: the surviving BLOB was lost or forced")
+    }
+    let Some(ColdBlob(before)) = std.page.blob_slot(original, 1) else {
+        fail("L68: the earlier capture lost its BLOB")
+    }
+    let mut expected = retained
+    expected.body = 0
+    if before != retained || after != expected || std.page.totals(edited) != (1u64, 1110u64) {
+        fail("L68: fold did not preserve the surviving BLOB location and rebind its ordinal")
+    }
+    let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(id: u64) -> std.page.PagePtr {
+        fail("L68: Cold edges have no entry in the new pack's location table")
+    }
+    let sealed = sealed_tiered_root(edited, locate)?
+    let Some(ColdBlob(installed)) = std.page.blob_slot(sealed, 0) else {
+        fail("L68: sealing lost the retained BLOB")
+    }
+    if installed != expected {
+        fail("L68: sealing rewrote an unmodified Cold BLOB's location")
+    }
+    let child = std.page.PagePtr(pack: 8, offset: 72, len: 79, checksum: 103, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: child, rows: 1, charge: 1110))))
+    let parent = page_result(std.page.encode(branches, 1, 42, Collection))?
+    let root = page_result(std.page.attach_cold(take parent))?
+    let installed_root = sealed_tiered_root(root, locate)?
+    let Some(ColdPage(inherited)) = std.page.child_slot(installed_root, 0) else {
+        fail("L68: sealing lost a Cold child")
+    }
+    if inherited != child {
+        fail("L68: sealing changed an unmodified child PAGE location")
+    }
+    Ok(())
+}
+
+fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[PageTree, Error] {
+    let mut raw = l68_collection_map_wire()
+    list.copy_from_slice(mut raw, 33, std.page.encode_ptr(base))
+    list.set_word_le(mut raw, 69, 3u64)
+    list.set_word_le(mut raw, 77, 258u64)
+    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let mut slots: List[std.page.Slot] = list.new()
+    list.push(mut slots, ColdPage(base))
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    tree.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    Ok(take tree)
+}
+
+fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree,
+    key: Bytes) -> Result[Option[Bytes], Error] waits {
+    read_tiered_point(source, grant, root, tree, key, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
+        match raw {
+            Some(value) => Ok(Some(copied(value)?)),
+            None => Ok(None),
+        }
+    })
+}
+
+fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let grant = pager_reader_grant(source.pager, VALUE_LIMIT + 1048576)?
+    let mut tree = l62_replay_read_tree(base)?
+    let key = log_key(9, 1)?
+    let mut root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    for _ in 0u64 .. 2 {
+        let Some(value) = l62_read_point_bytes(source, grant, root, tree, key)? else {
+            fail("L62: cold and warm lookup must both find the row")
+        }
+        if list.compare_bytes(value, string.as_bytes("stored")) != Equal {
+            fail("L62: pager lookup changed the row")
+        }
+    }
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut ids = 101u64
+    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let put_op = JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, put_op)?
+    root.root_stamp = tree_stamp(tree)
+    let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
+    let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? else {
+        fail("L62: a replay put did not answer without the Cold inventory")
+    }
+    if list.compare_bytes(replayed, string.as_bytes("second")) != Equal {
+        fail("L62: a replay put did not take precedence over its base")
+    }
+    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?)? else {
+        fail("L62: an overlay skipped the Cold base for an untouched key")
+    }
+    if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
+        fail("L62: reading past an overlay changed a base row")
+    }
+    let deleted = JournalOp(key: clone(key), value: None, prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, deleted)?
+    root.root_stamp = tree_stamp(tree)
+    if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? {
+        fail("L62: a replay tombstone did not hide the base row")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = l79_fold_base(fixtures, owner)?
+    let width: u64 = int.widen(base.len)
+    let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 41, deadline: 0)
+    let checked = l62_read_replayed_point(source, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}
+
+fn l62_check_batch_error_order(source: TieredPageSource, owner: StoreId, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let tree = l62_replay_read_tree(base)?
+    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    let key = log_key(9, 1)?
+    // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
+    // header and two 2-byte slots. The 16-byte frame head makes 160.
+    let short = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 160))
+    let Error(Full(Cache(problem))) = l62_read_point_bytes(source, short, root, tree, key) else {
+        fail("L62: a batch tail error escaped the first-touch limit")
+    }
+    if problem.requested != 216 || problem.available != 160 {
+        fail("L62: the touch counts the missing child's 40 bytes and frame head")
+    }
+    let enough = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 216))
+    let Error(Corrupt(Fault(why: Dangling(48), ..))) = l62_read_point_bytes(source, enough, root, tree, key) else {
+        fail("L62: a failing edge that passes admission must report its fault")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let missing = std.page.PagePtr(pack: 7, offset: 72, len: 40, checksum: 11, stamp: 48)
+    let sibling = std.page.PagePtr(pack: 8, offset: 72, len: 40, checksum: 12, stamp: 49)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: missing, rows: 1, charge: 86))))
+    list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: sibling, rows: 1, charge: 86))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let base = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(image))?
+    let inventory = PagePack(class: 3, frames: 1, live: 144, payload_bytes: 260, index: 232)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 51, deadline: 0)
+    let checked = l62_check_batch_error_order(source, owner, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}
+
+@test
+fn test_l68_resident_images_ignore_cold_slots() -> Result[(), Error] {
+    let base = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 111, stamp: 40)
+    let mut roots = empty_roots()
+    roots.collections = l62_replay_read_tree(base)?
+    let mut retained: List[Roots] = list.with_capacity(2)
+    list.push(mut retained, share_roots(roots))
+    list.push(mut retained, share_roots(roots))
+    if resident_images(retained, None) != 91 || page_row_account(retained) != 126 {
+        fail("L68: shared collection map counts once and its Cold data is neither resident nor Memory")
+    }
+    let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(reference)))
+    let image = page_result(std.page.encode(rows, 0, 50, Collection))?
+    let page = page_result(std.page.attach_cold(take image))?
+    let mut seen: Map[u64, ()] = map.new()
+    // 24-byte header, 8-byte prefix, 45-byte BLOB entry, 2-byte slot.
+    if page_image_charge(page, mut seen) != 79 || map.contains(seen, 30u64) {
+        fail("L68: a Cold BLOB still consumes only the bytes of its resident leaf")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
+    let key = log_key(9, 1)?
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    let value = string.into_bytes(string.from("stored"))
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(take value)))
+    let first_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let first_ptr = std.page.PagePtr(pack: 8, offset: 72, len: 45, checksum: 111, stamp: 40)
+    let first_frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(first_ptr)), payload: TieredImage(page_result(std.page.attach_cold(take first_image))?)))
+    let mut before = l62_replay_read_tree(first_ptr)?
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut visible, (8, 72), take first_frame)
+    let initial = tiered_attempt(61, 0)
+    if tiered_plan_prior(initial, visible, before, key)? != 7 {
+        fail("L63: the first root's stored value is six bytes")
+    }
+
+    let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    list.clear(mut rows)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(reference)))
+    let moved_image = page_result(std.page.encode(rows, 0, 41, Collection))?
+    let moved_ptr = std.page.PagePtr(pack: 9, offset: 72, len: 79, checksum: 112, stamp: 41)
+    let moved_frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(moved_ptr)), payload: TieredImage(page_result(std.page.attach_cold(take moved_image))?)))
+    let mut moved = l62_replay_read_tree(moved_ptr)?
+    moved.root = std.page.copy_with_stamp(moved.root, 101)
+    map.insert(mut visible, (9, 72), take moved_frame)
+    let deciding = tiered_attempt(95, 0)
+    if tiered_plan_prior(deciding, visible, moved, key)? != 1026 || tiered_attempt_state(deciding).touched_bytes != 95 {
+        fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
+    }
+
+    let mut account = ReplayTieredAccount(total: 258, exact: false)
+    let mut ids = 102u64
+    let before_edit = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let new_bytes = string.into_bytes(string.from("second"))
+    let op = JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut before, mut ids, mut account, before_edit, op)?
+    let folded = tiered_attempt(0, 0)
+    let Error(Missed) = tiered_plan_prior(folded, visible, before, key) else {
+        fail("L63: a write tried to plan through an overlay")
+    }
+    if let Some(AttemptFold(9)) = tiered_attempt_state(folded).stopped {
+        if tiered_attempt_state(folded).touched_bytes == 0 {
+            return Ok(())
+        }
+    }
+    fail("L63: the fold demand must precede every touch")
+}
+
+@test
+fn test_l68_trim_preserves_untouched_cold_slots() -> Result[(), Error] {
+    let removed = std.page.BlobRef(stamp: 31, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let kept = std.page.BlobRef(stamp: 32, len: 1025, checksum: 102, pack: 7, offset: 1121, body: 1)
+    let mut rows: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(removed)))
+    list.push(mut rows, std.page.Entry(key: key_word(2), cell: BlobValue(kept)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let leaf = page_result(std.page.attach_cold(take leaf_image))?
+    let sibling = std.page.PagePtr(pack: 8, offset: 72, len: 45, checksum: 111, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: std.page.unlocated(40), rows: 2, charge: 2220))))
+    list.push(mut branches, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: sibling, rows: 1, charge: 86))))
+    let branch_image = page_result(std.page.encode(branches, 1, 42, Collection))?
+    let mut children: List[std.page.Slot] = list.with_capacity(2)
+    list.push(mut children, HotPage(arc.share(leaf)))
+    list.push(mut children, ColdPage(sibling))
+    let root = page_result(std.page.attach(take branch_image, take children, list.new()))?
+    let mut ids = 43u64
+    let trimmed = page_result(std.page.cut_before(root, key_word(2), mut ids))?
+    let Some(ColdPage(retained)) = std.page.child_slot(trimmed, 1) else {
+        fail("L68: trim loaded or dropped the right sibling")
+    }
+    let Some(HotPage(rewritten)) = std.page.child_slot(trimmed, 0) else {
+        fail("L68: trim lost the rewritten boundary leaf")
+    }
+    let Some(ColdBlob(retained_blob)) = std.page.blob_slot(rewritten, 0) else {
+        fail("L68: trim loaded or dropped the retained BLOB")
+    }
+    let mut expected_blob = kept
+    expected_blob.body = 0
+    if retained != sibling || retained_blob != expected_blob || std.page.totals(trimmed) != (2u64, 1196u64) {
+        fail("L68: trim changed the reference or charge of a surviving Cold slot")
+    }
+    Ok(())
+}
+
+@test
+fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
+    let owner = StoreId(hi: 3, lo: 4)
+    let value = arc.new(string.into_bytes(string.from("test")))
+    let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(stamp: u64) -> std.page.PagePtr {
+        fail("Tiered BLOB encoding does not resolve a child")
+    }
+    // The first frame costs 28 bytes. The worst-case index adds 28 bytes
+    // for its head and prefix and 41 per row, including both 12-byte keys.
+    let first = PackFrame(stamp: 31, size: 12, body: BlobBody(arc.share(value)))
+    let second = PackFrame(stamp: 32, size: 12, body: BlobBody(arc.share(value)))
+    let first_key = log_key(9, 1)?
+    let second_key = log_key(9, 2)?
+    let mut draft = begin_tiered_pack(owner, 7, 4, 237)?
+    let Some(_) = add_tiered_pack_frame(mut draft, first, 9, first_key, locate)? else {
+        fail("L68: the first BLOB did not fit")
+    }
+    if let Some(_) = add_tiered_pack_frame(mut draft, second, 9, second_key, locate)? {
+        fail("L68: pack admission used the front-coded size")
+    }
+    let (_, split) = finish_tiered_pack(take draft)?
+    if split.frames != 1 || split.index != 100 || split.live != 12 || split.payload_bytes != 169 {
+        fail("L68: a refused frame changed the pack")
+    }
+
+    let mut complete = begin_tiered_pack(owner, 8, 4, 238)?
+    let Some(left) = add_tiered_pack_frame(mut complete, first, 9, first_key, locate)? else {
+        fail("L68: the first indexed BLOB did not fit")
+    }
+    let Some(right) = add_tiered_pack_frame(mut complete, second, 9, second_key, locate)? else {
+        fail("L68: the second indexed BLOB should fit at its worst-case size")
+    }
+    let (take raw, pack) = finish_tiered_pack(take complete)?
+    let mut packed_frames: List[TieredEmitFrame] = list.with_capacity(2)
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: first.stamp, key: clone(first_key), frame: clone(first)))
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: second.stamp, key: clone(second_key), frame: clone(second)))
+    let layout = layout_tiered_packs(take packed_frames, 4, 8, 238)?
+    let expected_pack = planned_tiered_pack(layout, layout.packs[0u64])
+    if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 ||
+        expected_pack.index != 128 || expected_pack.live != 24 || expected_pack.frames != 2 || expected_pack.class != 4 {
+        fail("T4: the pack row must use the actual front-coded width before emission")
+    }
+    if left.offset != 72 || right.offset != 100 || pack.index != 128 || pack.payload_bytes != 227 || pack.live != 24 || pack.frames != 2 {
+        fail("L68: pack inventory did not describe the frames and full object")
+    }
+    let context = DiskContext(store: owner, role: 3, seq: 8)
+    let trailer = disk_frame_bytes("p-8", context, raw, pack.index)?
+    if trailer.kind != PACK_INDEX_KIND || trailer.end != 227 {
+        fail("L68: pack did not finish with its authenticated index")
+    }
+    let payload = list.slice(raw, trailer.payload, trailer.end)
+    let (prior_offset, take index_start) = start_pack_index("p-8", pack.index, payload, 0)?
+    let mut cursor = take index_start
+    let Some(take indexed_first) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+        fail("L68: probing one row must yield the first index key")
+    }
+    if prior_offset != 0 || indexed_first.offset != 72 || cursor.remaining != 1 || indexed_first.key != first_key {
+        fail("L68: a partial index read must preserve the cursor at the second BLOB")
+    }
+    let Some(take indexed_second) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+        fail("L68: the cursor must resume the front-coded key")
+    }
+    if indexed_second.offset != 100 || indexed_second.key != second_key || cursor.remaining != 0 {
+        fail("L68: index resume must recover the second BLOB's full key")
+    }
+    let mut last_offset = 0u64
+    let decoded_index = decode_pack_index("p-8", pack.index, payload, mut last_offset)?
+    if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key ||
+        decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
+        fail("L68: the index did not describe the second BLOB")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_branch_split_reuses_cold_divider() -> Result[(), Error] {
+    let mut value: Bytes = list.with_capacity(1000)
+    list.fill(mut value, 1000, 106u8)
+    let mut rows: List[std.page.Entry] = list.with_capacity(4)
+    for key in 70u64 .. 74 {
+        list.push(mut rows, std.page.Entry(key: key_word(key), cell: InlineValue(clone(value))))
+    }
+    let leaf_image = page_result(std.page.encode(rows, 0, 71, Collection))?
+    let leaf = page_result(std.page.attach(take leaf_image, list.new(), list.new()))?
+    let mut branches: List[std.page.Entry] = list.with_capacity(71)
+    let mut children: List[std.page.Slot] = list.with_capacity(71)
+    for slot in 0u64 .. 70 {
+        let ptr = std.page.PagePtr(pack: 8, offset: 72 + 61 * slot, len: 45, checksum: 11, stamp: slot + 1)
+        let divider: Bytes = if slot == 0 { list.new() } else { key_word(slot) }
+        list.push(mut children, ColdPage(ptr))
+        list.push(mut branches, std.page.Entry(key: take divider, cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 86))))
+    }
+    list.push(mut children, HotPage(arc.share(leaf)))
+    list.push(mut branches, std.page.Entry(key: key_word(70), cell: Child(std.page.Branch(child: std.page.unlocated(71), rows: 4, charge: 4312))))
+    let branch_image = page_result(std.page.encode(branches, 1, 72, Collection))?
+    let mut root = page_result(std.page.attach(take branch_image, take children, list.new()))?
+    let mut ids = 73u64
+    // The append splits the 4,059-byte rightmost leaf, then overflows
+    // the 4,077-byte branch. AP3 puts its last two children to the right.
+    page_result(std.page.append_row(mut root, key_word(74), value, None, 1024, 73, mut ids))?
+    let top = std.page.image_of(root)
+    if std.page.level(top) != 2 || std.page.key_at(top, 1) != Some(key_word(70)) {
+        fail("L63: the branch must give its parent the existing divider at slot 70")
+    }
+    let Some(HotPage(left)) = std.page.child_slot(root, 0) else {
+        fail("L63: split did not build the new left branch")
+    }
+    let Some(ColdPage(last_untouched)) = std.page.child_slot(left, 69) else {
+        fail("L63: split forced the Cold child before the divider")
+    }
+    if last_untouched.stamp != 70 || last_untouched.offset != 4281 || std.page.totals(root) != (75u64, 11410u64) {
+        fail("L63: split changed the untouched edge or the collection totals")
+    }
+    let Some(added) = std.page.lookup(root, key_word(74)) else {
+        fail("L63: the new divider does not route the appended key")
+    }
+    if added != value {
+        fail("L63: split changed the appended value")
+    }
+    Ok(())
+}
+
+@test
+fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] {
+    let raw = l68_collection_map_wire()
+    let image = page_result(std.page.decode(clone(raw), CollectionMap))?
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, ColdPage(ptr))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take children, list.new()))?
+    let mut held_roots: List[Roots] = list.with_capacity(1)
+    list.push(mut held_roots, share_roots(roots))
+    let mut holders: List[HeldPage] = list.with_capacity(3)
+    note_held_roots(mut holders, 0, 0, roots)
+
+    let mut installed = new_page_locations()
+    let cold = PagePack(class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
+    capacity(disk_index_put(mut installed.packs, 8, cold, pack_edge_charge))?
+    let base = page_retry_base(installed, map.new(), holders, held_roots)?
+    if base.account != 126 || map_has_location(base.locations, 40) {
+        fail("L68: a Tiered root entered the Memory location table or account")
+    }
+    let mut ids = 101u64
+    let mut cut_plan = plan_page_cut(base, holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
+    if list.len(cut_plan.data_pages.frames) != 1 || list.len(cut_plan.blobs.frames) != 0 || list.len(cut_plan.lists.removals) != 0 {
+        fail("L68: a Memory cut tried to re-emit or retire a Tiered frame")
+    }
+    let Some(kept) = std.page.lookup(cut_plan.lists.roots.packs, key_word(8)) else {
+        fail("L68: a Tiered pack retired without a probe")
+    }
+    if list.len(kept) != 29 || kept[0u64] != 3 || read_le(kept, 5, 8) != 0 || read_le(kept, 13, 8) != 220 || read_le(kept, 21, 8) != 168 {
+        fail("L68: cut changed the Tiered pack inventory")
+    }
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut output: Bytes = list.with_capacity(179)
+    encode_pack(owner, cut_plan.data_pages, cut_plan.data_pages.packs[0u64], mut cut_plan.locations, mut output)?
+    if list.len(output) != 179 || list.slice(output, 88, 179) != raw {
+        fail("L68: the emitted Memory map did not retain the Cold pointer")
+    }
+    Ok(())
+}
+
+@test
+fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let value = string.into_bytes(string.from("stored"))
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: list.new(), cell: InlineValue(clone(value))))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let leaf = page_result(std.page.attach(take leaf_image, list.new(), list.new()))?
+    let mut map_wire = l68_collection_map_wire()
+    list.copy_from_slice(mut map_wire, 33, std.page.encode_ptr(std.page.unlocated(40)))
+    let image = page_result(std.page.decode(take map_wire, CollectionMap))?
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, HotPage(arc.share(leaf)))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take children, list.new()))?
+    let capture = share_roots(roots)
+
+    let id = prefix(9)?
+    let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
+    let frame = PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
+    let Some(place) = add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
+        fail("L68: an inline leaf does not resolve a child")
+    })? else {
+        fail("L68: the first PAGE must fit")
+    }
+    let (take payload_bytes, inventory) = finish_tiered_pack(take draft)?
+    let mut ids = 101u64
+    page_result(std.page.install_tiered_root(mut roots.collections.root, id, ColdPage(place), mut ids))?
+    let Some((HotPage(old_leaf), _)) = std.page.collection_slot(capture.collections.root, id) else {
+        fail("L68: install changed the earlier capture")
+    }
+    let Some(old_value) = std.page.lookup(old_leaf, list.new()) else {
+        fail("L68: earlier capture lost its row")
+    }
+    if old_value != value || tree_stamp(roots.collections) != 101 {
+        fail("L68: install changed the prior leaf or failed to restamp the new map")
+    }
+
+    let mut held_roots: List[Roots] = list.with_capacity(1)
+    list.push(mut held_roots, share_roots(roots))
+    let mut holders: List[HeldPage] = list.with_capacity(3)
+    note_held_roots(mut holders, 0, 0, roots)
+    let mut installed = new_page_locations()
+    capacity(disk_index_put(mut installed.packs, 8, inventory, pack_edge_charge))?
+    let base = page_retry_base(installed, map.new(), holders, held_roots)?
+    let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut buffers = cut_output_buffers(cut_plan, 1048576, 1048576)?
+    let layout = write_page_cut(fixtures, owner, take cut_plan, mut buffers)?
+    let mut manifest = page_manifest_empty()
+    manifest.next_pack = layout.lists.run_packs.next_pack
+    manifest.next_stamp = ids
+    manifest.next_table = 10
+    manifest.account_memory = 126
+    manifest.account_tiered = 78
+    manifest.pack_root = published_tree_pointer(layout.locations, layout.lists.roots.packs)
+    manifest.branches[0u64].roots = published_page_roots(layout.locations, roots)
+    let manifest_wire = disk_page_manifest_bytes(owner, manifest)?
+    let (_, take opened_manifest) = disk_read_page_manifest("MANIFEST", manifest_wire)?
+    // p-8 is absent: the metadata walk must read only the map and pack list.
+    let validated = validate_directory_graph(fixtures, owner, take opened_manifest, true)?
+    let loaded = rebuild_page_store(take validated, None)?
+    let Some((ColdPage(found), descriptor)) = std.page.collection_slot(loaded.holders[0u64].collections.root, id) else {
+        fail("L68: recovery lost the installed Cold slot")
+    }
+    if found != place || place.offset != 72 || place.len != 37 || inventory.index != 125 || inventory.payload_bytes != 186 ||
+        read_le(descriptor, 44, 8) != 78 {
+        fail("L68: the reopened descriptor or pack extent differs from the cut")
+    }
+    let verified = read_tiered_frame("p-8", owner, TieredPage(found), payload_bytes, 0, ids)?
+    let TieredImage(ready) = view verified.payload else {
+        fail("L68: the installed pointer must resolve to a PAGE")
+    }
+    let Some(disk_value) = std.page.lookup(ready, list.new()) else {
+        fail("L68: the installed pointer does not resolve to the cut's row")
+    }
+    if disk_value != value {
+        fail("L68: the installed pointer does not resolve to the cut's row")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 111, stamp: 40)
+    let mut descriptor = collection_header(40, 3, 258, 4, 1)?
+    list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
+    list.put_word_le(mut descriptor, 4u64)
+    list.put_word_le(mut descriptor, 1u64)
+    let id = prefix(9)?
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: clone(id), cell: InlineValue(take descriptor)))
+    let image = page_result(std.page.encode(rows, 0, 100, CollectionMap))?
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, ColdPage(base))
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    tree.root = page_result(std.page.attach(take image, take children, list.new()))?
+
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut ids = 101u64
+    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 1, next: 4)))
+    let trim = JournalOp(key: take id, value: None, prior: 0, trim: Some(JournalTrim(floor: 2, dropped: 86)))
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, trim)?;
+
+    // There is no pager to answer. The former first row is in the base but
+    // the new descriptor masks it. A retained row still needs the pager.
+    let (requests, receiver): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(1)
+    let _ = take receiver
+    let source = TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
+    let grant = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
+    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 1)?) else {
+        fail("L62: a trimmed row must not reach the Cold base")
+    }
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 4)?) else {
+        fail("L62: a key at next_seq must not reach the Cold base")
+    }
+    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?) else {
+        fail("L62: masking bypassed the Cold base inside the Log bounds")
+    }
+    Ok(())
+}
+
+@test
+fn test_l70_pager_admits_cache_backing(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let owner = StoreId(hi: 3, lo: 4)
+    let funding = TieredPagerFunding(cache_bytes: 12 * 1048576, writer_pin_bytes: 4 * 1048576, pager_task_bytes: 65536, cut_pins: false)
+    let short = capacity(bound bytes 1048576 {
+        start_tiered_pager(tasks, owner, 1, PagerDirectory(d), funding, 1)
+    })?
+    let Error(Full(Allocation(problem))) = take short else {
+        fail("L70: the pager started without backing its cache")
+    }
+    // 12 MiB (both partitions) plus 64 KiB of task state and MEM-24's
+    // 288-byte Task[()] charge. The request channel has its own payer.
+    if problem.requested != 12648736 || problem.available > 1048576 {
+        fail("L70: pager startup reported the wrong physical reservation")
+    }
+    let funded = capacity(bound bytes 12652544 {
+        start_tiered_pager(tasks, owner, 1, PagerDirectory(d), funding, 1)
+    })?
+    let (take requests, take worker) = funded?
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
+    Ok(())
+}
+
+fn l63_edit_leaf(first_key: u64, n: u64, widths: (u64, u64), stamp: u64) -> Result[Arc[std.page.Page], Error] {
+    let mut rows: List[std.page.Entry] = list.with_capacity(n)
+    for offset in 0u64 .. n {
+        let width = if offset == 0 { widths.0 } else { widths.1 }
+        let mut bytes_out: Bytes = list.with_capacity(width)
+        list.fill(mut bytes_out, width, 111u8)
+        list.push(mut rows, std.page.Entry(key: key_word(first_key + offset), cell: InlineValue(take bytes_out)))
+    }
+    let image = page_result(std.page.encode(rows, 0, stamp, Collection))?
+    page_result(std.page.attach(take image, list.new(), list.new()))
+}
+
+@test
+fn test_l63_resolved_edits_follow_candidate_neighbors() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(10, 3, (1000u64, 32u64), 40)?
+    let middle_leaf = l63_edit_leaf(20, 1, (32u64, 32u64), 41)?
+    let right_leaf = l63_edit_leaf(30, 4, (1005u64, 1005u64), 42)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 1116, checksum: 11, stamp: 40)
+    let middle = std.page.PagePtr(pack: 8, offset: 1204, len: 71, checksum: 12, stamp: 41)
+    let right = std.page.PagePtr(pack: 8, offset: 1291, len: 4079, checksum: 13, stamp: 42)
+    let mut branches: List[std.page.Entry] = list.with_capacity(3)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 1298))))
+    list.push(mut branches, std.page.Entry(key: key_word(20), cell: Child(std.page.Branch(child: middle, rows: 1, charge: 110))))
+    list.push(mut branches, std.page.Entry(key: key_word(30), cell: Child(std.page.Branch(child: right, rows: 4, charge: 4344))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let mut root = page_result(std.page.attach_cold(take image))?
+    let blank = std.page.empty(0, 0, Collection)
+    let mut ids = 51u64
+    let removed_large = page_result(std.page.remove_resolved(mut root, key_word(10), blank, 51, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place == left {
+            Ok(arc.share(left_leaf))
+        } else if place == middle {
+            Ok(arc.share(middle_leaf))
+        } else {
+            fail("L63: first edit needs only B and C")
+        }
+    }))?
+    if !removed_large || std.page.count(std.page.image_of(root)) != 2 {
+        fail("L63: removing the wide row must merge B with C")
+    }
+    let mut calls = 0u64
+    let removed_small = page_result(std.page.remove_resolved(mut root, key_word(11), blank, 51, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place != right {
+            fail("L63: the merged page has just one Cold neighbor")
+        }
+        calls += 1
+        Ok(arc.share(right_leaf))
+    }))?
+    {
+        let Some(ColdPage(inherited)) = std.page.child_slot(root, 1) else {
+            fail("L63: checking a neighbor must keep its Cold slot intact")
+        }
+        if !removed_small || calls != 1 || inherited != right || std.page.totals(root) != (6u64, 4564u64) {
+            fail("L63: the second edit must consult D and keep its slot")
+        }
+    }
+    let value = arc.new(string.into_bytes(string.from("stored")))
+    page_result(std.page.insert_shared_resolved(mut root, key_word(30), value, 1024, 51, false, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place != right {
+            fail("L63: this update only replaces D")
+        }
+        Ok(arc.share(right_leaf))
+    }))?
+    let Some(stored) = std.page.lookup(root, key_word(30)) else {
+        fail("L63: update did not expose the edited row")
+    }
+    if list.compare_bytes(stored, value) != Equal || std.page.totals(root) != (6u64, 3564u64) {
+        fail("L63: update changed the count or the wrong charge")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(10, 3, (1000u64, 32u64), 40)?
+    let right_leaf = l63_edit_leaf(20, 1, (32u64, 32u64), 41)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 1116, checksum: 11, stamp: 40)
+    let right = std.page.PagePtr(pack: 8, offset: 1204, len: 71, checksum: 12, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 1298))))
+    list.push(mut branches, std.page.Entry(key: key_word(20), cell: Child(std.page.Branch(child: right, rows: 1, charge: 110))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let base = page_result(std.page.attach_cold(take image))?
+    let target: std.page.Slot = HotPage(arc.share(base))
+    let empty_root = std.page.empty(0, 0, Collection)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let first = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
+    map.insert(mut visible, (8u64, 72u64), take first)
+    let attempted = tiered_attempt(1379, 0)
+    let mut ids = 51u64
+    let Error(Missed) = stage_tiered_row(attempted, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids) else {
+        fail("L63: editing without a required sibling must latch a miss")
+    }
+    let Some(AttemptMiss(TieredPage(requested))) = tiered_attempt_state(attempted).stopped else {
+        fail("L63: missing edit sibling did not become the attempt's demand")
+    }
+    // 160 bytes for the branch and 1,132 and 87 bytes for its leaves.
+    if requested != right || tiered_attempt_state(attempted).touched_bytes != 1379 || ids != 51 || std.page.totals(base) != (4u64, 1408u64) {
+        fail("L63: the missed edit changed the base or counted its path incorrectly")
+    }
+    let second = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(right)), payload: TieredImage(arc.share(right_leaf))))
+    map.insert(mut visible, (8u64, 1204u64), take second)
+    let retry = tiered_attempt(1379, 0)
+    let ready = stage_tiered_row(retry, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
+    if tiered_attempt_state(retry).touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) ||
+        std.page.totals(base) != (4u64, 1408u64) {
+        fail("L63: the retry must apply once and keep its base intact")
+    }
+    Ok(())
+}
+
+@test
+fn test_l79_pinned_trim_records_boundary_charge() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(1, 2, (6u64, 6u64), 40)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 59, checksum: 11, stamp: 40)
+    let right = std.page.PagePtr(pack: 8, offset: 147, len: 59, checksum: 12, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 2, charge: 172))))
+    list.push(mut branches, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: right, rows: 2, charge: 172))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let root = page_result(std.page.attach_cold(take image))?
+    let target: std.page.Slot = HotPage(arc.share(root))
+    let empty_root = std.page.empty(0, 0, Collection)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let supplied = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
+    map.insert(mut visible, (8u64, 72u64), take supplied)
+    let mut ids = 51u64
+    let limits = LogBounds(first: 1, next: 5)
+    let attempt = tiered_attempt(235, 0)
+    let (take ready, dropped) = stage_tiered_trim(attempt, visible, target, empty_root, limits, 344, 2, mut ids)?
+    let Some(ColdPage(retained)) = std.page.child_slot(ready, 1) else {
+        fail("L79: trim loaded a retained subtree beyond the boundary")
+    }
+    if dropped != 86 || retained != right || tiered_attempt_state(attempt).touched_bytes != 235 || std.page.totals(ready) != (3u64, 258u64) {
+        fail("L79: trim must charge the removed row from its two pinned pages")
+    }
+    let all_rows = tiered_attempt(0, 0)
+    let stamp_before = ids
+    let (take empty, all_dropped) = stage_tiered_trim(all_rows, visible, target, empty_root, limits, 344, 8, mut ids)?
+    if all_dropped != 344 || tiered_attempt_state(all_rows).touched_bytes != 0 || ids != stamp_before || std.page.totals(empty) != (0u64, 0u64) {
+        fail("L79: trim past next_seq uses the descriptor's charge without paging")
+    }
+    Ok(())
+}

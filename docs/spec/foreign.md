@@ -548,7 +548,8 @@ been issued, its own package's releases included. So four issued calls never wai
 fifth, and the queue always moves. A package whose native library needs one call to wait for
 another unissued one, such as a lock released only by a later call, cannot be audited for v1.
 SQLite meets it: two calls on one connection wait only for each other's issued C on the
-connection's mutex, its busy handler never sleeps, and its file locks never block (slice 2).
+connection's mutex, it has no busy handler, its only sleep is the finite WAL read retry on
+the Directory VFS, and its file locks never block (slice 2).
 While a helper runs, the other tasks keep running. **Shutdown with a call in flight**: a run
 ends only after its tasks end, and a task parked in a `waits` call ends only after delivery.
 Its own cancellation and cleanup wait for C as well
@@ -623,8 +624,9 @@ The domain `hirsel.code-foreign.v1` is added by this chapter.
 ## The `sqlite` package
 
 The acceptance consumer is the package `sqlite@1`, at `core/programs/sqlite`. Its foreign
-module `native` binds an **adapter**. This is one C file, `hirsel_sqlite.c`, compiled together
-with the SQLite amalgamation into one static archive per target. The adapter is the audited
+module `native` binds an **adapter**. This is the C file `hirsel_sqlite.c`, with its OS layer
+(the mutexes and the memory VFS) in `hirsel_sqlite_os.c` and `hirsel_sqlite_os.h`, compiled
+together with the SQLite amalgamation into one static archive per target. The adapter is the audited
 code: it calls the SQLite API and gives each call the FFI-5 shape. The interface is
 `pub opaque type Sqlite {}` in module `sqlite`, and the kinds are `DbHandle` and `StmtHandle`
 there. The first archive row is `x86_64-unknown-linux-gnu`.
@@ -645,14 +647,20 @@ steps, and the pinned archive:
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME
   -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1`, and no other
   `SQLITE_` option and no extension.
-- **Steps.** For each of `sqlite3.c` and `hirsel_sqlite.c`: `clang --target=T -std=c11 -O2
+- **Steps.** For each of `sqlite3.c`, `hirsel_sqlite.c` and `hirsel_sqlite_os.c`: `clang --target=T -std=c11 -O2
   -fPIC -fno-ident -ffile-prefix-map=$PWD=. OPTIONS -c F.c -o F.o`. Then `ld.lld -r sqlite3.o
-  hirsel_sqlite.o -o hsq.o`; `llvm-objcopy --wildcard --keep-global-symbol='hsq_*' hsq.o`,
+  hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o`; `llvm-objcopy --wildcard --keep-global-symbol='hsq_*' hsq.o`,
   which makes every SQLite symbol local so the one member's global definitions all carry the
   prefix (FFI-3); and `llvm-ar rcs libhirsel_sqlite.a hsq.o`, which writes no timestamps or
   owners. The build is byte-reproducible: two runs give one SHA-256, and the pin is that
   digest. The adapter includes the header that `hirsel inspect --foreign-header
   sqlite@1/native` prints, and expands `HIRSEL_ABI_TEXT` once (FFI-3).
+- **Native laws.** `build.sh --test DIR` builds no archive: it links `native_laws.c` against
+  the checked-in archive, with the SQLite symbols the laws call made global again and `fcntl`
+  wrapped to time a peer's release, and runs it in a fresh directory under `DIR`. Its cases
+  are the `-shm` allocation law (it needs `DIR` on a filesystem with 32 to 64 KiB free, such
+  as a `tmpfs` mounted with `size=64k`), the three dead-man opener cases, the trusted-schema
+  and persistent-prepare settings, `POWERSAFE_OVERWRITE` clear, and the two `xSleep`s.
 
 `SQLITE_THREADSAFE=1` (serialized) is chosen because tasks move between threads, helpers are
 threads, and a statement and its connection are separate handles that two tasks may use at
@@ -680,19 +688,28 @@ and `sqlite3_os_end`, and it registers its VFSes itself. SQLite gets no ambient 
   function gives `NULL`. `SQLITE_OMIT_LOCALTIME` removes the `localtime` and `utc` modifiers,
   which would read the host's time zone through libc, so they give `NULL` too. A program that
   needs the time binds a value from `Clock`.
-- `xSleep` returns at once, having slept 0 microseconds, and no busy handler is installed, so
-  a busy database returns `SQLITE_BUSY` at once.
+- No busy handler is installed, so a busy database returns `SQLITE_BUSY` at once. The memory
+  VFS's `xSleep` returns at once, having slept 0 microseconds. The Directory VFS's `xSleep`
+  (slice 2) sleeps the requested microseconds with `nanosleep` and returns them: its only
+  caller is SQLite's finite WAL read retry, whose delays total under 10 seconds before it
+  returns `SQLITE_PROTOCOL`, and it runs on the call's helper thread, never a scheduler
+  thread. File locks stay nonblocking.
 - `xDlOpen` and the other loader hooks are null.
 - **The authorizer.** Right after a connection opens, the adapter installs, with
   `sqlite3_set_authorizer`, an authorizer that returns `SQLITE_DENY` for `SQLITE_ATTACH` and
   `SQLITE_DETACH` whatever their arguments, and for `SQLITE_PRAGMA` whose name is, in any
   case, `temp_store_directory`, `data_store_directory`, `soft_heap_limit` or
-  `hard_heap_limit`, the pragmas that read or change process globals; it allows everything
-  else. If installing it fails, the open closes the connection and fails with that code. A
+  `hard_heap_limit`, the pragmas that read or change process globals, and for
+  `busy_timeout` with a value, which would install a sleeping busy handler (reading it is
+  allowed); it allows everything else. If installing it fails, the open closes the connection and fails with that code. A
   computed attach name is denied too. `VACUUM` and `VACUUM INTO` attach a database internally
   through the same authorizer, so both fail with `SQLITE_AUTH` (23) when they are stepped. The
   null-name files SQLite opens are the adapter's in-memory files and never read
   `sqlite3_temp_directory`.
+- **Untrusted schema.** Every open, in memory or in a `Dir`, then sets
+  `SQLITE_DBCONFIG_TRUSTED_SCHEMA` to 0 and reads it back; if the call fails or the value is
+  not 0, the open closes the connection and fails, so a database file's schema cannot run
+  functions or virtual tables that are not marked innocuous.
 
 **The control record.** A `DbHandle`'s pointer is the adapter's control record, not the
 `sqlite3 *`: it holds the connection, a reference count and, in slice 2, the connection's VFS
@@ -789,7 +806,9 @@ pub fn errstr(f: Foreign[sqlite.Sqlite], code: i32, mut e: Bytes)
   loops `sqlite3_prepare_v3(db, p, n, 0, &st, &tail)` over the remaining bytes: it steps each
   statement to `SQLITE_DONE`, finalizes it, and goes on from `tail` until no bytes remain; a
   null statement, from whitespace or comments, is skipped. The first error ends the loop with
-  its code. `prepare` prepares the first statement the same way and then prepares the rest:
+  its code. `prepare` prepares the first statement the same way, but with
+  `SQLITE_PREPARE_PERSISTENT`, since the statement it returns is held and reused, and then
+  prepares the rest:
   if the rest is not empty of statements, it finalizes both and fails with
   `SqliteError(code: 1, message: "sqlite: prepare takes one statement")`. A `sql` with no
   statement at all fails with `SqliteError(code: 1, message: "sqlite: no statement")`, so
@@ -928,10 +947,19 @@ its WAL and its `-shm`. Temporary files never reach a directory.
 - **WAL index.** Each connection opens the `-shm` of its leaf under the same root through
   `openat2`, maps each region it is asked for with `MAP_SHARED`, and locks with `F_OFD_SETLK`
   on its own descriptor over SQLite's shm lock slots, so two connections, in one process or
-  two, see one WAL index and exclude each other. The first opener is the one whose exclusive
-  OFD lock on the dead-man byte (offset 128 of the `-shm` file, as SQLite's Unix VFS uses)
-  succeeds: it truncates the file to zero, so a stale index from a crash is never read, and
-  then holds the byte shared, as every other opener does. `xShmBarrier` is a sequentially
+  two, see one WAL index and exclude each other. An opener first queries the dead-man byte
+  (offset 128 of the `-shm` file, as SQLite's Unix VFS uses) with `F_OFD_GETLK`, as SQLite's
+  `unixLockSharedMemory` does. If another descriptor holds it shared, the opener is admitted
+  without truncating. If one holds it exclusive, the open gives `SQLITE_BUSY`, because that
+  first opener may have died before its truncation finished, and SQLite retries. If it is
+  free, the opener takes it exclusive (`SQLITE_BUSY` if it loses that race) and truncates the
+  file to zero, so a stale index from a crash is never read. Every admitted opener then holds
+  the byte shared. To extend the file for a new region, the adapter writes the last byte of
+  each new 4096-byte page, as SQLite's Unix VFS does, never `ftruncate`, so the file's size
+  never runs ahead of the pages written: a full disk gives `SQLITE_IOERR_SHMSIZE` there, before
+  the region is mapped, rather than `SIGBUS` on a later store. Like SQLite's, this does not
+  make every later fault of the mapping impossible. `xDeviceCharacteristics` reports 0, so
+  `SQLITE_IOCAP_POWERSAFE_OVERWRITE` stays clear for an arbitrary granted directory. `xShmBarrier` is a sequentially
   consistent fence. `xShmUnmap` unmaps, closes, and with its delete flag, which SQLite passes
   only when this connection is the last one, removes the `-shm` with `unlinkat` on the root.
 - **Durability.** A commit is durable as SQLite's own contract makes it, over `xSync` that

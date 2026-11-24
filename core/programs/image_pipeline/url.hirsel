@@ -1,0 +1,136 @@
+pub opaque type SignedTransform {
+    source: Inline[u8, 32],
+    transform: Transform
+}
+
+fn append_digest(mut out: Bytes, digest: Inline[u8, 32]) {
+    for i in 0u64 .. 32 {
+        list.push(mut out, digest[i])
+    }
+}
+
+fn transform_payload(source: Inline[u8, 32], transform: Transform) -> Bytes {
+    let mut out: Bytes = list.with_capacity(78)
+    let crop_flag = if let Some(_) = transform.crop {
+        1u8
+    } else {
+        0u8
+    }
+    let pad_flag = if let Some(_) = transform.pad {
+        2u8
+    } else {
+        0u8
+    }
+    list.push(mut out, 1)
+    list.push(mut out, crop_flag | pad_flag)
+    append_digest(mut out, source)
+    list.put_word_be(mut out, transform.width)
+    list.put_word_be(mut out, transform.height)
+    if let Some(rect) = transform.crop {
+        list.put_word_be(mut out, rect.x)
+        list.put_word_be(mut out, rect.y)
+        list.put_word_be(mut out, rect.width)
+        list.put_word_be(mut out, rect.height)
+    }
+    if let Some(pad) = transform.pad {
+        list.put_word_be(mut out, pad.width)
+        list.put_word_be(mut out, pad.height)
+        list.put_word_be(mut out, pad.x)
+        list.put_word_be(mut out, pad.y)
+        list.put_word_be(mut out, pad.rgba)
+    }
+    take out
+}
+
+fn parse_payload(payload: Bytes) -> Result[SignedTransform, PipelineError] {
+    let n = list.len(payload)
+    if n < 42 || payload[0] != 1 || payload[1] > 3 {
+        return Error(PipelineSignature)
+    }
+    let flags = payload[1]
+    let crop_length: u64 = if flags & 1 != 0 {
+        16
+    } else {
+        0
+    }
+    let pad_length: u64 = if flags & 2 != 0 {
+        20
+    } else {
+        0
+    }
+    if n != 42 + crop_length + pad_length {
+        return Error(PipelineSignature)
+    }
+    let mut source: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        source[i] = payload[2 + i]
+    }
+    let width: u32 = list.word_be(payload, 34)
+    let height: u32 = list.word_be(payload, 38)
+    let crop = if crop_length > 0 {
+        Some(image_core.image.Rect(x: list.word_be(payload, 42), y: list.word_be(payload, 46), width: list.word_be(payload, 50), height: list.word_be(payload, 54)))
+    } else {
+        None
+    }
+    let pad = if pad_length > 0 {
+        let start = 42 + crop_length
+        Some(Padding(width: list.word_be(payload, start), height: list.word_be(payload, start + 4), x: list.word_be(payload, start + 8), y: list.word_be(payload, start + 12), rgba: list.word_be(payload, start + 16)))
+    } else {
+        None
+    }
+    Ok(SignedTransform(source: source, transform: Transform(width: width, height: height, crop: crop, pad: pad)))
+}
+
+/// The URL path is /<base64url tag>/<base64url payload>. Use a dedicated
+/// secret. The full 32-byte tag covers the path after the signature segment,
+/// including its slash. The payload binds the transform to the source SHA-256.
+pub fn sign_url(key: Secret, source: Inline[u8, 32], transform: Transform) -> Result[String, PipelineError] {
+    let payload = transform_payload(source, transform)
+    let token = std.base64.encode_url(payload, false)
+    let mut message = string.from("/")
+    string.push(mut message, token)
+    let Ok(tag) = secret.hmac_sha256(key, string.as_bytes(message)) else {
+        return Error(PipelineSignature)
+    }
+    let mut raw: Bytes = list.with_capacity(32)
+    append_digest(mut raw, tag)
+    let mut path = string.from("/")
+    string.push(mut path, std.base64.encode_url(raw, false))
+    string.push(mut path, message)
+    Ok(take path)
+}
+
+pub fn verify_url(key: Secret, path: String) -> Result[SignedTransform, PipelineError] {
+    let content = string.as_bytes(path)
+    let n = list.len(content)
+    // 43 unpadded tag characters and up to 104 payload characters.
+    if n < 46 || n > 149 || content[0] != b'/' || content[44] != b'/' {
+        return Error(PipelineSignature)
+    }
+    let Some(tag) = std.base64.decode_url(list.slice(content, 1, 44), false) else {
+        return Error(PipelineSignature)
+    }
+    let Ok(true) = secret.verify_hmac_sha256(key, list.slice(content, 44, n), tag) else {
+        return Error(PipelineSignature)
+    }
+    let Some(payload) = std.base64.decode_url(list.slice(content, 45, n), false) else {
+        return Error(PipelineSignature)
+    }
+    parse_payload(payload)
+}
+
+fn verify_source(request: SignedTransform, input: Bytes, limits: image_core.image.Limits) -> Result[(), PipelineError] {
+    if list.len(input) > limits.max_bytes {
+        return Error(PipelineImage(ByteLimit))
+    }
+    if request.source != std.sha256.hash(input) {
+        return Error(PipelineSignature)
+    }
+    Ok(())
+}
+
+pub fn render_signed(codecs: Codecs, key: Secret, path: String, take input: Bytes, accept: Bytes, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[ResultImage, PipelineError] waits {
+    let request = verify_url(key, path)?
+    verify_source(request, input, limits)?
+    render(codecs, take input, request.transform, accept, limits, max_native_bytes)
+}

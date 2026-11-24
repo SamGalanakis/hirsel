@@ -2,11 +2,11 @@
 // built from a sealed cutoff's entries.
 type Shown = Text(String) | Absent | Kept
 
-fn render(tx: store.Tx, sec: Section, l: Limits) -> Shown {
+fn render[App: inert + send](tx: store.Tx, h: Handles, app: App, sec: Section[App], l: Limits) -> Shown {
     let go = code.callable(sec.render)
     let ran = bound bytes l.section_bytes {
         bound steps l.section_steps {
-            go(tx)
+            go(tx, h, app)
         }
     }
     match take ran {
@@ -29,24 +29,97 @@ fn hash_of(list: List[SectionHash], key: String) -> Option[Bytes] {
     None
 }
 
-fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result[List[ToolDef], Refused] {
+const TOOL_SEARCH: String = "tool_search"
+
+fn search_tool[G: send, App: inert + send]() -> Tool[G, App] {
+    inside(TOOL_SEARCH, "Search the MCP tool catalog and offer matching tools in the next request.", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", code.describe(tool_search))
+}
+
+fn tool_search[App: inert + send](mut tx: store.Tx, h: Handles, app: App, inv: Invoke) -> Result[Reply, Fault] {
+    let Ok(args) = string.from_utf8(clone(inv.args)) else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let Ok(fields) = mcp.rpc.object(args) else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let Some(query) = mcp.rpc.field_text(fields, "query") else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let mut s = session_of(tx, h) ?=> |_| Unavailable
+    let mut names: List[String] = list.new()
+    let mut texts: List[String] = list.new()
+    {
+        let mut rows = store.range(tx, h.mcp_catalog, Unbounded, Unbounded) ?=> |_| Unavailable
+        while let Some((take name, r)) = store.next_in(tx, mut rows) ?=> |_| Unavailable {
+            if narrowed(s, name) {
+                list.push(mut names, take name)
+                list.push(mut texts, string.from(mcp_tools.about(r)))
+            }
+        }
+    }
+    let mut matches: List[String] = list.new()
+    let old_end = list.len(s.admitted)
+    let mut admitted: std.set.Set[String] = std.set.new()
+    for name in s.admitted {
+        let _ = std.set.insert(mut admitted, clone(name))
+    }
+    for hit in search.rank(texts, query) {
+        let name = view names[hit.id]
+        if std.set.insert(mut admitted, clone(name)) {
+            list.push(mut s.admitted, clone(name))
+        }
+        list.push(mut matches, clone(name))
+    }
+    let output = string.into_bytes(mcp.rpc.typed_json(matches))
+    if list.len(output) > INLINE_LIMIT {
+        return Error(TooLarge)
+    }
+    if list.len(s.admitted) != old_end {
+        store.put(mut tx, h.session, 0u64, s) ?=> |_| Unavailable
+    }
+    Ok(Now(take output))
+}
+
+fn local_definition[G: send, App: inert + send](t: Tool[G, App]) -> ToolDef {
+    ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None)
+}
+
+fn remote_definition(take name: String, r: mcp_tools.Remote) -> ToolDef {
+    ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)), rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r))))
+}
+
+fn offered[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App], s: Session) -> Result[List[ToolDef], Refused] {
     let mut defs: List[ToolDef] = list.new()
+    let has_catalog = tool_search_enabled(a)
     for t in a.tools {
-        if mcp_tools.reserved(t.name) {
+        if mcp_tools.reserved(t.name) || (has_catalog && t.name == TOOL_SEARCH) {
             return Error(Malformed("reserved MCP tool name"))
         }
         if narrowed(s, t.name) {
-            list.push(mut defs, ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None))
+            list.push(mut defs, local_definition(t))
         }
     }
-    if let Some(_) = a.mcp_peer {
-        let Ok(take cursor) = store.range(tx, store.shape(h.mcp_catalog), Unbounded, Unbounded) else {
+    if has_catalog {
+        if narrowed(s, TOOL_SEARCH) {
+            let tool: Tool[G, App] = search_tool()
+            list.push(mut defs, local_definition(tool))
+        }
+        let Ok(take cursor) = store.range(tx, h.mcp_catalog, Unbounded, Unbounded) else {
             return Error(Storage)
         }
         let mut rows = take cursor
-        while let Some((take name, r)) = kept(store.next_range(mut rows))? {
+        while let Some((take name, r)) = kept(store.next_in(tx, mut rows))? {
+            if !mcp_tools.deferred(r) && narrowed(s, name) {
+                list.push(mut defs, remote_definition(take name, r))
+            }
+        }
+        for name in s.admitted {
             if narrowed(s, name) {
-                list.push(mut defs, ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)), rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r)))))
+                if let Some(r) = kept(store.fetch(tx, h.mcp_catalog, name))? {
+                    if mcp_tools.deferred(r) {
+                        list.push(mut defs, remote_definition(clone(name), r))
+                    }
+                }
             }
         }
     }
@@ -60,7 +133,7 @@ fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result
 // A patch whose order differs from the shown order is a baseline; a baseline
 // that would need a kept section's text, which only the log holds, is put off
 // to the next request and every section keeps its shown text.
-fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> Result[(), Refused] {
+fn plan[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], mut s: Session) -> Result[(), Refused] {
     let first = list.len(s.active_tools_hash) == 0u64
     let mut shown: List[SectionHash] = list.new()
     let mut changes: List[Change] = list.new()
@@ -68,7 +141,7 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
     let mut kept_any = false
     for sec in a.sections {
         let old = hash_of(s.active_sections_hashes, sec.key)
-        match render(tx, sec, a.limits) {
+        match render(tx, h, a.app, sec, a.limits) {
             Text(take text) => {
                 let hash = digest(string.as_bytes(text))
                 list.push(mut shown, SectionHash(key: clone(sec.key), hash: clone(hash)))
@@ -143,17 +216,27 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
 
 // The request for a model effect, built from immutable entries read through
 // the attempt's snapshot, so the advance transaction never carries the body.
-// System entries fold into `system` and `tools`; Notes are not sent.
-pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, cutoff: Cutoff) -> Result[Request, store.Error] {
+// System entries fold into `system` and `tools`; Notes are not sent. A frame's
+// seed is the first message, and the sealed omit ranges leave messages out.
+pub fn request(read_handle: store.Reader, snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> Result[Request, store.Error] waits {
+    let cutoff = view e.cutoff
     let mut messages: List[Entry] = list.new()
     let mut system: List[Change] = list.new()
     let mut tools: List[ToolDef] = list.new()
-    let mut p = cutoff.head_pos
+    if cutoff.frame > 0u64 {
+        let Some(f) = store.get(read_handle, snap, h.frames, cutoff.frame)? else {
+            return Error(Missing("frame"))
+        }
+        list.push(mut messages, Inform(clone(f.seed)))
+    }
+    let mut p = cutoff.frame
     while p <= cutoff.tail_pos {
-        match store.get(snap, store.shape(h.entries), p)? {
+        match store.get(read_handle, snap, h.entries, p)? {
             Some(System(take patch)) => fold(mut system, mut tools, take patch),
             Some(Note(_, _)) => (),
-            Some(take entry) => list.push(mut messages, take entry),
+            Some(take entry) => if !omitted(cutoff.omit, p) {
+                list.push(mut messages, take entry)
+            },
             None => return Error(Missing("entry")),
         }
         p += 1u64
@@ -167,7 +250,11 @@ pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, cutoff: Cutoff)
     let mut stable: Bytes = list.new()
     std.codec.put_u64(key.run, mut stable)
     std.codec.put_u64(key.round, mut stable)
-    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable))
+    if key.kind == WARM {
+        list.push(mut stable, WARM)
+        std.codec.put_u64(key.ordinal, mut stable)
+    }
+    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable, stream: e.stream, warm: key.kind == WARM))
 }
 
 fn fold(mut system: List[Change], mut tools: List[ToolDef], take p: Patch) {

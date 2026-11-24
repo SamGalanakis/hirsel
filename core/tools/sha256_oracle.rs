@@ -1,4 +1,4 @@
-//! RustCrypto sha2 0.10.9 oracle and benchmark partner, built with its default
+//! RustCrypto sha2 oracle and benchmark partner, built with its default
 //! backends (SHA-NI when the CPU has it) by core/tools/sha256_reference.py. `vectors` emits the differential corpus;
 //! otherwise SIZE LOOPS hashes the same evolving byte image as core/programs/sha256/bench.hirsel.
 use sha2::{Digest, Sha256};
@@ -22,7 +22,10 @@ fn main() {
                 h.update(&bytes[cut..n]);
                 assert_eq!(h.finalize(), expected);
             }
-            println!("{expected:x}");
+            for byte in expected {
+                print!("{byte:02x}");
+            }
+            println!();
         }
         return;
     }

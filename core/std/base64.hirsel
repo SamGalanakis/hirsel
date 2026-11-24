@@ -274,6 +274,41 @@ pub fn encode_string(b: Bytes) -> String {
     string.encode_base64(b)
 }
 
+/// Encodes RFC 4648 section 5, with '=' padding when padded is true. O(n).
+pub fn encode_url(b: Bytes, padded: bool) -> String {
+    let mut out: Bytes = list.new()
+    string.append_base64_bytes(b, mut out)
+    let mut end = list.len(out)
+    if !padded {
+        while end > 0 && out[end - 1] == b'=' {
+            end -= 1
+        }
+        list.truncate(mut out, end)
+    }
+    for i in 0 .. end {
+        if out[i] == b'+' {
+            out[i] = b'-'
+        } else if out[i] == b'/' {
+            out[i] = b'_'
+        }
+    }
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn decode_value(b: u8, url: bool) -> u8 {
+    if url {
+        match b {
+            b'-' => 62,
+            b'_' => 63,
+            b'+' => 255,
+            b'/' => 255,
+            _ => value(b),
+        }
+    } else {
+        value(b)
+    }
+}
+
 // Added (mod 256) to a digit by its high nibble; '/' (0x2f) takes entry 1.
 const ROLL: Inline[u8, 16] =[0, 16, 19, 4, 191, 191, 185, 185, 0, 0, 0, 0, 0, 0, 0, 0]
 
@@ -318,70 +353,85 @@ fn decode_blocks(b: Bytes, end: u64, mut out: Bytes) {
 /// Error means Capacity. Whitespace, missing padding and nonzero pad bits fail.
 /// O(n); validates before allocating. Ex: `base64.decode(key)`.
 pub fn decode(b: Bytes) -> Option[Bytes] {
+    decode_alphabet(b, false, true)
+}
+
+/// Decodes canonical RFC 4648 section 5 bytes. The padded form requires '='
+/// where needed. The unpadded form rejects '='. None means malformed input.
+pub fn decode_url(b: Bytes, padded: bool) -> Option[Bytes] {
+    decode_alphabet(b, true, padded)
+}
+
+fn decode_alphabet(b: Bytes, url: bool, padded: bool) -> Option[Bytes] {
     let n = list.len(b)
-    if n % 4 != 0 {
-        return None
-    }
-    let mut pad: u64 = 0
-    if n > 0 && b[n - 1] == b'=' {
-        pad = if b[n - 2] == b'=' {
-            2
-        } else {
-            1
+    let mut digits = n
+    if padded {
+        if n % 4 != 0 {
+            return None
+        }
+        if n > 0 && b[n - 1] == b'=' {
+            digits -= 1
+            if b[n - 2] == b'=' {
+                digits -= 1
+            }
         }
     }
-    let full = if pad == 0 {
-        n
-    } else {
-        n - 4
+    let tail = digits % 4
+    if tail == 1 {
+        return None
     }
-    let end = full - full % 32
+    let full = digits - tail
+    let end: u64 = if url {
+        0
+    } else {
+        full - full % 32
+    }
     if invalid_blocks(b, end) {
         return None
     }
     let mut src = end
     while src < full {
-        if (value(b[src]) | value(b[src + 1]) | value(b[src + 2]) | value(b[src + 3])) == 255 {
+        if (decode_value(b[src], url) | decode_value(b[src + 1], url) | decode_value(b[src + 2], url) | decode_value(b[src + 3], url)) == 255 {
             return None
         }
         src += 4
     }
     let mut first: u8 = 0
     let mut second: u8 = 0
-    if pad > 0 {
-        let a = value(b[full])
-        let c = value(b[full + 1])
-        let d: u8 = if pad == 1 {
-            value(b[full + 2])
+    if tail > 0 {
+        let a = decode_value(b[full], url)
+        let c = decode_value(b[full + 1], url)
+        let d: u8 = if tail == 3 {
+            decode_value(b[full + 2], url)
         } else {
             0
         }
-        if (a | c | d) == 255 || (pad == 2 && c & 15 != 0) || d & 3 != 0 {
+        if (a | c | d) == 255 || (tail == 2 && c & 15 != 0) || d & 3 != 0 {
             return None
         }
         first = (a << 2) | (c >> 4)
         second = (c << 4) | (d >> 2)
     }
-    let size = n / 4 * 3 - pad
+    let size = digits / 4 * 3 + tail * 3 / 4
     let mut out: Bytes = list.with_capacity(size)
     decode_blocks(b, end, mut out)
     src = end
     let mut dst = list.len(out)
     list.fill(mut out, size - dst, 0)
     while src < full {
-        let a = value(b[src])
-        let c = value(b[src + 1])
-        let d = value(b[src + 2])
-        let e = value(b[src + 3])
+        let a = decode_value(b[src], url)
+        let c = decode_value(b[src + 1], url)
+        let d = decode_value(b[src + 2], url)
+        let e = decode_value(b[src + 3], url)
         out[dst] = (a << 2) | (c >> 4)
         out[dst + 1] = (c << 4) | (d >> 2)
         out[dst + 2] = (d << 6) | e
         src += 4
         dst += 3
     }
-    if pad > 0 {
+    if tail > 0 {
         out[dst] = first
-        if pad == 1 {
+        if tail == 3 {
             out[dst + 1] = second
         }
     }

@@ -1,0 +1,164 @@
+fn load(d: Dir, stem: String, suffix: String) -> Bytes waits {
+    let mut name: String = string.with_capacity(string.byte_len(stem) + string.byte_len(suffix))
+    string.push(mut name, stem)
+    string.push(mut name, suffix)
+    result.unwrap(std.file.read(d, name))
+}
+
+fn buffer(size: u64) -> Bytes {
+    let mut output: Bytes = list.with_capacity(size)
+    list.fill(mut output, size, 0)
+    output
+}
+
+fn limits(frames: u32) -> image_core.image.Limits {
+    image_core.image.Limits(max_bytes: 16777216, max_header_bytes: 16777216, max_pixels: 16777216, max_frames: frames, max_steps: 100000)
+}
+
+fn check_still_pixels(f: Foreign[webp.Webp], input: Bytes, expected: Bytes) waits {
+    let mut rgba = buffer(list.len(expected))
+    let size = result.unwrap(webp.decode(f, input, limits(1), None, None, mut rgba))
+    let width: u64 = int.widen(size.width)
+    let height: u64 = int.widen(size.height)
+    if rgba != expected || list.len(rgba) != 4 * width * height {
+        fail("still RGBA differs from libwebp")
+    }
+}
+
+fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits {
+    let input = load(d, stem, ".webp")
+    check_still_pixels(f, input, load(d, stem, ".rgba"))
+    if scaled {
+        let expected_scaled = load(d, stem, ".scaled")
+        let mut rgba_scaled = buffer(list.len(expected_scaled))
+        let crop = Some(image_core.image.Rect(x: 2, y: 4, width: 96, height: 80))
+        let scale = Some(image_core.image.Size(width: 37, height: 29))
+        let size_scaled = result.unwrap(webp.decode(f, input, limits(1), crop, scale, mut rgba_scaled))
+        if rgba_scaled != expected_scaled || size_scaled.width != 37 || size_scaled.height != 29 {
+            fail("cropped and scaled RGBA differs from libwebp")
+        }
+    }
+}
+
+fn decode_after_cancel(take args: (Foreign[webp.Webp], Bytes, Bytes, Receiver[()])) waits {
+    let (f, input, expected, take start) = take args
+    // The parent cancels before sending. Polling leaves the request pending.
+    while let Error(Empty) = channel.try_receive(start) {}
+    check_still_pixels(f, input, expected)
+}
+
+fn check_decode_route(f: Foreign[webp.Webp], d: Dir, tasks: Tasks, stem: String, helper: bool) waits {
+    let (start, ready): (Sender[()], Receiver[()]) = channel.new(1)
+    let input = load(d, stem, ".webp")
+    let expected = load(d, stem, ".rgba")
+    let mut child = task.spawn(tasks, bytes 16777216, (f, take input, take expected, take ready), decode_after_cancel)
+    task.cancel(mut child)
+    result.unwrap(channel.try_send(start, ()))
+    match task.join(take child) {
+        Ok(()) if !helper => (),
+        Error(Cancelled(_)) if helper => (),
+        _ => fail("still decode used the wrong foreign call class"),
+    }
+}
+
+fn check_encoding(f: Foreign[webp.Webp], d: Dir, name: String, encoding: webp.Encoding) waits {
+    let rgba = load(d, "encode", ".rgba")
+    let expected = load(d, name, ".webp")
+    let size = image_core.image.Size(width: 37, height: 29)
+    let mut output = buffer(list.len(expected))
+    let count = result.unwrap(webp.encode(f, rgba, size, encoding, mut output))
+    let size_written: u64 = int.widen(count)
+    if size_written != list.len(expected) || output != expected {
+        fail("encoded WebP differs from libwebp")
+    }
+    let mut short = buffer(list.len(expected) - 1)
+    let Error(BufferTooSmall) = webp.encode(f, rgba, size, encoding, mut short) else {
+        fail("encoder accepted short output")
+    }
+    match encoding {
+        Lossless => {
+            let mut pixels = buffer(list.len(rgba))
+            result.unwrap(webp.decode(f, output, limits(1), None, None, mut pixels))
+            if pixels != rgba {
+                fail("lossless encoder changed RGBA")
+            }
+        },
+        _ => (),
+    }
+}
+
+fn check_animation(f: Foreign[webp.Webp], d: Dir, name: String, frames: u32) waits {
+    let input = load(d, name, ".webp")
+    let expected = load(d, name, ".expected")
+    let area = 260u64 * 260
+    let frame_size = 4 * area
+    let n: u64 = int.widen(frames)
+    let mut rgba = buffer(n * frame_size)
+    let mut timestamps = buffer(n * 4)
+    let info = result.unwrap(webp.decode_animation(f, input, limits(frames), mut rgba, mut timestamps))
+    if info.frame_count != frames || info.width != 260 || info.height != 260 || list.len(expected) != n * (4 + frame_size) {
+        fail("animation dimensions or frame count differ from libwebp")
+    }
+    for i in 0u64 .. n {
+        let at = i * (4 + frame_size)
+        let start = i * frame_size
+        if list.slice(timestamps, 4 * i, 4 * (i + 1)) != list.slice(expected, at, at + 4) || list.slice(rgba, start, start + frame_size) != list.slice(expected, at + 4, at + 4 + frame_size) {
+            fail("animation canvas or timestamp differs from libwebp")
+        }
+    }
+    let Error(WrongImageKind) = webp.decode(f, input, limits(frames), None, None, mut rgba) else {
+        fail("still decoder accepted an animation")
+    }
+}
+
+fn check_limits(f: Foreign[webp.Webp], d: Dir) waits {
+    let bomb = load(d, "bomb", ".webp")
+    let mut output = buffer(4)
+    let denied = result.unwrap(bound bytes 0 {
+        webp.decode(f, bomb, limits(1), None, None, mut output)
+    })
+    let Error(Header(PixelLimit)) = denied else {
+        fail("bomb did not hit the pixel cap before allocation")
+    }
+    let corrupt = load(d, "corrupt-animation", ".webp")
+    let mut rgba = buffer(3 * 260 * 260 * 4)
+    let mut timestamps = buffer(12)
+    let Error(Header(FrameLimit)) = webp.decode_animation(f, corrupt, limits(2), mut rgba, mut timestamps) else {
+        fail("frame cap did not refuse the file before decoding its corrupt first frame")
+    }
+    if rgba != buffer(list.len(rgba)) || timestamps != buffer(12) {
+        fail("over-cap animation wrote output")
+    }
+    let Error(CodecFailure) = webp.decode_animation(f, corrupt, limits(3), mut rgba, mut timestamps) else {
+        fail("raising the cap did not reach the corrupt frame")
+    }
+    let many = load(d, "129-frames", ".webp")
+    let Error(Header(FrameLimit)) = webp.decode_animation(f, many, limits(129), mut rgba, mut timestamps) else {
+        fail("native frame ceiling was bypassed")
+    }
+    let still = load(d, "0", ".webp")
+    let Error(BufferTooSmall) = webp.decode(f, still, limits(1), None, None, mut output) else {
+        fail("still decoder accepted short RGBA")
+    }
+    let odd = Some(image_core.image.Rect(x: 1, y: 0, width: 1, height: 1))
+    let Error(InvalidOptions) = webp.decode(f, still, limits(1), odd, None, mut output) else {
+        fail("still decoder silently rounded down the crop origin")
+    }
+}
+
+@test
+fn libwebp_vectors(f: Foreign[webp.Webp], d: Dir, tasks: Tasks) -> Result[(), ()] waits {
+    for i in 0u64 .. 16 {
+        let mut stem = string.with_capacity(2)
+        string.push_u64(mut stem, i)
+        check_still(f, d, stem, i == 0 || i == 2 || i == 6)
+    }
+    check_decode_route(f, d, tasks, "tiny", false)
+    check_decode_route(f, d, tasks, "0", true)
+    check_encoding(f, d, "lossless", Lossless)
+    check_encoding(f, d, "quality", Lossy(82))
+    check_animation(f, d, "animation", 3)
+    check_animation(f, d, "single-frame", 1)
+    check_limits(f, d)
+    Ok(())
+}

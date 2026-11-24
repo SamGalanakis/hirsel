@@ -1,0 +1,512 @@
+fn prior_fixture_value(width: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, 0u8)
+    take raw
+}
+
+fn prior_fixture_frame(wire: Bytes, at: u64, tag: u8, length: u64, prior: u64) -> bool {
+    // 16 (frame) + 21 (COMMIT) + 5 (data section) gives the op tag.
+    // The 12-byte logical key follows its u32 length, then the prior.
+    read_le(wire, at + 4, 4) == length - 16 && wire[at + 42] == tag &&
+        read_le(wire, at + 43, 4) == 12 && read_le(wire, at + 59, 4) == prior
+}
+
+// Pre-prior format 4, frozen from the format tables with libxxhash. The
+// MANIFEST has one empty branch and the journal has no COMMITs.
+fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(72)
+    list.put_word_le(mut wire, 0x0000003800010001u64)
+    let checksum: u64 = match role {
+        1 => if bucketed { 0x5c6ae52a18ccd6b2u64 } else { 0xe0f2a21e936a02feu64 },
+        2 => 0x1b4139a107227ef7,
+        _ => 0xc07ca99a378f2a2f,
+    }
+    list.put_word_le(mut wire, checksum)
+    list.append(mut wire, string.as_bytes("HIRSTORE"))
+    list.put_word_le(mut wire, 4u32)
+    list.push(mut wire, role)
+    list.push(mut wire, if bucketed { 1u8 } else { 0u8 })
+    list.put_word_le(mut wire, 0u16)
+    list.put_word_le(mut wire, 1u64)
+    list.put_word_le(mut wire, 2u64)
+    list.put_word_le(mut wire, if bucketed { 1u64 } else { 0u64 })
+    list.put_word_le(mut wire, 1u64)
+    list.put_word_le(mut wire, 0u64)
+    take wire
+}
+
+fn legacy4_manifest(bucketed: bool) -> Bytes {
+    let mut wire = legacy4_header(1, bucketed)
+    let words: Inline[u64, 10] = [
+        0x000001cf00010031, 0xb51851a0c4a366ff, 1,
+        0x0000100000001000, 0x0100004000000400, 1,
+        0x0000000100000001, 1, 1, 1,
+    ]
+    for word in words {
+        list.put_word_le(mut wire, word)
+    }
+    list.fill(mut wire, 244, 0u8)
+    list.put_word_le(mut wire, 1u32)
+    list.put_word_le(mut wire, 0u32)
+    list.put_word_le(mut wire, 4u16)
+    list.append(mut wire, string.as_bytes("main"))
+    list.fill(mut wire, 141, 0u8)
+    take wire
+}
+
+fn refuse_legacy4_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let manifest = legacy4_manifest(false)
+    let segment = legacy4_header(2, false)
+    let mut ending = legacy4_header(4, false)
+    list.put_word_le(mut ending, 0x0000000800010012u64)
+    list.put_word_le(mut ending, 0x215e84b9326bf203u64)
+    list.put_word_le(mut ending, 72u64)
+    let debris = string.as_bytes("unselected temporary")
+    disk_write_synced(directory, "MANIFEST", manifest)?
+    disk_write_synced(directory, "j-1", segment)?
+    disk_write_synced(directory, "j-1.end", ending)?
+    disk_write_synced(directory, "MANIFEST.tmp", debris)?
+    match open(tasks, directory, c, r, journal_crash_options()) {
+        Error(Unsupported(4)) => (),
+        _ => return Error(Missing("format 4 directory refusal")),
+    }
+    if disk_exists(directory, "LOCK")? || disk_exists(directory, "j-2")? ||
+        disk_read_file(directory, "MANIFEST", 551)? != manifest ||
+        disk_read_file(directory, "j-1", 72)? != segment ||
+        disk_read_file(directory, "j-1.end", 96)? != ending ||
+        disk_read_file(directory, "MANIFEST.tmp", 20)? != debris {
+        return Error(Missing("format 4 directory changed"))
+    }
+    Ok(())
+}
+
+fn refuse_legacy4_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let id = StoreId(hi: 1, lo: 2)
+    workspace.packet = legacy4_manifest(true)
+    let manifest = history_new_ref(1, 1, workspace.packet)
+    history_create(mut client, history_key("m-", manifest), mut workspace.packet, mut workspace.compare, deadline)?
+    // Use a current checkpoint envelope to exercise the old MANIFEST's
+    // refusal itself, even when the enclosing entry passes its format check.
+    let base = history_genesis_packet(mut workspace.packet, id, 1, manifest, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    history_create(mut client, history_key("e-", base), mut workspace.packet, mut workspace.compare, deadline)?
+    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding: [0; 32])
+    let place = std.object.bucket_config(client)
+    let authority = history_config_bytes(object_history_config(take place, "bucket"))?
+    history_encode_head(mut workspace.body, head, authority)?
+    let expected = copied(workspace.body)?
+    match history_write_head(mut client, Absent, mut workspace.body, mut workspace.witness, deadline) {
+        HistoryApplied(_) => (),
+        _ => return Error(Missing("format 4 bucket setup")),
+    }
+    let opener = bucket_law_client_with(sim, tasks, "s3.test", 6, true)?
+    let mut source = history_reader(take opener, 0)
+    let options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    match history_open_register(mut source, sim.time, r, options, "bucket", mut workspace, BUCKET_LAW_OP_MS) {
+        Error(Unsupported(4)) => (),
+        _ => return Error(Missing("format 4 bucket refusal")),
+    }
+    let _ = history_fetch(mut client, "head", mut workspace.witness, deadline)?
+    if expected != workspace.witness {
+        return Error(Missing("format 4 bucket head changed"))
+    }
+    Ok(())
+}
+
+@test
+fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    if !law_frames(c) {
+        return Error(Missing("ordered data wire vectors"))
+    }
+    if !journal_law_payload() {
+        return Error(Missing("data and reply parser vectors"))
+    }
+    if !journal_law_call_vector() {
+        return Error(Missing("recorded call wire vectors"))
+    }
+    refuse_legacy4_directory(d, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, 399, None, list.new())
+    let refused = refuse_legacy4_bucket(sim, r, tasks)
+    let _ = bucket_law_finish(take sim)
+    refused?
+    let dir = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, dir, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let baseline = db.resident
+    let start = db.file_end
+    let seq = db.file_seq
+    let Committed(initial) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(34))
+    })? else { return Error(Missing("insert")) }
+    // entry(12, 34) = 62 + 16 + 40 = 118.
+    if db.resident != baseline + 118 || db.file_end != start + 101 {
+        return Error(Missing("insert charge or length"))
+    }
+    let first = share_page_tree(db.heads[0].roots.collections)
+    let Committed(changed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(16))?
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(10))
+    })? else { return Error(Missing("overwrite")) }
+    // entry(12, 10) = 62 + 16 + 16 = 94. Only one put survives in the frame.
+    if db.resident != baseline + 94 || db.file_end != start + 101 + 77 {
+        return Error(Missing("overwrite charge or length"))
+    }
+    let Committed(removed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
+        let _ = delete_bytes(mut tx, 1, key_word(7))?
+        Ok(())
+    })? else { return Error(Missing("delete")) }
+    if db.resident != baseline || db.file_end != start + 101 + 77 + 63 {
+        return Error(Missing("delete charge or length"))
+    }
+    durable(mut db, removed.ticket)?
+    let path = capacity(disk_path("j-", seq, ""))?
+    let wire = read_journal_prefix(dir, path, start + 241)?
+    if !prior_fixture_frame(wire, start, 1, 101, 0) || !prior_fixture_frame(wire, start + 101, 1, 77, 35) ||
+        !prior_fixture_frame(wire, start + 178, 2, 63, 11) {
+        return Error(Missing("table prior bytes"))
+    }
+
+    let body_at = start + 101 + 16
+    let mut body = copied(list.slice(wire, body_at, start + 178))?
+    list.set_word_le(mut body, 43, 34u32)
+    let invalid = journal_decode_commit(path, body)?
+    let mut tree = take first
+    let mut ids = db.next_node
+    let mut tiered = ReplayTieredAccount(total: 0, exact: true)
+    match journal_apply_ops(path, mut ids, mut tree, invalid.data, mut tiered) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("contradictory prior refusal")),
+    }
+    list.set_word_le(mut body, 43, 16711682u32)
+    match journal_decode_commit(path, body) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("oversized prior refusal")),
+    }
+    if initial.info.id.version + 1 != changed.info.id.version || changed.info.id.version + 1 != removed.info.id.version {
+        return Error(Missing("version sequence"))
+    }
+    close(take db)?
+    let reopened = open(tasks, dir, c, r, options)?
+    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 ||
+        reopened.heads[0].head != removed.info.id.version {
+        return Error(Missing("replayed table account"))
+    }
+    close(take reopened)
+}
+
+fn check_overlapping_put(body: Bytes) -> Result[(), Error] {
+    let commit = journal_decode_commit("format-4 suffix", body)?
+    let top = commit.data[0]
+    let Some(raw) = view top.value else { return Error(Missing("overlapping put")) }
+    if list.len(commit.data) != 1 || top.key != logical_key(1, key_word(7))? ||
+        top.prior != 5 || list.len(raw) != 1 || raw[0] != 0xa5 {
+        return Error(Missing("overlapping put interpretation"))
+    }
+    Ok(())
+}
+
+fn refuse_frozen_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let frozen = frozen_format4_directory()
+    for (path, raw) in frozen {
+        if path == "j-3" {
+            check_overlapping_put(list.slice(raw, 88, list.len(raw)))?
+        }
+        disk_write_synced(directory, path, raw)?
+    }
+    let locked = disk_lock(directory, c, 0)?
+    match open(tasks, directory, c, r, journal_crash_options()) {
+        Error(Unsupported(4)) => (),
+        _ => return Error(Missing("format 4 refusal before lock")),
+    }
+    disk_io(host.close(take locked))?
+    for (path, raw) in frozen {
+        if disk_read_file(directory, path, list.len(raw))? != raw {
+            return Error(Missing("frozen directory changed"))
+        }
+    }
+    if disk_exists(directory, "MANIFEST.tmp")? || disk_exists(directory, "j-4")? || disk_exists(directory, "j-4.end")? {
+        return Error(Missing("frozen directory rotated"))
+    }
+    Ok(())
+}
+
+fn check_frozen_bucket_open(sim: BucketSim, r: Random, tasks: Tasks, mut workspace: HistoryBuffers) -> Result[(), Error] waits {
+    let opener = bucket_law_client_with(sim, tasks, "s3.test", 6, true)?
+    let mut source = history_reader(take opener, 0)
+    let options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    match history_open_register(mut source, sim.time, r, options, "bucket", mut workspace, BUCKET_LAW_OP_MS) {
+        Error(Unsupported(4)) => Ok(()),
+        _ => Error(Missing("frozen bucket refusal")),
+    }
+}
+
+fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(u64, Bytes, Bytes), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let frozen = frozen_format4_bucket()
+    let mut first_head: Bytes = list.new()
+    for (path, raw) in frozen {
+        if path == "head" {
+            first_head = copied(raw)?
+        }
+        if string.starts_with(path, "e-00000000000000000006-") {
+            check_overlapping_put(list.slice(raw, 128, list.len(raw)))?
+        }
+        list.clear(mut workspace.packet)
+        list.append(mut workspace.packet, raw)
+        history_create(mut client, path, mut workspace.packet, mut workspace.compare, deadline)?
+    }
+    let initial = history_fetch(mut client, "head", mut workspace.body, deadline)?
+    if workspace.body != first_head {
+        return Error(Missing("legacy fixture head bytes"))
+    }
+    check_frozen_bucket_open(sim, r, tasks, mut workspace)?
+    let after_old = history_fetch(mut client, "head", mut workspace.body, deadline)?
+    if initial.etag != after_old.etag || first_head != workspace.body {
+        return Error(Missing("legacy head changed"))
+    }
+
+    // The current head still names both frozen format-4 entries.
+    // Only the HEADER's version and §2.1 checksum change (libxxhash).
+    list.set_word_le(mut workspace.body, 24, 6u32)
+    list.set_word_le(mut workspace.body, 8, 0x7af66413ba085948u64)
+    let expected = copied(workspace.body)?
+    let HistoryApplied(replaced) = history_write_head(mut client, Match(initial.etag), mut workspace.body, mut workspace.witness, deadline) else {
+        return Error(Missing("replace fixture head"))
+    }
+    check_frozen_bucket_open(sim, r, tasks, mut workspace)?
+    let after_entry = history_fetch(mut client, "head", mut workspace.body, deadline)?
+    if replaced != after_entry.etag || expected != workspace.body {
+        return Error(Missing("current head changed"))
+    }
+    for (path, raw) in frozen {
+        if path != "head" {
+            let _ = history_fetch(mut client, path, mut workspace.packet, deadline)?
+            if workspace.packet != raw {
+                return Error(Missing("frozen bucket object changed"))
+            }
+        }
+    }
+    Ok((list.len(frozen) + 1, take first_head, take expected))
+}
+
+fn covering_prior_key(k: u64, old_value: u32) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, k)
+    Ok(take keys)
+}
+
+fn covering_prior_value(k: u64, v: u32) -> Result[u32, Capacity] {
+    Ok(v)
+}
+
+fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, directory, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let mut declared = declare_table(mut declaring, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let projected_index = covering(mut declaring, mut declared, "projected", Many, code.describe(covering_prior_key), std.codec.key_u64(), code.describe(covering_prior_value), std.codec.of_u32())?
+    let primary = finish(mut declaring, take declared)?
+    let _ = seal(mut db, take declaring)?
+    for new_value in 6u32 .. 8 {
+        let start = db.file_end
+        let seq = db.file_seq
+        let commit = run(mut db, None, (copy_env(primary), new_value), fn(mut tx: Tx, args: (Table[u64, u32], u32)) -> Result[(), Error] {
+            put(mut tx, args.0, 9u64, args.1)
+        })?
+        let Committed(done) = commit else { return Error(Missing("covering put")) }
+        durable(mut db, done.ticket)?
+        if new_value == 7 {
+            let path = capacity(disk_path("j-", seq, ""))?
+            let raw = read_journal_prefix(directory, path, db.file_end)?
+            // Payload is a two-byte schema number plus a four-byte u32.
+            // The 20-byte Many key follows the primary's 31-byte put.
+            let op = start + 42 + 31
+            let found: u32 = list.word_be(raw, op + 5)
+            if raw[op] != 1 || read_le(raw, op + 1, 4) != 20 || found != projected_index.id ||
+                read_le(raw, op + 25, 4) != 7 || read_le(raw, op + 29, 4) != 6 ||
+                read_le(raw, op + 33, 2) != 0 || read_le(raw, op + 35, 4) != 7 {
+                return Error(Missing("covering prior wire charge"))
+            }
+        }
+    }
+    let expected = db.resident
+    close(take db)?
+    let recovered = open(tasks, directory, c, r, options)?
+    if recovered.resident != expected { return Error(Missing("covering prior replay charge")) }
+    close(take recovered)
+}
+
+fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut db, spec("big", std.codec.key_u64(), std.codec.of_bytes()))?
+    let baseline = db.resident
+    let logical = logical_key(1, key_word(7))?
+    let width = 12582912u64
+    {
+        // Seed a valid checkpoint from a writer whose write limit held 12 MiB.
+        // The law also runs with the public write limit compiled to 8 MiB.
+        let mut next_stamp = stamp_after(db.next_node)?
+        let first = next_stamp
+        let raw = prior_fixture_value(width)
+        put_page_row(mut db.heads[0].roots.collections, logical, raw, first, mut next_stamp)?
+        db.next_node = next_stamp - 1
+        db.resident += 12582990
+    }
+    let receipt = checkpoint(mut db)?
+    durable(mut db, receipt)?
+    close(take db)?
+
+    let mut reopened = open(tasks, directory, c, r, options)?
+    if reopened.resident != baseline + 12582990 {
+        return Error(Missing("12 MiB prior seed charge"))
+    }
+    if let Some(raw) = get_page_row(reopened.heads[0].roots.collections, logical) {
+        if list.len(raw) != width { return Error(Missing("12 MiB seed size")) }
+    } else {
+        return Error(Missing("12 MiB seed row"))
+    }
+    let start = reopened.file_end
+    let seq = reopened.file_seq
+    let removed = run(mut reopened, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
+        if !delete_bytes(mut tx, 1, key_word(7))? { return Error(Missing("delete 12 MiB")) }
+        Ok(())
+    })?
+    let Committed(done) = removed else { return Error(Missing("delete commit")) }
+    durable(mut reopened, done.ticket)?
+    let path = capacity(disk_path("j-", seq, ""))?
+    let wire = read_journal_prefix(directory, path, start + 63)?
+    if !prior_fixture_frame(wire, start, 2, 63, 12582913) || reopened.resident != baseline {
+        return Error(Missing("12 MiB delete prior or charge"))
+    }
+    let mut body = copied(list.slice(wire, start + 16, start + 63))?
+    list.set_word_le(mut body, 43, 16711681u32)
+    let at_ceiling = journal_decode_commit(path, body)?
+    if at_ceiling.data[0].prior != 16711681 { return Error(Missing("maximum wire prior")) }
+    list.set_word_le(mut body, 43, 16711682u32)
+    match journal_decode_commit(path, body) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("prior above wire ceiling")),
+    }
+    close(take reopened)?
+    let replayed = open(tasks, directory, c, r, options)?
+    if replayed.resident != baseline || page_row_count(replayed.heads[0].roots.collections) != 0 {
+        return Error(Missing("12 MiB delete replay"))
+    }
+    close(take replayed)
+}
+
+fn install_cold_companion(mut roots: Roots, stamp: u64) -> Result[(), Error] {
+    let warm_key = prefix(1)?
+    let (take resident_root, take resident_descriptor) = {
+        let Some((warm_root, warm_descriptor)) = std.page.collection_entry(roots.collections.root, warm_key) else {
+            return Error(Missing("warm fixture root"))
+        }
+        (arc.share(warm_root), copied(warm_descriptor)?)
+    }
+    let cold = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let mut descriptor = std.page.encode_ptr(cold)
+    list.put_word_le(mut descriptor, 2u64)
+    list.put_word_le(mut descriptor, 172u64)
+    list.put_word_le(mut descriptor, 257u32)
+    let mut descriptors: List[std.page.Entry] = list.new()
+    list.push(mut descriptors, std.page.Entry(key: take warm_key, cell: InlineValue(take resident_descriptor)))
+    list.push(mut descriptors, std.page.Entry(key: prefix(9)?, cell: InlineValue(take descriptor)))
+    let mut slots: List[std.page.Slot] = list.new()
+    list.push(mut slots, HotPage(take resident_root))
+    list.push(mut slots, ColdPage(cold))
+    let image = page_result(std.page.encode(descriptors, 0, stamp, CollectionMap))?
+    roots.collections.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    Ok(())
+}
+
+fn retained_fixture_write(mut db: Db, k: u64, v: u64) -> Result[(), Error] waits {
+    let outcome = run(mut db, None, (k, v), fn(mut tx: Tx, args: (u64, u64)) -> Result[(), Error] {
+        let mut raw: Bytes = list.new()
+        list.put_word_le(mut raw, 0u16)
+        let word: u32 = int.narrow(args.1)
+        list.put_word_le(mut raw, word)
+        put_bytes(mut tx, 1, key_word(args.0), raw)
+    })?
+    let Committed(committed) = outcome else { return Error(Missing("retained root write")) }
+    durable(mut db, committed.ticket)
+}
+
+fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    let mut db = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut db, spec("warm", std.codec.key_u64(), std.codec.of_u32()))?
+    let baseline = db.resident
+    retained_fixture_write(mut db, 1, 1)?
+    retained_fixture_write(mut db, 2, 2)?
+    let original = snapshot(db)
+    let receipt = pin(mut db, "held", original)?
+    durable(mut db, receipt)?
+    retained_fixture_write(mut db, 2, 99)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    close(take db)?
+
+    // Key 1, pinned 2:A and head 2:B are three distinct 86-byte versions.
+    options.resident_limit = baseline + 258
+    let mut writer = open(tasks, directory, c, r, options)?
+    if writer.resident != baseline + 258 { return Error(Missing("retained fixture baseline")) }
+    retained_fixture_write(mut writer, 2, 2)?
+    if writer.resident != baseline + 172 { return Error(Missing("retained live settle")) }
+    close(take writer)?
+
+    let mut replayed = open(tasks, directory, c, r, options)?
+    if replayed.resident != baseline + 172 { return Error(Missing("retained replay settle")) }
+    {
+        // Attach an untouched Tiered sibling with no resolvable page at its
+        // pointer. Only its 126-byte Memory descriptor belongs to this walk.
+        let mut state = capacity(main_state(share_roots(replayed.heads[0].roots), replayed.heads[0].head, 0))?
+        install_cold_companion(mut state.tips[0].roots, 101)?
+        let mut restored = journal_replay(take state, 102)?
+        if journal_account(restored)? != baseline + 172 + 126 {
+            return Error(Missing("single mixed root Memory account"))
+        }
+        let mut held = capacity(share_pin(replayed.pins[0]))?
+        install_cold_companion(mut held.roots, 102)?
+        list.push(mut restored.state.pins, take held)
+        if journal_account(restored)? != baseline + 172 + 126 {
+            return Error(Missing("retained mixed root Memory account"))
+        }
+    }
+    retained_fixture_write(mut replayed, 3, 3)?
+    if replayed.resident != baseline + 258 { return Error(Missing("retained reopen admission")) }
+    close(take replayed)
+}
+
+@test
+fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    refuse_frozen_directory(d, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, 401, None, list.new())
+    let expected = refuse_frozen_bucket(sim, r, tasks)
+    let trace = bucket_law_report(take sim)
+    let (writes, take original, take current) = expected?
+    // Both applied HEADs are fixture writes. The refused product opens apply none.
+    if trace.writes != writes || list.len(trace.head_writes) != 2 {
+        return Error(Missing("legacy bucket published an object"))
+    }
+    let first = view trace.head_writes[0u64]
+    let second = view trace.head_writes[1u64]
+    let Some(predecessor) = second.if_match else { return Error(Missing("legacy fixture HEAD precondition")) }
+    if first.key != "head" || first.data != original || first.if_match != None || first.if_none_match != Some("*") ||
+        second.key != "head" || second.data != current || first.etag == second.etag || predecessor != first.etag || second.if_none_match != None {
+        return Error(Missing("legacy fixture HEAD history"))
+    }
+    covering_prior_case(d, c, r, tasks)?
+    retained_replay_case(d, c, r, tasks)?
+    prior_ceiling_case(d, c, r, tasks)
+}

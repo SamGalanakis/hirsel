@@ -7,36 +7,36 @@
 // are past the first Batch by then; the barrier is the same in both modes), then calls
 // task.check_cancel(), the event at which core/tools/runner_mark.c records the checkpoint.
 // A subscription keeps its Cover and read set, never its rows, so the two figures are equal.
-type Hc: send { t: store.Table[u64, u64] }
+type Hc: shareable + send { t: store.Table[u64, u64] }
 
 type Spans = runner.Registry[(), Hc]
 
 const ROWS: u64 = 1954u64
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hc, store.Error] {
+fn schema(mut d: store.Declare) -> Result[Hc, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
+    let t = store.finish(mut d, take table)?
     Ok(Hc(t: t))
 }
 
 
 // Keys 0 to n - 1 of "data".
-fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.t), Included(0u64), Excluded(n))
+fn query_table(h: Hc) -> store.Table[u64, u64] {
+    clone(h.t)
+}
+
+fn query_slots() -> Result[runner.Slots[Hc], runner.RegisterError] {
+    runner.table_slot("data", code.describe(query_table))
+}
+
+fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.t, Included(0u64), Excluded(n))
 }
 
 // The query's bound also holds the rows it projects into the initial Batch: 1,954 in mode 1.
 fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
-    runner.query(mut r, code.describe(span), std.codec.key_u64(), std.codec.of_u64(), 524288u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(span), query_slots()?, 524288u64, runner.DEFAULT_STEPS)
 }
 
 // identity ++ fingerprint(A) ++ fingerprint(row schemas), as a client builds a query's key.
@@ -44,7 +44,7 @@ fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(span)))
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
 }
@@ -60,7 +60,8 @@ type D: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock
 // The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
 fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
     match wire_client.next(cn) {
-        Ok(Batch(_, take complete, take got, _)) => {
+        Ok(Batch(_, take complete, take groups, _)) => {
+            let got = runner.publication_rows(take groups)
             if list.len(complete) != 1u64 || complete[0u64] != sub || list.len(got) != rows {
                 fail("runner_cover: an initial Batch not whole")
             }
@@ -73,7 +74,7 @@ fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
 fn drive(take d: D) -> () waits {
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, k_span())
-    let mut config = runner.wire_defaults(131072u64, 65536u64)
+    let mut config = runner.wire_defaults(131072u64)
     config.q = 0u64
     config.budget = 262144u64
     config.socket.max_frame = 131072u64
@@ -92,9 +93,9 @@ fn drive(take d: D) -> () waits {
 }
 
 fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () waits {
-    let done = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        for k in from .. to {
-            store.put(mut tx, t, k, k)?
+    let done = store.run(mut db, None, (store.copy_env(from), store.copy_env(t), store.copy_env(to)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        for k in call_env.0 .. call_env.2 {
+            store.put(mut tx, call_env.1, k, k)?
         }
         Ok(())
     })
@@ -107,10 +108,11 @@ fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () wa
 pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let covered = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { ROWS } else { 10u64 }
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let h = match store.with_schema(db, code.describe(handles)) {
+    let mut declaration = result.unwrap(store.declare(db, Open))
+    let h = match schema(mut declaration) {
         Ok(take h) => take h,
         Error(_) => return Error(Exit(status: 5)),
     }
@@ -124,7 +126,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) ->
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, net: net, random: random, covered: covered)
     let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

@@ -465,7 +465,7 @@ impl FunctionEmitter<'_> {
             // An infallible private callee has no status; the public caller
             // still returns its constant zero. Its destination can be forwarded
             // even though that return convention prevents a tail jump.
-            let values = self.invoke(&abi, &callee, args, &site_attrs(site));
+            let values = self.invoke(&abi, &callee, args, &self.site_attrs(site));
             if let Some((original, shadow)) = carrier_shadow {
                 self.shadow_copy_back(&original, &shadow);
             }
@@ -486,7 +486,7 @@ impl FunctionEmitter<'_> {
         let values: Vec<_> = args.into_iter().map(|(_, v)| v).collect();
         let attrs = CallAttrs {
             tail: ending.frame_safe,
-            ..site_attrs(site)
+            ..self.site_attrs(site)
         };
         if ending.frame_safe {
             // No argument points into the frame, so the scoped slots end
@@ -512,6 +512,9 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn return_at(&mut self, block: usize, values: PoolRange<ValueId>) {
         self.step_refund();
+        if !self.body.parked_returns.contains(&BlockId(block as u32)) {
+            self.law_leave(true);
+        }
         if (self.abi.ok.is_some() || self.abi.record.is_some())
             && self.body.parked_returns.contains(&BlockId(block as u32))
         {
@@ -539,6 +542,7 @@ impl FunctionEmitter<'_> {
         }
     }
     pub(super) fn emit_failure_return(&mut self) {
+        self.law_leave(false);
         let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
             self.ret(&abi_ty, &int(1));
@@ -639,9 +643,9 @@ impl FunctionEmitter<'_> {
         }
         self.ret(&abi_ty, &r);
     }
-    pub(super) fn call_site(&mut self, site: &CallSite, fused_receive: bool) -> Result<()> {
+    pub(super) fn call_site(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
-            return self.runtime_call(op, site, fused_receive);
+            return self.runtime_call(op, site);
         }
         let sig = &self.module.signatures[site.signature.index()];
         let layouts = self.call_layouts.unwrap();
@@ -652,7 +656,7 @@ impl FunctionEmitter<'_> {
         let callee = self.callee(site.callee, has_status, abi.ok.is_some());
         let site_word = self.call_site_word(site.callee);
         args.push(word(site_word));
-        let mut values = self.invoke(&abi, &callee, args, &site_attrs(site));
+        let mut values = self.invoke(&abi, &callee, args, &self.site_attrs(site));
         if let Some((original, shadow)) = carrier_shadow {
             self.shadow_copy_back(&original, &shadow);
         }
@@ -902,14 +906,22 @@ pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
 /// A call the front marked cold (core-ir CallSite::cold, the growth path) is
 /// cold and not inlined, so the inliner keeps the growth body out of the hot
 /// caller; the branch into its block is weighted unlikely (`cold_edge`).
-fn site_attrs(site: &CallSite) -> CallAttrs {
-    CallAttrs {
-        cold: site.cold,
-        inline: if site.cold {
-            Inline::Never
-        } else {
-            Inline::Default
-        },
-        ..CallAttrs::default()
+impl FunctionEmitter<'_> {
+    fn site_attrs(&self, site: &CallSite) -> CallAttrs {
+        CallAttrs {
+            cold: site.cold,
+            inline: if site.cold {
+                Inline::Never
+            } else if let Some(sites) = &self.items.callback_sites
+                && let Some(caller) = self.function
+                && let Callee::Direct(callee) = site.callee
+                && sites.should_inline(caller, callee)
+            {
+                Inline::Always
+            } else {
+                Inline::Default
+            },
+            ..CallAttrs::default()
+        }
     }
 }

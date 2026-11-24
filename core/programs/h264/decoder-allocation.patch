@@ -1,0 +1,33 @@
+--- a/codec/decoder/plus/src/welsDecoderExt.cpp
++++ b/codec/decoder/plus/src/welsDecoderExt.cpp
+@@ -184,5 +184,6 @@
+ 
+   m_pDecThrCtx = new SWelsDecoderThreadCTX[m_iCtxCount];
+-  memset (m_pDecThrCtx, 0, sizeof (SWelsDecoderThreadCTX)*m_iCtxCount);
++  if (m_pDecThrCtx != NULL)
++    memset (m_pDecThrCtx, 0, sizeof (SWelsDecoderThreadCTX)*m_iCtxCount);
+   for (int32_t i = 0; i < WELS_DEC_MAX_NUM_CPU; ++i) {
+     m_pDecThrCtxActive[i] = NULL;
+@@ -269,5 +270,5 @@
+ long CWelsDecoder::Initialize (const SDecodingParam* pParam) {
+   int iRet = ERR_NONE;
+-  if (m_pWelsTrace == NULL) {
++  if (m_pWelsTrace == NULL || m_pDecThrCtx == NULL) {
+     return cmMallocMemeError;
+   }
+@@ -293,4 +294,6 @@
+ 
+ void CWelsDecoder::UninitDecoder (void) {
++  if (m_pDecThrCtx == NULL)
++    return;
+   for (int32_t i = 0; i < m_iCtxCount; ++i) {
+     if (m_pDecThrCtx[i].pCtx != NULL) {
+@@ -396,5 +399,7 @@
+   WelsDecoderLastDecPicInfoDefaults (m_sLastDecPicInfo);
+   for (int32_t i = 0; i < m_iCtxCount; ++i) {
+-    InitDecoderCtx (m_pDecThrCtx[i].pCtx, pParam);
++    int32_t iRet = InitDecoderCtx (m_pDecThrCtx[i].pCtx, pParam);
++    if (iRet != cmResultSuccess)
++      return iRet;
+     if (m_iThreadCount >= 1) {
+       m_pDecThrCtx[i].pCtx->pThreadCtx = &m_pDecThrCtx[i];

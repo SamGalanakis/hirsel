@@ -18,3 +18,4 @@ limit = 33554432
 
 [tests.sources]
 "tests/rpc.hirsel" = "laws"
+"example.hirsel" = "example"

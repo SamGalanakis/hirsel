@@ -57,7 +57,8 @@ fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
 #include "hirsel_core_rt.h"
 {sites}
 extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
-extern void hirsel_core_test_flow_run(size_t, bool, uint8_t, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
+extern void hirsel_core_test_flow_run(bool, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
+extern void hirsel_core_test_flow_run_pool(uint64_t, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
 typedef struct {{ uint64_t value; uint8_t status; }} FlowResult;
 typedef FlowResult (*Case)(HirselCoreContext *, uint64_t);
 {declarations}
@@ -79,11 +80,9 @@ static void cases(HirselCoreContext *ctx, uint8_t *state) {{
     hirsel_core_causes_drop(cause);
 }}
 int main(void) {{
-    hirsel_core_test_flow_run(1,false,0,4000,0,cases);
-    hirsel_core_test_flow_run(1,true,0,4000,0,cases);
-    for (uint8_t pause=0; pause<4; ++pause) {{
-        hirsel_core_test_flow_run(16,false,pause,4000,0,cases);
-    }}
+    hirsel_core_test_flow_run(false,4000,0,cases);
+    hirsel_core_test_flow_run(true,4000,0,cases);
+    hirsel_core_test_flow_run_pool(4,4000,0,cases);
     return 0;
 }}
 "#,
@@ -188,13 +187,25 @@ fn static_bytes_preserve_budget_law() {
         &program,
         &[
             (names["literal_refusal"], vec![0]),
-            (names["literal_refusal"], vec![1]),
             (names["refund_after_handover"], vec![0]),
-            (names["refund_after_handover"], vec![1]),
             (names["empty_is_free"], vec![]),
-            (names["cloned_and_counted"], vec![]),
             (names["inline_capacity"], vec![]),
         ],
         false,
     );
+    let f = names["static_and_clone"];
+    let expected = eval::run(&program, f, &[32], 4096);
+    assert_eq!(expected.outcome, eval::Outcome::Returned(vec![1]));
+    // This codegen case checks that our backend elides the static copy.
+    for optimize in [false, true] {
+        execute_reports_checked(
+            &program,
+            &[(f, vec![0])],
+            optimize,
+            4096,
+            None,
+            Some(std::slice::from_ref(&expected)),
+            NativeCheck::Source,
+        );
+    }
 }

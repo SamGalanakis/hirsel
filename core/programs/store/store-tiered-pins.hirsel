@@ -1,0 +1,85 @@
+type TieredPinRoot: key {
+    domain: u64,
+    branch: u32,
+    generation: u64,
+    root_stamp: u64
+}
+
+type TieredPins: send {
+    root: TieredPinRoot,
+    frames: Map[TieredCacheKey, Arc[TieredFrame]],
+    ordered: List[TieredCacheKey],
+    retained: u64,
+    partition: u64
+}
+
+fn empty_tiered_pins(root: TieredPinRoot, partition: u64) -> TieredPins {
+    TieredPins(root: root, frames: map.new(), ordered: list.new(), retained: 0, partition: partition)
+}
+
+fn tiered_reset_pins(mut pins: TieredPins, root: TieredPinRoot) {
+    if pins.root != root {
+        pins = empty_tiered_pins(root, pins.partition)
+    }
+}
+
+// Plan the newest-first eviction without disturbing the pins if the
+// protected targets already fill too much of the partition.
+fn tiered_pin_eviction(pins: TieredPins, touched: Map[u64, ()], needed: u64) -> Option[u64] {
+    let mut oldest = list.len(pins.ordered)
+    let mut left = needed
+    while left != 0 && oldest != 0 {
+        oldest -= 1
+        let key = pins.ordered[oldest]
+        let frame = option.unwrap(map.get(pins.frames, key))
+        if !map.contains(touched, frame.identity.stamp) {
+            left = int.saturating_sub(left, tiered_frame_charge(frame))
+        }
+    }
+    if left == 0 {
+        Some(oldest)
+    } else {
+        None
+    }
+}
+
+fn tiered_install_pin(mut pins: TieredPins, from_root: TieredPinRoot, touched: Map[u64, ()], frame: Arc[TieredFrame]) -> Result[bool, Error] {
+    if pins.root != from_root {
+        return Ok(false)
+    }
+    let target_key = tiered_cache_key(frame.identity)
+    if let Some(previous) = map.get(pins.frames, target_key) {
+        if previous.identity != frame.identity {
+            return Error(disk_fault(paged_pack_path(target_key.0)?, target_key.1, Checksum))
+        }
+        return Ok(true)
+    }
+    let charge = tiered_frame_charge(frame)
+    if charge > pins.partition {
+        return Ok(false)
+    }
+    let needed = int.saturating_sub(charge, pins.partition - pins.retained)
+    let Some(oldest) = tiered_pin_eviction(pins, touched, needed) else {
+        return Ok(false)
+    }
+    capacity(map.try_reserve(mut pins.frames, 1))?
+    capacity(list.try_reserve(mut pins.ordered, 1))?
+    let mut slot = list.len(pins.ordered)
+    while slot > oldest {
+        slot -= 1
+        let key = pins.ordered[slot]
+        let (protected, width) = {
+            let prior = option.unwrap(map.get(pins.frames, key))
+            (map.contains(touched, prior.identity.stamp), tiered_frame_charge(prior))
+        }
+        if !protected {
+            let _ = map.remove(mut pins.frames, key)
+            let _ = list.remove(mut pins.ordered, slot)
+            pins.retained -= width
+        }
+    }
+    pins.retained += charge
+    map.insert(mut pins.frames, target_key, arc.share(frame))
+    list.push(mut pins.ordered, target_key)
+    Ok(true)
+}

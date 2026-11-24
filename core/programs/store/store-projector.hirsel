@@ -1,0 +1,534 @@
+pub type Binding: codec + key {
+    store: StoreId,
+    branch: u32,
+    table: u32
+}
+
+pub type Image: codec + key {
+    generation: u32,
+    position: u64,
+    slot: u8
+}
+
+pub type Pass: codec + key {
+    generation: u32,
+    target: u64,
+    resume: Option[Bytes]
+}
+
+pub type Projection: codec + key {
+    binding: Option[Binding],
+    image: Option[Image],
+    pass: Option[Pass],
+    retiring: Option[u32],
+    next: u32,
+    again: bool
+}
+
+pub type Source = Local | Follower(Follower)
+
+pub opaque type ProjectionDecl: shareable + send {
+    rows: Table[String, Projection],
+    name: String
+}
+
+pub opaque type Projector[K, V] {
+    decl: ProjectionDecl,
+    input: Table[K, V],
+    from: Source,
+    reads: Reader,
+    base: Option[Snapshot],
+    target: Option[Snapshot],
+    observed: Option[Projection]
+}
+
+pub type Delta[K, V] {
+    generation: u32,
+    at: u64,
+    key: K,
+    value: Option[V]
+}
+
+pub type Fold[E: inert, K, V, A] {
+    env: E,
+    apply: fn(mut Tx, E, Delta[K, V]) -> Result[(), A],
+    drop: fn(mut Tx, E, u32, Limits) -> Result[bool, A]
+}
+
+pub type Stepped = Updated(u64) | Paged(u64) | Published(u64) | Dropped(u32) | Reloaded | Idle
+pub type ProjectError[A] = Store(Error) | Apply(A)
+
+fn projection_empty() -> Projection {
+    Projection(binding: None, image: None, pass: None, retiring: None, next: 0, again: false)
+}
+
+fn projector_pin_name(name: String, slot: u8) -> String {
+    let mut out = string.from("hirsel.projector.")
+    string.push(mut out, name)
+    string.push(mut out, if slot == 0 { ".0" } else { ".1" })
+    take out
+}
+
+pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error] {
+    let _ = checked_name(projector_pin_name(name, 0))?
+    let rows_name = "hirsel.projections"
+    let dictionary: std.codec.Codec[Projection] = std.codec.of()
+    let table_key_bytes = table_key(rows_name)?
+    if let Some(raw) = get_page_row(d.plan.roots.catalog, table_key_bytes) {
+        let descriptor = decode_catalog(raw)?
+        if option.copied(map.get(d.tables, descriptor.id)) == Some(true) {
+            let rows = catalog_handle(d.plan.store, d.plan.roots.catalog, take rows_name, std.codec.key_string(), dictionary)?
+            return Ok(ProjectionDecl(rows: take rows, name: named(name)?))
+        }
+    }
+    let declared = declare_table_inner(mut d, rows_name, std.codec.key_string(), dictionary)?
+    let rows = finish(mut d, take declared)?
+    Ok(ProjectionDecl(rows: take rows, name: named(name)?))
+}
+
+pub fn projector[K, V](decl: ProjectionDecl, input: Table[K, V], take from: Source, take r: Reader) -> Projector[K, V] {
+    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, base: None, target: None, observed: None)
+}
+
+pub fn binding[K, V](input: Table[K, V], b: Branch) -> Binding {
+    Binding(store: input.store, branch: b.id, table: input.id)
+}
+
+pub fn live(row: Projection, b: Binding) -> Option[u32] {
+    if row.binding != Some(b) { return None }
+    match row.image {
+        Some(image) => Some(image.generation),
+        None => None,
+    }
+}
+
+pub fn projection_row(tx: Tx, decl: ProjectionDecl) -> Result[Projection, Error] {
+    match fetch(tx, decl.rows, decl.name)? {
+        Some(take row) => Ok(take row),
+        None => Ok(projection_empty()),
+    }
+}
+
+fn read_projection(db: Db, decl: ProjectionDecl) -> Result[Projection, Error] waits {
+    let current = snapshot(db)
+    match get(reader(db, 0)?, current, decl.rows, decl.name)? {
+        Some(take row) => Ok(take row),
+        None => Ok(projection_empty()),
+    }
+}
+
+fn project_target[K, V](mut p: Projector[K, V], db: Db) -> Result[Snapshot, Error] waits {
+    match p.from {
+        Local => Ok(snapshot(db)),
+        Follower(mut remote) => fresh(mut remote, 18446744073709551615u64),
+    }
+}
+
+fn project_binding[K, V](p: Projector[K, V], db: Db) -> Result[Binding, Error] {
+    let source_branch = match p.from {
+        Local => main_branch(db),
+        Follower(remote) => follower_main(remote),
+    }
+    if !same(p.input.store, source_branch.store) { return Error(Foreign) }
+    Ok(binding(p.input, source_branch))
+}
+
+fn same_project_snapshot(s: Snapshot, b: Binding, head: u64) -> bool {
+    same(s.store, b.store) && s.branch == b.branch && version(s) == head
+}
+
+fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, image: Image) -> Result[Option[Snapshot], Error] waits {
+    if let Some(held) = p.base {
+        if same_project_snapshot(held, b, image.position) { return Ok(Some(clone(held))) }
+    }
+    let selected = match p.from {
+        Local => owned_pin(db, ProjectorPin, projector_pin_name(p.decl.name, image.slot)),
+        Follower(mut remote) => exact_follower_checkpoint(mut remote, image.position)?,
+    }
+    match take selected {
+        Some(take retained) if same_project_snapshot(retained, b, image.position) => Ok(Some(take retained)),
+        _ => Ok(None),
+    }
+}
+
+fn held_projection_target[K, V](mut p: Projector[K, V], b: Binding, pass: Pass) -> Result[Option[Snapshot], Error] waits {
+    if let Some(held) = p.target {
+        if same_project_snapshot(held, b, pass.target) { return Ok(Some(clone(held))) }
+    }
+    match p.from {
+        Local => Ok(None),
+        Follower(mut remote) => exact_follower_checkpoint(mut remote, pass.target),
+    }
+}
+
+fn exact_follower_checkpoint(mut remote: Follower, wanted: u64) -> Result[Option[Snapshot], Error] waits {
+    match follower_floor(mut remote, wanted) {
+        Ok(Some(take captured)) if version(captured) == wanted => Ok(Some(take captured)),
+        Ok(_) => Ok(None),
+        Error(Reclaimed(_)) => Ok(None),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn projection_page[K, V](p: Projector[K, V], base: Option[Snapshot], target: Snapshot, resume: Option[Bytes], limits: Limits) -> Result[ChangePage, Error] waits {
+    if !same(p.input.store, target.store) { return Error(Foreign) }
+    readable(target.roots, p.input.catalog_key, p.input.catalog_page, p.input.id)?
+    let low = match resume {
+        Some(key) => copied(key)?,
+        None => prefix(p.input.id)?,
+    }
+    let page = changes_page(p.reads, base, target, low, prefix(p.input.id + 1)?, limits)?
+    if list.len(page.trimmed) > 0 || list.len(page.bounds) > 0 { return Error(malformed(0)) }
+    Ok(take page)
+}
+
+fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, target: Snapshot) -> Result[u8, Error] waits {
+    let slot = match row.image {
+        Some(image) => {
+            if image.slot > 1 { return Error(malformed(0)) }
+            1u8 - image.slot
+        },
+        None => 0u8,
+    }
+    match p.from {
+        Local => {
+            let name = projector_pin_name(p.decl.name, slot)
+            let _ = replace_projector_pin(mut db, name, target)?
+            Ok(slot)
+        },
+        Follower(_) => Ok(0),
+    }
+}
+
+type ProjectionAction = SetProjection | ApplyPage(u32, u64, List[Change]) | DropGeneration(u32, Limits)
+
+type ProjectionWork[K, V, E: inert, A] {
+    decl: ProjectionDecl,
+    input: Table[K, V],
+    expected: Projection,
+    replacement: Projection,
+    action: ProjectionAction,
+    fold: Fold[E, K, V, A]
+}
+
+type ProjectionAbort[A] = ProjectionMoved | ProjectionFailed(ProjectError[A])
+
+fn apply_projection_change[K, V, E: inert, A](mut tx: Tx, input: Table[K, V], fold: Fold[E, K, V, A],
+    change: Change, generation: u32, at: u64) -> Result[(), ProjectError[A]] {
+    let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
+    let key = decoded(std.codec.decode_key(input.key, raw_key)) ?=> Store
+    let value = match change.value {
+        Some(raw) => Some(row_value(input.readers, input.id, raw) ?=> Store),
+        None => None,
+    }
+    (fold.apply)(mut tx, fold.env, Delta(generation: generation, at: at, key: take key, value: take value)) ?=> Apply
+    Ok(())
+}
+
+fn write_projection[K, V, E: inert, A](mut tx: Tx, work: ProjectionWork[K, V, E, A]) -> Result[Projection, ProjectionAbort[A]] {
+    let observed = projection_row(tx, work.decl) ?=> |problem| ProjectionFailed(Store(take problem))
+    if observed != work.expected { return Error(ProjectionMoved) }
+    let mut replacement: Projection = clone(work.replacement)
+    match work.action {
+        SetProjection => (),
+        ApplyPage(generation, at, page_rows) => for change in page_rows {
+            apply_projection_change(mut tx, work.input, work.fold, change, generation, at) ?=> ProjectionFailed
+        },
+        DropGeneration(generation, limits) => {
+            let remaining = (work.fold.drop)(mut tx, work.fold.env, generation, limits) ?=> |problem| ProjectionFailed(Apply(take problem))
+            if !remaining { replacement.retiring = None }
+        },
+    }
+    put(mut tx, work.decl.rows, work.decl.name, replacement) ?=> |problem| ProjectionFailed(Store(take problem))
+    Ok(take replacement)
+}
+
+fn project_commit[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, expected: Projection, take replacement: Projection,
+    take action: ProjectionAction, fold: Fold[E, K, V, A]) -> Result[bool, ProjectError[A]] waits {
+    let work: ProjectionWork[K, V, E, A] = ProjectionWork(decl: clone(p.decl), input: clone(p.input), expected: clone(expected),
+        replacement: take replacement, action: take action, fold: clone(fold))
+    let outcome = run(mut db, None, work, write_projection) ?=> Store
+    match take outcome {
+        Committed(Done(value: take current, ..)) => {
+            p.observed = Some(take current)
+            Ok(true)
+        },
+        Aborted(Undone(value: ProjectionMoved, ..)) => {
+            p.observed = None
+            Ok(false)
+        },
+        Aborted(Undone(value: ProjectionFailed(take problem), ..)) => Error(take problem),
+        Failed(Conflict(take name)) => Error(Store(Conflict(take name))),
+        Refused(problem) => Error(Store(Full(problem))),
+        _ => Error(Store(MigrationFault)),
+    }
+}
+
+fn forget_projector[K, V](mut p: Projector[K, V]) -> Stepped {
+    p.base = None
+    p.target = None
+    Reloaded
+}
+
+fn discard_projection_pass[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, pass: Pass,
+    fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    let mut ready: Projection = clone(row)
+    ready.pass = None
+    ready.retiring = Some(pass.generation)
+    ready.again = true
+    let _ = project_commit(mut p, mut db, row, take ready, SetProjection, fold)?
+    Ok(forget_projector(mut p))
+}
+
+fn retire_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, generation: u32,
+    limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    if project_commit(mut p, mut db, row, clone(row), DropGeneration(generation, limits), fold)? {
+        return Ok(Dropped(generation))
+    }
+    Ok(forget_projector(mut p))
+}
+
+fn rebind_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, source_binding: Binding,
+    limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    if let Some(pass) = row.pass {
+        return discard_projection_pass(mut p, mut db, row, pass, fold)
+    }
+    if let Some(generation) = row.retiring {
+        return retire_projection(mut p, mut db, row, generation, limits, fold)
+    }
+    let mut ready: Projection = clone(row)
+    ready.binding = Some(source_binding)
+    ready.image = None
+    ready.retiring = match row.image {
+        Some(image) => Some(image.generation),
+        None => None,
+    }
+    let _ = project_commit(mut p, mut db, row, take ready, SetProjection, fold)?
+    Ok(forget_projector(mut p))
+}
+
+fn publish_projection_page[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, target: Snapshot,
+    generation: u32, take page: ChangePage, fold: Fold[E, K, V, A], opening: bool, rebuilding: bool) -> Result[Stepped, ProjectError[A]] waits {
+    let ChangePage(changes: take page_rows, next: take resume, ..) = take page
+    let at = version(target)
+    let n = list.len(page_rows)
+    let mut ready: Projection = clone(row)
+    if opening {
+        let Some(next_generation) = int.checked_add(row.next, 1u32) else { return Error(Store(Limit(Ids))) }
+        ready.next = next_generation
+        ready.again = false
+    }
+    let advanced: Stepped = if let Some(take key) = take resume {
+        ready.pass = Some(Pass(generation: generation, target: at, resume: Some(take key)))
+        Paged(n)
+    } else {
+        let slot = pin_projection_target(p, mut db, row, target) ?=> Store
+        ready.image = Some(Image(generation: generation, position: at, slot: slot))
+        ready.pass = None
+        if rebuilding {
+            ready.retiring = match row.image { Some(image) => Some(image.generation), None => None }
+            Published(at)
+        } else { Updated(n) }
+    }
+    if !project_commit(mut p, mut db, row, take ready, ApplyPage(generation, at, take page_rows), fold)? {
+        return Ok(forget_projector(mut p))
+    }
+    if let Paged(_) = advanced {
+        p.target = Some(clone(target))
+    } else {
+        p.base = Some(clone(target))
+        p.target = None
+    }
+    Ok(advanced)
+}
+
+fn continue_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, source_binding: Binding,
+    pass: Pass, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    let Some(take target) = held_projection_target(mut p, source_binding, pass) ?=> Store else {
+        return discard_projection_pass(mut p, mut db, row, pass, fold)
+    }
+    let page = match projection_page(p, None, target, pass.resume, limits) {
+        Ok(take page) => take page,
+        Error(Reclaimed(_)) => return discard_projection_pass(mut p, mut db, row, pass, fold),
+        Error(take problem) => return Error(Store(take problem)),
+    }
+    publish_projection_page(mut p, mut db, row, target, pass.generation, take page, fold, false, true)
+}
+
+pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits,
+    fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    page_limits(limits) ?=> Store
+    let row = read_projection(db, p.decl) ?=> Store
+    let moved = match p.observed { Some(previous) => previous != row, None => false }
+    p.observed = Some(clone(row))
+    if moved { return Ok(forget_projector(mut p)) }
+    let source_binding = project_binding(p, db) ?=> Store
+    if row.binding != Some(source_binding) {
+        return rebind_projection(mut p, mut db, row, source_binding, limits, fold)
+    }
+    if let Some(pass) = row.pass {
+        return continue_projection(mut p, mut db, row, source_binding, pass, limits, fold)
+    }
+    let target = project_target(mut p, db) ?=> Store
+    let mut new_pass = true
+    if let Some(image) = row.image {
+        if let Some(take base) = borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
+            if version(base) == version(target) {
+                new_pass = row.again
+            } else {
+                match projection_page(p, Some(take base), target, None, limits) {
+                    Ok(take page) => if let None = page.next {
+                        if list.len(page.changes) > 0 {
+                            return publish_projection_page(mut p, mut db, row, target, image.generation, take page, fold, false, false)
+                        }
+                        new_pass = row.again
+                    },
+                    Error(Reclaimed(_)) => (),
+                    Error(take problem) => return Error(Store(take problem)),
+                }
+            }
+        }
+    }
+    if let Some(generation) = row.retiring {
+        return retire_projection(mut p, mut db, row, generation, limits, fold)
+    }
+    if !new_pass { return Ok(Idle) }
+    if row.next == 4294967295u32 { return Error(Store(Limit(Ids))) }
+    let page = projection_page(p, None, target, None, limits) ?=> Store
+    publish_projection_page(mut p, mut db, row, target, row.next, take page, fold, true, true)
+}
+
+pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits {
+    let row = read_projection(db, p.decl)?
+    if row.again {
+        return Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
+    }
+    let request_env: (ProjectionDecl, Projection) = (clone(p.decl), row)
+    let requested = run(mut db, None, request_env, fn(mut tx, input) -> Result[Projection, Error] {
+        let mut updated = projection_row(tx, input.0)?
+        if updated != input.1 { return Error(Foreign) }
+        updated.again = true
+        put(mut tx, input.0.rows, input.0.name, updated)?
+        Ok(take updated)
+    })?
+    match take requested {
+        Committed(Done(value: take current, ticket: committed, ..)) => {
+            p.observed = Some(take current)
+            Ok(committed)
+        },
+        Aborted(Undone(value: take problem, ..)) => Error(take problem),
+        Failed(Conflict(take name)) => Error(Conflict(take name)),
+        Refused(problem) => Error(Full(problem)),
+        _ => Error(MigrationFault),
+    }
+}
+
+type PinOwner: key + shareable + send = ApplicationPin | ProjectorPin
+
+type Pin: shareable + send {
+    owner: PinOwner,
+    name: String,
+    branch: u32,
+    version: u64,
+    serial: u64,
+    roots: Roots,
+    watermark: u64
+}
+
+fn share_pin(p: Pin) -> Result[Pin, Capacity] {
+    Ok(Pin(owner: p.owner, name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
+}
+
+fn pin_owner_tag(owner: PinOwner) -> u64 {
+    match owner {
+        ApplicationPin => 1,
+        ProjectorPin => 2,
+    }
+}
+
+fn pin_order(a: String, a_owner: PinOwner, b: String, b_owner: PinOwner) -> Order {
+    let names = order.compare(a, b)
+    if names == Equal { order.compare(pin_owner_tag(a_owner), pin_owner_tag(b_owner)) } else { names }
+}
+
+fn pin_index(db: Db, owner: PinOwner, name: String) -> u64 {
+    for k in 0u64 .. list.len(db.pins) {
+        if db.pins[k].owner == owner && same_name(db.pins[k].name, name) {
+            return k
+        }
+    }
+    list.len(db.pins)
+}
+
+pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
+    owned_pin(db, ApplicationPin, name)
+}
+
+fn owned_pin(db: Db, owner: PinOwner, name: String) -> Option[Snapshot] {
+    let k = pin_index(db, owner, name)
+    if k == list.len(db.pins) {
+        return None
+    }
+    let p = db.pins[k]
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), watermark: p.watermark))
+}
+
+pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+    change_pin(mut db, ApplicationPin, name, s)
+}
+
+fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+    change_pin(mut db, ProjectorPin, name, s)
+}
+
+fn capture_matches_head(from: Snapshot, head: Head) -> bool {
+    if !(head.head == from.head &&
+        tree_stamp(head.roots.collections) == tree_stamp(from.roots.collections) &&
+        tree_stamp(head.roots.streams) == tree_stamp(from.roots.streams) &&
+        tree_stamp(head.roots.catalog) == tree_stamp(from.roots.catalog) &&
+        list.len(head.roots.keyed) == list.len(from.roots.keyed)) { return false }
+    for slot in 0u64 .. list.len(head.roots.keyed) {
+        if tree_stamp(head.roots.keyed[slot]) != tree_stamp(from.roots.keyed[slot]) { return false }
+    }
+    true
+}
+
+fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    this_open(db, s)?
+    let owned = checked_name(name)?
+    let slot = pin_index(db, owner, name)
+    let replacing = slot != list.len(db.pins)
+    if replacing {
+        if owner == ApplicationPin { return Error(Exists(take owned)) }
+        check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(db.pins[slot].roots.keyed)))?
+    } else {
+        check_manifest_addition(db, pin_root_bytes(name, s.roots))?
+    }
+    let serial = db.next_pin
+    let Some(following) = int.checked_add(serial, 1) else { return Error(Limit(Ids)) }
+    db.next_pin = following
+    // Equal stamps identify the logical roots. A cut may have moved their frames.
+    let roots = match branch_slot(db, s.branch) {
+        Ok(head_slot) if capture_matches_head(s, db.heads[head_slot]) => share_roots(db.heads[head_slot].roots),
+        _ => share_roots(s.roots),
+    }
+    let kept = Pin(owner: owner, name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
+    if replacing { return cut_install(mut db, ReplacePin(slot, take kept)) }
+    cut_install(mut db, AddPin(take kept))
+}
+
+pub fn unpin(mut db: Db, name: String) -> Result[Ticket, Error] waits {
+    remove_pin(mut db, ApplicationPin, name)
+}
+
+fn remove_pin(mut db: Db, owner: PinOwner, name: String) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let k = pin_index(db, owner, name)
+    if k == list.len(db.pins) {
+        return Error(Missing(named(name)?))
+    }
+    cut_install(mut db, RemovePin(k))
+}

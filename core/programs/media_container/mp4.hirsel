@@ -1,0 +1,561 @@
+// ISO BMFF box ranges. Bounds are offsets into the supplied byte window.
+pub type Error = Truncated | InvalidBox | InvalidTrack | InvalidFragment | Unsupported | ShortBuffer
+
+pub opaque type BoxHeader {
+    kind: u32,
+    body: u64,
+    next: u64
+}
+
+pub fn box_kind(b: BoxHeader) -> u32 {
+    b.kind
+}
+
+pub fn box_body(b: BoxHeader) -> u64 {
+    b.body
+}
+
+pub fn box_next(b: BoxHeader) -> u64 {
+    b.next
+}
+
+// Parse one box in [at, limit). Pass eof only when limit is a known end;
+// a size of zero extends to that end.
+pub fn read_box(input: Bytes, at: u64, limit: u64, eof: bool) -> Result[BoxHeader, Error] {
+    if limit > list.len(input) || at > limit || limit - at < 8 {
+        return Error(Truncated)
+    }
+    let short_size: u32 = list.word_be(input, at)
+    let kind: u32 = list.word_be(input, at + 4)
+    let mut prefix = 8u64
+    let mut size: u64 = int.widen(short_size)
+    if short_size == 1 {
+        if limit - at < 16 {
+            return Error(Truncated)
+        }
+        prefix = 16
+        size = list.word_be(input, at + 8)
+    } else if short_size == 0 {
+        if !eof {
+            return Error(Truncated)
+        }
+        size = limit - at
+    }
+    if kind == 0x75756964 {
+        prefix += 16
+    }
+    if size < prefix {
+        return Error(InvalidBox)
+    }
+    if size > limit - at {
+        return Error(Truncated)
+    }
+    Ok(BoxHeader(kind: kind, body: at + prefix, next: at + size))
+}
+
+pub type Media = Audio | Video(u16, u16)
+
+pub type Track {
+    id: u32,
+    timescale: u32,
+    media: Media
+}
+
+pub type Sample {
+    duration: u32,
+    size: u32,
+    flags: u32,
+    composition_offset: i32
+}
+
+pub const FTYP: u32 = 0x66747970
+
+pub const MOOV: u32 = 0x6d6f6f76
+
+pub const MOOF: u32 = 0x6d6f6f66
+
+pub const MDAT: u32 = 0x6d646174
+
+pub const TRAF: u32 = 0x74726166
+
+pub const TFHD: u32 = 0x74666864
+
+pub const TFDT: u32 = 0x74666474
+
+pub const TRUN: u32 = 0x7472756e
+
+pub const META: u32 = 0x6d657461
+
+pub const HDLR: u32 = 0x68646c72
+
+pub const PITM: u32 = 0x7069746d
+
+pub const ILOC: u32 = 0x696c6f63
+
+pub const IINF: u32 = 0x69696e66
+
+pub const INFE: u32 = 0x696e6665
+
+pub const IREF: u32 = 0x69726566
+
+pub const AUXL: u32 = 0x6175786c
+
+pub const IPRP: u32 = 0x69707270
+
+pub const IPCO: u32 = 0x6970636f
+
+pub const COLR: u32 = 0x636f6c72
+
+pub const IROT: u32 = 0x69726f74
+
+pub const IMIR: u32 = 0x696d6972
+
+pub const AUXC: u32 = 0x61757843
+
+pub const IPMA: u32 = 0x69706d61
+
+pub const ISPE: u32 = 0x69737065
+
+pub const PIXI: u32 = 0x70697869
+
+pub const AV1C: u32 = 0x61763143
+
+// Reserve a 32-bit size. The caller must keep the completed box below 2^32 bytes.
+pub fn start_box(mut out: Bytes, kind: u32) -> u64 {
+    let at = list.len(out)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, kind)
+    at
+}
+
+pub fn close_box(mut out: Bytes, at: u64) {
+    let size: u32 = int.narrow(list.len(out) - at)
+    list.set_word_be(mut out, at, size)
+}
+
+pub fn full_box(mut out: Bytes, kind: u32, version_flags: u32) -> u64 {
+    let at = start_box(mut out, kind)
+    list.put_word_be(mut out, version_flags)
+    at
+}
+
+fn empty_table(mut out: Bytes, kind: u32) {
+    let at = full_box(mut out, kind, 0)
+    list.put_word_be(mut out, 0u32)
+    close_box(mut out, at)
+}
+
+fn unity_matrix(mut out: Bytes) {
+    let matrix: Inline[u32, 9] =[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000]
+    for i in 0u64 .. 9 {
+        list.put_word_be(mut out, matrix[i])
+    }
+}
+
+// Emit an initialization segment for one track. sample_entry includes its box
+// header and codec configuration, with data_reference_index 1.
+pub fn write_init(mut out: Bytes, track: Track, sample_entry: Bytes) -> Result[(), Error] {
+    let n = list.len(sample_entry)
+    if n > 0xffffffff - 1024 || n < 16 || track.id == 0 || track.id == 0xffffffff || track.timescale == 0 {
+        return Error(InvalidTrack)
+    }
+    let entry = read_box(sample_entry, 0, n, true)?
+    let reference: u16 = list.word_be(sample_entry, 14)
+    if entry.body != 8 || entry.next != n || reference != 1 {
+        return Error(InvalidTrack)
+    }
+    let (handler, volume, width, height, slots) = match track.media {
+        Audio => (0x736f756eu32, 0x0100u16, 0u32, 0u32, 509u64),
+        Video(w, h) => {
+            if w == 0 || h == 0 {
+                return Error(InvalidTrack)
+            }
+            let wide: u32 = int.widen(w)
+            let high: u32 = int.widen(h)
+            (0x76696465u32, 0u16, wide << 16, high << 16, 513u64)
+        },
+    }
+    if list.capacity(out) < n + slots {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    let ftyp = start_box(mut out, FTYP)
+    list.append(mut out, b"iso6\x00\x00\x00\x00iso6cmfcmp41")
+    close_box(mut out, ftyp)
+    let moov = start_box(mut out, MOOV)
+    let mvhd = full_box(mut out, 0x6d766864, 0)
+    list.fill(mut out, 8, 0)
+    list.put_word_be(mut out, track.timescale)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, 0x00010000u32)
+    list.put_word_be(mut out, 0x0100u16)
+    list.fill(mut out, 10, 0)
+    unity_matrix(mut out)
+    list.fill(mut out, 24, 0)
+    list.put_word_be(mut out, track.id + 1)
+    close_box(mut out, mvhd)
+    let trak = start_box(mut out, 0x7472616b)
+    let tkhd = full_box(mut out, 0x746b6864, 7)
+    list.fill(mut out, 8, 0)
+    list.put_word_be(mut out, track.id)
+    list.fill(mut out, 20, 0)
+    list.put_word_be(mut out, volume)
+    list.put_word_be(mut out, 0u16)
+    unity_matrix(mut out)
+    list.put_word_be(mut out, width)
+    list.put_word_be(mut out, height)
+    close_box(mut out, tkhd)
+    let mdia = start_box(mut out, 0x6d646961)
+    let mdhd = full_box(mut out, 0x6d646864, 0)
+    list.fill(mut out, 8, 0)
+    list.put_word_be(mut out, track.timescale)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, 0x55c4u16)
+    list.put_word_be(mut out, 0u16)
+    close_box(mut out, mdhd)
+    let hdlr = full_box(mut out, 0x68646c72, 0)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, handler)
+    list.fill(mut out, 13, 0)
+    close_box(mut out, hdlr)
+    let minf = start_box(mut out, 0x6d696e66)
+    match track.media {
+        Audio => {
+            let smhd = full_box(mut out, 0x736d6864, 0)
+            list.put_word_be(mut out, 0u32)
+            close_box(mut out, smhd)
+        },
+        Video(_, _) => {
+            let vmhd = full_box(mut out, 0x766d6864, 1)
+            list.put_word_be(mut out, 0u64)
+            close_box(mut out, vmhd)
+        },
+    }
+    let dinf = start_box(mut out, 0x64696e66)
+    let dref = full_box(mut out, 0x64726566, 0)
+    list.put_word_be(mut out, 1u32)
+    let url = full_box(mut out, 0x75726c20, 1)
+    close_box(mut out, url)
+    close_box(mut out, dref)
+    close_box(mut out, dinf)
+    let stbl = start_box(mut out, 0x7374626c)
+    let stsd = full_box(mut out, 0x73747364, 0)
+    list.put_word_be(mut out, 1u32)
+    list.append(mut out, sample_entry)
+    close_box(mut out, stsd)
+    empty_table(mut out, 0x73747473)
+    empty_table(mut out, 0x73747363)
+    let stsz = full_box(mut out, 0x7374737a, 0)
+    list.put_word_be(mut out, 0u64)
+    close_box(mut out, stsz)
+    empty_table(mut out, 0x7374636f)
+    close_box(mut out, stbl)
+    close_box(mut out, minf)
+    close_box(mut out, mdia)
+    close_box(mut out, trak)
+    let mvex = start_box(mut out, 0x6d766578)
+    let trex = full_box(mut out, 0x74726578, 0)
+    list.put_word_be(mut out, track.id)
+    list.put_word_be(mut out, 1u32)
+    list.fill(mut out, 12, 0)
+    close_box(mut out, trex)
+    close_box(mut out, mvex)
+    close_box(mut out, moov)
+    Ok(())
+}
+
+// Emit moof and the mdat box header. Follow it with the caller's sample bytes
+// in list order. No payload is read or copied by this function.
+pub fn write_fragment(mut out: Bytes, track_id: u32, sequence: u32, decode_time: u64, samples: List[Sample]) -> Result[(), Error] {
+    let count = list.len(samples)
+    if track_id == 0 || count == 0 || count > (0x7fffffff - 108) / 16 {
+        return Error(InvalidFragment)
+    }
+    let mut payload = 0u64
+    let mut time = decode_time
+    for sample in samples {
+        payload += int.widen(sample.size)
+        let duration: u64 = int.widen(sample.duration)
+        let Some(end_time) = int.checked_add(time, duration) else {
+            return Error(InvalidFragment)
+        }
+        time = end_time
+    }
+    let wide = payload > 0xffffffff - 8
+    let mdat_header = if wide {
+        16u64
+    } else {
+        8u64
+    }
+    let prefix = 88 + 16 * count + mdat_header
+    if list.capacity(out) < prefix {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    let moof = start_box(mut out, MOOF)
+    let mfhd = full_box(mut out, 0x6d666864, 0)
+    list.put_word_be(mut out, sequence)
+    close_box(mut out, mfhd)
+    let traf = start_box(mut out, TRAF)
+    let tfhd = full_box(mut out, TFHD, 0x020000)
+    list.put_word_be(mut out, track_id)
+    close_box(mut out, tfhd)
+    let tfdt = full_box(mut out, TFDT, 0x01000000)
+    list.put_word_be(mut out, decode_time)
+    close_box(mut out, tfdt)
+    let trun = full_box(mut out, TRUN, 0x01000f01)
+    let sample_count: u32 = int.narrow(count)
+    let data_offset: u32 = int.narrow(prefix)
+    list.put_word_be(mut out, sample_count)
+    list.put_word_be(mut out, data_offset)
+    for sample in samples {
+        list.put_word_be(mut out, sample.duration)
+        list.put_word_be(mut out, sample.size)
+        list.put_word_be(mut out, sample.flags)
+        let bits: u32 = int.truncate(sample.composition_offset)
+        list.put_word_be(mut out, bits)
+    }
+    close_box(mut out, trun)
+    close_box(mut out, traf)
+    close_box(mut out, moof)
+    if wide {
+        list.put_word_be(mut out, 1u32)
+        list.put_word_be(mut out, MDAT)
+        list.put_word_be(mut out, payload + 16)
+    } else {
+        let mdat_size: u32 = int.narrow(payload + 8)
+        list.put_word_be(mut out, mdat_size)
+        list.put_word_be(mut out, MDAT)
+    }
+    Ok(())
+}
+
+pub type Defaults {
+    duration: u32,
+    size: u32,
+    flags: u32
+}
+
+pub type Timing {
+    track: u32,
+    decode_time: u64,
+    duration: u32,
+    flags: u32,
+    composition_offset: i64
+}
+
+type FragmentTrack {
+    id: u32,
+    defaults: Defaults,
+    decode_time: u64
+}
+
+fn track_header(input: Bytes, b: BoxHeader, defaults: Defaults) -> Result[FragmentTrack, Error] {
+    if b.next - b.body < 8 {
+        return Error(InvalidFragment)
+    }
+    let flags: u32 = list.word_be(input, b.body)
+    let id: u32 = list.word_be(input, b.body + 4)
+    if id == 0 {
+        return Error(InvalidFragment)
+    }
+    // This profile uses moof-relative addresses and a single sample entry.
+    if (flags & ~0x02003au32) != 0 {
+        return Error(Unsupported)
+    }
+    let mut at = b.body + 8
+    if (flags & 2) != 0 && read_optional_word(input, b.next, mut at)? != 1 {
+        return Error(Unsupported)
+    }
+    let mut fields = defaults
+    if (flags & 8) != 0 {
+        fields.duration = read_optional_word(input, b.next, mut at)?
+    }
+    if (flags & 16) != 0 {
+        fields.size = read_optional_word(input, b.next, mut at)?
+    }
+    if (flags & 32) != 0 {
+        fields.flags = read_optional_word(input, b.next, mut at)?
+    }
+    if at != b.next {
+        return Error(InvalidFragment)
+    }
+    Ok(FragmentTrack(id: id, defaults: fields, decode_time: 0))
+}
+
+fn read_optional_word(input: Bytes, limit: u64, mut at: u64) -> Result[u32, Error] {
+    if limit - at < 4 {
+        return Error(InvalidFragment)
+    }
+    let word: u32 = list.word_be(input, at)
+    at += 4
+    Ok(word)
+}
+
+fn decode_time_box(input: Bytes, b: BoxHeader) -> Result[u64, Error] {
+    let size = b.next - b.body
+    if size < 4 {
+        return Error(InvalidFragment)
+    }
+    let version: u32 = list.word_be(input, b.body)
+    if version == 0 && size == 8 {
+        let time: u32 = list.word_be(input, b.body + 4)
+        return Ok(int.widen(time))
+    }
+    if version == 0x01000000 && size == 12 {
+        return Ok(list.word_be(input, b.body + 4))
+    }
+    Error(InvalidFragment)
+}
+
+fn run(input: Bytes, b: BoxHeader, moof_at: u64, mdat: BoxHeader, mut offset: u64, mut track: FragmentTrack, sample: scoped fn(Timing, Bytes)) -> Result[(), Error] {
+    if b.next - b.body < 8 {
+        return Error(InvalidFragment)
+    }
+    let flags: u32 = list.word_be(input, b.body)
+    let count: u32 = list.word_be(input, b.body + 4)
+    if (flags & ~0x01000f05u32) != 0 || (flags & 0x404) == 0x404 {
+        return Error(InvalidFragment)
+    }
+    let mut at = b.body + 8
+    if (flags & 1) != 0 {
+        let displacement: i32 = int.truncate(read_optional_word(input, b.next, mut at)?)
+        if displacement < 0 {
+            return Error(Unsupported)
+        }
+        let unsigned: u32 = int.truncate(displacement)
+        let delta: u64 = int.widen(unsigned)
+        let Some(address) = int.checked_add(moof_at, delta) else {
+            return Error(InvalidFragment)
+        }
+        offset = address
+    }
+    if offset < mdat.body || offset > mdat.next {
+        return Error(InvalidFragment)
+    }
+    let mut first_flags = track.defaults.flags
+    if (flags & 4) != 0 {
+        first_flags = read_optional_word(input, b.next, mut at)?
+    }
+    let mut words = 0u64
+    for bit in 8u32 .. 12 {
+        if (flags & (1u32 << bit)) != 0 {
+            words += 1
+        }
+    }
+    let n: u64 = int.widen(count)
+    if b.next - at != n * words * 4 {
+        return Error(InvalidFragment)
+    }
+    // All-default samples consume payload even when the table has no rows.
+    let default_size: u64 = int.widen(track.defaults.size)
+    if (flags & 0x200) == 0 && (default_size == 0 || n * default_size > mdat.next - offset) {
+        return Error(InvalidFragment)
+    }
+    for i in 0u32 .. count {
+        let duration = if (flags & 0x100) != 0 {
+            read_optional_word(input, b.next, mut at)?
+        } else {
+            track.defaults.duration
+        }
+        let size: u64 = if (flags & 0x200) != 0 {
+            int.widen(read_optional_word(input, b.next, mut at)?)
+        } else {
+            int.widen(track.defaults.size)
+        }
+        let sample_flags = if (flags & 0x400) != 0 {
+            read_optional_word(input, b.next, mut at)?
+        } else if i == 0 {
+            first_flags
+        } else {
+            track.defaults.flags
+        }
+        let mut composition_offset = 0i64
+        if (flags & 0x800) != 0 {
+            let raw = read_optional_word(input, b.next, mut at)?
+            if (flags >> 24) == 0 {
+                composition_offset = int.widen(raw)
+            } else {
+                let signed: i32 = int.truncate(raw)
+                composition_offset = int.widen(signed)
+            }
+        }
+        let d: u64 = int.widen(duration)
+        let Some(time_after) = int.checked_add(track.decode_time, d) else {
+            return Error(InvalidFragment)
+        }
+        if size > mdat.next - offset {
+            return Error(InvalidFragment)
+        }
+        let end_sample = offset + size
+        sample(Timing(track: track.id, decode_time: track.decode_time, duration: duration, flags: sample_flags, composition_offset: composition_offset), list.slice(input, offset, end_sample))
+        offset = end_sample
+        track.decode_time = time_after
+    }
+    Ok(())
+}
+
+// Demux a single-traf movie fragment followed by its mdat. Defaults are the
+// values of the track's trex. Each callback loans one verified byte range.
+// A later malformed run may return an error after earlier samples were emitted.
+pub fn read_fragment(input: Bytes, at: u64, eof: bool, defaults: Defaults, sample: scoped fn(Timing, Bytes)) -> Result[u64, Error] {
+    let limit = list.len(input)
+    let moof = read_box(input, at, limit, eof)?
+    if moof.kind != MOOF {
+        return Error(InvalidFragment)
+    }
+    let mdat = read_box(input, moof.next, limit, eof)?
+    if mdat.kind != MDAT {
+        return Error(Unsupported)
+    }
+    let mut child_at = moof.body
+    let mut found = false
+    while child_at < moof.next {
+        let child = read_box(input, child_at, moof.next, true)?
+        if child.kind == TRAF {
+            if found {
+                return Error(Unsupported)
+            }
+            found = true
+            demux_track(input, child, at, mdat, defaults, sample)?
+        }
+        child_at = child.next
+    }
+    if !found {
+        return Error(InvalidFragment)
+    }
+    Ok(mdat.next)
+}
+
+fn demux_track(input: Bytes, traf: BoxHeader, moof_at: u64, mdat: BoxHeader, defaults: Defaults, sample: scoped fn(Timing, Bytes)) -> Result[(), Error] {
+    let first = read_box(input, traf.body, traf.next, true)?
+    if first.kind != TFHD {
+        return Error(InvalidFragment)
+    }
+    let mut track = track_header(input, first, defaults)?
+    let mut has_time = false
+    let mut has_run = false
+    let mut offset = moof_at
+    let mut at = first.next
+    while at < traf.next {
+        let b = read_box(input, at, traf.next, true)?
+        if b.kind == TFDT {
+            if has_time || has_run {
+                return Error(InvalidFragment)
+            }
+            has_time = true
+            track.decode_time = decode_time_box(input, b)?
+        } else if b.kind == TRUN {
+            if !has_time {
+                return Error(Unsupported)
+            }
+            has_run = true
+            run(input, b, moof_at, mdat, mut offset, mut track, sample)?
+        }
+        at = b.next
+    }
+    if !has_run {
+        return Error(InvalidFragment)
+    }
+    Ok(())
+}

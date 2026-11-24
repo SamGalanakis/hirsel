@@ -1,0 +1,40 @@
+[package]
+name = "media_container"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+media_bits = { major = 1, path = "../media_bits" }
+
+[sources]
+"ogg.hirsel" = "ogg"
+"opus.hirsel" = "opus"
+"mp4.hirsel" = "mp4"
+"mp4_init.hirsel" = "mp4"
+"mp4_vod.hirsel" = "mp4"
+"mp4_tables.hirsel" = "mp4"
+"mp4_formats.hirsel" = "mp4"
+"mp4_vod_write.hirsel" = "mp4"
+"mp4_sidx.hirsel" = "mp4"
+"mp4_faststart.hirsel" = "mp4"
+"mp4_clip.hirsel" = "mp4"
+"webm.hirsel" = "webm"
+"webm_init.hirsel" = "webm"
+"webm_probe.hirsel" = "webm"
+"probe.hirsel" = "probe"
+
+[tests]
+limit = 16777216
+grants = []
+
+[tests.sources]
+"ogg_laws.hirsel" = "tests"
+"mp4_laws.hirsel" = "tests"
+"mp4_vod_laws.hirsel" = "tests"
+"mp4_write_laws.hirsel" = "tests"
+"mp4_faststart_laws.hirsel" = "tests"
+"mp4_clip_laws.hirsel" = "tests"
+"mp4_rotation_laws.hirsel" = "tests"
+"mp4_duration_laws.hirsel" = "tests"
+"webm_laws.hirsel" = "tests"

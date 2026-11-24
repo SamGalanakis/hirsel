@@ -101,6 +101,10 @@ impl Function<'_, '_, '_> {
                 self.swizzle(result, shape, first, second.unwrap());
                 return Ok(());
             }
+            MaddI16 | PackSaturating => {
+                self.narrowing(result, op, first, second.unwrap());
+                return Ok(());
+            }
             _ => {}
         }
 
@@ -141,6 +145,14 @@ impl Function<'_, '_, '_> {
                 Splat => a,
                 WrappingAdd => self.b.ins().iadd(a, b.unwrap()),
                 WrappingSub => self.b.ins().isub(a, b.unwrap()),
+                WrappingMul => self.b.ins().imul(a, b.unwrap()),
+                MulhiI16 => {
+                    let a = self.b.ins().sextend(types::I32, a);
+                    let b = self.b.ins().sextend(types::I32, b.unwrap());
+                    let product = self.b.ins().imul(a, b);
+                    let high = self.b.ins().sshr_imm(product, 16);
+                    self.b.ins().ireduce(types::I16, high)
+                }
                 SaturatingAdd | SaturatingSub => {
                     let arith = if op == SaturatingAdd {
                         ArithOp::Add
@@ -189,6 +201,65 @@ impl Function<'_, '_, '_> {
             self.set(result, reduction.unwrap());
         }
         Ok(())
+    }
+
+    /// `simd.madd_i16` and `simd.pack_saturating`, whose result lanes differ
+    /// from their operands' lanes: one result lane at a time from the spilled
+    /// operands.
+    fn narrowing(&mut self, result: ValueId, op: SimdOp, first: ValueId, second: ValueId) {
+        let (Ty::Vector(from), Ty::Vector(to)) = (
+            self.body.values[first.index()],
+            self.body.values[result.index()],
+        ) else {
+            unreachable!()
+        };
+        let in_ty = ty(Ty::Scalar(from.lane()));
+        let out_ty = ty(Ty::Scalar(to.lane()));
+        let in_width = from.lane().size() as i32;
+        let out_width = to.lane().size() as i32;
+        let a = self.spill_vector(first);
+        let b = self.spill_vector(second);
+        let output = self.vector_slot(to);
+        for i in 0..to.lanes() as i32 {
+            let value = if op == SimdOp::MaddI16 {
+                let mut sum = None;
+                for k in [2 * i, 2 * i + 1] {
+                    let x = self.b.ins().stack_load(types::I64, in_ty, a, k * in_width);
+                    let y = self.b.ins().stack_load(types::I64, in_ty, b, k * in_width);
+                    let x = self.b.ins().sextend(types::I32, x);
+                    let y = self.b.ins().sextend(types::I32, y);
+                    let product = self.b.ins().imul(x, y);
+                    sum = Some(match sum {
+                        Some(sum) => self.b.ins().iadd(sum, product),
+                        None => product,
+                    });
+                }
+                sum.unwrap()
+            } else {
+                let half = from.lanes() as i32;
+                let (slot, k) = if i < half { (a, i) } else { (b, i - half) };
+                let wide = self
+                    .b
+                    .ins()
+                    .stack_load(types::I64, in_ty, slot, k * in_width);
+                let (min, max) = match to.lane() {
+                    Scalar::I8 => (i64::from(i8::MIN), i64::from(i8::MAX)),
+                    Scalar::U8 => (0, i64::from(u8::MAX)),
+                    Scalar::I16 => (i64::from(i16::MIN), i64::from(i16::MAX)),
+                    Scalar::U16 => (0, i64::from(u16::MAX)),
+                    _ => unreachable!("a pack narrows to 8 or 16 bits"),
+                };
+                let min = self.b.ins().iconst(in_ty, min);
+                let max = self.b.ins().iconst(in_ty, max);
+                let low = self.b.ins().smax(wide, min);
+                let clamped = self.b.ins().smin(low, max);
+                self.b.ins().ireduce(out_ty, clamped)
+            };
+            self.b
+                .ins()
+                .stack_store(types::I64, value, output, i * out_width);
+        }
+        self.fill_vector(result, output);
     }
 
     fn swizzle(&mut self, result: ValueId, shape: Vector, table: ValueId, indices: ValueId) {

@@ -12,3 +12,10 @@ bits are rejected.
 Full blocks use SEM-11 vectors. The encoder writes only ASCII and constructs
 the `String` from the bytes it produced. Tail padding follows Goose's Base64
 codec, with RFC 4648's zero pad bits required for a canonical spelling.
+
+`encode_url(bytes, padded)` returns a string using RFC 4648 section 5's
+`-` and `_` alphabet. `decode_url(bytes, padded)` takes that same alphabet.
+Pass `true` to require canonical padding or `false` to omit it. Decoding
+rejects the standard alphabet's `+` and `/`, misplaced or unexpected padding,
+whitespace, and nonzero pad bits. Malformed input returns `None` before
+allocation. Both operations can raise Capacity.

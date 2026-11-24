@@ -1,0 +1,187 @@
+type Output {
+    data: Bytes,
+    limit: u64,
+    canonical: bool
+}
+
+/// Write UTF-8 XML with comments and processing instructions.
+pub fn write(doc: Document, limits: Limits) -> Result[Bytes, Error] {
+    render(doc, limits, false)
+}
+
+/// Write James Clark's test-suite canonical form for documents without a DTD.
+pub fn canonical(doc: Document, limits: Limits) -> Result[Bytes, Error] {
+    render(doc, limits, true)
+}
+
+fn render(doc: Document, limits: Limits, canonical_form: bool) -> Result[Bytes, Error] {
+    match (bound steps limits.max_steps {
+        render_document(doc, limits, canonical_form)
+    }) {
+        Ok(take value) => take value,
+        Error(_) => Error(StepLimit),
+    }
+}
+
+fn put(mut out: Output, value: Bytes) -> Result[(), Error] {
+    let size = list.len(value)
+    if size > out.limit - list.len(out.data) {
+        return Error(ByteLimit)
+    }
+    reserve(mut out.data, size)?
+    list.append(mut out.data, value)
+    Ok(())
+}
+
+fn put_text(mut out: Output, value: String) -> Result[(), Error] {
+    put(mut out, string.as_bytes(value))
+}
+
+fn escaped(mut out: Output, value: String, attribute: bool) -> Result[(), Error] {
+    let data = string.as_bytes(value)
+    let mut start = 0u64
+    for i in 0u64 .. list.len(data) {
+        let replacement: Bytes = match data[i] {
+            b'&' => b"&amp;",
+            b'<' => b"&lt;",
+            b'>' => b"&gt;",
+            b'"' => if attribute || out.canonical {
+                b"&quot;"
+            } else {
+                b""
+            },
+            9 => if attribute || out.canonical {
+                b"&#9;"
+            } else {
+                b""
+            },
+            10 => if attribute || out.canonical {
+                b"&#10;"
+            } else {
+                b""
+            },
+            13 => b"&#13;",
+            _ => b"",
+        }
+        if list.len(replacement) != 0 {
+            put(mut out, list.slice(data, start, i))?
+            put(mut out, replacement)?
+            start = i + 1
+        }
+    }
+    put(mut out, list.slice(data, start, list.len(data)))
+}
+
+fn emit_attribute(mut out: Output, attr: Attribute, limits: Limits) -> Result[(), Error] {
+    if string.byte_len(attr.name.qualified) > limits.max_name_bytes {
+        return Error(NameLimit)
+    }
+    put(mut out, b" ")?
+    put_text(mut out, attr.name.qualified)?
+    put(mut out, b"=\"")?
+    escaped(mut out, attr.value, true)?
+    put(mut out, b"\"")
+}
+
+fn emit_start(mut out: Output, element: Element, limits: Limits) -> Result[(), Error] {
+    let count = list.len(element.attributes)
+    if count > limits.max_attributes {
+        return Error(AttributeLimit)
+    }
+    if string.byte_len(element.name.qualified) > limits.max_name_bytes {
+        return Error(NameLimit)
+    }
+    put(mut out, b"<")?
+    put_text(mut out, element.name.qualified)?
+    if out.canonical {
+        let mut indices: List[u64] = list.new()
+        reserve(mut indices, count)?
+        for i in 0u64 .. count {
+            list.push(mut indices, i)
+        }
+        for i in 1u64 .. count {
+            let mut j = i
+            while j > 0 {
+                let after = string.as_bytes(element.attributes[indices[j - 1]].name.qualified)
+                let before = string.as_bytes(element.attributes[indices[j]].name.qualified)
+                if let Less = list.compare_bytes(before, after) {} else {
+                    break
+                }
+                list.swap(mut indices, j, j - 1)
+                j -= 1
+            }
+        }
+        for i in indices {
+            emit_attribute(mut out, element.attributes[i], limits)?
+        }
+    } else {
+        for attr in element.attributes {
+            emit_attribute(mut out, attr, limits)?
+        }
+    }
+    put(mut out, b">")
+}
+
+fn emit_end(mut out: Output, element: Element) -> Result[(), Error] {
+    put(mut out, b"</")?
+    put_text(mut out, element.name.qualified)?
+    put(mut out, b">")
+}
+
+fn emit_instruction(mut out: Output, value: Instruction, limits: Limits) -> Result[(), Error] {
+    if string.byte_len(value.target) > limits.max_name_bytes {
+        return Error(NameLimit)
+    }
+    put(mut out, b"<?")?
+    put_text(mut out, value.target)?
+    if out.canonical || string.byte_len(value.data) != 0 {
+        put(mut out, b" ")?
+        put_text(mut out, value.data)?
+    }
+    put(mut out, b"?>")
+}
+
+fn render_document(doc: Document, limits: Limits, canonical_form: bool) -> Result[Bytes, Error] {
+    let mut out = Output(data: list.new(), limit: limits.max_bytes, canonical: canonical_form)
+    let mut i = 0u64
+    let mut depth = 0u64
+    loop {
+        let node = doc.items[i]
+        match node.content {
+            Tag(element) => {
+                if depth == limits.max_depth {
+                    return Error(DepthLimit)
+                }
+                emit_start(mut out, element, limits)?
+                if let Some(child) = node.first_child {
+                    i = child
+                    depth += 1
+                    continue
+                }
+                emit_end(mut out, element)?
+            },
+            Characters(value) => escaped(mut out, value, false)?,
+            Remark(value) => if !canonical_form {
+                put(mut out, b"<!--")?
+                put_text(mut out, value)?
+                put(mut out, b"-->")?
+            },
+            InstructionNode(value) => emit_instruction(mut out, value, limits)?,
+        }
+        loop {
+            if let Some(sibling) = doc.items[i].next_sibling {
+                i = sibling
+                break
+            }
+            let Some(parent) = doc.items[i].parent else {
+                let Output(data: take data, limit: _, canonical: _) = take out
+                return Ok(take data)
+            }
+            if let Tag(element) = doc.items[parent].content {
+                emit_end(mut out, element)?
+            }
+            depth -= 1
+            i = parent
+        }
+    }
+}

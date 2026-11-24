@@ -10,6 +10,14 @@
 //! Each cell admits `charge::PROVIDE_CELL` from the constructing payer, held
 //! until teardown with the cell, as a narrowed grant's rule storage (MEM-24):
 //! a capability is plain and copyable, so nothing earlier proves it gone.
+mod net;
+mod payload;
+pub(crate) mod random;
+mod replies;
+mod udp;
+use replies::answer;
+pub(crate) use udp::release_udp;
+
 use crate::exec_runtime::{Call, ProcCall, SpawnCall};
 use crate::unix_net::{
     SERVED_DATAGRAM_RECV, SERVED_UNIX_LISTEN, UnixField, UnixHandle, UnixOperation, UnixReply,
@@ -17,7 +25,10 @@ use crate::unix_net::{
 };
 use crate::{Context, causes, provider::*};
 use hirsel_core_layout::charge::PROVIDE_CELL;
-use hirsel_core_net::exec::{ExecRules, served as exec};
+use hirsel_core_net::{
+    exec::{ExecRules, served as exec},
+    random_stream::RandomStream,
+};
 use std::{
     collections::BTreeMap,
     mem::ManuallyDrop,
@@ -27,7 +38,7 @@ use std::{
 
 enum Cell {
     Clock(Mutex<ClockCell>),
-    Random(Mutex<u64>),
+    Random(Mutex<RandomStream>),
     Process(Mutex<ProcessCell>),
     Port(Mutex<Port>),
 }
@@ -74,6 +85,7 @@ struct Port {
     /// A Net port's caller socket and listener keys (direction bits clear)
     /// and the server ids they name (NOTES 31).
     keys: BTreeMap<u64, u64>,
+    udp_retired: BTreeMap<u64, crate::udp_net::served::Retirement>,
     /// A Net port's root rules: every address, pinned with the port, so
     /// `net.narrow` intersects them as any Net grant's.
     rules: Option<crate::net::RulesStorage>,
@@ -98,6 +110,7 @@ enum Kind {
     Listener,
     UnixListener,
     Datagram,
+    Udp,
     Proc,
     PipeRead,
     PipeWrite,
@@ -142,6 +155,8 @@ const HANDLE_ROOM: u64 = 32;
 /// DirOp variants in declaration order (core.md, Provide).
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
+const DIR_MKSTEMP: u64 = 21;
+const DIR_ZERO_EXTENSION: u64 = 22;
 /// NetOp variants in declaration order.
 const NET_CONNECT: u64 = 0;
 const NET_RESOLVE: u64 = 1;
@@ -154,6 +169,8 @@ const NET_SEND_SECRET: u64 = 7;
 const NET_RELEASED: u64 = 8;
 /// After the Unix variants (9 to 17).
 const NET_READY: u64 = 18;
+const NET_LOCAL_ADDR: u64 = 19;
+const NET_PEER_ADDR: u64 = 20;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
 const R_FAILED: u64 = 1;
@@ -164,6 +181,7 @@ const R_STAT: u64 = 5;
 const R_FILE: u64 = 6;
 const R_DIR: u64 = 7;
 const R_ENTRIES: u64 = 8;
+const R_ZERO_EXTENSION: u64 = 9;
 /// NetReply's own variants after the shared Done, Failed and Count.
 const R_SOCKET: u64 = 9;
 const R_LISTENER: u64 = 10;
@@ -172,6 +190,7 @@ const R_UNIX_SOCKET: u64 = 12;
 const R_UNIX_LISTENING: u64 = 13;
 const R_DATAGRAM: u64 = 14;
 const R_PACKET: u64 = 15;
+const R_ADDRESS: u64 = 16;
 
 fn unix_reply(reply: UnixReply) -> (u64, Option<Kind>) {
     match reply {
@@ -207,6 +226,7 @@ struct PortCall {
     finished: bool,
     /// Reply bytes `fill` staged in the room.
     staged: Vec<u8>,
+    staged_packets: Vec<hirsel_core_net::udp::Packet>,
     /// A SendSecret's Secrets, narrowed to the stream's name at issue.
     secret: Option<Vec<crate::secret::Secret>>,
 }
@@ -257,8 +277,9 @@ impl Port {
     }
     fn free_staged(&mut self, id: u64) {
         if let Some(call) = self.calls.get_mut(&id) {
-            self.used -= call.staged.len() as u64;
+            self.used -= call.staged.len() as u64 + udp::packet_charge(call.staged_packets.len());
             call.staged = Vec::new();
+            call.staged_packets = Vec::new();
         }
     }
     /// A Close call ends: a server that took it knows the file is gone; one
@@ -355,104 +376,6 @@ impl Port {
     }
     /// A Net call's words: an address operation on the port's Net (its rules
     /// already permitted the address), or an operation on a live key.
-    fn net_words(&self, request: &Request) -> Option<[u64; 9]> {
-        if let Some(op) = UnixOperation::describe(request.operation) {
-            // SAFETY: the Unix adapter pins this extension through delivery.
-            let n = unsafe { &*request.path.cast::<UnixRequest>() };
-            let mut w = [0; 9];
-            w[0] = op.served;
-            let b = request.buffer;
-            for (word, field) in w[1..].iter_mut().zip(op.fields) {
-                *word = match field {
-                    UnixField::Listener => self.socket(request.handle, Kind::UnixListener)?,
-                    UnixField::Datagram => self.socket(request.handle, Kind::Datagram)?,
-                    UnixField::Root(_) => n.root.len() as u64,
-                    UnixField::Path => n.path.len() as u64,
-                    UnixField::Backlog => u64::from(n.backlog),
-                    UnixField::Bytes => b.len as u64,
-                    UnixField::Room => b.capacity.saturating_sub(b.len) as u64,
-                };
-            }
-            return Some(w);
-        }
-        // SAFETY: every Net adapter pins its NetworkRequest in `path`.
-        let n = unsafe { &*request.path.cast::<crate::net::NetworkRequest>() };
-        let a = n.address;
-        let b = request.buffer;
-        let spare = (b.capacity.saturating_sub(b.len)) as u64;
-        let address = [u64::from(a.family), a.hi, a.lo, u64::from(a.port)];
-        let mut w = [0; 9];
-        match request.operation {
-            CONNECT => {
-                w[0] = NET_CONNECT;
-                w[1..5].copy_from_slice(&address);
-            }
-            RESOLVE => {
-                // The name as the caller wrote it, which its rules covered,
-                // and room for that many address records (NOTES 34).
-                // SAFETY: RESOLVE pins its ResolveRequest in `path`.
-                let name = unsafe {
-                    (*request.path.cast::<crate::resolve::ResolveRequest>())
-                        .raw_name
-                        .len
-                };
-                let room = spare.saturating_mul(hirsel_core_net::IP_RECORD_LEN as u64);
-                w[..3].copy_from_slice(&[NET_RESOLVE, name as u64, room]);
-            }
-            LISTEN => {
-                w[0] = NET_LISTEN;
-                w[1..5].copy_from_slice(&address);
-                w[5] = u64::from(n.backlog);
-            }
-            ACCEPT => {
-                let id = self.socket(request.handle, Kind::Listener)?;
-                w[..2].copy_from_slice(&[NET_ACCEPT, id]);
-            }
-            RECV_BOUNDED => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                w[..4].copy_from_slice(&[NET_RECV, id, spare, n.max_receive]);
-            }
-            RECV_READY => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                w[..2].copy_from_slice(&[NET_READY, id]);
-            }
-            SEND_PAIR => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: SEND_PAIR pins its tail carrier through delivery.
-                let tail = unsafe { (*n.send_tail).len } as u64;
-                w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
-            }
-            SEND_SECRET => {
-                // A TLS write half; the Secrets themselves go to the call.
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: SEND_SECRET pins its SendRequest and its marks'
-                // bytes through delivery.
-                let (secrets, marks) = unsafe {
-                    let send = &*request.path.cast::<crate::secret::SendRequest>();
-                    (
-                        send.designations.len() as u64,
-                        (*n.send_tail).len as u64 / 8,
-                    )
-                };
-                w[..5].copy_from_slice(&[NET_SEND_SECRET, id, b.len as u64, secrets, marks]);
-            }
-            TLS_CONNECT => {
-                // The Socket is whole: `tls.connect` takes it before any split.
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: TLS_CONNECT pins its TlsRequest in `path`.
-                let tls = unsafe { &*request.path.cast::<crate::tls::TlsRequest>() };
-                w[..5].copy_from_slice(&[
-                    NET_HANDSHAKE,
-                    id,
-                    tls.name.len as u64,
-                    tls.alpn.len as u64,
-                    u64::from(tls.trust == 0),
-                ]);
-            }
-            _ => return None,
-        }
-        Some(w)
-    }
     fn exec_words(&self, request: &Request) -> Option<[u64; 9]> {
         let mut words = [0; 9];
         let b = request.buffer;
@@ -528,7 +451,9 @@ impl Port {
                 (Kind::Dir, &[])
             }
             SYNC_DIR => (Kind::Dir, &[8, h]),
-            ENTRIES => (Kind::Dir, &[9, h]),
+            ZERO_EXTENSION => (Kind::Dir, &[DIR_ZERO_EXTENSION, h]),
+            ENTRIES => (Kind::Dir, &[9, h, path]),
+            MKSTEMP => (Kind::Dir, &[DIR_MKSTEMP, h, b.len as u64, spare]),
             READ => (Kind::File, &[10, h, spare]),
             READ_AT => {
                 w[..4].copy_from_slice(&[11, h, request.offset(), spare]);
@@ -594,13 +519,14 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
         };
         match (vocab, call.words[0], field) {
             (Vocab::Stream, 0, 0) => buffer,
-            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6, 1) => path,
-            (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
+            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6 | 9, 1) => path,
+            (Vocab::Dir, 2 | 12 | DIR_MKSTEMP, 1) | (Vocab::Dir, 13, 2) => buffer,
             (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
             (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
             (Vocab::Net, NET_RESOLVE, 0) => {
                 crate::tls::bytes(&(*r.path.cast::<crate::resolve::ResolveRequest>()).raw_name)
             }
+            (Vocab::Net, udp::SEND, _) => crate::udp_net::served::payload(r, field),
             (Vocab::Exec, exec::SPAWN, _) => {
                 let call = &(*r.path.cast::<Call<SpawnCall>>()).data;
                 match field {
@@ -634,42 +560,10 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
 fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
     match (vocab, words[0]) {
         (Vocab::Dir, 10 | 19) => words[2],
-        (Vocab::Dir, 2 | 11) => words[3],
+        (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => words[3],
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
-        (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV) => words[2],
+        (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV | udp::RECV) => words[2],
         _ => 0,
-    }
-}
-
-/// Whether a reply variant answers the call's operation (core.md, Handles).
-fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
-    match vocab {
-        Vocab::Exec => unreachable!("Exec replies use their own matrix"),
-        Vocab::Stream => matches!(reply, R_DONE | R_WRITE_FAILED),
-        Vocab::Dir => {
-            (reply == R_FAILED && op != DIR_RELEASED)
-                || match op {
-                    0 => reply == R_FILE,
-                    1 | 2 => reply == R_DIR,
-                    3 | 14 => reply == R_STAT,
-                    9 => reply == R_ENTRIES,
-                    10 | 11 | 19 => reply == R_COUNT,
-                    12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
-                    16 => reply == R_LOCKED,
-                    _ => reply == R_DONE,
-                }
-        }
-        Vocab::Net => {
-            (reply == R_FAILED && op != NET_RELEASED)
-                || match op {
-                    NET_CONNECT | NET_ACCEPT => reply == R_SOCKET,
-                    NET_LISTEN => reply == R_LISTENER,
-                    NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
-                    NET_HANDSHAKE => reply == R_SECURED,
-                    NET_SEND_SECRET | NET_READY => reply == R_DONE,
-                    _ => false,
-                }
-        }
     }
 }
 
@@ -838,6 +732,7 @@ unsafe fn due(port: &Mutex<Port>, request: &Request, token: u64) -> crate::os_ne
         let until = match (vocab, request.operation) {
             (Vocab::Exec, EXEC_WAIT) => (*request.path.cast::<Call<ProcCall>>()).data.until,
             (Vocab::Net, op) if unix_operation(op) => (*request.path.cast::<UnixRequest>()).until,
+            (Vocab::Net, op) if udp_operation(op) => crate::udp_net::served::until(request),
             (Vocab::Net, _) | (Vocab::Exec, RECV_BOUNDED | SEND_PAIR) => {
                 (*request.path.cast::<crate::net::NetworkRequest>()).until
             }
@@ -888,6 +783,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     if queued.is_some() || quiesced {
         port.servers.retain(|&(t, _)| t != token);
         lock(&SERVERS).remove(&token);
+        let mut retired = None;
         let id = match queued {
             None => return done(Outcome::default()),
             Some(Queued::Call(id)) => {
@@ -914,6 +810,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                 if h.done() {
                     port.handles.remove(&handle);
                     port.used -= HANDLE_ROOM;
+                    retired = port.udp_retired.remove(&handle);
                 }
                 let id = port.next_id;
                 port.next_id += 1;
@@ -929,12 +826,15 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
                         answer: None,
                         finished: true,
                         staged: Vec::new(),
+                        staged_packets: Vec::new(),
                         secret: None,
                     },
                 );
                 id
             }
         };
+        drop(port);
+        drop(retired);
         return done(Outcome {
             value: id,
             written: 1,
@@ -975,15 +875,6 @@ fn ready_all(tokens: Vec<u64>) {
     }
 }
 
-/// SplitMix64 (Steele, Lea and Flood 2014): eight little-endian bytes a step.
-fn split_mix(state: &mut u64) -> [u8; 8] {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    (z ^ (z >> 31)).to_le_bytes()
-}
-
 /// I: every cell operation finishes here.
 unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: as `wait`; RANDOM's buffer owns its spare capacity.
@@ -1000,24 +891,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             }
         }
         (Cell::Random(random), RANDOM) => {
-            let mut random = lock(random);
-            let spare = request.buffer.capacity.saturating_sub(request.buffer.len);
-            let mut filled = 0;
-            while filled < spare {
-                let bytes = split_mix(&mut random);
-                let n = (spare - filled).min(8);
-                // SAFETY: bounded to the carrier's spare capacity.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        request.buffer.data.add(request.buffer.len + filled),
-                        n,
-                    )
-                };
-                filled += n;
-            }
-            request.buffer.len += filled;
-            outcome.written = filled as u64;
+            // SAFETY: the request pins its exclusively writable spare.
+            outcome = unsafe { random::draw_request(&mut lock(random), &mut request.buffer) };
         }
         (Cell::Port(port), PORT_NEXT) => return next_step(state, port, token),
         (Cell::Port(port), RELEASE | CLOSE)
@@ -1092,6 +967,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                         answer: None,
                         finished: false,
                         staged: Vec::new(),
+                        staged_packets: Vec::new(),
                         secret,
                     },
                 );
@@ -1127,7 +1003,13 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             p.sealed = true;
             let ids: Vec<u64> = p.calls.keys().copied().collect();
             let tokens = ids.into_iter().filter_map(|id| p.close_call(id)).collect();
+            let retired = std::mem::take(&mut p.udp_retired);
+            for id in retired.keys() {
+                p.handles.remove(id);
+                p.used -= HANDLE_ROOM;
+            }
             drop(p);
+            drop(retired);
             ready_all(tokens);
         }
         _ => {}
@@ -1209,7 +1091,7 @@ impl Cells {
     unsafe fn add(
         &self,
         context: *mut Context,
-        cell: Cell,
+        make: impl FnOnce() -> Cell,
         charge: u64,
     ) -> Result<Provider, Outcome> {
         // SAFETY: a running context has a current payer.
@@ -1226,8 +1108,9 @@ impl Cells {
             forget: forget_cells,
             drop_cells,
         });
+        let cell = Box::new(make());
         let mut cells = lock(&self.0);
-        cells.push((Box::new(cell), payer, charge));
+        cells.push((cell, payer, charge));
         Ok(Provider {
             state: (&raw const *cells.last().unwrap().0).cast_mut().cast(),
             ..PROVIDER
@@ -1262,11 +1145,13 @@ pub unsafe extern "C" fn hirsel_core_provide_clock(
     let provider = match unsafe {
         files.registry.run_grants().cells.add(
             context,
-            Cell::Clock(Mutex::new(ClockCell {
-                mono,
-                wall,
-                ..ClockCell::default()
-            })),
+            || {
+                Cell::Clock(Mutex::new(ClockCell {
+                    mono,
+                    wall,
+                    ..ClockCell::default()
+                }))
+            },
             PROVIDE_CELL,
         )
     } {
@@ -1293,11 +1178,11 @@ pub unsafe extern "C" fn hirsel_core_provide_random(
     let files = unsafe { files(context) };
     // SAFETY: forwarded.
     let provider = match unsafe {
-        files
-            .registry
-            .run_grants()
-            .cells
-            .add(context, Cell::Random(Mutex::new(seed)), PROVIDE_CELL)
+        files.registry.run_grants().cells.add(
+            context,
+            || Cell::Random(Mutex::new(RandomStream::Seeded(seed))),
+            PROVIDE_CELL,
+        )
     } {
         Ok(provider) => provider,
         Err(refused) => return refused,
@@ -1319,7 +1204,7 @@ pub unsafe extern "C" fn hirsel_core_provide_process(context: *mut Context, _sit
     let provider = match unsafe {
         files.registry.run_grants().cells.add(
             context,
-            Cell::Process(Mutex::new(ProcessCell::default())),
+            || Cell::Process(Mutex::new(ProcessCell::default())),
             PROVIDE_CELL,
         )
     } {
@@ -1510,22 +1395,10 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
     }
     let mut root = 0;
     if vocab == Vocab::Net {
-        // Every address in either direction and family (NOTES 31), a
+        // Every address in each direction and family (NOTES 31), a
         // handshake to any name and port under any trust (NOTES 32), and a
         // lookup of any name (NOTES 34).
-        let addresses = (0..2).flat_map(|dir| {
-            (0..2).map(move |family| {
-                hirsel_core_net::GrantRule::Address(hirsel_core_net::Rule {
-                    dir,
-                    family,
-                    hi: 0,
-                    lo: 0,
-                    bits: 0,
-                    first: 0,
-                    last: u16::MAX,
-                })
-            })
-        });
+        let addresses = hirsel_core_net::GrantRule::served_addresses();
         let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
         let resolve = hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
         let unix = hirsel_core_net::UnixDirection::ALL
@@ -1549,7 +1422,7 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
             .registry
             .run_grants()
             .cells
-            .add(context, Cell::Port(Mutex::new(port)), charge)
+            .add(context, || Cell::Port(Mutex::new(port)), charge)
     } {
         Ok(provider) => provider,
         Err(refused) => return refused,
@@ -1799,44 +1672,6 @@ pub unsafe extern "C" fn hirsel_core_call_secret(
     }
 }
 
-/// `provide.payload(c, field, mut out)`: append the field's bytes while the
-/// call is unsettled (a settled call's caller storage is gone: nothing); a
-/// short spare capacity raises Bounds before copying anything.
-/// # Safety
-/// Context is running, `call` is a live `Call` key and `out` a live mutable
-/// Bytes carrier.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_call_payload(
-    context: *mut Context,
-    call: u64,
-    field: u64,
-    out: *mut Buffer,
-    site: u64,
-) -> Outcome {
-    // SAFETY: forwarded; an unsettled call's caller is parked, so its request
-    // and the bytes it borrows are pinned.
-    unsafe {
-        let (port, id) = call_of(context, call);
-        let port = lock(port);
-        let c = &port.calls[&id];
-        if c.finished || c.answer.is_some() {
-            return Outcome::default();
-        }
-        let from = field_bytes(port.vocab, c, field);
-        let out = &mut *out;
-        if out.capacity.saturating_sub(out.len) < from.len() {
-            causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
-            return CANCELLED;
-        }
-        ptr::copy_nonoverlapping(from.as_ptr(), out.data.add(out.len), from.len());
-        out.len += from.len();
-        Outcome {
-            written: from.len() as u64,
-            ..Outcome::default()
-        }
-    }
-}
-
 /// A Capacity refusal of `requested` room bytes: error tag 1, `written` the
 /// bytes available, from which the server raises Capacity (MEM-21).
 fn refused(requested: u64, available: u64) -> Outcome {
@@ -1900,135 +1735,6 @@ fn alpn_count(mut wire: &[u8]) -> u64 {
         count += 1;
     }
     count
-}
-
-/// The caller's outcome for a reply that answers its call, or None when the
-/// reply breaks the port's rules (the server fails).
-fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -> Option<Outcome> {
-    let op = call.words[0];
-    if p.vocab == Vocab::Exec {
-        let [value, error, code, written] =
-            exec::answer(&call.words, call.staged.len() as u64, tag, &w, |id| {
-                p.handles.contains_key(&id)
-            })?;
-        return Some(Outcome {
-            value,
-            error: IoError {
-                tag: error as u8,
-                code: code as u32,
-            },
-            written,
-            ..Outcome::default()
-        });
-    }
-    if !unix.map_or_else(
-        || answers(p.vocab, op, tag),
-        |reply| tag == reply || tag == R_FAILED,
-    ) {
-        return None;
-    }
-    // An IoError's tags are 1 to 5, a NetError's 1 to 9; the code is the
-    // reply word's low 32 bits.
-    let tags = match (p.vocab, op) {
-        (Vocab::Net, SERVED_UNIX_LISTEN) => 10,
-        (Vocab::Net, _) => 9,
-        _ => 5,
-    };
-    let io = |t: u64, code: u64| {
-        (1..=tags).contains(&t).then_some(IoError {
-            tag: t as u8,
-            code: code as u32,
-        })
-    };
-    let mut out = Outcome::default();
-    match tag {
-        R_DONE => {
-            out.written = match (p.vocab, op) {
-                (Vocab::Stream, _) | (Vocab::Dir, 12) => {
-                    call.words[2 - (p.vocab == Vocab::Stream) as usize]
-                }
-                (Vocab::Dir, 13) => call.words[3],
-                _ => 0,
-            }
-        }
-        R_FAILED => out.error = io(w[0], w[1])?,
-        R_WRITE_FAILED => {
-            let len = if op == 13 {
-                call.words[3]
-            } else {
-                call.words[2 - (p.vocab == Vocab::Stream) as usize]
-            };
-            if w[0] > len {
-                return None;
-            }
-            out.error = io(w[1], w[2])?;
-            out.written = w[0];
-        }
-        R_COUNT if p.vocab == Vocab::Net && op == NET_SEND => {
-            // A send's count is at most the bytes it offered.
-            if w[0] > call.words[2] + call.words[3] {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_COUNT if p.vocab == Vocab::Net && op == NET_RESOLVE => {
-            // A resolve's count is its staged records, each well formed and
-            // distinct (NOTES 34).
-            let records = hirsel_core_net::ip_records(&call.staged)?;
-            if w[0] != records.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_COUNT => {
-            // A read's count is the bytes it staged; a listing's, its entries.
-            if op != 19 && w[0] != call.staged.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_SOCKET | R_LISTENER => {
-            // A new socket or listener, at a well-formed address.
-            let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
-            if w[0] == 0 || p.handles.contains_key(&w[0]) || !(v4 || w[1] == 1) || w[4] > 0xffff {
-                return None;
-            }
-            out.value = w[0];
-        }
-        R_SECURED => {
-            // Some(i) names one of the offered protocols; None is (0, 0).
-            // SAFETY: the call is unsettled, so its caller's request is pinned.
-            let offered = alpn_count(unsafe { field_bytes(p.vocab, call, 2) });
-            if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
-                return None;
-            }
-            // SAFETY: as above.
-            out.value = unsafe { (*call.request).handle };
-        }
-        R_PACKET => {
-            let room = call.words[2];
-            if w[1] != u64::from(w[0] > room) || w[0].min(room) != call.staged.len() as u64 {
-                return None;
-            }
-            out.value = w[0];
-            out.written = call.staged.len() as u64;
-            out.kind = w[1] as u8;
-        }
-        R_LOCKED => out.value = (w[0] != 0) as u64,
-        R_STAT => {
-            out.kind = w[0].min(3) as u8;
-            out.value = w[1];
-            out.written = w[2];
-        }
-        _ => {
-            // A new object: never the root, never an id already in use.
-            if w[0] == 0 || p.handles.contains_key(&w[0]) {
-                return None;
-            }
-            out.value = w[0];
-        }
-    }
-    Some(out)
 }
 
 /// `provide.reply`'s commit: settle the call with the reply's tag and words
@@ -2115,6 +1821,18 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         return CANCELLED;
     };
     let mut outcome = outcome;
+    if p.vocab == Vocab::Net && udp::operation(p.calls[&id].words[0]) {
+        if let Err((needed, available)) = udp::deliver(&mut p, id, tag, w) {
+            let token = p.close_call(id);
+            drop(p);
+            ready_all(token.into_iter().collect());
+            return refused(needed, available);
+        }
+        let token = p.settle(id, outcome);
+        drop(p);
+        ready_all(token.into_iter().collect());
+        return Outcome::default();
+    }
     let kind = match (p.vocab, tag) {
         (Vocab::Dir, R_FILE) => Some(Kind::File),
         (Vocab::Dir, R_DIR) => Some(Kind::Dir),
@@ -2141,20 +1859,20 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             // bound one, an accepted socket's peer.
             outcome.value = p.issue_key(w[0]);
         }
-        if matches!(kind, Kind::Socket | Kind::Listener) && matches!(tag, R_SOCKET | R_LISTENER) {
-            // SAFETY: the unsettled IP operation pins its address output.
-            unsafe {
-                let n = (*p.calls[&id].request)
-                    .path
-                    .cast_mut()
-                    .cast::<crate::net::NetworkRequest>();
-                (*n).address = crate::net::Address {
-                    family: w[1] as u8,
-                    hi: w[2],
-                    lo: w[3],
-                    port: w[4] as u16,
-                };
-            }
+    }
+    if p.vocab == Vocab::Net && matches!(tag, R_SOCKET | R_LISTENER | R_ADDRESS) {
+        // SAFETY: the unsettled IP operation pins its address output.
+        unsafe {
+            let n = (*p.calls[&id].request)
+                .path
+                .cast_mut()
+                .cast::<crate::net::NetworkRequest>();
+            (*n).address = crate::net::Address {
+                family: w[1] as u8,
+                hi: w[2],
+                lo: w[3],
+                port: w[4] as u16,
+            };
         }
     }
     if (p.vocab, tag) == (Vocab::Exec, exec::STARTED) {
@@ -2217,7 +1935,10 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     let c = &p.calls[&id];
     if !c.staged.is_empty()
         && !((p.vocab == Vocab::Exec
-            || (p.vocab, c.words[0]) == (Vocab::Net, SERVED_DATAGRAM_RECV))
+            || matches!(
+                (p.vocab, c.words[0]),
+                (Vocab::Net, SERVED_DATAGRAM_RECV) | (Vocab::Dir, DIR_MKSTEMP)
+            ))
             && outcome.error != IoError::OK)
     {
         // The commit copies the staged bytes into the caller's spare

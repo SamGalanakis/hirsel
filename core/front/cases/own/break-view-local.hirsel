@@ -1,0 +1,40 @@
+// OWN-10: a `break` value is its frame's value, so a view of a local declared in the
+// frame outlives that local, which the exit's cleanup drops; refused at the closing `}`
+// of the block it leaves, with the view as the secondary site, as a block's tail is.
+// expect: refuse OWN-10 at 26:5
+// expect: cause OWN-10 at 26:5 from 25:15
+// expect: refuse OWN-10 at 38:5
+// expect: cause OWN-10 at 38:5 from 37:21
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn in_loop(c: u64) -> u64 {
+    let v = loop {
+        let m = result.unwrap(Mark(id: 3))
+        break me(m)
+    }
+    id_of(v)
+}
+
+fn labelled(c: u64) -> u64 {
+    let a = result.unwrap(Mark(id: 1))
+    let v = 'done: {
+        let m = result.unwrap(Mark(id: 3))
+        if c == 1 {
+            break 'done view a
+        }
+        break 'done me(m)
+    }
+    id_of(v)
+}

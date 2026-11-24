@@ -4,10 +4,15 @@ A block holds the regimes lock (and the board lock when it touches CPUs
 10-11), refuses the 02:45-04:00 window for board CPUs, and is discarded when
 `pgrep -x cc1plus` prints anything before or after it.
 """
-import datetime, fcntl, os, subprocess, time
+from contextlib import ExitStack
+import datetime
+from pathlib import Path
+import subprocess
+import sys
+import time
 
-REGIMES = "/run/user/1000/hirsel-mc-regimes.lock"
-BOARD = "/run/user/1000/hirsel-board.lock"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core/tools"))
+from timing_shield import BOARD, REGIMES, hold
 FORBIDDEN = set(range(12, 16)) | set(range(28, 32)) | set(range(20, 24))
 
 
@@ -43,7 +48,7 @@ class Block:
         # The board lock too when the block touches CPUs 10-11, or when asked.
         self.board = bool(self.cpus & {10, 11}) if board is None else board
         self.log = log
-        self.files = []
+        self.locks = ExitStack()
         self.clean = False
 
     def __enter__(self):
@@ -54,30 +59,16 @@ class Block:
             while cc1plus():
                 self.log("cc1plus running; waiting before block")
                 time.sleep(30)
-            paths = [REGIMES] + ([BOARD] if self.board else [])
-            self.files = []
-            for p in paths:
-                f = open(p, "a")
-                fcntl.flock(f, fcntl.LOCK_EX)  # wait our turn; never break a lock
-                self.files.append(f)
-            if cc1plus():
-                self._release()
-                continue
-            if self.board and not board_window_ok():
-                self._release()
-                continue
-            return self
-
-    def _release(self):
-        for f in reversed(self.files):
-            fcntl.flock(f, fcntl.LOCK_UN)
-            f.close()
-        self.files = []
+            with ExitStack() as locks:
+                locks.enter_context(hold(REGIMES, *([BOARD] if self.board else [])))
+                if not cc1plus() and (not self.board or board_window_ok()):
+                    self.locks = locks.pop_all()
+                    return self
 
     def __exit__(self, *exc):
-        after = cc1plus()
-        self.clean = not after
-        if after:
-            self.log(f"cc1plus appeared during block ({after}); discarding")
-        self._release()
+        with self.locks:
+            after = cc1plus()
+            self.clean = not after
+            if after:
+                self.log(f"cc1plus appeared during block ({after}); discarding")
         return False

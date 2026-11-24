@@ -4,52 +4,61 @@ pub fn journal_law_call_vector() -> bool {
     list.fill(mut value, 32, 4u8)
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut data: DataRows = new_data_rows()
-    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value))))
+    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
     let mut stream_value: Bytes = list.new()
     result.unwrap(le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
     result.unwrap(le(mut stream_value, 2, 1))
     list.fill(mut stream_value, 8, 3u8)
-    let stream = result.unwrap(copied(string.as_bytes("stream00")))
+    let stream = law_stream_bytes(b"stream00", 0u64)
     let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value))))
+    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value)), trim: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
     list.fill(mut args, 16, 2u8)
-    let call = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: code_vector()), settlement: None))
+    let call = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector()), settlement: None))
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 257), at: 1234, seed: 0)
     let raw = result.unwrap(encode_sections(ci, mut data, streams, call, 7, 72))
     // L29 (d): independent layout from AP1a's fields, checked with libxxhash XXH3.
-    let expected: Inline[u8, 313] =[17, 0, 1, 0, 41, 1, 0, 0, 72, 28, 112, 123, 72, 77, 23, 235, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 3, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 49, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 3, 3, 3, 3, 3, 3, 3, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 48, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
-    if list.len(raw) != 313 {
+    let expected: Inline[u8, 335] = [17, 0, 1, 0, 63, 1, 0, 0, 144, 45, 149, 40, 173, 54, 177, 241, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 3, 26, 0, 0, 0, 2, 8, 115, 116, 114, 101, 97, 109, 48, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 3, 3, 3, 3, 3, 3, 3, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 48, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
+    if list.len(raw) != 335 {
         return false
     }
-    for i in 0u64 .. 313 {
+    for i in 0u64 .. 335 {
         if raw[i] != expected[i] {
             return false
         }
     }
     for way in 1u64 .. 3 {
         let settle: u8 = int.truncate(way)
-        let record = CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: code_vector())
-        let context = Settlement(way: settle, base: 256, at: 1122, seed: 3344)
+        let record = CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: code_vector())
+        let context = Settlement(way: settle, base: 256, at: 1122, seed: 3344, stop: if way == 1 {
+            Some(Raised)
+        } else {
+            None
+        })
         let shifted = result.unwrap(encode_sections(ci, mut data, streams, Some(CallSection(record: take record, settlement: Some(context))), 7, 72))
         let checksum = if way == 1 {
-            8931551807492595195u64
+            7732084696176172798u64
         } else {
-            7804208544902511782u64
+            8704233826682833273u64
         }
-        if list.len(shifted) != 337 || read_le(shifted, 8, 8) != checksum || shifted[312] != settle {
+        let width = if way == 1 {
+            360u64
+        } else {
+            359u64
+        }
+        if list.len(shifted) != width || read_le(shifted, 8, 8) != checksum || shifted[334] != settle {
             return false
         }
-        if word_be(shifted, 313) != 256 || word_be(shifted, 321) != 1122 || word_be(shifted, 329) != 3344 {
+        if word_be(shifted, 335) != 256 || word_be(shifted, 343) != 1122 || word_be(shifted, 351) != 3344 {
             return false
         }
-        let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, 337)))
+        let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, width)))
         match call_commit.call {
             Some(decoded_call) => match decoded_call.settlement {
-                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 {
+                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 || (way == 1 && shifted[359] != 1u8) {
                     return false
                 },
                 None => return false,
@@ -59,24 +68,24 @@ pub fn journal_law_call_vector() -> bool {
     }
     // Without the replay identity the entry's two allowances remain.
     let available = code_vector()
-    let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: result.unwrap(copied(list.slice(available, 0, 16)))), settlement: None))
+    let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: option.unwrap(parse_stream_key(stream)), revision: Some(revision_vector()), code: result.unwrap(copied(list.slice(available, 0, 16)))), settlement: None))
     let short = result.unwrap(encode_sections(ci, mut data, streams, without_identity, 7, 72))
-    if list.len(short) != 281 {
+    if list.len(short) != 303 {
         return false
     }
-    match result.unwrap(journal_decode_commit("j-7", list.slice(short, 16, 281))).call {
+    match result.unwrap(journal_decode_commit("j-7", list.slice(short, 16, 303))).call {
         Some(c) => if c.record.code != list.slice(available, 0, 16) || !revision_is_vector(c.record.revision) {
             return false
         },
         None => return false,
     }
     // None is a zero length: 4 bytes, not 36, and reads back as None.
-    let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: take stream, revision: None, code: code_vector()), settlement: None))
+    let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: None, code: code_vector()), settlement: None))
     let bare = result.unwrap(encode_sections(ci, mut data, streams, no_revision, 7, 72))
-    if list.len(bare) != 281 {
+    if list.len(bare) != 303 {
         return false
     }
-    match result.unwrap(journal_decode_commit("j-7", list.slice(bare, 16, 281))).call {
+    match result.unwrap(journal_decode_commit("j-7", list.slice(bare, 16, 303))).call {
         Some(c) => if !revision_is_none(c.record.revision) {
             return false
         },
@@ -101,7 +110,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     // a W2 cut's write failure arrives here as Poisoned.
     journal_poll(mut db)?
     healthy(db)?
-    let stream = result.unwrap(copied(string.as_bytes("stream00")))
+    let stream = law_stream_bytes(b"stream00", 0u64)
     let mut value: Bytes = list.new()
     result.unwrap(le(mut value, 1, 8))
     list.fill(mut value, 32, 0u8)
@@ -113,12 +122,12 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         8u64
     }, 3u8)
     let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value))))
+    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value)), trim: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
     list.fill(mut args, 16, 2u8)
-    let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision, code: code_vector())
+    let checked = CallRecord(key: take entry_key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: take revision, code: code_vector())
     call_checked(checked)?
     let call = Some(CallSection(record: take checked, settlement: None))
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
@@ -139,8 +148,10 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     db.resident = result.unwrap(state_account(replay.state))
     db.file_end += size
     db.frame_seq += 1
-    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
-    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) { state.pending = Some(take frame_bytes) })
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
+        state.pending = Some(take frame_bytes)
+    })
     handoff(mut db)?
     Ok(commit_ticket)
 }
@@ -170,7 +181,7 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     // The journal has not had a blocking turn since handoff. Only the
     // write barrier makes this answer independent of when it drains.
     match result.unwrap(recorded(db, br, head)) {
-        Some(captured) => if list.len(captured.record.key) != 32 || list.len(captured.record.args) != 16 || captured.record.stream != string.as_bytes("stream00") || !revision_is_vector(captured.record.revision) {
+        Some(captured) => if list.len(captured.record.key) != 32 || list.len(captured.record.args) != 16 || captured.record.stream.caller.subject != b"stream00" || !revision_is_vector(captured.record.revision) {
             return false
         },
         None => return false
@@ -213,8 +224,8 @@ fn settle_body(mut tx: Tx, s: Bytes) -> Result[(), u64] {
 
 // put_one's commit through run, which hands its frame to the journal.
 fn put_run(mut db: Db, k: u64, v: u64) -> bool waits {
-    let outcome = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put_bytes(mut tx, 1, key_word(k), key_word(v))
+    let outcome = run(mut db, None, (copy_env(k), copy_env(v)), fn(mut tx, call_env) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(call_env.0), key_word(call_env.1))
     })
     match take outcome {
         Ok(Committed(_)) => true,
@@ -224,7 +235,7 @@ fn put_run(mut db: Db, k: u64, v: u64) -> bool waits {
 
 fn journal_mark(t: Ticket) -> u64 {
     match t.mark {
-        Journal(m) => m,
+        Journal(m, _, _) => m,
         Cut(_) => 0
     }
 }
@@ -239,12 +250,12 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let dir = disk_test_directory(d)
     let mut options = journal_crash_options()
     options.resident_limit = 4194304
-    let s = result.unwrap(copied(string.as_bytes("s")))
+    let s = law_stream_bytes(b"s", host.wall_ms(c))
     let ours = digest_for("d")
     let theirs = digest_for("e")
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
     result.unwrap(create_table(mut before, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let first = match result.unwrap(admit(mut before, s, 0, ours)) {
+    let first = match result.unwrap(admit_law_stream(mut before, s, 0, ours)) {
         Admitted(t) => ticket(t),
         _ => return false
     }
@@ -255,7 +266,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     // AH1 across a reopen: the digest replayed from the frame still binds
     // 0, so theirs mismatches with no frame and the re-commit keeps ours.
     let quiet = db.frame_seq
-    match result.unwrap(admit(mut db, s, 0, theirs)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, theirs)) {
         RequestMismatch => {},
         _ => return false
     }
@@ -268,7 +279,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     // Wrong implementation caught: a reserved entry that answers Abandoned.
     let limit = db.ceiling
     db.ceiling = 1
-    match admit(mut db, s, 0, ours) {
+    match admit_law_stream(mut db, s, 0, ours) {
         Error(Full(_)) => {},
         _ => return false
     }
@@ -276,14 +287,14 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if db.heads[0].head != head {
         return false
     }
-    let again = match result.unwrap(admit(mut db, s, 0, ours)) {
+    let again = match result.unwrap(admit_law_stream(mut db, s, 0, ours)) {
         Abandoned(t) => ticket(t),
         _ => return false
     }
     if again.open != open_number(db) || again.open == first.open || db.heads[0].head != head + 1 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 0, ours)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, ours)) {
         Abandoned(complete) => if ticket(complete).open != again.open || journal_mark(ticket(complete)) != journal_mark(again) {
             return false
         },
@@ -292,16 +303,16 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if db.heads[0].head != head + 1 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 0, theirs)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, theirs)) {
         RequestMismatch => {},
         _ => return false
     }
     let frames = db.frame_seq
-    let effect = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let effect = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) {
             return Error(1)
         }
-        if let Error(_) = reply_recorded(mut tx, 0, result.unwrap(copied(string.as_bytes("r0"))), call_for(s, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 0, result.unwrap(copied(string.as_bytes("r0"))), call_for(call_env, 32)) {
             return Error(2)
         }
         Ok(())
@@ -315,20 +326,20 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     let b = main_branch(db)
     match result.unwrap(recorded(db, b, db.heads[0].head)) {
-        Some(call) => if call.record.stream != s {
+        Some(call) => if !stream_record_matches(s, call.record.stream) {
             return false
         },
         None => return false
     }
-    match result.unwrap(admit(mut db, s, 1, ours)) {
+    match result.unwrap(admit_law_stream(mut db, s, 1, ours)) {
         Admitted(_) => {},
         _ => return false
     }
-    let aborted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let aborted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) {
             return Error(1)
         }
-        if let Error(_) = reply_recorded(mut tx, 1, result.unwrap(copied(string.as_bytes("r1"))), call_for(s, 32)) {
+        if let Error(_) = reply_recorded(mut tx, 1, result.unwrap(copied(string.as_bytes("r1"))), call_for(call_env, 32)) {
             return Error(2)
         }
         Error(5)
@@ -338,7 +349,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         _ => return false
     }
     match result.unwrap(recorded(db, b, db.heads[0].head)) {
-        Some(call) => if call.record.stream != s {
+        Some(call) => if !stream_record_matches(s, call.record.stream) {
             return false
         },
         None => return false
@@ -357,25 +368,29 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if !put_run(mut db, 9, 2) || !put_run(mut db, 9, 3) || !put_run(mut db, 9, 4) {
         return false
     }
-    let last = match result.unwrap(admit(mut db, s, 2, ours)) {
+    let final_item = match result.unwrap(admit_law_stream(mut db, s, 2, ours)) {
         Admitted(t) => ticket(t),
         _ => return false
     }
     result.unwrap(durable(mut db, kept))
-    result.unwrap(durable(mut db, last))
+    result.unwrap(durable(mut db, final_item))
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
-    let figure = match stage(mut db, 0, wall, None, keep_reply, fn(mut tx: Tx) -> Result[(), u64] {
+    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let figure = match stage(mut db, 0, wall, None, keep_reply, attempt, no_pins, fn(mut tx: Tx) -> Result[(), u64] {
         settle_body(mut tx, s)
     }) {
         Ran(ran) => ran.live,
-        Over(_) => return false
+        Over(_) => return false,
+        DraftError(_) => return false,
+        Latched => return false
     }
     let ceiling = db.ceiling
     let cut = db.checkpointed
     db.ceiling = figure - 1
-    let settled = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        settle_body(mut tx, s)
+    let settled = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
+        settle_body(mut tx, call_env)
     }))
     match take settled {
         Committed(_) => {},
@@ -399,7 +414,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     let main = main_branch(after)
     match result.unwrap(recorded(after, main, committed_at)) {
-        Some(call) => if call.record.stream != s {
+        Some(call) => if !stream_record_matches(s, call.record.stream) {
             return false
         },
         None => return false
@@ -407,17 +422,17 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     // After the reopen, replied 2 keeps ours: Duplicate for ours, a mismatch
     // for theirs, and below latest no answer from history; none writes a frame.
     let still = after.frame_seq
-    match result.unwrap(admit(mut after, s, 2, theirs)) {
+    match result.unwrap(admit_law_stream(mut after, s, 2, theirs)) {
         RequestMismatch => {},
         _ => return false
     }
-    match result.unwrap(admit(mut after, s, 2, ours)) {
+    match result.unwrap(admit_law_stream(mut after, s, 2, ours)) {
         Duplicate(x) => if x.reply != string.as_bytes("r2") {
             return false
         },
         _ => return false
     }
-    match result.unwrap(admit(mut after, s, 1, ours)) {
+    match result.unwrap(admit_law_stream(mut after, s, 1, ours)) {
         HistoryUnavailable => {},
         _ => return false
     }
@@ -437,9 +452,9 @@ fn journal_test_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     }
 }
 
-fn step_row(s: Snapshot, t: Shape[u64, u64], k: u64) -> Option[u64] {
-    let seen = result.unwrap(look(s, None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
-        fetch(tx, t, k)
+fn step_row(s: Snapshot, t: Table[u64, u64], k: u64) -> Option[u64] waits {
+    let seen = result.unwrap(look(law_reader(s), s, None, (copy_env(k), copy_env(t)), fn(tx, call_env) -> Result[Option[u64], Error] {
+        fetch(tx, call_env.1, call_env.0)
     }))
     match take seen {
         Seen(v) => match v.value {
@@ -472,13 +487,13 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     if !typed_put(mut db, t, 1, 10) {
         return false
     }
-    let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let before = db.heads[0].head
-    let live = db.resident
+    let live_bytes = db.resident
     let frames = db.frame_seq
     let end = db.file_end
-    let ran = result.unwrap(run(mut db, Some(65536u64), scoped fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 7u64, 70u64)?
+    let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 7u64, 70u64)?
         loop {}
     }))
     match take ran {
@@ -487,21 +502,21 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if db.heads[0].head != before || db.resident != live || db.frame_seq != frames || db.file_end != end {
+    if db.heads[0].head != before || db.resident != live_bytes || db.frame_seq != frames || db.file_end != end {
         return false
     }
     let main = main_branch(db)
-    if let Some(_) = step_row(result.unwrap(snapshot_of(db, main)), shape(t), 7) {
+    if let Some(_) = step_row(result.unwrap(snapshot_of(db, main)), t, 7) {
         return false
     }
     result.unwrap(durable(mut db, earlier))
-    if let Some(_) = step_row(snapshot(db), shape(t), 7) {
+    if let Some(_) = step_row(snapshot(db), t, 7) {
         return false
     }
     // (c): None, then Some with room to finish.
     let open_end = db.file_end
-    let unbounded = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[u64, Error] {
-        put(mut tx, t, 8u64, 80u64)?
+    let unbounded = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
+        put(mut tx, call_env, 8u64, 80u64)?
         Ok(5u64)
     }))
     match take unbounded {
@@ -515,11 +530,11 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     }
     let unbounded_bytes = db.file_end - open_end
     let bounded_end = db.file_end
-    let bounded = result.unwrap(run(mut db, Some(1048576u64), scoped fn(mut tx: Tx) -> Result[u64, Error] {
-        put(mut tx, t, 9u64, 90u64)?
+    let bounded = result.unwrap(run(mut db, Some(1048576u64), t, fn(mut tx, call_env) -> Result[u64, Error] {
+        put(mut tx, call_env, 9u64, 90u64)?
         Ok(5u64)
     }))
-    let last = match take bounded {
+    let final_item = match take bounded {
         Committed(done) => if done.value != 5 {
             return false
         } else {
@@ -530,12 +545,12 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     if db.heads[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
         return false
     }
-    result.unwrap(durable(mut db, last))
+    result.unwrap(durable(mut db, final_item))
     result.unwrap(close(take db))
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     let t2 = result.unwrap(table(mut after, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let s = snapshot(after)
-    let good = after.heads[0].head == before + 2 && step_row(s, shape(t2), 7) == None && step_row(s, shape(t2), 1) == Some(10u64) && step_row(s, shape(t2), 8) == Some(80u64) && step_row(s, shape(t2), 9) == Some(90u64)
+    let good = after.heads[0].head == before + 2 && step_row(s, t2, 7) == None && step_row(s, t2, 1) == Some(10u64) && step_row(s, t2, 8) == Some(80u64) && step_row(s, t2, 9) == Some(90u64)
     result.unwrap(close(take after))
     good
 }
@@ -585,8 +600,8 @@ pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let br = main_branch(db)
     for k in 0u64 .. 8 {
-        match result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, t, k, k + 10)
+        match result.unwrap(run(mut db, None, (copy_env(t), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, call_env.1, call_env.1 + 10)
         })) {
             Committed(_) => {},
             _ => return false
@@ -609,8 +624,8 @@ fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
     let mut db = open(tasks, d, c, r, journal_ack_options())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 4 {
-        let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, t, k, k + 10)
+        let committed = run(mut db, None, (copy_env(t), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, call_env.1, call_env.1 + 10)
         })?
         match take committed {
             Committed(_) => {},
@@ -647,7 +662,7 @@ fn journal_failure_notice(db: Db) -> Option[IoError] {
     }
     if let Some(e) = found {
         if let Some(disk) = db.disk {
-        let sender = view disk.written_send
+            let sender = view disk.written_send
             let _ = channel.try_send(sender, WriteFailed(e))
         }
     }
@@ -708,9 +723,9 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(durable(mut db, again))
     result.unwrap(close(take db))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 3 {
-        if result.unwrap(get(snapshot(reopened), sh, k)) != Some(k + 10) {
+        if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, k)) != Some(k + 10) {
             return false
         }
     }
@@ -741,20 +756,20 @@ pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let before = snapshot(db)
     let cut = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, cut))
-    let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 0, 11)?
-        if !delete(mut tx, t, 1)? {
+    let done = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 0, 11)?
+        if !delete(mut tx, call_env, 1)? {
             fail("missing L23 row")
         }
-        put(mut tx, t, 2, 30)?
-        put(mut tx, t, 3, 40)
+        put(mut tx, call_env, 2, 30)?
+        put(mut tx, call_env, 3, 40)
     }))
     match take done {
         Committed(_) => {},
         _ => return false
     }
     let after = snapshot(db)
-    let found = result.unwrap(changes(before, after))
+    let found = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after)).rows
     if list.len(found) != 3 {
         return false
     }
@@ -792,10 +807,10 @@ pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks)
             }
         }
     }
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 4 {
-        let old = result.unwrap(get(before, sh, k))
-        let new = result.unwrap(get(after, sh, k))
+        let old = result.unwrap(get(result.unwrap(reader(db, 0u64)), before, sh, k))
+        let new = result.unwrap(get(result.unwrap(reader(db, 0u64)), after, sh, k))
         let expected_old: Option[u64] = if k < 3 {
             Some((k + 1) * 10)
         } else {
@@ -830,16 +845,15 @@ fn journal_test_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     }
 }
 
-fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, accepted: bool) -> bool waits {
+fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: u64, accepted: bool) -> bool waits {
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
-    options.checkpoint_bytes = 134217728
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
+    let done = result.unwrap(run(mut db, None, final_item, fn(mut tx, call_env) -> Result[u64, Error] {
         for k in 0u64 .. 16 {
             let size = if k == 15 {
-                last
+                call_env
             } else {
                 1048576u64
             }
@@ -847,16 +861,16 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
             list.fill(mut value, size, 0u8)
             put_bytes(mut tx, 1, key_word(k), value)?
         }
-        // §2.4:26-byte section prelude +16*(1+4+12+4)+stored values.
-        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
-        if tx.frame_bytes != expected {
+        // §2.4:26-byte section prelude +16*(1+4+12+4+4)+stored values.
+        let expected = 16 + 26 + 16 * 25 + 15 * 1048576 + call_env
+        if tx.frame_bytes != Some(expected) {
             fail("disk L29 arithmetic")
         }
         Ok(expected)
     }))
     match take done {
         Committed(x) => {
-            if !accepted || x.value != 15729018 + last || db.heads[0].head != 2 {
+            if !accepted || x.value != 15729082 + final_item || db.heads[0].head != 2 {
                 return false
             }
             result.unwrap(durable(mut db, x.ticket))
@@ -869,12 +883,12 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     let seq = db.file_seq
     result.unwrap(close(take db))
     let path = result.unwrap(disk_path("j-", seq, ""))
-    let raw = result.unwrap(disk_read_file(d, path, 16777400))
     if accepted {
-        if list.len(raw) != 72 + 15729018 + last || read_le(raw, 76, 4) != 15729002 + last {
+        let raw = result.unwrap(read_journal_prefix(d, path, 72 + 15729082 + final_item))
+        if read_le(raw, 76, 4) != 15729066 + final_item {
             return false
         }
-    } else if list.len(raw) != 72 {
+    } else if list.len(result.unwrap(disk_read_file(d, path, 72))) != 72 {
         return false
     }
     let reopened = result.unwrap(open(tasks, d, c, r, options))
@@ -896,7 +910,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
         for k in 0u64 .. 16 {
             let found = option.unwrap(result.unwrap(get_raw(snapshot(reopened), 1, key_word(k))))
             let expected_size = if k == 15 {
-                last
+                final_item
             } else {
                 1048576u64
             }
@@ -914,10 +928,10 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     true
 }
 
-// L29 disk: the same hand-derived cap-1/cap/cap+1 as the memory law.
+// L29: the journal applies the hand-derived payload boundary.
 // The whole 16MiB boundary frame is replayed, rather than only decoded.
 pub fn journal_law_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048277, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048278, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048279, false)
+    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048213, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048214, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048215, false)
 }
 
 @test
@@ -934,6 +948,6 @@ fn journal_full_frame(mut tx: Tx, rows: Table[u64, Bytes]) -> Result[(), Error] 
     list.fill(mut body, 16711674, 8u8)
     put(mut tx, rows, 2, body)?
     list.clear(mut body)
-    list.fill(mut body, 65526, 9u8)
+    list.fill(mut body, 65518, 9u8)
     put(mut tx, rows, 3, body)
 }

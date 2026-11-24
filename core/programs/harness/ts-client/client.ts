@@ -46,7 +46,7 @@ export class Client {
   private older = true;
   private olderBefore: number | null = null;
   private generation = 0; // bumped on every Reset; stale history pages are dropped
-  private abort: AbortController | null = null;
+  private following: AbortController | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
 
@@ -130,33 +130,61 @@ export class Client {
   }
 
   // ---- the event stream ----
-  start() { this.stopped = false; void this.follow(); }
-  stop() { this.stopped = true; this.abort?.abort(); }
+  start() {
+    if (this.following) return;
+    this.stopped = false;
+    const run = (this.following = new AbortController());
+    void this.follow(run.signal);
+  }
+
+  stop() {
+    this.stopped = true;
+    const run = this.following;
+    if (!run) return;
+    this.following = null;
+    run.abort();
+    this.clearImage();
+  }
+
+  private clearImage() {
+    this.generation += 1;
+    this.rows.clear();
+    this.draft = null;
+    this.live = false;
+    this.older = false;
+    this.olderBefore = null;
+    this.changed();
+  }
 
   // Each connection is a Reset: the rows it sends before its first batch are the
   // complete image, which replaces everything held, earlier pages included.
-  private async follow() {
-    for (let wait = 100; !this.stopped; wait = Math.min(wait * 2, 5000)) {
-      const generation = ++this.generation;
-      const abort = (this.abort = new AbortController());
+  private async follow(run: AbortSignal) {
+    for (let wait = 100; !run.aborted; wait = Math.min(wait * 2, 5000)) {
+      this.generation += 1;
+      const abort = new AbortController();
+      const signal = AbortSignal.any([run, abort.signal]);
       let heard = Date.now();
       const stale = setInterval(() => { if (Date.now() - heard > (this.o.staleMs ?? 15000)) abort.abort(); }, 1000);
+      let reader: ReadableStreamDefaultReader<string> | undefined;
       try {
         const tail = this.o.tail ? `?tail=${this.o.tail}` : "";
-        const r = await fetch(this.url(`/events${tail}`), { headers: this.headers(), signal: abort.signal });
-        if (!r.ok || !r.body) throw new Error(`events: HTTP ${r.status}`);
+        const r = await fetch(this.url(`/events${tail}`), { headers: this.headers(), signal });
+        if (signal.aborted || !r.ok || !r.body) {
+          void r.body?.cancel().catch(() => undefined);
+          throw new Error(`events: HTTP ${r.status}`);
+        }
         this.draft = null;
         let pending: Shown[] = [];
         let first = true;
         let buffer = "";
-        const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
-        for (;;) {
+        reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+        while (!signal.aborted) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done || signal.aborted) break;
           heard = Date.now();
           buffer += value;
           let cut: number;
-          while ((cut = buffer.indexOf("\n\n")) >= 0) {
+          while (!signal.aborted && (cut = buffer.indexOf("\n\n")) >= 0) {
             const block = buffer.slice(0, cut);
             buffer = buffer.slice(cut + 2);
             let event = "message";
@@ -178,17 +206,23 @@ export class Client {
           }
         }
       } catch { /* the connection ended; reconnect */ }
-      clearInterval(stale);
-      if (generation === this.generation) {
-        this.generation += 1;
-        this.rows.clear();
-        this.draft = null;
-        this.live = false;
-        this.older = false;
-        this.olderBefore = null;
-        this.changed();
+      finally {
+        clearInterval(stale);
+        abort.abort();
+        void reader?.cancel().catch(() => undefined);
       }
-      if (!this.stopped) await new Promise((ok) => setTimeout(ok, wait));
+      if (run.aborted) break;
+      this.clearImage();
+      if (run.aborted) break;
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          run.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, wait);
+        run.addEventListener("abort", finish, { once: true });
+      });
     }
   }
 

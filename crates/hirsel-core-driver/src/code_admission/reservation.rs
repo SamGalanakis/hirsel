@@ -1,7 +1,7 @@
 use super::{AdmissionError, Limit, ObjectKey, ObjectKind};
-use crate::code_store::CodeStore;
+use crate::code_store::{CodeStore, Object};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::decode::DecodeBudget;
+use hirsel_core_ir::decode::Debit;
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io;
@@ -112,7 +112,7 @@ impl AdmissionStore {
         root: ContentHash,
         mut objects: Listing,
         max_outstanding: usize,
-        budget: &mut DecodeBudget,
+        budget: &Debit<'_>,
     ) -> Result<Reservation<'_>, AdmissionError> {
         let mut collection = self.collection();
         if let Some(error) = &collection.staging_error {
@@ -223,9 +223,11 @@ impl Reservation<'_> {
         })
     }
 
-    pub(super) fn open(&self, key: ObjectKey) -> io::Result<File> {
+    pub(super) fn open(&self, key: ObjectKey) -> io::Result<Object> {
         if self.objects[&key].received {
-            File::open(self.staged_path(key).expect("received in staging"))
+            Object::file(File::open(
+                self.staged_path(key).expect("received in staging"),
+            )?)
         } else {
             self.owner.store.open(key.kind, key.hash)
         }

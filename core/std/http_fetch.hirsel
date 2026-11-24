@@ -1,0 +1,929 @@
+// Module `http_fetch`: the connection pool and fetch behind `std.http_client`'s Fetch
+// section (HTTP-18). A `Pool` owns one coordinator task, which keeps the idle connections
+// and the slot counts and nothing else. A `Client` is a send handle holding a sender to it.
+// A fetch asks for a lease, does its own socket I/O on the leased connection, and parks the
+// connection at a clean boundary or drops the lease, whose finalizer frees the slot with
+// one try_send. Dials run in tasks the coordinator spawns from the pool's reservation, so
+// every block of a pooled connection keeps the pool's limit record (MEM-20).
+/// An origin and the authority written for it. Shared by a hop, a lease and an endpoint.
+type Site: shareable + send {
+    tls: bool,
+    host: String,
+    port: u16,
+    authority: String
+}
+
+type HopUrl: send {
+    text: String,
+    parsed: Option[uri.Uri],
+    site: Arc[Site],
+    target: String
+}
+
+type Checkout: send {
+    site: Arc[Site],
+    fresh: bool,
+    deadline: u64,
+    reply: Sender[Grant]
+}
+
+type Ask: send = Want(Checkout) | Wake
+
+type Grant: send = Leased(Lease) | Refused(http_client.FetchError)
+
+/// What comes back to the coordinator. Each held slot has at most one in flight.
+type Back: send = Park(Arc[Site], http_client.Connection) | Retire | Dialed(u64)
+
+/// A connection and the slot it holds. Made by the coordinator inside the pool's
+/// reservation. Parking destructures it; dropping it frees the slot without waiting.
+resource type Lease: send {
+    site: Arc[Site],
+    conn: http_client.Connection,
+    reused: bool,
+    back: Sender[Back],
+    wake: Sender[Ask]
+} drop(lease) {
+    let _ = channel.try_send(lease.back, Retire)
+    // A full queue already holds an event that drains the returns.
+    let _ = channel.try_send(lease.wake, Wake)
+}
+
+type Idle: send {
+    site: Arc[Site],
+    conn: http_client.Connection,
+    since: u64
+}
+
+type Dial {
+    id: u64,
+    job: Task[Result[http_client.Connection, http_client.FetchError]],
+    site: Arc[Site],
+    reply: Sender[Grant]
+}
+
+type DialJob: send {
+    net: Net,
+    clock: Clock,
+    trust: Trust,
+    site: Arc[Site],
+    deadline: u64,
+    id: u64,
+    back: Sender[Back],
+    wake: Sender[Ask]
+}
+
+type Alarm: send {
+    clock: Clock,
+    at: u64,
+    wake: Sender[Ask]
+}
+
+type Coordinator: send {
+    net: Net,
+    clock: Clock,
+    tasks: Tasks,
+    trust: Trust,
+    conns_max: u64,
+    waiters_max: u64,
+    idle_ns: u64,
+    dial_bytes: u64,
+    asks: Receiver[Ask],
+    wake: Sender[Ask],
+    returns: Receiver[Back],
+    back: Sender[Back],
+    idle: List[Idle],
+    waiters: List[Checkout],
+    live: u64,
+    next_id: u64
+}
+
+/// The owner of a pool's coordinator, Net and Trust. Dropping it ends the pool.
+pub opaque type Pool {
+    coordinator: Task[()],
+    ask: Sender[Ask],
+    clock: Clock,
+    limits: http_client.Limits
+}
+
+/// A handle on a pool: no Net, no Trust, only the way to ask for a connection.
+pub opaque type Client: send {
+    ask: Sender[Ask],
+    clock: Clock,
+    limits: http_client.Limits
+}
+
+/// A handle confined to one origin, parsed once.
+pub opaque type Endpoint: send {
+    client: Client,
+    site: Arc[Site],
+    origin: String
+}
+
+pub opaque type Response: send {
+    url: HopUrl,
+    lease: Option[Lease],
+    head: Option[http_client.ResponseHead],
+    coding: Option[http_client.ContentCoding],
+    body: Option[http_coding.Body],
+    ended: bool,
+    fault: Option[http_client.FetchError]
+}
+
+/// A dial task's own limit, beyond the trust roots it copies: its connection's three
+/// 8192-byte buffers and authority, at most ADDRESSES resolved addresses and the
+/// handshake's protocol list.
+const DIAL_BYTES: u64 = 40960
+
+/// One slot's share of the reservation: a dial, then its task record, lease block,
+/// origin key and table entry.
+const SLOT_BYTES: u64 = 49152
+
+/// The pool's fixed share: its one timer task.
+const POOL_BYTES: u64 = 8192
+
+const ALARM_BYTES: u64 = 1024
+
+/// The addresses a dial tries, in resolver order.
+const ADDRESSES: u64 = 64
+
+/// The longest host a URL may name: a DNS name is at most 253 bytes, and this bounds
+/// the origin keys the coordinator copies.
+const HOST_MAX: u64 = 255
+
+fn round8(n: u64) -> u64 {
+    (n + 7) / 8 * 8
+}
+
+fn roots_bytes(trust: Trust) -> u64 {
+    match trust {
+        Roots(data) => round8(list.len(data)),
+        System => 0,
+    }
+}
+
+/// Starts a pool's coordinator and admits its whole reservation (HTTP-18 Charging).
+pub fn pool(n: Net, c: Clock, tasks: Tasks, take trust: Trust, cfg: http_client.Limits) -> Result[Pool, Capacity] {
+    let conns: u64 = int.widen(cfg.conns_max)
+    let waiting: u64 = int.widen(cfg.waiters_max)
+    let roots = roots_bytes(trust)
+    let (wake, asks): (Sender[Ask], Receiver[Ask]) = channel.new(order.max(waiting, 1))
+    let (back, returns): (Sender[Back], Receiver[Back]) = channel.new(order.max(conns, 1))
+    let idle: List[Idle] = list.with_capacity(conns)
+    let waiters: List[Checkout] = list.with_capacity(waiting)
+    let setup = Coordinator(net: n, clock: c, tasks, trust: take trust, conns_max: conns, waiters_max: waiting, idle_ns: cfg.idle_ns, dial_bytes: DIAL_BYTES + roots, asks: take asks, wake: channel.sender(wake), returns: take returns, back: take back, idle: take idle, waiters: take waiters, live: 0, next_id: 0)
+    match task.try_spawn(tasks, bytes conns * (SLOT_BYTES + roots) + POOL_BYTES, take setup, coordinate) {
+        Ok(take t) => Ok(Pool(coordinator: take t, ask: take wake, clock: c, limits: cfg)),
+        Error((refused, _)) => Error(refused),
+    }
+}
+
+/// A new handle on the pool. Admits nothing.
+pub fn handle(p: Pool) -> Client {
+    Client(ask: channel.sender(p.ask), clock: p.clock, limits: p.limits)
+}
+
+fn same_site(a: Arc[Site], b: Arc[Site]) -> bool {
+    a.tls == b.tls && a.port == b.port && a.host == b.host
+}
+
+fn coordinate(take setup: Coordinator) waits {
+    let mut co = take setup
+    let mut dials: List[Dial] = list.with_capacity(co.conns_max)
+    let mut timer: Option[Task[()]] = None
+    let mut timer_at: u64 = 0
+    while let Ok(take message) = channel.receive(co.asks) {
+        absorb(mut co, mut dials)
+        let now = host.mono_ns(co.clock)
+        serve(mut co, mut dials, now)
+        if let Want(take ask) = take message {
+            if let Some(take waiting) = try_serve(mut co, mut dials, take ask, now) {
+                if list.len(co.waiters) == co.waiters_max {
+                    refuse(take waiting, Busy)
+                } else {
+                    list.push(mut co.waiters, take waiting)
+                }
+            }
+        }
+        rearm(co, mut timer, mut timer_at, now)
+    }
+}
+
+fn refuse(take c: Checkout, take e: http_client.FetchError) {
+    let _ = channel.try_send(c.reply, Refused(take e))
+}
+
+fn absorb(mut co: Coordinator, mut dials: List[Dial]) waits {
+    while let Ok(take item) = channel.try_receive(co.returns) {
+        match take item {
+            Park(take site, take conn) => {
+                list.push(mut co.idle, Idle(site: take site, conn: take conn, since: host.mono_ns(co.clock)))
+            },
+            Retire => {
+                co.live -= 1
+            },
+            Dialed(id) => dialed(mut co, mut dials, id),
+        }
+    }
+}
+
+fn dialed(mut co: Coordinator, mut dials: List[Dial], id: u64) waits {
+    let mut at: u64 = 0
+    while at < list.len(dials) && dials[at].id != id {
+        at += 1
+    }
+    if at == list.len(dials) {
+        return
+    }
+    let Dial(id: _, job: take job, site: take site, reply: take reply) = list.remove(mut dials, at)
+    match task.join(take job) {
+        Ok(Ok(take conn)) => lease_out(mut co, take site, take conn, false, take reply),
+        Ok(Error(take e)) => {
+            co.live -= 1
+            let _ = channel.try_send(reply, Refused(take e))
+        },
+        Error(_) => {
+            co.live -= 1
+            let _ = channel.try_send(reply, Refused(Busy))
+        },
+    }
+}
+
+fn lease_out(mut co: Coordinator, take site: Arc[Site], take conn: http_client.Connection, reused: bool, take reply: Sender[Grant]) {
+    match Lease(site: take site, conn: take conn, reused, back: channel.sender(co.back), wake: channel.sender(co.wake)) {
+        Ok(take lease) => match channel.try_send(reply, Leased(take lease)) {
+            Ok(()) => {},
+            Error(Closed(take grant)) => restore(mut co, take grant),
+            Error(Full(take grant)) => restore(mut co, take grant),
+        },
+        Error((_, _)) => {
+            co.live -= 1
+            let _ = channel.try_send(reply, Refused(Busy))
+        },
+    }
+}
+
+// The asker has gone: its connection is still clean, so it becomes idle.
+fn restore(mut co: Coordinator, take grant: Grant) {
+    if let Leased(take lease) = take grant {
+        let Lease(site: take site, conn: take conn, reused: _, back: _, wake: _) = take lease
+        if http_client.drained(conn) {
+            list.push(mut co.idle, Idle(site: take site, conn: take conn, since: host.mono_ns(co.clock)))
+        } else {
+            co.live -= 1
+        }
+    }
+}
+
+fn serve(mut co: Coordinator, mut dials: List[Dial], now: u64) waits {
+    while list.len(co.idle) != 0 && now - co.idle[0].since >= co.idle_ns {
+        let _ = list.remove(mut co.idle, 0)
+        co.live -= 1
+    }
+    let mut i: u64 = 0
+    while i < list.len(co.waiters) {
+        let next = list.remove(mut co.waiters, i)
+        if let Some(take waiting) = try_serve(mut co, mut dials, take next, now) {
+            list.insert(mut co.waiters, i, take waiting)
+            i += 1
+        }
+    }
+}
+
+fn newest_idle(co: Coordinator, site: Arc[Site]) -> Option[u64] {
+    let mut at = list.len(co.idle)
+    while at != 0 {
+        at -= 1
+        if same_site(co.idle[at].site, site) {
+            return Some(at)
+        }
+    }
+    None
+}
+
+// Serves one ask, or gives it back to wait.
+fn try_serve(mut co: Coordinator, mut dials: List[Dial], take c: Checkout, now: u64) -> Option[Checkout] waits {
+    if c.deadline <= now {
+        refuse(take c, Http(Deadline))
+        return None
+    }
+    if !c.fresh {
+        while let Some(at) = newest_idle(co, c.site) {
+            let Idle(site: take site, conn: take held, since: _) = list.remove(mut co.idle, at)
+            let mut conn = take held
+            // Bytes or an end that arrived while it was parked: not a clean boundary.
+            if !http_client.quiet(mut conn) {
+                co.live -= 1
+                continue
+            }
+            let Checkout(site: _, fresh: _, deadline: _, reply: take reply) = take c
+            lease_out(mut co, take site, take conn, true, take reply)
+            return None
+        }
+    }
+    if co.live >= co.conns_max {
+        if list.len(co.idle) == 0 {
+            return Some(take c)
+        }
+        let _ = list.remove(mut co.idle, 0)
+        co.live -= 1
+    }
+    start_dial(mut co, mut dials, take c)
+    None
+}
+
+fn start_dial(mut co: Coordinator, mut dials: List[Dial], take c: Checkout) {
+    let Checkout(site: take asked, fresh: _, deadline, reply: take reply) = take c
+    // The coordinator's own copy, so no caller block outlives its fetch here.
+    let site = arc.new(Site(tls: asked.tls, host: string.from(asked.host), port: asked.port, authority: string.from(asked.authority)))
+    let id = co.next_id
+    co.next_id += 1
+    co.live += 1
+    let job = DialJob(net: co.net, clock: co.clock, trust: clone(co.trust), site: arc.share(site), deadline, id, back: channel.sender(co.back), wake: channel.sender(co.wake))
+    match task.try_spawn(co.tasks, bytes co.dial_bytes, take job, dial_task) {
+        Ok(take t) => list.push(mut dials, Dial(id, job: take t, site: take site, reply: take reply)),
+        Error((_, _)) => {
+            co.live -= 1
+            let _ = channel.try_send(reply, Refused(Busy))
+        },
+    }
+}
+
+fn alarm(take a: Alarm) waits {
+    host.sleep_until(a.clock, a.at)
+    let _ = channel.try_send(a.wake, Wake)
+}
+
+// One timer for the earliest waiting deadline.
+fn rearm(co: Coordinator, mut timer: Option[Task[()]], mut timer_at: u64, now: u64) {
+    let mut earliest: Option[u64] = None
+    for w in co.waiters {
+        earliest = match earliest {
+            Some(at) => Some(order.min(at, w.deadline)),
+            None => Some(w.deadline),
+        }
+    }
+    let Some(at) = earliest else {
+        timer = None
+        return
+    }
+    if let Some(_) = timer {
+        if timer_at > now && timer_at <= at {
+            return
+        }
+    }
+    timer = None
+    timer_at = at
+    if let Ok(take t) = task.try_spawn(co.tasks, bytes ALARM_BYTES, Alarm(clock: co.clock, at, wake: channel.sender(co.wake)), alarm) {
+        timer = Some(take t)
+    }
+}
+
+fn http_error(take e: http_client.Error) -> http_client.FetchError {
+    Http(e)
+}
+
+fn url_error(take e: uri.Error) -> http_client.FetchError {
+    Url(e)
+}
+
+fn part(s: String, span: http1.Span) -> View[String] in s {
+    string.slice(s, span.start, span.end)
+}
+
+fn parse_url(take text: String) -> Result[HopUrl, http_client.FetchError] {
+    let parsed = result.map_err(uri.parse(text), url_error)?
+    let Some(scheme) = parsed.scheme else {
+        return Error(Url(Relative))
+    }
+    let is_tls = http1.equal_ascii(string.as_bytes(part(text, scheme)), b"https")
+    if !is_tls && !http1.equal_ascii(string.as_bytes(part(text, scheme)), b"http") {
+        return Error(Scheme)
+    }
+    if let Some(_) = parsed.userinfo {
+        return Error(UserInfo)
+    }
+    let Some(raw_host) = parsed.host else {
+        return Error(Url(Invalid(scheme.end + 1)))
+    }
+    let (name, ipv6) = match raw_host {
+        Name(span) => (span, false),
+        Ip6(span) => (span, true),
+    }
+    if name.start == name.end || name.end - name.start > HOST_MAX {
+        return Error(Url(Invalid(name.start)))
+    }
+    let port = match uri.port_number(text, parsed) {
+        Some(n) => n,
+        None => if is_tls {
+            443u16
+        } else {
+            80u16
+        },
+    }
+    let host = string.to_lower(part(text, name))
+    let authority_start = if ipv6 {
+        name.start - 1
+    } else {
+        name.start
+    }
+    let authority_end = parsed.path.start
+    let authority = string.from(string.slice(text, authority_start, authority_end))
+    let mut target = string.with_capacity(string.byte_len(text) - authority_end + 1)
+    if parsed.path.start == parsed.path.end {
+        string.push(mut target, "/")
+    } else {
+        string.push(mut target, part(text, parsed.path))
+    }
+    if let Some(query) = parsed.query {
+        string.push(mut target, "?")
+        string.push(mut target, part(text, query))
+    }
+    let site = arc.new(Site(tls: is_tls, host: take host, port, authority: take authority))
+    Ok(HopUrl(text: take text, parsed: Some(parsed), site: take site, target: take target))
+}
+
+fn resolve_peers(n: Net, c: Clock, name: String, deadline: u64) -> Result[List[Ip], http_client.FetchError] waits {
+    let mut peers: List[Ip] = list.with_capacity(ADDRESSES)
+    let count = match host.resolve(n, name, mut peers, At(c, deadline)) {
+        Ok(found) => found,
+        Error(TimedOut) => return Error(Http(Deadline)),
+        Error(Aborted) => return Error(Http(Cancelled)),
+        Error(e) => return Error(Resolve(e)),
+    }
+    if count == 0 {
+        return Error(NoAddress)
+    }
+    Ok(take peers)
+}
+
+fn connect_ip(n: Net, c: Clock, trust: Trust, site: Arc[Site], ip: Ip, deadline: u64) -> Result[http_client.Connection, http_client.Error] waits {
+    let address = Addr(ip, port: site.port)
+    if site.tls {
+        http_client.open_tls(n, address, site.authority, site.host, trust, c, deadline)
+    } else {
+        http_client.open(n, address, site.authority, c, deadline)
+    }
+}
+
+fn open(n: Net, c: Clock, trust: Trust, site: Arc[Site], deadline: u64) -> Result[http_client.Connection, http_client.FetchError] waits {
+    if host.mono_ns(c) >= deadline {
+        return Error(Http(Deadline))
+    }
+    if let Ok(ip) = net.parse_ip(string.as_bytes(site.host)) {
+        return result.map_err(connect_ip(n, c, trust, site, ip, deadline), http_error)
+    }
+    let peers = resolve_peers(n, c, site.host, deadline)?
+    let mut failure: http_client.FetchError = NoAddress
+    for ip in peers {
+        match connect_ip(n, c, trust, site, ip, deadline) {
+            Ok(take conn) => return Ok(take conn),
+            Error(Deadline) => return Error(Http(Deadline)),
+            Error(Cancelled) => return Error(Http(Cancelled)),
+            Error(e) => {
+                failure = Http(e)
+            },
+        }
+    }
+    Error(failure)
+}
+
+fn dial_task(take job: DialJob) -> Result[http_client.Connection, http_client.FetchError] waits {
+    let opened = open(job.net, job.clock, job.trust, job.site, job.deadline)
+    let _ = channel.try_send(job.back, Dialed(job.id))
+    let _ = channel.try_send(job.wake, Wake)
+    opened
+}
+
+// One ask and its one reply. The reply's only sender goes with the ask, so a pool that
+// ends closes it.
+fn checkout(cl: Client, site: Arc[Site], fresh: bool, deadline: u64) -> Result[Lease, http_client.FetchError] waits {
+    if host.mono_ns(cl.clock) >= deadline {
+        return Error(Http(Deadline))
+    }
+    let (reply, incoming): (Sender[Grant], Receiver[Grant]) = channel.new(1)
+    if let Error(_) = channel.send(cl.ask, Want(Checkout(site: arc.share(site), fresh, deadline, reply: take reply))) {
+        return Error(Gone)
+    }
+    match channel.receive(incoming) {
+        Ok(Leased(take lease)) => Ok(take lease),
+        Ok(Refused(take e)) => Error(take e),
+        Error(_) => Error(Gone),
+    }
+}
+
+// Parks a connection at a clean boundary; anything else closes it.
+fn park(take lease: Lease) {
+    if !http_client.drained(lease.conn) {
+        return
+    }
+    let Lease(site: take site, conn: take conn, reused: _, back: take back, wake: take wake) = take lease
+    if let Ok(()) = channel.try_send(back, Park(take site, take conn)) {
+        let _ = channel.try_send(wake, Wake)
+    }
+}
+
+fn retryable(e: http_client.Error, conn: http_client.Connection, method: String) -> bool {
+    if http_client.response_started(conn) {
+        return false
+    }
+    let transport_error = match e {
+        Write(_) => true,
+        Receive(_) => true,
+        MalformedHead => true,
+        _ => false,
+    }
+    transport_error && (!http_client.request_started(conn) || method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "TRACE")
+}
+
+fn exchange(mut conn: http_client.Connection, u: HopUrl, method: String, headers: List[http_client.Header], segments: List[http_client.Segment], deadline: u64) -> Result[(), http_client.Error] waits {
+    http_client.start_fetch(mut conn, u.site.authority, method, u.target, headers, segments, deadline)?
+    // The final head determines whether the caller's bound applies to wire
+    // bytes, decoded bytes, or a discarded redirect body.
+    http_client.finish_request(mut conn, 0xffffffffffffffff)
+}
+
+fn hop(cl: Client, u: HopUrl, take kept: Option[Lease], method: String, headers: List[http_client.Header], segments: List[http_client.Segment], deadline: u64) -> Result[Lease, http_client.FetchError] waits {
+    let mut lease = match take kept {
+        Some(take held) => take held,
+        None => checkout(cl, u.site, false, deadline)?,
+    }
+    match exchange(mut lease.conn, u, method, headers, segments, deadline) {
+        Ok(()) => {
+            lease.reused = true
+            return Ok(take lease)
+        },
+        Error(e) => if !lease.reused || !retryable(e, lease.conn, method) {
+            return Error(Http(e))
+        },
+    }
+    {
+        let stale = take lease
+    }
+    let mut fresh = checkout(cl, u.site, true, deadline)?
+    result.map_err(exchange(mut fresh.conn, u, method, headers, segments, deadline), http_error)?
+    fresh.reused = true
+    Ok(take fresh)
+}
+
+fn is_header(name: String, expected: Bytes) -> bool {
+    http1.equal_ascii(string.as_bytes(name), expected)
+}
+
+fn body_header(name: String) -> bool {
+    is_header(name, b"content-encoding") || is_header(name, b"content-language") || is_header(name, b"content-location") || is_header(name, b"content-type") || is_header(name, b"digest") || is_header(name, b"last-modified")
+}
+
+fn credential(h: http_client.Header) -> bool {
+    if let Protected(_, _) = h.value {
+        return true
+    }
+    is_header(h.name, b"authorization") || is_header(h.name, b"proxy-authorization") || is_header(h.name, b"cookie")
+}
+
+fn automatic(cl: Client, method: String, headers: List[http_client.Header], strip: bool) -> bool {
+    if !cl.limits.decode || method == "HEAD" {
+        return false
+    }
+    for field in headers {
+        if (!strip || !credential(field)) && (is_header(field.name, b"accept-encoding") || is_header(field.name, b"range")) {
+            return false
+        }
+    }
+    true
+}
+
+fn hop_headers(source: List[http_client.Header], strip: bool, dropped: bool, offer: bool) -> List[http_client.Header] {
+    let mut out: List[http_client.Header] = list.new()
+    for field in source {
+        if (strip && credential(field)) || (dropped && body_header(field.name)) {
+            continue
+        }
+        let name = string.from(field.name)
+        let value: http_client.HeaderValue = match field.value {
+            Public(data) => Public(clone(data)),
+            Protected(prefix, token) => Protected(clone(prefix), secret.share(token)),
+        }
+        list.push(mut out, http_client.Header(name: take name, value: take value))
+    }
+    if offer {
+        list.push(mut out, http_client.Header(name: "Accept-Encoding", value: Public(string.into_bytes("gzip, deflate, zstd"))))
+    }
+    take out
+}
+
+fn redirect_status(status: u16) -> bool {
+    status == 301 || status == 302 || status == 303 || status == 307 || status == 308
+}
+
+fn redirect(u: HopUrl, h: http_client.ResponseHead) -> Result[Option[HopUrl], http_client.FetchError] {
+    let mut location: Option[String] = None
+    for i in 0u64 .. http_client.field_count(h) {
+        if let Some((name, value)) = http_client.field_at(h, i) {
+            if !http1.equal_ascii(name, b"location") {
+                continue
+            }
+            if let Some(_) = location {
+                return Error(Location)
+            }
+            location = match string.from_utf8(clone(value)) {
+                Ok(take s) => Some(take s),
+                Error(_) => return Error(Location),
+            }
+        }
+    }
+    let Some(take value) = take location else {
+        return Ok(None)
+    }
+    let Ok(reference) = uri.parse(value) else {
+        return Error(Location)
+    }
+    // An endpoint's hop is parsed only when it redirects.
+    let base = match u.parsed {
+        Some(p) => p,
+        None => match uri.parse(u.text) {
+            Ok(p) => p,
+            Error(_) => return Error(Location),
+        },
+    }
+    let mut next = string.with_capacity(0)
+    if let Error(_) = uri.resolve(u.text, base, value, reference, mut next) {
+        return Error(Location)
+    }
+    match parse_url(take next) {
+        Ok(take target) => Ok(Some(take target)),
+        Error(_) => Error(Location),
+    }
+}
+
+const REDIRECT_DRAIN: u64 = 2048
+
+fn drain(mut conn: http_client.Connection) -> Result[(), http_client.FetchError] waits {
+    let Ok(frame) = http_client.limit_response(mut conn, REDIRECT_DRAIN) else {
+        return Ok(())
+    }
+    let mut scratch: Bytes = list.with_capacity(REDIRECT_DRAIN)
+    let mut drained: u64 = 0
+    loop {
+        list.clear(mut scratch)
+        match http_client.read(mut conn, mut scratch) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                drained += n
+                // Delimited bodies can finish by consuming only framing.
+                // A body delimited by close would have to probe another byte.
+                if frame == CloseDelimited && drained == REDIRECT_DRAIN {
+                    return Ok(())
+                }
+            },
+            Error(Deadline) => return Error(Http(Deadline)),
+            Error(Cancelled) => return Error(Http(Cancelled)),
+            Error(_) => return Ok(()),
+        }
+    }
+}
+
+// The response keeps a copy of its head, and the connection is parked or closed.
+fn settle(mut r: Response, take lease: Lease) {
+    r.head = Some(http_client.copy_head(lease.conn))
+    park(take lease)
+}
+
+fn response(cl: Client, take lease: Lease, take url: HopUrl, offer: bool, deadline: u64) -> Result[Response, http_client.FetchError] {
+    let mut held = take lease
+    let coding = http_coding.coding_of(http_client.head(held.conn), offer)?
+    let mut body: Option[http_coding.Body] = None
+    let max = cl.limits.body_max
+    if let Some(kind) = coding {
+        let _ = result.map_err(http_client.limit_response(mut held.conn, http_coding.encoded_limit(max)), http_error)?
+        body = Some(http_coding.body(kind, max, cl.limits.max_window, cl.clock, deadline))
+    } else {
+        let _ = result.map_err(http_client.limit_response(mut held.conn, max), http_error)?
+    }
+    let mut r = Response(url: take url, lease: None, head: None, coding, body: take body, ended: false, fault: None)
+    if let None() = coding {
+        if http_client.end_empty(mut held.conn) {
+            r.ended = true
+            settle(mut r, take held)
+            return Ok(take r)
+        }
+    }
+    r.lease = Some(take held)
+    Ok(take r)
+}
+
+fn run(cl: Client, take first: HopUrl, request_method: String, request_headers: List[http_client.Header], request_body: List[http_client.Segment], confined: bool, deadline_ns: u64) -> Result[Response, http_client.FetchError] waits {
+    let mut current = take first
+    let mut kept: Option[Lease] = None
+    let mut followed: u8 = 0
+    let mut as_get = false
+    let mut dropped = false
+    let mut strip = false
+    let empty: List[http_client.Segment] = list.new()
+    let get_method = "GET"
+    loop {
+        let method = if as_get {
+            view get_method
+        } else {
+            view request_method
+        }
+        let offer = automatic(cl, method, request_headers, strip)
+        let headers = hop_headers(request_headers, strip, dropped, offer)
+        let segments = if dropped {
+            view empty
+        } else {
+            view request_body
+        }
+        let mut lease = hop(cl, current, take kept, method, headers, segments, deadline_ns)?
+        kept = None
+        let code = http_client.status(http_client.head(lease.conn))
+        if let Follow(max) = cl.limits.redirects {
+            if redirect_status(code) {
+                let next_hop = redirect(current, http_client.head(lease.conn))?
+                if let Some(take next) = take next_hop {
+                    if followed == max {
+                        return Error(TooManyRedirects)
+                    }
+                    let same = same_site(current.site, next.site)
+                    if !same && confined {
+                        return Error(CrossOrigin)
+                    }
+                    if code == 303 || (code == 301 || code == 302) && method == "POST" {
+                        dropped = true
+                        as_get = method != "HEAD"
+                    }
+                    if !same {
+                        strip = true
+                        if !dropped {
+                            for segment in segments {
+                                if let Sealed(_, _) = segment {
+                                    return Error(CrossOriginSecret)
+                                }
+                            }
+                        }
+                    }
+                    drain(mut lease.conn)?
+                    if same && http_client.drained(lease.conn) {
+                        kept = Some(take lease)
+                    } else {
+                        park(take lease)
+                    }
+                    followed += 1
+                    current = take next
+                    continue
+                }
+            }
+        }
+        return response(cl, take lease, take current, offer, deadline_ns)
+    }
+}
+
+/// Runs one request through HTTP-18 on a lease from the handle's pool.
+pub fn fetch(cl: Client, req: http_client.Fetch, deadline_ns: u64) -> Result[Response, http_client.FetchError] waits {
+    let first = parse_url(string.from(req.url))?
+    run(cl, take first, req.method, req.headers, req.body, false, deadline_ns)
+}
+
+/// A handle confined to the origin of an origin-only URL.
+pub fn endpoint(cl: Client, base_url: String) -> Result[Endpoint, http_client.FetchError] {
+    let u = parse_url(string.from(base_url))?
+    if let Some(p) = u.parsed {
+        if p.path.end - p.path.start > 1 {
+            return Error(Url(Invalid(p.path.start)))
+        }
+        if let Some(q) = p.query {
+            return Error(Url(Invalid(q.start)))
+        }
+        if let Some(f) = p.fragment {
+            return Error(Url(Invalid(f.start)))
+        }
+    }
+    let mut origin = string.with_capacity(string.byte_len(u.site.authority) + 8)
+    string.push(mut origin, if u.site.tls {
+        "https://"
+    } else {
+        "http://"
+    })
+    string.push(mut origin, u.site.authority)
+    Ok(Endpoint(client: Client(ask: channel.sender(cl.ask), clock: cl.clock, limits: cl.limits), site: arc.share(u.site), origin: take origin))
+}
+
+/// Sends a request for a target on the endpoint's origin, without parsing a URL.
+pub fn call(e: Endpoint, req: http_client.Call, deadline_ns: u64) -> Result[Response, http_client.FetchError] waits {
+    if !string.starts_with(req.target, "/") {
+        return Error(Url(Invalid(0)))
+    }
+    result.map_err(uri.http_origin_form(req.target), url_error)?
+    let mut text = string.with_capacity(string.byte_len(e.origin) + string.byte_len(req.target))
+    string.push(mut text, e.origin)
+    string.push(mut text, req.target)
+    let first = HopUrl(text: take text, parsed: None, site: arc.share(e.site), target: string.from(req.target))
+    run(e.client, take first, req.method, req.headers, req.body, true, deadline_ns)
+}
+
+// Reads a whole body into `into`, growing it up to the body bound, and returns its head.
+fn read_all(take r: Response, mut into: Bytes, body_max: u64) -> Result[http_client.ResponseHead, http_client.FetchError] waits {
+    let mut owned = take r
+    let mut got: u64 = 0
+    loop {
+        if list.len(into) == list.capacity(into) {
+            let grow = order.min(order.max(list.capacity(into), 4096), body_max - got + 1)
+            list.reserve(mut into, grow)
+        }
+        let n = read(mut owned, mut into)?
+        if n == 0 {
+            break
+        }
+        got += n
+    }
+    let Some(take h) = replace(mut owned.head, None) else {
+        fail("an ended response keeps its head")
+    }
+    Ok(take h)
+}
+
+/// Fetches and reads the whole decoded body into `into`.
+pub fn fetch_all(cl: Client, req: http_client.Fetch, mut into: Bytes, deadline_ns: u64) -> Result[http_client.ResponseHead, http_client.FetchError] waits {
+    let r = fetch(cl, req, deadline_ns)?
+    read_all(take r, mut into, cl.limits.body_max)
+}
+
+/// GETs a URL into `into` and returns the final status.
+pub fn get(cl: Client, url: String, mut into: Bytes, deadline_ns: u64) -> Result[u16, http_client.FetchError] waits {
+    let first = parse_url(string.from(url))?
+    let headers: List[http_client.Header] = list.new()
+    let body: List[http_client.Segment] = list.new()
+    let r = run(cl, take first, "GET", headers, body, false, deadline_ns)?
+    let h = read_all(take r, mut into, cl.limits.body_max)?
+    Ok(http_client.status(h))
+}
+
+pub fn head(r: Response) -> View[http_client.ResponseHead] in r {
+    if let Some(lease) = view r.lease {
+        return http_client.head(lease.conn)
+    }
+    let Some(h) = view r.head else {
+        fail("response has no head")
+    }
+    view h
+}
+
+pub fn response_url(r: Response) -> View[String] in r {
+    view r.url.text
+}
+
+pub fn response_coding(r: Response) -> Option[http_client.ContentCoding] {
+    r.coding
+}
+
+/// `read`'s contract over the decoded body. The body's end parks the connection.
+pub fn read(mut r: Response, mut into: Bytes) -> Result[u64, http_client.FetchError] waits {
+    let before = list.len(into)
+    if before == list.capacity(into) {
+        return Error(Http(NoSpace))
+    }
+    if let Some(error) = r.fault {
+        return Error(error)
+    }
+    if r.ended {
+        return Ok(0)
+    }
+    let Some(take live) = replace(mut r.lease, None) else {
+        return Error(Http(State))
+    }
+    let mut lease = take live
+    let polled = if let Some(kind) = r.coding {
+        if let Some(mut b) = r.body {
+            http_coding.read_coded(mut b, kind, mut lease.conn, mut into)
+        } else {
+            Error(Http(State))
+        }
+    } else {
+        result.map_err(http_client.read(mut lease.conn, mut into), http_error)
+    }
+    match polled {
+        Ok(0) => {
+            r.ended = true
+            r.body = None
+            settle(mut r, take lease)
+            Ok(0)
+        },
+        Ok(n) => {
+            r.lease = Some(take lease)
+            Ok(n)
+        },
+        Error(e) => {
+            r.head = Some(http_client.copy_head(lease.conn))
+            {
+                let closing = take lease
+            }
+            r.body = None
+            r.fault = Some(e)
+            let produced = list.len(into) - before
+            if produced != 0 && http_coding.too_large(e) {
+                return Ok(produced)
+            }
+            list.truncate(mut into, before)
+            Error(e)
+        },
+    }
+}

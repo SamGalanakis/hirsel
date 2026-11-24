@@ -1,8 +1,8 @@
-// test-env-fixture: {"MISSING": null, "RAW": [255], "BAD": "invalid", "EMPTY": "", "SINT": "-9223372036854775808", "UINT": "18446744073709551615", "TRUE": "true", "FALSE": "false", "PORT_LOW": "1", "PORT_HIGH": "65535", "PORT_ZERO": "0", "PORT_OVER": "65536", "MILLIS": "1250", "DURATION_SUFFIX": "1s"}
+// test-env-fixture: {"MISSING": null, "BOOL_MISSING": null, "RAW": [255], "BAD": "invalid", "EMPTY": "", "SINT": "-9223372036854775808", "UINT": "18446744073709551615", "TRUE": "true", "FALSE": "false", "PORT_LOW": "1", "PORT_HIGH": "65535", "PORT_ZERO": "0", "PORT_OVER": "65536", "MILLIS": "1250", "DURATION_SUFFIX": "1s", "APP_PORT": "8000", "TAG": "a,b", "X": "6", "LOG": "warn"}
 // The call order deliberately differs from key order.
-// expect: run read_errors(env) = true
-fn read_errors(e: Env) -> bool {
-    let mut r = config.new(e, 3)
+// expect: run read_errors(args, env) = true
+fn read_errors(a: Args, e: Env) -> bool {
+    let mut r = config.new(Some(e), a, 3)
     let missing = config.string(mut r, "MISSING")
     let denied = config.bool_or(mut r, "DENIED", true)
     let raw = config.string_or(mut r, "RAW", "fallback")
@@ -12,7 +12,7 @@ fn read_errors(e: Env) -> bool {
     if missing != "" || denied || raw != "" || list.len(errors) != 3 {
         return false
     }
-    let KeyError(a, Missing) = errors[0] else {
+    let KeyError(m, Missing) = errors[0] else {
         return false
     }
     let KeyError(b, Denied) = errors[1] else {
@@ -21,12 +21,12 @@ fn read_errors(e: Env) -> bool {
     let KeyError(c, NonUtf8) = errors[2] else {
         return false
     }
-    a == "MISSING" && b == "DENIED" && c == "RAW" && config.format_errors(errors) == "MISSING: missing\nDENIED: read denied\nRAW: not UTF-8"
+    m == "MISSING" && b == "DENIED" && c == "RAW" && config.format_errors(errors) == "MISSING: missing\nDENIED: read denied\nRAW: not UTF-8"
 }
 
-// expect: run defaults_and_success(env) = true
-fn defaults_and_success(e: Env) -> bool {
-    let mut r = config.new(e, 0)
+// expect: run defaults_and_success(args, env) = true
+fn defaults_and_success(a: Args, e: Env) -> bool {
+    let mut r = config.new(Some(e), a, 0)
     let empty = config.string_or(mut r, "EMPTY", "fallback")
     let text = config.string(mut r, "BAD")
     let fallback = config.string_or(mut r, "MISSING", "fallback")
@@ -37,7 +37,7 @@ fn defaults_and_success(e: Env) -> bool {
     let elapsed = config.duration_ms(mut r, "MILLIS")
     let ud = config.u64_or(mut r, "MISSING", 11)
     let id = config.i64_or(mut r, "MISSING", -12)
-    let bd = config.bool_or(mut r, "MISSING", true)
+    let bd = config.bool_or(mut r, "BOOL_MISSING", true)
     let pd = config.port_or(mut r, "MISSING", 8080)
     let dd = config.duration_ms_or(mut r, "MISSING", 13)
     let Ok(()) = config.finish(take r) else {
@@ -46,9 +46,9 @@ fn defaults_and_success(e: Env) -> bool {
     empty == "" && text == "invalid" && fallback == "fallback" && big == 18446744073709551615 && small == -9223372036854775808 && yes && !no && elapsed == 1250 && ud == 11 && id == -12 && bd && pd == 8080 && dd == 13
 }
 
-// expect: run invalid_values_and_ports(env) = true
-fn invalid_values_and_ports(e: Env) -> bool {
-    let mut r = config.new(e, 5)
+// expect: run invalid_values_and_ports(args, env) = true
+fn invalid_values_and_ports(a: Args, e: Env) -> bool {
+    let mut r = config.new(Some(e), a, 5)
     let bad_unsigned = config.u64_or(mut r, "BAD", 9)
     let bad_signed = config.i64_or(mut r, "UINT", -9)
     let bad_time = config.duration_ms_or(mut r, "DURATION_SUFFIX", 10)
@@ -68,9 +68,9 @@ fn invalid_values_and_ports(e: Env) -> bool {
     key == "BAD" && reason == "expected an unsigned 64-bit decimal integer" && config.format_errors(errors) == "BAD: expected an unsigned 64-bit decimal integer\nUINT: expected a signed 64-bit decimal integer\nDURATION_SUFFIX: expected a decimal millisecond count\nPORT_ZERO: expected a decimal port in 1..65535\nPORT_OVER: expected a decimal port in 1..65535"
 }
 
-// expect: run bounded_errors(env) = true
-fn bounded_errors(e: Env) -> bool {
-    let mut r = config.new(e, 1)
+// expect: run bounded_errors(args, env) = true
+fn bounded_errors(a: Args, e: Env) -> bool {
+    let mut r = config.new(Some(e), a, 1)
     let _ = config.port(mut r, "PORT_ZERO")
     let bad = config.bool_or(mut r, "BAD", true)
     let _ = config.string(mut r, "MISSING")
@@ -78,7 +78,7 @@ fn bounded_errors(e: Env) -> bool {
     let Error(errors) = config.finish(take r) else {
         return false
     }
-    let mut none = config.new(e, 0)
+    let mut none = config.new(Some(e), a, 0)
     let _ = config.string(mut none, "MISSING")
     let Error(omitted) = config.finish(take none) else {
         return false
@@ -93,4 +93,201 @@ fn bounded_errors(e: Env) -> bool {
         return false
     }
     config.format_errors(errors) == "PORT_ZERO: expected a decimal port in 1..65535\nand 2 more" && config.format_errors(omitted) == "and 1 more"
+}
+
+// The flag token and ambiguity tables in api/config.md, followed by precedence,
+// usage and error-budget cases. Each row launches with its own Args.
+// test-argv: ["--b","pos","--x","1"]
+// expect: run flag_case(args, env, 0) = true
+// test-argv: ["--b","pos","--x","1"]
+// expect: run flag_case(args, env, 1) = true
+// test-argv: ["--s","--x","1"]
+// expect: run flag_case(args, env, 2) = true
+// test-argv: ["--n","-5"]
+// expect: run flag_case(args, env, 3) = true
+// test-argv: ["--n=-5"]
+// expect: run flag_case(args, env, 4) = true
+// test-argv: ["--x"]
+// expect: run flag_case(args, env, 5) = true
+// test-argv: ["--y=secret","3","-v=secret","--no-x"]
+// expect: run flag_case(args, env, 6) = true
+// test-argv: ["a","--","--x","--help","-","--"]
+// expect: run flag_case(args, env, 7) = true
+// test-argv: ["--x","1","--x","2"]
+// expect: run flag_case(args, env, 8) = true
+// test-argv: ["--tag","a","--tag=b","--tag="]
+// expect: run flag_case(args, env, 9) = true
+// test-argv: ["--app-port","9000","--raw=visible","--denied=true","--empty=","--false=false"]
+// expect: run flag_case(args, env, 10) = true
+// test-argv: ["--app-port=secret","--raw","--denied=secret"]
+// expect: run flag_case(args, env, 11) = true
+// test-argv: ["--help","--unknown=secret","bad"]
+// expect: run flag_case(args, env, 12) = true
+// test-argv: ["--help","--level=error"]
+// expect: run flag_case(args, env, 13) = true
+// test-argv: ["--s","-","--tag","--tag=good","-","--tag"]
+// expect: run flag_case(args, env, 14) = true
+// test-argv: ["--b","one","two"]
+// expect: run flag_case(args, env, 15) = true
+// test-argv: ["--x","1","--x"]
+// expect: run flag_case(args, env, 16) = true
+// test-argv: ["--help=secret","--port","2","--_name=secret","--app-port","81"]
+// expect: run flag_case(args, env, 17) = true
+// test-argv: ["--_name=secret","--=secret","---name=ok"]
+// expect: run flag_case(args, env, 18) = true
+// test-argv: ["--b=true","--log=INFO","--x","-5","pos"]
+// expect: run flag_case(args, env, 19) = true
+// test-argv: ["--b","word"]
+// expect: run flag_case(args, env, 20) = true
+fn passed(take r: config.Reader) -> bool {
+    match config.finish(take r) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+fn errors_are(take r: config.Reader, expected: String) -> bool {
+    let Error(errors) = config.finish(take r) else {
+        return false
+    }
+    config.format_errors(errors) == expected
+}
+
+fn flag_case(a: Args, e: Env, row: u64) -> bool {
+    let mut r = config.new(None, a, if row == 19 {
+        1
+    } else {
+        8
+    })
+    match row {
+        0 => {
+            let x = config.u64(mut r, "X")
+            let b = config.bool(mut r, "B")
+            let pos = config.positionals(mut r, 1, 1)
+            b && x == 1 && list.len(pos) == 1 && pos[0] == "pos" && passed(take r)
+        },
+        1 => {
+            let x = config.u64(mut r, "X")
+            let b = config.string(mut r, "B")
+            x == 1 && b == "pos" && list.len(config.positionals(mut r, 0, 1)) == 0 && passed(take r)
+        },
+        2 => {
+            let s = config.string(mut r, "S")
+            let x = config.u64(mut r, "X")
+            s == "" && x == 1 && errors_are(take r, "S: no value")
+        },
+        3 => {
+            let n = config.i64(mut r, "N")
+            n == 0 && errors_are(take r, "N: no value\n-5: unknown flag")
+        },
+        4 => {
+            let n = config.i64(mut r, "N")
+            n == -5 && passed(take r)
+        },
+        5 => {
+            let x = config.u64(mut r, "X")
+            x == 0 && errors_are(take r, "X: no value")
+        },
+        6 => {
+            let x = config.u64_or(mut r, "X", 7)
+            x == 7 && errors_are(take r, "--y: unknown flag\n3: unexpected argument\n-v: unknown flag\n--no-x: unknown flag")
+        },
+        7 => {
+            let pos = config.positionals(mut r, 0, 4)
+            let x = config.u64_or(mut r, "X", 7)
+            x == 7 && list.len(pos) == 4 && pos[0] == "a" && pos[1] == "--x" && pos[2] == "--help" && pos[3] == "-" && errors_are(take r, "--: unexpected argument")
+        },
+        8 => {
+            let x = config.u64(mut r, "X")
+            x == 0 && errors_are(take r, "X: repeated flag")
+        },
+        9 => {
+            let tags = config.strings(mut r, "TAG")
+            list.len(tags) == 3 && tags[0] == "a" && tags[1] == "b" && tags[2] == "" && passed(take r)
+        },
+        10 => {
+            let mut env = config.new(Some(e), a, 8)
+            let port = config.port_or(mut env, "APP_PORT", 8080)
+            let raw = config.string(mut env, "RAW")
+            let denied = config.bool(mut env, "DENIED")
+            let empty = config.string_or(mut env, "EMPTY", "backup")
+            let no = config.bool_or(mut env, "FALSE", true)
+            let tags = config.strings(mut env, "TAG")
+            let level = config.log_level(mut env, "LOG")
+            let fallback = config.u64_or(mut env, "MISSING", 9)
+            port == 9000 && raw == "visible" && denied && empty == "" && !no && list.len(tags) == 1 && tags[0] == "a,b" && level == Warn && fallback == 9 && passed(take env)
+        },
+        11 => {
+            let mut env = config.new(Some(e), a, 8)
+            let port = config.port_or(mut env, "APP_PORT", 8080)
+            let raw = config.string_or(mut env, "RAW", "backup")
+            let b = config.bool_or(mut env, "DENIED", true)
+            let x = config.u64_or(mut env, "X", 7)
+            port == 0 && raw == "" && !b && x == 6 && errors_are(take env, "APP_PORT: expected a decimal port in 1..65535\nRAW: no value\nDENIED: expected true or false")
+        },
+        12 => {
+            let _ = config.port_or(mut r, "APP_PORT", 8080)
+            let _ = config.bool_or(mut r, "APP_VERBOSE", false)
+            let _ = config.strings(mut r, "APP_TAG")
+            let _ = config.log_level_or(mut r, "APP_LOG", Info)
+            let _ = config.i64_or(mut r, "APP_OFFSET", -5)
+            let _ = config.string(mut r, "NEEDED")
+            let _ = config.positionals(mut r, 2, 4)
+            let Error(errors) = config.finish(take r) else {
+                return false
+            }
+            if list.len(errors) != 1 {
+                return false
+            }
+            let Help(text) = errors[0] else {
+                return false
+            }
+            text == "--app-port <value>  APP_PORT (default: 8080)\n--app-verbose  APP_VERBOSE (default: false)\n--app-tag <value>  APP_TAG (repeatable)\n--app-log <value>  APP_LOG (default: info)\n--app-offset <value>  APP_OFFSET (default: -5)\n--needed <value>  NEEDED\nARGS: 2..4 arguments" && config.format_errors(errors) == text
+        },
+        13 => {
+            let help = config.bool(mut r, "HELP")
+            let level = config.log_level(mut r, "LEVEL")
+            help && level == (Error : trace.Level) && passed(take r)
+        },
+        14 => {
+            let _ = config.string(mut r, "S")
+            let tags = config.strings(mut r, "TAG")
+            let pos = config.positionals(mut r, 3, 4)
+            list.len(tags) == 1 && tags[0] == "good" && list.len(pos) == 2 && pos[0] == "-" && pos[1] == "-" && errors_are(take r, "S: no value\nTAG: no value\nTAG: no value\nARGS: expected at least 3 arguments")
+        },
+        15 => {
+            let b = config.bool(mut r, "B")
+            let pos = config.positionals(mut r, 0, 1)
+            let again = config.positionals(mut r, 10, 10)
+            b && list.len(pos) == 1 && pos[0] == "one" && list.len(again) == 0 && errors_are(take r, "two: unexpected argument")
+        },
+        16 => {
+            let x = config.u64(mut r, "X")
+            x == 0 && errors_are(take r, "X: repeated flag")
+        },
+        17 => {
+            let port = config.port(mut r, "APP_PORT")
+            let invalid = config.string_or(mut r, "_name!", "backup")
+            port == 81 && invalid == "" && errors_are(take r, "_name!: a key is ASCII letters, digits and _\n--help: unknown flag\n--port: unknown flag\n2: unexpected argument\n--_name: unknown flag")
+        },
+        18 => {
+            let output = config.string(mut r, "_NAME")
+            output == "ok" && errors_are(take r, "--_name: unknown flag\n--: unknown flag")
+        },
+        19 => {
+            let b = config.bool(mut r, "B")
+            let level = config.log_level_or(mut r, "LOG", Debug)
+            let x = config.u64(mut r, "X")
+            b && level == Info && x == 0 && errors_are(take r, "LOG: expected debug, info, warn or error\nand 3 more")
+        },
+        20 => {
+            let b = config.bool(mut r, "B")
+            let wrong = config.string(mut r, "B")
+            let s = config.string_or(mut r, "ABSENT", "absent")
+            let wrong_absent = config.bool(mut r, "ABSENT")
+            let pos = config.positionals(mut r, 1, 1)
+            b && wrong == "" && s == "absent" && !wrong_absent && list.len(pos) == 1 && pos[0] == "word" && errors_are(take r, "B: read as a switch and as a value\nABSENT: read as a switch and as a value")
+        },
+        _ => false,
+    }
 }

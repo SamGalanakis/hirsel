@@ -1,0 +1,468 @@
+fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64) -> Result[(), Error] waits {
+    let id = prefix(collection)?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let (take raw, inventory, place, take leaf, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
+            fail("L62: fixture has no collection")
+        }
+        let image = std.page.image_of(here)
+        let mut draft = begin_tiered_pack(db.store, pack_seq, 3, 4096)?
+        let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
+        let first_key = logical_key(collection, option.unwrap(std.page.key_at(image, 0)))?
+        let Some(place) = add_tiered_pack_frame(mut draft, frame, collection, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
+            fail("L62: the fixture leaf has no owning edge")
+        })? else {
+            fail("L62: fixture PAGE did not fit")
+        }
+        let (take raw, inventory) = finish_tiered_pack(take draft)?
+        let kind = before[52u64]
+        let descriptor = if kind == 4 {
+            let limits = descriptor_bounds(before)
+            log_record(here, limits.first, limits.next, 1)?
+        } else {
+            rooted_collection_record(here, kind, 1)?
+        }
+        (take raw, inventory, place, arc.share(here), take descriptor)
+    }
+    disk_write_synced(d, paged_pack_path(pack_seq)?, raw)?
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, id, ColdPage(place), mut draw))?
+    let mut ids = pack_seq * 8
+    let initial = match tree.paging {
+        Some(previous) => std.omap.snapshot(previous.packs),
+        None => std.omap.new(),
+    }
+    let (take packs, _) = std.omap.insert(mut ids, initial, pack_seq, TieredPagerPack(inventory: inventory, object: None))
+    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1)))
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    // A disk store lists the pack as a promotion does, so a cut publishes it.
+    if let Some(mut state) = db.disk {
+        capacity(disk_index_put(mut state.pages.locations.packs, pack_seq, inventory, pack_edge_charge))?
+    }
+    Ok(())
+}
+
+fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Result[(), Error] {
+    let id = events.binding.id
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut draw = stamp_after(db.next_node)?
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let trimmed = JournalOp(key: prefix(id)?, value: None, prior: 0, trim: Some(JournalTrim(floor: 1, dropped: 86)))
+    replay_tiered_op("j-1", mut tree, mut draw, mut account,
+        ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
+    let mut value: Bytes = list.with_capacity(6)
+    list.put_word_le(mut value, events.binding.readers.current)
+    list.put_word_le(mut value, event_number)
+    let appended = JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account,
+        ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    db.heads[0u64].head += 1
+    Ok(())
+}
+
+fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let before = snapshot(db)
+    l62_replay_log_window(mut db, events, 13u32)?
+    let after = snapshot(db)
+    let added = window_changes(read_handle, before, after, events, 2)?
+    let removed = window_changes(read_handle, after, before, events, 2)?
+    let id = events.binding.id
+    let old_key = log_key(id, 1)?
+    let new_key = log_key(id, 3)?
+    let mut eleven: Bytes = list.new()
+    let mut thirteen: Bytes = list.new()
+    list.put_word_le(mut eleven, 11u32)
+    list.put_word_le(mut thirteen, 13u32)
+    // The windows are [1, 3) and [2, 4). Only 1 and 3 change membership.
+    if list.len(added) != 2 || added[0u64].tree_key != old_key || added[0u64].value != None ||
+        added[1u64].tree_key != new_key || published_log(events, added[1u64])? != Some(take thirteen) ||
+        list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) ||
+        removed[1u64].tree_key != new_key || removed[1u64].value != None {
+        fail("L82: a moving window must recover entering rows from Cold pages and replay")
+    }
+    db.heads[0u64].roots.collections = share_page_tree(before.roots.collections)
+    l62_replay_log_window(mut db, events, 14u32)?
+    let mut forked = snapshot(db)
+    forked.branch = 1
+    let branch_delta = window_changes(read_handle, after, forked, events, 2)?
+    let mut fourteen: Bytes = list.new()
+    list.put_word_le(mut fourteen, 14u32)
+    // Both branches retain [2, 4), share seq 2 on disk and appended distinct
+    // suffix values at seq 3. The latter is a replacement within the overlap.
+    if list.len(branch_delta) != 1 || branch_delta[0u64].tree_key != new_key ||
+        published_log(events, branch_delta[0u64])? != Some(take fourteen) {
+        fail("L82: a shared Cold root must not hide a fork's replayed suffix")
+    }
+    Ok(())
+}
+
+@test
+fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let mut schema = declare(db, Migrate)?
+    let events = declare_log(mut schema, "events", std.codec.of_u32())?
+    let _ = seal(mut db, take schema)?
+    let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, log_handle: Log[u32]) -> Result[(), Error] {
+        for value in 10u32 .. 13u32 { let _ = append(mut tx, log_handle, value)? }
+        Ok(())
+    })? else {
+        fail("L82: fixture Log appends must commit")
+    }
+    l62_prepare_snapshot_pages(mut db, fixtures, events.binding.id, 8)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = l62_log_window_reads(mut db, events)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
+}
+
+fn l62_snapshot_point_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    if get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
+        get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
+        get(read_handle, s, rows_handle, 2u64)? != None {
+        fail("L62: Reader value changed across cold, warm, and absent point lookups")
+    }
+    Ok(())
+}
+
+fn l62_borrowed_rows_survive_later_touches() -> Result[(), Error] {
+    let mut contents: Bytes = list.with_capacity(1025)
+    list.fill(mut contents, 1025, 0xa7u8)
+    let digest = std.check.xxh3(contents, 0, 1025)
+    let reference = std.page.BlobRef(stamp: 39, len: 1025, checksum: digest, pack: 9, offset: 72, body: 0)
+    let mut leaf_entries: List[std.page.Entry] = list.new()
+    list.push(mut leaf_entries, std.page.Entry(key: key_word(1), cell: InlineValue(string.into_bytes(string.from("inline")))))
+    list.push(mut leaf_entries, std.page.Entry(key: key_word(2), cell: BlobValue(reference)))
+    let image = page_result(std.page.encode(leaf_entries, 0, 40, Collection))?
+    let ptr = {
+        let payload = std.page.payload(image)
+        std.page.PagePtr(pack: 8, offset: 72, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: 40)
+    }
+    let leaf = page_result(std.page.attach_cold(take image))?
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut visible, (8, 72), arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))))
+    map.insert(mut visible, (9, 72), arc.new(TieredFrame(identity: tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take contents)))))
+    let root_edge: std.page.Slot = ColdPage(ptr)
+    let backing = TieredBorrowedRoot(edge: view root_edge, pins: view visible)
+    let attempt = tiered_attempt(4096, 0)
+    let Some(first) = tiered_point_bytes(attempt, backing, key_word(1))? else {
+        fail("L62: the inline row must be in the pinned leaf")
+    }
+    let Some(second) = tiered_point_bytes(attempt, backing, key_word(2))? else {
+        fail("L62: the overflow row must be in the pinned BLOB")
+    }
+    if first != string.as_bytes("inline") || list.len(second) != 1025 || second[1024u64] != 0xa7 || map.len(tiered_attempt_state(attempt).stamps) != 2 {
+        fail("L62: growing attempt bookkeeping must preserve both borrowed values")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_borrowed_rows_survive_later_touches()?
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows_handle), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 42u32)
+    })? else {
+        fail("L62: fixture insert did not commit")
+    }
+    let table_id = rows_handle.id
+    l62_prepare_snapshot_pages(mut db, fixtures, table_id, 8)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answered = l62_snapshot_point_reads(db, rows_handle)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answered
+}
+
+fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
+    let collection = rows_handle.id
+    let mut draw = stamp_after(db.next_node)?
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut stored: Bytes = list.with_capacity(6)
+    list.put_word_le(mut stored, rows_handle.readers.current)
+    list.put_word_le(mut stored, 20u32)
+    let inserted = JournalOp(key: log_key(collection, 2)?, value: Some(take stored), prior: 0, trim: None)
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
+    let deleted = JournalOp(key: log_key(collection, 3)?, value: None, prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    Ok(())
+}
+
+fn l62_snapshot_scan_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let mut forward = scan(read_handle, s, rows_handle, Unbounded, Unbounded)?
+    if next(read_handle, mut forward)? != Some((1u64, 10u32)) ||
+        next(read_handle, mut forward)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut forward)? != Some((5u64, 50u32)) ||
+        next(read_handle, mut forward)? != None ||
+        next(read_handle, mut forward)? != None {
+        fail("L62: a forward scan must merge Cold rows with replay puts and deletes")
+    }
+    let mut backward = scan_reverse(read_handle, s, rows_handle, Included(2u64), Excluded(5u64))?
+    if next(read_handle, mut backward)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut backward)? != None {
+        fail("L62: a reverse scan must resume below its last key within the bounds")
+    }
+    let mut reverse_all = scan_reverse(read_handle, s, rows_handle, Unbounded, Unbounded)?
+    if next(read_handle, mut reverse_all)? != Some((5u64, 50u32)) ||
+        next(read_handle, mut reverse_all)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut reverse_all)? != Some((1u64, 10u32)) ||
+        next(read_handle, mut reverse_all)? != None {
+        fail("L62: a reverse scan must include surviving Cold rows on both sides of the overlay")
+    }
+    Ok(())
+}
+
+fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, memory_sibling: bool, read: scoped[view] fn(Db, Table[u64, u32]) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows_handle), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L62: fixture inserts did not commit")
+    }
+    if memory_sibling {
+        let _ = create_table(mut db, spec("memory", std.codec.key_u64(), std.codec.of_u32()))?
+        let neighbor = table(mut db, "memory", std.codec.key_u64(), std.codec.of_u32())?
+        let Committed(_) = run(mut db, None, copy_env(neighbor), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+            put(mut tx, handle, 7u64, 70u32)
+        })? else {
+            fail("L62: the Memory neighbor's insert did not commit")
+        }
+    }
+    let collection = rows_handle.id
+    l62_prepare_snapshot_pages(mut db, fixtures, collection, 8)?
+    l62_prepare_scan_overlay(mut db, rows_handle)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = read(db, rows_handle)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
+}
+
+@test
+fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, false, l62_snapshot_scan_reads)
+}
+
+fn l62_snapshot_page_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let first = scan_page(read_handle, s, rows_handle, Unbounded, Unbounded, Limits(rows: 1, byte_limit: 1))?
+    if list.len(first.rows) != 1 || first.rows[0u64] != (1u64, 10u32) || first.byte_count != 18 {
+        fail("L62: a one-row page admits the first row even when it exceeds the byte limit")
+    }
+    let Some(first_resume) = view first.next else {
+        fail("L62: first page has more visible rows")
+    }
+    let limit = Limits(rows: 10, byte_limit: 18)
+    let Paged(second) = scan_next(read_handle, s, rows_handle, clone(first_resume), limit)? else {
+        fail("L62: a resume belongs to the same snapshot")
+    }
+    if list.len(second.rows) != 1 || second.rows[0u64] != (2u64, 20u32) || second.byte_count != 18 {
+        fail("L62: the next page picks the replay put and respects the byte limit")
+    }
+    let Some(second_resume) = view second.next else {
+        fail("L62: the byte-limited page must keep its resume")
+    }
+    let Paged(final_page) = scan_next(read_handle, s, rows_handle, clone(second_resume), limit)? else {
+        fail("L62: a resume belongs to the same snapshot")
+    }
+    if list.len(final_page.rows) != 1 || final_page.rows[0u64] != (5u64, 50u32) || final_page.byte_count != 18 {
+        fail("L62: resume excludes the replay tombstone and returns the last Cold row")
+    }
+    if let Some(_) = final_page.next {
+        fail("L62: an exhausted page has no resume")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_pages_resume_the_tiered_range(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, false, l62_snapshot_page_reads)
+}
+
+fn l62_check_span_row(change: Change, rows_handle: Table[u64, u32], key: u64, expected: u32) -> Result[(), Error] {
+    let Some(raw) = view change.value else {
+        fail("L62: a Snapshot span only returns visible values")
+    }
+    if change.tree_key != log_key(rows_handle.id, key)? || row_value(rows_handle.readers, rows_handle.id, raw)? != expected {
+        fail("L62: a span must read the same ordered rows as its Snapshot")
+    }
+    Ok(())
+}
+
+fn l62_snapshot_span_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let lo: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let whole = span_changes(read_handle, s, lo, hi)?
+    if list.len(whole) != 4 {
+        fail("L62: a Snapshot span must merge the Cold, replay and Memory rows")
+    }
+    l62_check_span_row(whole[0u64], rows_handle, 1, 10)?
+    l62_check_span_row(whole[1u64], rows_handle, 2, 20)?
+    l62_check_span_row(whole[2u64], rows_handle, 5, 50)?
+    let neighbor = catalog_handle(s.store, s.roots.catalog, "memory", std.codec.key_u64(), std.codec.of_u32())?
+    l62_check_span_row(whole[3u64], neighbor, 7, 70)?
+    let mut streamed = open_span_changes(read_handle, s, lo, hi)?
+    for row in whole {
+        let Some(found) = next_span_change(read_handle, mut streamed)? else {
+            fail("L62: a resumed span skipped a row")
+        }
+        if found.tree_key != row.tree_key || found.value != row.value {
+            fail("L62: a resumed span changed the key or value")
+        }
+    }
+    if let Some(_) = next_span_change(read_handle, mut streamed)? {
+        fail("L62: the span must exhaust after the last visible row")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_span_resumes_cold_and_replay(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, true, l62_snapshot_span_reads)
+}
+
+fn l62_initial_change_pages(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let lo: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let limits = Limits(rows: 2, byte_limit: 36)
+    let first = changes_page(read_handle, None, s, lo, hi, limits)?
+    if list.len(first.changes) != 2 || list.len(first.trimmed) != 0 || list.len(first.bounds) != 0 {
+        fail("L62: the initial page must contain the first two visible rows")
+    }
+    l62_check_span_row(first.changes[0u64], rows_handle, 1, 10)?
+    l62_check_span_row(first.changes[1u64], rows_handle, 2, 20)?
+    let Some(resume) = view first.next else {
+        fail("L62: an initial page with more rows must keep its resume")
+    }
+    if resume != log_key(rows_handle.id, 5)? {
+        fail("L62: a change-page resume begins at the first unseen key")
+    }
+    let last_page = changes_page(read_handle, None, s, resume, hi, limits)?
+    if list.len(last_page.changes) != 2 || list.len(last_page.trimmed) != 0 || list.len(last_page.bounds) != 0 {
+        fail("L62: the resumed page must cross into the Memory collection")
+    }
+    let neighbor = catalog_handle(s.store, s.roots.catalog, "memory", std.codec.key_u64(), std.codec.of_u32())?
+    l62_check_span_row(last_page.changes[0u64], rows_handle, 5, 50)?
+    l62_check_span_row(last_page.changes[1u64], neighbor, 7, 70)?
+    if let Some(_) = last_page.next {
+        fail("L62: the last change page has no resume")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_initial_change_pages_resolve_tiered_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, true, l62_initial_change_pages)
+}
+
+fn l62_index_parity(value: u32) -> Result[u32, Capacity] {
+    Ok(value % 2)
+}
+
+fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let mut odds = find(read_handle, s, parity, Included(1u32), Included(1u32))?
+    if next(read_handle, mut odds)? != Some((1u64, 43u32)) ||
+        next(read_handle, mut odds)? != Some((3u64, 39u32)) ||
+        next(read_handle, mut odds)? != None {
+        fail("L62: a Cold index scan must read the matching primary row for each index entry")
+    }
+    let limits = Limits(rows: 1, byte_limit: 18)
+    let first = find_page(read_handle, s, parity, Included(1u32), Included(1u32), limits)?
+    if list.len(first.rows) != 1 || first.rows[0u64] != (1u64, 43u32) || first.byte_count != 18 {
+        fail("L62: an index page must account for the replayed primary value")
+    }
+    let Some(resume) = view first.next else {
+        fail("L62: the remaining equal index key must have a resume")
+    }
+    let Paged(last_page) = find_next(read_handle, s, parity, clone(resume), limits)? else {
+        fail("L62: the index resume belongs to its original Snapshot")
+    }
+    if list.len(last_page.rows) != 1 || last_page.rows[0u64] != (3u64, 39u32) || last_page.byte_count != 18 {
+        fail("L62: the resume must read the next primary among equal index keys")
+    }
+    if let Some(_) = last_page.next {
+        fail("L62: the exhausted index page has no resume")
+    }
+    Ok(())
+}
+
+fn l62_replay_index_owner(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
+    let mut data = share_page_tree(db.heads[0u64].roots.collections)
+    let mut draw = stamp_after(db.next_node)?
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut stored: Bytes = list.with_capacity(6)
+    list.put_word_le(mut stored, rows_handle.readers.current)
+    list.put_word_le(mut stored, 43u32)
+    let edited = JournalOp(key: log_key(rows_handle.id, 1)?, value: Some(take stored), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut data, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), edited)?
+    db.heads[0u64].roots.collections = take data
+    db.next_node = draw - 1
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_find_reads_cold_index_and_primary(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows_handle), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 41u32)?
+        put(mut tx, handle, 2u64, 40u32)?
+        put(mut tx, handle, 3u64, 39u32)
+    })? else {
+        fail("L62: index fixture rows must commit")
+    }
+    let _ = create_index(mut db, rows_handle, "parity", code.describe(l62_index_parity), std.codec.key_u32())?
+    let parity = bind_table_index(mut db, rows_handle, "parity", code.describe(l62_index_parity), std.codec.key_u32())?
+    let data_id = rows_handle.id
+    let index_id = parity.id
+    l62_prepare_snapshot_pages(mut db, fixtures, data_id, 8)?
+    l62_prepare_snapshot_pages(mut db, fixtures, index_id, 9)?
+    l62_replay_index_owner(mut db, rows_handle)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = l62_snapshot_index_reads(db, parity)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
+}

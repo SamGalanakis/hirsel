@@ -1,0 +1,317 @@
+type PreviewPixels = PreviewJpeg | PreviewRgb | PreviewPalette
+
+type JpegPreview {
+    kind: PreviewPixels,
+    start: u64,
+    end: u64,
+    width: u32,
+    height: u32,
+    orientation: u8
+}
+
+fn jpeg_u16(input: Bytes, at: u64, little: bool) -> u16 {
+    if little {
+        list.word_le(input, at)
+    } else {
+        list.word_be(input, at)
+    }
+}
+
+fn jpeg_u32(input: Bytes, at: u64, little: bool) -> u32 {
+    if little {
+        list.word_le(input, at)
+    } else {
+        list.word_be(input, at)
+    }
+}
+
+fn exif_preview(input: Bytes, start: u64, end: u64, orientation: u8) -> Option[JpegPreview] {
+    let n = end - start
+    if n < 8 {
+        return None
+    }
+    let code: u16 = list.word_be(input, start)
+    let little = code == 0x4949
+    if (!little && code != 0x4d4d) || jpeg_u16(input, start + 2, little) != 42 {
+        return None
+    }
+    let ifd0: u64 = int.widen(jpeg_u32(input, start + 4, little))
+    if ifd0 < 8 || ifd0 > n - 2 {
+        return None
+    }
+    let first_count: u64 = int.widen(jpeg_u16(input, start + ifd0, little))
+    let link = ifd0 + 2 + first_count * 12
+    if link > n - 4 {
+        return None
+    }
+    let ifd1: u64 = int.widen(jpeg_u32(input, start + link, little))
+    if ifd1 < link + 4 || ifd1 > n - 2 {
+        return None
+    }
+    let count: u64 = int.widen(jpeg_u16(input, start + ifd1, little))
+    let after = ifd1 + 2 + count * 12
+    if after > n - 4 {
+        return None
+    }
+    let mut offset = 0u64
+    let mut length = 0u64
+    let mut angle = orientation
+    let mut seen_angle = false
+    for i in 0u64 .. count {
+        let entry = start + ifd1 + 2 + 12 * i
+        let tag = jpeg_u16(input, entry, little)
+        if tag == 0x0201 || tag == 0x0202 {
+            if jpeg_u16(input, entry + 2, little) != 4 || jpeg_u32(input, entry + 4, little) != 1 {
+                return None
+            }
+            let value: u64 = int.widen(jpeg_u32(input, entry + 8, little))
+            if value == 0 {
+                return None
+            }
+            if tag == 0x0201 {
+                if offset != 0 {
+                    return None
+                }
+                offset = value
+            } else {
+                if length != 0 {
+                    return None
+                }
+                length = value
+            }
+        } else if tag == 0x0112 {
+            if seen_angle || jpeg_u16(input, entry + 2, little) != 3 || jpeg_u32(input, entry + 4, little) != 1 {
+                return None
+            }
+            let value = jpeg_u16(input, entry + 8, little)
+            if value < 1 || value > 8 {
+                return None
+            }
+            angle = int.narrow(value)
+            seen_angle = true
+        }
+    }
+    if length == 0 || offset < after + 4 || offset > n || length > n - offset {
+        return None
+    }
+    Some(JpegPreview(kind: PreviewJpeg, start: start + offset, end: start + offset + length, width: 0, height: 0, orientation: angle))
+}
+
+fn jfxx_preview(input: Bytes, start: u64, end: u64, orientation: u8) -> Option[JpegPreview] {
+    if start == end {
+        return None
+    }
+    let kind = input[start]
+    if kind == 0x10 {
+        return Some(JpegPreview(kind: PreviewJpeg, start: start + 1, end: end, width: 0, height: 0, orientation: orientation))
+    }
+    if end - start < 3 || (kind != 0x11 && kind != 0x13) {
+        return None
+    }
+    let w: u32 = int.widen(input[start + 1])
+    let h: u32 = int.widen(input[start + 2])
+    let start_pixels = start + 3
+    if kind == 0x13 && end - start_pixels == 3 * area(w, h) {
+        Some(JpegPreview(kind: PreviewRgb, start: start_pixels, end: end, width: w, height: h, orientation: orientation))
+    } else if kind == 0x11 && end - start_pixels == 768 + area(w, h) {
+        Some(JpegPreview(kind: PreviewPalette, start: start_pixels, end: end, width: w, height: h, orientation: orientation))
+    } else {
+        None
+    }
+}
+
+fn fitting_preview(input: Bytes, candidate: JpegPreview, primary: image_core.image.ImageInfo, target: image_core.image.Size, limits: image_core.image.Limits) -> Option[JpegPreview] {
+    let mut preview = candidate
+    if let PreviewJpeg = preview.kind {
+        let Ok(info) = image_core.image.probe(list.slice(input, preview.start, preview.end), limits) else {
+            return None
+        }
+        if let Jpeg = info.format {} else {
+            return None
+        }
+        preview.width = info.width
+        preview.height = info.height
+    }
+    let source = oriented_size(primary.width, primary.height, primary.orientation)
+    let thumb = oriented_size(preview.width, preview.height, preview.orientation)
+    if thumb.width < target.width || thumb.height < target.height || area(preview.width, preview.height) > limits.max_pixels {
+        return None
+    }
+    // Accept aspect ratios that differ by at most one thumbnail pixel.
+    let a = area(thumb.width, source.height)
+    let b = area(thumb.height, source.width)
+    if order.max(a, b) - order.min(a, b) > int.widen(order.max(source.width, source.height)) {
+        return None
+    }
+    Some(preview)
+}
+
+fn jpeg_thumbnail(input: Bytes, info: image_core.image.ImageInfo, target: image_core.image.Size, limits: image_core.image.Limits) -> Option[JpegPreview] {
+    let end = order.min(list.len(input), limits.max_header_bytes)
+    let mut at = 2u64
+    while at < end && input[at] == 0xff {
+        while at < end && input[at] == 0xff {
+            at += 1
+        }
+        if end - at < 3 {
+            return None
+        }
+        let kind = input[at]
+        at += 1
+        if kind == 0xda {
+            return None
+        }
+        let length: u16 = list.word_be(input, at)
+        let next = at + int.widen(length)
+        if length < 2 || next > end {
+            return None
+        }
+        let body = at + 2
+        let candidate = if kind == 0xe1 && length >= 8 && list.slice(input, body, body + 6) == b"Exif\x00\x00" {
+            exif_preview(input, body + 6, next, info.orientation)
+        } else if kind == 0xe0 && length >= 7 && list.slice(input, body, body + 5) == b"JFXX\x00" {
+            jfxx_preview(input, body + 5, next, info.orientation)
+        } else {
+            None
+        }
+        if let Some(thumb) = candidate {
+            if let Some(fitting) = fitting_preview(input, thumb, info, target, limits) {
+                return Some(fitting)
+            }
+        }
+        at = next
+    }
+    None
+}
+
+fn decode_thumbnail(f: Foreign[image_jpeg.Jpeg], input: Bytes, thumb: JpegPreview, target: image_core.image.Size, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[image_core.image.Raster, PipelineError] waits {
+    let content = list.slice(input, thumb.start, thumb.end)
+    if let PreviewJpeg = thumb.kind {
+        let mut packet = buffer(0, 0)?
+        if let Error(_) = list.try_reserve(mut packet, list.len(content)) {
+            return Error(PipelineImage(ByteLimit))
+        }
+        list.append(mut packet, content)
+        return jpeg_decode(f, take packet, oriented_size(target.width, target.height, thumb.orientation), limits, max_native_bytes)
+    }
+    let count = area(thumb.width, thumb.height)
+    let mut rgba = buffer(4 * count, 255)?
+    for i in 0u64 .. count {
+        let pixel: u64 = if let PreviewPalette = thumb.kind {
+            let index: u64 = int.widen(content[768 + i])
+            3 * index
+        } else {
+            3 * i
+        }
+        put_rgb(mut rgba, 4 * i, content, pixel)
+    }
+    Ok(image_core.image.Raster(width: thumb.width, height: thumb.height, rgba: take rgba))
+}
+
+fn put_rgb(mut rgba: Bytes, to: u64, rgb: Bytes, from: u64) {
+    rgba[to] = rgb[from]
+    rgba[to + 1] = rgb[from + 1]
+    rgba[to + 2] = rgb[from + 2]
+}
+
+fn expand_rgb(mut rgba: Bytes, out: u64, rgb: Bytes, count: u64) {
+    let pick: Inline[u8, 16] =[0, 1, 2, 128, 3, 4, 5, 128, 6, 7, 8, 128, 9, 10, 11, 128]
+    let alpha: Inline[u8, 16] =[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+    let mut i = 0u64
+    // The load is 16 bytes, of which the shuffle consumes 12.
+    while i + 6 <= count {
+        let packed: Simd[u8, 16] = list.lanes(rgb, i * 3)
+        let pixels = simd.swizzle(packed, simd.from(pick)) | simd.from(alpha)
+        list.set_lanes(mut rgba, (out + i) * 4, pixels)
+        i += 4
+    }
+    for j in i .. count {
+        put_rgb(mut rgba, (out + j) * 4, rgb, j * 3)
+    }
+}
+
+fn jpeg_result[T](take value: Result[T, image_jpeg.Error]) -> Result[T, PipelineError] {
+    match take value {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(PipelineJpeg(e)),
+    }
+}
+
+fn jpeg_dimensions(mut d: image_jpeg.Decoder) -> Result[image_core.image.Size, PipelineError] waits {
+    loop {
+        if let Some(size) = jpeg_result(image_jpeg.start_decode(mut d))? {
+            return Ok(size)
+        }
+    }
+}
+
+fn jpeg_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, target: image_core.image.Size, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[image_core.image.Raster, PipelineError] waits {
+    let mut decoder = jpeg_result(image_jpeg.decoder(f, take input, target, limits, max_native_bytes))?
+    let size = jpeg_dimensions(mut decoder)?
+    require_size(size.width, size.height, limits)?
+    let pixels = area(size.width, size.height)
+    let mut rgba = buffer(4 * pixels, 255)?
+    let width: u64 = int.widen(size.width)
+    let mut rgb = buffer(3 * width * order.min(32u64, int.widen(size.height)), 0)?
+    let mut out = 0u64
+    loop {
+        match jpeg_result(image_jpeg.decode_strip(mut decoder, mut rgb))? {
+            Pending => (),
+            End => {
+                if out != pixels {
+                    return Error(PipelineJpeg(Invalid))
+                }
+                return Ok(image_core.image.Raster(width: size.width, height: size.height, rgba: take rgba))
+            },
+            Rows(rows) => {
+                let count = width * int.widen(rows)
+                expand_rgb(mut rgba, out, rgb, count)
+                out += count
+            },
+        }
+    }
+}
+
+fn flatten_rgb(mut rgb: Bytes, rgba: Bytes, start: u64, count: u64) {
+    let pick: Inline[u8, 16] =[0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 128, 128, 128, 128]
+    let alpha: Inline[u8, 16] =[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+    let mask = simd.from(alpha)
+    let mut i = 0u64
+    while i < count {
+        if i + 6 <= count {
+            let pixels: Simd[u8, 16] = list.lanes(rgba, (start + i) * 4)
+            if simd.bitmask(simd.eq(pixels & mask, mask)) == 65535 {
+                // The next iteration overwrites the four padding bytes.
+                list.set_lanes(mut rgb, i * 3, simd.swizzle(pixels, simd.from(pick)))
+                i += 4
+                continue
+            }
+        }
+        let at = (start + i) * 4
+        let a: u32 = int.widen(rgba[at + 3])
+        for channel in 0u64 .. 3 {
+            let sample: u32 = int.widen(rgba[at + channel])
+            rgb[i * 3 + channel] = int.narrow((sample * a + 255 * (255 - a) + 127) / 255)
+        }
+        i += 1
+    }
+}
+
+fn jpeg_encode(f: Foreign[image_jpeg.Jpeg], raster: image_core.image.Raster, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[Bytes, PipelineError] waits {
+    let size = image_core.image.Size(width: raster.width, height: raster.height)
+    let capacity = order.min(limits.max_bytes, int.saturating_add(int.saturating_mul(area(size.width, size.height), 6), 4096))
+    let content = buffer(capacity, 0)?
+    let mut encoder = jpeg_result(image_jpeg.encoder(f, size, 85, S444, Sequential, max_native_bytes, take content))?
+    let w: u64 = int.widen(size.width)
+    let height: u64 = int.widen(size.height)
+    let mut rgb = buffer(3 * w * order.min(16u64, height), 0)?
+    let mut row = 0u64
+    while row < height {
+        let rows = order.min(16u64, height - row)
+        let pixels = rows * w
+        flatten_rgb(mut rgb, raster.rgba, row * w, pixels)
+        let consumed = jpeg_result(image_jpeg.encode_strip(mut encoder, list.slice(rgb, 0, 3 * pixels)))?
+        row += int.widen(consumed)
+    }
+    jpeg_result(image_jpeg.finish_encode(take encoder))
+}

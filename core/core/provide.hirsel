@@ -6,6 +6,8 @@ pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
 
 pub fn random(seed: u64) -> Random
 
+pub fn random_tape(take b: Bytes) -> Random
+
 pub fn process() -> (Process, StopTrigger)
 
 // Served ports. Each operation on the capability waits after issue as a Call
@@ -26,6 +28,10 @@ pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
 
+// Append at most max bytes of the field and return the number of bytes omitted.
+// A settled call appends nothing and returns zero.
+pub fn payload_prefix[Op](c: Call[Op], field: u64, max: u64, mut out: Bytes) -> u64
+
 // A SendSecret call's Secret at index `i` of its `secrets`, narrowed to the
 // stream's verified name: a new designation charged as `secret.narrow`
 // (TLS-5). Never its bytes; any other call, or an index past `secrets`,
@@ -35,6 +41,8 @@ pub fn secret(c: Call[NetOp], i: u64) -> Secret
 // Stage the first bytes of `b` in the room for the reply, at most what the
 // call's `room` still offers; returns how many it took.
 pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
+
+pub fn fill_packets(mut s: Served[NetOp], mut c: Call[NetOp], take p: List[UdpStaged]) -> u64
 
 // Word `i` of the call's Op: 0 is its variant, then its fields.
 fn word[Op](c: Call[Op], i: u64) -> u64
@@ -52,6 +60,10 @@ fn open_mode(w: u64) -> OpenMode {
         Append
     } else if w == 3 {
         CreateNew
+    } else if w == 5 {
+        Durable
+    } else if w == 6 {
+        Direct
     } else {
         ReadWrite
     }
@@ -81,7 +93,7 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
     } else if t == 8 {
         SyncDir(dir: a)
     } else if t == 9 {
-        Entries(dir: a)
+        Entries(dir: a, path: b)
     } else if t == 10 {
         Read(file: a, room: b)
     } else if t == 11 {
@@ -102,6 +114,10 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
         Close(file: a)
     } else if t == 19 {
         NextEntries(entries: a, room: b)
+    } else if t == 21 {
+        Mkstemp(dir: a, prefix: b, room: d)
+    } else if t == 22 {
+        ZeroExtension(dir: a)
     } else {
         Released(id: a)
     }
@@ -169,8 +185,27 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         SendTo(datagram: a, root: b, path: d, len: e)
     } else if t == 17 {
         RecvDatagram(datagram: a, room: b)
-    } else {
+    } else if t == 18 {
         Ready(socket: a)
+    } else if t == 19 {
+        LocalAddr(id: a)
+    } else if t == 20 {
+        PeerAddr(socket: a)
+    } else if t == 21 {
+        UdpOpen(v6: a == 1, slots: int.truncate(b), slot_bytes: int.truncate(d))
+    } else if t == 22 {
+        let steer: Steer = if word(c, 8) == 0 {
+            Hash
+        } else {
+            Quic
+        }
+        UdpBind(addr: addr(a, b, d, e), slots: int.truncate(word(c, 5)), slot_bytes: int.truncate(word(c, 6)), members: int.truncate(word(c, 7)), steer: steer)
+    } else if t == 23 {
+        UdpRecv(socket: a, room: b, entries: d)
+    } else if t == 24 {
+        UdpSend(socket: a, data: b, pkts: d)
+    } else {
+        UdpLocal(socket: a)
     }
 }
 
@@ -279,6 +314,11 @@ pub fn dir_reply(r: DirReply) -> Reply[DirOp] {
         File(id) => words(6, id, 0, 0),
         Dir(id) => words(7, id, 0, 0),
         Entries(id) => words(8, id, 0, 0),
+        ZeroExtensionSupported(supported) => words(9, if supported {
+            1
+        } else {
+            0
+        }, 0, 0),
     }
 }
 
@@ -319,6 +359,9 @@ fn net_words(e: NetError) -> (u64, u64) {
             (9, code)
         },
         BoundNotListening(code) => (10, int.widen(code)),
+        EphemeralOutsideNetGrant => (11, 0),
+        Oversize(max) => (12, int.widen(max)),
+        Exhausted => (13, 0),
     }
 }
 
@@ -346,6 +389,12 @@ pub fn net_reply(r: NetReply) -> Reply[NetOp] {
         Count(n) => words(3, n, 0, 0),
         Socket(id, a) => addr_reply(9, id, a),
         Listener(id, a) => addr_reply(10, id, a),
+        Address(a) => addr_reply(16, 0, a),
+        UdpSockets(first: first, count: count, addr: a) => {
+            let (family, hi, lo) = ip_words(a)
+            Reply(tag: 17, w0: first, w1: family, w2: hi, w3: lo, w4: int.widen(a.port), w5: int.widen(count))
+        },
+        UdpPackets(count) => words(18, count, 0, 0),
         Secured(h) => {
             let (some, protocol): (u64, u64) = match h.protocol {
                 Some(p) => (1, p),

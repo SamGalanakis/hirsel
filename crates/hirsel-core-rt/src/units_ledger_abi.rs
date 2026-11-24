@@ -40,6 +40,7 @@ pub(crate) const TOOK_ITEM: u32 = 7;
 pub(crate) const TOOK_CLOSE: u32 = 8;
 pub(crate) const TOOK_SEAL_ANSWER: u32 = 9;
 pub(crate) const TOOK_CANCEL: u32 = 10;
+pub(crate) const TOOK_SHARED_RELEASE: u32 = 11;
 
 /// Send outcomes.
 pub(crate) const SENT_ACCEPTED: u32 = 0;
@@ -90,6 +91,7 @@ fn took_code(u: &UnitCtx, t: &Took, ident: *mut usize) -> u32 {
         Took::Close => TOOK_CLOSE,
         Took::SealAnswer => TOOK_SEAL_ANSWER,
         Took::Cancel => TOOK_CANCEL,
+        Took::SharedRelease => TOOK_SHARED_RELEASE,
     };
     if !ident.is_null() {
         // SAFETY: a non-null ident out-pointer is writable.

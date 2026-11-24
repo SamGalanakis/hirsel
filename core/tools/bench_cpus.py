@@ -55,12 +55,14 @@ def sibling_cpus(measure_cpus, build_cpus=(), *, allow_smt=False):
     return sorted(siblings)
 
 
-def validate_cpu_sets(parser, args, *, width=1, sequential=False, allow_smt=False):
+def validate_cpu_sets(parser, args, *, width=1, sequential=False, allow_smt=False, measure_affinity=None):
     if args.build_cpus is None or args.measure_cpus is None:
         parser.error("--build-cpus and --measure-cpus are required to measure")
     if len(args.measure_cpus) < width:
         parser.error(f"at least {width} measurement CPUs are required")
-    outside = (set(args.build_cpus) | set(args.measure_cpus)) - os.sched_getaffinity(0)
+    assigned = os.sched_getaffinity(0)
+    measure_affinity = assigned if measure_affinity is None else measure_affinity
+    outside = (set(args.build_cpus) - assigned) | (set(args.measure_cpus) - measure_affinity)
     if outside:
         parser.error(f"CPUs outside the caller's affinity: {sorted(outside)}")
     try:

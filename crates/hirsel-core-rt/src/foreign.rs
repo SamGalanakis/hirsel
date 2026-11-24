@@ -58,7 +58,7 @@ pub unsafe extern "C" fn hirsel_core_foreign_wait(
     // SAFETY: the caller pins the task and its run configuration through delivery.
     unsafe {
         crate::process::deny_describe_capability(context);
-        let _commit = tasks::before_provider_entry();
+        tasks::before_provider_entry();
         if tasks::check_cancel(context, site) != 0 {
             return 1;
         }

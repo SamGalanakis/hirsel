@@ -29,8 +29,18 @@ pub extern "C" fn hirsel_core_test_context_new_map_vectors(
 ) -> *mut hirsel_core_rt::Context {
     let context = hirsel_core_test_context_new(bytes);
     // SAFETY: the new context belongs to this test caller until it is returned.
-    unsafe { (*context).set_test_map_key(&std::array::from_fn(|i| i as u8)) };
+    unsafe { hirsel_core_test_set_map_vectors_key(context) };
     context
+}
+
+/// # Safety
+/// Context is live and exclusively borrowed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_set_map_vectors_key(
+    context: *mut hirsel_core_rt::Context,
+) {
+    // SAFETY: fixture passes its exclusive context.
+    unsafe { (*context).set_test_map_key(&std::array::from_fn(|i| i as u8)) };
 }
 /// # Safety
 /// Context is live and exclusively borrowed.

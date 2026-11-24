@@ -41,8 +41,8 @@ use hirsel_core_resolve::{NameScope, Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use simd::SimdCall;
-
 mod admission;
+use admission::held_size;
 mod anchors;
 mod builtins;
 mod bytes;
@@ -51,22 +51,26 @@ mod calls;
 mod cleanup;
 mod clone_glue;
 mod closures;
+mod code_describe;
 mod codec_glue;
 mod compact;
 mod compare;
 mod constants;
 mod control;
+mod exits;
+use exits::{Frame, FrameKind};
 pub(crate) mod core_ops;
 pub(crate) mod flow;
 mod frame_lists;
-mod frame_logs;
 mod frame_strings;
 mod growth;
+mod joins;
 mod key_glue;
 mod lists;
 mod maps;
 mod numeric_glue;
 mod ops;
+pub(crate) mod ordered_codec;
 mod patterns;
 mod places;
 mod row_closures;
@@ -176,7 +180,7 @@ impl SourceSignatures {
 pub struct Emitter {
     pub module: Module,
     funcs: HashMap<InstanceKey, FuncId>,
-    callable_adapters: HashMap<(FuncId, SigId), FuncId>,
+    callable_adapters: HashMap<(FuncId, SigId), (FuncId, Option<GenericTemplate>)>,
     #[cfg(test)]
     pub(crate) callable_signature_builds: usize,
     source_signatures: SourceSignatures,
@@ -195,6 +199,7 @@ pub struct Emitter {
     recipe_scratch: hirsel_core_layout::RecipeScratch,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
+    generic_key_codecs: std::collections::BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: Vec<[Option<bool>; 2]>,
@@ -571,6 +576,7 @@ impl Emitter {
             hooks: vec![],
             codecs: p.structural_codecs(),
             tuple_codecs: vec![],
+            key_codecs: vec![],
         };
         let r = f(&mut s);
         if r.is_none() {
@@ -580,6 +586,7 @@ impl Emitter {
         }
         let hooks = std::mem::take(&mut s.hooks);
         let tuples = std::mem::take(&mut s.tuple_codecs);
+        let keys = std::mem::take(&mut s.key_codecs);
         for (row, hook, f, arguments) in hooks {
             // A generic row's finalizer or clone body is its template's instance at the
             // row's arguments, materialized as any other generic callee.
@@ -619,6 +626,9 @@ impl Emitter {
         }
         for (row, ty) in tuples {
             self.tuple_codec(p, t, ty, TypeId(row.0));
+        }
+        for (row, ty) in keys {
+            self.ordered_codec(p, t, ty, TypeId(row.0));
         }
         r
     }
@@ -809,9 +819,15 @@ impl Emitter {
             params: vec![],
             result: true,
         };
+        // Each source parameter's index in `params`, when it is passed by address.
+        let mut at: Vec<Option<u32>> = vec![];
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
+            at.push(match (q.mode, rep) {
+                (Mode::Mut, _) | (_, Rep::Place(_)) => Some(params.len() as u32),
+                _ => None,
+            });
             if q.mode == Mode::Mut {
                 let place = self
                     .mut_place(p, t, ty, rep)
@@ -846,11 +862,19 @@ impl Emitter {
             Rep::Scalar(s) => (vec![s], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
+        // A result through `dest` anchored on parameters (OWN-20) borrows their places.
+        let mut anchors: Vec<u32> = match dest {
+            Some(_) => fd.anchors.iter().filter_map(|&k| at[k as usize]).collect(),
+            None => vec![],
+        };
+        anchors.sort_unstable();
+        anchors.dedup();
         Ok((
             Signature {
                 params,
                 results,
                 dest,
+                anchors,
                 never,
             },
             abi,
@@ -860,12 +884,11 @@ impl Emitter {
 
 /// A clone body's: `(ptr from, ptr to)`, failing with `Capacity` (MEM-17).
 fn clone_body_signature() -> Signature {
-    Signature {
-        params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-        results: vec![],
-        dest: None,
-        never: false,
-    }
+    Signature::new(
+        vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+        vec![],
+        None,
+    )
 }
 
 /// The loan a by-address parameter of this source mode carries (crate docs of
@@ -879,12 +902,7 @@ pub(super) fn loan(mode: Mode) -> Loan {
 }
 
 fn finalizer_signature() -> Signature {
-    Signature {
-        params: vec![Param::Value(Ty::Ptr)],
-        results: vec![],
-        dest: None,
-        never: false,
-    }
+    Signature::new(vec![Param::Value(Ty::Ptr)], vec![], None)
 }
 
 /// A field whose cleanup runs code by itself; the rows it holds go to `row`.
@@ -1111,36 +1129,6 @@ struct Join {
     destination: Option<AddressId>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum FrameKind {
-    Loop,
-    While { condition: Option<NodeId> },
-    Block,
-}
-struct Frame {
-    label: Option<String>,
-    kind: FrameKind,
-    /// The loop header `continue` jumps to.
-    header: Option<BlockId>,
-    exit: usize,
-    /// The value type its exits carry, once one fixes it.
-    ty: Option<TyId>,
-    /// Expected payload constraints survive until the first exit fixes its type.
-    hint: Option<Want>,
-    /// Whether any exit names it, reachable or not.
-    left: bool,
-    /// The undo log's length and the declaration count at its start.
-    mark: usize,
-    born: u32,
-    /// Where its exit edges begin in `exits`.
-    exits: usize,
-    scopes: usize,
-    /// `scope_slots`' length at its start: the slots declared inside it follow.
-    slots: usize,
-    /// The owners begun before it.
-    owners: usize,
-}
-
 struct BodyInstance {
     definition: usize,
     arguments: PoolRange<TyId>,
@@ -1187,7 +1175,8 @@ struct Cx<'c, 'a, 'e> {
     /// The StaticFn words `code.describe` produced in this body: each one's
     /// described function, its identity static and that static's length, so a
     /// `code.identity` or `code.callable` of one reads no descriptor.
-    static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, u64)>,
+    static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, Option<u64>)>,
+    descriptor_recipes: std::collections::BTreeMap<FuncId, crate::identity::DescriptorRecipe>,
     flow_literals: HashSet<ValueId>,
     shared_flow_holds: &'c [std::sync::OnceLock<(u8, u64)>],
     local_flow_holds: Vec<Option<(u8, u64)>>,
@@ -1259,7 +1248,7 @@ struct Cx<'c, 'a, 'e> {
     /// snapshotted, and the arguments so passed.
     direct_call: Option<(u32, Option<SlotId>)>,
     direct_args: Vec<(usize, TypeId, NodeId)>,
-    callable_signatures: HashMap<TyId, closures::CallableAbi>,
+    callable_signatures: HashMap<TyId, callable_abi::CallableAbi>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
     /// Invocation parameters available while a closure header is being read.
@@ -1334,14 +1323,6 @@ struct Cx<'c, 'a, 'e> {
     frame_binders: Option<HashMap<u32, bool>>,
     /// The frame bytes of each frame-backed list, by its slot.
     frame_slots: HashMap<SlotId, frame_lists::FrameList>,
-    /// Binders of logs whose node never leaves this body (frame_logs.rs).
-    frame_log_binders: Option<HashMap<u32, bool>>,
-    /// Set by a candidate's `let` for the `log.new()` it lowers next.
-    frame_log_next: Option<bool>,
-    /// The Log values whose node is in this body's frame, with their entry type.
-    frame_logs: HashMap<ValueId, TyId>,
-    /// The binders that own a frame node, with their log's entry type.
-    frame_log_owners: HashMap<u32, TyId>,
     /// Literal copies in an immutable let whose binding is only viewed.
     frame_string_copies: Vec<(NodeId, u64)>,
 }
@@ -1379,6 +1360,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             steps_in_source: !fd.path.package_is("core", "1"),
             func: None,
             static_fns: HashMap::default(),
+            descriptor_recipes: Default::default(),
             flow_literals: HashSet::default(),
             shared_flow_holds: p.flow_holds.get_or_init(|| {
                 (0..p.types.len())
@@ -1494,10 +1476,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             anchor_path: vec![],
             frame_binders: None,
             frame_slots: HashMap::default(),
-            frame_log_binders: None,
-            frame_log_next: None,
-            frame_logs: HashMap::default(),
-            frame_log_owners: HashMap::default(),
             frame_string_copies: Vec::new(),
         }
     }
@@ -2166,15 +2144,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 return None;
             }
         };
-        let value = match r {
-            Rep::None => return Some(()),
+        match r {
             Rep::Scalar(t) => {
                 let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(t), n);
-                self.read_bits(at, t, n)
+                let value = self.read_bits(at, t, n);
+                self.inst(Inst::Store { address: to, value }, n);
             }
-            Rep::Place(_) => pointer,
-        };
-        self.install(to, r, Some(value), n);
+            Rep::Place(id) if self.live() => self.copy_bytes_to(to, pointer, id, n),
+            Rep::None | Rep::Place(_) => {}
+        }
         Some(())
     }
     pub(super) fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
@@ -2289,83 +2267,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let r = self.b.blocks[blk.index()].params;
         r.get(&self.b.pools.values).unwrap_or_default().to_vec()
     }
-    fn new_join(&mut self) -> usize {
-        self.joins.push(Join::default());
-        self.joins.len() - 1
-    }
-    fn new_result_join(&mut self) -> usize {
-        let j = self.new_join();
-        self.joins[j].destination = self.expression_destination(self.node);
-        j
-    }
-    /// Leave the current block for join `j`, whose parameters carry a value of `ty`.
-    fn goto(&mut self, j: usize, ty: TyId, v: Option<ValueId>, n: NodeId) {
-        if !self.live() {
-            return;
-        }
-        let blk = match self.joins[j].block {
-            Some(b) => b,
-            None => {
-                let tys: Vec<Ty> = self.ir_ty(ty).into_iter().collect();
-                let b = self.new_block(&tys);
-                self.joins[j].block = Some(b);
-                b
-            }
-        };
-        if let Some(id) = self.drop_id(ty)
-            && v.is_some()
-        {
-            self.consume(v, n);
-            self.joins[j].drop = Some(id);
-        }
-        self.join_descriptor(j, v);
-        self.joins[j].anchors = self.anchors.union(self.joins[j].anchors, self.anchors.last);
-        let value = match (self.joins[j].destination, v) {
-            (Some(to), Some(from)) if self.pointer_address(from) != Some(to) => {
-                let PlaceTy::Declared(id) = self.b.addresses[to.index()].ty else {
-                    unreachable!("only aggregate results have a destination");
-                };
-                self.copy_to(to, from, id, n);
-                Some(self.pointer(to, n))
-            }
-            _ => v,
-        };
-        let args: Vec<ValueId> = value.into_iter().collect();
-        self.jump(blk, &args, n);
-    }
-    /// Continue at join `j`, if any edge reached it; its parameter is the joined value.
-    fn land(&mut self, j: usize) -> Option<ValueId> {
-        let blk = self.joins[j].block?;
-        self.start(blk);
-        let v = self.block_params(blk).first().copied();
-        if let (Some(v), Some(to)) = (v, self.joins[j].destination) {
-            self.note_pointer(v, to);
-        }
-        let anchors = self.joins[j].anchors;
-        self.anchors.last = anchors;
-        if anchors != 0 {
-            self.anchors.expressions.insert(self.node, anchors);
-            if let Some(v) = v {
-                self.anchors.values.insert(v, anchors);
-            }
-        }
-        if let (Some(value), Some(id)) = (v, self.joins[j].descriptor) {
-            self.descriptors.values.insert(value, id);
-        }
-        if let (Some(id), Some(value), true) = (self.joins[j].drop, v, self.live()) {
-            self.owners.push(cleanup::Owner::Temp(cleanup::Temp {
-                value,
-                source: self.node,
-                id,
-                avail: Avail::Live,
-                flag: None,
-                reached: 0,
-            }));
-            self.epoch += 1;
-        }
-        v
-    }
-
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
         let row = self.e.row(self.p, &mut self.t, f);
@@ -2627,9 +2528,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     allocations: std::mem::take(&mut self.allocations),
                     numeric_sites: std::mem::take(&mut self.numeric_sites),
                     nested: std::mem::take(&mut self.nested),
+                    descriptor_adapter: None,
+                    descriptors: std::mem::take(&mut self.descriptor_recipes),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
                     codecs: self.e.generic_codecs.clone(),
+                    key_codecs: self.e.generic_key_codecs.clone(),
                 };
                 self.out.template = Some(template);
             }
@@ -2861,12 +2765,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
-                let v = if self.plain_view(t, w.ty) {
-                    self.read_plain_view(w.ty, v, n)
-                } else {
-                    v
-                };
-                (w.ty, v)
+                if self.plain_view(t, w.ty) {
+                    return (w.ty, self.read_plain_view(w.ty, v, n));
+                }
+                // A view kept for a view parameter (OWN-7): a join carrying it owns nothing.
+                let kept = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
+                (if kept { t } else { w.ty }, v)
             }
             _ => (t, v),
         }
@@ -2964,6 +2868,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.expr_into_field(c[0], expect(ty), address, fresh)
             }
             NodeKind::Literal => self.literal(n, want, false),
+            NodeKind::BytesOf => {
+                let ty = self.ty(c[0]);
+                if mentions_error(&self.t, ty) {
+                    return (ERROR, None);
+                }
+                (scalar(Scalar::U64), self.layout_size(ty, true, n))
+            }
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),
             NodeKind::Block => self.block(n, want),
@@ -3130,48 +3041,5 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 }
 
-/// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
-/// local, a field, an element, a copy), or with `logical` what it counts in a
-/// portable size (FORM #116). A resource's or a region value's holder is its block
-/// pointer, and a region holder counts as a `RegionRef` field, 16 (MEM-24); only
-/// allocating the value takes its block. The emitter and the generic materialiser
-/// both ask here, so a rigid `T` and its instance cannot disagree.
-pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u64, &'static str> {
-    Ok(match repr {
-        LRepr::Resource => hirsel_core_layout::POINTER,
-        LRepr::Region if logical => 16,
-        LRepr::Region => hirsel_core_layout::POINTER,
-        _ if logical => recipe
-            .logical_size
-            .ok_or("logical size of a compact generic value is not built")?,
-        _ => match &recipe.layout {
-            Layout::Fixed(f) => f.size,
-            Layout::Compact(_) => return Err("copying a compact generic value is not built"),
-        },
-    })
-}
-
 #[cfg(test)]
-mod row_cache_tests {
-    use super::*;
-
-    #[test]
-    fn only_mentioned_function_rows_occupy_the_cache() {
-        let mut source = (0..64)
-            .map(|i| format!("fn unused{i}() -> u64 {{ 0 }}\n"))
-            .collect::<String>();
-        source.push_str("fn only() -> u64 { 42 }\n");
-        let (index, modules) = crate::tests::program_inputs(&source);
-        let p = Program::declare(&index, &modules);
-        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
-        let f = p.fns.iter().position(|f| f.path.0.name == "only").unwrap();
-        assert!(f >= 64);
-        let mut e = Emitter::new();
-        let mut t = Local::with_program(&p);
-        let row = e.row(&p, &mut t, f).unwrap();
-        assert_eq!(e.rows.len(), 1, "unmentioned definitions took cache slots");
-        assert_eq!(e.module.functions.len(), 1);
-        assert_eq!(e.row(&p, &mut t, f).unwrap(), row);
-        assert_eq!(e.rows.len(), 1);
-    }
-}
+mod row_cache_tests;

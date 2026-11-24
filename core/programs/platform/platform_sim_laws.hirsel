@@ -1,0 +1,64 @@
+// L43: accepting a stale child's clean report can mark the successor Clean,
+// so the next host loses the obligation to recover that still-running place.
+// Lose the launcher with its last report in flight, then replay delayed
+// reports in seeded order. Each replay must preserve the current wake row.
+@test
+fn wake_restart_reordered_ends(c: Clock, rnd: Random, seed_grant: Env) -> Result[(), ()] waits {
+    let seed = match std.sim.world.test_seed(seed_grant) {
+        Some(n) => n,
+        None => 19u64
+    }
+    let mut plan = std.sim.world.plan(seed)
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    expect(gens(r, "g") == one(1u64) && is_dirty(r, "g", 1u64), "restart: first Dirty owner")
+    let mut delayed: List[launcher.Event] = list.new()
+    let lives = 3u64 + std.sim.world.pick(mut plan, 5u64)
+    for gen in 1u64 .. lives {
+        let old = last(r, "g")
+        let clean = gen == 1u64 || std.sim.world.pick(mut plan, 2u64) == 0u64
+        let exit_code: launcher.Status = if clean {
+            Code(0i32)
+        } else {
+            Signal(9i32)
+        }
+        let report: Option[Option[u64]] = if clean {
+            Some(Some(T0 + gen))
+        } else {
+            None
+        }
+        let events = launcher.end(mut r.f, old, exit_code, report)
+        expect(list.len(events) == 1u64 && is_dirty(r, "g", gen), "restart: lost end changed Dirty")
+        list.push(mut delayed, clone(events[0u64]))
+        let next = gen + 1u64
+        let take successor = restart_bare(take r, 4u64)
+        r = take successor
+        expect(gens(r, "g") == one(next) && is_dirty(r, "g", next), "restart: expected one successor")
+        for _ in 0u64 .. 2u64 + std.sim.world.pick(mut plan, 5u64) {
+            let e = delayed[std.sim.world.pick(mut plan, list.len(delayed))]
+            let more = apply(mut r, Got(clone(e)))
+            pump(mut r, take more)
+            expect(gens(r, "g") == one(next) && is_dirty(r, "g", next), "restart: stale end changed the owner")
+        }
+    }
+    let due = T0 + 500u64
+    let owner = last(r, "g")
+    finish(mut r, owner, Code(0i32), Some(Some(due)))
+    for i in 0u64 .. list.len(delayed) + 1u64 {
+        let row = option.unwrap(wake_row(r.h, "g"))
+        let clean = match row.wake {
+            Clean(at) => at == Some(due),
+            _ => false
+        }
+        expect(row.gen == lives && clean, "restart: only the current end sets the due time")
+        if i < list.len(delayed) {
+            let more = apply(mut r, Got(clone(delayed[i])))
+            pump(mut r, take more)
+            expect(gens(r, "g") == one(lives), "restart: replay after Clean launched another place")
+        }
+    }
+    let Rig(h: take platform_host, ..) = take r
+    result.unwrap(store.close(close(take platform_host)))
+    Ok(())
+}

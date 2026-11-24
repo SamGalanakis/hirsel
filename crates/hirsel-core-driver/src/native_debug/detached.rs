@@ -1,5 +1,6 @@
 use hirsel_core_ids::ContentHash;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+use sha2::{Digest, Sha256};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -7,6 +8,27 @@ use std::{
 
 const IMAGE_NOTE: &str = ".note.hirsel.image-digest";
 const OWNER: &[u8] = b"Hirsel\0";
+
+pub(crate) enum ImageDigest {
+    Assembly,
+    Detached,
+}
+
+impl ImageDigest {
+    pub(crate) fn hash(self, image: &[u8]) -> ContentHash {
+        let mut sha = Sha256::new();
+        if matches!(self, Self::Detached) {
+            // Match the existing ContentHash::of_bytes framing. Assembly
+            // records and the launcher's image files use raw SHA-256.
+            let domain = b"hirsel.text.v1";
+            sha.update((domain.len() as u64).to_le_bytes());
+            sha.update(domain);
+            sha.update((image.len() as u64).to_le_bytes());
+        }
+        sha.update(image);
+        ContentHash(sha.finalize().into())
+    }
+}
 
 pub(super) enum Identity<'a> {
     BuildId(&'a [u8]),
@@ -17,7 +39,7 @@ impl<'a> Identity<'a> {
     pub(super) fn of(file: &object::File<'a>, image: &[u8]) -> io::Result<Self> {
         Ok(match file.build_id().map_err(io::Error::other)? {
             Some(id) if !id.is_empty() => Self::BuildId(id),
-            _ => Self::ImageDigest(ContentHash::of_bytes(image)),
+            _ => Self::ImageDigest(ImageDigest::Detached.hash(image)),
         })
     }
 

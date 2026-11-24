@@ -10,6 +10,7 @@
 //! static d0 = align 1 hex 6869            ; read-only data
 //! sig g0 = (i32, &view t0) -> (i32) dest t0 ; params: scalar, ptr or &mut/view/take tN
 //! sig g1 = (u64) -> never                 ; FORM v1: a function whose result is Never
+//! sig g2 = (&view t0) -> () dest view t0 in (0) ; a dest view anchored on params 0… (OWN-20)
 //! inst n0 = app@1/main/add [t0] []        ; instance row: definition, argument rows, dictionaries
 //! fn f0 = n0 g0 extern                    ; defined in another module
 //! fn f1 = n1 g1 {
@@ -20,6 +21,10 @@
 //!   return v2 at i0 0..20
 //! }
 //! ```
+
+mod allocation;
+mod runtime;
+use runtime::rt;
 
 use crate::ir::*;
 use hirsel_core_ids::DefPath;
@@ -106,6 +111,8 @@ pub fn uses_v1(m: &Module) -> bool {
                             Inst::Alloc { .. }
                                 | Inst::Grow { .. }
                                 | Inst::Free { .. }
+                                | Inst::FrameAdmit { .. }
+                                | Inst::FrameActive { .. }
                                 | Inst::FrameRefund { .. }
                                 | Inst::PromoteFrame { .. }
                                 | Inst::Copy { .. }
@@ -172,8 +179,10 @@ fn quote(s: &str) -> String {
     q.push('"');
     q
 }
+mod handle_names;
+use handle_names::HANDLE_NAMES;
+
 fn field_ty(f: &FieldTy) -> String {
-    use hirsel_core_layout::Handle;
     match f {
         FieldTy::Scalar(s) => s.name().into(),
         FieldTy::Inline(t) => format!("t{}", t.0),
@@ -182,24 +191,18 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::FrozenBytes => "frozen_bytes".into(),
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
+        FieldTy::Shared(t) => format!("shared t{}", t.0),
         FieldTy::RegionRef(t) => format!("region_ref t{}", t.0),
         FieldTy::Array(e, n) => format!("array {n} {}", field_ty(e)),
         FieldTy::Fn => "fn".into(),
         FieldTy::OwnFn => "ownfn".into(),
         FieldTy::Borrow => "borrow".into(),
         FieldTy::View(e) => format!("view {}", field_ty(e)),
-        FieldTy::Handle(Handle::Task) => "task".into(),
-        FieldTy::Handle(Handle::Sender) => "sender".into(),
-        FieldTy::Handle(Handle::Receiver) => "receiver".into(),
-        FieldTy::Handle(Handle::Latest) => "latest".into(),
-        FieldTy::Handle(Handle::Client) => "client".into(),
-        FieldTy::Handle(Handle::Inbox) => "inbox".into(),
-        FieldTy::Handle(Handle::Capability) => "cap".into(),
-        FieldTy::Handle(Handle::Causes) => "causes".into(),
-        FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
-        FieldTy::Handle(Handle::Socket) => "socket".into(),
-        FieldTy::Handle(Handle::Flow) => "flow".into(),
-        FieldTy::Handle(Handle::Secret) => "secret".into(),
+        FieldTy::Handle(handle) => HANDLE_NAMES
+            .iter()
+            .find_map(|&(name, kind)| (*handle == kind).then_some(name))
+            .expect("every Handle has a text spelling")
+            .into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
         FieldTy::FixedSpan(e) => format!("fixed {}", field_ty(e)),
@@ -252,6 +255,9 @@ fn shape(s: &Shape) -> String {
     if let Some(f) = s.codec {
         out += &format!(" codec f{}", f.0);
     }
+    if let Some(f) = s.key_codec {
+        out += &format!(" key_codec f{}", f.0);
+    }
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
     }
@@ -270,82 +276,6 @@ fn shape(s: &Shape) -> String {
         }
     }
     out
-}
-fn rt(op: RtOp) -> String {
-    match op {
-        RtOp::Spawn { x, r } => format!("rt.spawn[t{}, t{}]", x.0, r.0),
-        RtOp::Join { r } => format!("rt.join[t{}]", r.0),
-        RtOp::Cancel => "rt.cancel".into(),
-        RtOp::CheckCancel => "rt.check_cancel".into(),
-        RtOp::ChannelNew { item } => format!("rt.channel_new[t{}]", item.0),
-        RtOp::ChannelSender => "rt.channel_sender".into(),
-        RtOp::Send { item } => format!("rt.send[t{}]", item.0),
-        RtOp::TrySend { item } => format!("rt.try_send[t{}]", item.0),
-        RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
-        RtOp::ReceiveRec { item } => format!("rt.receive_rec[t{}]", item.0),
-        RtOp::TryReceive { item } => format!("rt.try_receive[t{}]", item.0),
-        RtOp::LatestNew { item } => format!("rt.latest_new[t{}]", item.0),
-        RtOp::LatestHandle => "rt.latest_handle".into(),
-        RtOp::ConnNew { item } => format!("rt.conn_new[t{}]", item.0),
-        RtOp::ConnClient => "rt.conn_client".into(),
-        RtOp::ConnSend { item } => format!("rt.conn_send[t{}]", item.0),
-        RtOp::ConnTrySend { item } => format!("rt.conn_try_send[t{}]", item.0),
-        RtOp::ConnReceive { item } => format!("rt.conn_receive[t{}]", item.0),
-        RtOp::ConnTryReceive { item } => format!("rt.conn_try_receive[t{}]", item.0),
-        RtOp::SpawnUnit { x, r } => format!("rt.spawn_unit[t{}, t{}]", x.0, r.0),
-        RtOp::LatestPublish => "rt.latest_publish".into(),
-        RtOp::LatestRead => "rt.latest_read".into(),
-        RtOp::DestId => "rt.dest_id".into(),
-        RtOp::CompareBytes => "rt.compare_bytes".into(),
-        RtOp::MapHashBytes => "rt.map_hash_bytes".into(),
-        RtOp::MapHashWord => "rt.map_hash_word".into(),
-        RtOp::MapHashStart => "rt.map_hash_start".into(),
-        RtOp::MapHashAddWord => "rt.map_hash_add_word".into(),
-        RtOp::MapHashAddBytes => "rt.map_hash_add_bytes".into(),
-        RtOp::MapHashFinish => "rt.map_hash_finish".into(),
-        RtOp::MapPlaceWord => "rt.map_place_word".into(),
-        RtOp::MapPlaceBytes => "rt.map_place_bytes".into(),
-        RtOp::MapStrongWord => "rt.map_strong_word".into(),
-        RtOp::MapStrongBytes => "rt.map_strong_bytes".into(),
-        RtOp::MapStrongStart => "rt.map_strong_start".into(),
-        RtOp::Xxh3Short => "rt.xxh3_short".into(),
-        RtOp::Xxh3Stripes => "rt.xxh3_stripes".into(),
-        RtOp::Sha1Blocks => "rt.sha1_blocks".into(),
-        RtOp::ZeroBytes => "rt.zero_bytes".into(),
-        RtOp::Sha256Blocks => "rt.sha256_blocks".into(),
-        RtOp::Crc32c => "rt.crc32c".into(),
-        RtOp::Crc64Nvme => "rt.crc64nvme".into(),
-        RtOp::Crc32cCombine => "rt.crc32c_combine".into(),
-        RtOp::Crc64NvmeCombine => "rt.crc64nvme_combine".into(),
-        RtOp::Ed25519Verify => "rt.ed25519_verify".into(),
-        RtOp::P256Verify => "rt.p256_verify".into(),
-        RtOp::P256VerifyDer => "rt.p256_verify_der".into(),
-        RtOp::CauseNext => "rt.cause_next".into(),
-        RtOp::CauseValue => "rt.cause_value".into(),
-        RtOp::ArgsLen => "rt.args_len".into(),
-        RtOp::ArgsGet => "rt.args_get".into(),
-        RtOp::LaunchWord => "rt.launch_word".into(),
-        RtOp::LaunchHandle => "rt.launch_handle".into(),
-        RtOp::SecretShare => "rt.secret_share".into(),
-        RtOp::DescribeEmit => "rt.describe_emit".into(),
-        RtOp::Flow(op) => format!("rt.{}", op.name()),
-        RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
-        RtOp::Host(op) => format!("rt.{}", op.name()),
-        RtOp::FrameRecord => "rt.frame_record".into(),
-        RtOp::Transfer { x, r } => format!("rt.transfer[t{}, t{}]", x.0, r.0),
-        RtOp::Returnable(wait) => match wait {
-            Wait::Host(op) => format!("rt.{}_rec", op.name()),
-            Wait::Join { r } => format!("rt.join_rec[t{}]", r.0),
-            Wait::ConnSend { item } => format!("rt.conn_send_rec[t{}]", item.0),
-            Wait::ConnReceive { item } => format!("rt.conn_receive_rec[t{}]", item.0),
-        },
-        RtOp::IsolateEnter => "rt.isolate_enter".into(),
-        RtOp::IsolateLeave => "rt.isolate_leave".into(),
-        RtOp::IsolateCatch => "rt.isolate_catch".into(),
-        RtOp::StepEnter => "rt.step_enter".into(),
-        RtOp::StepLeave => "rt.step_leave".into(),
-        RtOp::StepCatch => "rt.step_catch".into(),
-    }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
     items.into_iter().map(f).collect::<Vec<_>>().join(", ")
@@ -402,10 +332,11 @@ impl Printer {
             } else {
                 format!("({})", list(&s.results, |t| ty(*t).into()))
             };
-            let dest = s
-                .dest
-                .map(|t| format!(" dest t{}", t.0))
-                .unwrap_or_default();
+            let dest = match (s.dest, s.anchors.as_slice()) {
+                (None, _) => String::new(),
+                (Some(t), []) => format!(" dest t{}", t.0),
+                (Some(t), k) => format!(" dest view t{} in ({})", t.0, list(k, |k| k.to_string())),
+            };
             self.line(&format!("sig g{i} = ({params}) -> {results}{dest}"));
         }
         for (i, k) in m.instances.iter().enumerate() {
@@ -728,7 +659,6 @@ impl Printer {
                             AllocPlace::Current => String::new(),
                             AllocPlace::Like(b) => format!(" like v{}", b.0),
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
-                            AllocPlace::Frame(r) => format!(" frame v{}", r.0),
                             AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
                             AllocPlace::ByteHead => " byte_head".into(),
                             AllocPlace::ByteTail(r) => format!(" byte_tail v{}", r.0),
@@ -769,7 +699,26 @@ impl Printer {
                     Inst::Free { block, charge } => {
                         format!("free {} charge {}", v(block), v(charge))
                     }
-                    Inst::FrameRefund { charge } => format!("frame_refund {}", v(charge)),
+                    Inst::FrameAdmit {
+                        storage,
+                        admitted,
+                        available,
+                        charge,
+                        overflow,
+                        replace,
+                    } => format!(
+                        "{}, {} = frame_admit a{} charge {}{}{}",
+                        def(*admitted),
+                        def(*available),
+                        storage.0,
+                        v(charge),
+                        overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
+                        if *replace { " replace" } else { "" },
+                    ),
+                    Inst::FrameActive { storage, result } => {
+                        format!("{} = frame_active a{}", def(*result), storage.0)
+                    }
+                    Inst::FrameRefund { storage } => format!("frame_refund a{}", storage.0),
                     Inst::PromoteFrame { carrier } => format!("promote_frame a{}", carrier.0),
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
@@ -1091,16 +1040,16 @@ impl<'a> Line<'a> {
         Ok(hirsel_core_layout::TypeRef(self.id('t')?))
     }
     fn field_ty(&mut self) -> R<FieldTy> {
-        use hirsel_core_layout::Handle;
         let boxed = |l: &mut Self| l.field_ty().map(Box::new);
         Ok(match self.peek().ok_or("expected a field type")? {
-            "box" | "rc" | "arc" | "region_ref" | "link" => {
+            "box" | "rc" | "arc" | "shared" | "region_ref" | "link" => {
                 let w = self.next()?;
                 let t = self.tref()?;
                 match w {
                     "box" => FieldTy::Box(t),
                     "rc" => FieldTy::Rc(t),
                     "arc" => FieldTy::Arc(t),
+                    "shared" => FieldTy::Shared(t),
                     "region_ref" => FieldTy::RegionRef(t),
                     _ => FieldTy::Link(t),
                 }
@@ -1142,23 +1091,16 @@ impl<'a> Line<'a> {
                     "fn" => FieldTy::Fn,
                     "ownfn" => FieldTy::OwnFn,
                     "borrow" => FieldTy::Borrow,
-                    "task" => FieldTy::Handle(Handle::Task),
-                    "sender" => FieldTy::Handle(Handle::Sender),
-                    "receiver" => FieldTy::Handle(Handle::Receiver),
-                    "latest" => FieldTy::Handle(Handle::Latest),
-                    "client" => FieldTy::Handle(Handle::Client),
-                    "inbox" => FieldTy::Handle(Handle::Inbox),
-                    "cap" => FieldTy::Handle(Handle::Capability),
-                    "causes" => FieldTy::Handle(Handle::Causes),
-                    "hostfile" => FieldTy::Handle(Handle::HostFile),
-                    "socket" => FieldTy::Handle(Handle::Socket),
-                    "flow" => FieldTy::Handle(Handle::Flow),
-                    "secret" => FieldTy::Handle(Handle::Secret),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
                         (None, Some(Ok(n))) => FieldTy::Inline(hirsel_core_layout::TypeRef(n)),
-                        _ => return Err(format!("unknown field type `{w}`")),
+                        _ => FieldTy::Handle(
+                            HANDLE_NAMES
+                                .iter()
+                                .find_map(|&(name, kind)| (w == name).then_some(kind))
+                                .ok_or_else(|| format!("unknown field type `{w}`"))?,
+                        ),
                     },
                 }
             }
@@ -1234,6 +1176,11 @@ impl<'a> Line<'a> {
         } else {
             None
         };
+        let key_codec = if self.eat("key_codec") {
+            Some(FuncRef(self.id('f')?))
+        } else {
+            None
+        };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
         let send = self.eat("send");
         let held = if self.eat("held") {
@@ -1262,6 +1209,7 @@ impl<'a> Line<'a> {
             finalizer,
             clone,
             codec,
+            key_codec,
             grant,
             send,
             held,
@@ -1451,7 +1399,9 @@ impl BodyParser {
             }
             Some("frame_refund") => {
                 l.next()?;
-                return Ok(Inst::FrameRefund { charge: l.value()? });
+                return Ok(Inst::FrameRefund {
+                    storage: AddressId(l.id('a')?),
+                });
             }
             Some(op @ ("copy" | "move")) => {
                 let overlap = op == "move";
@@ -1627,58 +1577,32 @@ impl BodyParser {
                 fail: l.fail()?,
             }
         } else if op == "alloc" {
-            let (result, available, region_entry) = match defs.as_slice() {
-                [a, b] => (*a, *b, None),
-                [a, b, c] => (*a, *b, Some(*c)),
-                _ => return Err("alloc takes pointer, room and optionally region entry".into()),
-            };
-            let kind = match l.next()? {
-                "for" => AllocKind::Own {
-                    edge: l.field_ty()?,
-                },
-                "env" => AllocKind::Environment { ty: l.tref()? },
-                "region" => AllocKind::Region,
-                "resource" => {
-                    l.expect("grant")?;
-                    AllocKind::Resource { grant: l.num()? }
-                }
-                k => return Err(format!("unknown allocation kind `{k}`")),
-            };
-            let size = l.value()?;
-            l.expect("align")?;
-            let align = l.num()?;
+            allocation::parse(l, &defs)?
+        } else if op == "frame_admit" {
+            let (admitted, available) = pair(&defs)?;
+            let storage = AddressId(l.id('a')?);
             l.expect("charge")?;
             let charge = l.value()?;
-            let place = if l.eat("like") {
-                AllocPlace::Like(l.value()?)
-            } else if l.eat("in") {
-                AllocPlace::Region(l.value()?)
-            } else if l.eat("lent_frame") {
-                AllocPlace::LentFrame(l.value()?)
-            } else if l.eat("frame") {
-                AllocPlace::Frame(l.value()?)
-            } else if l.eat("byte_head") {
-                AllocPlace::ByteHead
-            } else if l.eat("byte_tail") {
-                AllocPlace::ByteTail(l.value()?)
-            } else {
-                AllocPlace::Current
-            };
             let overflow = if l.eat("overflow") {
                 Some(l.value()?)
             } else {
                 None
             };
-            Inst::Alloc {
-                result,
+            Inst::FrameAdmit {
+                storage,
+                admitted,
                 available,
-                region_entry,
-                kind,
-                place,
                 charge,
                 overflow,
-                size,
-                align,
+                replace: l.eat("replace"),
+            }
+        } else if op == "frame_active" {
+            let [result] = defs.as_slice() else {
+                return Err("frame_active takes one result".into());
+            };
+            Inst::FrameActive {
+                storage: AddressId(l.id('a')?),
+                result: *result,
             }
         } else if op == "grow" {
             let (result, available) = pair(&defs)?;
@@ -1931,6 +1855,9 @@ impl BodyParser {
                 }
                 "latest_publish" => RtOp::LatestPublish,
                 "latest_read" => RtOp::LatestRead,
+                "shared_new" => RtOp::SharedNew { item: tys(1)?[0] },
+                "shared_share" => RtOp::SharedShare,
+                "shared_release" => RtOp::SharedRelease { item: tys(1)?[0] },
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
                 "map_hash_bytes" => RtOp::MapHashBytes,
@@ -1946,9 +1873,8 @@ impl BodyParser {
                 "map_strong_start" => RtOp::MapStrongStart,
                 "xxh3_short" => RtOp::Xxh3Short,
                 "xxh3_stripes" => RtOp::Xxh3Stripes,
-                "sha1_blocks" => RtOp::Sha1Blocks,
+                name if let Some(op) = runtime::sha(name) => op,
                 "zero_bytes" => RtOp::ZeroBytes,
-                "sha256_blocks" => RtOp::Sha256Blocks,
                 "crc32c" => RtOp::Crc32c,
                 "crc64nvme" => RtOp::Crc64Nvme,
                 "crc32c_combine" => RtOp::Crc32cCombine,
@@ -1956,10 +1882,16 @@ impl BodyParser {
                 "ed25519_verify" => RtOp::Ed25519Verify,
                 "p256_verify" => RtOp::P256Verify,
                 "p256_verify_der" => RtOp::P256VerifyDer,
+                "p384_verify" => RtOp::P384Verify,
+                "p384_verify_der" => RtOp::P384VerifyDer,
+                "rsa_verify_pkcs1_sha256" => RtOp::RsaVerifyPkcs1Sha256,
+                "rsa_verify_pss_sha256" => RtOp::RsaVerifyPssSha256,
+                "argon2id" => RtOp::Argon2id,
                 "cause_next" => RtOp::CauseNext,
                 "cause_value" => RtOp::CauseValue,
                 "args_len" => RtOp::ArgsLen,
                 "args_get" => RtOp::ArgsGet,
+                "root_limit" => RtOp::RootLimit,
                 "launch_word" => RtOp::LaunchWord,
                 "launch_handle" => RtOp::LaunchHandle,
                 "secret_share" => RtOp::SecretShare,
@@ -2211,16 +2143,28 @@ impl Parser {
                     } else {
                         l.seq("(", ")", Line::ty)?
                     };
-                    let dest = if l.eat("dest") {
-                        Some(TypeId(l.id('t')?))
+                    let (dest, anchors) = if l.eat("dest") {
+                        let view = l.eat("view");
+                        let dest = Some(TypeId(l.id('t')?));
+                        let anchors = if view {
+                            l.expect("in")?;
+                            l.seq("(", ")", |l| {
+                                let k = l.next()?;
+                                k.parse().map_err(|_| format!("bad anchor `{k}`"))
+                            })?
+                        } else {
+                            vec![]
+                        };
+                        (dest, anchors)
                     } else {
-                        None
+                        (None, vec![])
                     };
                     l.end()?;
                     self.module.signatures.push(Signature {
                         params,
                         results,
                         dest,
+                        anchors,
                         never,
                     });
                 }

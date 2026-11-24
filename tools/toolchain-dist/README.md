@@ -18,6 +18,15 @@ Training checks the retained native hello source and builds it with Cranelift an
 
 The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata.
 
+`tools/toolchain-dist/build --bolt` rewrites the distribution compiler with
+the same BOLT options and release workloads as the engine library. Install
+the pinned tools with `tools/native-toolchain/install --bolt-tools DIR` and
+put `DIR/bin` on PATH. The bundle builds its installed package products
+after the rewrite, using the resulting compiler and its build ID. The
+compiler's DWARF is decompressed for the rewrite and compressed again for
+the distribution. When
+combined with `--pgo`, BOLT runs after the PGO-use link.
+
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`
 derives it from Cargo.lock, Cargo metadata, the Buck link graph,

@@ -182,7 +182,7 @@ fn signature_identity(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Header {
     /// The signature as readers depend on it (`signature_identity`).
-    digest: ContentHash,
+    pub(crate) digest: ContentHash,
     /// The item's source bytes from its first token to its last
     /// (`body_identity`), the body key's `body`.
     source: ContentHash,

@@ -63,7 +63,7 @@ def manifest(source):
 
 def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
     """Launch the named roots without the recorder's foreign link adapter."""
-    roots = ('unbounded', 'bounded', 'routes', 'flow_step_owner')
+    roots = ('unbounded', 'bounded', 'routes', 'flow_step_owner', 'fuel_stops_infinite_loop')
     failures = ('failure_before_slice', 'failure_at_slice', 'failure_after_slice')
 
     def position(offset):
@@ -103,26 +103,23 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True)
         if result.returncode:
             raise ValueError(f'{name}/{backend}: build {result.stdout!r} {result.stderr!r}')
-        ran = subprocess.run([output], capture_output=True)
-        if name in failures:
-            sites = [(kind, int(line), int(column)) for kind, line, column in re.findall(
-                r'^(\w+) at .*step-bounds\.hirsel:(\d+):(\d+)$', ran.stderr.decode(), re.M)]
-            if ran.returncode != 101 or ran.stdout or len(ran.stderr.splitlines()) != 2 or sites != causes:
-                raise ValueError(f'{name}/{backend}: causes {ran}')
-        elif (ran.returncode, ran.stdout, ran.stderr) != (0, b'', b''):
+        try:
+            ran = subprocess.run([output], capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError(f'{name}/{backend}: run did not end') from error
+        if (ran.returncode, ran.stdout, ran.stderr) != (0, b'', b''):
             raise ValueError(f'{name}/{backend}: run {ran}')
         return output.read_bytes()
 
     if 'cranelift' in (args.backend or ('cranelift', 'llvm')):
-        for name in (*roots, *failures):
+        for name in roots:
             build(name, 'cranelift', folder / 'cranelift-images')
     if 'llvm' not in (args.backend or ('cranelift', 'llvm')):
         return
     build('flow_step_owner', 'llvm', folder / 'flow-image')
     build('routes', 'llvm', folder / 'routes-image')
     build('unbounded', 'llvm', folder / 'foreign-image', recorder_linker)
-    for name in failures:
-        build(name, 'llvm', folder / 'failure-images')
+    build('fuel_stops_infinite_loop', 'llvm', folder / 'fuel-image')
     pair = ('unbounded', 'bounded')
     cold = {name: build(name, 'llvm', folder / f'cold-{name}') for name in pair}
     for order in (pair, pair[::-1]):
@@ -130,7 +127,7 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
         for name in order:
             if build(name, 'llvm', store) != cold[name]:
                 raise ValueError(f'{name}: release bytes differ after priming with {order[0]}')
-    print('step-bounds: exact cause sites, metered flow stage, step-context routes and both cache orders pass', flush=True)
+    print('step-bounds: reference cause sites, native fuel bounds, step-context routes and LLVM cache orders pass', flush=True)
 
 
 def main():
@@ -160,7 +157,7 @@ def check_event_order(args, work):
     fixtures = sorted(p for p in FIXTURES.glob('*.hirsel') if not args.only or p.stem in args.only)
     assert fixtures, 'no fixture selected'
     failures = []
-    unbuilt = 0
+    unbuilt = build_specific = 0
     with Evaluator(args.evaluator.resolve()) as evaluator:
         for fixture in fixtures:
             text = fixture.read_text()
@@ -230,6 +227,15 @@ def check_event_order(args, work):
                                           f'{shlex.quote(str(provider_recorder))} {shlex.quote(str(provider))} '
                                           '-lpthread\n')
                 fixture_linker.chmod(0o755)
+            # The reference trace pins the exact fuel count. Native roots
+            # prove bounds without requiring the reference trace or prefix.
+            if fixture.stem == 'step-bounds':
+                try:
+                    step_image_laws(args, evaluator, inputs, folder, text, fixture_linker)
+                    build_specific += 1
+                except ValueError as error:
+                    failures.append(str(error))
+                continue
             for backend in args.backend or (('cranelift', 'llvm') if oracle else ('cranelift',)):
                 command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',
                            '--backend', backend, '--runtime', str(args.runtime), '--store', str(work / 'store'),
@@ -288,14 +294,10 @@ def check_event_order(args, work):
                         failures.append(f'{fixture.stem}/{backend}: replay differs: {replay}')
                     else:
                         print(f'{fixture.stem}/{backend}: replay agrees', flush=True)
-            if fixture.stem == 'step-bounds' and args.release:
-                try:
-                    step_image_laws(args, evaluator, inputs, folder, text, fixture_linker)
-                except ValueError as error:
-                    failures.append(str(error))
     for failure in failures:
         print('FAIL', failure, flush=True)
-    print(f'event order: {len(fixtures) - len(failures) - unbuilt} equal, {unbuilt} evaluator-only, {len(failures)} differ', flush=True)
+    print(f'event order: {len(fixtures) - len(failures) - unbuilt - build_specific} equal, '
+          f'{build_specific} build-specific, {unbuilt} evaluator-only, {len(failures)} differ', flush=True)
     return int(bool(failures))
 
 

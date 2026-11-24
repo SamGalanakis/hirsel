@@ -1,25 +1,54 @@
 type BindingJob[G: send]: send {
-    seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], credential: Bytes, steps: u64
+    seed: G, bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, ()] waits], credential: Bytes, steps: u64
 }
 
-fn run_binding[G: send](take job: BindingJob[G]) -> Option[Caller] waits {
-    let BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps) = take job
-    let invoke = code.callable(bind)
+fn binding_job[G: send, B: send](supplied: Option[Wire[G, B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
+    if let Some(w) = supplied {
+        if let Some(bind_app) = w.bind {
+            let raw = match take credential { Some(take bytes_in) => take bytes_in, None => list.new() }
+            let job = BindingJob(seed: (w.duplicate)(w.seed), bind: bind_app, credential: take raw, steps: w.bind_steps)
+            return Some((take job, w.bind_bytes))
+        }
+    }
+    None
+}
+
+fn anonymous_caller(random: Random) -> Option[Caller] {
+    let mut nonce: Bytes = list.with_capacity(16u64)
+    host.random(random, mut nonce)
+    Some(store.Caller(issuer: 1u8, subject: take nonce))
+}
+
+// §3 "Binding": a binding whose exclusive expiry the wall clock has reached is refused like
+// any other, so a credential already expired at bind never yields a session.
+fn unexpired(clock: Clock, take given: Option[BoundCaller]) -> Option[BoundCaller] {
+    match take given {
+        Some(take b) => match b.expires_at_ms {
+            Some(end) if host.wall_ms(clock) >= end => None,
+            _ => Some(take b),
+        },
+        None => None,
+    }
+}
+
+fn run_binding[G: send](take job: BindingJob[G]) -> Option[BoundCaller] waits {
+    let BindingJob(seed: take seed, bind: bind_app, credential: take credential, steps: steps) = take job
+    let invoke = code.callable(bind_app)
     let result = bound steps steps { invoke(seed, credential) }
     match take result {
-        Ok(Ok(take caller)) if caller.issuer != 1u8 => Some(take caller),
+        Ok(Ok(take given)) if given.caller.issuer != 1u8 => Some(take given),
         _ => None,
     }
 }
 
 // Apply the same credential binding rules for a front that seeds a private
-// session before a place is listening.
-pub fn bind_credential[G: send](tasks: Tasks, take seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Option[Caller] waits {
-    bound_caller(tasks, BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps), bytes_budget)
+// session before a place is listening. A binding already expired on `clock` is None.
+pub fn bind_credential[G: send](tasks: Tasks, clock: Clock, take seed: G, bind_app: StaticFn[fn(G, Bytes) -> Result[BoundCaller, ()] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Option[BoundCaller] waits {
+    unexpired(clock, bound_caller(tasks, BindingJob(seed: take seed, bind: bind_app, credential: take credential, steps: steps), bytes_budget))
 }
 
-fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Option[Caller] waits {
-    let run: fn(take BindingJob[G]) -> Option[Caller] waits = run_binding
+fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Option[BoundCaller] waits {
+    let run: fn(take BindingJob[G]) -> Option[BoundCaller] waits = run_binding
     let handle = match task.try_spawn(tasks, bytes allowance, take job, run) {
         Ok(take child) => take child,
         Error(_) => return None,
@@ -123,6 +152,8 @@ type LaunchBytes { field: u64, size: u64 }
 
 type LaunchEnv {
     n_place: u64,
+    n_place_explicit: bool,
+    revision: LaunchBytes,
     digest: LaunchBytes,
     target: LaunchBytes,
     describe: bool,
@@ -132,6 +163,8 @@ type LaunchEnv {
     idle: Option[u64],
     store_id: Option[(u64, u64)],
     install: Option[u64],
+    witness: u64,
+    dry_run: bool,
 }
 
 fn launch_env() -> LaunchEnv {
@@ -141,9 +174,10 @@ fn launch_env() -> LaunchEnv {
     let idle: Option[u64] = if idle_ms == 0u64 { None } else { Some(idle_ms) }
     let store_id = if launch_word(14u64, 0u64) != 0u64 { Some((launch_word(14u64, 1u64), launch_word(14u64, 2u64))) } else { None }
     let install_at = if launch_word(15u64, 0u64) != 0u64 { Some(launch_word(15u64, 1u64)) } else { None }
-    LaunchEnv(n_place: launch_word(0u64, 0u64), digest: launch_image(), target: launch_target_bytes(),
+    LaunchEnv(n_place: launch_word(0u64, 0u64), n_place_explicit: launch_word(16u64, 0u64) != 0u64,
+        revision: LaunchBytes(field: 18u64, size: launch_word(17u64, 0u64)), digest: launch_image(), target: launch_target_bytes(),
         describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64,
-        idle: idle, store_id: store_id, install: install_at)
+        idle: idle, store_id: store_id, install: install_at, witness: launch_word(19u64, 0u64), dry_run: launch_word(20u64, 0u64) != 0u64)
 }
 
 fn launch_image() -> LaunchBytes { LaunchBytes(field: 2u64, size: launch_word(1u64, 0u64)) }
@@ -160,4 +194,214 @@ fn launch_digest() -> Result[Bytes, Capacity] { Ok(launch_bytes(launch_image()))
 
 fn owned_launch_target(target: LaunchBytes) -> String {
     result.unwrap(string.from_utf8(launch_bytes(target)))
+}
+
+pub type HttpBindError: key = RejectedCredential | BindingDeadline | BindingCapacity
+
+type HttpBindingResult: send = Bound(Option[BoundCaller]) | BindingExpired
+
+resource type BindingCompletion: send {
+    to: Sender[HttpBindingResult], sent: bool
+} drop(completion) {
+    if !completion.sent { let _ = channel.try_send(completion.to, Bound(None)) }
+}
+
+type HttpBindingJob[B: send]: send { app: BindingJob[B], completion: BindingCompletion }
+
+fn run_http_binding[B: send](take job: HttpBindingJob[B]) -> () waits {
+    let HttpBindingJob(app: take app, completion: take done) = take job
+    let mut completion = take done
+    let caller = run_binding(take app)
+    let _ = channel.try_send(completion.to, Bound(take caller))
+    completion.sent = true
+}
+
+pub fn bind_http[G: send, B: send](supplied: Option[Wire[G, B]], take credential: Option[Bytes], take entries: List[Bytes],
+    random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
+    let arrived = host.mono_ns(clock)
+    if arrived >= deadline { return Error(BindingDeadline) }
+    let binding = binding_job(supplied, take credential)
+    let Some((take app, allowance)) = take binding else {
+        let caller = option.unwrap(anonymous_caller(random))
+        return Ok(admitted(take caller, None, take entries, arrived, arrived, budget, arg_max))
+    }
+    let (to, from): (Sender[HttpBindingResult], Receiver[HttpBindingResult]) = channel.new(1u64)
+    let completion = BindingCompletion(to: channel.sender(to), sent: false) ?=> |(_, _)| BindingCapacity
+    let alarm = std.clock.alarm(tasks, clock, deadline, to, BindingExpired)
+    let job = HttpBindingJob(app: take app, completion: take completion)
+    let run: fn(take HttpBindingJob[B]) -> () waits = run_http_binding
+    let child = task.try_spawn(tasks, bytes allowance, take job, run) ?=> |(_, _)| BindingCapacity
+    let answer = channel.receive(from)
+    let now = host.mono_ns(clock)
+    let _ = std.task.cancel_join(take child)
+    let _ = std.task.cancel_join(take alarm)
+    if now >= deadline { return Error(BindingDeadline) }
+    match take answer {
+        Ok(Bound(take given)) => match unexpired(clock, take given) {
+            Some(BoundCaller(caller: take caller, expires_at_ms: expiry)) => Ok(admitted(take caller, expiry, take entries, arrived, now, budget, arg_max)),
+            None => Error(RejectedCredential),
+        },
+        Ok(BindingExpired) => Error(BindingDeadline),
+        _ => Error(RejectedCredential),
+    }
+}
+
+type CheckedArgument: send {
+    validate: own[send] fn(Bytes, u64) -> Option[Refusal],
+    description: own[send] fn() -> Result[std.codec.Schema, std.codec.EncodeError],
+}
+
+fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
+    let check = fn(arg: Bytes, maximum: u64) -> Option[Refusal] {
+        let seen = bound bytes order.min(n, maximum) {
+            let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
+                bound steps steps {
+                    match std.codec.decode(ca, arg) {
+                        Ok(_) => { let no_refusal: Option[Refusal] = None; no_refusal },
+                        Error(e) => Some(Malformed(bad(e))),
+                    }
+                }
+            }
+            isolate(validate)
+        }
+        match take seen {
+            Ok(Ok(Ok(Ok(take why)))) => take why,
+            Ok(Ok(Ok(Error(_)))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
+            Ok(Ok(Error(_))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
+            Ok(Error(c)) => Some(Budget(room(c))),
+            Error(c) => Some(Budget(room(c))),
+        }
+    }
+    let description = fn() -> Result[std.codec.Schema, std.codec.EncodeError] { std.codec.describe(ca) }
+    let go = CheckedArgument(validate: take check, description: take description)
+    let copied_result: Bytes = clone(key)
+    let copied: Bytes = take copied_result
+    map.insert(mut r.checks, take copied, take go)
+    Ok(())
+}
+
+// The composition root supplies previous/current activation keys. A current key
+// always wins; retaining a gone key never substitutes a newly registered entry.
+pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
+    map.insert(mut r.gone, take key, ())
+    Ok(())
+}
+
+// `expires_at_ms` is the binding's exclusive wall-clock expiry (§3 "Binding"). It stays in
+// the transport: no store key, transaction or CallInfo carries it.
+pub opaque type Admitted: send {
+    caller: Caller, expires_at_ms: Option[u64], entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64
+}
+
+fn admitted(take caller: Caller, expires_at_ms: Option[u64], take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
+    Admitted(caller: take caller, expires_at_ms: expires_at_ms, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
+}
+
+pub type CallWant: send { key: Bytes, stream: StreamId, p: u64, arg: Bytes, deadline_ms: u32 }
+pub opaque type Send: send { stream: store.StreamKey, key: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64, expires_at_ms: Option[u64], claim: Option[Bytes] }
+
+pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
+    let CallWant(key: take key, stream: stream_id, p: p, arg: take arg, deadline_ms: relative) = take want
+    prepare_call(r, a, take key, stream_id, p, take arg, int.widen(relative))
+}
+
+fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
+    let known = map.contains(r.slots, key)
+    if !known && !map.contains(r.gone, key) { return Error(NoEntry) }
+    let mut allowed = false
+    for entry in a.entries { if entry == key { allowed = true } }
+    if !allowed { return Error(NotAllowed) }
+    let size = list.len(arg)
+    if size > a.arg_max { return Error(Budget(Room(requested: size, available: a.arg_max))) }
+    if size > a.budget { return Error(Budget(Room(requested: size, available: a.budget))) }
+    let end = std.clock.deadline_after_ms(a.arrived, relative)
+    if relative == 0u64 || end <= a.now { return Error(Deadline) }
+    if let Some(check) = map.get(r.checks, key) {
+        if let Some(take why) = (check.validate)(arg, a.arg_max) { return Error(take why) }
+    }
+    let digest = store.request_digest(key, arg)
+    let subject_size = list.len(a.caller.subject)
+    if subject_size > SUBJECT_MAX { return Error(Budget(Room(requested: subject_size, available: SUBJECT_MAX))) }
+    let stream = store.StreamKey(caller: clone(a.caller), id: stream_id)
+    Ok(Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget, expires_at_ms: a.expires_at_ms, claim: None))
+}
+
+fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {
+    let stream = if none(prepared.claim) { result.unwrap(store.stream_key_bytes(prepared.stream)) } else { list.new() }
+    let Send(stream: store.StreamKey(caller: take caller, id: stream_id), key: take key, p: p, arg: take arg, digest: digest, deadline: deadline, claim: take claim, ..) = take prepared
+    Req(e: Requested(Request(caller: take caller, stream: take stream, stream_id: stream_id, p: p, key: take key, arg: take arg, digest: digest,
+        deadline: deadline, claim: take claim, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
+}
+
+fn stream_time(head: Sender[HeadInput]) -> Option[StreamTime] waits {
+    host_head(head, scoped fn(take to: Sender[StreamTime]) -> Result[HeadInput, Capacity] { Ok(ReadStreamTime(take to)) })
+}
+
+type WireHello[G: send]: send {
+    binding: Option[(BindingJob[G], u64)], anonymous: Caller, tasks: Tasks, to: Sender[WireEvent], head: WireHead
+}
+
+fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
+    let WireHello(binding: take binding, anonymous: take anonymous, tasks: tasks, to: take to, head: take head) = take job
+    let identity = match take binding {
+        Some((take claim_job, allowance)) => bound_caller(tasks, take claim_job, allowance),
+        None => Some(BoundCaller(caller: take anonymous, expires_at_ms: None)),
+    }
+    let sample = match identity {
+        Some(_) => match head { LifecycleHead(sender) => stream_time(sender) },
+        None => None,
+    }
+    let _ = channel.send(to, wire_event(HelloBound(take identity, sample)))
+}
+
+// §3 "Binding": what a wire binding returns. `expires_at_ms` is the binding's exclusive expiry
+// in Unix milliseconds, None for a binding that does not expire; it stays in the transport.
+pub type BoundCaller: send { caller: Caller, expires_at_ms: Option[u64] }
+
+// A place's wire configuration (§3 "Binding"): the binding's plain seed `B` and, when wire
+// calls may reach `Granted` entries, the plain grant `G` each such call copies. The copiers
+// carry the plain bounds into sessions that also support registries with movable trigger
+// grants. `wire` makes both halves from one plain `G`; `wire_bind` makes the binding alone,
+// so a registry whose `G` is movable still binds its sessions, and its wire calls to
+// `Granted` entries are refused.
+pub opaque type Wire[G: send, B: send]: send {
+    grant: Option[WireGrant[G]], seed: B, duplicate: fn(B) -> B,
+    bind: Option[StaticFn[fn(B, Bytes) -> Result[BoundCaller, ()] waits]], bind_bytes: u64, bind_steps: u64,
+}
+
+type WireGrant[G: send]: send { value: G, duplicate: fn(G) -> G }
+
+fn copy_plain[G: plain](g: G) -> G { g }
+
+pub fn wire[G: plain + send](grant: G, bind_app: Option[StaticFn[fn(G, Bytes) -> Result[BoundCaller, ()] waits]], bind_bytes: u64, bind_steps: u64) -> Wire[G, G] {
+    let duplicate: fn(G) -> G = copy_plain
+    Wire(grant: Some(WireGrant(value: grant, duplicate: duplicate)), seed: grant, duplicate: duplicate, bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
+}
+
+pub fn wire_bind[G: send, B: plain + send](seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, ()] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G, B] {
+    let duplicate: fn(B) -> B = copy_plain
+    Wire(grant: None, seed: seed, duplicate: duplicate, bind: Some(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
+}
+
+fn copy_wire[G: send, B: send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B]] {
+    match supplied {
+        Some(w) => {
+            let grant = match w.grant { Some(g) => Some(WireGrant(value: (g.duplicate)(g.value), duplicate: g.duplicate)), None => None }
+            Some(Wire(grant: take grant, seed: (w.duplicate)(w.seed), duplicate: w.duplicate, bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps))
+        },
+        None => None,
+    }
+}
+
+// Latches the binding's expiry: at or past it the session closes with 4401
+// AuthExpired and no further data frame is admitted or written.
+fn wire_auth_lapsed[C: send](mut st: WireLoop[C]) -> bool {
+    if st.closing { return false }
+    match st.auth_end {
+        Some(end) if host.wall_ms(st.clock) >= end => {
+            wire_owner_refuse(mut st, 4401u16)
+            true
+        },
+        _ => false,
+    }
 }

@@ -78,6 +78,13 @@ impl RecipeGraph {
     }
 }
 impl Reachable<'_> {
+    /// A published recipe owns the units it will assemble. Release the
+    /// instance bodies while keeping the request's reach report.
+    pub(crate) fn finish(&mut self) -> crate::reach::ReachCounters {
+        self.materialized = crate::instances::InstanceSet::default();
+        self.counters
+    }
+
     /// The bodyless foreign definitions selected by this entry's checked slot closure.
     pub fn foreign_functions(&self) -> impl Iterator<Item = &DefPath> {
         self.materialized
@@ -299,16 +306,21 @@ impl Reached<'_> {
 }
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
-        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit, None, None))
+        hirsel_core_ids::published::catch_io(|| {
+            self.reachable_inner(entry, limit, None, None, false)
+        })
     }
 
     pub(crate) fn reachable_recipe(
         &self,
         entry: &DefPath,
-        limit: usize,
+        options: &NativeOptions,
     ) -> io::Result<Reachable<'_>> {
+        let limit = options.instance_limit;
         if !crate::resident::serving() {
-            return self.reachable(entry, limit);
+            return hirsel_core_ids::published::catch_io(|| {
+                self.reachable_inner(entry, limit, None, None, true)
+            });
         }
         let key = crate::native::key(
             "hirsel.recipe-reach.v1",
@@ -321,17 +333,23 @@ impl CheckProduct {
         )?;
         let record = crate::resident::RECIPE_REACH
             .get_or(Some(key), || Ok::<_, io::Error>(Arc::default()))?;
-        self.reachable_recipe_record(entry, limit, &mut record.lock().unwrap())
+        self.reachable_recipe_record(
+            entry,
+            limit,
+            matches!(options.backend, crate::native::Backend::Cranelift),
+            &mut record.lock().unwrap(),
+        )
     }
 
     pub(crate) fn reachable_recipe_record(
         &self,
         entry: &DefPath,
         limit: usize,
+        compact_recipe: bool,
         record: &mut Option<RecipeGraph>,
     ) -> io::Result<Reachable<'_>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.reachable_inner(entry, limit, None, Some(record))
+            self.reachable_inner(entry, limit, None, Some(record), compact_recipe)
         })
     }
     /// The build's reachable set for `options`. A Cranelift development build
@@ -355,7 +373,7 @@ impl CheckProduct {
         let inputs = crate::native::native_inputs(self, options)?;
         let mut reached = hirsel_core_ids::published::catch_io(|| {
             let Some(records) = inputs.records.as_ref() else {
-                return self.reachable_inner(entry, options.instance_limit, None, None);
+                return self.reachable_inner(entry, options.instance_limit, None, None, false);
             };
             let Some(selection) = crate::reach::selection(self, records, entry, options)? else {
                 return self.reachable_inner(
@@ -363,6 +381,7 @@ impl CheckProduct {
                     options.instance_limit,
                     Some((records, None, damaged)),
                     None,
+                    false,
                 );
             };
             let loaded = crate::reach::load(&records.store, selection)?;
@@ -431,6 +450,7 @@ impl CheckProduct {
                     damaged,
                 )),
                 None,
+                false,
             )?;
             reached.counters.record_bytes = record_bytes as u64;
             let complete = reached.accepted() && reached.first_stops.is_empty();
@@ -568,8 +588,9 @@ impl CheckProduct {
             &BTreeSet<Identity>,
         )>,
         mut recipe_record: Option<&mut Option<RecipeGraph>>,
+        compact_recipe: bool,
     ) -> io::Result<Reachable<'_>> {
-        let mut materialized = crate::instances::InstanceSet::for_reach();
+        let mut materialized = crate::instances::InstanceSet::for_reach(compact_recipe);
         let roots = [Identity::plain(entry.clone())];
         let prior = records.and_then(|(_, p, _)| p);
         let instances = match records {

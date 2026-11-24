@@ -3,6 +3,11 @@
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
 [Outbound HTTP/1.1](http_client.md).
 
+`defaults()` sets ceilings of 512 sockets, HTTP connections, first-phase
+connections and sockets per source IP. It sets 8 KiB head and output buffers,
+64 fields, a 256 KiB handler budget, 16 refusal workers and a 64-event
+supervisor inbox. Upgrades and event streams are disabled.
+
 `serve(take listeners, clock, tasks, take config, take routes, take state)`
 serves HTTP/1.1 and HTTP/1.0 on listeners from `Net`. The supplied
 `Tasks` capability owns the acceptors, connection tasks and refusal
@@ -17,6 +22,18 @@ idle/active transitions. It closes admission, cancels idle connections and
 shortens active exchanges to that deadline. A promoted stream finishes
 its current output and closes. An upgraded protocol can read the deadline
 from its socket. At the deadline any remaining socket task is cancelled.
+
+`serve_with_factory` uses the same supervisor and creates a sendable state
+value for each admitted connection. The supervisor calls the factory within
+`state_bytes`. Live state allocations stay charged there until they drop.
+`serve` and `serve_with_stop` share one state allocation.
+
+`serve_with_connection_plan` calls `request_done` after handling and writing a
+request. The supervisor keeps a private retirement value for each admitted
+connection. After the owner ends, the supervisor checks that value and, if
+retirement is pending, runs it in a task that keeps the connection slot.
+`serve_with_stream_factory` accepts the same connection lifecycle callbacks
+alongside its stream factory.
 
 Build `routes` with [router](router.md). A raw handler receives an anchored
 `Request`, a scratch `Region`, a mutable `Responder` and a read-only
@@ -35,6 +52,16 @@ decoded segments. `copy_bytes` makes an owned
 copy charged to the current request. `handler_deadline` gives the absolute
 monotonic deadline used by the dispatcher.
 
+`query_param(request, name)` looks up a decoded name and returns an owned
+UTF-8 value. An absent name gives `Ok(None)`. A bare name or `name=` gives
+an empty string. It splits pairs before decoding, keeps `+` and `;` literal,
+and returns `Repeated` for a second occurrence of the decoded name. It
+reports malformed escapes and invalid decoded text as `Escape` and `Utf8`.
+Values of unrelated parameters are skipped.
+
+`header_at(request, index)` borrows the actual header name and value at a
+zero-based index in receipt order. Repeated fields retain their own positions.
+
 `inline_body` borrows a short fixed-length body already in the read buffer.
 Otherwise `read(mut body, mut buffer)` copies decoded body bytes into the
 buffer's spare capacity and returns zero at EOF. The first read of a pending
@@ -48,10 +75,16 @@ budget and deadline before the next head is parsed. A response without a
 body still sends a complete head.
 
 `response(status, take body, close)` builds a final response for status 200
-through 599. `header(mut response, take name, take value)` appends a field
+through 599. `response_typed(status, format, value)` sends
+`application/json` using a prepared [JSON format](json.md). It encodes the
+value once and measures the exact length before the connection streams the
+JSON through its output buffer. `header(mut response, take name, take value)` appends a field
 after checking HTTP field syntax. It refuses Content-Length, Transfer-Encoding
-and Connection case-insensitively with `HeaderReserved`. Invalid status and
-field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
+Connection, Idempotent-Outcome and Hirsel-Refused case-insensitively with
+`HeaderReserved`. Invalid status and field syntax return `StatusInvalid` and
+`HeaderInvalid` respectively. Tagged runner routes use `mark_committed` to
+report a committed reply and `mark_refused` to echo the request's
+Idempotency-Key with a terminal refusal kind.
 While encoding the response head, HTTP returns `DateInvalid` at the Date
 field when the clock falls outside `std.time.from_unix_ms`. The refusal
 occurs before the writer appends any part of that field.

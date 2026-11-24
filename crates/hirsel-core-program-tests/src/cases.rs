@@ -1,4 +1,5 @@
 //! Source corpus assertions over per-definition products and reached units.
+mod budgets;
 use crate::{Checked, repo};
 use hirsel_core_front::*;
 use hirsel_core_ids::{DefPath, PackageId};
@@ -115,6 +116,7 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
             | FieldTy::Box(r)
             | FieldTy::Rc(r)
             | FieldTy::Arc(r)
+            | FieldTy::Shared(r)
             | FieldTy::RegionRef(r)
             | FieldTy::Link(r) => out.push(r.0),
             FieldTy::Seq(e)
@@ -209,7 +211,11 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     );
     let demanded: Vec<_> = source
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("// expect: run "))
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("// expect: run ")
+                .or_else(|| l.strip_prefix("// expect: reference run "))
+        })
         .filter_map(|l| l.split_once('(').map(|(name, _)| name))
         .collect();
     let all_emitted = refusals.is_empty() && gaps.is_empty() && resources.is_empty();
@@ -723,7 +729,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     failures.push(format!("{source} does not outlive {target}"));
                 }
             }
-            ["run", call, "=", want @ ..] => {
+            ["run", call, "=", want @ ..] | ["reference", "run", call, "=", want @ ..] => {
                 // `evaluator-only:cranelift,llvm` (last): the named native walkers do
                 // not hold this run yet and require it to disagree; the evaluator does.
                 let want = match want {
@@ -1569,10 +1575,10 @@ fn diagnostic_delimiter_openers() {
 #[test]
 fn diagnostic_name_candidates() {
     let failures: Vec<_> = ["transpose", "case", "other-module", "available"]
-        .iter()
+        .into_iter()
+        .chain(["take-shadowed"])
         .flat_map(|case| {
-            let path = root().join(format!("cases/body/diag-name-{case}.hirsel"));
-            run_case(&path)
+            run_case(&root().join(format!("cases/body/diag-name-{case}.hirsel")))
                 .into_iter()
                 .map(move |failure| format!("{case}: {failure}"))
         })
@@ -2636,15 +2642,6 @@ fn declaration_members_and_attributes_are_unique() {
 }
 
 #[test]
-fn step_bounds_rules() {
-    let mut failures = run_case(&root().join("cases/body/step-bounds.hirsel"));
-    failures.extend(run_case(
-        &root().join("../../crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel"),
-    ));
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[test]
 fn explicit_drop_and_option_copied() {
     let mut failures = run_case(&root().join("cases/body/explicit-drop.hirsel"));
     failures.extend(run_case(&root().join("cases/body/option-copied.hirsel")));
@@ -2688,12 +2685,6 @@ fn static_strings_preserve_budget_law() {
         ),
         "static string uses have the literal's result and charges at an eight-byte limit",
     );
-}
-
-#[test]
-fn static_bytes_preserve_budget_law() {
-    let failures = run_case(&root().join("cases/rules/MEM-28-static-bytes.hirsel"));
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

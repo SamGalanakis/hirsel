@@ -5,7 +5,7 @@ type Item: codec + send {
     done: bool
 }
 
-type Handles: send {
+type Handles: shareable + send {
     items: store.Table[u64, Item]
 }
 
@@ -17,29 +17,37 @@ fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
     Ok(Value(Some(None), 9007199254740993u64))
 }
 
-fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.items), Unbounded, Unbounded)
+fn query_table(h: Handles) -> store.Table[u64, Item] {
+    clone(h.items)
+}
+
+fn query_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("items", code.describe(query_table))
+}
+
+fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("items", h.items, Unbounded, Unbounded)
 }
 
 fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
     runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?
-    runner.query(mut registry, code.describe(packed_rows), std.codec.key_u64(), item_codec(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut registry, code.describe(packed_rows), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    match store.migration_create_table(mut phase, store.spec("items", std.codec.key_u64(), item_codec())) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take e) => Error(take e),
-    }
+fn by_id(id: u64, value: Item) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, id)
+    Ok(take keys)
 }
 
-fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
-    Ok(Handles(items: store.schema_table(schema, "items", std.codec.key_u64(), item_codec())?))
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let mut table = store.declare_table(mut d, "items", std.codec.key_u64(), item_codec())?
+    let _ = store.index(mut d, mut table, "by_id", Many, code.describe(by_id), std.codec.key_u64())?
+    Ok(Handles(items: store.finish(mut d, take table)?))
 }
 
 type Publisher: send {
-    head: Sender[runner.Req],
+    head: Sender[runner.HeadInput],
     post: Sender[runner.PubIn]
 }
 
@@ -49,11 +57,20 @@ fn first_batch(take publisher: Publisher) -> runner.Frame waits {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(packed_rows)))
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_unit())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), item_codec()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     runner.fixture_subscribe(owner, 0u32, take key, list.new())
     let frame: runner.Frame = match result.unwrap(runner.fixture_receive(owner)) {
-        Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: _)) => Batch(v, take complete, take rows, list.new()),
+        Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: _)) => {
+            let mut members: List[runner.Row] = list.with_capacity(list.len(rows))
+            for take row in rows {
+                let runner.SubRow(key: take tree_key, value: take value, ..) = take row
+                list.push(mut members, runner.Row(slot: 0u16, key: take tree_key, value: take value))
+            }
+            let mut groups: List[runner.Group] = list.new()
+            list.push(mut groups, runner.Group(sub: 0u32, value: list.new(), rows: take members))
+            Batch(v, take complete, take groups, list.new())
+        },
         _ => fail("expected the place's initial Batch"),
     }
     runner.fixture_close(take owner)
@@ -62,19 +79,20 @@ fn first_batch(take publisher: Publisher) -> runner.Frame waits {
 }
 
 fn payload(out: Stdout, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
-    let mut db = store.memory(clock, random, store.defaults())
-    result.unwrap(store.create_table(mut db, store.spec("items", std.codec.key_u64(), item_codec())))
-    let items = result.unwrap(store.table(mut db, "items", std.codec.key_u64(), item_codec()))
-    match result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, items, 9007199254740993u64, Item(title: "crème", done: true))
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let Handles(items: take items) = result.unwrap(schema(mut d))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    match result.unwrap(store.run(mut db, None, items, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env, 9007199254740993u64, Item(title: "crème", done: true))
     })) {
         Committed(_) => (),
         _ => fail("expected the fixture row to commit"),
     }
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(8u64))
     let job = task.spawn(tasks, bytes 1048576u64, Publisher(head: take head, post: runner.post(mail)), first_batch)
-    result.unwrap(runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
     let batch = result.unwrap(task.join(take job))
     let reply = result.unwrap(packed_reply(()))
     let codec: std.codec.Codec[Reply] = std.codec.of()
@@ -94,5 +112,5 @@ pub fn main(args: Args, out: Stdout, clock: Clock, random: Random, tasks: Tasks)
     let serve = scoped fn() -> Result[(), Exit] waits {
         payload(out, clock, random, tasks)
     }
-    runner.launch_server(args, code.describe(place), serve)
+    runner.launch_server(args, clock, code.describe(place), code.describe(schema), serve)
 }

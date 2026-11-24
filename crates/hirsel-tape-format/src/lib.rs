@@ -6,14 +6,22 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
-use hirsel_core_net::{
-    EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust, UnixDirection,
-    UnixRule,
+#[cfg(test)]
+hirsel_guard::install!();
+
+mod arguments;
+mod blocks;
+mod payload;
+pub use arguments::Args;
+pub use blocks::{
+    Blocks, Header, HeaderTooLarge, ReadError, Stop, TAPE_ID_AT, block, run_route, seal,
 };
+pub use payload::{carries_payload, tls_connect_payload};
+
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 11;
+pub const FORMAT: u16 = 13;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -227,686 +235,19 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Protected entry input. Tape diagnostics must not print it.
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
-pub struct MapHashKey(pub [u8; 16]);
-
-impl std::fmt::Debug for MapHashKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
-
-/// Block 0's payload (section 5.3).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Header {
-    pub kind: u8,
-    pub tape_id: [u8; 16],
-    pub identity: Vec<u8>,
-    /// The code's revision: the entry's code revision for a Run tape, the
-    /// called function's for a Call tape. No compiler,
-    /// backend or runtime identity is in it.
-    pub revision: [u8; 32],
-    pub charge_policy: u32,
-    pub limit: u64,
-    pub bound: u64,
-    pub chooser: u8,
-    pub arg: Vec<u8>,
-    /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
-    pub net_rules: Vec<GrantRule>,
-    pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
-    /// TLS-7 `Cred` grants, after the Secret grants.
-    pub cred_grants: Vec<hirsel_core_net::CredGrant>,
-    pub env: Option<EnvSnapshot>,
-    pub map_hash_key: MapHashKey,
-}
-/// The complete encoded header does not fit in block zero.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HeaderTooLarge;
-
-const NET_KIND: u8 = 1;
 /// Stream grants carry a single canonical terminal bit in a GRANT frame.
 pub const fn is_stream_grant(kind: u8) -> bool {
     matches!(kind, 4..=6)
 }
 
-const ENV_KIND: u8 = 7;
 const SECRET_KIND: u8 = 11;
 const EXEC_KIND: u8 = 13;
 const CRED_KIND: u8 = 14;
-const NET_RULE_LEN: usize = 23;
-
-fn read_net_rule(bytes: &[u8]) -> Rule {
-    Rule {
-        dir: bytes[0],
-        family: bytes[1],
-        hi: u64::from_le_bytes(bytes[2..10].try_into().unwrap()),
-        lo: u64::from_le_bytes(bytes[10..18].try_into().unwrap()),
-        bits: bytes[18],
-        first: u16::from_le_bytes(bytes[19..21].try_into().unwrap()),
-        last: u16::from_le_bytes(bytes[21..23].try_into().unwrap()),
-    }
-}
-
-fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
-    let trust = match c.u8()? {
-        0 => TlsTrust::System,
-        1 => TlsTrust::Roots(c.fixed()?),
-        _ => return Err(Corrupt),
-    };
-    let first = u16::from_le_bytes(c.fixed()?);
-    let last = u16::from_le_bytes(c.fixed()?);
-    TlsRule::new(&read_patterns(c)?, first, last, trust).ok_or(Corrupt)
-}
-
-fn read_patterns(c: &mut Cursor<'_>) -> Result<String, Corrupt> {
-    let count = u16::from_le_bytes(c.fixed()?);
-    let mut patterns = String::new();
-    for i in 0..count {
-        let len = usize::from(c.u8()?);
-        let pattern = std::str::from_utf8(c.take(len)?).map_err(|_| Corrupt)?;
-        if pattern.is_empty() || pattern.contains(',') {
-            return Err(Corrupt);
-        }
-        if i != 0 {
-            patterns.push(',');
-        }
-        patterns.push_str(pattern);
-    }
-    Ok(patterns)
-}
-
-fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
-    c.u8()?;
-    let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
-    let mut rules = Vec::new();
-    for _ in 0..count {
-        match c.bytes.get(c.at) {
-            Some(2) => {
-                c.u8()?;
-                rules.push(GrantRule::Tls(read_tls_rule(c)?));
-            }
-            Some(3) => {
-                c.u8()?;
-                let rule = ResolveRule::new(&read_patterns(c)?).ok_or(Corrupt)?;
-                rules.push(GrantRule::Resolve(rule));
-            }
-            Some(4) => {
-                c.u8()?;
-                let direction = UnixDirection::from_tag(c.u8()?).ok_or(Corrupt)?;
-                let mut read_text = || {
-                    let len = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
-                    std::str::from_utf8(c.take(len)?).map_err(|_| Corrupt)
-                };
-                let root = read_text()?;
-                let path = read_text()?;
-                rules.push(GrantRule::Unix(
-                    UnixRule::new(direction, root, path).ok_or(Corrupt)?,
-                ));
-            }
-            _ => {
-                let rule = read_net_rule(c.take(NET_RULE_LEN)?);
-                if !rule.valid() {
-                    return Err(Corrupt);
-                }
-                rules.push(GrantRule::Address(rule));
-            }
-        }
-    }
-    if count == 0 {
-        return Err(Corrupt);
-    }
-    Ok(rules)
-}
-
-fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
-    if rules.is_empty() {
-        return Ok(vec![]);
-    }
-    let mut out = vec![NET_KIND];
-    put_varint(&mut out, rules.len() as u64);
-    for rule in rules {
-        match rule {
-            GrantRule::Address(rule) => {
-                out.extend_from_slice(&[rule.dir, rule.family]);
-                out.extend_from_slice(&rule.hi.to_le_bytes());
-                out.extend_from_slice(&rule.lo.to_le_bytes());
-                out.push(rule.bits);
-                out.extend_from_slice(&rule.first.to_le_bytes());
-                out.extend_from_slice(&rule.last.to_le_bytes());
-            }
-            GrantRule::Tls(rule) => {
-                out.push(2);
-                match rule.trust() {
-                    TlsTrust::System => out.push(0),
-                    TlsTrust::Roots(digest) => {
-                        out.push(1);
-                        out.extend_from_slice(&digest);
-                    }
-                    // Only a served Net's root holds Any, and a tape never
-                    // records one: the reader refuses it as Corrupt.
-                    TlsTrust::Any => out.push(2),
-                }
-                let (first, last) = rule.ports();
-                out.extend_from_slice(&first.to_le_bytes());
-                out.extend_from_slice(&last.to_le_bytes());
-                write_patterns(&mut out, &rule.pattern_text())?;
-            }
-            GrantRule::Resolve(rule) => {
-                out.push(3);
-                write_patterns(&mut out, &rule.pattern_text())?;
-            }
-            GrantRule::Unix(rule) => {
-                let (root, path) = rule.endpoint().ok_or(HeaderTooLarge)?;
-                out.extend_from_slice(&[4, rule.direction as u8]);
-                for text in [root, path] {
-                    put_varint(&mut out, text.len() as u64);
-                    out.extend_from_slice(text.as_bytes());
-                }
-            }
-        }
-        if out.len() > MAX_LEN {
-            return Err(HeaderTooLarge);
-        }
-    }
-    Ok(out)
-}
-
-fn write_patterns(out: &mut Vec<u8>, text: &str) -> Result<(), HeaderTooLarge> {
-    let patterns = text.split(',');
-    let count = u16::try_from(patterns.clone().count()).map_err(|_| HeaderTooLarge)?;
-    out.extend_from_slice(&count.to_le_bytes());
-    for pattern in patterns {
-        out.push(u8::try_from(pattern.len()).map_err(|_| HeaderTooLarge)?);
-        out.extend_from_slice(pattern.as_bytes());
-        if out.len() > MAX_LEN {
-            return Err(HeaderTooLarge);
-        }
-    }
-    Ok(())
-}
-
-fn read_env(c: &mut Cursor<'_>) -> Result<EnvSnapshot, Corrupt> {
-    c.u8()?;
-    let text = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
-    let patterns = EnvPatterns::parse(text).ok_or(Corrupt)?;
-    let count = c.varint()?;
-    let mut entries = Vec::<(String, Vec<u8>)>::new();
-    for _ in 0..count {
-        let name = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
-        if !patterns.covers(name) || entries.last().is_some_and(|row| row.0.as_str() >= name) {
-            return Err(Corrupt);
-        }
-        entries.push((name.to_owned(), c.bytes()?.to_vec()));
-    }
-    Ok(EnvSnapshot { patterns, entries })
-}
-
-fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretGrant>, Corrupt> {
-    let mut grants = Vec::new();
-    while c.bytes.get(c.at) == Some(&SECRET_KIND) {
-        c.u8()?;
-        let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
-        let grant =
-            hirsel_core_net::SecretGrant::new(field()?, field()?, field()?).ok_or(Corrupt)?;
-        if grants
-            .iter()
-            .any(|old: &hirsel_core_net::SecretGrant| old.parameter == grant.parameter)
-        {
-            return Err(Corrupt);
-        }
-        grants.push(grant);
-    }
-    Ok(grants)
-}
-
-fn read_cred_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::CredGrant>, Corrupt> {
-    let mut grants = Vec::<hirsel_core_net::CredGrant>::new();
-    while !c.done() {
-        if c.u8()? != CRED_KIND {
-            return Err(Corrupt);
-        }
-        let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
-        let grant =
-            hirsel_core_net::CredGrant::new(field()?, field()?, field()?).map_err(|_| Corrupt)?;
-        if grants.iter().any(|old| old.parameter == grant.parameter) {
-            return Err(Corrupt);
-        }
-        grants.push(grant);
-    }
-    Ok(grants)
-}
-
-fn varint_len(value: usize) -> usize {
-    (usize::BITS - value.leading_zeros()).div_ceil(7).max(1) as usize
-}
-
-impl Header {
-    pub fn encoded_len(
-        identity: usize,
-        arg: usize,
-        grants: usize,
-    ) -> Result<usize, HeaderTooLarge> {
-        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1 + 16;
-        for field in [identity, arg, grants] {
-            if field > MAX_LEN {
-                return Err(HeaderTooLarge);
-            }
-            len += field + varint_len(field);
-        }
-        if len > MAX_LEN {
-            return Err(HeaderTooLarge);
-        }
-        Ok(len)
-    }
-
-    pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
-        let mut grants = write_net_rules(&self.net_rules)?;
-        if let Some(env) = &self.env {
-            grants.push(ENV_KIND);
-            put_bytes(&mut grants, env.patterns.text().as_bytes());
-            put_varint(&mut grants, env.entries.len() as u64);
-            for (name, value) in &env.entries {
-                if grants
-                    .len()
-                    .saturating_add(name.len())
-                    .saturating_add(value.len())
-                    > MAX_LEN
-                {
-                    return Err(HeaderTooLarge);
-                }
-                put_bytes(&mut grants, name.as_bytes());
-                put_bytes(&mut grants, value);
-            }
-        }
-        for grant in &self.secret_grants {
-            grants.push(SECRET_KIND);
-            for field in [&grant.parameter, &grant.source, &grant.policy] {
-                if grants.len().saturating_add(field.len()) > MAX_LEN {
-                    return Err(HeaderTooLarge);
-                }
-                put_bytes(&mut grants, field.as_bytes());
-            }
-        }
-        for grant in &self.cred_grants {
-            grants.push(CRED_KIND);
-            for field in [&grant.parameter, &grant.source, &grant.policy] {
-                if grants.len().saturating_add(field.len()) > MAX_LEN {
-                    return Err(HeaderTooLarge);
-                }
-                put_bytes(&mut grants, field.as_bytes());
-            }
-        }
-        let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants.len())?;
-        let mut out = Vec::with_capacity(len);
-        out.extend_from_slice(&FORMAT.to_le_bytes());
-        out.push(self.kind);
-        out.extend_from_slice(&self.tape_id);
-        put_bytes(&mut out, &self.identity);
-        out.extend_from_slice(&revision);
-        out.extend_from_slice(&self.charge_policy.to_le_bytes());
-        out.extend_from_slice(&self.limit.to_le_bytes());
-        out.extend_from_slice(&self.bound.to_le_bytes());
-        out.push(self.chooser);
-        put_bytes(&mut out, &self.arg);
-        put_bytes(&mut out, &grants);
-        out.extend_from_slice(&self.map_hash_key.0);
-        Ok(out)
-    }
-    pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
-        if payload.len() > MAX_LEN {
-            return Err(Corrupt);
-        }
-        let mut c = Cursor::new(payload);
-        if u16::from_le_bytes(c.fixed()?) != FORMAT {
-            return Err(Corrupt);
-        }
-        let kind = c.u8()?;
-        if !matches!(kind, KIND_RUN | KIND_CALL) {
-            return Err(Corrupt);
-        }
-        let tape_id = c.fixed()?;
-        let identity = c.bytes()?;
-        let revision = c.fixed()?;
-        let charge_policy = u32::from_le_bytes(c.fixed()?);
-        let limit = u64::from_le_bytes(c.fixed()?);
-        let bound = u64::from_le_bytes(c.fixed()?);
-        let chooser = c.u8()?;
-        if !matches!(chooser, CHOOSER_FIFO | CHOOSER_COMMIT) {
-            return Err(Corrupt);
-        }
-        let arg = c.bytes()?;
-        let grants = c.bytes()?;
-        let map_hash_key = MapHashKey(c.fixed()?);
-        if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
-            return Err(Corrupt);
-        }
-        let mut grants = Cursor::new(grants);
-        let net_rules = if grants.bytes.first() == Some(&NET_KIND) {
-            read_net_rules(&mut grants)?
-        } else {
-            vec![]
-        };
-        let env = if grants.bytes.get(grants.at) == Some(&ENV_KIND) {
-            Some(read_env(&mut grants)?)
-        } else {
-            None
-        };
-        let secret_grants = read_secret_grants(&mut grants)?;
-        let cred_grants = read_cred_grants(&mut grants)?;
-        if let Some(env) = &env
-            && secret_grants.iter().any(|grant| {
-                matches!(
-                    hirsel_core_net::SecretSource::parse(&grant.source),
-                    Some(hirsel_core_net::SecretSource::Env(name)) if env.patterns.covers(name)
-                )
-            })
-        {
-            return Err(Corrupt);
-        }
-        Ok(Self {
-            kind,
-            tape_id,
-            identity: identity.to_vec(),
-            revision,
-            charge_policy,
-            limit,
-            bound,
-            chooser,
-            arg: arg.to_vec(),
-            net_rules,
-            secret_grants,
-            cred_grants,
-            env,
-            map_hash_key,
-        })
-    }
-}
-/// Where block 0's payload keeps the tape id: after format and kind.
-pub const TAPE_ID_AT: usize = 3;
-
-/// One block's bytes: head, payload, then the check over the tape id and
-/// everything before the check.
-pub fn block(tape_id: &[u8; 16], flags: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
-    assert!(payload.len() <= MAX_LEN);
-    let mut out = Vec::with_capacity(BLOCK_HEAD + payload.len() + BLOCK_CHECK);
-    out.push(flags);
-    out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(payload);
-    let check = xxh3(&[tape_id, &out]);
-    out.extend_from_slice(&check.to_le_bytes());
-    out
-}
 
 /// Append the DATA frame continuing a payload with `chunk`.
 pub fn put_data(out: &mut Vec<u8>, chunk: &[u8]) {
     out.push(F_DATA);
     put_bytes(out, chunk);
-}
-
-/// Seal a block filled in place: `bytes` holds `BLOCK_HEAD` reserved bytes
-/// and then the payload. Writes the head and appends the check, giving the
-/// same bytes as `block`.
-pub fn seal(tape_id: &[u8; 16], flags: u8, seq: u64, bytes: &mut Vec<u8>) {
-    let len = bytes.len() - BLOCK_HEAD;
-    assert!(len <= MAX_LEN);
-    bytes[0] = flags;
-    bytes[1..4].copy_from_slice(&MAGIC);
-    bytes[4..12].copy_from_slice(&seq.to_le_bytes());
-    bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
-    let check = xxh3(&[tape_id, bytes]);
-    bytes.extend_from_slice(&check.to_le_bytes());
-}
-
-/// Why reading stopped before the tape's END block (section 5.2's table).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Stop {
-    /// End of file exactly at a block boundary, with no END block read.
-    Missing,
-    /// A trailing partial block, or a TRUNCATED block.
-    Truncated,
-    /// A complete block failing a check, or anything after an END block.
-    Damaged(u64),
-    /// A validated block whose bytes break the grammar.
-    Corrupt,
-}
-impl From<Corrupt> for Stop {
-    fn from(_: Corrupt) -> Self {
-        Stop::Corrupt
-    }
-}
-
-#[derive(Debug)]
-pub enum ReadError<E> {
-    Source(E),
-    Format(Stop),
-}
-impl<E> From<Stop> for ReadError<E> {
-    fn from(stop: Stop) -> Self {
-        Self::Format(stop)
-    }
-}
-
-type Block<'a> = (u8, &'a [u8]);
-
-/// Sequential block discovery. The reader reuses storage for one checked
-/// block and never reads beyond that block until the next call.
-pub struct Blocks {
-    bytes: Vec<u8>,
-    seq: u64,
-    tape_id: [u8; 16],
-    ended: bool,
-}
-impl Blocks {
-    /// Read and validate block zero before requesting any later bytes.
-    pub fn open<E>(
-        mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
-    ) -> Result<(Self, Header), ReadError<E>> {
-        let bytes = header_block(&mut read, Some(FORMAT))?;
-        let payload = header_payload(&bytes);
-        let header = Header::decode(payload).map_err(Stop::from)?;
-        let tape_id = header.tape_id;
-        Ok((
-            Self {
-                bytes,
-                seq: 1,
-                tape_id,
-                ended: false,
-            },
-            header,
-        ))
-    }
-
-    /// Allocation that can be retained for the next block after its payload is consumed.
-    pub fn buffer_capacity(&self) -> usize {
-        self.bytes.capacity()
-    }
-
-    /// Release storage between blocks without changing the read position.
-    pub fn discard_buffer(&mut self) {
-        self.bytes = Vec::new();
-    }
-
-    /// Read the next checked block, or confirm EOF after END.
-    pub fn next<E>(
-        &mut self,
-        mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
-    ) -> Result<Option<Block<'_>>, ReadError<E>> {
-        if self.ended {
-            return if read(&mut [0]).map_err(ReadError::Source)? == 0 {
-                Ok(None)
-            } else {
-                Err(Stop::Damaged(self.seq).into())
-            };
-        }
-        read_block(&mut self.bytes, self.seq, &mut read)?;
-        check_head(&self.bytes, self.seq)?;
-        check_digest(&self.bytes, &self.tape_id, self.seq)?;
-        self.seq += 1;
-        let flags = self.bytes[0];
-        if flags & TRUNCATED != 0 {
-            return Err(Stop::Truncated.into());
-        }
-        self.ended = flags & END != 0;
-        Ok(Some((
-            flags,
-            &self.bytes[BLOCK_HEAD..self.bytes.len() - BLOCK_CHECK],
-        )))
-    }
-}
-
-fn fill<E>(
-    mut bytes: &mut [u8],
-    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
-) -> Result<usize, ReadError<E>> {
-    let len = bytes.len();
-    while !bytes.is_empty() {
-        let n = read(bytes).map_err(ReadError::Source)?;
-        if n == 0 {
-            break;
-        }
-        bytes = &mut bytes[n..];
-    }
-    Ok(len - bytes.len())
-}
-
-fn header_payload(bytes: &[u8]) -> &[u8] {
-    &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK]
-}
-
-fn header_block<E>(
-    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
-    format: Option<u16>,
-) -> Result<Vec<u8>, ReadError<E>> {
-    let mut bytes = Vec::new();
-    read_block(&mut bytes, 0, read)?;
-    check_head(&bytes, 0)?;
-    if bytes[0] != 0 {
-        return Err(Stop::Damaged(0).into());
-    }
-    let payload = header_payload(&bytes);
-    if let (Some(format), Some(version)) = (format, payload.get(..2))
-        && version != format.to_le_bytes()
-    {
-        return Err(Stop::Corrupt.into());
-    }
-    let tape_id = payload
-        .get(TAPE_ID_AT..TAPE_ID_AT + 16)
-        .ok_or(Stop::Damaged(0))?;
-    check_digest(&bytes, tape_id.try_into().unwrap(), 0)?;
-    Ok(bytes)
-}
-
-/// The fixed prefix of block 0 used to choose a pinned executable. The image
-/// validates the full header and frames with its own runtime before replay.
-pub fn run_route<E>(
-    mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
-) -> Result<([u8; 16], Vec<u8>), ReadError<E>> {
-    fn route(payload: &[u8]) -> Result<([u8; 16], Vec<u8>), Corrupt> {
-        let mut c = Cursor::new(payload);
-        c.take(2)?; // Runtime-owned format version.
-        if c.u8()? != KIND_RUN {
-            return Err(Corrupt);
-        }
-        let tape_id = c.fixed()?;
-        c.bytes()?; // Identity.
-        c.take(32 + 4 + 8 + 8 + 1)?; // Revision, charge policy, limits, chooser.
-        Ok((tape_id, c.bytes()?.to_vec()))
-    }
-
-    let bytes = header_block(&mut read, None)?;
-    route(header_payload(&bytes)).map_err(|e| Stop::from(e).into())
-}
-
-fn read_block<E>(
-    bytes: &mut Vec<u8>,
-    seq: u64,
-    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
-) -> Result<(), ReadError<E>> {
-    if bytes.len() < BLOCK_HEAD {
-        bytes.resize(BLOCK_HEAD, 0);
-    }
-    match fill(&mut bytes[..BLOCK_HEAD], read)? {
-        0 => return Err(Stop::Missing.into()),
-        BLOCK_HEAD => {}
-        _ => return Err(Stop::Truncated.into()),
-    }
-    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if len > MAX_LEN {
-        return Err(Stop::Damaged(seq).into());
-    }
-    let size = BLOCK_HEAD + len + BLOCK_CHECK;
-    bytes.reserve_exact(size.saturating_sub(bytes.len()));
-    bytes.resize(size, 0);
-    if fill(&mut bytes[BLOCK_HEAD..], read)? != len + BLOCK_CHECK {
-        return Err(Stop::Truncated.into());
-    }
-    Ok(())
-}
-
-fn check_head(bytes: &[u8], seq: u64) -> Result<(), Stop> {
-    if bytes[1..4] != MAGIC
-        || bytes[0] & !(END | TRUNCATED) != 0
-        || u64::from_le_bytes(bytes[4..12].try_into().unwrap()) != seq
-    {
-        return Err(Stop::Damaged(seq));
-    }
-    Ok(())
-}
-
-fn check_digest(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
-    let (body, stored) = bytes.split_at(bytes.len() - BLOCK_CHECK);
-    if xxh3(&[id, body]) != u64::from_le_bytes(stored.try_into().unwrap()) {
-        return Err(Stop::Damaged(seq));
-    }
-    Ok(())
-}
-
-/// `args` of an ISSUE or OP frame: up to 16 literal bytes, else a digest.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Args {
-    Literal(Vec<u8>),
-    Digest(u64),
-}
-impl Args {
-    pub fn of(bytes: &[u8]) -> Self {
-        Self::of_parts(&[bytes])
-    }
-    pub fn of_parts(parts: &[&[u8]]) -> Self {
-        let len = parts
-            .iter()
-            .fold(0usize, |len, part| len.saturating_add(part.len()));
-        if len <= ARGS_LITERAL {
-            let mut bytes = Vec::with_capacity(len);
-            for part in parts {
-                bytes.extend_from_slice(part);
-            }
-            Args::Literal(bytes)
-        } else {
-            Args::Digest(xxh3(parts))
-        }
-    }
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            Args::Literal(b) => put_bytes(out, b),
-            Args::Digest(d) => {
-                out.push(ARGS_LITERAL as u8 + 1);
-                out.extend_from_slice(&d.to_le_bytes());
-            }
-        }
-    }
-    fn decode(c: &mut Cursor) -> Result<Self, Corrupt> {
-        let n = c.varint()?;
-        if n as usize <= ARGS_LITERAL {
-            Ok(Args::Literal(c.take(n as usize)?.to_vec()))
-        } else if n as usize == ARGS_LITERAL + 1 {
-            Ok(Args::Digest(u64::from_le_bytes(c.fixed()?)))
-        } else {
-            Err(Corrupt)
-        }
-    }
 }
 
 /// Whether the operation encodes an extra byte count in its outcome.
@@ -916,44 +257,6 @@ pub fn writes(op: u8) -> bool {
         op,
         WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES | DATAGRAM_RECV
     )
-}
-
-pub fn carries_payload(op: u8) -> bool {
-    use crate::op::*;
-    matches!(
-        op,
-        READ | READ_AT
-            | MKDTEMP
-            | RANDOM
-            | LISTEN
-            | ACCEPT
-            | RECV_BOUNDED
-            | TLS_CONNECT
-            | SECRET_MAC
-            | CRED_FETCH
-            | RESOLVE
-            | STDIN_READ
-            | NEXT_ENTRIES
-            | STAT
-            | STAT_FILE
-            | EXEC_SPAWN
-            | DATAGRAM_RECV
-    )
-}
-
-/// A successful TLS_CONNECT carries a length-prefixed ALPN, the fixed peer
-/// digest and a length-prefixed channel binding (zero length when absent).
-pub fn tls_connect_payload(bytes: &[u8]) -> Result<(&[u8], &[u8; 32], &[u8]), Corrupt> {
-    let (&alpn_len, rest) = bytes.split_first().ok_or(Corrupt)?;
-    let (alpn, rest) = rest
-        .split_at_checked(usize::from(alpn_len))
-        .ok_or(Corrupt)?;
-    let (peer, rest) = rest.split_first_chunk::<32>().ok_or(Corrupt)?;
-    let (&binding_len, binding) = rest.split_first().ok_or(Corrupt)?;
-    if !matches!(binding_len, 0 | 32 | 48 | 64) || usize::from(binding_len) != binding.len() {
-        return Err(Corrupt);
-    }
-    Ok((alpn, peer, binding))
 }
 
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
@@ -990,7 +293,10 @@ impl Out {
             return Err(Corrupt);
         }
         let value = c.varint()?;
-        if op == op::SECRET_KDF && (status != OK || value == 0) {
+        if matches!(op, op::MEDIA_P256_KEY | op::MEDIA_KEY_SHARE) && (status != OK || value == 0) {
+            return Err(Corrupt);
+        }
+        if op == op::MEDIA_AGREEMENT && (status != OK || value > 2) {
             return Err(Corrupt);
         }
         if op == op::SCRAM_VERIFY && (status != OK || value > 1) {
@@ -1004,6 +310,11 @@ impl Out {
         } else {
             (0, 0)
         };
+        if op == op::SECRET_KDF
+            && !((status == OK && value != 0) || (status == ERROR && error == (1, 0) && value == 0))
+        {
+            return Err(Corrupt);
+        }
         if op == op::STDIN_READ
             && status != OK
             && (value != 0
@@ -1011,7 +322,9 @@ impl Out {
         {
             return Err(Corrupt);
         }
-        if error.0 == 10 && op != op::UNIX_LISTEN {
+        if (error.0 == 10 && op != op::UNIX_LISTEN)
+            || (error.0 == 11 && (op != op::LISTEN || error.1 != 0))
+        {
             return Err(Corrupt);
         }
         let written = if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && status != OK) {
@@ -1024,7 +337,7 @@ impl Out {
             if b.len() > PAYLOAD_CHUNK {
                 return Err(Corrupt);
             }
-            if matches!(op, op::LISTEN | op::ACCEPT) {
+            if matches!(op, op::LISTEN | op::ACCEPT | op::LOCAL_ADDR | op::PEER_ADDR) {
                 if status == OK {
                     let [family, rest @ ..] = b else {
                         return Err(Corrupt);
@@ -1038,6 +351,15 @@ impl Out {
                 } else if !b.is_empty() {
                     return Err(Corrupt);
                 }
+            }
+            if op == op::MKSTEMP
+                && if status == OK {
+                    !hirsel_core_ids::host_op::valid_temp_suffix(b)
+                } else {
+                    !b.is_empty()
+                }
+            {
+                return Err(Corrupt);
             }
             if op == op::TLS_CONNECT {
                 if status == OK {

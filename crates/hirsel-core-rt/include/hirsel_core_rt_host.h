@@ -6,7 +6,9 @@
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
-   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78. Positioned requests carry an eight-byte little-endian
+   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78, Mkstemp 119, ZeroExtension 124.
+   Entries takes an optional path (path_len 0 means the grant root).
+   Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
@@ -57,8 +59,8 @@ HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProv
    status@24 (failure convention 3c242a8a), kind@25. Stat returns size in value,
    signed modification nanoseconds in written, and the file kind in kind. error 0 succeeds; 1..5 are IoError
    case + 1. Clock rows ignore status and use value; waiting rows can fail with
-   Cancelled. Mkdtemp, positioned I/O and NextEntries can also fail with Bounds.
-   Read, ReadAt, Mkdtemp and NextEntries can update operand.len; data and
+   Cancelled. Mkdtemp, Mkstemp, positioned I/O and NextEntries can also fail with Bounds.
+   Read, ReadAt, Mkdtemp, Mkstemp and NextEntries can update operand.len; data and
    capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
@@ -156,7 +158,8 @@ uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
    NET-12 extends dir with 4 Unix and 5 UnixRoot (launch input only). For
    those rows, patterns contains the concatenated label and path, and hi
    gives the label's byte count. A Unix row's family is its direction
-   (0 Connect, 1 Listen, 2 Bind, 3 Send). */
+   (0 Connect, 1 Listen, 2 Bind, 3 Send). NET-15 extends address directions
+   with 6 UdpBind and 7 UdpSend. */
 typedef struct {
     uint8_t dir, family;
     uint64_t hi, lo;
@@ -207,6 +210,9 @@ typedef struct {
     const void *exec_bindings;
     size_t exec_bindings_len;
     const void *exec_ops;
+    const HirselCoreView (*cred_grants)[3];
+    size_t cred_grants_len;
+    const uint8_t (*revision)[32];
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -245,6 +251,8 @@ typedef struct {
     uint16_t port;
 } HirselCoreAddressOutcome;
 HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_net_local_addr(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_net_peer_addr(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare
@@ -277,6 +285,7 @@ HirselCoreHostOutcome hirsel_core_exec_signal(HirselCoreContext *, uint64_t, uin
    key). The last argument of each call is the site. */
 HirselCoreHostOutcome hirsel_core_provide_clock(HirselCoreContext *, uint64_t mono, uint64_t wall, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_random(HirselCoreContext *, uint64_t seed, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_random_tape(HirselCoreContext *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_process(HirselCoreContext *, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_advance_to(HirselCoreContext *, uint64_t hand, uint64_t mono, uint64_t);
 HirselCoreHostOutcome hirsel_core_clock_set_wall(HirselCoreContext *, uint64_t hand, uint64_t wall, uint64_t);
@@ -294,6 +303,7 @@ HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served
 HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_secret(HirselCoreContext *, uint64_t call, uint64_t index, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_payload_prefix(HirselCoreContext *, uint64_t call, uint64_t field, uint64_t max, HirselCoreBuffer *out, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t served, uint64_t call, uint64_t tag, uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint64_t w4, uint64_t w5, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_fill(HirselCoreContext *, uint64_t served, uint64_t call, const HirselCoreBuffer *bytes, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_dir(HirselCoreContext *, uint64_t n, uint64_t);
@@ -343,13 +353,35 @@ HirselCoreHostOutcome hirsel_core_scram_verify(HirselCoreContext *, uint64_t, co
 #define HIRSEL_CORE_SECRET_MAC 39
 #define HIRSEL_CORE_SECRET_KDF 79
 HirselCoreHostOutcome hirsel_core_secret_derive_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_derive_hkdf_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_derive_argon2id(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint32_t, uint32_t, uint32_t, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_hmac_sha384(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_hmac_sha512(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha384(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha512(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_jws_hmac_sign(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_jws_hmac_verify(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t, uint64_t);
 /* Key operations: SECRET_MAC modes 2 wrap, 3 unwrap, 4 sign; error tag is the
    KeyError case plus one (Denied 1, Invalid 2, Tampered 3, Capacity 4). */
 HirselCoreHostOutcome hirsel_core_secret_wrap(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_unwrap(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
-HirselCoreHostOutcome hirsel_core_secret_sign(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_sign(HirselCoreContext *, uint64_t, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_p256_key(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_key_share(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
+void hirsel_core_media_drop(HirselCoreContext *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_quic_initial(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_sealer(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_opener(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_header_mask(HirselCoreContext *, uint64_t, uint64_t, bool, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_seal(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_seal_into(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t, HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_open(HirselCoreContext *, uint64_t, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_open_into(HirselCoreContext *, uint64_t, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_packet_mask(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_aead_seal(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_aead_open(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);

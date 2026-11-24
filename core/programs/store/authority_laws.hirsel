@@ -1,0 +1,510 @@
+// L55's host level uses the directory journal's published sync frontier.
+@test
+fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let declared = levels(db)
+    if list.len(declared) != 1 || declared[0] != "host" {
+        fail("the directory store did not declare host")
+    }
+    if let Error(NoLevel(missing)) = level(db, "process") {
+        if missing != "process" {
+            fail("the refusal named the wrong level")
+        }
+    } else {
+        fail("an undeclared level resolved")
+    }
+    let host_level = level(db, "host")?
+    let mem = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
+    let memory_level = level(mem, "memory")?
+    let schema = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if let Error(Foreign) = durable_at(mut db, schema, memory_level) {} else {
+        fail("a level from another store was accepted")
+    }
+    durable_at(mut db, schema, host_level)?
+    close(take db)
+}
+
+// L57. A receipt keeps its branch version across later journal rotations.
+@test
+fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let committed = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 7, 70)
+    })?
+    let Committed(done) = committed else {
+        fail("the position law did not commit")
+    }
+    let receipt = done.ticket
+    let seed = std.sim.world.test_seed(seed_grant)
+    let mut plan = std.sim.world.plan(match seed {
+        Some(active) => active,
+        None => 0,
+    })
+    let mut frontier = 2u64
+    for i in 0u64 .. 3 {
+        let cut = checkpoint(mut db)?
+        if let Error(Missing(_)) = position(mut db, cut) {} else {
+            fail("a cut received a commit Position")
+        }
+        if seed != None && std.sim.world.pick(mut plan, 2) == 1 {
+            let after_cut = run(mut db, None, (copy_env(rows), copy_env(i)), fn(mut tx, call_env) -> Result[(), Error] {
+                put(mut tx, call_env.0, call_env.1 + 8, 80 + call_env.1)
+            })?
+            let Committed(continued) = after_cut else {
+                fail("the position law did not commit after the cut")
+            }
+            durable(mut db, continued.ticket)?
+            frontier += 1
+        }
+    }
+    let saved = position(mut db, receipt)?
+    if !same(saved.store, db.store) || saved.branch != 0 || saved.version != 2 {
+        fail("the ticket lost its original branch version")
+    }
+    close(take db)?
+    let mut ids = followers()
+    let follow_plan = follower_law_plan(Directory, result.unwrap(sized(Directory, 2147483648u64)))
+    let service = follower_law_service(tasks, follow_plan, 2)?
+    let owner = follower_owner(service)?
+    let mut first = follower(mut ids, follower_slot(owner, follow_plan)?, log_authority(directory), c, None)?
+    let second = follower(mut ids, follower_slot(owner, follow_plan)?, log_authority(directory), c, None)?
+    let main = option.unwrap(follower_branch(first, "main"))
+    let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
+    let found = at_least(mut first, saved, due)?
+    let refreshed = fresh(mut first, due)?
+    if refreshed.open != found.open || version(refreshed) != frontier {
+        fail("fresh replaced the follower's open identity or lost a row")
+    }
+    let also = snapshot_follower(second, main)?
+    if found.open == also.open || version(found) != frontier || version(also) != frontier {
+        fail("log followers did not keep distinct capture identities")
+    }
+    let mut schema = declare_follower(second)
+    let declared_rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let source = finish(mut schema, take declared_rows)?
+    seal_follower(second, take schema)?
+    if get(result.unwrap(follower_reader(second, 0u64)), also, source, 7)? != Some(70) || get(result.unwrap(follower_reader(first, 0u64)), found, source, 7)? != Some(70) {
+        fail("the follower missed the committed row")
+    }
+    Ok(())
+}
+
+@test
+fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    close(take writer)?
+    let mut ids = followers()
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut mirror = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(directory), c, options.expect)?
+    let main = option.unwrap(follower_branch(mirror, "main"))
+    // A recovery read would fail here. The expired call must return the
+    // already published position without trying to load another manifest.
+    disk_io(host.remove(directory, "MANIFEST"))?
+    match catch_up(mut mirror, 0) {
+        Error(Behind(p)) if same(p.store, main.store) && p.branch == 0 && p.version == 1 => (),
+        _ => fail("expired catch-up did not return Behind at the applied position"),
+    }
+    if version(snapshot_follower(mirror, main)?) != 1 {
+        fail("expired catch-up changed the published capture")
+    }
+    Ok(())
+}
+
+fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let primary = bucket_law_client_lanes(sim, tasks, "s3.test", 701, true, 1)?
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    let mut writer = open_authority(tasks, object_authority(take primary, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    let rows = bucket_law_rows_table(mut writer)?
+    let captured = snapshot(writer)
+    let expected = Position(store: identity(writer), branch: 1, version: 2)
+    let mut ids = followers()
+    let early = bucket_law_client_lanes(sim, tasks, "s3.test", 702, true, 1)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let owner = follower_owner(service)?
+    let mut observed = follower(mut ids, follower_slot(owner, plan)?, object_authority(take early, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
+    if let Error(Unseen(1)) = at_least(mut observed, expected, 0) {} else {
+        fail("L57: an expired read did not report the future branch as Unseen")
+    }
+    let _ = take observed
+    let (line, _) = fork(mut writer, "child", captured)?
+    let value = bucket_law_value(7)
+    let outcome = run_on(mut writer, line, None, (copy_env(rows), copy_env(value)), fn(mut tx, envs) -> Result[(), Error] {
+        put(mut tx, envs.0, 7, envs.1)
+    })?
+    let Committed(done) = outcome else {
+        fail("L57: the branch write was not committed")
+    }
+    durable(mut writer, done.ticket)?
+    for _ in 0u64 .. 3 {
+        bucket_law_checkpoint(mut writer)?
+    }
+    let saved = position(mut writer, done.ticket)?
+    if !same(saved.store, expected.store) || saved.branch != 1 || saved.version != 2 {
+        fail("L57: the branch ticket changed its Position across cuts")
+    }
+    let cold = bucket_law_client_lanes(sim, tasks, "s3.test", 703, true, 1)?
+    let mut recovered = follower(mut ids, follower_slot(owner, plan)?, object_authority(take cold, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
+    let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    let found = at_least(mut recovered, saved, due)?
+    let main_image = fresh(mut recovered, due)?
+    let reading = follower_reader(recovered, 0u64)?
+    if version(found) != 2 || version(main_image) != 1 || get(reading, found, rows, 7)? != Some(clone(value)) || get(reading, main_image, rows, 7)? != None {
+        fail("L57: cold recovery did not contain the branch-only write")
+    }
+    let deleted = delete_branch(mut writer, line)?
+    durable(mut writer, deleted)?
+    let _ = catch_up(mut recovered, due)?
+    if let Error(Gone(1)) = at_least(mut recovered, saved, due) {} else {
+        fail("L57: the deleted branch was still visible")
+    }
+    if get(follower_reader(recovered, 0u64)?, found, rows, 7)? != Some(take value) {
+        fail("L57: deletion changed the earlier follower snapshot")
+    }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_branch_position(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 253), None, list.new())
+    let observed = object_branch_position_law(r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    observed
+}
+
+fn sim_law_declared(first: String, other: Option[String]) -> SimLevels {
+    let mut weak: List[String] = list.with_capacity(2)
+    list.push(mut weak, string.from(first))
+    if let Some(next_name) = other {
+        list.push(mut weak, string.from(next_name))
+    }
+    SimLevels(weak: take weak, strongest: "durable")
+}
+
+fn sim_law_open(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, declare_levels: SimLevels, take sync: LevelSync, create: bool) -> Result[Db, Error] waits {
+    let client = bucket_law_client_with(sim, tasks, "s3.test", seed, true)?
+    let opened = open_authority(tasks, sim_authority(take client, declare_levels, take sync, BUCKET_LAW_OP_MS), sim.time, r, bucket_order_options(create))
+    Ok(opened ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Tasks, sim: BucketSim, mut world: LevelWorld, plan: FollowerPlan) -> Result[(), Error] waits {
+    let service = follower_law_service(tasks, plan, 1)?
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 605, true)?
+    let no_declared_levels = SimLevels(weak: list.new(), strongest: "reader")
+    let mut ids = followers()
+    let mut watch = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, sim_authority(take client, no_declared_levels, level_sync(mut world)?, BUCKET_LAW_OP_MS), sim.time, Some(wanted.store))?
+    let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    if version(fresh(mut watch, due)?) != 6 {
+        fail("L56-W: fresh saw the weak prefix")
+    }
+    let short = clock.deadline_after_ms(host.mono_ns(sim.time), 10)
+    match at_least(mut watch, wanted, short) {
+        Error(Behind(visible)) if same(visible.store, wanted.store) && visible.branch == 0 && visible.version == 6 => (),
+        _ => fail("L56-W: the first at_least did not report Behind at version 6"),
+    }
+    sim_law_get_mark(tasks, sim)?
+    // The GET of mark-1 releases the held head PUT. Once `durable` returns it
+    // is applied and no hold or fault is left: the heal of the VP2 epilogue.
+    durable(mut writer, receipt)?
+    let mut marker = bucket_law_client_with(sim, tasks, "s3.test", 606, true)?
+    let advanced = follower_converges(mut watch, mut marker, sim.time, wanted, "L56-W watch")
+    if version(advanced) != 7 {
+        fail("L56-W: at_least missed the applied prefix")
+    }
+    let _ = take watch
+    close_follower_service(take service)
+}
+
+fn sim_law_get_mark(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut inspector = bucket_law_client_with(sim, tasks, "s3.test", 604, true)?
+    let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
+    let (observed, _) = std.object.fetch(mut inspector, "mark-1", list.new(), due)
+    if let Error(NotFound) = observed {
+        return Ok(())
+    }
+    fail("L55-1: the independent GET did not reach the simulator")
+}
+
+fn sim_law_reopen_refusal(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld, declare_levels: SimLevels, expected: String) -> Result[(), Error] waits {
+    let opened = sim_law_open(tasks, r, sim, 603, declare_levels, level_sync(mut world)?, false)
+    if let Error(Declared(rejected)) = opened {
+        if rejected == expected {
+            return Ok(())
+        }
+    }
+    fail("L55-2: the open did not name the first differing recorded level")
+}
+
+fn sim_law_invalid_declarations(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
+    let mut more: List[String] = list.with_capacity(16)
+    for ordinal in 0u64 .. 16 {
+        let mut name = string.with_capacity(2)
+        string.push_u64(mut name, ordinal)
+        list.push(mut more, take name)
+    }
+    let grant = SimLevels(weak: take more, strongest: "durable")
+    if let Error(Limit(Name)) = sim_law_open(tasks, r, sim, 603, grant, level_sync(mut world)?, false) {} else {
+        fail("L55-2: sixteen weak names were admitted")
+    }
+    let duplicate = sim_law_open(tasks, r, sim, 603, sim_law_declared("durable", None), level_sync(mut world)?, false)
+    match duplicate {
+        Error(Exists(name)) if name == "durable" => (),
+        _ => fail("L55-2: the strongest name was admitted twice"),
+    }
+    Ok(())
+}
+
+fn sim_law_bad_header(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 606, true)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut wire: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let old = history_fetch(mut client, "head", mut wire, due)?
+    // AUTHORITY begins with style and four length-prefixed strings.
+    let mut cursor = 241u64
+    for _ in 0u64 .. 4 {
+        cursor += 2 + read_le(wire, cursor, 2)
+    }
+    cursor += 1
+    cursor += 2 + read_le(wire, cursor, 2)
+    wire[cursor] = 1
+    let header = DiskContext(store: StoreId(hi: read_le(wire, 32, 8), lo: read_le(wire, 40, 8)), role: 7, seq: read_le(wire, 56, 8))
+    capacity(history_seal(mut wire, header, 224, 0x00D0))?
+    let (written, _) = std.object.store_if(mut client, "head", Match(old.etag), take wire, due)
+    if let Ok(Applied(_)) = written {} else {
+        fail("L55-2: the fixture did not write its malformed declaration")
+    }
+    let opened = sim_law_open(tasks, r, sim, 607, sim_law_declared("volatile", None), level_sync(mut world)?, false)
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = opened {
+        return Ok(())
+    }
+    fail("L55-2: a recorded weak level claimed host-crash survival")
+}
+
+fn sim_law_declarations(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
+    let absent = SimLevels(weak: list.new(), strongest: "durable")
+    sim_law_reopen_refusal(tasks, r, sim, mut world, absent, "volatile")?
+    sim_law_reopen_refusal(tasks, r, sim, mut world, sim_law_declared("fast", None), "volatile")?
+    sim_law_bad_header(tasks, r, sim, mut world)?
+    sim_law_invalid_declarations(tasks, r, sim, mut world)
+}
+
+fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_last: bool, plan: FollowerPlan) -> Result[(), Error] waits {
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // The held request consumes A's operation deadline. B's claim is the next PUT.
+    let head_hold: std.sim.s3.Hold = if apply_last {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: 9, count: 1, until: Requested("GET", "mark-1", 1), then: ApplyLoseReply)
+    } else {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: 9, count: 1, until: Never, then: Drop)
+    }
+    list.push(mut holds, take head_hold)
+    let sim = bucket_law_sim_holds(tasks, real, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let mut world = level_world(tasks, sim.time, list.new(), 1048576)?
+    let declare_levels = sim_law_declared("volatile", None)
+    let mut writer = sim_law_open(tasks, r, sim, 601, declare_levels, level_sync(mut world)?, true)?
+    for _ in 0u64 .. 6 {
+        let receipt = bucket_order_commit(mut writer)?
+        durable(mut writer, receipt)?
+    }
+    let held_receipt = bucket_order_commit(mut writer)?
+    let weak = level(writer, "volatile")?
+    durable_at(mut writer, held_receipt, weak)?
+    let mut marks = level_sync(mut world)?
+    level_mark(mut marks, 1)?
+    let recovered_version = if apply_last {
+        let wanted = Position(store: identity(writer), branch: 0, version: 7)
+        sim_law_follower(mut writer, wanted, held_receipt, tasks, sim, mut world, plan)?
+        7u64
+    } else {
+        if let Error(Undecided) = durable(mut writer, held_receipt) {} else {
+            fail("L55-1: the held strongest barrier did not return Undecided")
+        }
+        6u64
+    }
+    let _ = take writer
+    let later = sim_law_open(tasks, r, sim, 602, declare_levels, level_sync(mut world)?, false)?
+    if version(snapshot(later)) != recovered_version {
+        fail("L55-1: B recovered the wrong prefix")
+    }
+    close(take later)?
+    if !apply_last {
+        sim_law_declarations(tasks, r, sim, mut world)?
+    }
+    let events = level_log(take world)?
+    let report = bucket_law_report(take sim)
+    if apply_last {
+        bucket_law_head_history(report)?
+        follower_heal_reads(report, "L56-W watch")
+    } else {
+        let invalid_head = view report.head_writes[list.len(report.head_writes) - 1]
+        let latest_claim = view report.head_writes[list.len(report.head_writes) - 2]
+        let Some(predecessor) = invalid_head.if_match else {
+            fail("L55-2: malformed fixture lost its precondition")
+        }
+        if predecessor != latest_claim.etag {
+            fail("L55-2: malformed fixture skipped its predecessor")
+        }
+        let mut after_claim = false
+        let mut after_malformed = false
+        let mut refused_gets = 0u64
+        let mut last_gets = 0u64
+        for request in report.requests {
+            if request.request == latest_claim.request {
+                after_claim = true
+            } else if request.request == invalid_head.request {
+                after_malformed = true
+            } else if after_claim {
+                if request.method != "GET" || request.key != "head" {
+                    fail("L55-2: a refusal made another request")
+                }
+                if after_malformed {
+                    last_gets += 1
+                } else {
+                    refused_gets += 1
+                }
+            }
+        }
+        if refused_gets != 3 || last_gets != 1 {
+            fail("L55-2: refusal requests did not stop after their head GET")
+        }
+    }
+    let mut synced_last = false
+    for event in events {
+        match event.kind {
+            Synced(9) if event.epoch == 1 && event.level == "volatile" => {
+                synced_last = true
+            },
+            Mark(1) if !synced_last => fail("L55-1: weak durability returned before Synced(9)"),
+            _ => (),
+        }
+    }
+    if !synced_last {
+        fail("L55-1: the world never synced position 9")
+    }
+    let mut newest = 0u64
+    let mut successor_writes = 0u64
+    for item in report.head_writes {
+        let epoch = read_le(item.data, 88, 8)
+        if item.data[29] != 2 {
+            fail("L55-1: sim head did not record authority 2")
+        }
+        if epoch == 1 {
+            newest = read_le(item.data, 120, 8)
+        }
+        if epoch == 2 {
+            successor_writes += 1
+        }
+    }
+    if newest != recovered_version + 2 || successor_writes != (if apply_last {
+        2u64
+    } else {
+        3u64
+    }) {
+        fail("L55: the head history contains an extra or missing write")
+    }
+    Ok(())
+}
+
+fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_first: bool) -> Result[(), Error] waits {
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 3, count: 1, until: At(20000000), then: Apply))
+    let sim = bucket_law_sim_holds(tasks, real, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let mut weak_holds: List[LevelHold] = list.with_capacity(2)
+    if hold_first {
+        list.push(mut weak_holds, LevelHold(level: "a", until: Never))
+    }
+    list.push(mut weak_holds, LevelHold(level: "b", until: At(10000000)))
+    let mut world = level_world(tasks, sim.time, take weak_holds, 1048576)?
+    let declare_levels = sim_law_declared("a", Some("b"))
+    let mut writer = sim_law_open(tasks, r, sim, 610, declare_levels, level_sync(mut world)?, true)?
+    let a = level(writer, "a")?
+    let b = level(writer, "b")?
+    let held_receipt = bucket_order_commit(mut writer)?
+    let mut marks = level_sync(mut world)?
+    durable_at(mut writer, held_receipt, a)?
+    host.sleep_until(sim.time, host.mono_ns(sim.time) + 1)
+    level_mark(mut marks, 1)?
+    durable_at(mut writer, held_receipt, b)?
+    level_mark(mut marks, 2)?
+    durable(mut writer, held_receipt)?
+    host.sleep_until(sim.time, host.mono_ns(sim.time) + 1)
+    level_mark(mut marks, 3)?
+    close(take writer)?
+    sim_law_reopen_refusal(tasks, r, sim, mut world, sim_law_declared("b", Some("a")), "a")?
+    let events = level_log(take world)?
+    let report = bucket_law_finish(take sim)
+    if list.len(report.head_writes) != 3 {
+        fail("L55-3: a weak barrier or refusal moved the register")
+    }
+    let request_id = report.head_writes[2].request
+    let mut head_at: Option[u64] = None
+    for item in report.requests {
+        if item.request == request_id && item.applied {
+            head_at = Some(item.at_ns)
+        }
+    }
+    let put_at = option.unwrap(head_at)
+    let mut first_sync: Option[u64] = None
+    let mut second_sync: Option[u64] = None
+    let mut first_mark: Option[u64] = None
+    let mut second_mark: Option[u64] = None
+    let mut third_mark: Option[u64] = None
+    for event in events {
+        match event.kind {
+            Synced(3) if event.level == "a" => {
+                first_sync = Some(event.at_ns)
+            },
+            Synced(3) if event.level == "b" => {
+                second_sync = Some(event.at_ns)
+            },
+            Mark(1) => {
+                first_mark = Some(event.at_ns)
+            },
+            Mark(2) => {
+                second_mark = Some(event.at_ns)
+            },
+            Mark(3) => {
+                third_mark = Some(event.at_ns)
+            },
+            _ => (),
+        }
+    }
+    let b_at = option.unwrap(second_sync)
+    let one_at = option.unwrap(first_mark)
+    let two_at = option.unwrap(second_mark)
+    let three_at = option.unwrap(third_mark)
+    if hold_first {
+        if first_sync != None || b_at > one_at {
+            fail("L55-3: level a ignored the stronger frontier")
+        }
+    } else {
+        let a_at = option.unwrap(first_sync)
+        if a_at >= one_at || one_at >= b_at {
+            fail("L55-3: level a waited for the stronger barrier")
+        }
+    }
+    if b_at > two_at || two_at >= put_at || put_at >= three_at {
+        fail("L55-3: waiters woke out of barrier order")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_sim_levels(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 553)
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+        sim_law_weak_ahead(tasks, c, r, seed, false, plan)?
+        sim_law_weak_ahead(tasks, c, r, seed, true, plan)?
+        sim_law_ordered_levels(tasks, c, r, seed, false)?
+        sim_law_ordered_levels(tasks, c, r, seed, true)
+    }, "L55 sim_levels fixture")
+}

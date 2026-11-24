@@ -1,0 +1,196 @@
+/// bug: a grammar, scalar resolution, emitter, or bounded expansion mistake.
+/// oracle: YAML Test Suite events and error cases, YAML 1.2 Core Schema, and
+/// a hand-derived 10-way alias family with 1,000,000,000 leaves at level nine.
+@test
+fn conformance() -> Result[(), String] {
+    let mut failures = string.new()
+    suite_vectors(mut failures)
+    let mut bomb = string.from("a0: &a0 [payload]\n")
+    let mut level = 1u64
+    while level <= 9 {
+        string.push(mut bomb, "a")
+        string.push_u64(mut bomb, level)
+        string.push(mut bomb, ": &a")
+        string.push_u64(mut bomb, level)
+        string.push(mut bomb, " [")
+        let mut i = 0u64
+        while i < 10 {
+            if i > 0 {
+                string.push(mut bomb, ", ")
+            }
+            string.push(mut bomb, "*a")
+            string.push_u64(mut bomb, level - 1)
+            i += 1
+        }
+        string.push(mut bomb, "]\n")
+        level += 1
+    }
+    match yaml.parse(bomb) {
+        Error(ByteLimit) => (),
+        Error(StepLimit) => (),
+        _ => string.push(mut failures, "9-level alias expansion: expected a resource refusal\n"),
+    }
+    let mut limits = yaml.defaults()
+    limits.steps = 10000
+    if let Error(StepLimit) = yaml.parse_with(bomb, limits) {} else {
+        string.push(mut failures, "alias expansion: expected StepLimit under a smaller step budget\n")
+    }
+    limits.steps = 4
+    if let Error(StepLimit) = yaml.parse_with("[a, b]", limits) {} else {
+        string.push(mut failures, "steps: expected StepLimit\n")
+    }
+    limits = yaml.defaults()
+    limits.allocation_bytes = 1
+    if let Error(ByteLimit) = yaml.parse_with("[a, b]", limits) {} else {
+        string.push(mut failures, "allocation: expected ByteLimit\n")
+    }
+    limits = yaml.defaults()
+    limits.input_bytes = 1
+    if let Error(InputLimit) = yaml.parse_with("[a, b]", limits) {} else {
+        string.push(mut failures, "input: expected InputLimit\n")
+    }
+    limits = yaml.defaults()
+    limits.depth = 2
+    if let Error(DepthLimit) = yaml.parse_with("[&a [x], [*a]]", limits) {} else {
+        string.push(mut failures, "alias nesting: expected DepthLimit\n")
+    }
+    if let Error(RecursiveAlias(_)) = yaml.parse("&a [*a]") {} else {
+        string.push(mut failures, "cyclic alias: expected RecursiveAlias\n")
+    }
+    if let Error(UnknownTag(_)) = yaml.parse("!local x") {} else {
+        string.push(mut failures, "custom tag: expected UnknownTag\n")
+    }
+    if let Error(DuplicateKey(_)) = yaml.parse("{15: a, 0xF: b}") {} else {
+        string.push(mut failures, "equal Core keys: expected DuplicateKey\n")
+    }
+    if let Error(DuplicateKey(_)) = yaml.parse("{? {a: 1, b: 2}: x, ? {b: 2, a: 1}: y}") {} else {
+        string.push(mut failures, "mapping order in keys: expected DuplicateKey\n")
+    }
+    if let Error(InvalidCharacter(_)) = yaml.parse("plain \u{feff} text") {} else {
+        string.push(mut failures, "embedded byte-order mark: expected InvalidCharacter\n")
+    }
+    vector(mut failures, "UTF-8 document start", b"\xf0\x9f\x90\x91", b"s4:\xf0\x9f\x90\x91", true)
+    vector(mut failures, "quote and colon in single-quoted root", b"'a''b: c'\n", b"s6:a'b: c", true)
+    vector(mut failures, "Core numbers and YAML 1.1 words", b"[yes, NO, On, off, ~, FALSE, +002, 0o17, 0x10, +.5, 2.E-1, .INF, -.inf, .NaN, 0b10, 1_000]", b"qs3:yess2:NOs2:Ons3:offnb0i1:2i2:15i2:16f3fe0000000000000;f3fc999999999999a;f7ff0000000000000;ffff0000000000000;f7ff8000000000000;s4:0b10s5:1_000;", true)
+    if failures != "" {
+        return Error(take failures)
+    }
+    Ok(())
+}
+
+fn vector(mut failures: String, id: String, input: Bytes, expected: Bytes, valid: bool) {
+    let source = result.unwrap(string.from_utf8(clone(input)))
+    let parsed = yaml.parse(source)
+    if !valid {
+        if let Ok(_) = parsed {
+            mismatch(mut failures, id, "accepted an invalid input")
+        }
+        return
+    }
+    let documents = match take parsed {
+        Ok(take docs) => take docs,
+        Error(issue) => {
+            let mut detail = string.from("refused valid input")
+            match issue {
+                Syntax(at) => error_at(mut detail, "syntax", at),
+                InvalidCharacter(at) => error_at(mut detail, "character", at),
+                UnknownTag(at) => error_at(mut detail, "tag", at),
+                UnknownAlias(at) => error_at(mut detail, "alias", at),
+                DuplicateKey(at) => error_at(mut detail, "duplicate key", at),
+                _ => (),
+            }
+            mismatch(mut failures, id, detail)
+            return
+        },
+    }
+    let mut actual = string.new()
+    for doc in documents {
+        project_value(mut actual, doc)
+    }
+    if list.compare_bytes(string.as_bytes(actual), expected) != Equal {
+        mismatch(mut failures, id, "Core tree differs from the event oracle")
+        return
+    }
+    let Ok(encoded) = yaml.emit(documents) else {
+        mismatch(mut failures, id, "emitter refused a parsed tree")
+        return
+    }
+    let decoded = match yaml.parse(encoded) {
+        Ok(take reparsed) => take reparsed,
+        Error(issue) => {
+            let mut detail = string.from("emission does not parse")
+            if let Syntax(at) = issue {
+                error_at(mut detail, "syntax", at)
+            }
+            mismatch(mut failures, id, detail)
+            return
+        },
+    }
+    if list.len(decoded) != list.len(documents) {
+        mismatch(mut failures, id, "document count changed")
+        return
+    }
+    let mut i = 0u64
+    for doc in documents {
+        if !yaml.equal(decoded[i], doc) {
+            mismatch(mut failures, id, "tree changed on emission")
+            return
+        }
+        i += 1
+    }
+}
+
+fn error_at(mut out: String, kind: String, at: u64) {
+    string.push(mut out, " (")
+    string.push(mut out, kind)
+    string.push(mut out, " at ")
+    string.push_u64(mut out, at)
+    string.push(mut out, ")")
+}
+
+fn mismatch(mut failures: String, id: String, detail: String) {
+    string.push(mut failures, id)
+    string.push(mut failures, ": ")
+    string.push(mut failures, detail)
+    string.push(mut failures, "\n")
+}
+
+fn frame(mut out: String, kind: String, payload: String) {
+    string.push(mut out, kind)
+    string.push_u64(mut out, string.byte_len(payload))
+    string.push(mut out, ":")
+    string.push(mut out, payload)
+}
+
+fn project_value(mut out: String, value: yaml.Value) {
+    match value {
+        Null => string.push(mut out, "n"),
+        Boolean(b) => string.push(mut out, if b {
+            "b1"
+        } else {
+            "b0"
+        }),
+        Integer(i) => frame(mut out, "i", i),
+        Text(s) => frame(mut out, "s", s),
+        Float(bits) => {
+            string.push(mut out, "f")
+            string.push_uint(mut out, bits, 16, 0, '0')
+            string.push(mut out, ";")
+        },
+        Sequence(items) => {
+            string.push(mut out, "q")
+            for item in items {
+                project_value(mut out, item)
+            }
+            string.push(mut out, ";")
+        },
+        Mapping(entries) => {
+            string.push(mut out, "m")
+            for entry in entries {
+                project_value(mut out, entry.key)
+                project_value(mut out, entry.value)
+            }
+            string.push(mut out, ";")
+        },
+    }
+}

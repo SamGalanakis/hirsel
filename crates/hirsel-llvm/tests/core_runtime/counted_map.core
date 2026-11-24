@@ -1,6 +1,6 @@
 ; A chain of counted nodes, each holding its predecessor as a map value.
 ; A removed slot has no initialized key or value and must never be visited.
-; PROG-11 orders these three words as meta, key, value. Two 24-byte slots
+; The index in docs/internal/map-index.md orders the words as meta, key, value. Two 24-byte slots
 ; are followed by a 32-byte header and an 80-byte group. Cleanup only reads
 ; the slots, and MEM-24 charges 2 × (8 + 8 + 16) = 64 bytes.
 core v1

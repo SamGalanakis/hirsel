@@ -1,0 +1,53 @@
+[package]
+name = "image_core"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+media_container = { major = 1, path = "../media_container" }
+
+media_bits = { major = 1, path = "../media_bits" }
+
+[sources]
+"image.hirsel" = "image"
+"jpeg.hirsel" = "image"
+"webp.hirsel" = "image"
+"gif_header.hirsel" = "image"
+"avif_header.hirsel" = "image"
+"metadata.hirsel" = "image"
+
+"raster.hirsel" = "image"
+"qoi.hirsel" = "image"
+"png.hirsel" = "image"
+"png_encode.hirsel" = "image"
+
+"gif_decode.hirsel" = "image"
+"avif_item.hirsel" = "image"
+"avif_sequence.hirsel" = "image"
+"avif_mux.hirsel" = "image"
+
+"geometry.hirsel" = "image"
+"linear.hirsel" = "image"
+"resize.hirsel" = "image"
+
+"thumbhash.hirsel" = "image"
+"thumbhash_decode.hirsel" = "image"
+
+"png_simd.hirsel" = "image"
+"resize_simd.hirsel" = "image"
+
+"icc.hirsel" = "image"
+
+[tests]
+limit = 16777216
+grants = []
+
+[tests.sources]
+"probe_laws.hirsel" = "tests"
+"codec_laws.hirsel" = "tests"
+"container_laws.hirsel" = "tests"
+"resize_laws.hirsel" = "tests"
+"hash_laws.hirsel" = "tests"
+"simd_laws.hirsel" = "tests"
+"icc_laws.hirsel" = "tests"

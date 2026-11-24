@@ -1,10 +1,12 @@
 //! Tests over the FORM v0 samples. Every expected value is the hand-derived `run:`
 //! line in the sample file, not output of this crate.
 
-use crate::text::{parse, print};
-use crate::*;
+mod frame;
+mod own;
 
 use crate::eval;
+use crate::text::{parse, print};
+use crate::*;
 
 const SAMPLES: &[(&str, &str)] = &[
     ("arith", include_str!("../samples/arith.core")),
@@ -365,9 +367,7 @@ fn direct_calls_agree_with_their_callee_by_signature_value() {
 /// Bug: two slots share a home and the `dead` of one still ends it, so the other,
 /// reached without its own `live` on that path, is used after the home's end.
 /// Law: a body well formed before `share_slots` is well formed after it. s1 is
-/// begun on b1; s0 is begun and ended on b2; both reach b3, which writes and reads
-/// s1. Their needed ranges never meet, so they share a home, and on b2 -> b3 s0's
-/// `dead` precedes s1's write.
+/// begun on b1 and s0 ends on b2. Their shared home stays live for s1's use in b3.
 #[test]
 fn shared_slots_keep_every_use_inside_its_storage() {
     let text = "core v1\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n  slot s0 = i32\n  slot s1 = i32\n  addr a0 = s0 : i32\n  addr a1 = s1 : i32\nb0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  live s1\n  jump b3\nb2:\n  live s0\n  address a0\n  store a0, v0\n  v3: i32 = read a0\n  dead s0\n  jump b3\nb3:\n  address a1\n  store a1, v1\n  v4: i32 = read a1\n  dead s1\n  return v4\n}\n";

@@ -1,4 +1,5 @@
 include!("../../../hirsel-cranelift/tests/support/native.rs");
+include!("front_cases.rs");
 impl NativeInput for hirsel_core_program_tests::SourceProgram {
     fn module(&self) -> &c::Module {
         self
@@ -11,23 +12,9 @@ impl NativeInput for hirsel_core_program_tests::SourceProgram {
     }
 }
 fn check_front_end_run_cases() {
-    fn files(path: &std::path::Path, out: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files(&path, out)
-            } else if path.extension().is_some_and(|e| e == "hirsel") {
-                out.push(path)
-            }
-        }
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let mut cases = Vec::new();
-    files(&root.join("cases"), &mut cases);
-    cases.sort();
     let mut count = 0;
     let mut failures = Vec::new();
-    for file in cases {
+    for file in front_run_paths() {
         let source = fs::read_to_string(&file).unwrap();
         if !source.lines().any(|l| l.starts_with("// expect: run ")) {
             continue;
@@ -70,7 +57,15 @@ fn check_front_end_run_cases() {
                 runs.push((f, args));
                 count += 1;
             }
-            execute(&module, &runs, false);
+            execute_reports_checked(
+                &module,
+                &runs,
+                false,
+                1_000_000,
+                None,
+                None,
+                NativeCheck::Source,
+            );
             for (line, run) in pending {
                 let agrees = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute(&module, &[run], false)
@@ -193,7 +188,7 @@ fn check_growth_shadow_words() {
             &cases,
             false,
             include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"),
-            true,
+            NativeCheck::Memcheck,
         );
     }
 }

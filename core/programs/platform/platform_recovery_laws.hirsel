@@ -1,0 +1,259 @@
+type HandInstall: codec { old: Bytes, new: Bytes, hosted: Bytes, bare: Bytes }
+
+// Offline fixture for the native T1 history. The previous host created this catalog
+// and accepted OLD's store ID. A real host reopens the resulting Dirty row.
+pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv: Args, input: Stdin) -> Result[(), Exit] waits {
+    let mode = option.unwrap(args.get(argv, 0u64))
+    let raw = result.unwrap(std.io.read_all(input))
+    let codec: std.codec.Codec[HandInstall] = std.codec.of()
+    let fixture = result.unwrap(std.codec.decode(codec, raw))
+    let db = result.unwrap(store.open(tasks, dir, c, rnd, result.unwrap(store.sized(Directory, 2147483648u64))))
+    let (take opened, _) = must(open(take db, Config(max_places: 4u64, idle_ms: 60000u64)), "T1: catalog")
+    let mut h = take opened
+    let name = "app"
+    if mode == "seed" {
+        let made = {
+            let t = view h.t
+            store.run(mut h.db, None, (store.copy_env(fixture), store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+                let Some(found) = st(store.fetch(tx, call_env.2.groups, call_env.1))? else { return Error(Unknown) }
+                let Some(w) = st(store.fetch(tx, call_env.2.wake, call_env.1))? else { return Error(Unknown) }
+                if let Clean(_) = w.wake { let _ = mark_dirty(mut tx, call_env.2, call_env.1)? }
+                let mut g = found
+                expect(!is_none(g.store_id), "T1: registration did not accept a store ID")
+                g.assembly = clone(call_env.0.old)
+                g.retained = list.new()
+                let attempt = fresh_attempt(mut tx, call_env.2)?
+                let hosted_binding = Binding(identity: clone(call_env.0.hosted), n_place: 1048576u64)
+                let d = DeployRow(request: list.new(), attempt: attempt, assembly: clone(call_env.0.new), image: list.new(),
+                    old_assembly: clone(g.assembly), old_binding: Some(clone(hosted_binding)), old_claim: None, binding: Some(take hosted_binding),
+                    new_retained: false, digest: bytes_of(32u64, 9u8), release: list.new(), activation: 10u64,
+                    old: w.gen, candidate: w.gen + 1u64, outcome: Failed("not installed after recovery"), describe: list.new(),
+                    retry_of: None, fetch_ns: None, assemble_ns: None, preview: operator.Preview(grants: launcher.no_grants(), entries: list.new(), triggers: list.new()))
+                g.activation = 3u64
+                retain_release(mut g, d.assembly)
+                g.recovery = Some(Unmatched(attempt, 11u64, clone(call_env.0.bare), Some(524288u64)))
+                index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
+                st(store.put(mut tx, call_env.2.groups, call_env.1, g))?
+                st(store.put(mut tx, call_env.2.deploys, call_env.1, d))
+            })
+        }
+        must(decided(mut h, take made), "T1: seed marked group")
+        must(synced(mut h), "T1: sync marked group")
+    } else {
+        expect(mode == "inspect", "T1: unknown catalog fixture command")
+        let g = option.unwrap(must(group_row(h, name), "T1: read group"))
+        expect(g.activation == 12u64 && is_none(g.recovery), "T1: the relaunch did not clear the mark at 12")
+        let d = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name)))
+        expect(g.assembly == d.old_assembly && !roots_release(g, d.assembly), "T1: failed deploy did not keep OLD alone")
+        expect(failed_outcome(d.outcome), "T1: adoption changed the deploy outcome")
+        let selected = result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.activations, (g.incarnation, 12u64)))
+        expect(selected == Some(clone(g.assembly)), "T1: activation 12 was not indexed to OLD")
+        let pending = result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.activations, (g.incarnation, 10u64)))
+        expect(is_none(pending), "T1: adoption changed the attempt's activation")
+    }
+    result.unwrap(store.close(close(take h)))
+    Ok(())
+}
+
+pub fn inspect_hand_install(root: Dir, argv: Args, input: Stdin) -> Result[(), Exit] waits {
+    let expected = result.unwrap(std.io.read_all(input))
+    let path = option.unwrap(args.get(argv, 0u64))
+    let dir = result.unwrap(host.open_dir(root, path))
+    let opts = result.unwrap(store.sized(Directory, 134217728u64))
+    let source = result.unwrap(store.open_read_only(dir, opts))
+    let at = store.read_only_snapshot(source)
+    expect(store.version(at) == 12, "T1: the native install did not take version 12")
+    let mut schema = store.declare_read_only(source)
+    let codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+    let releases = result.unwrap(store.declare_release_table(mut schema, codec))
+    let installed_row = option.unwrap(result.unwrap(store.read_only_get(source, releases, 12u64)))
+    expect(installed_row.n_place == 524288 && installed_row.binding == expected, "T1: the native install recorded another release")
+    expect(list.len(installed_row.prepared) == 0, "T1: the native install recorded a prepared witness")
+    let handle = result.unwrap(store.declare_activation_table(mut schema))
+    let raw = option.unwrap(result.unwrap(store.read_only_get(source, handle, 0u8)))
+    let installed = option.unwrap(runner.decode_description(raw))
+    let binding = result.unwrap(runner.identity_digest(installed))
+    expect(installed.n_place == 524288 && binding == expected, "T1: the native install described another release")
+    Ok(())
+}
+
+fn failed_outcome(outcome: DeployOutcome) -> bool {
+    match outcome { Failed(why) => why == "not installed after recovery", _ => false }
+}
+
+fn cutover_read(store_at: u64) -> Bytes {
+    let description = describe_of(if store_at == 2u64 { image_two() } else { image() })
+    let witness_bytes: Bytes = if store_at == 2u64 { image_two() } else { list.new() }
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: result.unwrap(runner.identity_digest(description)), n_place: Some(description.n_place), prepared: take witness_bytes, witness_present: store_at == 2u64, claim: None)
+    let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, read, mut raw))
+    take raw
+}
+
+// A group serving at gen 1 and a deploy prepared but not yet sent: its Start and cutover.
+fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Request]) waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    answer_opened(mut r, "g", 1u64)
+    let old = last(r, "g")
+    let go = prepared(mut r, old)
+    (take r, old, take go)
+}
+
+fn trace_read(id: u8, n_place: u64) -> Bytes {
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: bytes_of(32u64, id), n_place: Some(n_place), prepared: list.new(), witness_present: false, claim: None)
+    let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, read, mut raw))
+    take raw
+}
+
+fn claim_read(epoch: u64, holder: u8) -> Bytes {
+    let description = describe_of(image())
+    let binding = result.unwrap(runner.identity_digest(description))
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: take binding,
+        n_place: Some(description.n_place), prepared: list.new(), witness_present: false, claim: Some((epoch, bytes_of(16u64, holder))))
+    let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, read, mut raw))
+    take raw
+}
+
+fn bucket_absent_witness(c: Clock, rnd: Random) waits {
+    let mut setup = rig(c, rnd, 4u64)
+    add(mut setup, "g", "t")
+    op_wake(mut setup, "g")
+    let old = last(setup, "g")
+    old_says(mut setup, old, PlaceOpened(runner.PlaceReady(version: 1u64, store_hi: 1u64, store_lo: 2u64,
+        release: release_at(1u64), retain_from: 0u64, ready_ns: 0u64, read: claim_read(1u64, 1u8))))
+    let go = prepared(mut setup, old)
+    pump(mut setup, take go)
+    let mut probing = restart_bare(take setup, 4u64)
+    trace_current(mut probing, 1u64, claim_read(1u64, 1u8))
+    if let Some(Undecided(ProbeOld)) = deploy_outcome(probing.h, "g") {} else {
+        fail("L44 Bucket: absence under OLD's claim did not keep the deploy Undecided")
+    }
+    expect(starts_are(probing, two_pairs(3u64, 2u64, image_two(), 4u64, 1u64, image())),
+        "L44 Bucket: absence under OLD's claim did not probe OLD next")
+    trace_current(mut probing, 1u64, claim_read(2u64, 2u8))
+    expect(failed_with(probing, "not installed after recovery"), "L44 Bucket: absence under a new claim proved no outcome")
+}
+
+fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits {
+    trace_probe_authority(c, rnd, (1, 2), bytes_of(32, 1), bytes_of(32, if shared { 1u8 } else { 2u8 }), None, retain_r)
+}
+
+// `old_claim` is the claim Preparing pinned for OLD: a Bucket OLD holds one, a Directory OLD none.
+fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identity: Bytes, new_identity: Bytes, old_claim: Option[(u64, Bytes)], retain_r: bool) -> Rig waits {
+    let (take setup, _, _) = cut_case(c, rnd)
+    let mut r = take setup
+    let made = {
+        let t = view r.h.t
+        let before: Bytes = clone(old_identity)
+        let after: Bytes = clone(new_identity)
+        let pinned: Option[(u64, Bytes)] = clone(old_claim)
+        store.run(mut r.h.db, None, (retain_r, take before, store.copy_env(t), expected, take after, take pinned), fn(mut tx, call_env) -> Result[(), Refused] {
+            let g0 = option.unwrap(st(store.fetch(tx, call_env.2.groups, "g"))?)
+            let d0 = option.unwrap(st(store.fetch(tx, call_env.2.deploys, "g"))?)
+            let mut g = g0
+            let mut d = d0
+            g.activation = 3u64
+            g.store_id = Some(call_env.3)
+            if call_env.0 { retain_release(mut g, bytes_of(32u64, 6u8)) }
+            d.activation = 10u64
+            d.outcome = Undecided(ProbeNew)
+            d.old_binding = Some(Binding(identity: clone(call_env.1), n_place: 1048576u64))
+            d.old_claim = clone(call_env.5)
+            d.binding = Some(Binding(identity: clone(call_env.4), n_place: 1048576u64))
+            index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
+            st(store.put(mut tx, call_env.2.groups, "g", g))?
+            st(store.put(mut tx, call_env.2.deploys, "g", d))
+        })
+    }
+    must(decided(mut r.h, take made), "traces: seed the deploy")
+    must(synced(mut r.h), "traces: sync the deploy")
+    restart_bare(take r, 4u64)
+}
+
+fn trace_current(mut r: Rig, version: u64, take data: Bytes) waits {
+    let child = last(r, "g")
+    old_says(mut r, child, PlaceCurrent(version, take data))
+    finish(mut r, child, Code(1i32), None)
+}
+
+fn trace_marked(c: Clock, rnd: Random) -> Rig waits {
+    let mut r = trace_probe(c, rnd, true, false)
+    trace_current(mut r, 11u64, trace_read(4u8, 524288u64))
+    expect(rooted_at(r, image(), 3u64), "T1: a no-match read moved the group")
+    expect(collection_keeps(mut r, true, true), "T1: a no-match read dropped a candidate")
+    take r
+}
+
+fn trace_replayed(c: Clock, rnd: Random, report: bool) -> Rig waits {
+    let mut r = trace_marked(c, rnd)
+    let child = last(r, "g")
+    if report { launcher.remember_place_answer(mut r.f, child, PlaceCurrent(11u64, list.new())) }
+    let _ = launcher.end(mut r.f, child, Code(1i32), None)
+    restart(take r, 4u64)
+}
+
+fn release_recovery_traces(c: Clock, rnd: Random) waits {
+    // Both records match the hand install. The failed outcome selects OLD.
+    let mut r = trace_marked(c, rnd)
+    trace_current(mut r, 12u64, trace_read(1u8, 1048576u64))
+    expect(rooted_at(r, image(), 12u64) && last_activation(r) == Some(12u64), "T1: adoption did not relaunch OLD at 12")
+    expect(collection_keeps(mut r, false, true), "T1: failed deploy retained NEW after adoption")
+    // The adopted start dies before its open, then the store advances to an unmatched release.
+    let adopted = last(r, "g")
+    finish(mut r, adopted, Code(1i32), None)
+    expect(failing_cause(r, "g") == Some("exit status 1"), "T2: Adopted showed the previous mark's cause")
+    trace_current(mut r, 13u64, trace_read(4u8, 524288u64))
+    expect(failing_cause(r, "g") == Some("No recovery candidate matches the store at activation 13: its release identity is 0404040404040404040404040404040404040404040404040404040404040404 at n_place 524288; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576; last start: NotCurrent: the store is at activation 13; this start requested 12"), "T2: wrong cause or candidate list after the store moved again")
+    let _ = take r
+
+    let mut distinct = trace_probe(c, rnd, false, false)
+    trace_current(mut distinct, 11u64, trace_read(4u8, 524288u64))
+    trace_current(mut distinct, 12u64, trace_read(2u8, 1048576u64))
+    expect(rooted_at(distinct, image_two(), 12u64) && collection_keeps(mut distinct, true, true),
+        "T1: the distinct identity did not adopt NEW and retain OLD")
+    let _ = take distinct
+
+    let with_report = trace_replayed(c, rnd, true)
+    let prefix = "No recovery candidate matches the store at activation 11: its release identity is 0404040404040404040404040404040404040404040404040404040404040404 at n_place 524288; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576, 0909090909090909090909090909090909090909090909090909090909090909 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576; last start: "
+    expect(failing_cause(with_report, "g") == Some(joined(prefix, "NotCurrent: the store is at activation 11; this start requested 3")), "T2: inventory lost the reported refusal")
+    let _ = take with_report
+    let without_report = trace_replayed(c, rnd, false)
+    expect(failing_cause(without_report, "g") == Some(joined(prefix, "exit status 1")), "T2: an unreported end did not supply its exit status")
+    let _ = take without_report
+
+    // The bare, wrong-allowance and misordered native installs all report this identity.
+    let mut unmatched = restart_bare(trace_marked(c, rnd), 4u64)
+    trace_current(mut unmatched, 12u64, trace_read(4u8, 524288u64))
+    expect(rooted_at(unmatched, image(), 3u64), "T1: an unmatched install moved OLD's selection")
+    let marked = option.unwrap(must(group_row(unmatched.h, "g"), "T1: read unmatched group"))
+    if let Some(Unmatched(_, 12u64, id, Some(524288u64))) = marked.recovery {
+        expect(id == bytes_of(32, 4), "T1: Unmatched used another identity")
+    } else { fail("T1: the host did not mark the install Unmatched at 12") }
+    expect(failed_with(unmatched, "not installed after recovery"), "T1: an unmatched install changed the deploy outcome")
+    expect(failing_cause(unmatched, "g") == Some("No recovery candidate matches the store at activation 12: its release identity is 0404040404040404040404040404040404040404040404040404040404040404 at n_place 524288; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576, 0909090909090909090909090909090909090909090909090909090909090909 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576; last start: NotCurrent: the store is at activation 12; this start requested 3"), "T1: wrong cause after an unmatched install")
+    expect(collection_keeps(mut unmatched, true, true), "T1: collection dropped a candidate after an unmatched install")
+    let _ = take unmatched
+
+    let mut probe = trace_probe(c, rnd, false, false)
+    trace_current(mut probe, 3u64, list.new())
+    trace_current(mut probe, 3u64, list.new())
+    expect(failing_cause(probe, "g") == Some("NotCurrent: the store is at activation 3; this start requested 10"), "T3: the probe used the group's old selection for its cause")
+    let next_retry = probe.now.mono_ns + SECOND_NS
+    at_mono(mut probe, next_retry)
+    trace_current(mut probe, 10u64, list.new())
+    expect(failing_cause(probe, "g") == Some("NotCurrent: the store's release identity at activation 10 is not that of assembly 0909090909090909090909090909090909090909090909090909090909090909, which this start ran"),
+        "T3: an equal-activation refusal did not name the release identity")
+    let _ = take probe
+
+    let mut retained = trace_probe(c, rnd, false, true)
+    trace_current(mut retained, 11u64, trace_read(6u8, 1048576u64))
+    expect(failing_cause(retained, "g") == Some("No recovery candidate matches the store at activation 11: its release identity is 0606060606060606060606060606060606060606060606060606060606060606 at n_place 1048576; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576, 0909090909090909090909090909090909090909090909090909090909090909 with identity 0202020202020202020202020202020202020202020202020202020202020202 at n_place 1048576; last start: NotCurrent: the store is at activation 11; this start requested 10"), "T4: wrong cause for a retained release outside the candidate list")
+    expect(names_root(collected_roots(mut retained), bytes_of(32u64, 6u8)), "T4: collection removed the retained release")
+}

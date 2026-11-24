@@ -36,7 +36,7 @@ fn profile(net: Net, time: Clock, tasks: Tasks, random: Random, input: Stdin, ou
     list.fill(mut key, 32, 165u8)
     let secret_key = result.unwrap(secret.seal(take key, "kdf"))
     let credentials = std.cred.from_secret(string.from("bench"), take secret_key, string.new())
-    let mut client = result.unwrap(std.object.start(net, tasks, take bucket, take credentials, None, System, time, random, 1, 4194304, clock.deadline_after_ms(host.mono_ns(time), 10000)))
+    let mut client = result.unwrap(std.object.start(net, tasks, take bucket, take credentials, None, System, time, random, std.object.LaneConfig(requested_lanes: 1, lane_bytes: 4194304), clock.deadline_after_ms(host.mono_ns(time), 10000)))
     let mut buf: Bytes = list.with_capacity(BODY)
     if put {
         list.fill(mut buf, BODY, 165u8)

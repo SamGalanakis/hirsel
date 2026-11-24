@@ -1,0 +1,112 @@
+// LANG-6, OWN-7, OWN-16: the view-join matrix for `?`. A join of views is an argument
+// before a `?` that may leave: its selected temporary (3) ends with the statement or
+// on the `?` exit, before the locals b (2), a (1). opt(c) is Some(1) only for c == 1.
+// tried: c == 1 makes 3: 3 + 1 = 4; c == 0 makes 3, then `?` leaves: 0; c == 5 views
+// a and leaves: 0. tried_bytes: len("abc") + 1 = 4, or the `?` exit: 0.
+// tried_let: the join is let-bound, then `?` leaves with it live.
+// expect: run tried(1) = 4 trace 3,2,1
+// expect: run tried(0) = 0 trace 3,2,1
+// expect: run tried(5) = 0 trace 2,1
+// expect: run tried_bytes(1) = 4
+// expect: run tried_bytes(0) = 0
+// expect: run tried_let(1) = 4 trace 3,2,1
+// expect: run tried_let(0) = 0 trace 3,2,1
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+scoped type Holder {
+    m: View[Mark]
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn mk(i: u64) -> Mark {
+    result.unwrap(Mark(id: i))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn both(x: Mark, y: Mark) -> u64 {
+    x.id * 10 + y.id
+}
+
+fn opt(c: u64) -> Option[u64] {
+    if c == 1 {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn plus(m: Mark, n: u64) -> u64 {
+    m.id + n
+}
+
+fn width_plus(b: Bytes, n: u64) -> u64 {
+    list.len(b) + n
+}
+
+fn tried_in(c: u64) -> Option[u64] {
+    let a = mk(1)
+    let b = mk(2)
+    Some(plus(if c < 5 {
+        me(mk(3))
+    } else {
+        view a
+    }, opt(c)?))
+}
+
+fn tried(c: u64) -> u64 {
+    match tried_in(c) {
+        Some(x) => x,
+        None => 0
+    }
+}
+
+fn tried_bytes_in(c: u64) -> Option[u64] {
+    Some(width_plus(match c {
+        1 => string.as_bytes(made("abc")),
+        _ => string.as_bytes(made("abcde"))
+    }, opt(c)?))
+}
+
+fn tried_bytes(c: u64) -> u64 {
+    match tried_bytes_in(c) {
+        Some(x) => x,
+        None => 0
+    }
+}
+
+fn tried_let_in(c: u64) -> Option[u64] {
+    let a = mk(1)
+    let b = mk(2)
+    let v = loop {
+        if c < 5 {
+            break me(mk(3))
+        }
+        break view a
+    }
+    Some(plus(v, opt(c)?))
+}
+
+fn tried_let(c: u64) -> u64 {
+    match tried_let_in(c) {
+        Some(x) => x,
+        None => 0
+    }
+}

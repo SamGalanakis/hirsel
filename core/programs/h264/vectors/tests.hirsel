@@ -1,0 +1,128 @@
+fn name(prefix: String, index: u64, suffix: String) -> String {
+    let mut s: String = string.with_capacity(32)
+    string.push(mut s, prefix)
+    string.push_u64(mut s, index)
+    string.push(mut s, suffix)
+    s
+}
+
+fn buffer(size: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(size)
+    list.fill(mut b, size, 0)
+    b
+}
+
+// Reads up to need bytes of f at offset at into buf, which it empties first.
+fn read_exact(mut f: HostFile, at: u64, mut buf: Bytes, need: u64) -> u64 waits {
+    list.clear(mut buf)
+    while list.len(buf) < need {
+        let n = result.unwrap(std.file.read_at(mut f, at + list.len(buf), mut buf))
+        if n == 0 {
+            break
+        }
+    }
+    list.len(buf)
+}
+
+// reference.c writes each picture as width and height (u32), the output
+// timestamp (u64), then unpadded Y, U and V planes.
+fn check_frame(mut expected: HostFile, at: u64, mut scratch: Bytes, frame: h264.Frame, out: Bytes) -> u64 waits {
+    let width: u64 = int.widen(frame.width)
+    let height: u64 = int.widen(frame.height)
+    let size = width * height * 3 / 2
+    if read_exact(mut expected, at, mut scratch, 16 + size) < 16 + size {
+        fail("decoder produced more picture bytes than the C reference")
+    }
+    let w: u32 = list.word_le(scratch, 0)
+    let h: u32 = list.word_le(scratch, 4)
+    let timestamp: u64 = list.word_le(scratch, 8)
+    if w != frame.width || h != frame.height || timestamp != frame.timestamp {
+        fail("picture size or timestamp differs from the C reference")
+    }
+    if list.slice(scratch, 16, 16 + size) != list.slice(out, 8, 8 + size) {
+        fail("picture differs from the C reference")
+    }
+    at + 16 + size
+}
+
+fn check_decode(f: Foreign[h264.H264], d: Dir, index: u64) waits {
+    let nals = result.unwrap(std.file.read(d, name("d-", index, ".nal")))
+    let mut expected = result.unwrap(std.file.open(d, name("d-", index, ".demo"), Read))
+    let mut decoder = result.unwrap(h264.decoder(f, 1920, 1088))
+    let capacity = h264.decoded_capacity(decoder)
+    let mut out = buffer(capacity)
+    let mut scratch: Bytes = list.with_capacity(capacity + 8)
+    let mut at = 0u64
+    let mut position = 0u64
+    let mut timestamp = 100u64
+    while at < list.len(nals) {
+        let size: u32 = list.word_le(nals, at)
+        let end = at + 4 + int.widen(size)
+        if let Some(frame) = result.unwrap(h264.decode(mut decoder, list.slice(nals, at + 4, end), timestamp, mut out)) {
+            position = check_frame(mut expected, position, mut scratch, frame, out)
+        }
+        timestamp += 1
+        at = end
+    }
+    while let Some(frame) = result.unwrap(h264.finish(mut decoder, mut out)) {
+        position = check_frame(mut expected, position, mut scratch, frame, out)
+    }
+    if position == 0 || read_exact(mut expected, position, mut scratch, 1) != 0 {
+        fail("decoder produced fewer pictures than the C reference")
+    }
+}
+
+fn check_encode(f: Foreign[h264.H264], d: Dir, index: u64) waits {
+    let config = result.unwrap(std.file.read(d, name("e-", index, ".config")))
+    let yuv = result.unwrap(std.file.read(d, name("e-", index, ".yuv")))
+    let packets = result.unwrap(std.file.read(d, name("e-", index, ".encoded")))
+    let width: u32 = list.word_le(config, 0)
+    let height: u32 = list.word_le(config, 4)
+    let fps: u32 = list.word_le(config, 8)
+    let bitrate: u32 = list.word_le(config, 12)
+    let main: u32 = list.word_le(config, 16)
+    let profile: h264.Profile = if main == 1 {
+        Main
+    } else {
+        Baseline
+    }
+    let mut encoder = result.unwrap(h264.encoder(f, width, height, fps, bitrate, profile))
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    let rate: u64 = int.widen(fps)
+    let picture = w * h * 3 / 2
+    let mut at = 0u64
+    for i in 0u64 .. list.len(yuv) / picture {
+        let start = i * picture
+        let n = result.unwrap(h264.encode(mut encoder, list.slice(yuv, start, start + picture), i * 1000 / rate))
+        let mut packet = buffer(int.widen(n))
+        let copied = result.unwrap(h264.copy_packet(encoder, mut packet))
+        let size: u32 = list.word_le(packets, at)
+        let end = at + 4 + int.widen(size)
+        if copied != n || size != n || end > list.len(packets) || packet != list.slice(packets, at + 4, end) {
+            fail("access unit differs from the C reference")
+        }
+        at = end
+    }
+    if at == 0 || at != list.len(packets) {
+        fail("encoder produced fewer access units than the C reference")
+    }
+}
+
+/// bug: The wrapper's NAL feed, drain, plane copy-out or encoder configuration diverges from OpenH264 called directly.
+/// oracle: OpenH264 decoder_test.cpp vectors decoded and CiscoVT2people encoded by reference.c over the same libopenh264.a.
+@test
+fn conformance(f: Foreign[h264.H264], d: Dir, out: Stdout) -> Result[(), ()] waits {
+    let counts = result.unwrap(std.file.read(d, "count"))
+    let decodes: u64 = list.word_le(counts, 0)
+    let encodes: u64 = list.word_le(counts, 8)
+    for index in 0u64 .. decodes {
+        check_decode(f, d, index)
+        result.unwrap(stdout.write(out, name("d-", index, "\n")))
+    }
+    for index in 0u64 .. encodes {
+        check_encode(f, d, index)
+        result.unwrap(stdout.write(out, name("e-", index, "\n")))
+    }
+    Ok(())
+}

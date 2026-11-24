@@ -1,0 +1,49 @@
+fn buffer(size: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(size)
+    list.fill(mut out, size, 0)
+    out
+}
+
+fn check_bounds(f: Foreign[h264.H264]) waits {
+    let limited = bound bytes 1048576 {
+        if let Error(Capacity) = h264.decoder(f, 320, 192) {
+            true
+        } else {
+            false
+        }
+    }
+    if !result.unwrap(limited) {
+        fail("decoder opened without its heap reservation")
+    }
+    let mut decoder = result.unwrap(h264.decoder(f, 320, 192))
+    let mut out = buffer(h264.decoded_capacity(decoder))
+    // H.264 7.3.2.1.1, Baseline SPS coding 8192 by 4096.
+    let bomb = b"\x00\x00\x01\x67\x42\x00\x34\xda\x00\x20\x00\x08\x06\x40"
+    // This SPS codes 640 by 384 and crops to 144 by 160.
+    let cropped = b"\x00\x00\x01\x67\x42\x00\x34\xda\x02\x80\xc7\x80\xf9\x81\xc5"
+    if let Error(Limit) = h264.decode(mut decoder, bomb, 0, mut out) {} else {
+        fail("oversized coded picture accepted")
+    }
+    if let Error(Limit) = h264.decode(mut decoder, cropped, 0, mut out) {} else {
+        fail("cropping bypassed the coded size limit")
+    }
+    let combined = b"\x00\x00\x01\x09\xf0\x00\x00\x01\x67\x42\x00\x34\xda\x00\x20\x00\x08\x06\x40"
+    if let Error(InvalidNal) = h264.decode(mut decoder, combined, 0, mut out) {} else {
+        fail("second start code bypassed SPS validation")
+    }
+    let mut short = buffer(h264.decoded_capacity(decoder) - 1)
+    if let Error(ShortBuffer) = h264.finish(mut decoder, mut short) {} else {
+        fail("undersized output accepted")
+    }
+    if let Error(InvalidConfig) = h264.encoder(f, 4098, 2160, 30, 1000000, Main) {} else {
+        fail("oversized encode dimensions accepted")
+    }
+}
+
+/// bug: A crop or second NAL can disguise an oversized coded picture, or a session can allocate without budget.
+/// oracle: H.264 7.3.2.1.1 and the declared coded-size and heap limits.
+@test
+fn limits(f: Foreign[h264.H264]) -> Result[(), ()] waits {
+    check_bounds(f)
+    Ok(())
+}

@@ -1,6 +1,16 @@
 //! Callable payloads use typed addresses, so a rigid generic call and its closed
 //! scalar instance have the same convention. Adapters retain FORM's task/status ABI.
+use super::calls::CallScratch;
 use super::*;
+
+#[derive(Clone, Copy)]
+pub(super) struct CallableAbi {
+    pub(super) signature: SigId,
+    pub(super) params: PoolRange<Rep>,
+    pub(super) result: Rep,
+    pub(super) regions: PoolRange<u32>,
+    pub(super) scoped_result: bool,
+}
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn indirect_signature(
@@ -53,6 +63,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             params: std::mem::take(buffer),
             results,
             dest,
+            anchors: vec![],
             never: result == NEVER,
         };
         if let Some(&row) = self
@@ -98,6 +109,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
+    pub(super) fn checked_function_item(&mut self, f: usize, n: NodeId) -> Option<TyId> {
+        let g = &self.p.fns[f];
+        if mentions_error(&self.t, g.callable) {
+            self.inherited_refusal = true;
+            self.halt();
+            return None;
+        }
+        if g.params.iter().any(|p| self.vector_shape(p.ty).is_some())
+            || self.vector_shape(g.result).is_some()
+        {
+            self.refuse(
+                "SEM-11",
+                n,
+                "a function with a vector parameter or result cannot be a callable value",
+            );
+            return None;
+        }
+        if g.anchors
+            .iter()
+            .any(|&i| !self.region_handle(g.params[i as usize].ty))
+        {
+            self.refuse(
+                "LANG-13",
+                n,
+                "a result anchored to a view parameter fits no callable type",
+            );
+            return None;
+        }
+        let ty = g.callable;
+        if let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
+            && !crate::decls::scoped_result_rooted(&self.p.decls, &self.t, *result, false)
+        {
+            self.gap(
+                n,
+                "scoped callable result region anchors are not represented",
+            );
+            return None;
+        }
+        Some(ty)
+    }
+
     pub(super) fn item_adapter(
         &mut self,
         item: usize,
@@ -112,26 +164,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        self.callable_adapter(raw, Some((item, types)), ty, n, false)
+        self.callable_adapter(raw, Some((item, types)), ty, n, None)
     }
-    pub(super) fn item_adapter_closed(
+    pub(super) fn item_descriptor_adapter(
         &mut self,
+        raw: FuncId,
         item: usize,
         types: &[TyId],
         ty: TyId,
         n: NodeId,
+        depends_on_enclosing: bool,
     ) -> Option<FuncId> {
-        let (raw, _) = match self.instance_row(item, types) {
-            Ok(row) => row,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-        };
-        self.callable_adapter(raw, Some((item, types)), ty, n, true)
+        self.callable_adapter(raw, Some((item, types)), ty, n, Some(depends_on_enclosing))
     }
     pub(super) fn row_adapter(&mut self, raw: FuncId, ty: TyId, n: NodeId) -> Option<FuncId> {
-        self.callable_adapter(raw, None, ty, n, false)
+        self.callable_adapter(raw, None, ty, n, None)
     }
     fn callable_adapter(
         &mut self,
@@ -139,7 +186,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: Option<(usize, &[TyId])>,
         ty: TyId,
         n: NodeId,
-        close_generics: bool,
+        descriptor_depends_on_enclosing: Option<bool>,
     ) -> Option<FuncId> {
         if !self.live() {
             return None;
@@ -160,8 +207,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        if self.e.module.signatures[self.e.source_signature(raw).index()]
-            == self.e.module.signatures[signature.index()]
+        let descriptor_instance = descriptor_depends_on_enclosing.is_some()
+            && item.is_some_and(|(f, _)| self.p.fns[f].generics.iter().any(|g| !g.region));
+        if !descriptor_instance
+            && self.e.module.signatures[self.e.source_signature(raw).index()]
+                == self.e.module.signatures[signature.index()]
             && item.map_or(
                 self.e.module.functions[raw.index()].body.is_some()
                     || self.nested.contains_key(&raw),
@@ -170,8 +220,40 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return Some(raw);
         }
-        if let Some(&row) = self.e.callable_adapters.get(&(raw, signature)) {
-            return Some(row);
+        let descriptor_key = descriptor_instance.then(|| {
+            let mut key = self.e.module.instances
+                [self.e.module.functions[raw.index()].instance.index()]
+            .clone();
+            if descriptor_depends_on_enclosing == Some(true) {
+                // Each rigid adapter belongs to one template. Its closed key is
+                // chosen from the specialized target during materialization.
+                let enclosing = self.func.expect("a live body has a function row");
+                key.definition
+                    .0
+                    .name
+                    .push_str(&format!("$descriptor-template[{}]", enclosing.0));
+            } else {
+                key.definition.0.name.push_str("$callable[instance]");
+            }
+            key
+        });
+        match &descriptor_key {
+            Some(key) => {
+                if let Some(&row) = self.e.funcs.get(key) {
+                    return Some(row);
+                }
+            }
+            None => {
+                // Closures are built in their own bodies. A second closure that
+                // reuses a generic adapter needs its template, or its instance
+                // names a row that no instance fills.
+                if let Some((row, template)) = self.e.callable_adapters.get(&(raw, signature)) {
+                    if let Some(template) = template {
+                        self.nested.insert(*row, template.clone());
+                    }
+                    return Some(*row);
+                }
+            }
         }
         let mut child = Cx::new(self.p, self.definition, self.e);
         let mut fd = self.fd.as_ref().clone();
@@ -179,7 +261,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // An item adapter closes the source function's generic arguments. Keeping
         // the enclosing generic declaration here leaves a body-less generic row;
         // a StaticFn described in a generic body then names no native body.
-        if close_generics {
+        if descriptor_depends_on_enclosing == Some(false) {
             fd.generics.clear();
             fd.has_region_parameters = false;
         }
@@ -195,6 +277,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             fd.path.0.name,
             crate::decls::canonical(&self.p.decls, &self.t, ty)
         );
+        if let Some(key) = &descriptor_key {
+            fd.path = key.definition.clone();
+        }
         child.fd = std::borrow::Cow::Owned(fd);
         child.entry = false;
         child.generated = true;
@@ -202,10 +287,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             child.nested.insert(raw, template.clone());
         }
         std::mem::swap(&mut child.t, &mut self.t);
-        let row = child.e.function(
-            &child.fd.path,
-            child.e.module.signatures[signature.index()].clone(),
-        );
+        let sig = child.e.module.signatures[signature.index()].clone();
+        let row = match descriptor_key {
+            Some(key) => child.e.add_function(key, sig),
+            None => child.e.function(&child.fd.path, sig),
+        };
         child.e.install_source_signature(row, signature);
         child.func = Some(row);
         let sig = &child.e.module.signatures[signature.index()];
@@ -281,16 +367,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         std::mem::swap(&mut child.t, &mut self.t);
         let out = child.finish();
-        if let Some(template) = out.template {
-            self.nested.insert(row, template);
+        if let Some(template) = &out.template {
+            self.nested.insert(row, template.clone());
         }
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
         if out.function.is_none() {
             self.halt();
-        } else {
-            self.e.callable_adapters.insert((raw, signature), row);
+        } else if !descriptor_instance {
+            self.e
+                .callable_adapters
+                .insert((raw, signature), (row, out.template));
         }
         out.function
     }
@@ -473,5 +561,136 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         dest.map(|at| self.pointer(at, n)).or(value)
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn value_call_abi(
+        &mut self,
+        callable: TyId,
+        result: TyId,
+        n: NodeId,
+        scratch: &mut CallScratch,
+    ) -> Option<CallableAbi> {
+        let abi = match self.callable_signatures.get(&callable).copied() {
+            Some(abi) => abi,
+            None => {
+                let signature = match self.indirect_signature(
+                    &scratch.params,
+                    result,
+                    &mut scratch.ir_params,
+                ) {
+                    Ok(signature) => signature,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                let start = self.callable_reps.len();
+                for &(_, ty) in &scratch.params {
+                    let rep = match self.rep(ty) {
+                        Ok(rep) => rep,
+                        Err(what) => {
+                            self.gap(n, what);
+                            return None;
+                        }
+                    };
+                    self.callable_reps.push(rep);
+                }
+                let result_ty = result;
+                let result = match self.rep(result) {
+                    Ok(rep) => rep,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                let roots = self.callable_regions.len();
+                for (i, &(_, ty)) in scratch.params.iter().enumerate() {
+                    if self.region_handle(ty)
+                        && (self.parameter_region_result(result_ty, i as u32)
+                            || scratch
+                                .params
+                                .iter()
+                                .any(|&(_, ty)| self.parameter_region_result(ty, i as u32)))
+                    {
+                        self.callable_regions.push(i as u32);
+                    }
+                }
+                let abi = CallableAbi {
+                    signature,
+                    params: PoolRange::new(start as u32, scratch.params.len() as u32),
+                    result,
+                    scoped_result: matches!(
+                        self.type_kind(result_ty),
+                        Kind::Scoped | Kind::Generic
+                    ),
+                    regions: PoolRange::new(
+                        roots as u32,
+                        (self.callable_regions.len() - roots) as u32,
+                    ),
+                };
+                self.callable_signatures.insert(callable, abi);
+                abi
+            }
+        };
+        Some(abi)
+    }
+    pub(super) fn scoped_result_regions_only(
+        &self,
+        ty: TyId,
+        params: &[crate::decls::ParamDecl],
+    ) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Region(Root::Parameter(i)) => self
+                .fd
+                .params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::CallableParameter { depth: 0, index: i }) => params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::Local(slot)) => self.vars[*slot as usize]
+                .map(|v| v.ty)
+                .or_else(|| self.captured_root_ty(*slot))
+                .is_some_and(|ty| self.region_handle(ty)),
+            TyKind::Anchored(x, root) => {
+                self.scoped_result_regions_only(*x, params)
+                    && self.scoped_result_regions_only(*root, params)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .all(|&x| self.scoped_result_regions_only(x, params)),
+            TyKind::View(x) | TyKind::Array(x, _) => self.scoped_result_regions_only(*x, params),
+            _ => true,
+        }
+    }
+
+    pub(super) fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
+        self.parameter_region_result_at(ty, parameter, 0)
+    }
+    pub(super) fn parameter_region_result_at(&self, ty: TyId, parameter: u32, depth: u32) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Region(Root::CallableParameter {
+                depth: bound,
+                index: i,
+            }) => *i == parameter && *bound == depth,
+            TyKind::Anchored(inner, root) => {
+                matches!(self.t.kind(*root), TyKind::Region(Root::CallableParameter {depth: bound, index: i}) if *i == parameter && *bound == depth)
+                    || self.parameter_region_result_at(*inner, parameter, depth)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .any(|&x| self.parameter_region_result_at(x, parameter, depth)),
+            TyKind::Array(x, _) | TyKind::View(x) => {
+                self.parameter_region_result_at(*x, parameter, depth)
+            }
+            TyKind::Fn(ps, r, _, _) => {
+                ps.iter()
+                    .any(|&(_, p)| self.parameter_region_result_at(p, parameter, depth + 1))
+                    || self.parameter_region_result_at(*r, parameter, depth + 1)
+            }
+            _ => false,
+        }
     }
 }

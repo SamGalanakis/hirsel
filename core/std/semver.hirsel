@@ -1,0 +1,325 @@
+pub type Error = SemVerSyntax(u64) | SemVerTooLong
+
+type Shape {
+    core: Inline[(u64, u64), 3],
+    count: u64,
+    pre_start: u64,
+    pre_end: u64,
+    end: u64
+}
+
+pub opaque type Version {
+    text: String,
+    shape: Shape
+}
+
+type Operator: key = Caret | Tilde | Exact | Above | AtLeast | Below | AtMost
+
+type Comparator {
+    op: Operator,
+    shape: Shape,
+    last: bool
+}
+
+pub opaque type Requirement {
+    text: String,
+    comparators: List[Comparator]
+}
+
+const MAX_BYTES: u64 = 4096
+
+fn at(b: Bytes, i: u64, c: u8) -> bool {
+    i < list.len(b) && b[i] == c
+}
+
+fn number_end(b: Bytes, start: u64) -> Result[u64, Error] {
+    let mut i = start
+    while i < list.len(b) && int.is_ascii_digit(b[i]) {
+        i += 1
+    }
+    if i == start || (i - start > 1 && b[start] == b'0') {
+        return Error(SemVerSyntax(start))
+    }
+    Ok(i)
+}
+
+fn identifiers_end(b: Bytes, start: u64, prerelease: bool) -> Result[u64, Error] {
+    let mut i = start
+    loop {
+        let first = i
+        let mut numeric = true
+        while i < list.len(b) {
+            let digit = int.is_ascii_digit(b[i])
+            if !digit && !int.is_ascii_alpha(b[i]) && b[i] != b'-' {
+                break
+            }
+            numeric = numeric && digit
+            i += 1
+        }
+        if i == first || (prerelease && numeric && i - first > 1 && b[first] == b'0') {
+            return Error(SemVerSyntax(first))
+        }
+        if !at(b, i, b'.') {
+            return Ok(i)
+        }
+        i += 1
+    }
+}
+
+fn read_shape(b: Bytes, start: u64) -> Result[Shape, Error] {
+    let mut core: Inline[(u64, u64), 3] =[(0, 0), (0, 0), (0, 0)]
+    let mut i = start
+    let mut count: u64 = 0
+    loop {
+        let end = number_end(b, i)?
+        core[count] = (i, end)
+        count += 1
+        i = end
+        if count == 3 || !at(b, i, b'.') {
+            break
+        }
+        i += 1
+    }
+    let mut pre_start = i
+    let mut pre_end = i
+    if count == 3 && at(b, i, b'-') {
+        pre_start = i + 1
+        pre_end = identifiers_end(b, pre_start, true)?
+        i = pre_end
+    }
+    if count == 3 && at(b, i, b'+') {
+        i = identifiers_end(b, i + 1, false)?
+    }
+    Ok(Shape(core, count, pre_start, pre_end, end: i))
+}
+
+fn has_pre(s: Shape) -> bool {
+    s.pre_start < s.pre_end
+}
+
+/// Parses SemVer 2.0.0. Numeric fields have no machine-integer limit.
+/// Fails: SemVerSyntax(byte offset) for bad syntax, SemVerTooLong above 4096 bytes.
+/// Alloc: copies the validated text, may raise Capacity. Cost: O(bytes).
+pub fn parse(s: String) -> Result[Version, Error] {
+    let n = string.byte_len(s)
+    if n > MAX_BYTES {
+        return Error(SemVerTooLong)
+    }
+    let shape = read_shape(string.as_bytes(s), 0)?
+    if shape.count != 3 || shape.end != n {
+        return Error(SemVerSyntax(shape.end))
+    }
+    Ok(Version(text: string.from(s), shape))
+}
+
+/// Formats all components, including the original build metadata.
+/// Alloc: copies the version text, may raise Capacity. Cost: O(bytes).
+pub fn format(v: Version) -> String {
+    string.from(v.text)
+}
+
+fn number_order(a: Bytes, b: Bytes) -> Order {
+    let by_length = order.compare(list.len(a), list.len(b))
+    if by_length != Equal {
+        return by_length
+    }
+    list.compare_bytes(a, b)
+}
+
+fn core_order(a: Bytes, sa: Shape, b: Bytes, sb: Shape, count: u64) -> Order {
+    for i in 0 .. count {
+        let (alo, ahi) = sa.core[i]
+        let (blo, bhi) = sb.core[i]
+        let cmp = number_order(list.slice(a, alo, ahi), list.slice(b, blo, bhi))
+        if cmp != Equal {
+            return cmp
+        }
+    }
+    Equal
+}
+
+fn identifier(b: Bytes, start: u64, end: u64) -> (u64, bool) {
+    let mut i = start
+    let mut numeric = true
+    while i < end && b[i] != b'.' {
+        numeric = numeric && int.is_ascii_digit(b[i])
+        i += 1
+    }
+    (i, numeric)
+}
+
+fn pre_order(a: Bytes, sa: Shape, b: Bytes, sb: Shape) -> Order {
+    if !has_pre(sa) || !has_pre(sb) {
+        // A release sorts above a pre-release.
+        return order.compare(has_pre(sb), has_pre(sa))
+    }
+    let mut i = sa.pre_start
+    let mut j = sb.pre_start
+    while i < sa.pre_end && j < sb.pre_end {
+        let (ie, an) = identifier(a, i, sa.pre_end)
+        let (je, bn) = identifier(b, j, sb.pre_end)
+        let av = list.slice(a, i, ie)
+        let bv = list.slice(b, j, je)
+        let cmp = if an != bn {
+            order.compare(bn, an)
+        } else if an {
+            number_order(av, bv)
+        } else {
+            list.compare_bytes(av, bv)
+        }
+        if cmp != Equal {
+            return cmp
+        }
+        i = ie + 1
+        j = je + 1
+    }
+    order.compare(i < sa.pre_end, j < sb.pre_end)
+}
+
+/// Compares precedence per SemVer 2.0.0 §11, ignoring build metadata.
+/// Alloc: nothing. Cost: O(bytes compared).
+pub fn ordered(a: Version, b: Version) -> Order {
+    let ab = string.as_bytes(a.text)
+    let bb = string.as_bytes(b.text)
+    let cmp = core_order(ab, a.shape, bb, b.shape, 3)
+    if cmp != Equal {
+        return cmp
+    }
+    pre_order(ab, a.shape, bb, b.shape)
+}
+
+fn skip_space(b: Bytes, start: u64) -> u64 {
+    let mut i = start
+    while at(b, i, b' ') || at(b, i, b'\t') {
+        i += 1
+    }
+    i
+}
+
+fn read_op(b: Bytes, i: u64) -> (Operator, u64) {
+    if i == list.len(b) {
+        return (Caret, i)
+    }
+    let eq = at(b, i + 1, b'=')
+    match b[i] {
+        b'^' => (Caret, i + 1),
+        b'~' => (Tilde, i + 1),
+        b'=' => (Exact, i + 1),
+        b'>' => if eq {
+            (AtLeast, i + 2)
+        } else {
+            (Above, i + 1)
+        },
+        b'<' => if eq {
+            (AtMost, i + 2)
+        } else {
+            (Below, i + 1)
+        },
+        _ => (Caret, i),
+    }
+}
+
+/// Parses Cargo caret (also the default) and tilde ranges, including 0.x and
+/// missing minor or patch fields. Accepts =, >, >=, < and <=. Comma binds as
+/// AND within each || alternative. Spaces and tabs may surround operators.
+/// Fails: SemVerSyntax(byte offset) for bad syntax, SemVerTooLong above 4096 bytes.
+/// Alloc: copies text and stores one record per comparator, may raise Capacity.
+/// Cost: O(bytes). Ex: `semver.requirement("^0.2, >=0.2.4 || ~1.5")`.
+pub fn requirement(s: String) -> Result[Requirement, Error] {
+    let n = string.byte_len(s)
+    if n > MAX_BYTES {
+        return Error(SemVerTooLong)
+    }
+    let b = string.as_bytes(s)
+    let mut i = skip_space(b, 0)
+    let mut comparators: List[Comparator] = list.new()
+    loop {
+        let (op, start) = read_op(b, i)
+        let shape = read_shape(b, skip_space(b, start))?
+        i = skip_space(b, shape.end)
+        let last = !at(b, i, b',')
+        list.push(mut comparators, Comparator(op, shape, last))
+        if i == n {
+            return Ok(Requirement(text: string.from(s), comparators: take comparators))
+        }
+        if !last {
+            i = skip_space(b, i + 1)
+        } else if at(b, i, b'|') && at(b, i + 1, b'|') {
+            i = skip_space(b, i + 2)
+        } else {
+            return Error(SemVerSyntax(i))
+        }
+    }
+}
+
+// Caret fixes the prefix through the first nonzero field, to the precision
+// supplied. Tilde fixes the major and (when supplied) minor.
+fn compatible_prefix(b: Bytes, s: Shape, op: Operator) -> u64 {
+    if op == Tilde {
+        if s.count == 1 {
+            return 1
+        }
+        return 2
+    }
+    for i in 0 .. s.count {
+        let (lo, _) = s.core[i]
+        if b[lo] != b'0' {
+            return i + 1
+        }
+    }
+    s.count
+}
+
+fn accepts(v: Bytes, vs: Shape, r: Bytes, c: Comparator, core_cmp: Order) -> bool {
+    let cmp = if core_cmp == Equal {
+        pre_order(v, vs, r, c.shape)
+    } else {
+        core_cmp
+    }
+    let strict = if c.shape.count == 3 {
+        cmp
+    } else {
+        core_cmp
+    }
+    let compatible = if c.op == Caret && c.shape.count < 3 {
+        core_cmp
+    } else {
+        cmp
+    }
+    if c.op == Caret || c.op == Tilde {
+        return compatible != Less && core_order(v, vs, r, c.shape, compatible_prefix(r, c.shape, c.op)) == Equal
+    }
+    match c.op {
+        Exact => cmp == Equal,
+        Above => strict == Greater,
+        AtLeast => strict == Greater || cmp == Equal,
+        Below => strict == Less,
+        AtMost => strict == Less || cmp == Equal,
+        _ => false,
+    }
+}
+
+/// Tests a requirement. Each AND group admits a pre-release only if a comparator
+/// in that group names a pre-release with the same major, minor and patch.
+/// Alloc: nothing. Cost: O(requirement bytes + comparators * version bytes).
+pub fn matches(req: Requirement, v: Version) -> bool {
+    let version = string.as_bytes(v.text)
+    let range = string.as_bytes(req.text)
+    let mut all = true
+    let mut eligible = !has_pre(v.shape)
+    for c in req.comparators {
+        if all {
+            let cmp = core_order(version, v.shape, range, c.shape, c.shape.count)
+            all = accepts(version, v.shape, range, c, cmp)
+            eligible = eligible || (has_pre(c.shape) && cmp == Equal)
+        }
+        if c.last {
+            if all && eligible {
+                return true
+            }
+            all = true
+            eligible = !has_pre(v.shape)
+        }
+    }
+    false
+}

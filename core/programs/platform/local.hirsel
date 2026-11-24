@@ -35,10 +35,9 @@ pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Fa
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
 // `place_bytes` is the budget every live child shares; `max_places` bounds the sessions
 // and is, with `idle_ms`, the host's Config (§14.2, §14.4). `sessions` is the wire
-// sessions every place admits at once (`PlaceConfig.max_sessions`). `migrate` makes a new
-// session's store.
+// sessions every place admits at once (`PlaceConfig.max_sessions`).
 pub type Config[T: send]: send {
-    root: Dir, options: store.Options, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], factory: Factory[T], seed: T,
+    root: Dir, options: store.Options, factory: Factory[T], seed: T,
     max_places: u64, idle_ms: u64, place_bytes: u64, sessions: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
 }
@@ -60,7 +59,7 @@ const LOCAL_BYTES: u64 = 1048576u64
 const NEXT_ID: u64 = 0u64
 
 type Launch[T: send]: send {
-    supplied: Supplied, backing: runner.Backing, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
+    supplied: Supplied, backing: runner.Backing, sizes: store.Overrides, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
     stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64,
 }
 type Started { task: Task[()], charge: u64 }
@@ -68,13 +67,13 @@ type Started { task: Task[()], charge: u64 }
 type AccessReply = Sender[Result[Option[Lease], Refused]]
 pub type ColdCheck: send {
     caller: store.Caller,
-    check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error]],
+    check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error] waits],
 }
 
 // A read of a session's store, run in the host while no child of the session holds it.
 pub type ColdRead: send {
     arg: Bytes,
-    read: StaticFn[fn(store.ReadOnly, Bytes) -> Result[Bytes, String]]
+    read: StaticFn[fn(store.ReadOnly, Bytes) -> Result[Bytes, String] waits]
 }
 
 type ReadReply = Sender[Result[Bytes, Refused]]
@@ -83,17 +82,17 @@ type Downs = Sender[Result[u64, Refused]]
 
 type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
-type PlaceJob[G: send, H: send, S: send, B: send]: send {
+type PlaceJob[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64, need: u64,
 }
-type Operated[G: send, H: send, S: send, B: send]: send {
+type Operated[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
 // A live child: the host's identity for it, its stop, its status and its task.
 type Kid {
     child: launcher.Child, stop: Option[Sender[()]], status: Latest[runner.Status], task: Option[Task[()]], charge: u64,
-    expect: Option[(u64, u64)], ready: bool,
+    expect: Option[(u64, u64)], ready: bool, selected: launcher.Selection,
 }
 
 type Catalog: send { sessions: store.Table[u64, Bytes], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
@@ -103,7 +102,7 @@ type Sessions { catalog: Catalog, by_id: Map[u64, Bytes], by_key: Map[Bytes, u64
 
 type Actor[T: send] {
     h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], max_sessions: u64, s: Sessions,
+    max_sessions: u64, s: Sessions,
     // Each session's marks since the host started, who watches them and who waits for its next end.
     marks: Map[u64, Marks],
     watching: Map[u64, Map[u64, Sender[()]]],
@@ -147,7 +146,7 @@ type Forward: send { from: Receiver[platform.Input], to: Sender[In] }
 
 // ---- factories ----
 
-pub fn factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
+pub fn factory[T: send, G: send, H: shareable + inert + send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
     let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
         let config = make(clone(request.supplied))
         start_made(take request, take config)
@@ -157,7 +156,7 @@ pub fn factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Suppli
 
 // A factory whose `make` also sees the host's seed. `make` is still a plain fn, so only
 // linked code runs as a group.
-pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
+pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send, B: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
     let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
         let config = make(clone(request.supplied), seed)
         start_made(take request, take config)
@@ -165,14 +164,20 @@ pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take
     Factory(start: take made)
 }
 
-fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
-    let Launch(supplied: supplied, backing: take backing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
+fn start_made[T: send, G: send, H: shareable + inert + send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
+    let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made { Ok(take m) => take m, Error(_) => return Error(string.from("Full")) }
     config.backing = take backing
+    config.sizes = sizes
     config.selection = selection
     config.idle = Some(idle)
     config.max_sessions = sessions
-    let need = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
+    let overhead = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
+    let share = match store.sized_with(Directory, 0u64, sizes) {
+        Error(short) => short.need,
+        Ok(_) => 0u64,
+    }
+    let need = int.saturating_add(overhead, int.saturating_add(share, 1048576u64))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available { return Error(string.from("Full")) }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
@@ -183,7 +188,7 @@ fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[
 
 // The child task: operate runs in a child of it so this task can read its phases. Its
 // last message is Down, sent after operate has returned and so after the store is closed.
-fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
+fn run_place[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
     let to = channel.sender(job.to)
     let name = string.from(job.name)
     let gen = job.gen
@@ -191,7 +196,7 @@ fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B])
     let _ = channel.send(to, Down(take name, gen, take ended))
 }
 
-fn operated[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn operated[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
@@ -209,7 +214,7 @@ fn operated[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) 
     }
 }
 
-fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: shareable + inert + send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }
@@ -249,7 +254,7 @@ fn selection_of(activation: u64) -> runner.Selection { Current(activation) }
 // Carries out a Start of a serving child: the group's store at root/<workdir>, the
 // activation the host names, and the host's idle bound.
 fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[launcher.Event]) waits {
-    let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, ..) = take l
+    let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, assembly: take assembly, ..) = take l
     let role = launcher.role_of(mode)
     if let Install(_) = role {
         list.push(mut events, Refused(launcher.Child(group: clone(group), role: role), Mismatch))
@@ -279,14 +284,15 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         Error(_) => { list.push(mut events, Refused(take child, Spawn(string.from("Full")))); return },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir, clone(a.options)), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms),
+        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
             a.used += charged
             list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged,
-                expect: serve.store_id, ready: false))
+                expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
             list.push(mut events, Launched(take child, Started))
         },
         Error(take why) => list.push(mut events, Refused(take child, Spawn(take why))),
@@ -323,7 +329,7 @@ fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: Lis
     match take r {
         Hello => {
             let mut children: List[launcher.ChildState] = list.new()
-            for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started)) }
+            for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None)) }
             list.push(mut events, Inventory(take children, list.new(), list.new()))
         },
         Bind(take g, _, _, _, _) => list.push(mut events, Bound(take g)),
@@ -378,7 +384,7 @@ fn serves(k: Kid) -> bool {
 
 // A route is answered once the host has accepted a child of its group as Ready, and is
 // refused when its group is gone.
-fn answer_routes[T: send](mut a: Actor[T]) {
+fn answer_routes[T: send](mut a: Actor[T]) waits {
     let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take name, take reply)) = list.pop(mut a.routes) {
         let answer: Option[Result[Option[Lease], Refused]] = match platform.serving_ready(a.h, name) {
@@ -425,7 +431,7 @@ fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
         list.push(mut events, Placed(take child, PlaceStoreMismatch(want.0, want.1, s.store_id.0, s.store_id.1)))
     } else {
         a.kids[i].ready = true
-        let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock))
+        let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock), read: list.new())
         list.push(mut events, Placed(take child, PlaceOpened(take ready)))
         if let Some(id) = id_of(name) { count_up(mut a, id) }
         if let Some(w) = a.watch { let _ = channel.try_send(w, Up(string.from(name))) }
@@ -456,7 +462,6 @@ fn start_text(e: runner.StartError) -> String {
         Listen(_) => string.from("listen"),
         Missing(what) => string.from(what),
         Exceeds(b) => string.from(b.name),
-        Disagrees(d) => string.from(d.name),
         Full(_) => string.from("Full"),
     }
 }
@@ -475,8 +480,8 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     let mut events: List[launcher.Event] = list.new()
     let mut failed: Option[String] = None
     if !k.ready {
-        if let Error(Open(NotCurrent(Active(version, description)))) = ended {
-            list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(description))))
+        if let Error(Open(NotCurrent(Active(version, _, read)))) = ended {
+            list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(read))))
         }
         if let Error(e) = ended { failed = Some(start_text(e)) }
     }
@@ -530,24 +535,23 @@ fn group_spec(name: String) -> platform.NewGroup {
 
 fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Failed("seed store")) }
-    if let Error(_) = store.run_migration(mut db, a.tasks, a.migrate) { let _ = store.close(take db); return Error(Failed("seed migration")) }
     let seeded = seed(mut db)
     let _ = store.close(take db)
     match take seeded { Ok(()) => Ok(()), Error(take why) => Error(Failed(take why)) }
 }
 
 fn add_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.add_group_with(mut h, group_spec(name_of(id)), scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, cat.sessions, id, clone(key))?
-        store.put(mut tx, cat.keys, clone(key), id)?
-        store.put(mut tx, cat.meta, NEXT_ID, id + 1u64)
+    platform.add_group_with(mut h, group_spec(name_of(id)), (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        store.put(mut tx, env.0.sessions, env.1, clone(env.2))?
+        store.put(mut tx, env.0.keys, clone(env.2), env.1)?
+        store.put(mut tx, env.0.meta, NEXT_ID, env.1 + 1u64)
     })
 }
 
 fn remove_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.remove_with(mut h, name_of(id), Delete, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.delete(mut tx, cat.keys, clone(key))?
-        let _ = store.delete(mut tx, cat.sessions, id)?
+    platform.remove_with(mut h, name_of(id), Delete, (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        let _ = store.delete(mut tx, env.0.keys, clone(env.2))?
+        let _ = store.delete(mut tx, env.0.sessions, env.1)?
         Ok(())
     })
 }
@@ -682,7 +686,7 @@ fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
     }
 }
 
-fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] {
+fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
     let name = listed(a, id)?
     let Some(gen) = platform.serving_ready(a.h, name) else {
         return match platform.wake_row(a.h, name) { Some(_) => Error(Busy), None => Error(Unknown) }
@@ -813,11 +817,11 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
         keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?,
         meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
     let snap = store.snapshot(db)
-    let next_id = match store.get(snap, store.shape(catalog.meta), NEXT_ID)? { Some(n) => n, None => 0u64 }
+    let next_id = match store.get(result.unwrap(store.reader(db, 0u64)), snap, catalog.meta, NEXT_ID)? { Some(n) => n, None => 0u64 }
     let mut by_id: Map[u64, Bytes] = map.new()
     let mut by_key: Map[Bytes, u64] = map.new()
-    let mut rows = store.scan(snap, store.shape(catalog.sessions), Unbounded, Unbounded)?
-    while let Some((id, key)) = store.next(mut rows)? {
+    let mut rows = store.scan(result.unwrap(store.reader(db, 0u64)), snap, catalog.sessions, Unbounded, Unbounded)?
+    while let Some((id, key)) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows)? {
         map.insert(mut by_key, clone(key), id)
         map.insert(mut by_id, id, clone(key))
     }
@@ -837,7 +841,7 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
 
 fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let Config(root: root, options: take options, migrate: migrate, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
+    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
         sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, listed_sessions, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
@@ -848,7 +852,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, migrate: migrate, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)

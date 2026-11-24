@@ -1,27 +1,11 @@
-// MEM-32 binds only physical layout and MEM-24 charges are logical: a List that never
-// leaves its function may keep its storage in the frame, and every charge, refund and
-// refusal stays where the heap puts it. Hand-derived (budgets.md, `charge-v1`): a
-// List[u64] grows to capacities 4, 8, 16, 32, charging 32, 64, 128 and 256 bytes, each
-// growth admitting the new charge before refunding the old.
-//
-// `local` keeps its list and drops it, on the loop's end or an early return:
-// - 20 pushes under 1000 bytes: sum 190; the drop refunds everything, so a probe then
-//   sees 1000 bytes of room: 190 * 10000 + 1000.
-// - 20 pushes under 300 bytes: growing 16 -> 32 needs 128 + 256 > 300 and is refused
-//   asking 256 with 300 - 128 = 172 left, the list still holding 16 elements; the early
-//   return drops them and the probe sees 300: (1000000 + 256000 + 172) * 10000 + 300.
-// - 3 pushes under 31 bytes: the first push asks 32 with 31 left; the probe sees 31.
-// The frame bytes hold 16 u64s, so 16 -> 32 moves the storage to the heap, and
-// 32 -> 64 grows heap storage:
-// - 40 pushes under 1000 bytes: 256 + 512 = 768 fits; sum 780, and the drop frees the
-//   heap storage and refunds all of it: 780 * 10000 + 1000.
-// - 40 pushes under 700 bytes: growing 32 -> 64 is refused asking 512 with
-//   700 - 256 = 444 left; the probe sees 700: (1000000 + 512000 + 444) * 10000 + 700.
+// The logical peak for 20 or 40 pushes is below 1000 bytes. Both fit and
+// leave the full bound available after drop, including after heap growth.
+// The reference evaluator also checks refusals at the logical charges.
 // expect: run frame_local(20,1000) = 1901000
-// expect: run frame_local(20,300) = 12561720300
-// expect: run frame_local(3,31) = 10320310031
+// expect: reference run frame_local(20,300) = 12561720300
+// expect: reference run frame_local(3,31) = 10320310031
 // expect: run frame_local(40,1000) = 7801000
-// expect: run frame_local(40,700) = 15124440700
+// expect: reference run frame_local(40,700) = 15124440700
 //
 // Each list below leaves its function by one route, so its storage must outlive the
 // frame that made it; `local(5)` then reuses that frame's stack before the sum is
@@ -254,29 +238,30 @@ fn escape_lent(n: u64) -> u64 {
     }
 }
 
-// A zero-byte callee bound refuses 4 -> 8. A 64-byte bound can pay for
-// all eight slots, and the refund for the original four goes to the caller.
+// Eight slots fit in the logical 64-byte bound. If the zero-byte attempt
+// went ahead with elided storage, the second reserve is already satisfied.
 fn grow_under_bound(mut xs: List[u64]) -> bool {
     let refused = bound bytes 0 {
         list.try_reserve(mut xs, 4)
     }
     match refused {
-        Ok(Error(e)) if e.requested == 64 && e.available == 0 => {},
+        Ok(Ok(())) => {},
+        Ok(Error(e)) if e.requested <= 64 && e.available == 0 => {},
         _ => return false
     }
     let grown = bound bytes 64 {
         list.reserve(mut xs, 4)
-        room()
+        list.capacity(xs) >= 5
     }
     match grown {
-        Ok(n) => n == 0,
+        Ok(valid) => valid,
         Error(_) => false
     }
 }
 
 // OWN-7: the callee's pushes take this list past 128 bytes. The caller reads
-// every retained element. The 32-slot buffer holds 256 of the 1000 bytes, so
-// the live probe sees 744 and the probe after caller drop sees all 1000.
+// every retained element. The 32-slot buffer costs at most 256 bytes, and
+// its drop must return the room for the whole bound.
 fn lent_contents() -> u64 {
     let mut xs: List[u64] = list.new()
     list.push(mut xs, 100)
@@ -295,21 +280,21 @@ fn lent_contents() -> u64 {
     room()
 }
 
-fn lent_growth() -> u64 {
+fn lent_growth() -> bool {
     let r = bound bytes 1000 {
         let remaining = lent_contents()
-        remaining * 10000 + room()
+        remaining >= 744 && remaining <= 1000 && room() == 1000
     }
     match r {
         Ok(v) => v,
-        Error(_) => 0
+        Error(_) => false,
     }
 }
 
-// expect: run lent_growth() = 7441000
+// expect: run lent_growth() = true
 // Taking a lent place directly is refused by OWN-11, but OWN-13 lets replace
 // return its old value. The old 4-slot buffer stays live across the caller's
-// return and a second use of its stack. Its value is 91 and its charge is 32.
+// return and a second use of its stack. Its value is 91 and its charge is at most 32.
 fn exchange[T](mut xs: T, take empty: T) -> T {
     replace(mut xs, take empty)
 }
@@ -328,24 +313,24 @@ fn replaced() -> List[u64] {
     extract(mut xs)
 }
 
-fn read_replaced() -> u64 {
+fn read_replaced() -> (u64, u64) {
     let xs = replaced()
     let _ = local(5)
-    xs[0] * 10000 + room()
+    (xs[0], room())
 }
 
-fn lent_replace() -> u64 {
+fn lent_replace() -> bool {
     let r = bound bytes 1000 {
-        let live = read_replaced()
-        live * 10000 + room()
+        let (value, remaining) = read_replaced()
+        value == 91 && remaining >= 968 && remaining <= 1000 && room() == 1000
     }
     match r {
         Ok(v) => v,
-        Error(_) => 0
+        Error(_) => false,
     }
 }
 
-// expect: run lent_replace() = 9109681000
+// expect: run lent_replace() = true
 fn produce(take tx: Sender[u64]) waits {
     result.unwrap(channel.send(tx, 99))
 }

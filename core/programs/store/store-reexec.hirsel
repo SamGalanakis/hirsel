@@ -1,9 +1,8 @@
 // RUNNER-SPEC §7 (R5): a recorded call re-executed on its base, under its
 // recorded CallInfo, compared with what it committed.
-
 pub type Difference = Reply | Writes
 
-pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused
+pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused | Residency
 
 pub type Verdict = Same | Different(Difference) | Unknown(UnknownReason)
 
@@ -15,9 +14,9 @@ fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Record
     }
     let context = match section.settlement {
         Some(current) => current,
-        None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed)
+        None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed, stop: None)
     }
-    Some(Recorded(record: clone(section.record), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed))
+    Some(Recorded(record: clone(section.record), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed, stop: context.stop))
 }
 
 // The committed frame of `wanted` on `b`, read from the live journal. A
@@ -25,7 +24,9 @@ fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Record
 fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommit], Error] waits {
     healthy(db)?
     let i = branch_index(db, b)?
-    let Some(state) = view db.disk else { return Ok(None) }
+    let Some(state) = view db.disk else {
+        return Ok(None)
+    }
     // A version the last cut covers has its frame below record_cut, so the
     // scan from there does not find it.
     if wanted > db.heads[i].head {
@@ -34,7 +35,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
     // Z1: skip the barrier exactly when every frame this Db has sent is acked,
     // so it is written (X1 step 0's condition); never compare a version with
     // `journaled`, which counts frames.
-    if !covered(db, Journal(db.frame_seq)) {
+    if !covered(db, Journal(db.frame_seq, 0, 0)) {
         let _ = channel.send(state.journal, Barrier)
         match result.unwrap(channel.receive(state.written)) {
             Written => (),
@@ -44,7 +45,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             }
         }
     }
-    let d = disk_state(db).d
+    let d = log_directory(db)?
     let mut seq = disk_state(db).record_cut
     loop {
         let path = capacity(disk_path("j-", seq, ""))?
@@ -59,12 +60,12 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             Some(h) => Some(h.prev_end),
             None => disk_end(d, db.store, seq)?
         }
-        let last = match following {
+        let final_item = match following {
             Some(_) => false,
             None => true
         }
         let mut search: Option[JournalCommit] = None
-        let _ = journal_scan(mut source, path, db.store, seq, boundary, last, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, db.store, seq, boundary, final_item, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
             let Commit(take commit) = take event else {
                 return Ok(())
             }
@@ -80,7 +81,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
         if let Some(take commit) = take search {
             return Ok(Some(take commit))
         }
-        if last {
+        if final_item {
             return Ok(None)
         }
         seq += 1
@@ -98,24 +99,12 @@ type BaseReplay {
 // journal replayed up to, not including, the commit after `base`. This is the
 // open path, so the pages are the ones every load path builds (MEM-30). None
 // when the MANIFEST is already past `base`.
-fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
-    let d = disk_state(db).d
+fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[(Roots, u64)], Error] waits {
+    let d = log_directory(db)?
     let (_, id, take manifest) = read_only_manifest(d)?
-    if let Some(_) = manifest.claim {
-        return Error(Unsupported(1))
-    }
-    let validated = validate_page_manifest(d, id, take manifest)?
-    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
-    let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let state = disk_allocation(scoped fn() -> Result[State, Error] {
-        let holders = attach_manifest_holders(selected, pages, empty_collection)
-        capacity(manifest_state(selected, holders))
-    })?
-    let replay = journal_replay(take state, selected.next_stamp - 1)?
+    let validated = validate_store_manifest(d, id, take manifest)?
+    let (take selected, take state) = replay_base_state(take validated)?
+    let replay = journal_replay_manifest(take state, selected)?
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
             return Ok(None)
@@ -135,11 +124,11 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
         }
-        let last = match following {
+        let final_item = match following {
             Some(_) => false,
             None => true
         }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, last, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
             if at.stopped {
                 return Ok(())
             }
@@ -157,35 +146,73 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
         let JournalInput(file: take consumed_file, ..) = take source
         disk_io(host.close(take consumed_file))?
         let _ = scanned?
-        if held.stopped || last {
+        if held.stopped || final_item {
             break
         }
         seq += 1
     }
     for tip in held.replay.state.tips {
         if tip.id == b.id && tip.head == base {
-            return Ok(Some(share_roots(tip.roots)))
+            return Ok(Some((share_roots(tip.roots), stamp_after(held.replay.next_node)?)))
         }
     }
     Ok(None)
 }
 
-type Rerun = RanTo(Bytes, DataRows) | Halted(Stop) | RoomRefused
+fn replay_base_state(take validated: ValidatedPageManifest) -> Result[(PageManifest, State), Error] {
+    let mut has_cold = false
+    for (_, pack) in validated.inventory {
+        if pack.class >= 3 {
+            has_cold = true
+            break
+        }
+    }
+    if has_cold {
+        let LoadedPageStore(manifest: take selected, holders: take holders, ..) = rebuild_page_store(take validated, None)?
+        let state = disk_allocation(scoped fn() -> Result[State, Error] {
+            capacity(manifest_state(selected, holders))
+        })?
+        return Ok((take selected, take state))
+    }
+    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[State, Error] {
+        let holders = attach_manifest_holders(selected, pages, empty_collection)
+        capacity(manifest_state(selected, holders))
+    })?
+    Ok((take selected, take state))
+}
+
+fn stop_kind(stop: Stop) -> StopKind {
+    match stop {
+        Raised(_) => Raised,
+        OutOfSteps(steps) => OutOfSteps(steps),
+        OutOfBytes(_) => OutOfBytes,
+        Conflict(_) => Conflict,
+    }
+}
+
+type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Rerun {
-    let reads: Log[Read] = log.new()
-    let issued: Log[u64] = log.new()
-    let caught = isolate(fn() -> Result[Result[Finished[Bytes, Bytes], Capacity], OutOfTime] {
+fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded,
+    attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
+    let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
-                let keep: Option[fn(Bytes) -> bool] = None
-                let staged = draft_body(db, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+                let keep: Option[fn(R) -> bool] = None
+                let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
-                match prepare_metered_pages(take staged) {
+                match prepare_metered_pages(issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(_) => fail("store: invalid re-run pages"),
@@ -195,7 +222,10 @@ fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: sc
         }
     })
     let _ = log.finish(take reads)
-    let _ = log.finish(take issued)
+    let _ = cell.into_inner(take issued)
+    if call_attempt_latched(attempt) {
+        return RoomRefused
+    }
     let finished = match take caught {
         Error(problem) => return Halted(OutOfBytes(problem)),
         Ok(Error(take causes)) => return match raised_capacity(causes) {
@@ -210,9 +240,11 @@ fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: sc
         RolledBack(Aborted(Undone(value: take answer, ..))) => (take answer, new_data_rows()),
         RolledBack(Refused(Allocation(problem))) => return Halted(OutOfBytes(problem)),
         RolledBack(Refused(_)) => return RoomRefused,
-        RolledBack(Failed(causes)) => return Halted(Raised(cause_number(causes))),
+        RolledBack(Failed(Raised(causes))) => return Halted(Raised(cause_number(causes))),
+        RolledBack(Failed(Conflict(take name))) => return Halted(Conflict(take name)),
         RolledBack(Stopped(limit)) => return Halted(OutOfSteps(limit.steps)),
         RolledBack(Committed(_)) => fail("store: re-run committed"),
+        DraftFault(_) => return RoomRefused,
         Prepared(take ready) => {
             let Prepared(outcome: take outcome, ops: take ops, ..) = take ready
             match take outcome {
@@ -221,17 +253,43 @@ fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: sc
             }
         },
     }
-    if list.len(output) > plan.reply_max {
-        return Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max)))
-    }
     RanTo(take output, take writes)
+}
+
+fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, watermark: u64, ci: CallInfo, plan: Plan, call: Recorded,
+    body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Result[Rerun[R], Error] waits {
+    let root = tiered_pin_root(open_number(db), ci.id.branch, base.collections)
+    let mut pins = empty_tiered_pins(root, db.writer_pin_bytes)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    loop {
+        let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
+        let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            return Ok(take reran)
+        }
+        match state.stopped {
+            None => return Ok(take reran),
+            Some(AttemptMiss(_)) => {
+                match deliver_call_miss(db, base.collections, watermark, state, mut pins, mut pending) {
+                    Ok(()) => (),
+                    Error(Full(_)) => return Ok(RoomRefused),
+                    Error(Io(_)) => return Ok(RoomRefused),
+                    Error(Remote(_)) => return Ok(RoomRefused),
+                    Error(Reclaimed(_)) => return Ok(RoomRefused),
+                    Error(Corrupt(Fault(why: Absent, ..))) => return Ok(RoomRefused),
+                    Error(take problem) => return Error(take problem),
+                }
+            },
+            Some(_) => return Ok(RoomRefused),
+        }
+    }
 }
 
 // The reply the frame wrote on the record's stream: position 8, digest 32,
 // state 2, then the reply (AH3).
-fn recorded_reply(commit: JournalCommit, stream: Bytes) -> Option[View[Bytes]] in commit {
+fn recorded_reply(commit: JournalCommit, stream: StreamKey) -> Option[View[Bytes]] in commit {
     for op in commit.streams {
-        if op.key == stream {
+        if stream_record_matches(op.key, stream) {
             if let Some(raw) = view op.value {
                 if list.len(raw) >= 41 && raw[40u64] == 2u8 {
                     return Some(view raw)
@@ -248,10 +306,19 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
         return Ok(false)
     }
     let order = capacity(data_order(rows))?
-    for position in 0u64 .. rows.count {
-        let op = ordered_row(rows, order, position)
-        let other = view committed[position]
+    for slot_order in 0u64 .. rows.count {
+        let op = ordered_row(rows, order, slot_order)
+        let other = view committed[slot_order]
         if op.key != other.key {
+            return Ok(false)
+        }
+        if let Some(trim) = op.trim {
+            let Some(expected) = other.trim else { return Ok(false) }
+            if trim.floor != expected.floor {
+                return Ok(false)
+            }
+            continue
+        } else if let Some(_) = other.trim {
             return Ok(false)
         }
         let equal = match (view op.value, view other.value) {
@@ -266,7 +333,14 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
     Ok(true)
 }
 
-type ReplaySource { commit: JournalCommit, call: Recorded, base: Roots }
+pub opaque type ReplaySource {
+    store: StoreId,
+    open: u64,
+    commit: JournalCommit,
+    call: Recorded,
+    base: Roots,
+    watermark: u64
+}
 
 fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
     let Some(commit) = recorded_commit(db, b, v)? else {
@@ -281,23 +355,38 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
     if let None = recorded_reply(commit, call.record.stream) {
         return Ok(Error(NotRecorded))
     }
-    let Some(base) = base_roots(db, b, call.base)? else {
+    let Some((take base, watermark)) = base_roots(db, b, call.base)? else {
         return Ok(Error(StateGone))
     }
-    Ok(Ok(ReplaySource(commit: take commit, call: take call, base: take base)))
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base, watermark: watermark)))
 }
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
 // original CallInfo, and compare the committed reply and writes.
-fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Result[Bytes, Error], body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let reran = rerun(db, source.base, ci, plan, call, body)
-    let (take output, take writes) = match (call.settle, take reran) {
-        (0, RanTo(take output, take writes)) => (take output, take writes),
-        (1, Halted(stop)) => (failed(stop), new_data_rows()),
-        (_, RoomRefused) => return Ok(Unknown(AdmissionRefused)),
-        _ => return Ok(Different(Reply)),
+    let reran = rerun(db, registry, source.base, source.watermark, ci, plan, call, body)?
+    let metered: Rerun[Bytes] = match take reran {
+        RanTo(output, _) if list.len(output) > plan.reply_max => Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max))),
+        take within => take within,
+    }
+    let rerun_stop: Option[StopKind] = match metered {
+        RanTo(_, _) => None,
+        Halted(stop) => Some(stop_kind(stop)),
+        RoomRefused => return Ok(Unknown(StateGone)),
+    }
+    if call.stop != rerun_stop {
+        return Ok(match (call.stop, rerun_stop) {
+            (Some(OutOfSteps(_)), _) => Unknown(Residency),
+            (_, Some(OutOfSteps(_))) => Unknown(Residency),
+            _ => Different(Reply),
+        })
+    }
+    let (take output, take writes) = match take metered {
+        RanTo(take output, take writes) => (take output, take writes),
+        Halted(stop) => (failed(stop)?, new_data_rows()),
+        RoomRefused => return Ok(Unknown(StateGone)),
     }
     let stored = option.unwrap(recorded_reply(source.commit, call.record.stream))
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
@@ -309,25 +398,94 @@ fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) 
     Ok(Same)
 }
 
-pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
-    match replay_source(db, b, v)? {
-        Ok(take source) => replay_run(db, source, plan, failed, body),
+pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Stop) -> Bytes, env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    let selected = replay_source(db, b, v)?
+    match take selected {
+        Ok(take source) => replay_run(db, db.indexes, source, plan,
+            scoped fn(stop: Stop) -> Result[Bytes, Error] { Ok(failed(stop)) },
+            scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) }),
         Error(reason) => Ok(Unknown(reason)),
     }
 }
 
-// Select the plan and open fresh handles on the same historical schema the
-// re-execution will read. Preparation runs outside the recorded entry's bounds.
-pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes,
-    prepare: scoped fn(Recorded, Schema, scoped fn(Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
-    let loaded = replay_source(db, b, v) ?=> |e| store_error(take e)
+// Prepare handles on the same historical catalog the attempt will read.
+pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
+    replay_source(db, b, v)
+}
+
+fn replay_declaration_base(source: ReplaySource) -> DeclarationBase {
+    DeclarationBase(store: source.store, opened: source.open, version: source.call.base,
+        stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
+}
+
+pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
+    if !same(source.store, db.store) || source.open != open_number(db) { return Error(Foreign) }
+    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node,
+        next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), preview: None)
+    Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
+}
+
+pub fn replay_record(source: ReplaySource) -> Recorded {
+    clone(source.call)
+}
+
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan,
+    failed: fn(Stop) -> Result[Bytes, Error], env: Env,
+    body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    let Open = selected.mode else { return Error(Foreign) }
+    if !same(source.store, db.store) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {
+        return Error(Foreign)
+    }
+    complete_declaration(selected)?
+    let Declare(plan: SchemaPlan(bindings: take bindings, ..), ..) = take selected
+    let registry = declared_index_registry(take bindings)
+    replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) })
+}
+
+
+// Run a read-only projection at the recorded base with the same entry bounds.
+pub type ReplayProjection[R] = Projected(R) | ProjectionUnavailable(UnknownReason) | ProjectionStopped
+
+pub fn project_recorded[E: inert, R](db: Db, b: Branch, v: u64, plan: Plan, env: E, body: fn(Tx, E) -> R) -> Result[ReplayProjection[R], Error] waits {
+    let loaded = replay_source(db, b, v)?
     let source = match take loaded {
-        Ok(take source) => take source,
-        Error(reason) => return Ok(Unknown(reason)),
+        Ok(take retained) => take retained,
+        Error(reason) => return Ok(ProjectionUnavailable(reason)),
     }
-    let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog))
-    let rerun_selected = scoped fn(plan: Plan, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
-        replay_run(db, source, plan, failed, body)
+    let call = view source.call
+    let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
+    let projected = rerun(db, db.indexes, source.base, source.watermark, ci, plan, call, scoped fn(call_record: Recorded, mut tx: Tx) -> Result[R, R] {
+        Ok(body(tx, env))
+    })?
+    match take projected {
+        RanTo(take answer, _) => Ok(Projected(take answer)),
+        Halted(_) => Ok(ProjectionStopped),
+        RoomRefused => Ok(ProjectionUnavailable(AdmissionRefused)),
     }
-    prepare(source.call, schema, rerun_selected)
+}
+
+pub type RecordedClaim {
+    claim: Bytes,
+    call: KeyedCallRecord,
+    settle: u8,
+    base: u64,
+    at: u64,
+    seed: u64,
+    stop: Option[StopKind]
+}
+
+pub fn recorded_claim(db: Db, wanted: u64) -> Result[Option[RecordedClaim], Error] waits {
+    let Some(take commit) = recorded_commit(db, main_branch(db), wanted)? else { return Ok(None) }
+    for edit in commit.keyed {
+        if let Some(section) = edit.call {
+            let context = match section.settlement {
+                Some(current) => current,
+                None => Settlement(way: 0, base: commit.version - 1, at: commit.at,
+                    seed: call_info(db.store, 0, commit.version, commit.at, commit.at).seed, stop: None),
+            }
+            return Ok(Some(RecordedClaim(claim: copied(edit.key)?, call: clone(section.record), settle: context.way,
+                base: context.base, at: context.at, seed: context.seed, stop: context.stop)))
+        }
+    }
+    Ok(None)
 }

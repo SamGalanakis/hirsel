@@ -6,6 +6,7 @@ use std::mem::{offset_of, size_of};
 fn published_entry_layout_matches_c_abi() {
     assert_eq!(size_of::<OsConfig>(), OS_CONFIG_BYTES as usize);
     for (actual, published) in [
+        (offset_of!(OsConfig, revision), OS_CONFIG_REVISION),
         (offset_of!(OsConfig, root_limit), OS_CONFIG_ROOT_LIMIT),
         (offset_of!(OsConfig, args), OS_CONFIG_ARGS),
         (offset_of!(OsConfig, args_len), OS_CONFIG_ARGS_LEN),

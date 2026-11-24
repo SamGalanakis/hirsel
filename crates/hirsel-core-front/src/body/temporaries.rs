@@ -131,6 +131,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         address
     }
+    /// An entry-block place of `ty` that is rooted at its own row, like a field
+    /// place after each step (`field_address`): the field it is projected from may
+    /// be typed as a holder (`arc t`, a box) rather than the row its uses project.
+    pub(super) fn entry_place(
+        &mut self,
+        base: AddressBase,
+        steps: &[Step],
+        ty: PlaceTy,
+    ) -> AddressId {
+        let address = self.entry_address(base, steps, ty);
+        if !matches!(ty, PlaceTy::Declared(_)) {
+            return address;
+        }
+        let result = self.value(Ty::Ptr);
+        self.entry_setup.push(Inst::Pointer { result, address });
+        self.note_pointer(result, address);
+        self.entry_address(AddressBase::Value(result), &[], ty)
+    }
     pub(super) fn spill_temporary(&mut self, i: usize, n: NodeId) {
         let cleanup::Owner::Temp(t) = self.owners[i] else {
             return;
@@ -174,6 +192,98 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             t.avail = Avail::Maybe;
         }
         self.epoch += 1;
+    }
+    /// A copy of temporary owner `i` behind a drop flag set on this path, for a
+    /// `break` to carry to its frame's exit. The owner itself is left as it is, so
+    /// the path that does not break still cleans it; a temporary already spilled
+    /// keeps its own storage and flag.
+    pub(super) fn carry_temporary(&mut self, i: usize, n: NodeId) -> Option<cleanup::Owner> {
+        let cleanup::Owner::Temp(t) = self.owners[i] else {
+            return None;
+        };
+        if !self.live() || !matches!(t.avail, Avail::Live | Avail::Maybe) {
+            return None;
+        }
+        if self.temporary_storage(t).is_some() {
+            return Some(cleanup::Owner::Temp(t));
+        }
+        let storage = self.entry_slot(PlaceTy::Declared(t.id), n);
+        let flag = self.entry_slot(PlaceTy::Value(Ty::Scalar(Scalar::Bool)), n);
+        let off = self.value(Ty::Scalar(Scalar::Bool));
+        self.entry_setup.push(Inst::Const {
+            result: off,
+            bits: 0,
+        });
+        self.entry_setup.push(Inst::Store {
+            address: flag,
+            value: off,
+        });
+        self.reached_temps.push(Reached {
+            storage: Some(storage),
+            held: None,
+        });
+        let carried = cleanup::Temp {
+            flag: Some(flag),
+            avail: Avail::Maybe,
+            reached: self.reached_temps.len() as u32,
+            ..t
+        };
+        self.carry_into(i, carried, n);
+        Some(cleanup::Owner::Temp(carried))
+    }
+    /// On this path, move temporary owner `i` into the carried owner `to`'s storage
+    /// and set `to`'s flag to whether `i` is live here.
+    pub(super) fn carry_into(&mut self, i: usize, to: cleanup::Temp, n: NodeId) {
+        let cleanup::Owner::Temp(t) = self.owners[i] else {
+            return;
+        };
+        let (Some(storage), Some(flag)) = (self.temporary_storage(to), to.flag) else {
+            return;
+        };
+        if !self.live() {
+            return;
+        }
+        let on = match (t.avail, t.flag) {
+            (Avail::Live, _) => self.konst(Ty::Scalar(Scalar::Bool), 1, n),
+            (Avail::Maybe, Some(f)) => {
+                let on = self.value(Ty::Scalar(Scalar::Bool));
+                self.inst(
+                    Inst::Read {
+                        result: on,
+                        address: f,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                Some(on)
+            }
+            _ => None,
+        };
+        let Some(on) = on else { return };
+        if self.temporary_storage(t) != Some(storage) {
+            let from = match self.temporary_storage(t) {
+                Some(at) => at,
+                None => self.address(AddressBase::Value(t.value), &[], PlaceTy::Declared(t.id), n),
+            };
+            let bytes = self.native_size(t.id, n);
+            self.inst(
+                Inst::Copy {
+                    to: storage,
+                    from,
+                    bytes,
+                },
+                n,
+            );
+        }
+        if t.flag != Some(flag) {
+            self.inst(
+                Inst::Store {
+                    address: flag,
+                    value: on,
+                },
+                n,
+            );
+        }
     }
     pub(super) fn install_entry_setup(&mut self) {
         if self.entry_setup.is_empty() {

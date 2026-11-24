@@ -1,0 +1,243 @@
+// HDR-to-SDR tone mapping. Pure Hirsel: no foreign reach.
+//
+// Operator: the ITU-R BT.2390-11 §5.4.1 EETF with Lb = Lmin = 0, applied
+// to each PQ-coded R'G'B' component, mapping the source peak (mdcv, else
+// clli, else 1000 cd/m²) onto a 100 cd/m² SDR peak. Then the PQ EOTF
+// (SMPTE ST 2084), the BT.2020-to-BT.709 primaries matrix (BT.2087), a
+// clip to [0, 1], the BT.709 OETF and BT.709 limited-range Y'CbCr.
+
+const STEPS: u64 = 4096
+const ONE: i64 = 65536
+
+const M1: f64 = 0.1593017578125
+const M2: f64 = 78.84375
+const C1: f64 = 0.8359375
+const C2: f64 = 18.8515625
+const C3: f64 = 18.6875
+
+const LN2: f64 = 0.6931471805599453
+
+pub type Tone {
+    // E' (index × 1/4096) to linear light relative to the SDR peak, × 65536.
+    linear: List[i64],
+    // Linear light (index × 16/65536) to the BT.709 OETF value, × 65536.
+    oetf: List[i64],
+    // 10-bit limited-range code to Y' or C', × 65536.
+    luma: List[i64],
+    chroma: List[i64]
+}
+
+/// Natural logarithm of a positive normal number.
+pub fn ln(x: f64) -> f64 {
+    let bits = float.to_bits64(x)
+    let biased: i64 = int.narrow((bits >> 52) & 0x7ff)
+    let mut e = biased - 1023
+    let mut m = float.from_bits64((bits & 0x000fffffffffffff) | 0x3ff0000000000000)
+    if float.gt(m, 1.4142135623730951) {
+        m = m / 2.0
+        e += 1
+    }
+    let s = (m - 1.0) / (m + 1.0)
+    let s2 = s * s
+    let mut term = s
+    let mut sum: f64 = 0.0
+    let mut k: f64 = 1.0
+    for _ in 0u64 .. 12 {
+        sum = sum + term / k
+        term = term * s2
+        k = k + 2.0
+    }
+    let ef: f64 = float.from_int(e)
+    ef * LN2 + 2.0 * sum
+}
+
+pub fn pow(x: f64, y: f64) -> f64 {
+    if float.le(x, 0.0) {
+        return 0.0
+    }
+    float.exp(y * ln(x))
+}
+
+/// SMPTE ST 2084 EOTF: E' in [0, 1] to cd/m².
+pub fn pq_eotf(e: f64) -> f64 {
+    let p = pow(e, 1.0 / M2)
+    let mut num = p - C1
+    if float.lt(num, 0.0) {
+        num = 0.0
+    }
+    10000.0 * pow(num / (C2 - C3 * p), 1.0 / M1)
+}
+
+/// SMPTE ST 2084 inverse EOTF: cd/m² to E'.
+pub fn pq_inverse(nits: f64) -> f64 {
+    let y = pow(nits / 10000.0, M1)
+    pow((C1 + C2 * y) / (1.0 + C3 * y), M2)
+}
+
+/// BT.2390 EETF (Lb = Lmin = 0) on a PQ value, for a source peak and a
+/// target peak in cd/m².
+pub fn eetf(e: f64, source_peak: f64, target_peak: f64) -> f64 {
+    let lw = pq_inverse(source_peak)
+    let max_lum = pq_inverse(target_peak) / lw
+    let mut e1 = e / lw
+    if float.gt(e1, 1.0) {
+        e1 = 1.0
+    }
+    let ks = 1.5 * max_lum - 0.5
+    let e2 = if float.lt(e1, ks) {
+        e1
+    } else {
+        let t = (e1 - ks) / (1.0 - ks)
+        let t2 = t * t
+        let t3 = t2 * t
+        (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * max_lum
+    }
+    e2 * lw
+}
+
+/// BT.709 OETF.
+pub fn oetf709(l: f64) -> f64 {
+    if float.lt(l, 0.018) {
+        4.5 * l
+    } else {
+        1.099 * pow(l, 0.45) - 0.099
+    }
+}
+
+fn fixed(x: f64) -> i64 {
+    let r = float.round(x * 65536.0)
+    let converted: Result[i64, FloatError] = float.to_int(r)
+    match converted {
+        Ok(v) => v,
+        Error(_) => 0,
+    }
+}
+
+pub fn new(source_peak: u32, target_peak: u32) -> Tone {
+    let peak: f64 = float.from_int(source_peak)
+    let target: f64 = float.from_int(target_peak)
+    let steps: f64 = float.from_int(STEPS)
+    let mut linear: List[i64] = list.with_capacity(STEPS + 1)
+    let mut oetf: List[i64] = list.with_capacity(STEPS + 1)
+    for k in 0u64 .. STEPS + 1 {
+        let kf: f64 = float.from_int(k)
+        let e = kf / steps
+        let mut rel = pq_eotf(eetf(e, peak, target)) / target
+        if float.gt(rel, 1.0) {
+            rel = 1.0
+        }
+        list.push(mut linear, fixed(rel))
+        list.push(mut oetf, fixed(oetf709(kf / steps)))
+    }
+    let mut luma: List[i64] = list.with_capacity(1024)
+    let mut chroma: List[i64] = list.with_capacity(1024)
+    for code in 0i64 .. 1024 {
+        list.push(mut luma, (code - 64) * ONE / 876)
+        list.push(mut chroma, (code - 512) * ONE / 896)
+    }
+    Tone(linear: take linear, oetf: take oetf, luma: take luma, chroma: take chroma)
+}
+
+fn clamp(v: i64, hi: i64) -> i64 {
+    if v < 0 {
+        0
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+fn sample(src: Bytes, at: u64) -> u64 {
+    let lo: u64 = int.widen(src[at])
+    let hi: u64 = int.widen(src[at + 1])
+    (hi << 8 | lo) & 1023
+}
+
+fn idx(v: i64) -> u64 {
+    int.narrow(clamp(v, ONE) >> 4)
+}
+
+fn byte(v: i64) -> u8 {
+    int.narrow(clamp(v, 255))
+}
+
+/// Converts one 10-bit 4:2:0 BT.2020 PQ picture (packed little-endian u16
+/// Y, U, V planes) to 8-bit BT.709 I420 of the same size.
+pub fn frame(t: Tone, width: u32, height: u32, src: Bytes, mut dst: Bytes) {
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    let cw = (w + 1) / 2
+    let ch = (h + 1) / 2
+    let u_at = 2 * w * h
+    let v_at = u_at + 2 * cw * ch
+    let dst_u = w * h
+    let dst_v = dst_u + cw * ch
+    let linear = view t.linear
+    let oetf = view t.oetf
+    let luma = view t.luma
+    let chroma = view t.chroma
+    for cy in 0u64 .. ch {
+        for cx in 0u64 .. cw {
+            let c = cy * cw + cx
+            let cb = chroma[sample(src, u_at + 2 * c)]
+            let cr = chroma[sample(src, v_at + 2 * c)]
+            // BT.2020 non-constant luminance inverse.
+            let dr = cr * 96639 / ONE
+            let dg = (cb * 10784 + cr * 37444) / ONE
+            let db = cb * 123299 / ONE
+            let mut sum_r = 0i64
+            let mut sum_g = 0i64
+            let mut sum_b = 0i64
+            let mut n = 0i64
+            for dy in 0u64 .. 2 {
+                let y = 2 * cy + dy
+                if y < h {
+                    for dx in 0u64 .. 2 {
+                        let x = 2 * cx + dx
+                        if x < w {
+                            let p = y * w + x
+                            let yy = luma[sample(src, 2 * p)]
+                            let lr = linear[idx(yy + dr)]
+                            let lg = linear[idx(yy - dg)]
+                            let lb = linear[idx(yy + db)]
+                            // BT.2020 to BT.709 primaries, × 65536.
+                            let r = clamp((lr * 108822 - lg * 38511 - lb * 4774) / ONE, ONE)
+                            let g = clamp((lg * 74246 - lr * 8163 - lb * 547) / ONE, ONE)
+                            let b = clamp((lb * 73317 - lr * 1190 - lg * 6592) / ONE, ONE)
+                            let vr = oetf[idx(r)]
+                            let vg = oetf[idx(g)]
+                            let vb = oetf[idx(b)]
+                            let yo = (vr * 13933 + vg * 46871 + vb * 4732) / ONE
+                            dst[p] = byte(16 + (219 * yo + 32768) / ONE)
+                            sum_r += vr
+                            sum_g += vg
+                            sum_b += vb
+                            n += 1
+                        }
+                    }
+                }
+            }
+            let ar = sum_r / n
+            let ag = sum_g / n
+            let ab = sum_b / n
+            let ay = (ar * 13933 + ag * 46871 + ab * 4732) / ONE
+            // Cb = (B' - Y') / 1.8556, Cr = (R' - Y') / 1.5748, × 224.
+            dst[dst_u + c] = byte(128 + ((ab - ay) * 224 * 35318 / ONE + 32768) / ONE)
+            dst[dst_v + c] = byte(128 + ((ar - ay) * 224 * 41616 / ONE + 32768) / ONE)
+        }
+    }
+}
+
+/// Narrows a 10-bit SDR 4:2:0 picture to 8 bits, rounding.
+pub fn narrow(width: u32, height: u32, src: Bytes, mut dst: Bytes) {
+    let n = list.len(dst)
+    for i in 0u64 .. n {
+        let v = sample(src, 2 * i)
+        dst[i] = int.narrow(if v >= 1022 {
+            255u64
+        } else {
+            (v + 2) >> 2
+        })
+    }
+}

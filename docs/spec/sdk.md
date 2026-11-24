@@ -26,28 +26,116 @@ retain every tag, including Some(None) and Some(unit). Nominal `via` types
 expose their representation type.
 
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
-result supplies `call.<name>`, `subscribe.<name>` and `subscribeDecoded.<name>`
-entry stubs. Names are the
-percent-decoded final component of an entry's definition identity. Duplicate
-names cause `DuplicateStubName(a, b)` before any output is written.
+result supplies `call`, `subscribe` and `subscribeDecoded` entry stubs, each
+namespaced by module: `api.call.<module>.<name>(args, options?)`, `api.subscribe.<module>.<name>`
+and `api.subscribeDecoded.<module>.<name>`. Every module is namespaced the same
+way, `main` included, and there is no flat name. Calls (compute, granted and
+transact entries) appear under `call`; queries appear under `subscribe` and
+`subscribeDecoded`.
+
+An entry's **stub path** comes from its definition identity `D`, which in the
+identity bytes ends at the first `[` or `(` ([PROG-9](programs.md#prog-9-code-descriptors)).
+The package component is dropped, and every remaining component, each module path
+component and then the function's name, is percent-decoded. A nested module path
+gives nested objects: an entry `fn` in module `a.b`, with `D` =
+`app@1/a/b/fn`, is `api.call.a.b.fn`. Two instances of one generic function have
+one stub path.
+
+Stub paths must be distinct, and no stub path may be a proper prefix of another,
+so a module `a` with an entry `b` and a module `a.b` cannot both be exported (the
+object `api.call.a.b` would be both a function and a namespace). The rule covers
+every entry kind together. A clash, such as two instances of one generic function
+in one module, causes `DuplicateStubName(a, b)` before any output is written,
+where `a` and `b` are the two entries written `module.path::name`, for example
+`DuplicateStubName(main::pick, main::pick)`.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
-`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onRows, onEnd?)`, returning a
-handle with `unsubscribe()`. The generated stub forwards the optional `onEnd`
-callback. The runtime removes the matching subscription before delivering the
-decoded `Ended` reason once. An empty completed Batch delivers `[]` to `onRows`.
-Reset and reconnect resubscribe without calling `onEnd`.
+`Promise<Outcome<R>>`.
 
-Use `api.subscribeDecoded.<name>(args, onRows, onEnd?)` for typed rows. Each
-row has `sub`, the numeric `table` id, the decoded `key`, and `value` as an
-`Option` of the decoded row type. The wrapper reads the four-byte table id
-and decodes the remaining key bytes with the table's ordered key codec.
-`codec.js` exports the key and row value codecs as `Key<i>` and `RowValue<i>`
-for the query at index `i` in `want`. Use `api.subscribe.<name>` for wire rows.
+### Subscriptions
 
-For a query, `Described.result` is the ordered key schema and the value schema
-in that order, each encoded as `std.codec` Bytes. `result_fp` fingerprints
-that pair so changing either schema changes the Want.
+`subscribe(want, argsBytes, onChange, onEnd?)` returns a handle with `value()`,
+`rows(slot)`, `map(slot)`, `get(slot, key)` and `unsubscribe()`. The four reads
+return `Pending` until the current instance completes, `Ready` with the data
+from the server plus pending optimistic writes, or `Ended` after an `Ended`
+frame or `unsubscribe()`. `current()` reports whether the instance has a
+server image. An absent key in a ready image gives `Ready` with
+`undefined`.
+
+`value()` reads the query result. `rows(slot)` reads the rows as an array.
+`map(slot)` indexes the same rows by lowercase hex of the slot key.
+Raw subscriptions use the full wire key. Generated decoded subscriptions
+use the ordered key encoding without the store's four-byte collection id.
+`get(slot, key)` reads one row by key. The array and map each keep their
+identity until that slot changes. Reads and deltas share row references. The
+SDK freezes decoded plain objects, arrays and tuples, and exposes
+`ReadonlyMap` and readonly byte types. Mutating a shared map or
+`Uint8Array`, or any data within a map leaf, is undefined behavior.
+
+`onChange(sub, change)` runs after the client applies the whole Batch or
+recomputes the image for a local change. `change.rows` contains typed `RowChange` records with the slot
+and hex key. An insertion has `new`, a deletion has `old`, and an update
+has both. `change.value` carries the old and new result when its encoded
+bytes change. `change.replaced` marks a completing group. Its rows still
+describe the difference from the current image, and a byte-identical
+completion of a ready image is silent. The first completion publishes even
+when its rows and value encoding are empty. An empty value in a
+non-completing group leaves that result as it was.
+
+Reset, transport loss and terminal client states clear the public image and
+detach old subscription ids immediately. When an image is cleared, its
+handler receives `{invalidated: true, replaced: false, rows: []}` after all
+affected handles read `Pending`. The next instance's first completion
+describes only the new image, including for the same Caller. The SDK ignores
+frames of lost connections and groups for retired ids. Reset and reconnect
+resubscribe. The SDK delivers the optional `onEnd` once after removing the
+matching subscription for an `Ended` frame.
+
+Use `api.subscribeDecoded.<module>.<name>(args, onChange, onEnd?)` for typed
+values, rows and keys. A row holds its slot name, decoded key and present
+value as `Some`. The generated stub uses the appropriate slot's
+`Key<i>_<s>` encoder for `get`. `codec.js` exports `Value<i>`,
+`Key<i>_<s>` and `RowValue<i>_<s>`
+for the query at index `i` and slot `s` in that query. Use
+`api.subscribe.<module>.<name>` for numeric slots and raw byte keys.
+
+### Optimistic writes
+
+Pass `{optimistic(draft) { … }}` as the call options to update subscription
+images while a call is queued or in flight. `draft.get(sub, slot, key)`
+reads the current draft. `put(sub, slot, key, row)`, `delete(sub, slot, key)`
+and `value(sub, result)` edit it. The draft uses the subscription's key type
+and encoder. A row passed to `put` must match its slot and key and carry a
+`Some` value. Custom subscription codecs provide `encodeRow` and
+`encodeValue` for the corresponding writes.
+
+Write synchronous functions that use the draft for reads and writes. The
+client runs them in queue order over the latest server images on every
+commit and whenever optimistic work enters or leaves the queue. A throwing
+function loses its changes and reports its error to `onDiagnostic`. The
+call continues. The functions live in memory and disappear on reload.
+
+The SDK applies a successful outcome's server rows and removes the matching
+optimistic writes in the same commit. Equal encoded rows and values stay
+silent. After loss or Reset, reads remain `Pending` until the fresh instance
+completes. A successful outcome arriving early keeps its overlay until every
+subscription it wrote has completed or ended. Failures remove the overlay
+immediately. If an instance is current and the server delivers a successful
+outcome before its rows in a later Batch, the visible row can revert briefly.
+
+Server rows and Draft writes use the same encoded key in decoded slots,
+so confirmation can keep an optimistically inserted row even when the slot
+was empty. The collection id belongs to the live store and can differ from
+ids in Describe's empty-store declaration run.
+
+For a query, `Described.result` is R's value schema followed by the slot list,
+each slot's name, ordered key schema and value schema, each schema encoded as
+`std.codec` Bytes. `result_fp` fingerprints the whole, so changing R, a slot's
+name, its table's schemas, or the slot order changes the Want. Describe also
+carries the explicit `value` and `slots` schemas for each query. Its
+`tables` diagnostics list declarations from a Migrate run over an empty
+memory store. The generator exports those diagnostics without using them as
+part of the release identity.
 
 Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
 `Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete
@@ -59,13 +147,20 @@ The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
 
 `frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
-and BadKind number tables, and `subprotocol = "hirsel.2"`. Frame is a protocol
-type shared by every executable. The generator computes
-`std.codec.schema(of[runner.Frame]())` from the compiler's bundled runner and
-std sources. Describe contains only per-program data. A Frame change requires
-a subprotocol change; the client checks the negotiated subprotocol.
+and BadKind number tables, and `subprotocol = "hirsel.4"`. Frame is a protocol
+type shared by every executable. The schema `std.codec.schema(of[runner.Frame]())`
+is generated from the Runner and std sources by `core/tools/frame_schema.py`
+and checked in as `core/programs/runner/frame-schema.bin`. The
+`core-runner-frame-schema` CI target regenerates it and compares the bytes. The generator reads that file, and
+Describe contains only per-program data. A Frame change requires a subprotocol
+change; the client checks the negotiated subprotocol. To a client that offers
+only retired tokens (`hirsel.1`, `hirsel.2`) the server answers 101 selecting the
+first token offered, so the browser completes the handshake, and then Close 1009
+with reason `hirsel.4` before any Welcome; the client reports that the page or client must be
+reloaded, and never retries. A 1009 after Welcome is the stored-reply close and
+is reported as a reply error.
 Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
-4. Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
+4. Fault appends Conflict at tag 4 (RUNNER-SPEC v2.45). Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
 Superseded is absent. The generated codecs follow the bundled declarations.
 
 `--place-timeout` is a positive number of seconds, default 10. `--n-place` fixes
@@ -107,62 +202,124 @@ and needs Node type declarations when you type-check it.
 
 `Client.open` requires the ingress WebSocket `url`, the generated `frame`
 codec and `wants`, and a `storage` adapter. Pass the generated `identity` to
-check the launch digest, target and `n_place`. Optional `credential` bytes go
-in Hello. `deadlineMs` sets the server's call deadline and defaults to 30,000.
+check the launch digest, target and `n_place`. The optional `credential` is an
+async source, `() => Promise<Uint8Array | undefined>`, whose bytes go in Hello.
+The client calls it before its first Hello and once per credential recovery
+(below), never inside its serialized work or the storage lock. `deadlineMs` sets the server's call deadline and defaults to 30,000.
 The optional `socket` factory and `clock` override the platform WebSocket and
-time source. `onState`, `onDiagnostic`, `onRecovered`, `onBatch` and
-`onPrediction` observe state changes, diagnostics, recovered call outcomes,
-applied Batch versions and pending predictions, respectively.
+time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
+state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
-Locks. Node storage uses durable file
-replacement and `flock` leases. Generation validation and each work send share
-the installation lock. Missing allocated stream records fence the generation;
-pending requests are tied to the Caller saved for that stream.
+Locks. Node storage uses durable file replacement and `flock` leases.
+Recovery format 4 stores a random installation ID and random fencing generation.
+Generation validation and each work send share the installation lock. Missing
+stream records fence the generation. Pending requests keep their original Caller.
 
 The client keeps one call in flight per stream. Calls submitted while ready
-wait in memory in submission order, including behind a recovered call.
-Pending identity and admission uncertainty are durable before send. Returned
-and Failed outcomes commit together with the next position. A definitive V1
-refusal reuses the position only after a single, unambiguous attempt; otherwise
-the stream retires. HistoryUnavailable retires only a matching pending request,
-while RequestMismatch also fences the generation. Incompatible closes remain
-terminal until an explicit reconnect or bindings reload. Reconnection waits for
-all Placed frames, recovers pending calls, and restores subscriptions using new
-ids. Cache replacement waits for Batch.complete.
+wait in memory in submission order, including behind a recovered call. The
+first call mints a stream ID from the keyed time in Welcome and a cryptographic
+64-bit nonce. The client persists the stream ID, position, argument bytes and
+in-flight flag before sending. Returned and Failed outcomes commit together
+with the next position. A lost attempt retries the original identity after
+backoff. A decisive refusal reuses the position only when every attempt received
+a no-commit answer.
 
-The application may supply credential bytes in Client options. The client
-sends them in Hello and stores the returned Caller with the stream. It replays
+On WebSocket, HistoryUnavailable allows one remint when the installation
+minted the stream and every attempt received a no-commit answer. If prior
+delivery is uncertain, the client retires the stream and reports LocallyUnknown.
+On HTTP a matching 410 marker applies to its own delivery. An earlier request
+could have reached the place through a proxy retry, so the client reports
+LocallyUnknown and retires the stream. Every POST comes from an explicit
+recovery transition. RequestMismatch fences the generation.
+
+Incompatible closes remain terminal until an explicit reconnect or bindings
+reload. Reconnection waits for all Placed frames, recovers pending calls, and
+restores subscriptions using new IDs. Disconnect invalidates old images.
+Each subscription stays pending until its new `complete` (above).
+
+The client sends the bytes of the application's credential source in Hello and stores the returned Caller with the stream. It replays
 pending work only when Welcome returns the same Caller. If an anonymous
 connection receives a new anonymous Caller, the client reports any pending
 outcome as LocallyUnknown and starts at position zero for that Caller.
 
+A place's binding may give the session an expiry (RUNNER-SPEC CHANGES-v2.57).
+When it is reached, the place closes an established socket with the private
+code 4401 `AuthExpired` and answers a private HTTP call with 401. A client that
+was offline past its credential's expiry first sees Close 1008 before Welcome
+instead. All three are one credential recovery. The client drops the refused
+bytes, so no path sends them again, clears every public image at once, enters
+the `CredentialNeeded` state, reports a diagnostic and calls the credential
+source once. WS and HTTP refusals share the one refresh in flight. The client
+reconnects with the fresh bytes. If the source throws, gives no bytes, gives
+the bytes just refused, or the place refuses the refreshed credential too, the
+client enters `Unbound` with no further refresh. A recovery attempt ends at
+Welcome; the next refusal starts a new one. A refresh that settles after
+`close()` or fencing is discarded. Durable pending work is replayed only after
+Welcome names the same Caller: the client recovers the exact pending identity
+and resubscribes with fresh ids and complete images, as on any reconnect. A
+different Caller follows the Caller change rules above, and the anonymous
+issuer-1 reset to LocallyUnknown is unchanged. Calls queued in memory wait
+through `CredentialNeeded`.
+
+An SSE subscription (http.md B-9) shares the same credential source and the
+same refresh in flight. Its final event `expired`, and a 401 on any SSE
+request or re-request, are the same credential recovery as Close 4401: the
+consumer clears that subscription's image, never re-requests with the refused
+bytes, and re-requests with the refreshed ones, under the same one-refresh
+rule and the same `Unbound` ends. A stream that ends with no final event
+(`lease_end` or a place's stop) is not a credential failure: the consumer
+re-requests at once with the credential it holds, without calling the source.
+If `expired` was lost, that re-request gets 401, which starts the recovery,
+so the consumer never needs the event to stay correct. Every re-request is a
+fresh subscription (no `Last-Event-ID`), and the image is replaced from empty
+at its completing `batch` event.
+
+Call `bindHttp(client, {url}).<op>(args, {signal, onChange, onEnd})` for a
+generated Subscribe binding. It returns the same typed image reads as a
+decoded WebSocket subscription and a `done` promise. `done` reports
+`Ended` with the decoded Outcome, `Refused` with the pre-head HTTP status
+and body, or `Aborted` on cancellation. It rejects with the client's error
+if the shared credential recovery ends in `Unbound`. A Reset or a transport
+failure clears the image and resubscribes with jittered backoff. Each active
+SSE subscription holds one HTTP/1.1 connection for its current request.
+
 ## Calling an entry from the terminal
 
-`hirsel call SERVER --url ws://HOST:PORT/PATH [-- ENTRY [--FLAG VALUE...]]`
+`hirsel call SERVER --url ws://HOST:PORT/PATH [--stream 32-HEX] [-- ENTRY [--FLAG VALUE...]]`
 lists a running place's entries, or calls one of them, for debugging. SERVER is
 the built executable the place runs. Without ENTRY, or with `-- --help`, the
 command prints every entry with its kind, flags and result type. `-- ENTRY
 --help` also prints the entry's named types.
 
+ENTRY is `MODULE/NAME`: the entry's module path, its components joined by `.`,
+then `/` and the function's name, the stub path of the TypeScript bindings
+(section 4) written for the terminal. So `fn` in module `main` is `main/fn`, and
+`fn` in module `a.b` is `a.b/fn`. There is no bare-name form, for `main` or any
+other module. The listing prints each entry in this form, and the stub path
+rules, including `DuplicateStubName`, apply as they do in `hirsel sdk ts`.
+
 **Transport.** The call is an ordinary client session on the server's ingress,
 as the TypeScript client's is. It sends Hello without an application credential.
-It sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
-the Done for that position arrives. There is no debug entry point or second call
-path: a place applies its credential binding to the CLI's empty credential as it
-would to any other client. The upgrade offers `hirsel.2` and checks
+It mints a fresh stream ID from the keyed time in Welcome and a random nonce,
+sends one Call at position zero, and reads Batch and Reset frames until the
+matching Done arrives. A place applies its credential binding to the CLI's
+empty credential as it would to any other client. The upgrade offers `hirsel.4` and checks
 `Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
 connection and is the Call's `deadline_ms`; default 10 seconds. A session that
-ends after the Call was sent reports that the outcome is unknown, and the call
-is never resent. `wss://` is refused as unsupported.
+ends after the Call was sent reports LocallyUnknown. The command sends once
+and prints the received outcome, including HistoryUnavailable or Overloaded.
+With `--stream`, it uses the supplied ID as-is. The 32 hexadecimal digits
+encode the 64-bit birth stamp followed by the 64-bit nonce in most-significant
+digit first order. Repeat the command with the same Caller, ID and arguments
+to recover a retained outcome. `wss://` is refused as unsupported.
 
 **Schemas.** Entry identities, fingerprints and argument and result schemas come
 from SERVER's describe launch mode, as in `hirsel sdk ts`. `--n-place` and
 `--place-timeout` mean what they mean there. They must match the running place,
 so the types match what is running. The Frame codec is the same one the SDK
-generates: `std.codec.schema(of[runner.Frame]())` from the compiler's bundled
-runner. The native options `--runtime` and `--cc` select the toolchain for that
-probe. Before sending a Call, the CLI checks two things:
+uses, from the checked-in Runner frame schema. Before sending a Call, the CLI
+checks two things:
 
 - If Welcome names a launch digest, the digest, target and `n_place` must equal
   the Describe's. Otherwise the CLI refuses and sends nothing more.

@@ -1,6 +1,9 @@
 //! FORM decision 44: capabilities and Args are plain u64 provider handles.
 //! Config.grants is in main parameter order; the run closes its grants after
 //! main's cleanup. Grant closure cannot allocate, admit or fail.
+#[path = "entry_launch.rs"]
+mod launch_options;
+
 use crate::{
     Context,
     os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
@@ -216,6 +219,8 @@ pub struct OsConfig {
     /// One `[parameter, source, policy]` record per Cred parameter (TLS-7).
     pub cred_grants: *const [View; 3],
     pub cred_grants_len: usize,
+    /// The entry revision, or null for an embedder without one.
+    pub revision: *const [u8; 32],
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -329,19 +334,7 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
-pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
-    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
-    if text.len() != 2 * N {
-        return Err(invalid());
-    }
-    let mut out = [0u8; N];
-    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
-        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
-        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
-        *byte = (hi * 16 + lo) as u8;
-    }
-    Ok(out)
-}
+pub(crate) use launch_options::prepare_hex;
 
 /// The platform launcher pins the image across exec, including the serving shell's
 /// exec. Consume its descriptor before any grants or process metadata are opened.
@@ -531,7 +524,6 @@ impl OsProcess {
     pub(crate) fn host_launch(&self) -> Option<&HostLaunch> {
         self.host.as_ref()
     }
-
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     /// Matching socket activation metadata is consumed during process startup,
     /// before other threads can access the environment.
@@ -548,96 +540,27 @@ impl OsProcess {
                 std::str::from_utf8(value)
                     .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             }
-            let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
-            let mut describe_mode = false;
-            let mut preview_mode = false;
-            let mut wake = false;
-            let mut install_child = None;
-            let mut idle_ms = None;
-            let mut store_id = None;
-            let mut prefix = 0;
-            let mut exec_approvals = Vec::new();
-            for argument in argv.clone() {
-                if let Some(approval) = argument.strip_prefix(b"--hirsel-exec=")
-                    && input.exec_bindings_len != 0
-                {
-                    exec_approvals.push(approval);
-                } else if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
-                    if describe_mode {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    describe_mode = true;
-                    preview_mode = argument == b"--hirsel-preview";
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-install-child=") {
-                    install_child = Some(
-                        std::str::from_utf8(value)
-                            .ok()
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
-                    );
-                    prefix += 1;
-                    break;
-                } else if argument == b"--hirsel-wake" {
-                    if wake {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    wake = true;
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-idle=") {
-                    if idle_ms.is_some() {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    let idle = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .filter(|idle| *idle != 0)
-                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-                    idle_ms = Some(idle);
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-store-id=") {
-                    let parsed = std::str::from_utf8(value).ok().and_then(|value| {
-                        if value.len() != 32 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-                        {
-                            return None;
-                        }
-                        let (hi, lo) = value.split_at(16);
-                        Some((
-                            u64::from_str_radix(hi, 16).ok()?,
-                            u64::from_str_radix(lo, 16).ok()?,
-                        ))
-                    });
-                    if store_id.is_some() || parsed.is_none() {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    store_id = parsed;
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
-                    n_place = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-                } else {
-                    break;
-                }
-                prefix += 1;
-            }
-            let args: Vec<_> = argv.skip(prefix).map(<[u8]>::to_vec).collect();
-            let prepare_path = if args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
-                if describe_mode || args.len() != 4 || input.directories_len == 0 {
-                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                }
-                let dir = Path::new(OsStr::from_bytes(&args[1]));
-                if !dir.is_absolute() {
-                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                }
-                Some(dir)
-            } else {
-                None
-            };
+            let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
+            let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
+            let prepare_path = options.prepare_path(&args, input.directories_len)?;
+            let dry_run_path = options.dry_run_path(&args, input.directories_len)?;
+            let isolated_store = prepare_path.or(dry_run_path);
+            let dry_run = dry_run_path.is_some();
+            let program_args = if dry_run { &args[2..] } else { &args[..] };
+            let launch_options::LaunchOptions {
+                n_place,
+                n_place_explicit,
+                describe_mode,
+                preview_mode,
+                wake,
+                install_child,
+                idle_ms,
+                store_id,
+                witness,
+                exec_approvals,
+                ..
+            } = options;
             let installing = install_child.is_some();
-            if (wake && (describe_mode || prepare_path.is_some() || installing))
-                || (installing && (describe_mode || prepare_path.is_some()))
-                || (!wake && (idle_ms.is_some() || store_id.is_some()))
-            {
-                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-            }
             let digest = receive_launch_image()?;
             #[cfg(target_os = "macos")]
             end_with_launcher()?;
@@ -663,26 +586,29 @@ impl OsProcess {
             let mut launch = match digest {
                 Some(digest) => Metadata::embedded(Some(digest), target, n_place, describe_mode),
                 None => launch_metadata(target, n_place, describe_mode),
-            };
+            }
+            .with_launch_identity(input.revision.as_ref().copied(), n_place_explicit);
             if wake {
                 launch = launch
                     .with_wake(idle_ms.unwrap_or_default())
-                    .with_store_id(store_id);
+                    .with_store_id(store_id)
+                    .with_witness(witness);
             }
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
+            }
+            if dry_run {
+                launch = launch.with_dry_run();
             }
             if let Some(activation) = install_child {
                 launch = launch.with_install_child(activation);
             }
             if preview_mode {
                 use std::io::Read;
-                let _blocking = crate::units::blocking();
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
                 let mut old = Vec::new();
-                input
-                    .take(n_place.saturating_add(1))
-                    .read_to_end(&mut old)?;
+                let limit = n_place.saturating_add(1);
+                crate::units::off_slot(|| input.take(limit).read_to_end(&mut old))?;
                 if old.len() as u64 > n_place {
                     return Err(io::Error::from_raw_os_error(libc::EFBIG).into());
                 }
@@ -693,6 +619,7 @@ impl OsProcess {
             let net_ops = input.socket_activation.as_ref();
             let (inherited, operator) = if let Some(activation) = net_ops
                 && !installing
+                && !dry_run
                 && input.grant_mask & (1 << NET) != 0
             {
                 ((activation.receive)()?, (activation.operator)()?)
@@ -700,7 +627,7 @@ impl OsProcess {
                 (None, None)
             };
             let host_control = receive_host_control()?;
-            if host_control.is_some() && (describe_mode || prepare_path.is_some() || installing) {
+            if host_control.is_some() && (describe_mode || isolated_store.is_some() || installing) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let rows = if input.net_rules_len == 0 {
@@ -710,7 +637,7 @@ impl OsProcess {
             };
             let unix = !describe_mode
                 && !installing
-                && prepare_path.is_none()
+                && isolated_store.is_none()
                 && input.grant_mask & (1 << NET) != 0
                 && rows.iter().any(|row| row.address.dir == 4);
             let exec = if input.exec_bindings_len != 0 {
@@ -738,25 +665,29 @@ impl OsProcess {
             });
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
-            let stdout = if !describe_mode && !installing && input.grant_mask & (1 << STDOUT) != 0 {
+            let stdout = if !describe_mode
+                && !installing
+                && !dry_run
+                && input.grant_mask & (1 << STDOUT) != 0
+            {
                 duplicate_stream(input.stdout_fd, libc::STDOUT_FILENO)?
             } else {
                 duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?
             };
             let stderr = duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?;
             let mut os = Box::new(OsProvider::from_streams(stdout, stderr));
-            if !describe_mode && prepare_path.is_none() {
+            if !describe_mode && isolated_store.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
                 *os.inherited_unix.get_mut().unwrap() = operator;
             }
-            let describe_out = if describe_mode || installing {
+            let describe_out = if describe_mode || installing || dry_run {
                 Some(duplicate(input.stdout_fd)?)
             } else {
                 wake_report
             };
             let directory_ops = input.directory_ops.as_ref();
             let mut dirs = Vec::new();
-            if let Some(scratch) = prepare_path {
+            if let Some(scratch) = isolated_store {
                 let operations =
                     directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
                 let handle = (operations.grant)(&mut os, scratch)?;
@@ -782,7 +713,7 @@ impl OsProcess {
             } else {
                 None
             };
-            let views = args
+            let views = program_args
                 .iter()
                 .map(|a| Buffer {
                     data: a.as_ptr().cast_mut(),
@@ -793,7 +724,7 @@ impl OsProcess {
             let net_granted = input.grant_mask & (1 << NET) != 0;
             let net_rules = if describe_mode {
                 None
-            } else if prepare_path.is_some() || installing {
+            } else if isolated_store.is_some() || installing {
                 net_granted.then(crate::net::RulesStorage::empty)
             } else if input.net_rules_len != 0 {
                 let ops = net_ops.ok_or(StartupError::NetRules)?;
@@ -1012,7 +943,8 @@ impl OsProcess {
             process.config.state = (&mut *process as *mut Self).cast();
             if let Some(exec) = &process._exec {
                 for line in &exec.lines {
-                    let outcome = crate::os::write_all(input.stderr_fd, line.as_bytes());
+                    let (fd, line) = (input.stderr_fd, line.as_bytes());
+                    let outcome = crate::units::off_slot(|| crate::os::write_all(fd, line));
                     if outcome.error != IoError::OK {
                         return Err(StartupError::Exec(
                             "could not write Exec approval record".into(),
@@ -1439,6 +1371,7 @@ unsafe extern "C" fn describe_output(state: *mut u8, data: *const u8, len: usize
         let Some(out) = &process.describe_out else {
             return false;
         };
-        crate::os::write_all(out.as_raw_fd(), bytes(View { data, len })).error == IoError::OK
+        let (fd, bytes) = (out.as_raw_fd(), bytes(View { data, len }));
+        crate::units::off_slot(|| crate::os::write_all(fd, bytes)).error == IoError::OK
     }
 }

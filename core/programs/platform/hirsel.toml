@@ -10,6 +10,9 @@ runner = { major = 1, path = "../runner" }
 
 [sources]
 "platform.hirsel" = "platform"
+"serve.hirsel" = "platform"
+"platform-roots.hirsel" = "platform"
+"platform-recovery.hirsel" = "platform"
 "platform-preview.hirsel" = "platform"
 "platform-groups.hirsel" = "platform"
 "launcher.hirsel" = "launcher"
@@ -28,6 +31,10 @@ dirs = ["."]
 "launcher_wire.hirsel" = "launcher"
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
+"platform_cutover_laws.hirsel" = "platform"
+"platform_recovery_laws.hirsel" = "platform"
+"platform_object_recovery_laws.hirsel" = "platform"
+"platform_sim_laws.hirsel" = "platform"
 "platform_source_laws.hirsel" = "platform"
 "platform_preview_laws.hirsel" = "platform"
 
@@ -48,4 +55,10 @@ limit = 134217728
 
 # The place budget and the host's own catalog store.
 [tests.runs."platform@1/local_laws/test_local_reopen_keeps"]
+limit = 134217728
+
+[tests.runs."platform@1/platform/bucket_activation_witness_distinguishes_prepared"]
+limit = 134217728
+
+[tests.runs."platform@1/platform/bucket_moved_activation_recovery"]
 limit = 134217728

@@ -32,7 +32,7 @@ named cases, and `--backend evaluator` runs host-free cases on the test evaluato
 
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (`arc`, `char`, `check`, `clock`, `cred`, `exec`, `float`, `int`, `list`, `map`, `net`, `order`,
-`result`, `sha1`, `sha256`, `string`, `task` — see the `Extends` column in [API-INDEX.md](API-INDEX.md))
+`result`, `sha1`, `sha256`, `sha512`, `string`, `task` — see the `Extends` column in [API-INDEX.md](API-INDEX.md))
 merges into core's name, so `list.sort` and
 `string.find` are written bare everywhere. Core collections use bare names: `Deque[T]`, `deque.push_back`, `Heap[T]`,
 `heap.pop`, `list.swap` and `list.sort_stable`. The stable sort's scratch is specified

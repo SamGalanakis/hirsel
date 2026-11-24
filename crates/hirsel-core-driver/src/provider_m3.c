@@ -154,6 +154,9 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
         CHECK(r->handle==7);
         s.sync_dirs++;
         return out;
+    case 124: /* ZeroExtension */
+        CHECK(r->handle==7);
+        return out;
     case 18:
         CHECK(r->handle==0 && r->buffer.capacity-r->buffer.len>=4);
         for(size_t i=0;i<r->buffer.capacity-r->buffer.len;i++) r->buffer.data[r->buffer.len+i]=(uint8_t)(0xa0+i);

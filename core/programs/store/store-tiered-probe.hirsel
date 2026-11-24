@@ -1,0 +1,97 @@
+// A path is local to the probe step. Its slots start at the participating
+// root, and its final slot names the matched edge.
+type TieredProbePath {
+    target: TieredTarget,
+    slots: List[u64]
+}
+
+fn probe_frame_matches(pack: u64, row: PackIndexRow, target: TieredTarget) -> Result[bool, Error] {
+    let expected = tiered_frame_id(target)
+    if expected.pack != pack || expected.offset != row.offset {
+        return Ok(false)
+    }
+    if expected.len != int.widen(row.len) || expected.kind != int.widen(row.kind) || expected.stamp != row.stamp {
+        return Error(disk_fault(paged_pack_path(pack)?, row.offset, Malformed))
+    }
+    Ok(true)
+}
+
+fn probe_routing_key(pack: u64, row: PackIndexRow) -> Result[View[Bytes], Error] in row {
+    if list.len(row.key) < 4 {
+        return Error(disk_fault(paged_pack_path(pack)?, row.offset, Malformed))
+    }
+    let collection: u32 = list.word_be(row.key, 0)
+    if collection != row.collection {
+        return Error(disk_fault(paged_pack_path(pack)?, row.offset, Malformed))
+    }
+    Ok(list.slice(row.key, 4, list.len(row.key)))
+}
+
+fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row: PackIndexRow) -> Result[Option[TieredProbePath], Error] waits {
+    let key = probe_routing_key(pack, row)?
+    let mut edge: std.page.Slot = clone(root)
+    let mut expected_level: Option[u8] = None
+    let mut slots: List[u64] = list.new()
+    loop {
+        let (take page, matched): (Arc[std.page.Page], Option[std.page.PagePtr]) = match take edge {
+            ColdPage(ptr) => {
+                let target = TieredPage(ptr)
+                let matched = if probe_frame_matches(pack, row, target)? {
+                    Some(ptr)
+                } else {
+                    None
+                }
+                let frame = fold_frame_at(cut, target)?
+                (arc.share(fold_page(frame)), matched)
+            },
+            HotPage(take page) => (take page, None),
+        }
+        let image = std.page.image_of(page)
+        let height = std.page.level(image)
+        if let Some(wanted) = expected_level {
+            if height != wanted {
+                return Error(disk_fault(paged_pack_path(pack)?, row.offset, Malformed))
+            }
+        }
+        if let Some(ptr) = matched {
+            return Ok(Some(TieredProbePath(target: TieredPage(ptr), slots: take slots)))
+        }
+        if let Some(slot) = std.page.descend(image, key) {
+            let child = option.unwrap(std.page.child_slot(page, slot))
+            capacity(list.try_reserve(mut slots, 1))?
+            list.push(mut slots, slot)
+            edge = clone(child)
+            expected_level = Some(height - 1)
+            continue
+        }
+        if row.kind == 0x22 {
+            let (slot, found) = std.page.search(image, key)
+            if found {
+                if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+                    if let Some(ColdBlob(ptr)) = std.page.blob_slot(page, reference.body) {
+                        if probe_frame_matches(pack, row, TieredBlob(ptr))? {
+                            let _ = fold_frame_at(cut, TieredBlob(ptr))?
+                            capacity(list.try_reserve(mut slots, 1))?
+                            list.push(mut slots, slot)
+                            return Ok(Some(TieredProbePath(target: TieredBlob(ptr), slots: take slots)))
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(None)
+    }
+}
+
+fn probe_deferred_root(cut: TieredPageSource, queued: TieredTarget, pack: u64, row: PackIndexRow) -> Result[Option[TieredProbePath], Error] waits {
+    match queued {
+        TieredPage(ptr) => probe_tiered_path(cut, ColdPage(ptr), pack, row),
+        TieredBlob(ptr) => {
+            if probe_frame_matches(pack, row, TieredBlob(ptr))? {
+                let _ = fold_frame_at(cut, TieredBlob(ptr))?
+                return Ok(Some(TieredProbePath(target: TieredBlob(ptr), slots: list.new())))
+            }
+            Ok(None)
+        },
+    }
+}

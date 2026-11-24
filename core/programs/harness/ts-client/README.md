@@ -64,7 +64,7 @@ parsed without `client.ts`.
 out=$(mktemp -d)
 mkdir "$out/data"
 hirsel build gateway --limit 536870912 --dir "$out/data" --grant Stdin --grant Stdout --grant Clock \
-    --grant Random --grant Tasks --grant 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535' \
+    --grant Random --grant Tasks --grant 'Net=Listen 127.0.0.0/8 1-65535;Connect 127.0.0.0/8 1-65535' \
     -o "$out/gateway"
 node test.ts "$out/gateway"          # the checks
 node test.ts "$out/gateway" serve    # the example page, until interrupted

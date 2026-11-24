@@ -1,0 +1,49 @@
+type Handles: shareable + send { rows: store.Table[u64, u64] }
+
+fn place(mut r: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
+    Ok(())
+}
+
+fn seeded_schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let rows = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    Ok(Handles(rows: store.finish(mut d, take rows)?))
+}
+
+fn unique_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, value)
+    Ok(take keys)
+}
+
+fn candidate_schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let key = std.codec.key_u64()
+    let mut rows = store.declare_table(mut d, "rows", key, std.codec.of_u64())?
+    let _ = store.index(mut d, mut rows, "unique", Unique, code.describe(unique_keys), key)?
+    Ok(Handles(rows: store.finish(mut d, take rows)?))
+}
+
+fn seed(d: Dir, c: Clock, random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = store.open(tasks, d, c, random, options)?
+    let handles = store.bind_declaration(mut db, Migrate, seeded_schema)?
+    let saved = store.run(mut db, None, handles.rows, fn(mut tx, t) -> Result[(), store.Error] {
+        store.put(mut tx, t, 9u64, 22u64)?
+        store.put(mut tx, t, 3u64, 22u64)?
+        store.put(mut tx, t, 5u64, 17u64)
+    })?
+    let Committed(done) = saved else { return Error(MigrationFault) }
+    store.durable(mut db, done.ticket)?
+    store.close(take db)
+}
+
+pub fn main(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    if args.get(a, 0u64) == Some("seed") { return Ok(seed(d, c, random, tasks) ?=> |_| Exit(status: 1u8)) }
+    runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(candidate_schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let configured: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(),
+            selection: runner.launch_selection(a) ?=> Usage, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(candidate_schema),
+            session: runner.wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64,
+            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+        Ok(runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
+    })
+}

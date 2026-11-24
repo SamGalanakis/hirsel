@@ -1,0 +1,247 @@
+pub type AvifSource {
+    av1: Bytes,
+    configuration: Bytes
+}
+
+pub type AvifOptions {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    orientation: u8,
+    monochrome: bool,
+    color_space: ColorSpace
+}
+
+pub fn mux_avif(primary: AvifSource, alpha: Option[AvifSource], options: AvifOptions, limits: Limits) -> Result[Bytes, Error] {
+    match (bound steps limits.max_steps {
+        mux_avif_inner(primary, alpha, options, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn avif_source_size(source: AvifSource, limits: Limits) -> Result[u64, Error] {
+    let h = list.len(source.configuration)
+    let n = list.len(source.av1)
+    if h < 4 || source.configuration[0] != 0x81 {
+        return Error(Malformed)
+    }
+    if h > limits.max_bytes || n > limits.max_bytes - h || h + n > 0xfffffff0 {
+        return Error(ByteLimit)
+    }
+    validate_av1_config(source.configuration, limits)?
+    validate_av1_still(source.av1, limits)?
+    Ok(h + n)
+}
+
+fn mux_avif_inner(primary: AvifSource, alpha: Option[AvifSource], options: AvifOptions, limits: Limits) -> Result[Bytes, Error] {
+    check_size(options.width, options.height, 1, limits)?
+    if options.orientation < 1 || options.orientation > 8 || (options.bit_depth != 8 && options.bit_depth != 10 && options.bit_depth != 12) {
+        return Error(Malformed)
+    }
+    if let EmbeddedIcc = options.color_space {
+        return Error(Unsupported)
+    }
+    let primary_size = avif_source_size(primary, limits)?
+    let alpha_size = match alpha {
+        Some(layer) => avif_source_size(layer, limits)?,
+        None => 0,
+    }
+    let canvas = avif_orientation_properties(options.orientation)
+    let images: u16 = if alpha_size == 0 {
+        1
+    } else {
+        2
+    }
+    let color_size: u64 = if let Unspecified = options.color_space {
+        0
+    } else {
+        20
+    }
+    let channels: u64 = if options.monochrome {
+        1
+    } else {
+        3
+    }
+    let transforms: u64 = (if canvas.0 != 0 {
+        1u64
+    } else {
+        0
+    }) + (if canvas.1 != 0 {
+        1u64
+    } else {
+        0
+    })
+    // Box headers and fields (empty names), plus the codec records and payloads.
+    let overhead = 239 + channels + color_size + 10 * transforms + (if images == 2 {
+        166
+    } else {
+        0
+    })
+    let total = overhead + primary_size + alpha_size
+    if total > limits.max_bytes || total > 0xffffffff {
+        return Error(ByteLimit)
+    }
+    let mut out = alloc_bytes(total)?
+    let ftyp = media_container.mp4.start_box(mut out, media_container.mp4.FTYP)
+    list.append(mut out, b"avif\x00\x00\x00\x00avifmif1miaf")
+    media_container.mp4.close_box(mut out, ftyp)
+    let meta = media_container.mp4.full_box(mut out, media_container.mp4.META, 0)
+    let hdlr = media_container.mp4.full_box(mut out, media_container.mp4.HDLR, 0)
+    list.append(mut out, b"\x00\x00\x00\x00pict\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    media_container.mp4.close_box(mut out, hdlr)
+    let pitm = media_container.mp4.full_box(mut out, media_container.mp4.PITM, 0)
+    list.put_word_be(mut out, 1u16)
+    media_container.mp4.close_box(mut out, pitm)
+    let iloc = media_container.mp4.full_box(mut out, media_container.mp4.ILOC, 0)
+    list.put_word_be(mut out, 0x4400u16)
+    list.put_word_be(mut out, images)
+    let first = avif_write_location(mut out, 1, list.len(primary.av1))
+    let mut second = 0u64
+    if let Some(layer) = alpha {
+        second = avif_write_location(mut out, 2, list.len(layer.av1))
+    }
+    media_container.mp4.close_box(mut out, iloc)
+    let iinf = media_container.mp4.full_box(mut out, media_container.mp4.IINF, 0)
+    list.put_word_be(mut out, images)
+    for i in 1u16 .. images + 1 {
+        let infe = media_container.mp4.full_box(mut out, media_container.mp4.INFE, 0x02000000)
+        list.put_word_be(mut out, i)
+        list.put_word_be(mut out, 0u16)
+        list.append(mut out, b"av01\x00")
+        media_container.mp4.close_box(mut out, infe)
+    }
+    media_container.mp4.close_box(mut out, iinf)
+    if images == 2 {
+        let iref = media_container.mp4.full_box(mut out, media_container.mp4.IREF, 0)
+        let auxl = media_container.mp4.start_box(mut out, media_container.mp4.AUXL)
+        list.append(mut out, b"\x00\x02\x00\x01\x00\x01")
+        media_container.mp4.close_box(mut out, auxl)
+        media_container.mp4.close_box(mut out, iref)
+    }
+    avif_write_properties(mut out, primary, alpha, options, canvas, images, int.narrow(transforms))
+    media_container.mp4.close_box(mut out, meta)
+    let mdat = media_container.mp4.start_box(mut out, media_container.mp4.MDAT)
+    let start: u32 = int.narrow(list.len(out))
+    list.set_word_be(mut out, first, start)
+    list.append(mut out, primary.av1)
+    if let Some(layer) = alpha {
+        let start_alpha: u32 = int.narrow(list.len(out))
+        list.set_word_be(mut out, second, start_alpha)
+        list.append(mut out, layer.av1)
+    }
+    media_container.mp4.close_box(mut out, mdat)
+    Ok(take out)
+}
+
+fn avif_write_location(mut out: Bytes, item: u16, length: u64) -> u64 {
+    list.put_word_be(mut out, item)
+    list.put_word_be(mut out, 0u16)
+    list.put_word_be(mut out, 1u16)
+    let offset = list.len(out)
+    list.put_word_be(mut out, 0u32)
+    let size: u32 = int.narrow(length)
+    list.put_word_be(mut out, size)
+    offset
+}
+
+fn avif_orientation_properties(orientation: u8) -> (u8, u8) {
+    // Rotation is the quarter-turn count counterclockwise. Reflection is
+    // stored here as Imir axis plus one, leaving zero for no reflection.
+    match orientation {
+        2 => (0, 2),
+        3 => (2, 0),
+        4 => (0, 1),
+        5 => (1, 1),
+        6 => (3, 0),
+        7 => (3, 1),
+        8 => (1, 0),
+        _ => (0, 0),
+    }
+}
+
+fn avif_write_properties(mut out: Bytes, primary: AvifSource, alpha: Option[AvifSource], options: AvifOptions, orientation: (u8, u8), images: u16, transforms: u8) {
+    let iprp = media_container.mp4.start_box(mut out, media_container.mp4.IPRP)
+    let ipco = media_container.mp4.start_box(mut out, media_container.mp4.IPCO)
+    let channels: u8 = if options.monochrome {
+        1
+    } else {
+        3
+    }
+    avif_write_image_properties(mut out, primary, options, channels)
+    let mut count = 3 + transforms
+    if let Unspecified = options.color_space {} else {
+        let primaries: u16 = if let DisplayP3 = options.color_space {
+            12
+        } else {
+            1
+        }
+        let colr = media_container.mp4.start_box(mut out, media_container.mp4.COLR)
+        list.append(mut out, b"nclx")
+        list.put_word_be(mut out, primaries)
+        list.put_word_be(mut out, 13u16)
+        list.put_word_be(mut out, 1u16)
+        list.push(mut out, 0x80)
+        media_container.mp4.close_box(mut out, colr)
+        count += 1
+    }
+    if orientation.0 != 0 {
+        let irot = media_container.mp4.start_box(mut out, media_container.mp4.IROT)
+        list.push(mut out, orientation.0)
+        media_container.mp4.close_box(mut out, irot)
+    }
+    if orientation.1 != 0 {
+        let imir = media_container.mp4.start_box(mut out, media_container.mp4.IMIR)
+        list.push(mut out, orientation.1 - 1)
+        media_container.mp4.close_box(mut out, imir)
+    }
+    if let Some(layer) = alpha {
+        avif_write_image_properties(mut out, layer, options, 1)
+        let auxc = media_container.mp4.full_box(mut out, media_container.mp4.AUXC, 0)
+        list.append(mut out, b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\x00")
+        media_container.mp4.close_box(mut out, auxc)
+    }
+    media_container.mp4.close_box(mut out, ipco)
+    let ipma = media_container.mp4.full_box(mut out, media_container.mp4.IPMA, 0)
+    let n: u32 = int.widen(images)
+    list.put_word_be(mut out, n)
+    list.put_word_be(mut out, 1u16)
+    list.push(mut out, count)
+    for i in 1u8 .. count + 1 {
+        list.push(mut out, if i == 3 || i > count - transforms {
+            i | 128
+        } else {
+            i
+        })
+    }
+    if images == 2 {
+        list.put_word_be(mut out, 2u16)
+        list.push(mut out, 4)
+        for i in count + 1 .. count + 5 {
+            list.push(mut out, if i >= count + 3 {
+                i | 128
+            } else {
+                i
+            })
+        }
+    }
+    media_container.mp4.close_box(mut out, ipma)
+    media_container.mp4.close_box(mut out, iprp)
+}
+
+fn avif_write_image_properties(mut out: Bytes, source: AvifSource, options: AvifOptions, channels: u8) {
+    let ispe = media_container.mp4.full_box(mut out, media_container.mp4.ISPE, 0)
+    list.put_word_be(mut out, options.width)
+    list.put_word_be(mut out, options.height)
+    media_container.mp4.close_box(mut out, ispe)
+    let pixi = media_container.mp4.full_box(mut out, media_container.mp4.PIXI, 0)
+    list.push(mut out, channels)
+    for _ in 0u8 .. channels {
+        list.push(mut out, options.bit_depth)
+    }
+    media_container.mp4.close_box(mut out, pixi)
+    let cfg = media_container.mp4.start_box(mut out, media_container.mp4.AV1C)
+    list.append(mut out, source.configuration)
+    media_container.mp4.close_box(mut out, cfg)
+}

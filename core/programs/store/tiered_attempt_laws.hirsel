@@ -1,0 +1,80 @@
+// L62: the attempt record in a task-local cell (§13.3 "The attempt record", v2.81).
+
+// Settles and copies the attempt so a law can read it between touches.
+fn tiered_attempt_state(attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
+    cell.with(attempt, (), tiered_attempt_state_entry)
+}
+
+fn tiered_attempt_state_entry(mut a: TieredTouchSet, take nothing: ()) -> TieredTouchSet {
+    tiered_settle(mut a)
+    clone(a)
+}
+
+// Runs one resolve of BLOB stamp 1 under a step bound, with the attempt
+// outside the bound, and reads it back the way the driver does.
+fn l62_bounded_resolve(visible: Map[TieredCacheKey, Arc[TieredFrame]], steps: u64) -> (TieredTouchSet, bool) {
+    let target = l70_cache_target(1)
+    let attempt = tiered_attempt(2097, 0)
+    let ran = bound steps steps {
+        let _ = tiered_resolve_cold(attempt, visible, target)
+    }
+    let finished = match ran {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    (tiered_finish(take attempt), finished)
+}
+
+// A step stop can land anywhere in a touch. Whatever it hits, the attempt is
+// whole: the stamp is present iff its 1,049 bytes (8 + 1,025 + 16) are
+// counted, a cold attempt is latched on stamp 1 iff it is touched, and the
+// hit and the miss commit at the same step, since nothing miss-specific runs
+// before the one assignment that installs the touch.
+fn l62_stop_sweep() -> Result[(), Error] {
+    let cold_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let mut warm_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut warm_pins, (7, 2120), l70_cache_frame(1))
+    let mut saw_before = false
+    let mut saw_after = false
+    let mut steps = 0u64
+    loop {
+        let (cold, cold_done) = l62_bounded_resolve(cold_pins, steps)
+        let (warm, warm_done) = l62_bounded_resolve(warm_pins, steps)
+        let warm_touched = warm.touched_bytes == 1049
+        let cold_touched = cold.touched_bytes == 1049
+        if (!warm_touched && warm.touched_bytes != 0) || (!cold_touched && cold.touched_bytes != 0) ||
+            map.contains(warm.stamps, 1) != warm_touched || map.contains(cold.stamps, 1) != cold_touched {
+            fail("L62: a step stop tore a first touch")
+        }
+        if let Some(_) = warm.stopped {
+            fail("L62: a hit within the partition latched a stop")
+        }
+        let cold_latched = match cold.stopped {
+            Some(AttemptMiss(TieredBlob(demanded))) => demanded.stamp == 1,
+            None => false,
+            _ => fail("L62: a cold touch latched the wrong stop"),
+        }
+        if cold_latched != cold_touched {
+            fail("L62: a miss latch and its touch diverged")
+        }
+        if cold_touched != warm_touched {
+            fail("L62: the hit and the miss committed at different steps")
+        }
+        if warm_touched {
+            saw_after = true
+        } else {
+            saw_before = true
+        }
+        if cold_done && warm_done {
+            break
+        }
+        if steps == 100000 {
+            fail("L62: a bounded resolve never finished")
+        }
+        steps += 1
+    }
+    if !saw_before || !saw_after {
+        fail("L62: the sweep must stop both before and after the touch commits")
+    }
+    Ok(())
+}

@@ -1,20 +1,6 @@
 // RFC 4231, sections 4.2 through 4.8.
-fn hex_digit(b: u8) -> u8 {
-    if b <= b'9' {
-        b - b'0'
-    } else {
-        b - b'a' + 10
-    }
-}
-
 fn decode_hex(s: String) -> Bytes {
-    let text = string.as_bytes(s)
-    let n = list.len(text) / 2
-    let mut output: Bytes = list.with_capacity(n)
-    for i in 0u64 .. n {
-        list.push(mut output, (hex_digit(text[i * 2]) << 4) | hex_digit(text[i * 2 + 1]))
-    }
-    output
+    option.unwrap(hex.decode(string.as_bytes(s)))
 }
 
 fn tag_prefix(tag: Inline[u8, 32], n: u64) -> Bytes {
@@ -75,4 +61,33 @@ fn rfc_4231_case_6() -> bool {
 // expect: run rfc_4231_case_7() = true
 fn rfc_4231_case_7() -> bool {
     rfc_case("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "5468697320697320612074657374207573696e672061206c6172676572207468616e20626c6f636b2d73697a65206b657920616e642061206c6172676572207468616e20626c6f636b2d73697a6520646174612e20546865206b6579206e6565647320746f20626520686173686564206265666f7265206265696e6720757365642062792074686520484d414320616c676f726974686d2e", "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2")
+}
+
+fn repeated(byte: u8, count: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(count)
+    list.fill(mut out, count, byte)
+    take out
+}
+
+fn rfc_2202_case(key: Bytes, data: Bytes, tag_hex: String) -> bool {
+    let expected = decode_hex(tag_hex)
+    let n = list.len(expected)
+    let mut mac = hmac.start_sha1(key)
+    hmac.add_sha1_byte(mut mac, data[0])
+    let _ = hmac.finish_sha1(mac)
+    hmac.add_sha1(mut mac, data, 1, list.len(data))
+    let streaming = hmac.finish_sha1(mac)
+    let one_shot = hmac.sha1(key, data)
+    for i in 0u64 .. n {
+        if streaming[i] != expected[i] || one_shot[i] != expected[i] {
+            return false
+        }
+    }
+    true
+}
+
+// RFC 2202, section 3. Case 5 specifies both the full tag and its 96-bit prefix.
+// expect: run rfc_2202_sha1() = true
+fn rfc_2202_sha1() -> bool {
+    rfc_2202_case(repeated(0x0b, 20), b"Hi There", "b617318655057264e28bc0b6fb378c8ef146be00") && rfc_2202_case(b"Jefe", b"what do ya want for nothing?", "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79") && rfc_2202_case(repeated(0xaa, 20), repeated(0xdd, 50), "125d7342b9ac11cd91a39af48aa17b4f63f175d3") && rfc_2202_case(decode_hex("0102030405060708090a0b0c0d0e0f10111213141516171819"), repeated(0xcd, 50), "4c9007f4026250c6bc8414f9bf50c86c2d7235da") && rfc_2202_case(repeated(0x0c, 20), b"Test With Truncation", "4c1a03424b55e07fe7f27be1d58bb9324a9a5a04") && rfc_2202_case(repeated(0x0c, 20), b"Test With Truncation", "4c1a03424b55e07fe7f27be1") && rfc_2202_case(repeated(0xaa, 80), b"Test Using Larger Than Block-Size Key - Hash Key First", "aa4ae5e15272d00e95705637ce8a3b55ed402112") && rfc_2202_case(repeated(0xaa, 80), b"Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data", "e8e99d0f45237d786d6bbaa7965c7808bbff1a91")
 }

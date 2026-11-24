@@ -1,0 +1,183 @@
+type AnonymousStreams {
+    callers: Map[Caller, bool],
+    startup: Option[store.AnonymousCursor],
+    blocked: bool
+}
+
+fn anonymous_streams() -> AnonymousStreams {
+    AnonymousStreams(callers: map.new(), startup: Some(store.anonymous_cursor()), blocked: false)
+}
+
+fn see_anonymous(mut state: AnonymousStreams, caller: Caller) {
+    if caller.issuer == 1u8 && !map.contains(state.callers, caller) {
+        map.insert(mut state.callers, clone(caller), false)
+    }
+}
+
+fn retire_head_caller[G: send, H: shareable + inert + send](mut hd: Head[G, H], caller: Caller) {
+    if !map.contains(hd.anonymous.callers, caller) {
+        return
+    }
+    map.insert(mut hd.anonymous.callers, clone(caller), true)
+    let mut at = 0u64
+    while at < list.len(hd.waiting) {
+        if hd.waiting[at].req.caller == caller {
+            let _ = list.remove(mut hd.waiting, at)
+        } else {
+            at += 1u64
+        }
+    }
+}
+
+fn anonymous_quiet[G: send, H: shareable + inert + send](hd: Head[G, H], caller: Caller) -> bool {
+    let mut caller_prefix: Bytes = list.new()
+    result.unwrap(store.caller_key(caller, mut caller_prefix))
+    for (key, _) in hd.busy {
+        if list.starts_with_at(key, 0u64, caller_prefix) {
+            return false
+        }
+    }
+    for pending in hd.parked {
+        if pending.req.caller == caller {
+            return false
+        }
+    }
+    true
+}
+
+fn quiet_anonymous[G: send, H: shareable + inert + send](hd: Head[G, H]) -> Option[Caller] {
+    for (caller, retiring) in hd.anonymous.callers {
+        if retiring == true && anonymous_quiet(hd, caller) {
+            return Some(clone(caller))
+        }
+    }
+    None
+}
+
+fn advance_stream_retirement[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+    if hd.anonymous.blocked {
+        return Ok(false)
+    }
+    let candidate = quiet_anonymous(hd)
+    if let Some(caller) = candidate {
+        match store.reclaim_streams(mut hd.db, caller) {
+            Ok(_) => {
+                let _ = map.remove(mut hd.anonymous.callers, caller);
+                return Ok(true)
+            },
+            Error(Held) => (),
+            Error(Full(_)) => {
+                hd.anonymous.blocked = true;
+                return Ok(false)
+            },
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    scan_anonymous_streams(mut hd.db, mut hd.anonymous)
+}
+
+fn scan_anonymous_streams(mut db: store.Db, mut state: AnonymousStreams) -> Result[bool, store.Error] waits {
+    let seen = view state.callers
+    let next = match state.startup {
+        Some(cursor) => store.reclaim_startup_streams(mut db, cursor, fn(caller: Caller) -> bool {
+            map.contains(seen, caller)
+        }),
+        None => return Ok(false),
+    }
+    match take next {
+        Ok(take at) => {
+            state.startup = take at;
+            Ok(true)
+        },
+        Error(Full(_)) => {
+            state.blocked = true;
+            Ok(false)
+        },
+        Error(take problem) => Error(take problem),
+    }
+}
+
+pub opaque type WireRetirement: send {
+    head: Sender[HeadInput],
+    caller: Caller
+}
+
+fn wire_retirement(head: WireHead, caller: Caller) -> WireRetirement {
+    let LifecycleHead(to) = view head
+    WireRetirement(head: channel.sender(to), caller: clone(caller))
+}
+
+fn wire_retire(take pending: Option[WireRetirement]) waits {
+    if let Some(take notice) = take pending {
+        let WireRetirement(head: take head, caller: take caller) = take notice
+        let _ = channel.send(head, RetireCaller(take caller))
+    }
+}
+
+type WireJoiner[C: send]: send {
+    owner: WireOwner[C],
+    tasks: Tasks,
+    retirement: WireRetirement,
+    bytes_owner: u64
+}
+
+fn start_wire_joiner[C: send](tasks: Tasks, take owner: WireOwner[C], take notice: WireRetirement, allowance: u64) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
+    let total = option.unwrap(charge.task(bytes[Result[(), std.wsock.Error]], allowance))
+    let retirement_job = WireJoiner(owner: take owner, tasks: tasks, retirement: take notice, bytes_owner: allowance)
+    let run: fn(take WireJoiner[C]) -> Result[(), std.wsock.Error] waits = join_wire_owner
+    Ok(task.spawn(tasks, bytes total, take retirement_job, run))
+}
+
+fn join_wire_owner[C: send](take plan: WireJoiner[C]) -> Result[(), std.wsock.Error] waits {
+    let WireJoiner(owner: take owner, tasks, retirement: take retirement, bytes_owner) = take plan
+    let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
+    let child = task.spawn(tasks, bytes bytes_owner, take owner, run)
+    let result = task.join(take child)
+    wire_retire(Some(take retirement))
+    match take result {
+        Ok(take returned) => take returned,
+        Error(_) => Error(Protocol(1008u16)),
+    }
+}
+
+// W3c constructs the service at Hello and joins the publisher at the first Subscribe.
+pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
+    let mut opening_service = take service
+    let retirement = replace(mut opening_service.retirement, None)
+    let boxed = box.new(take opening_service)
+    let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None, allocate: Some(take allocate))
+    let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
+    let allowance = if wire_configuration(c) {
+        let pool = option.unwrap(charge.task(bytes[()], wire_connection_pool_bytes(c)))
+        let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_STANDALONE_SLOTS))
+        WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + pool + inbox
+    } else {
+        0u64
+    }
+    if let Some(take notice) = take retirement {
+        return start_wire_joiner(tasks, take x, take notice, allowance)
+    }
+    Ok(task.spawn(tasks, bytes allowance, take x, run))
+}
+
+fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] waits {
+    if !wire_configuration(x.config) {
+        return Error(Configuration)
+    }
+    if let Retired(_) = x.upgraded.protocol {
+        let WireOwner(upgraded: take retired, config: config, clock: clock, ..) = take x
+        return close_retired_upgrade(take retired, config.socket, clock)
+    }
+    let c = x.config
+    let mut owner = take x
+    let allocate = match replace(mut owner.allocate, None) {
+        Some(take a) => take a,
+        None => return Error(Configuration)
+    }
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), WIRE_STANDALONE_SLOTS, take allocate)
+    let (take to, take holding) = match take allocated {
+        Ok(take pair) => take pair,
+        Error(cap) => return Error(Allocation(cap)),
+    }
+    wire_owner(take owner, take to, Pooled(take holding))
+}

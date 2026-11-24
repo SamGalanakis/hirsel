@@ -1,0 +1,197 @@
+// test-vectors
+// test-env: HIRSEL_SHA512=portable
+fn matches512(digest: Inline[u8, 64], expected: Bytes, at: u64) -> bool {
+    for word in 0u64 .. 8u64 {
+        let actual: u64 = inline.word_be(digest, word * 8)
+        let wanted: u64 = list.word_be(expected, at + word * 8)
+        if actual != wanted {
+            return false
+        }
+    }
+    true
+}
+
+fn matches384(digest: Inline[u8, 48], expected: Bytes, at: u64) -> bool {
+    for word in 0u64 .. 6u64 {
+        let actual: u64 = inline.word_be(digest, word * 8)
+        let wanted: u64 = list.word_be(expected, at + word * 8)
+        if actual != wanted {
+            return false
+        }
+    }
+    true
+}
+
+// H1. Every record of NIST CAVP's four byte-oriented response files.
+// expect: run cavp_512_short() = true
+fn cavp_512_short() -> bool {
+    for row in cavp_512_short_data() {
+        let (message, digest) = row
+        if !matches512(sha512.hash(message), digest, 0) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run cavp_512_long() = true
+fn cavp_512_long() -> bool {
+    for row in cavp_512_long_data() {
+        let (message, digest) = row
+        if !matches512(sha512.hash(message), digest, 0) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run cavp_384_short() = true
+fn cavp_384_short() -> bool {
+    for row in cavp_384_short_data() {
+        let (message, digest) = row
+        if !matches384(sha384.hash(message), digest, 0) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run cavp_384_long() = true
+fn cavp_384_long() -> bool {
+    for row in cavp_384_long_data() {
+        let (message, digest) = row
+        if !matches384(sha384.hash(message), digest, 0) {
+            return false
+        }
+    }
+    true
+}
+
+// H1. The NIST SHA-384 and SHA-512 example sheets give both digests.
+// expect: run nist_examples() = true
+fn nist_examples() -> bool {
+    let short = b"abc"
+    let long = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+    let short512 = b"\xdd\xaf\x35\xa1\x93\x61\x7a\xba\xcc\x41\x73\x49\xae\x20\x41\x31\x12\xe6\xfa\x4e\x89\xa9\x7e\xa2\x0a\x9e\xee\xe6\x4b\x55\xd3\x9a\x21\x92\x99\x2a\x27\x4f\xc1\xa8\x36\xba\x3c\x23\xa3\xfe\xeb\xbd\x45\x4d\x44\x23\x64\x3c\xe8\x0e\x2a\x9a\xc9\x4f\xa5\x4c\xa4\x9f"
+    let long512 = b"\x8e\x95\x9b\x75\xda\xe3\x13\xda\x8c\xf4\xf7\x28\x14\xfc\x14\x3f\x8f\x77\x79\xc6\xeb\x9f\x7f\xa1\x72\x99\xae\xad\xb6\x88\x90\x18\x50\x1d\x28\x9e\x49\x00\xf7\xe4\x33\x1b\x99\xde\xc4\xb5\x43\x3a\xc7\xd3\x29\xee\xb6\xdd\x26\x54\x5e\x96\xe5\x5b\x87\x4b\xe9\x09"
+    let short384 = b"\xcb\x00\x75\x3f\x45\xa3\x5e\x8b\xb5\xa0\x3d\x69\x9a\xc6\x50\x07\x27\x2c\x32\xab\x0e\xde\xd1\x63\x1a\x8b\x60\x5a\x43\xff\x5b\xed\x80\x86\x07\x2b\xa1\xe7\xcc\x23\x58\xba\xec\xa1\x34\xc8\x25\xa7"
+    let long384 = b"\x09\x33\x0c\x33\xf7\x11\x47\xe8\x3d\x19\x2f\xc7\x82\xcd\x1b\x47\x53\x11\x1b\x17\x3b\x3b\x05\xd2\x2f\xa0\x80\x86\xe3\xb0\xf7\x12\xfc\xc7\xc7\x1a\x55\x7e\x2d\xb9\x66\xc3\xe9\xfa\x91\x74\x60\x39"
+    matches512(sha512.hash(short), short512, 0) && matches512(sha512.hash(long), long512, 0) && matches384(sha384.hash(short), short384, 0) && matches384(sha384.hash(long), long384, 0)
+}
+
+fn sample(n: u64) -> Bytes {
+    let mut input: Bytes = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut input, int.narrow(i % 251))
+    }
+    input
+}
+
+fn differential(lo: u64, hi: u64) -> bool {
+    let table = hashlib_data()
+    let message = sample(300)
+    for n in lo .. hi {
+        let at = n * 112
+        let input = list.slice(message, 0, n)
+        if !matches512(sha512.hash(input), table, at) || !matches384(sha384.hash(input), table, at + 64) {
+            return false
+        }
+        for cut in 0u64 .. (n + 1) {
+            let mut s = sha512.start()
+            sha512.add(mut s, input, 0, cut)
+            sha512.add(mut s, input, cut, n)
+            let mut t = sha384.start()
+            sha384.add(mut t, input, 0, cut)
+            sha384.add(mut t, input, cut, n)
+            if !matches512(sha512.finish(s), table, at) || !matches384(sha384.finish(t), table, at + 64) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// H2. Python hashlib for every length and every two-chunk split.
+// expect: run splits_0_127() = true
+fn splits_0_127() -> bool {
+    differential(0, 128)
+}
+
+// expect: run splits_128_191() = true
+fn splits_128_191() -> bool {
+    differential(128, 192)
+}
+
+// expect: run splits_192_255() = true
+fn splits_192_255() -> bool {
+    differential(192, 256)
+}
+
+// expect: run splits_256_300() = true
+fn splits_256_300() -> bool {
+    differential(256, 301)
+}
+
+// H2. NIST's million-a SHA-512 and SHA-384 examples.
+// expect: run million_a() = true
+fn million_a() -> bool {
+    let mut input: Bytes = list.with_capacity(1000)
+    list.fill(mut input, 1000, b'a')
+    let mut s = sha512.start()
+    let mut t = sha384.start()
+    for _ in 0u64 .. 1000u64 {
+        sha512.add(mut s, input, 0, 1000)
+        sha384.add(mut t, input, 0, 1000)
+    }
+    let want512 = b"\xe7\x18\x48\x3d\x0c\xe7\x69\x64\x4e\x2e\x42\xc7\xbc\x15\xb4\x63\x8e\x1f\x98\xb1\x3b\x20\x44\x28\x56\x32\xa8\x03\xaf\xa9\x73\xeb\xde\x0f\xf2\x44\x87\x7e\xa6\x0a\x4c\xb0\x43\x2c\xe5\x77\xc3\x1b\xeb\x00\x9c\x5c\x2c\x49\xaa\x2e\x4e\xad\xb2\x17\xad\x8c\xc0\x9b"
+    let want384 = b"\x9d\x0e\x18\x09\x71\x64\x74\xcb\x08\x6e\x83\x4e\x31\x0a\x4a\x1c\xed\x14\x9e\x9c\x00\xf2\x48\x52\x79\x72\xce\xc5\x70\x4c\x2a\x5b\x07\xb8\xb3\xdc\x38\xec\xc4\xeb\xae\x97\xdd\xd8\x7f\x3d\x89\x85"
+    matches512(sha512.finish(s), want512, 0) && matches384(sha384.finish(t), want384, 0)
+}
+
+// H3. Hash a prefix, then resume the same state and check the full digest.
+// expect: run finish_preserves_state() = true
+fn finish_preserves_state() -> bool {
+    let table = hashlib_data()
+    let input = sample(300)
+    let mut s = sha512.start()
+    let mut t = sha384.start()
+    for i in 0u64 .. 100u64 {
+        sha512.add_byte(mut s, input[i])
+        sha384.add_byte(mut t, input[i])
+    }
+    if !matches512(sha512.finish(s), table, 100 * 112) || !matches384(sha384.finish(t), table, 100 * 112 + 64) {
+        return false
+    }
+    for i in 100u64 .. 300u64 {
+        sha512.add_byte(mut s, input[i])
+        sha384.add_byte(mut t, input[i])
+    }
+    matches512(sha512.finish(s), table, 300 * 112) && matches384(sha384.finish(t), table, 300 * 112 + 64)
+}
+
+fn try_add(take st: sha512.Sha512, input: Bytes, cap: u64) -> bool {
+    let attempt = bound steps cap {
+        let mut s = take st
+        sha512.add(mut s, input, 0, list.len(input))
+        take s
+    }
+    match attempt {
+        Ok(_) => true,
+        Error(_) => false
+    }
+}
+
+// H4. Measure the least budget for 256 bytes and reuse that exact budget.
+// expect: run bulk_step_bound() = true
+fn bulk_step_bound() -> bool {
+    let small = sample(256)
+    let mut cap: u64 = 0
+    while !try_add(sha512.start(), small, cap) {
+        cap += 1
+    }
+    let mut large: Bytes = list.with_capacity(1048576)
+    list.fill(mut large, 1048576, 0u8)
+    let mut pending = sha512.start()
+    sha512.add(mut pending, small, 0, 5)
+    try_add(sha512.start(), large, cap) && try_add(take pending, large, cap)
+}

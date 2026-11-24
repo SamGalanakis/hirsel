@@ -56,12 +56,14 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <atomic>
 #include <numeric>
 #include <optional>
 #include <pthread.h>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
 using namespace llvm;
@@ -674,12 +676,41 @@ private:
     }
 };
 
-// Runs each thread's `start()` on the indices of `order`, taken in order, on up
-// to `jobs` threads, the calling thread one of them. Each thread has a target
-// machine of its own (a machine holds per-module state), or none when LLVM
-// cannot create one, and the stack the guard gives the compiler's own thread.
+constexpr size_t worker_stack = size_t(16) << 20;
+// Bank release codegen used about 42 MiB of data per LLVM worker beyond its
+// stack. Allow 64 MiB for the target machine, passes and allocator growth.
+constexpr size_t worker_budget = worker_stack + (size_t(64) << 20);
+
+size_t worker_width(size_t parts, unsigned jobs) {
+    size_t width = std::min<size_t>(std::max(jobs, 1u), parts);
+    if (width <= 1) return width;
+
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_DATA, &limit) != 0) return 1;
+    if (limit.rlim_cur == RLIM_INFINITY) return width;
+    FILE *status = std::fopen("/proc/self/status", "r");
+    if (!status) return 1;
+    auto close = make_scope_exit([&] { std::fclose(status); });
+    char line[256];
+    while (std::fgets(line, sizeof(line), status)) {
+        unsigned long long kib;
+        if (std::sscanf(line, "VmData: %llu", &kib) != 1) continue;
+        auto used = kib << 10;
+        if (used >= limit.rlim_cur) return 1;
+        // Count the caller too: it needs LLVM heap space beside the new stacks.
+        auto fit = (limit.rlim_cur - used) / worker_budget;
+        return std::max<size_t>(1, std::min<unsigned long long>(width, fit));
+    }
+    return 1;
+}
+
+// Runs each thread's `start()` on the indices of `order`, taken in order. Each
+// thread, including the caller, has its own target machine, or none when LLVM
+// cannot create one. Width limits concurrency without changing the parts.
 template <typename Start>
 void on_threads(const TargetMachine &tm, const std::vector<size_t> &order, unsigned jobs, Start start) {
+    size_t width = worker_width(order.size(), jobs);
+    if (width == 0) return;
     struct Shared {
         const TargetMachine &tm;
         const std::vector<size_t> &order;
@@ -695,16 +726,19 @@ void on_threads(const TargetMachine &tm, const std::vector<size_t> &order, unsig
         for (size_t k; (k = s.next.fetch_add(1)) < s.order.size();) work(machine.get(), s.order[k]);
         return nullptr;
     };
-    size_t width = std::min<size_t>(std::max(jobs, 1u), order.size());
     std::vector<pthread_t> threads;
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, size_t(128) << 20);
-    for (size_t i = 1; i < width; ++i) {
-        pthread_t t;
-        if (pthread_create(&t, &attr, run, &shared) == 0) threads.push_back(t);
+    if (width > 1 && pthread_attr_init(&attr) == 0) {
+        if (pthread_attr_setstacksize(&attr, worker_stack) == 0) {
+            threads.reserve(width - 1);
+            for (size_t i = 1; i < width; ++i) {
+                pthread_t t;
+                if (pthread_create(&t, &attr, run, &shared) != 0) break;
+                threads.push_back(t);
+            }
+        }
+        pthread_attr_destroy(&attr);
     }
-    pthread_attr_destroy(&attr);
     run(&shared);
     for (pthread_t t : threads) pthread_join(t, nullptr);
 }
@@ -961,10 +995,14 @@ extern "C" int hirsel_llvm_generate_parts(LLVMTargetMachineRef machine, const ui
 }
 
 extern "C" void *hirsel_llvm_tail_open(LLVMModuleRef module, LLVMTargetMachineRef machine);
-extern "C" void hirsel_llvm_tail_run(void *tail, LLVMValueRef function);
+extern "C" LLVMBool hirsel_llvm_take_tail_change(LLVMValueRef function);
+extern "C" void hirsel_llvm_tail_run(void *tail, LLVMValueRef function, LLVMBool changed);
 extern "C" void hirsel_llvm_tail_close(void *tail);
 
 namespace {
+constexpr StringLiteral TailChangedKey = "tail-cleanup post-o3-changed\n";
+constexpr StringLiteral TailUnchangedKey = "tail-cleanup post-o3-unchanged\n";
+
 // Whether `f`'s body can be lent to a part and restored from one exactly: as
 // `part_bitcode` moves it rather than cloning it.
 bool movable(const Function &f) {
@@ -1239,6 +1277,7 @@ void reached_variables(const Function &f, SmallPtrSetImpl<const GlobalVariable *
 struct Tail {
     Function *f;
     std::string name;
+    bool changed = false;
     // Live: runs in place, unkeyed (a body a part cannot lend back exactly).
     // Held: the caller holds the part after the tail. Missed: a worker runs it.
     enum Kind { Live, Held, Missed } kind = Live;
@@ -1286,7 +1325,8 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
         t.live = true;
         return;
     }
-    StringRef facts = StringRef(t.key).drop_front(machine_text_size);
+    StringRef mode = t.changed ? TailChangedKey : TailUnchangedKey;
+    StringRef facts = StringRef(t.key).drop_front(machine_text_size + mode.size());
     while (!facts.empty()) {
         auto [line, rest] = facts.split('\n');
         facts = rest;
@@ -1308,7 +1348,7 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
     auto before = declared_all(p);
     size_t variables = p.global_size();
     void *tail = hirsel_llvm_tail_open(wrap(&p), reinterpret_cast<LLVMTargetMachineRef>(&tm));
-    hirsel_llvm_tail_run(tail, wrap(own));
+    hirsel_llvm_tail_run(tail, wrap(own), t.changed);
     hirsel_llvm_tail_close(tail);
     // Only the definition's own body and attributes may change: in place,
     // a change to anything else would be the program's.
@@ -1334,7 +1374,8 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
 // in module order. The tail of a definition is a function of its part at the
 // cut, so a definition whose body a part can lend and take back exactly is
 // keyed by that part's key (`hirsel_key::module_key`), the machine text, and
-// the linkage the part does not keep: `find` answers 1 with the part after the
+// whether it changed after O3, and the linkage the part does not keep: `find`
+// answers 1 with the part after the
 // tail when the caller holds it, the body is restored from it, and otherwise
 // the tail runs, on one of `jobs` threads from the part's bitcode when `jobs`
 // is above 1 or else in place, and `keep` gets the part after it. `find`
@@ -1386,6 +1427,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     // Keys `t`'s part as the module is now and asks the caller for its tail.
     auto ask = [&](Tail &t) {
         t.key = machine_key;
+        t.key += t.changed ? TailChangedKey : TailUnchangedKey;
         t.debug.clear();
         t.input.clear();
         t.names.clear();
@@ -1416,6 +1458,9 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         Tail &t = tails[k];
         t.f = bodies[k];
         t.name = t.f->getName().str();
+        t.changed = hirsel_llvm_take_tail_change(wrap(t.f));
+    }
+    for (Tail &t : tails) {
         if (keyed && movable(*t.f)) ask(t);
     }
     if (parallel) {
@@ -1452,12 +1497,12 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     };
     // Runs `t`'s tail in place, noting what it changed besides the body.
     auto run_live = [&](Tail &t) {
-        if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f));
+        if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f), t.changed);
         SmallPtrSet<const GlobalVariable *, 32> variables;
         reached_variables(*t.f, variables);
         for (const Function &f : m) look(f);
         for (const GlobalVariable *v : variables) look(*v);
-        hirsel_llvm_tail_run(tail, wrap(t.f));
+        hirsel_llvm_tail_run(tail, wrap(t.f), t.changed);
         reached_variables(*t.f, variables);
         for (const Function &f : m) recheck(f);
         for (const GlobalVariable *v : variables) recheck(*v);

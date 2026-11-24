@@ -148,6 +148,8 @@ int main(int argc, char **argv) {
     StringRef facts = (*key)->getBuffer();
     auto machine = test_machine(facts);
     if (!machine) return 2;
+    bool changed = facts.consume_front(TailChangedKey);
+    if (!changed && !facts.consume_front(TailUnchangedKey)) return 2;
 
     LLVMContext context;
     context.setDiscardValueNames(true);
@@ -177,7 +179,7 @@ int main(int argc, char **argv) {
         append_range(debug, bindings->operands());
     auto *tail = hirsel_llvm_tail_open(wrap(module.get()),
         reinterpret_cast<LLVMTargetMachineRef>(machine.get()));
-    hirsel_llvm_tail_run(tail, wrap(own));
+    hirsel_llvm_tail_run(tail, wrap(own), changed);
     hirsel_llvm_tail_close(tail);
 
     SmallVector<char, 0> rebuilt;

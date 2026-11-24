@@ -89,7 +89,7 @@ impl Unwind {
         let section = product
             .object
             .section_id(object::write::StandardSection::EhFrame);
-        product
+        let frame_offset = product
             .object
             .append_section_data(section, output.bytes.slice(), 8);
         for relocation in output.relocations {
@@ -97,15 +97,45 @@ impl Unwind {
                 return Err(backend("unexpected non-symbol .eh_frame relocation"));
             };
             let symbol = product.function_symbol(self.functions[index]);
+            // Weak function symbols can resolve to a definition in another object.
+            // An FDE describes the code at this definition's section offset.
+            let (symbol, code_offset) = if product.object.format() == object::BinaryFormat::MachO {
+                // A Mach-O relocation against a section stores the target's
+                // address, not its offset, and code need not start a file at
+                // zero: name the definition by a local symbol of its own.
+                let (section, offset) = {
+                    let defined = product.object.symbol(symbol);
+                    match defined.section {
+                        object::write::SymbolSection::Section(section) => (section, defined.value),
+                        _ => return Err(backend("unwind function has no section")),
+                    }
+                };
+                let local = product.object.add_symbol(object::write::Symbol {
+                    name: format!("hirsel.fde.{index}").into_bytes(),
+                    value: offset,
+                    size: 0,
+                    kind: object::SymbolKind::Text,
+                    scope: object::SymbolScope::Compilation,
+                    weak: false,
+                    section: object::write::SymbolSection::Section(section),
+                    flags: object::SymbolFlags::None,
+                });
+                (local, 0)
+            } else {
+                product
+                    .object
+                    .symbol_section_and_offset(symbol)
+                    .expect("unwind function has a definition in this object")
+            };
             // ELF applies S + A - P, with P the address of the encoded field.
             product
                 .object
                 .add_relocation(
                     section,
                     object::write::Relocation {
-                        offset: relocation.offset as u64,
+                        offset: frame_offset + relocation.offset as u64,
                         symbol,
-                        addend: relocation.addend,
+                        addend: relocation.addend + code_offset as i64,
                         flags: object::RelocationFlags::Generic {
                             kind: object::RelocationKind::Relative,
                             encoding: object::RelocationEncoding::Generic,

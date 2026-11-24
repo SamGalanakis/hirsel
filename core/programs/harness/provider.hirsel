@@ -1,13 +1,13 @@
 // Provider wire formats for the harness: the request body and the streamed
 // answer of the Anthropic Messages API and the OpenAI Chat Completions API.
-// Everything here is pure: the transport feeds response chunks to `feed` and
+// The wire parser is pure: the transport feeds response chunks to `feed` and
 // asks `answer` for the result. An answer exists only after the provider's
 // documented success terminator (Anthropic `message_stop`, OpenAI
-// `data: [DONE]`); anything short of it is an error, which the worker
-// records as doubt because the request was already sent.
+// `data: [DONE]`). The non-streaming retry reads a complete JSON body.
 
 pub type Dialect: codec + send + key = Anthropic | OpenAi
-pub type Model: codec + send { dialect: Dialect, name: String, max_tokens: u64 }
+pub type CacheControl: codec + send + key = Off | Ephemeral
+pub type Model: codec + send { dialect: Dialect, name: String, max_tokens: u64, cache_control: CacheControl }
 
 // Bounds on one streamed answer. Deltas accumulate here in memory only and
 // are never stored.
@@ -15,24 +15,6 @@ pub type Bounds: codec + send { event_bytes: u64, body_bytes: u64, text_bytes: u
 
 pub fn bounds() -> Bounds {
     Bounds(event_bytes: 1048576u64, body_bytes: 8388608u64, text_bytes: 262144u64, calls: 32u64, args_bytes: 65536u64)
-}
-
-// ---- how outcomes are worded for the model ----
-
-// The one place a tool outcome becomes model-visible text, with whether the
-// provider should see it as an error.
-pub fn worded(o: harness.Outcome) -> (String, bool) {
-    match o {
-        Returned(Inline(b)) => match string.from_utf8(clone(b)) {
-            Ok(take s) => (take s, false),
-            Error(_) => ("the tool returned bytes that are not text", true),
-        },
-        Returned(Blob(r)) => (cat("the tool returned a stored object of type ", r.mime), false),
-        Failed(why) => (cat("the tool failed: ", why), true),
-        Denied(why) => (cat("the call was not allowed: ", why), true),
-        InDoubt => ("the call was interrupted and may or may not have taken effect; check before repeating it", true),
-        Gone => ("this tool is no longer available", true),
-    }
 }
 
 fn cat(a: String, b: String) -> String {
@@ -74,6 +56,7 @@ fn checked(req: harness.Request) -> Result[(), String] {
 // same bytes.
 pub fn body(m: Model, req: harness.Request) -> Result[String, String] {
     checked(req)?
+    if req.warm && (req.stream || m.cache_control != Ephemeral) { return Error("keep-warm requires nonstreaming ephemeral cache control") }
     let mut out = string.new()
     std.json.write(mut out, false, fn(doc) {
         std.json.object(doc, 0u64, fn(w, mut items) {
@@ -96,33 +79,75 @@ fn member_raw(w: std.json.Writer, mut items: std.json.Items, key: String, raw: S
     let _ = std.json.write_raw(w, raw)
 }
 
+fn cache_breakpoint(w: std.json.Writer, mut items: std.json.Items) {
+    std.json.write_member(w, mut items, "cache_control")
+    std.json.object(w, items.depth, fn(cw, mut c) {
+        member_string(cw, mut c, "type", "ephemeral")
+    })
+}
+
+fn text_block(w: std.json.Writer, mut blocks: std.json.Items, text: String, cache: bool) {
+    std.json.element(w, mut blocks)
+    std.json.object(w, blocks.depth, fn(bw, mut b) {
+        member_string(bw, mut b, "type", "text")
+        member_string(bw, mut b, "text", text)
+        if cache { cache_breakpoint(bw, mut b) }
+    })
+}
+
+fn last_message(messages: List[harness.Entry]) -> Option[u64] {
+    let mut end = list.len(messages)
+    while end > 0u64 {
+        end -= 1u64
+        match messages[end] {
+            System(_) => (),
+            Note(_, _) => (),
+            _ => return Some(end),
+        }
+    }
+    None
+}
+
 fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
     member_string(w, mut items, "model", m.name)
     std.json.write_member(w, mut items, "max_tokens")
-    let _ = std.json.write_u64(w, m.max_tokens)
+    let _ = std.json.write_u64(w, if req.warm { 1u64 } else { m.max_tokens })
     std.json.write_member(w, mut items, "stream")
-    std.json.write_bool(w, true)
-    if list.len(req.system) > 0u64 { member_string(w, mut items, "system", joined(req.system)) }
-    if list.len(req.tools) > 0u64 {
+    std.json.write_bool(w, req.stream)
+    let cache = m.cache_control == Ephemeral
+    if list.len(req.system) > 0u64 {
+        let prompt = joined(req.system)
+        if cache {
+            std.json.write_member(w, mut items, "system")
+            std.json.array(w, items.depth, fn(sw, mut blocks) { text_block(sw, mut blocks, prompt, true) })
+        } else {
+            member_string(w, mut items, "system", prompt)
+        }
+    }
+    let count = list.len(req.tools)
+    if count > 0u64 {
         std.json.write_member(w, mut items, "tools")
         std.json.array(w, items.depth, fn(tw, mut tools) {
-            for t in req.tools {
+            for j in 0u64 .. count {
+                let t = view req.tools[j]
                 std.json.element(tw, mut tools)
                 std.json.object(tw, tools.depth, fn(ow, mut o) {
                     member_string(ow, mut o, "name", t.name)
                     member_string(ow, mut o, "description", t.about)
                     member_raw(ow, mut o, "input_schema", t.input)
+                    if cache && j + 1u64 == count { cache_breakpoint(ow, mut o) }
                 })
             }
         })
     }
+    let last = if cache { last_message(req.messages) } else { None }
     std.json.write_member(w, mut items, "messages")
     std.json.array(w, items.depth, fn(mw, mut msgs) {
         let n = list.len(req.messages)
         let mut i = 0u64
         while i < n {
             match req.messages[i] {
-                ToolResult(_, _) => {
+                ToolResult(_, _, _) => {
                     // Every result for one assistant turn goes in one user message.
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {
@@ -130,8 +155,9 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                         std.json.write_member(ow, mut o, "content")
                         std.json.array(ow, o.depth, fn(cw, mut cs) {
                             while i < n {
-                                let ToolResult(id, outcome) = view req.messages[i] else { break }
-                                let (text, is_error) = worded(outcome)
+                                let ToolResult(id, _, shown) = view req.messages[i] else { break }
+                                let text = view shown.text
+                                let is_error = shown.error
                                 std.json.element(cw, mut cs)
                                 std.json.object(cw, cs.depth, fn(rw, mut r) {
                                     member_string(rw, mut r, "type", "tool_result")
@@ -139,6 +165,7 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                                     member_string(rw, mut r, "content", text)
                                     std.json.write_member(rw, mut r, "is_error")
                                     std.json.write_bool(rw, is_error)
+                                    if last == Some(i) { cache_breakpoint(rw, mut r) }
                                 })
                                 i += 1u64
                             }
@@ -152,14 +179,12 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                         member_string(ow, mut o, "role", "assistant")
                         std.json.write_member(ow, mut o, "content")
                         std.json.array(ow, o.depth, fn(cw, mut cs) {
-                            if string.byte_len(a.text) > 0u64 || list.len(a.calls) == 0u64 {
-                                std.json.element(cw, mut cs)
-                                std.json.object(cw, cs.depth, fn(bw, mut b) {
-                                    member_string(bw, mut b, "type", "text")
-                                    member_string(bw, mut b, "text", a.text)
-                                })
+                            let calls = list.len(a.calls)
+                            if string.byte_len(a.text) > 0u64 || calls == 0u64 {
+                                text_block(cw, mut cs, a.text, last == Some(i) && calls == 0u64)
                             }
-                            for c in a.calls {
+                            for j in 0u64 .. calls {
+                                let c = view a.calls[j]
                                 let Ok(args) = args_text(c.args) else { continue }
                                 std.json.element(cw, mut cs)
                                 std.json.object(cw, cs.depth, fn(bw, mut b) {
@@ -167,14 +192,14 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                                     member_string(bw, mut b, "id", c.id)
                                     member_string(bw, mut b, "name", c.name)
                                     member_raw(bw, mut b, "input", args)
+                                    if last == Some(i) && j + 1u64 == calls { cache_breakpoint(bw, mut b) }
                                 })
                             }
                         })
                     })
                 },
-                User(text) => user_message(mw, mut msgs, text),
-                Inform(text) => user_message(mw, mut msgs, text),
-                Reset(summary) => user_message(mw, mut msgs, summary),
+                User(text) => user_message(mw, mut msgs, text, cache, last == Some(i)),
+                Inform(text) => user_message(mw, mut msgs, text, cache, last == Some(i)),
                 _ => (),
             }
             i += 1u64
@@ -182,25 +207,29 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
     })
 }
 
-fn user_message(w: std.json.Writer, mut msgs: std.json.Items, text: String) {
+fn user_message(w: std.json.Writer, mut msgs: std.json.Items, text: String, array_content: bool, cache: bool) {
+    if !array_content { role_message(w, mut msgs, "user", text); return () }
     std.json.element(w, mut msgs)
     std.json.object(w, msgs.depth, fn(ow, mut o) {
         member_string(ow, mut o, "role", "user")
-        member_string(ow, mut o, "content", text)
+        std.json.write_member(ow, mut o, "content")
+        std.json.array(ow, o.depth, fn(cw, mut blocks) { text_block(cw, mut blocks, text, cache) })
     })
 }
 
 fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
     member_string(w, mut items, "model", m.name)
     std.json.write_member(w, mut items, "max_completion_tokens")
-    let _ = std.json.write_u64(w, m.max_tokens)
+    let _ = std.json.write_u64(w, if req.warm { 1u64 } else { m.max_tokens })
     std.json.write_member(w, mut items, "stream")
-    std.json.write_bool(w, true)
-    std.json.write_member(w, mut items, "stream_options")
-    std.json.object(w, items.depth, fn(ow, mut o) {
-        std.json.write_member(ow, mut o, "include_usage")
-        std.json.write_bool(ow, true)
-    })
+    std.json.write_bool(w, req.stream)
+    if req.stream {
+        std.json.write_member(w, mut items, "stream_options")
+        std.json.object(w, items.depth, fn(ow, mut o) {
+            std.json.write_member(ow, mut o, "include_usage")
+            std.json.write_bool(ow, true)
+        })
+    }
     if list.len(req.tools) > 0u64 {
         std.json.write_member(w, mut items, "tools")
         std.json.array(w, items.depth, fn(tw, mut tools) {
@@ -225,7 +254,6 @@ fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: har
             match e {
                 User(text) => role_message(mw, mut msgs, "user", text),
                 Inform(text) => role_message(mw, mut msgs, "user", text),
-                Reset(summary) => role_message(mw, mut msgs, "user", summary),
                 Assistant(a) => {
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {
@@ -253,8 +281,8 @@ fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: har
                         }
                     })
                 },
-                ToolResult(id, outcome) => {
-                    let (text, _) = worded(outcome)
+                ToolResult(id, _, shown) => {
+                    let text = view shown.text
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {
                         member_string(ow, mut o, "role", "tool")
@@ -287,15 +315,14 @@ pub type Stream: send {
     text: String,
     parts: List[Part],
     stop: String,
-    input: u64,
-    output: u64,
-    cached_input: Option[u64],
+    usage: harness.Usage,
+    retry_delay: u64,
     done: bool,
     seen: u64,
 }
 
 pub fn stream(d: Dialect, b: Bounds) -> Stream {
-    Stream(dialect: d, bounds: b, text: string.new(), parts: list.new(), stop: string.new(), input: 0u64, output: 0u64, cached_input: None, done: false, seen: 0u64)
+    Stream(dialect: d, bounds: b, text: string.new(), parts: list.new(), stop: string.new(), usage: harness.Usage(input: 0u64, output: 0u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64), retry_delay: DEFAULT_RETRY_SECONDS, done: false, seen: 0u64)
 }
 
 pub fn decoder(b: Bounds) -> std.sse.Decoder { std.sse.decoder(b.event_bytes) }
@@ -314,8 +341,8 @@ fn u64_at(x: std.json.Json, p: String) -> Option[u64] {
     }
 }
 
-fn add_text(mut st: Stream, more: String) -> Result[(), String] {
-    if string.byte_len(st.text) + string.byte_len(more) > st.bounds.text_bytes { return Error("answer text exceeds its bound") }
+fn add_text(mut st: Stream, more: String) -> Result[(), harness.ModelFault] {
+    if string.byte_len(st.text) + string.byte_len(more) > st.bounds.text_bytes { return Error(Rejected("answer text exceeds its bound")) }
     string.push(mut st.text, more)
     Ok(())
 }
@@ -325,28 +352,42 @@ fn part_at(st: Stream, index: u64) -> Option[u64] {
     None
 }
 
-fn open_part(mut st: Stream, index: u64, take id: String, take name: String) -> Result[u64, String] {
-    if list.len(st.parts) >= st.bounds.calls { return Error("answer has more tool calls than its bound") }
+fn open_part(mut st: Stream, index: u64, take id: String, take name: String) -> Result[u64, harness.ModelFault] {
+    if list.len(st.parts) >= st.bounds.calls { return Error(Rejected("answer has more tool calls than its bound")) }
     list.push(mut st.parts, Part(index: index, id: take id, name: take name, args: string.new()))
     Ok(list.len(st.parts) - 1u64)
 }
 
-fn add_args(mut st: Stream, at: u64, more: String) -> Result[(), String] {
-    if string.byte_len(st.parts[at].args) + string.byte_len(more) > st.bounds.args_bytes { return Error("tool arguments exceed their bound") }
+fn add_args(mut st: Stream, at: u64, more: String) -> Result[(), harness.ModelFault] {
+    if string.byte_len(st.parts[at].args) + string.byte_len(more) > st.bounds.args_bytes { return Error(Rejected("tool arguments exceed their bound")) }
     string.push(mut st.parts[at].args, more)
     Ok(())
 }
 
-fn anthropic_event(mut st: Stream, x: std.json.Json) -> Result[(), String] {
+fn anthropic_usage(mut usage: harness.Usage, x: std.json.Json) {
+    if let Some(n) = u64_at(x, "/input_tokens") { usage.input = n }
+    if let Some(n) = u64_at(x, "/output_tokens") { usage.output = n }
+    if let Some(n) = u64_at(x, "/cache_read_input_tokens") { usage.cache_read = n }
+    if let Some(n) = u64_at(x, "/cache_creation_input_tokens") { usage.cache_write = n }
+}
+
+fn openai_usage(mut usage: harness.Usage, x: std.json.Json) {
+    if let Some(n) = u64_at(x, "/prompt_tokens") { usage.input = n }
+    if let Some(n) = u64_at(x, "/completion_tokens") { usage.output = n }
+    if let Some(n) = u64_at(x, "/prompt_tokens_details/cached_tokens") { usage.cache_read = n }
+    if let Some(n) = u64_at(x, "/prompt_tokens_details/cache_write_tokens") { usage.cache_write = n }
+    if let Some(n) = u64_at(x, "/completion_tokens_details/reasoning_tokens") { usage.reasoning = n }
+}
+
+fn anthropic_event(mut st: Stream, x: std.json.Json) -> Result[(), harness.ModelFault] {
     let kind = match str_at(x, "/type") { Some(take k) => take k, None => return Ok(()) }
     if kind == "message_start" {
-        if let Some(n) = u64_at(x, "/message/usage/input_tokens") { st.input = n }
-        if let Some(n) = u64_at(x, "/message/usage/output_tokens") { st.output = n }
+        if let Some(usage) = std.json.pointer(x, "/message/usage") { anthropic_usage(mut st.usage, usage) }
     } else if kind == "content_block_start" {
         if str_at(x, "/content_block/type") == Some("tool_use") {
-            let Some(index) = u64_at(x, "/index") else { return Error("tool block without an index") }
-            let Some(take id) = str_at(x, "/content_block/id") else { return Error("tool block without an id") }
-            let Some(take name) = str_at(x, "/content_block/name") else { return Error("tool block without a name") }
+            let Some(index) = u64_at(x, "/index") else { return Error(Rejected("tool block without an index")) }
+            let Some(take id) = str_at(x, "/content_block/id") else { return Error(Rejected("tool block without an id")) }
+            let Some(take name) = str_at(x, "/content_block/name") else { return Error(Rejected("tool block without a name")) }
             let _ = open_part(mut st, index, take id, take name)?
         }
     } else if kind == "content_block_delta" {
@@ -354,36 +395,34 @@ fn anthropic_event(mut st: Stream, x: std.json.Json) -> Result[(), String] {
         if delta == "text_delta" {
             if let Some(take more) = str_at(x, "/delta/text") { add_text(mut st, more)? }
         } else if delta == "input_json_delta" {
-            let Some(index) = u64_at(x, "/index") else { return Error("tool delta without an index") }
-            let Some(at) = part_at(st, index) else { return Error("tool delta for an unopened block") }
+            let Some(index) = u64_at(x, "/index") else { return Error(Rejected("tool delta without an index")) }
+            let Some(at) = part_at(st, index) else { return Error(Rejected("tool delta for an unopened block")) }
             if let Some(take more) = str_at(x, "/delta/partial_json") { add_args(mut st, at, more)? }
         }
     } else if kind == "message_delta" {
         if let Some(take why) = str_at(x, "/delta/stop_reason") { st.stop = take why }
         // Usage in message_delta is cumulative, so the last one is the total.
-        if let Some(n) = u64_at(x, "/usage/output_tokens") { st.output = n }
-        if let Some(n) = u64_at(x, "/usage/input_tokens") { st.input = n }
+        if let Some(usage) = std.json.pointer(x, "/usage") { anthropic_usage(mut st.usage, usage) }
     } else if kind == "message_stop" {
         st.done = true
     } else if kind == "error" {
-        let why = match str_at(x, "/error/type") { Some(take t) => take t, None => "error" }
-        return Error(cat("provider error event: ", why))
+        return Error(classify(0u16, st.retry_delay, x))
     }
     // ping, content_block_stop and event types added later are ignored.
     Ok(())
 }
 
-fn openai_chunk(mut st: Stream, x: std.json.Json) -> Result[(), String] {
-    if let Some(_) = std.json.pointer(x, "/error") { return Error("provider error chunk") }
+fn openai_chunk(mut st: Stream, x: std.json.Json) -> Result[(), harness.ModelFault] {
+    if let Some(_) = std.json.pointer(x, "/error") { return Error(classify(0u16, st.retry_delay, x)) }
     if let Some(take more) = str_at(x, "/choices/0/delta/content") { add_text(mut st, more)? }
     if let Some(Arr(calls)) = std.json.pointer(x, "/choices/0/delta/tool_calls") {
         for i in 0u64..seq.len(calls) {
             let Some(tc) = indexed.get(calls, i) else { continue }
-            let Some(index) = u64_at(tc, "/index") else { return Error("tool call delta without an index") }
+            let Some(index) = u64_at(tc, "/index") else { return Error(Rejected("tool call delta without an index")) }
             let at = match part_at(st, index) {
                 Some(at) => at,
                 None => {
-                    let Some(take id) = str_at(tc, "/id") else { return Error("first tool call delta without an id") }
+                    let Some(take id) = str_at(tc, "/id") else { return Error(Rejected("first tool call delta without an id")) }
                     let name = match str_at(tc, "/function/name") { Some(take n) => take n, None => string.new() }
                     open_part(mut st, index, take id, take name)?
                 },
@@ -392,15 +431,13 @@ fn openai_chunk(mut st: Stream, x: std.json.Json) -> Result[(), String] {
         }
     }
     if let Some(take why) = str_at(x, "/choices/0/finish_reason") { st.stop = take why }
-    if let Some(n) = u64_at(x, "/usage/prompt_tokens") { st.input = n }
-    if let Some(n) = u64_at(x, "/usage/completion_tokens") { st.output = n }
-    if let Some(n) = u64_at(x, "/usage/prompt_tokens_details/cached_tokens") { st.cached_input = Some(n) }
+    if let Some(usage) = std.json.pointer(x, "/usage") { openai_usage(mut st.usage, usage) }
     Ok(())
 }
 
-fn on_event(mut st: Stream, data: Bytes) -> Result[(), String] {
+fn on_event(mut st: Stream, data: Bytes) -> Result[(), harness.ModelFault] {
     if st.done { return Ok(()) }
-    let Ok(take s) = string.from_utf8(clone(data)) else { return Error("event data is not UTF-8") }
+    let Ok(take s) = string.from_utf8(clone(data)) else { return Error(Rejected("event data is not UTF-8")) }
     if st.dialect == OpenAi && s == "[DONE]" {
         st.done = true
         return Ok(())
@@ -411,16 +448,16 @@ fn on_event(mut st: Stream, data: Bytes) -> Result[(), String] {
                 Anthropic => anthropic_event(mut st, x),
                 OpenAi => openai_chunk(mut st, x),
             },
-            Error(_) => Error("event data is not JSON"),
+            Error(_) => Error(Rejected("event data is not JSON")),
         }
     }
 }
 
 // Feeds one response chunk. Answers whether the terminator has been seen.
-pub fn feed(mut dec: std.sse.Decoder, mut st: Stream, chunk: Bytes) -> Result[bool, String] {
+pub fn feed(mut dec: std.sse.Decoder, mut st: Stream, chunk: Bytes) -> Result[bool, harness.ModelFault] {
     st.seen += list.len(chunk)
-    if st.seen > st.bounds.body_bytes { return Error("response body exceeds its bound") }
-    let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, id: Bytes) -> std.sse.FeedControl[String] {
+    if st.seen > st.bounds.body_bytes { return Error(Rejected("response body exceeds its bound")) }
+    let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, id: Bytes) -> std.sse.FeedControl[harness.ModelFault] {
         match on_event(mut st, data) {
             Ok(()) => if st.done { Stop } else { Continue },
             Error(take why) => Fail(take why),
@@ -428,28 +465,28 @@ pub fn feed(mut dec: std.sse.Decoder, mut st: Stream, chunk: Bytes) -> Result[bo
     })
     match take fed {
         Ok(_) => Ok(st.done),
-        Error(Decode(_, _)) => Error("malformed event stream"),
+        Error(Decode(_, _)) => Error(Rejected("malformed event stream")),
         Error(Callback(take why, _)) => Error(take why),
     }
 }
 
 // The answer, only after the terminator and a stop reason; every tool call's
 // arguments must be JSON.
-pub fn answer(take st: Stream) -> Result[harness.Answer, String] {
-    if !st.done { return Error("stream ended before its terminator") }
-    if string.byte_len(st.stop) == 0u64 { return Error("stream ended without a stop reason") }
-    let Stream(text: take text, parts: take parts, stop: take stop, input: input, output: output, ..) = take st
+pub fn answer(take st: Stream) -> Result[harness.Answer, harness.ModelFault] {
+    if !st.done { return Error(StreamDropped("stream ended before its terminator")) }
+    if string.byte_len(st.stop) == 0u64 { return Error(Rejected("stream ended without a stop reason")) }
+    let Stream(text: take text, parts: take parts, stop: take stop, usage: take usage, ..) = take st
     let mut calls: List[harness.Call] = list.new()
     for p in parts {
         let args = if string.byte_len(p.args) == 0u64 { "{}" } else { clone(p.args) }
-        if let Error(_) = std.json.size(args) { return Error(cat("tool arguments are not JSON for ", p.name)) }
+        if let Error(_) = std.json.size(args) { return Error(Rejected(cat("tool arguments are not JSON for ", p.name))) }
         list.push(mut calls, harness.Call(id: clone(p.id), name: clone(p.name), args: Inline(string.into_bytes(take args))))
     }
-    Ok(harness.Answer(text: take text, calls: take calls, stop: take stop, usage: harness.Usage(input: input, output: output)))
+    Ok(harness.Answer(text: take text, calls: take calls, stop: take stop, usage: take usage))
 }
 
 // A whole response body at once: what the transport does chunk by chunk.
-pub fn read(d: Dialect, b: Bounds, raw: Bytes) -> Result[harness.Answer, String] {
+pub fn read(d: Dialect, b: Bounds, raw: Bytes) -> Result[harness.Answer, harness.ModelFault] {
     let mut dec = decoder(b)
     let mut st = stream(d, b)
     let _ = feed(mut dec, mut st, raw)?
@@ -482,10 +519,10 @@ fn public(name: String, value: String) -> std.http_client.Header {
     std.http_client.Header(name: string.from(name), value: Public(string.into_bytes(string.from(value))))
 }
 
-fn headers(p: Provider) -> List[std.http_client.Header] {
+fn headers(p: Provider, streaming: bool) -> List[std.http_client.Header] {
     let mut out: List[std.http_client.Header] = list.new()
     list.push(mut out, public("Content-Type", "application/json"))
-    list.push(mut out, public("Accept", "text/event-stream"))
+    list.push(mut out, public("Accept", if streaming { "text/event-stream" } else { "application/json" }))
     match p.model.dialect {
         Anthropic => {
             list.push(mut out, public("anthropic-version", "2023-06-01"))
@@ -509,116 +546,103 @@ fn event_stream(head: std.http_client.ResponseHead) -> bool {
     false
 }
 
-// Once request bytes may have left, every failure is Unavailable: the
-// provider may have run and charged the call, so the worker records doubt.
-// Before that, a failure is a plain refusal and nothing was spent.
-fn sent_or(c: std.http_client.Connection, why: String) -> harness.Fault {
-    if std.http_client.request_started(c) { Unavailable } else { Refused(string.from(why)) }
+fn send_failure(c: std.http_client.Connection, why: String) -> harness.ModelFault {
+    if std.http_client.request_started(c) { StreamDropped(string.from(why)) } else { Rejected(string.from(why)) }
 }
 
-// Calls the provider and reads its streamed answer. A non-200 reply is a
-// definite rejection (Refused); a stream that ends without its terminator is
-// doubt (Unavailable).
-pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut sink: Option[preview.Source] = None
     ask_with_preview(n, clock, p, take req, mut sink)
 }
 
 pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Request,
-    mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let reply = ask_reported(n, clock, p, take req, mut sink)
-    match take reply {
-        Ok(Reported(answer: take a, ..)) => Ok(take a),
-        Error(Transport(take why)) => Error(take why),
-        Error(Http(status, message)) => Error(Refused(http_error(status, message))),
+    mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let text = match body(p.model, req) { Ok(take text) => take text, Error(take why) => return Error(Rejected(take why)) }
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), p.deadline_ms)
+    let mut response = open_response(n, clock, p, text, req.stream, deadline, None)?
+    if response.status != 200u16 { return Error(http_fault(mut response.connection, response.status, response.delay)) }
+    if !req.stream {
+        let raw = read_body(mut response.connection, p.bounds.body_bytes)?
+        return complete(p.model.dialect, p.bounds, response.delay, take raw)
     }
+    if !response.events { return Error(Rejected("provider did not send an event stream")) }
+    read_stream(mut response.connection, p.model.dialect, p.bounds, response.delay, mut sink, list.with_capacity(8192u64), None)
 }
 
-pub type Reported { answer: harness.Answer, cached_input: Option[u64] }
-pub type Failure = Transport(harness.Fault) | Http(u16, Option[String])
-
-pub fn http_error(status: u16, message: Option[String]) -> String {
-    let mut why = string.from("HTTP ")
-    string.push_u64(mut why, int.widen(status))
-    if let Some(detail) = message {
-        string.push(mut why, ": ")
-        string.push(mut why, detail)
-    }
-    if status >= 500u16 {
-        string.push(mut why, ". Retry when the provider is available again.")
-    }
-    take why
+type Response: send {
+    connection: std.http_client.Connection,
+    status: u16,
+    events: bool,
+    delay: u64,
 }
 
-// Error responses are not streams. Read a bounded JSON body and use only
-// error.message. Omit details that might contain a provider API key.
-fn error_message(mut c: std.http_client.Connection) -> Option[String] waits {
-    let mut raw: Bytes = list.with_capacity(8193u64)
-    loop {
-        match std.http_client.read(mut c, mut raw) {
-            Ok(0u64) => break,
-            Ok(_) => if list.len(raw) > 8192u64 { return None },
-            Error(_) => return None,
-        }
-    }
-    let Ok(text) = string.from_utf8(take raw) else { return None }
-    let found = region r {
-        match std.json.parse(r, text) {
-            Ok(json) => str_at(json, "/error/message"),
-            Error(_) => None,
-        }
-    }
-    let Some(message) = found else { return None }
-    if let Some(_) = string.find(message, 0u64, "sk-") { return None }
-    let mut line: Bytes = list.new()
-    for byte in string.as_bytes(message) {
-        list.push(mut line, if byte < 32u8 || byte == 127u8 { b' ' } else { byte })
-    }
-    let Ok(clean) = string.from_utf8(take line) else { return None }
-    let trimmed = string.trim_ascii(clean)
-    if trimmed == "" { None } else { Some(string.from(trimmed)) }
-}
-
-pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request,
-    mut sink: Option[preview.Source]) -> Result[Reported, Failure] waits {
-    let text = match body(p.model, req) {
-        Ok(take t) => take t,
-        Error(take why) => return Error(Transport(BadArgs(take why))),
-    }
-    let deadline = host.mono_ns(clock) + p.deadline_ms * 1000000u64
+fn open_response(n: Net, clock: Clock, p: Provider, text: String, streaming: bool, deadline: u64, history: Option[Sender[HistoryMessage]]) -> Result[Response, harness.ModelFault] waits {
     let opened = match p.endpoint.security {
         Plain => std.http_client.open(n, p.endpoint.address, p.endpoint.authority, clock, deadline),
         Https(name, trust) => std.http_client.open_tls(n, p.endpoint.address, p.endpoint.authority, name, trust, clock, deadline),
     }
     let mut c = match take opened {
         Ok(take ready) => take ready,
-        Error(_) => return Error(Transport(Refused("could not connect to the provider"))),
+        Error(_) => return Error(Rejected("could not connect to the provider")),
     }
-    let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p), body: Fixed(string.byte_len(text)))
-    if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(Transport(sent_or(c, "could not start the request"))) }
-    if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(Transport(sent_or(c, "could not send the request"))) }
-    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.body_bytes) { return Error(Transport(Unavailable)) }
-    let (status, events) = {
+    let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p, streaming), body: Fixed(string.byte_len(text)))
+    if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(send_failure(c, "could not start the request")) }
+    if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(send_failure(c, "could not send the request")) }
+    if let Some(to) = history { let _ = channel.send(to, Sent) }
+    match std.http_client.finish_request(mut c, p.bounds.body_bytes) {
+        Ok(()) => (),
+        Error(TooLarge) => return Error(Rejected("response body exceeds its bound")),
+        Error(_) => return Error(StreamDropped("provider did not send a complete response head")),
+    }
+    let (status, events, delay) = {
         let head = std.http_client.head(c)
-        (std.http_client.status(head), event_stream(head))
+        let status = std.http_client.status(head)
+        (status, event_stream(head), retry_after(head, host.wall_ms(clock)))
     }
-    if status != 200 {
-        return Error(Http(status, error_message(mut c)))
-    }
-    if !events { return Error(Transport(Unavailable)) }
-    let mut dec = decoder(p.bounds)
-    let mut st = stream(p.model.dialect, p.bounds)
-    let mut chunk: Bytes = list.with_capacity(8192u64)
+    Ok(Response(connection: take c, status: status, events: events, delay: delay))
+}
+
+fn read_body(mut c: std.http_client.Connection, max: u64) -> Result[Bytes, harness.ModelFault] waits {
+    let mut raw: Bytes = list.new()
     loop {
-        let got = match std.http_client.read(mut c, mut chunk) {
-            Ok(k) => k,
-            Error(_) => return Error(Transport(Unavailable)),
+        let remaining = max - list.len(raw)
+        list.reserve(mut raw, order.min(int.saturating_add(remaining, 1u64), 8192u64))
+        match std.http_client.read(mut c, mut raw) {
+            Ok(0u64) => return Ok(take raw),
+            Ok(_) => if list.len(raw) > max { return Error(Rejected("response body exceeds its bound")) },
+            Error(TooLarge) => return Error(Rejected("response body exceeds its bound")),
+            Error(_) => return Error(StreamDropped("provider did not send a complete response body")),
         }
-        if got == 0u64 { return Error(Transport(Unavailable)) }
+    }
+}
+
+// HTTP status still classifies the fault when the body is missing or invalid.
+fn http_fault(mut c: std.http_client.Connection, status: u16, delay: u64) -> harness.ModelFault waits {
+    if let Ok(take raw) = read_body(mut c, 8192u64) {
+        if let Ok(take text) = string.from_utf8(take raw) {
+            region r {
+                if let Ok(x) = std.json.parse(r, text) { return classify(status, delay, x) }
+            }
+        }
+    }
+    status_fault(status, delay, error_text(status, None), None, None)
+}
+
+fn read_stream(mut c: std.http_client.Connection, d: Dialect, limits: Bounds, delay: u64,
+    mut sink: Option[preview.Source], take first: Bytes, take timing: Option[TokenTiming]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let mut dec = decoder(limits)
+    let mut st = stream(d, limits)
+    st.retry_delay = delay
+    let mut chunk = take first
+    let mut sample = take timing
+    loop {
+        if list.len(chunk) == 0u64 && stream_chunk(mut c, mut chunk)? == 0u64 { break }
         let from = string.byte_len(st.text)
-        let done = match feed(mut dec, mut st, chunk) {
-            Ok(is_done) => is_done,
-            Error(_) => return Error(Transport(Unavailable)),
+        let done = feed(mut dec, mut st, chunk)?
+        if string.byte_len(st.text) > 0u64 || list.len(st.parts) > 0u64 {
+            if let Some(take stamp) = replace(mut sample, None) {
+                record_token(stamp)
+            }
         }
         if let Some(mut preview_out) = sink {
             preview.delta(mut preview_out, string.slice(st.text, from, string.byte_len(st.text)))
@@ -627,9 +651,70 @@ pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request
         list.clear(mut chunk)
     }
     std.sse.finish(mut dec)
-    let cached = st.cached_input
-    match answer(take st) {
-        Ok(take a) => Ok(Reported(answer: take a, cached_input: cached)),
-        Error(_) => Error(Transport(Unavailable)),
+    answer(take st)
+}
+
+fn stream_chunk(mut c: std.http_client.Connection, mut chunk: Bytes) -> Result[u64, harness.ModelFault] waits {
+    match std.http_client.read(mut c, mut chunk) {
+        Ok(n) => Ok(n),
+        Error(TooLarge) => Error(Rejected("response body exceeds its bound")),
+        Error(_) => Error(StreamDropped("provider interrupted the response stream")),
     }
+}
+
+fn complete(d: Dialect, limits: Bounds, delay: u64, take raw: Bytes) -> Result[harness.Answer, harness.ModelFault] {
+    let Ok(take text) = string.from_utf8(take raw) else { return Error(Rejected("response body is not UTF-8")) }
+    let mut st = stream(d, limits)
+    st.retry_delay = delay
+    region r {
+        let Ok(x) = std.json.parse(r, text) else { return Error(Rejected("response body is not JSON")) }
+        if let Some(_) = std.json.pointer(x, "/error") { return Error(classify(0u16, st.retry_delay, x)) }
+        match d {
+            Anthropic => anthropic_complete(mut st, x)?,
+            OpenAi => openai_complete(mut st, x)?,
+        }
+    }
+    st.done = true
+    answer(take st)
+}
+
+fn anthropic_complete(mut st: Stream, x: std.json.Json) -> Result[(), harness.ModelFault] {
+    let Some(take stop) = str_at(x, "/stop_reason") else { return Error(Rejected("response has no stop reason")) }
+    st.stop = take stop
+    if let Some(usage) = std.json.pointer(x, "/usage") { anthropic_usage(mut st.usage, usage) }
+    let Some(Arr(blocks)) = std.json.pointer(x, "/content") else { return Error(Rejected("response has no content blocks")) }
+    for i in 0u64 .. seq.len(blocks) {
+        let Some(block) = indexed.get(blocks, i) else { continue }
+        if str_at(block, "/type") == Some("text") {
+            if let Some(text) = str_at(block, "/text") { add_text(mut st, text)? }
+        } else if str_at(block, "/type") == Some("tool_use") {
+            let Some(take id) = str_at(block, "/id") else { return Error(Rejected("tool block without an id")) }
+            let Some(take name) = str_at(block, "/name") else { return Error(Rejected("tool block without a name")) }
+            let Some(input) = std.json.pointer(block, "/input") else { return Error(Rejected("tool block without input")) }
+            let at = open_part(mut st, i, take id, take name)?
+            let mut args = string.new()
+            std.json.push_json(mut args, input)
+            add_args(mut st, at, args)?
+        }
+    }
+    Ok(())
+}
+
+fn openai_complete(mut st: Stream, x: std.json.Json) -> Result[(), harness.ModelFault] {
+    let Some(take stop) = str_at(x, "/choices/0/finish_reason") else { return Error(Rejected("response has no finish reason")) }
+    st.stop = take stop
+    if let Some(usage) = std.json.pointer(x, "/usage") { openai_usage(mut st.usage, usage) }
+    let Some(message) = std.json.pointer(x, "/choices/0/message") else { return Error(Rejected("response has no message")) }
+    if let Some(text) = str_at(message, "/content") { add_text(mut st, text)? }
+    if let Some(Arr(calls)) = std.json.pointer(message, "/tool_calls") {
+        for i in 0u64 .. seq.len(calls) {
+            let Some(call) = indexed.get(calls, i) else { continue }
+            let Some(take id) = str_at(call, "/id") else { return Error(Rejected("tool call without an id")) }
+            let Some(take name) = str_at(call, "/function/name") else { return Error(Rejected("tool call without a name")) }
+            let Some(args) = str_at(call, "/function/arguments") else { return Error(Rejected("tool call without arguments")) }
+            let at = open_part(mut st, i, take id, take name)?
+            add_args(mut st, at, args)?
+        }
+    }
+    Ok(())
 }

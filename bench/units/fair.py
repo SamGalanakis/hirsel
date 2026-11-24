@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "bench/awfy"))
 from receipt import measurement_slot, read, release_tools, write
 from bench_cpus import cpu_list
 from measurement import FOREIGN_SHARE_LIMIT, MIN_ARM_NS, hold as measurement_hold
+from timing_shield import in_timing_slice, local_host, scoped_command
 
 from bench.multicore import build, regimes, run
 
@@ -37,7 +38,7 @@ CPU_DEFAULTS = {
 MEASURE_CPUS = set().union(*CPU_DEFAULTS.values())
 BUILD_CPUS = (8, 9, 10, 11)
 BUILD_MEMORY = "4G"
-REGIME_MEMORY = "3G"
+REGIME_MEMORY = 3 << 30
 MATCHED_OFFER = 3000
 CONNECTIONS = (256, 2048, 8192)
 QUICK_REGIMES = ("fanin", "pipeline")
@@ -176,6 +177,9 @@ def guard(cpu_sets, output):
 
 
 def scope(cpus, command, *, limit=55):
+    if local_host() and in_timing_slice():
+        return ["taskset", "-c", cpus, *scoped_command(
+            list(map(str, command)), memory_bytes=REGIME_MEMORY, runtime_seconds=limit)]
     return ["taskset", "-c", cpus, "systemd-run", "--user", "--scope", "--quiet", "--collect",
             "--unit", f"hirsel-fair-{os.getpid()}-{next(SCOPE)}.scope", "-p", f"MemoryMax={REGIME_MEMORY}",
             "-p", "MemorySwapMax=0", "-p", f"RuntimeMaxSec={limit}s", "-p", "TimeoutStopSec=2s",
@@ -581,7 +585,7 @@ def main():
     config = {"mode": "full" if args.full else "quick", "families": suites,
               "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
               "reverse": args.reverse, "build_cpus": BUILD_CPUS, "build_jobs": 4,
-              "build_memory_limit_bytes": 4 << 30, "regime_scope_memory_limit_bytes": 3 << 30,
+              "build_memory_limit_bytes": 4 << 30, "regime_scope_memory_limit_bytes": REGIME_MEMORY,
               "sync_policy": {"wait_us": 400, "max_writes": 4096, "durable_syncs_per_group": 1},
               "hold_policy": "foreign-cpu-share", "foreign_share_limit": FOREIGN_SHARE_LIMIT,
               "minimum_arm_ns": MIN_ARM_NS,

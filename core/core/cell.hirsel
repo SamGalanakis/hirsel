@@ -1,0 +1,14 @@
+// Module `cell` (MEM-29): a task-local cell, one value written through a view.
+pub fn new[T](take v: T) -> Cell[T]
+
+pub fn get[T: plain](c: Cell[T]) -> T
+
+pub fn set[T](c: Cell[T], take v: T) {
+    let _ = replace(c, take v)
+}
+
+pub fn replace[T](c: Cell[T], take v: T) -> T
+
+pub fn with[T, A, R](c: Cell[T], take a: A, f: fn(mut T, take A) -> R) -> R
+
+pub fn into_inner[T](take c: Cell[T]) -> T

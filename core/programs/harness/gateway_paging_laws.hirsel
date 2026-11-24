@@ -1,0 +1,77 @@
+// The gateway paging law: the tail and history pages of a finished session.
+
+// With `again`, the message queued during the run became a second turn:
+// its user line at 6 and the scripted "done" at 7 (a tool result is already in
+// the request, so the script answers at once).
+fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -> u64 waits {
+    let Ok(take opened) = browser_at(net, clock, port, me, "/sessions/0/events?tail=2") else {
+        return 1u64
+    }
+    let mut fresh = take opened
+    let mut decoder = std.sse.decoder(65536u64)
+    let mut rows: List[(u64, Bytes)] = list.new()
+    let last = if again { 7u64 } else { 5u64 }
+    if !read_until_row(mut fresh, mut decoder, mut rows, "answered", last) {
+        return 2u64
+    }
+    let _ = take fresh
+    let mut tail: List[(u64, Bytes)] = list.new()
+    list.push(mut tail, row_of(0u64, Status("answered")))
+    if again {
+        list.push(mut tail, row_of(6u64, Line("user", "again")))
+        list.push(mut tail, row_of(7u64, Line("assistant", "done")))
+    } else {
+        list.push(mut tail, row_of(4u64, Line("tool", "c1")))
+        list.push(mut tail, row_of(5u64, Line("assistant", "done")))
+    }
+    if !same_rows(rows, tail) {
+        return 3u64
+    }
+    let format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
+    let mut before = last - 1u64
+    let mut pages = 0u64
+    while before > 1u64 {
+        let mut target = string.from("/sessions/0/history?before=")
+        string.push_u64(mut target, before)
+        string.push(mut target, "&lines=2")
+        let (status, body) = http(net, clock, port, "GET", target, person(me, 0u64), list.new())
+        if status != 200u16 {
+            return 4u64
+        }
+        let Ok(page) = std.json.decode_typed(format, clone(body), 65536u64) else {
+            return 5u64
+        }
+        if page.from >= before {
+            return 6u64
+        }
+        for r in page.rows {
+            if r.at < page.from || r.at >= before {
+                return 7u64
+            }
+            list.push(mut rows, (r.at, bytes_of(r.line)))
+        }
+        before = page.from
+        pages += 1u64
+    }
+    let paged_want = if again { 3u64 } else { 2u64 }
+    if pages != paged_want {
+        return 8u64
+    }
+    if !same_rows(rows, tool_finished_rows(again)) {
+        return 9u64
+    }
+    let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me, 0u64), list.new())
+    if refused != 400u16 {
+        return 10u64
+    }
+    0u64
+}
+
+fn tool_finished_rows(again: bool) -> List[(u64, Bytes)] {
+    let mut want = rows_want("answered", true)
+    if again {
+        list.push(mut want, row_of(6u64, Line("user", "again")))
+        list.push(mut want, row_of(7u64, Line("assistant", "done")))
+    }
+    take want
+}

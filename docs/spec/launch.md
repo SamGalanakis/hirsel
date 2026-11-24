@@ -10,7 +10,7 @@ to the program. A program must reach this branch without using a capability.
 ## Immutable launch identity
 
 The runtime supplies one private launch metadata value with `digest`, `target`,
-`n_place` and `assembly`. `digest` is the 32-byte SHA-256 digest of the executable image's
+`n_place` and `revision`. `digest` is the 32-byte SHA-256 digest of the executable image's
 bytes, as specified by FIPS 180-4. `target` is that image's target triple.
 `n_place` is the byte allowance used for this launch's place registration. The
 launcher fixes these values before program code runs. The runner reads this
@@ -24,23 +24,22 @@ allowances, so the full identity includes `n_place` independently of the digest.
 Both native and evaluator launchers supply it, and describe reports it. Bindings
 record the allowance of the described launch.
 
-`assembly` (STORE-SPEC v2.51, v2.52; not yet built) is the 32-byte name of the assembly record
-the launch runs ("Assembly records" below), or empty when the launcher names none. One
-executable can be the image of several records (two recipes that differ outside the image,
-or one recipe under two toolchains that give the same bytes), and records differ in what the
-host approved for them, so the record is part of the identity apart from the digest. Only the
-platform launcher names one by default: it passes the record it launches to every child of it.
-`hirsel run`, `hirsel build --manifest`, evaluator, embedded and bare launches leave it empty,
-so a plain restart of the same executable outside the host still reopens its store. An
-operator who installs on a hosted store by hand passes `--hirsel-assembly`<!-- doc-ref: planned -->
-with the record the host should serve, and the allowance that record launches with
-(`--hirsel-n-place`<!-- doc-ref: external -->), both first on the command line, before
-`--hirsel-install`<!-- doc-ref: external -->, which is a place argument ("Place activation" below). A launch that names a record runs at the
-launch's allowance in every mode, as a hosted launch does, and the launcher refuses a name
-without an explicit allowance (RUNNER-SPEC §6 "A named launch runs at the launch's
-allowance"). Without the name the install names none, and with another allowance it
-describes another launch; either matches no host record ("Place activation" below). The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
-nothing, and is compared only as part of `Describe`. A const-parameter mechanism was
+`revision` (RUNNER-SPEC v2.42, Spec Q5; not yet built) is the 32-byte `code.revision` of the
+program's entry ([PROG-9](programs.md#prog-9-code-descriptors)), the value a recording's admission
+already compares ([recording](../recording.md#what-a-recording-holds)), or unavailable for a
+program assembled without revisions. It names the code, not the bytes: the same program built by
+Cranelift or LLVM, at another optimisation level, or as a recording build has one revision and
+different digests. The **release identity** is `revision`, `n_place` and the exported list
+(RUNNER-SPEC §6 "One identity"), and it, not the digest, binds a store, matches a host record and
+stamps a granted trigger. `digest` and `target` are diagnostics: Welcome, `Status`, refusals and
+the release rows report them, and no rule compares them. An assembly record's name is the host's
+and is not launch metadata: v2.51's `assembly` field and its launch option are deleted.
+
+`n_place` comes from the private option `--hirsel-n-place`<!-- doc-ref: external --> when it is
+given, and the runtime records that it was given; otherwise the place runs at its own
+`PlaceConfig.n_place` (RUNNER-SPEC §6 "One n_place"). The platform host and launcher always
+give it. A const-parameter mechanism was
+consideredA const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `runner@1/runner` to
 require or extract a constant argument.
@@ -63,8 +62,9 @@ require or extract a constant argument.
   the store pathname cannot change the executed image or its digest.
 - An image that cannot be read at launch produces `Unavailable(reason)`.
   Missing source-only or embedded identity has the same representation. It
-  does not fail launch. Its digest is empty; the known target and `n_place`
-  remain available.
+  does not fail launch. Its digest is empty; the known target, `n_place` and
+  `revision` remain available, so the release identity does not depend on the
+  digest.
 
 The value is anchored in the launch owner, before user entry, and stays constant
 through every task, describe response and session in that process. An embedded
@@ -78,8 +78,8 @@ of one program are different executables, so their digests differ
 
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
-`Welcome` carries `(caller, q, budget, executable, target, n_place)` under
-tag 4 of `hirsel.2`. Target and allowance are independent of the executable digest.
+`Welcome` carries `(caller, q, budget, executable, target, n_place, now_ms, retention_ms)`
+under tag 4 of `hirsel.4`. Target and allowance are independent of the executable digest.
 When either identity is unavailable the diagnostic is "identity unknown", with
 no mismatch report. A differing available digest, target or `n_place` produces
 a developer diagnostic only. Compatibility is decided by entry identity and
@@ -95,10 +95,14 @@ store or listener. It encodes this record with the ordinary value codec:
 type Kind: codec + send = Compute | Transact | Query | Granted
 type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
-type Describe: codec + send { digest: Bytes, target: String, n_place: u64, assembly: Bytes, exported: List[Exported] }
+type Describe: codec + send { digest: Bytes, target: String, n_place: u64, revision: Bytes, exported: List[Exported] }
+type ReleaseIdentity: codec + send { revision: Bytes, n_place: u64, exported: List[Exported] }
 type ReleaseManifest: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64, recipe: Bytes }
 ```
 
+`revision` is the launch's entry revision, empty when it is unavailable. A `Describe`'s
+**identity digest** is SHA-256 over `u8 18 ‖ "hirsel.identity.v1" ‖` the value codec's bytes of
+`ReleaseIdentity { revision, n_place, exported }` taken from it (RUNNER-SPEC §6 "One identity").
 Entries are in registration order. `Described` has the fields `kind`, `identity`,
 `args` and `result`, in that order, with no separate error field. Its `result`
 is the schema of the value carried by `Returned`: `Result[R, E]` for transact,
@@ -127,22 +131,22 @@ and reports `PlaceTimedOut`; no generated output is written. The deadline
 covers entry through `main`, registration, encoding and child exit. Capacity,
 duplicate registration and timeout errors leave the output destination alone.
 
-The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external -->,
-`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> and `--hirsel-assembly=<hex>`<!-- doc-ref: planned -->
-(64 lowercase hex digits; absent means empty) before constructing user `Args`. The prefix is
+The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external --> and
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> before constructing user `Args`. The prefix is
 the leading run of arguments that are recognised private launch options: the first argument
 that is not one ends it, and that argument and every one after it become `Args` verbatim, so a
 private option written after a place argument is never read as one. `--hirsel-install`<!-- doc-ref: external -->
 and `--hirsel-activation=<version>`<!-- doc-ref: external --> are place arguments, read from `Args`
 by `runner.launch_selection`, so they come after every private option. A malformed private
-option in the prefix, and a name without an allowance, are refused before user code: the process writes `not started: ` and the reason to standard error and exits 103. The allowance defaults
-to 16 MiB. A place launched by the platform host or launcher, or by any launch that names
-an assembly record, runs at the allowance that option selects; `--hirsel-assembly`<!-- doc-ref: planned -->
-without `--hirsel-n-place`<!-- doc-ref: external --> is refused before user code, as a malformed private option is.
-Any other standalone place runs at its own `PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
-that value or the start is refused `Disagrees` naming both, and `Status` and
-Welcome report it (RUNNER-SPEC §6 "One n_place"). Evaluator and embedded launch configurations carry the same mode and
-allowance explicitly. SDK generation uses the driver's `describe_child` helper;
+option in the prefix is refused before user code: the process writes `not started: ` and the
+reason to standard error and exits 103. A launch that gives `--hirsel-n-place`<!-- doc-ref: external -->
+runs at that allowance in every mode; one that does not runs at its own `PlaceConfig.n_place`
+(a describe at the 16 MiB default), whose wire configuration must repeat that value or the
+start is refused `Disagrees` naming both, and `Status` and Welcome report it (RUNNER-SPEC §6
+"One n_place"). There is no private option that names an assembly record (RUNNER-SPEC v2.42 deleted
+the planned one, never built). Evaluator and embedded launch configurations
+carry the same mode, the allowance and whether it is explicit.
+SDK generation uses the driver's `describe_child` helper;
 the CLI and generator share its bounded read, absolute deadline, kill and reap.
 
 Laws: `place_run_bounded` kills a looping place at its deadline and observes no
@@ -163,24 +167,25 @@ after `--` with `hirsel run`. The install runs `place` and `migrate`, validates
 both handle sets, commits the activation under the store lock, closes the store
 and exits. Start the executable again to serve.
 
-A bare install exits 0 whatever host the store belongs to: it skips the current-image guard
-and writes a `Describe` that names no assembly record. That is right for a standalone place
-and wrong for a store a platform host serves, whose group then matches none of its records.
-A hand install meant for a hosted group must launch as one of the records the host can adopt,
-the marked deploy's OLD or NEW that the group still keeps: run its exact image with that
-record's name and allowance first and the install last, for example
+An install exits 0 whatever host the store belongs to: it skips the current-identity guard
+and writes its own release identity. That is right for a standalone place, and for a store a
+platform host serves it is right only when the identity is one the host keeps a record for.
+A hand install meant for a hosted group must have the release identity of one of the records
+the host can adopt, the marked deploy's OLD or NEW that the group still keeps: run an
+executable of that record's code (any backend or optimisation level, since the identity is the
+code's) with the record's allowance first and the install last, for example
 
 ```sh
-./place --hirsel-assembly=<OLD-hex> --hirsel-n-place=1048576 --hirsel-install
+./place --hirsel-n-place=1048576 --hirsel-install
 ```
 
 The install then registers and writes its `Describe` at that allowance, not at `PlaceConfig.n_place`.
-Written in another order (`./place --hirsel-install --hirsel-assembly=<OLD-hex> --hirsel-n-place=1048576`),
-the first argument ends the private prefix, so the name and the allowance are user `Args`
-that `launch_selection` skips: the run is a bare install at `PlaceConfig.n_place`, it exits 0,
-and its `Describe` matches no record.
-The group's `Status.failing[].last` names those candidates with their allowances when the
-host finds no match, and keeps that cause ahead of each retry's own refusal or exit status
+Written in another order (`./place --hirsel-install --hirsel-n-place=1048576`), the first
+argument ends the private prefix, so the allowance is a user `Arg` that `launch_selection`
+skips: the install runs at `PlaceConfig.n_place`, it exits 0, and its identity matches no
+record when the two allowances differ.
+The group's `Status.failing[].last` names those candidates with their identity digests and
+allowances when the host finds no match, and keeps that cause ahead of each retry's own refusal or exit status
 until a read matches. The group's
 next retry reads the store and serves that record at the installed activation
 (RUNNER-SPEC §14.3 "Leaving no record"); a group left failing by a decided deploy recovers
@@ -188,15 +193,16 @@ only this way, because a hot deploy needs a live OLD. Both options are run argum
 which a recording holds like every entry argument. The launcher passes
 `--hirsel-activation`<!-- doc-ref: external --> to serving children.
 
-A store is bound to the image that activated it (RUNNER-SPEC §6, "Restart and
-rebuild"). Another executable, the same source rebuilt in another mode
-included, is refused `NotCurrent` with the store's version and image and this
-launch's image. To move a store to a new build, stop the old process and start
+A store is bound to the release identity that activated it (RUNNER-SPEC §6, "Restart and
+rebuild", "One identity"). The same code built by another backend, at another optimisation
+level or as a recording build opens it. Other code, another allowance or another exported
+list is refused `NotCurrent` with the store's version and identity digest and this launch's,
+and both executable digests as a diagnostic. To move a store to a new build, stop the old process and start
 the new build once with `--hirsel-install`<!-- doc-ref: external -->, or deploy it with `hirsel deploy`.
 
 A refused selection returns `NotCurrent(found)` before handles run. A disk
-genesis or standalone install requires a known executable identity and returns
-`IdentityUnknown` if it is unavailable.
+genesis or standalone install requires a known release identity (an available `revision`)
+and returns `IdentityUnknown` if it is unavailable.
 
 A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest>`<!-- doc-ref: external -->
 as its place arguments. The attempt and image digest use lowercase hex for 16 and
@@ -221,7 +227,7 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   the exported entries in registration order. `n_place` is the allowance the
   child ran with. A hosted launch that selects another `--hirsel-n-place`<!-- doc-ref: external -->
   is a different release identity, and Welcome and the status route report it.
-  `assembly` is empty.
+  `revision` is the entry's.
 - `release` is the preview child's `release`, which it computes with
   `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the
   value codec's bytes of the registry's exported list. The driver never hashes
@@ -240,9 +246,9 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 - `root_limit` is the executable's root limit.
 - `recipe` is the 32-byte root R of the release recipe the executable was assembled
   from (below). `release` says what the public interface runs, R says what code was
-  assembled, and the digest says which bytes run. R does not enter `release` or the
-  store's `releases` rows; the store's `Describe` names it only through `assembly`, whose
-  record names R.
+  assembled, and the digest says which bytes run. R does not enter `release`, the
+  release identity or the store's `releases` rows: two recipes of the same code under two
+  toolchains have one identity.
 
 Grants and the root limit are part of the executable's build key, so a manifest
 describes exactly one executable. Limits the place sets in its own code (`q`,
@@ -385,8 +391,10 @@ assembly run under the same kind of limits on time, memory and output.
 
 **Assembly records.** An **assembly record** is an immutable host record naming one realised
 combination: R, the toolchain fingerprint, and the image digest that assembly produced. Its name
-is the hash of those three, and every launch of the record carries it in its `Describe`
-("Immutable launch identity"), so an activation names exactly one record. The **toolchain fingerprint** is a hash of the effective environment
+is the hash of those three. It is the host's name and is in no launch metadata or `Describe`
+(RUNNER-SPEC v2.42): an activation names a release identity, which several records can share
+(one R under two toolchains, or two recipes that differ only in grants), and the host picks
+among them by RUNNER-SPEC §14.3 "What serves". The **toolchain fingerprint** is a hash of the effective environment
 of the assembly: the resolved target features, the compiler and backend, the runtime ABI and
 runtime archive, the linker, every link input and the effective settings. A host's toolchain is
 an immutable installation, so every file it loads is covered. Image bytes are kept once per
@@ -461,7 +469,7 @@ with another `prepared` proves this attempt did not install): the host
 makes NEW the current assembly and activation, keeps OLD's as retained, and records the
 deploy `Installed`, in one durable transaction, and the probe goes on serving. A probe
 refused `NotCurrent` reports one capture of the store, read before it exits and without
-application handles: its store ID, activation, image, on objects@1 its holder pair, and
+application handles: its store ID, activation, identity digest, on objects@1 its holder pair, and
 `releases[v]` (RUNNER-SPEC §14.3 "The probe's read"). On objects@1 the capture is a follower
 read; on log@1 the probe keeps the store's `LOCK` after the refused comparison and reads its
 own recovered state. Row `v` decides the attempt even when another install has since moved the
@@ -472,20 +480,22 @@ nothing yet: OLD's delayed write can still land, so the next probe opens OLD's a
 OLD's activation, and that open, or its read, decides. The outcome never chooses what serves.
 An Installed outcome also records NEW's assembly for `v` in the
 activation index, whatever activation the read reports. In the same transaction the host
-selects the store's current activation with the assembly whose `Describe` digest is the read's
-image, so a group never returns to `v` from a later activation. `Describe` names its assembly
-record, so at most one of OLD's and NEW's matches, and a probe that opens always matches the
-record it opened; when neither matches, nothing is selected, the group's row keeps a durable
-no-record mark (the attempt, the read's activation and the assembly its `Describe` names), and
+selects the store's current activation with a record whose identity digest is the read's
+(RUNNER-SPEC v2.42), so a group never returns to `v` from a later activation. Two records can
+share an identity (the same code under two backends, or a recipe that changed only grants), so
+when both OLD and NEW match, the attempt's decided outcome picks: Installed serves NEW, failed
+serves OLD. A probe that opens always serves the record it opened. When neither matches,
+nothing is selected, the group's row keeps a durable no-record mark (the attempt, the read's
+activation, its identity digest and allowance), and
 the group is failing with the cause `No recovery candidate matches the store at activation a`,
-followed by that assembly name (or "names no assembly") and allowance, and the names and
-allowances of the candidates below. The mark, not the start that last failed, carries the
+followed by that identity digest (or "does not decode") and allowance, and the names, identity
+digests and allowances of the candidates below. The mark, not the start that last failed, carries the
 cause: `Status` formats it from the mark and appends the last start's own refusal or exit
 status, so retries refused at the stale activation, retries that end before they report, and
 a host restart keep it (RUNNER-SPEC §14.5 "Failing and backoff"). Each retry of a marked group, once refused, reads the
-store as the probe does, without the witness row; when the read's image is the `Describe`
-digest of the attempt's OLD or NEW that the group still keeps, one transaction makes that
-record current at the read's activation and writes it into the activation index there, and the
+store as the probe does, without the witness row; when the read's identity digest is that of
+the attempt's OLD or NEW that the group still keeps (both: by the outcome, as above), one
+transaction makes that record current at the read's activation and writes it into the activation index there, and the
 group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"). Adoption turns the mark
 `Adopted`, which clears the previous cause. If the relaunch, or any later start before an open,
 is refused and its read matches no candidate (another install moved the store again), the mark
@@ -592,6 +602,34 @@ a live session's `Placed` answers for the same list; `manifest_exact` (L35)
 checks the grants, the root limit and `release`; `confirm_identity` (L32);
 `place_run_bounded` also covers the preview child, which observes no store or
 listener.
+
+## Dry run and dev loop
+
+*(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
+
+`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER` runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
+
+Backfill counts give the source rows read and the rows emitted into the
+preview image. A unique backfill reports the first duplicate by encoded
+index key, then the first two encoded primary keys for that key. The preview
+keeps the first row in its scratch index so it can check later declarations.
+Any such conflict makes the migration fail.
+
+Dry run takes the Store's lock while it captures the private image. It
+refuses a store held by another process. The candidate uses the root limit
+embedded in the executable and the same Store sizing overrides it would use
+when serving. Arguments after `--` go to the candidate.
+
+`SERVER` is the package to rebuild. The supervisor gives its first directory
+grant a temporary Store and holds a public loopback listener. The default
+address is `127.0.0.1:7700`, and `--listen ADDR` changes it. The server uses
+`runner.launch_selection` so the supervisor can run the ordinary install
+before restarting it. A build refusal leaves the current executable serving.
+A migration refusal before activation reopens the current executable. The
+supervisor retains each WebSocket, repeats its Hello and live Subscribe
+requests on the new connection, and forwards the complete groups with the
+original subscription numbers. It uses the new query's result fingerprint
+when the named entry still has the same argument fingerprint.
 
 ## Platform host and launcher
 
@@ -1001,7 +1039,7 @@ child endpoints, pidfds and cgroup population changes.
      request for a decision ("Deploy preview"). Nonempty
      approval text waits for the operator to confirm exactly that text. An untrusted
      author's deploy is source only, without Foreign or `Exec` grants, and is refused
-     before `Admit`. The host checks NEW's preview against the target, allowance and NEW's assembly record.
+     before `Admit`. The host checks NEW's preview against the target and allowance, and records its identity digest.
   4. `Assemble(attempt)` builds and syncs the image and its assembly record, and
      `Assembled(attempt, assembly, digest, fetch, assembly_ns)` answers it with the
      assembly name, the image digest and the fetch and assembly times in nanoseconds. The
@@ -1204,8 +1242,9 @@ takes the first that applies:
    as cancelled at its due time before it looks at its entry, so NEW's entries do not
    matter.
 2. **`held`**: a granted trigger that is parked under a hold, or whose attempt is at least
-   1 **and** whose revision stamp differs from NEW's launch image digest. The stamp is the
-   launch image digest of the code that started it (or the one a release selected). NEW
+   1 **and** whose revision stamp differs from NEW's identity digest. The stamp is the
+   identity digest of the release that started it (or the one a release selected; RUNNER-SPEC
+   v2.42 §14.6). NEW
    parks the second kind with a `Revision` hold at its next start, or keeps the first
    parked, until a release. This class comes before `gone`: `triggers.start` runs before
    the head looks for the entry, so a started granted run under another digest whose entry
@@ -1213,9 +1252,9 @@ takes the first that applies:
    digests are equal.
 3. **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
    NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
-   `Gone` when it comes due. Two recipes can differ in `n_place` alone and share an image
-   digest; then a started granted run passes `triggers.start` and lands here if its entry
-   is gone. NEW's head consumes these rows even when NEW lists no trigger entry at all
+   `Gone` when it comes due. Two records can share an identity (the same code under another
+   backend, or a recipe that changed only grants); then a started granted run passes
+   `triggers.start` and lands here if its entry is gone. NEW's head consumes these rows even when NEW lists no trigger entry at all
    (RUNNER-SPEC §12.1).
 4. **`changed`**: an allowed entry whose `revision` (PROG-9) differs from OLD's. It runs
    NEW's code when it comes due.
@@ -1223,8 +1262,9 @@ takes the first that applies:
 
 The report gives the exact count and earliest due time for each (class, kind, entry path,
 argument schema). A report above the prepare child's bound fails
-prepare with `Limit(triggers)`. The guard on started granted runs uses the image digest,
-which covers changes in `handles` such as table names, bindings and key codecs.
+prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
+whose entry revision covers changes in `handles` such as table names, bindings and key codecs,
+and which a rebuild of the same code by another backend leaves equal.
 
 Laws. Built for both the launcher (`crates/hirsel-core-driver/src/launcher/laws.rs`) and the
 platform host (`core/programs/platform/platform.hirsel`, `core/programs/platform/platform_laws.hirsel`

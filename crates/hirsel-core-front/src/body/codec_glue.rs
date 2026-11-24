@@ -1,9 +1,5 @@
-//! A tuple's codec (SEM-10, EXPANSION 9.1). The front derives `of[(A, B, ..)]`'s maker
-//! per tuple row, at any arity: it encodes the components in order with their own
-//! codecs, decodes them in order, describes `tuple(n)` then each component, and its
-//! LEAST is the components' sum. The maker and its encoder, decoder and describer are
-//! glue operations of std.codec, materialised like key glue from the closures of the
-//! rows they read, which their key names.
+//! Structural codec makers and their encoder, decoder and schema functions.
+//! Each instance names the type closures it reads.
 use super::key_glue::{Code, signature_id};
 use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
@@ -19,11 +15,37 @@ pub enum CodecOp {
     /// The describer `fn(mut Schema, Codec[T]) -> Result[(), EncodeError]`.
     Describe,
 }
-const OPS: [(CodecOp, &str); 4] = [
-    (CodecOp::Of, "$tuple_of"),
-    (CodecOp::Encode, "$tuple_encode"),
-    (CodecOp::Decode, "$tuple_decode"),
-    (CodecOp::Describe, "$tuple_describe"),
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Format {
+    Value,
+    Key,
+    Desc,
+}
+
+const FORMATS: [(Format, [&str; 4]); 3] = [
+    (
+        Format::Value,
+        [
+            "$tuple_of",
+            "$tuple_encode",
+            "$tuple_decode",
+            "$tuple_describe",
+        ],
+    ),
+    (
+        Format::Key,
+        ["$key_of", "$key_encode", "$key_decode", "$key_describe"],
+    ),
+    (
+        Format::Desc,
+        ["$desc_of", "$desc_encode", "$desc_decode", "$desc_describe"],
+    ),
+];
+const OPS: [CodecOp; 4] = [
+    CodecOp::Of,
+    CodecOp::Encode,
+    CodecOp::Decode,
+    CodecOp::Describe,
 ];
 
 /// The rows a tuple codec's operations read, which are its key's arguments in this
@@ -33,6 +55,7 @@ const OPS: [(CodecOp, &str); 4] = [
 /// (a String field is the `seq u8` a Bytes field is).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rows {
+    pub format: Format,
     pub tuple: TypeId,
     pub codec: TypeId,
     pub decoded: TypeId,
@@ -62,12 +85,13 @@ impl Rows {
         }
         xs
     }
-    fn from(xs: &[TypeId]) -> Option<Self> {
+    fn from(format: Format, xs: &[TypeId]) -> Option<Self> {
         let (head, parts) = xs.split_at_checked(6)?;
         if parts.len() % 3 != 0 {
             return None;
         }
         Some(Self {
+            format,
             tuple: head[0],
             codec: head[1],
             decoded: head[2],
@@ -87,30 +111,37 @@ impl Rows {
 }
 
 impl CodecOp {
-    fn named(definition: &DefPath) -> Option<Self> {
+    fn named(definition: &DefPath) -> Option<(Self, Format)> {
         let d = &definition.0;
         if d.package.name != "std" || d.modules != ["codec"] {
             return None;
         }
-        OPS.iter().find(|(_, n)| *n == d.name).map(|&(op, _)| op)
+        FORMATS.iter().find_map(|(format, names)| {
+            names
+                .iter()
+                .position(|n| *n == d.name)
+                .map(|i| (OPS[i], *format))
+        })
     }
-    /// The operation's definition beside `of`, any definition of std.codec.
-    pub fn definition(self, of: &DefPath) -> DefPath {
+
+    pub fn definition(self, of: &DefPath, format: Format) -> DefPath {
         let mut d = of.clone();
-        d.0.name = OPS.iter().find(|(op, _)| *op == self).unwrap().1.into();
+        let (_, names) = FORMATS.iter().find(|(mode, _)| *mode == format).unwrap();
+        d.0.name = names[self as usize].into();
         d
     }
     /// The operation's instance at `rows`.
     pub(super) fn instance(self, of: &DefPath, rows: &Rows) -> InstanceKey {
         InstanceKey {
-            definition: self.definition(of),
+            definition: self.definition(of, rows.format),
             arguments: rows.arguments(),
             dictionaries: vec![],
         }
     }
     /// The tuple codec operation instance `key` names, and the rows it reads.
     pub fn of(key: &InstanceKey) -> Option<(Self, Rows)> {
-        Some((Self::named(&key.definition)?, Rows::from(&key.arguments)?))
+        let (op, format) = Self::named(&key.definition)?;
+        Some((op, Rows::from(format, &key.arguments)?))
     }
     /// The signature of this operation at a value row and its codec rows, by address:
     /// the encoder's, decoder's and describer's are a callable's (an environment
@@ -122,6 +153,7 @@ impl CodecOp {
         codec: TypeId,
         decoded: TypeId,
         rows: &Rows,
+        format: Format,
     ) -> Signature {
         let view = |ty| Param::Address {
             place: PlaceTy::Declared(ty),
@@ -133,8 +165,11 @@ impl CodecOp {
         };
         let env = Param::Value(Ty::Ptr);
         let (params, dest) = match self {
-            Self::Of => (vec![], codec),
-            Self::Encode => (vec![env, view(value), out(rows.bytes)], rows.written),
+            Self::Of => (vec![], Some(codec)),
+            Self::Encode => (
+                vec![env, view(value), out(rows.bytes)],
+                (format == Format::Value).then_some(rows.written),
+            ),
             Self::Decode => (
                 vec![
                     env,
@@ -144,33 +179,37 @@ impl CodecOp {
                         loan: Loan::Mut,
                     },
                 ],
-                decoded,
+                Some(decoded),
             ),
-            Self::Describe => (vec![env, out(rows.schema), view(codec)], rows.written),
+            Self::Describe if format == Format::Value => {
+                (vec![env, out(rows.schema), view(codec)], Some(rows.written))
+            }
+            Self::Describe => (vec![env, out(rows.schema)], Some(rows.written)),
         };
-        Signature {
-            params,
-            results: vec![],
-            dest: Some(dest),
-            never: false,
-        }
+        Signature::new(params, vec![], dest)
     }
     /// Which parameters follow their rows' carriage: the viewed value, bytes or codec.
-    pub fn abi(self) -> scalar_abi::SignatureAbi {
+    pub fn abi(self, format: Format) -> scalar_abi::SignatureAbi {
         scalar_abi::SignatureAbi {
             params: match self {
                 Self::Of => vec![],
                 Self::Encode | Self::Decode => vec![false, true, false],
-                Self::Describe => vec![false, false, true],
+                Self::Describe if format == Format::Value => vec![false, false, true],
+                Self::Describe => vec![false, false],
             },
-            result: true,
+            result: self != Self::Encode || format == Format::Value,
         }
     }
-    /// The address signature of the operation at the tuple of `rows`.
     pub fn signature(self, module: &Module, rows: &Rows) -> Signature {
-        self.place(module, rows.tuple, rows.codec, rows.decoded, rows)
+        self.place(
+            module,
+            rows.tuple,
+            rows.codec,
+            rows.decoded,
+            rows,
+            rows.format,
+        )
     }
-    /// The signature a row of the operation has: the address one sealed by [`Self::abi`].
     pub(super) fn sealed(
         self,
         module: &Module,
@@ -178,14 +217,14 @@ impl CodecOp {
         codec: TypeId,
         decoded: TypeId,
         rows: &Rows,
+        format: Format,
     ) -> Signature {
-        let mut sig = self.place(module, value, codec, decoded, rows);
-        scalar_abi::Plan::signature(module, &mut sig, &self.abi());
+        let mut sig = self.place(module, value, codec, decoded, rows, format);
+        scalar_abi::Plan::signature(module, &mut sig, &self.abi(format));
         sig
     }
 }
 
-/// Whether `definition` is a tuple codec operation.
 pub(super) fn is_glue(definition: &DefPath) -> bool {
     CodecOp::named(definition).is_some()
 }
@@ -201,7 +240,14 @@ pub fn row(module: &mut Module, of: &DefPath, rows: &Rows, op: CodecOp) -> FuncI
     {
         return FuncId(i as u32);
     }
-    let sealed = op.sealed(module, rows.tuple, rows.codec, rows.decoded, rows);
+    let sealed = op.sealed(
+        module,
+        rows.tuple,
+        rows.codec,
+        rows.decoded,
+        rows,
+        rows.format,
+    );
     let signature = signature_id(module, sealed);
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);
@@ -236,7 +282,9 @@ pub fn derive(
     };
     let place = op.signature(d.module, rows);
     let old = signature_id(d.module, place);
-    let mut c = Code::new(&[Ty::Ptr; 4][..if op == CodecOp::Of { 1 } else { 4 }]);
+    let signature = &d.module.signatures[old.index()];
+    let inputs = signature.params.len() + usize::from(signature.dest.is_some());
+    let mut c = Code::new(&[Ty::Ptr; 4][..inputs]);
     let ps = c.body.blocks[0]
         .params
         .get(&c.body.pools.values)
@@ -244,13 +292,19 @@ pub fn derive(
         .to_vec();
     match op {
         CodecOp::Of => d.of_body(&mut c, ps[0])?,
-        CodecOp::Encode => d.encode_body(&mut c, ps[0], ps[2], ps[3])?,
+        CodecOp::Encode => {
+            if rows.format == Format::Value {
+                d.encode_body(&mut c, Some(ps[0]), ps[2], ps[3])?;
+            } else {
+                d.encode_body(&mut c, None, ps[1], ps[2])?;
+            }
+        }
         CodecOp::Decode => d.decode_body(&mut c, ps[0], ps[2], ps[3])?,
         CodecOp::Describe => d.describe_body(&mut c, ps[0], ps[2])?,
     }
     order_instructions(&mut c.body);
     let mut sig = d.module.signatures[old.index()].clone();
-    let plan = scalar_abi::Plan::signature(d.module, &mut sig, &op.abi());
+    let plan = scalar_abi::Plan::signature(d.module, &mut sig, &op.abi(rows.format));
     let signature = signature_id(d.module, sig);
     let old_calls = c
         .body
@@ -339,14 +393,13 @@ impl Derive<'_> {
         let part = self.rows.parts[i];
         let sig = signature_id(
             self.module,
-            Signature {
-                params: vec![],
-                results: vec![],
-                dest: Some(part.codec),
-                never: false,
-            },
+            Signature::new(vec![], vec![], Some(part.codec)),
         );
-        let maker = templates::codec_maker(self.module, self.of, part.ty, sig)?;
+        let maker = if self.rows.format == Format::Value {
+            templates::codec_maker(self.module, self.of, part.ty, sig)?
+        } else {
+            super::ordered_codec::maker(self.module, self.of, part.ty, sig)?
+        };
         let signature = self.module.functions[maker.index()].signature;
         let at = Self::slot(c, part.codec);
         self.call(c, Callee::Direct(maker), signature, &[Arg::Address(at)]);
@@ -368,17 +421,25 @@ impl Derive<'_> {
         });
         result
     }
-    /// The signature component `i`'s codec field of operation `op` is called at.
     fn part_signature(&mut self, i: usize, op: CodecOp) -> SigId {
         let p = self.rows.parts[i];
-        let sig = op.sealed(self.module, p.ty, p.codec, p.decoded, self.rows);
+        let format = if self.rows.format == Format::Value {
+            Format::Value
+        } else {
+            Format::Key
+        };
+        let sig = op.sealed(self.module, p.ty, p.codec, p.decoded, self.rows, format);
         signature_id(self.module, sig)
     }
 
     fn of_body(&mut self, c: &mut Code, dest: ValueId) -> Result<(), String> {
         let mut least = c.constant(0);
         let mut empty = c.boolean(false);
-        for i in 0..self.rows.parts.len() {
+        for i in 0..if self.rows.format == Format::Value {
+            self.rows.parts.len()
+        } else {
+            0
+        } {
             let at = self.part_codec(c, i)?;
             let n = Self::address(
                 c,
@@ -429,6 +490,10 @@ impl Derive<'_> {
                 value: result,
             });
         }
+        if self.rows.format != Format::Value {
+            Self::returns(c);
+            return Ok(());
+        }
         let at = Self::address(
             c,
             AddressBase::Address(to),
@@ -458,18 +523,22 @@ impl Derive<'_> {
     fn encode_body(
         &mut self,
         c: &mut Code,
-        dest: ValueId,
+        dest: Option<ValueId>,
         value: ValueId,
         bytes: ValueId,
     ) -> Result<(), String> {
         let rows = self.rows;
-        let failed = c.block(&[]);
-        let result = Self::address(
-            c,
-            AddressBase::Value(dest),
-            &[],
-            PlaceTy::Declared(rows.written),
-        );
+        let outcome = dest.map(|dest| {
+            (
+                c.block(&[]),
+                Self::address(
+                    c,
+                    AddressBase::Value(dest),
+                    &[],
+                    PlaceTy::Declared(rows.written),
+                ),
+            )
+        });
         let tuple = Self::address(
             c,
             AddressBase::Value(value),
@@ -482,12 +551,28 @@ impl Derive<'_> {
             &[],
             scalar_abi::mut_place(&self.module.types, rows.bytes),
         );
+        if rows.format == Format::Desc {
+            let key = self.part_codec(c, 0)?;
+            let (put, signature) = self.desc_helper(CodecOp::Encode);
+            self.call(
+                c,
+                Callee::Direct(put),
+                signature,
+                &[Arg::Address(tuple), Arg::Address(key), Arg::Address(out)],
+            );
+            Self::returns(c);
+            return Ok(());
+        }
         for i in 0..rows.parts.len() {
             let codec = self.part_codec(c, i)?;
             let encoder = Self::field_fn(c, codec, 0);
             let env = Self::null(c);
             let part = rows.parts[i].ty;
-            let mut args = vec![Arg::Address(result), Arg::Value(env)];
+            let mut args = vec![];
+            if let Some((_, result)) = outcome {
+                args.push(Arg::Address(result));
+            }
+            args.push(Arg::Value(env));
             match self.module.types[part.index()].carried {
                 Carried::Nothing => {}
                 Carried::Value(t) => {
@@ -512,11 +597,15 @@ impl Derive<'_> {
             args.push(Arg::Address(out));
             let signature = self.part_signature(i, CodecOp::Encode);
             self.call(c, Callee::Indirect(encoder), signature, &args);
-            Self::unless_failed(c, result, failed);
+            if let Some((failed, result)) = outcome {
+                Self::unless_failed(c, result, failed);
+            }
         }
         Self::returns(c);
-        c.start(failed);
-        Self::returns(c);
+        if let Some((failed, _)) = outcome {
+            c.start(failed);
+            Self::returns(c);
+        }
         Ok(())
     }
 
@@ -562,6 +651,23 @@ impl Derive<'_> {
             &[],
             PlaceTy::Value(Ty::Scalar(Scalar::U64)),
         );
+        if rows.format == Format::Desc {
+            let key = self.part_codec(c, 0)?;
+            let (take, signature) = self.desc_helper(CodecOp::Decode);
+            self.call(
+                c,
+                Callee::Direct(take),
+                signature,
+                &[
+                    Arg::Address(result),
+                    Arg::Address(input),
+                    Arg::Address(position),
+                    Arg::Address(key),
+                ],
+            );
+            Self::returns(c);
+            return Ok(());
+        }
         let mut decoded: Vec<AddressId> = vec![];
         for i in 0..rows.parts.len() {
             let part = rows.parts[i];
@@ -674,31 +780,30 @@ impl Derive<'_> {
             &[],
             scalar_abi::mut_place(&self.module.types, rows.schema),
         );
-        let (tuple, signature) = self.schema_tuple();
-        let n = c.constant(rows.parts.len() as u64);
-        self.call(
-            c,
-            Callee::Direct(tuple),
-            signature,
-            &[Arg::Address(result), Arg::Address(into), Arg::Value(n)],
-        );
-        Self::unless_failed(c, result, failed);
+        if rows.format == Format::Desc {
+            let (desc, signature) = self.desc_helper(CodecOp::Describe);
+            self.call(c, Callee::Direct(desc), signature, &[Arg::Address(into)]);
+        } else {
+            let (tuple, signature) = self.schema_tuple();
+            let n = c.constant(rows.parts.len() as u64);
+            self.call(
+                c,
+                Callee::Direct(tuple),
+                signature,
+                &[Arg::Address(result), Arg::Address(into), Arg::Value(n)],
+            );
+            Self::unless_failed(c, result, failed);
+        }
         for i in 0..rows.parts.len() {
             let codec = self.part_codec(c, i)?;
             let describer = Self::field_fn(c, codec, 2);
             let env = Self::null(c);
             let signature = self.part_signature(i, CodecOp::Describe);
-            self.call(
-                c,
-                Callee::Indirect(describer),
-                signature,
-                &[
-                    Arg::Address(result),
-                    Arg::Value(env),
-                    Arg::Address(into),
-                    Arg::Address(codec),
-                ],
-            );
+            let mut args = vec![Arg::Address(result), Arg::Value(env), Arg::Address(into)];
+            if rows.format == Format::Value {
+                args.push(Arg::Address(codec));
+            }
+            self.call(c, Callee::Indirect(describer), signature, &args);
             Self::unless_failed(c, result, failed);
         }
         Self::returns(c);
@@ -706,13 +811,56 @@ impl Derive<'_> {
         Self::returns(c);
         Ok(())
     }
-    /// std's `schema_tuple(mut s: Schema, n: u64) -> Result[(), EncodeError]`, as a row.
+    fn desc_helper(&mut self, op: CodecOp) -> (FuncId, SigId) {
+        let rows = self.rows;
+        let part = rows.parts[0];
+        let view = |ty| Param::Address {
+            place: PlaceTy::Declared(ty),
+            loan: Loan::View,
+        };
+        let out = |ty| Param::Address {
+            place: scalar_abi::mut_place(&self.module.types, ty),
+            loan: Loan::Mut,
+        };
+        let offset = Param::Address {
+            place: PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            loan: Loan::Mut,
+        };
+        let (name, arguments, params, dest) = match op {
+            CodecOp::Encode => (
+                "put_key_desc",
+                vec![part.ty],
+                vec![view(rows.tuple), view(part.codec), out(rows.bytes)],
+                None,
+            ),
+            CodecOp::Decode => (
+                "take_key_desc",
+                vec![part.ty],
+                vec![view(rows.bytes), offset, view(part.codec)],
+                Some(rows.decoded),
+            ),
+            CodecOp::Describe => ("schema_desc", vec![], vec![out(rows.schema)], None),
+            CodecOp::Of => unreachable!("descending key protocol"),
+        };
+        self.sibling(name, arguments, Signature::new(params, vec![], dest))
+    }
+
     fn schema_tuple(&mut self) -> (FuncId, SigId) {
+        let schema = Param::Address {
+            place: scalar_abi::mut_place(&self.module.types, self.rows.schema),
+            loan: Loan::Mut,
+        };
+        let params = vec![schema, Param::Value(Ty::Scalar(Scalar::U64))];
+        let sig = Signature::new(params, vec![], Some(self.rows.written));
+        self.sibling("schema_tuple", vec![], sig)
+    }
+
+    fn sibling(&mut self, name: &str, arguments: Vec<TypeId>, sig: Signature) -> (FuncId, SigId) {
         let mut definition = self.of.clone();
-        definition.0.name = "schema_tuple".into();
+        definition.0.name = name.into();
         let key = InstanceKey {
             definition,
-            arguments: vec![],
+            arguments,
             dictionaries: vec![],
         };
         if let Some(i) = self
@@ -723,18 +871,6 @@ impl Derive<'_> {
         {
             return (FuncId(i as u32), self.module.functions[i].signature);
         }
-        let sig = Signature {
-            params: vec![
-                Param::Address {
-                    place: scalar_abi::mut_place(&self.module.types, self.rows.schema),
-                    loan: Loan::Mut,
-                },
-                Param::Value(Ty::Scalar(Scalar::U64)),
-            ],
-            results: vec![],
-            dest: Some(self.rows.written),
-            never: false,
-        };
         let signature = signature_id(self.module, sig);
         let instance = InstanceId(self.module.instances.len() as u32);
         self.module.instances.push(key);
@@ -765,12 +901,12 @@ impl Emitter {
         let f = if has_param(t, ty) {
             let f = self.add_function_abi(
                 InstanceKey {
-                    definition: op.definition(&of),
+                    definition: op.definition(&of, rows.format),
                     arguments: rows.arguments(),
                     dictionaries: vec![],
                 },
                 op.signature(&self.module, &rows),
-                op.abi(),
+                op.abi(rows.format),
             );
             self.generic_calls.entry(f).or_insert_with(|| GenericCall {
                 dictionaries: vec![],
@@ -779,7 +915,7 @@ impl Emitter {
             f
         } else {
             self.glue_function(op.instance(&of, &rows), |m| {
-                op.sealed(m, rows.tuple, rows.codec, rows.decoded, &rows)
+                op.sealed(m, rows.tuple, rows.codec, rows.decoded, &rows, rows.format)
             })
         };
         std::sync::Arc::make_mut(&mut self.module.types[row.index()]).codec =
@@ -824,6 +960,7 @@ impl Emitter {
         Some((
             protocol.of.clone(),
             Rows {
+                format: Format::Value,
                 tuple,
                 codec: codec_row,
                 decoded: decoded_row,

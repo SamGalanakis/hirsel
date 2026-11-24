@@ -5,25 +5,29 @@ const REPLAY_BYTES: u64 = 131072u64
 const REPLAY_STEPS: u64 = 65536u64
 const REPLAY_PLACE_BYTES: u64 = 1048576u64
 
-fn replay_members(schema: store.Schema) -> Result[ReplayMembers, store.Error] {
-    store.schema_table(schema, "replay.members", std.codec.key_bytes(), std.codec.of_u64())
+fn replay_tables(mut d: store.Declare) -> Result[(ReplayMembers, ReplayMembers), store.Error] {
+    let members = store.declare_table(mut d, "replay.members", std.codec.key_bytes(), std.codec.of_u64())?
+    let h = store.finish(mut d, take members)?
+    let other = store.declare_table(mut d, "replay.other", std.codec.key_bytes(), std.codec.of_u64())?
+    Ok((take h, store.finish(mut d, take other)?))
 }
 
-fn replay_other_members(schema: store.Schema) -> Result[ReplayMembers, store.Error] {
-    store.schema_table(schema, "replay.other", std.codec.key_bytes(), std.codec.of_u64())
+fn replay_schema(mut d: store.Declare) -> Result[ReplayMembers, store.Error] {
+    let (take members, _) = replay_tables(mut d)?
+    Ok(take members)
 }
 
-fn replay_missing_members(_schema: store.Schema) -> Result[ReplayMembers, store.Error] {
+fn replay_other_schema(mut d: store.Declare) -> Result[ReplayMembers, store.Error] {
+    let (_, take other) = replay_tables(mut d)?
+    Ok(take other)
+}
+
+fn replay_missing_members(mut _declaration: store.Declare) -> Result[ReplayMembers, store.Error] {
     Error(Missing("replay opened handles before checking code"))
 }
 
-fn replay_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    store.migration_create_table(mut phase, store.spec("replay.members", std.codec.key_bytes(), std.codec.of_u64()))?
-    store.migration_create_table(mut phase, store.spec("replay.other", std.codec.key_bytes(), std.codec.of_u64()))
-}
-
 fn replay_member(mut tx: store.Tx, h: ReplayMembers, caller: Caller, take arg: u64) -> Result[u64, u64] {
-    if caller.issuer != 7u8 || result.unwrap(store.fetch(tx, store.shape(h), caller.subject)) != Some(1u64) {
+    if caller.issuer != 7u8 || result.unwrap(store.fetch(tx, h, caller.subject)) != Some(1u64) {
         return Error(13u64)
     }
     result.unwrap(store.put(mut tx, h, caller.subject, arg))
@@ -36,8 +40,8 @@ fn replay_place(mut r: ReplayRegistry) -> Result[(), RegisterError] {
 }
 
 fn replay_seed(mut db: store.Db, h: ReplayMembers, value: u64) -> () waits {
-    let seed = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h, string.as_bytes("alice"), value)
+    let seed = result.unwrap(store.run(mut db, None, (store.copy_env(h), store.copy_env(value)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.0, string.as_bytes("alice"), call_env.1)
     }))
     let Committed(receipt) = take seed else { fail("replay seed commit") }
     result.unwrap(store.durable(mut db, receipt.ticket))
@@ -49,12 +53,13 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
     let key = result.unwrap(attempt_key(code.describe(replay_member), std.codec.of_u64(), reply_codec))
     let mut arg_bytes: Bytes = list.new()
     std.codec.put_u64(arg, mut arg_bytes)
-    let raw_stream = result.unwrap(stream_key(author, stream))
+    let id = store.StreamId(t: store.keyed_time(db), n: int.widen(stream))
     let (reply_to, _reply_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
-    let Req(e: Requested(take q)) = head_request(take author, take raw_stream, 0u64, take key, take arg_bytes, take reply_to) else {
+    let Req(e: Requested(take q)) = head_request(take author, id, 0u64, take key, take arg_bytes, take reply_to) else {
         fail("replay expected a request")
     }
-    let admission = result.unwrap(store.admit(mut db, q.stream, q.p, q.digest))
+    let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    let admission = result.unwrap(store.admit(mut db, name, q.p, q.digest))
     let Admitted(take complete) = take admission else { fail("replay expected admission") }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
     let tried = result.unwrap(run_effect(mut db, identity, registered, h, q, take complete))
@@ -88,9 +93,9 @@ fn is_replay_verdict(actual: store.Verdict, expected: store.Verdict) -> bool {
     }
 }
 
-fn replay_check(db: store.Db, v: u64, mode: ReplayMode, handles: StaticFn[fn(store.Schema) -> Result[ReplayMembers, store.Error]]) -> store.Verdict waits {
+fn replay_check(db: store.Db, v: u64, mode: ReplayMode, handles: StaticFn[fn(mut store.Declare) -> Result[ReplayMembers, store.Error]]) -> store.Verdict waits {
     result.unwrap(reexecute(db, store.main_branch(db), v, mode,
-        code.describe(replay_place), REPLAY_PLACE_BYTES, code.describe(replay_migrate), handles))
+        code.describe(replay_place), REPLAY_PLACE_BYTES, None, handles))
 }
 
 // L30 and §7's Committed, Kept and concluded-fault verdicts, through the runner.
@@ -99,15 +104,12 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     let mut name = string.with_capacity(64u64)
     string.push(mut name, "runner-replay-")
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
-    let migration = result.unwrap(store.stage_migration(db, tasks, code.describe(replay_migrate)))
-    result.unwrap(store.install_activation(mut db, take migration))
-    let h = result.unwrap(store.with_schema(db, code.describe(replay_members)))
-    let other = result.unwrap(store.with_schema(db, code.describe(replay_other_members)))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
+    let (take h, take other) = result.unwrap(store.bind_declaration(mut db, Migrate, replay_tables))
     replay_seed(mut db, h, 1u64)
     replay_seed(mut db, other, 1u64)
-    let identity = result.unwrap(activation_identity(code.identity(code.describe(replay_place)), code.identity(code.describe(replay_migrate)), code.identity(code.describe(replay_members))))
-    let other_identity = result.unwrap(activation_identity(code.identity(code.describe(replay_place)), code.identity(code.describe(replay_migrate)), code.identity(code.describe(replay_other_members))))
+    let identity = result.unwrap(activation_identity(code.identity(code.describe(replay_place)), None, code.identity(code.describe(replay_schema))))
+    let other_identity = result.unwrap(activation_identity(code.identity(code.describe(replay_place)), None, code.identity(code.describe(replay_other_schema))))
     replay_expect(list.len(identity) == 32u64, "replay law needs an identified launch")
     let registered = result.unwrap(placed(code.describe(replay_place), REPLAY_PLACE_BYTES))
     let committed = replay_record(mut db, registered, h, identity, 11u32, "alice", 2u64)
@@ -123,19 +125,19 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     replay_seed(mut db, other, 1u64)
     let other_commit = replay_record(mut db, registered, other, other_identity, 16u32, "alice", 2u64)
 
-    let selected = code.describe(replay_members)
+    let selected = code.describe(replay_schema)
     replay_expect(is_replay_verdict(replay_check(db, committed, RecordedCode, selected), Same), "replay must use the recorded Caller and base")
     replay_expect(is_replay_verdict(replay_check(db, kept, RecordedCode, selected), Same), "replay must keep the typed error reply")
     replay_expect(is_replay_verdict(replay_check(db, fault, RecordedCode, selected), Same), "replay must encode the recorded fault")
-    replay_expect(is_replay_verdict(replay_check(db, fault, Candidate, code.describe(replay_other_members)), Different(Reply)), "a candidate that returns does not match a settled fault")
+    replay_expect(is_replay_verdict(replay_check(db, fault, Candidate, code.describe(replay_other_schema)), Different(Reply)), "a candidate that returns does not match a settled fault")
     replay_expect(is_replay_verdict(replay_check(db, unidentified, RecordedCode, selected), Unknown(RevisionUnknown)), "replay must refuse an unidentified recording")
     replay_expect(is_replay_verdict(replay_check(db, unidentified, Candidate, selected), Same), "candidate must accept an unidentified recording")
     replay_expect(is_replay_verdict(replay_check(db, bounds, RecordedCode, selected), Unknown(RevisionUnknown)), "replay must compare entry step bounds")
     replay_expect(is_replay_verdict(replay_check(db, bounds, Candidate, selected), Same), "candidate must run with different bounds")
     replay_expect(is_replay_verdict(replay_check(db, committed, RecordedCode, code.describe(replay_missing_members)), Unknown(RevisionUnknown)), "replay must check code before opening handles")
-    replay_expect(is_replay_verdict(replay_check(db, committed, Candidate, code.describe(replay_other_members)), Different(Writes)), "candidate must compare the other table's writes")
+    replay_expect(is_replay_verdict(replay_check(db, committed, Candidate, code.describe(replay_other_schema)), Different(Writes)), "candidate must compare the other table's writes")
     replay_expect(is_replay_verdict(replay_check(db, other_commit, RecordedCode, selected), Unknown(RevisionUnknown)), "one image's different handle selections must record different code")
-    replay_expect(is_replay_verdict(replay_check(db, other_commit, RecordedCode, code.describe(replay_other_members)), Same), "replay must accept the other recorded selection")
+    replay_expect(is_replay_verdict(replay_check(db, other_commit, RecordedCode, code.describe(replay_other_schema)), Same), "replay must accept the other recorded selection")
     replay_expect(is_replay_verdict(replay_check(db, committed - 1u64, Candidate, selected), Unknown(NotRecorded)), "admission alone has no call record")
     replay_expect(store.version(store.snapshot(db)) == other_commit, "replay must not publish a commit")
     result.unwrap(store.close(take db))

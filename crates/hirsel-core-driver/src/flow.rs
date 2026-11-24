@@ -103,6 +103,7 @@ fn holds_authority(closure: &Closure) -> bool {
             | FieldTy::Box(r)
             | FieldTy::Rc(r)
             | FieldTy::Arc(r)
+            | FieldTy::Shared(r)
             | FieldTy::RegionRef(r)
             | FieldTy::Link(r) => {
                 pending.push(r.index());

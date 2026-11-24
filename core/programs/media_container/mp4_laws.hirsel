@@ -1,0 +1,95 @@
+// FFmpeg 6.1.1, H.264 baseline, 32x32, 25 fps, 3 frames, default-base-is-moof.
+@test
+fn mp4_reference() -> Result[(), ()] {
+    let source = avc_fixture()
+    let mut pref: Bytes = list.with_capacity(1024)
+    let mut defaults = mp4.Defaults(duration: 0, size: 0, flags: 0)
+    let moof = result.unwrap(mp4.read_init(source, 0, true, scoped fn(track: mp4.Track, trex: mp4.Defaults, configuration: Bytes) {
+        let dimensions = match track.media {
+            Video(w, h) => w == 32 && h == 32,
+            Audio => false,
+        }
+        if track.id != 1 || track.timescale != 12800 || !dimensions {
+            fail("track metadata differs from ffprobe")
+        }
+        defaults = trex
+        result.unwrap(mp4.write_init(mut pref, track, configuration))
+    }))
+    let hashes: Inline[String, 3] =[string.from("d696fa39f9af9876fd09518e4c90a8e0c093cb30163c472cd8f20084dc62af5d"), string.from("f54a1162f99b964d7678bc4e0d9debc048fab706440dab9016ca98f35188dcd2"), string.from("21247a05133f00920ed74714cdc8a272d9549ec942bd841fed07fa673edc82b1")]
+    let sizes: Inline[u64, 3] =[1226, 9, 9]
+    let mut count = 0u64
+    let mut samples: List[mp4.Sample] = list.with_capacity(3)
+    let mut data: Bytes = list.with_capacity(1244)
+    let fragment_end = result.unwrap(mp4.read_fragment(source, moof, true, defaults, scoped fn(timing: mp4.Timing, payload: Bytes) {
+        if count >= 3 || timing.track != 1 || timing.decode_time != count * 512 || timing.composition_offset != 0 || timing.duration != 512 || list.len(payload) != sizes[count] || digest(payload) != hashes[count] {
+            fail("packet differs from ffprobe")
+        }
+        list.push(mut samples, mp4.Sample(duration: timing.duration, size: int.narrow(list.len(payload)), flags: timing.flags, composition_offset: 0))
+        list.append(mut data, payload)
+        count += 1
+    }))
+    if count != 3 || fragment_end >= list.len(source) {
+        fail("FFmpeg packet count or fragment extent")
+    }
+    let mut fragment: Bytes = list.with_capacity(144)
+    result.unwrap(mp4.write_fragment(mut fragment, 1, 1, 0, samples))
+    let mut remuxed: Bytes = list.with_capacity(list.len(pref) + list.len(fragment) + list.len(data))
+    list.append(mut remuxed, pref)
+    list.append(mut remuxed, fragment)
+    list.append(mut remuxed, data)
+    let mut verified = 0u64
+    let payload_end = result.unwrap(mp4.read_fragment(remuxed, list.len(pref), true, defaults, scoped fn(timing: mp4.Timing, payload: Bytes) {
+        if verified >= 3 || timing.decode_time != verified * 512 || timing.duration != 512 || timing.flags != samples[verified].flags || digest(payload) != hashes[verified] {
+            fail("remuxed sample differs from the FFmpeg fixture")
+        }
+        verified += 1
+    }))
+    if verified != 3 || payload_end != list.len(remuxed) {
+        fail("remuxed packet count or mdat size")
+    }
+    if let Error(Truncated) = mp4.read_fragment(list.slice(remuxed, 0, payload_end - 1), list.len(pref), false, defaults, scoped fn(_timing: mp4.Timing, _bytes: Bytes) {
+        fail("published a packet from an incomplete mdat")
+    }) {} else {
+        fail("accepted a truncated mdat")
+    }
+    // The first run starts at tfhd's moof-relative base when it has no data offset.
+    // That base is outside the following mdat, even when its payload would fit.
+    let missing_offset = b"\x00\x00\x00\x50\x6d\x6f\x6f\x66\x00\x00\x00\x10\x6d\x66\x68\x64\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x38\x74\x72\x61\x66\x00\x00\x00\x10\x74\x66\x68\x64\x00\x02\x00\x00\x00\x00\x00\x01\x00\x00\x00\x10\x74\x66\x64\x74\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x74\x72\x75\x6e\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x09\x6d\x64\x61\x74\x2a"
+    let implicit = mp4.Defaults(duration: 1, size: 1, flags: 0)
+    if let Error(InvalidFragment) = mp4.read_fragment(missing_offset, 0, true, implicit, scoped fn(_timing: mp4.Timing, _payload: Bytes) {
+        fail("used the mdat payload as the first run's implicit data offset")
+    }) {} else {
+        fail("a run starting outside mdat must be refused")
+    }
+    Ok(())
+}
+
+fn avc_fixture() -> Bytes {
+    let mut encoded: Bytes = list.with_capacity(2892)
+    list.append(mut encoded, b"AAAAHGZ0eXBpc281AAACAGlzbzVpc282bXA0MQAAAsFtb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAA")
+    list.append(mut encoded, b"AAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAB6HRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAA")
+    list.append(mut encoded, b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAIAAAACAAAAAAAYRtZGlhAAAAIG1kaGQAAAAAAAAAAAAA")
+    list.append(mut encoded, b"AAAAADIAAAAAAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAEvbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAA")
+    list.append(mut encoded, b"JGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAA73N0YmwAAACjc3RzZAAAAAAAAAABAAAAk2F2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAA")
+    list.append(mut encoded, b"IAAgAEgAAABIAAAAAAAAAAEMTGF2YyBsaWJ4MjY0AAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAAAtYXZjQwFCwAr/4QAWZ0LACtolsBEAAAMAAQAAAwAyDxIm")
+    list.append(mut encoded, b"oAEABGjOD8gAAAAQcGFzcAAAAAEAAAABAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAA")
+    list.append(mut encoded, b"AAAAAAAobXZleAAAACB0cmV4AAAAAAAAAAEAAAABAAAAAAAAAAAAAAAAAAAAPXVkdGEAAAA1bWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAA")
+    list.append(mut encoded, b"AAAAAAAAAAAIaWxzdAAAAHRtb29mAAAAEG1maGQAAAAAAAAAAQAAAFx0cmFmAAAAHHRmaGQAAgA4AAAAAQAAAgAAAATKAQEAAAAAABR0ZmR0AQAAAAAAAAAA")
+    list.append(mut encoded, b"AAAAAAAAJHRydW4AAAIFAAAAAwAAAHwCAAAAAAAEygAAAAkAAAAJAAAE5G1kYXQAAAJSBgX//07cRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY0IHIz")
+    list.append(mut encoded, b"MTA4IDMxZTE5ZjkgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDIzIC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5o")
+    list.append(mut encoded, b"dG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTA6MDowIGFuYWx5c2U9MDowIG1lPWRpYSBzdWJtZT0wIHBzeT0xIHBzeV9yZD0xLjAwOjAu")
+    list.append(mut encoded, b"MDAgbWl4ZWRfcmVmPTAgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0wIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9")
+    list.append(mut encoded, b"MSBjaHJvbWFfcXBfb2Zmc2V0PTAgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJs")
+    list.append(mut encoded, b"YWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTI1IGtleWludF9taW49MiBzY2Vu")
+    list.append(mut encoded, b"ZWN1dD0wIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3Jh")
+    list.append(mut encoded, b"dGlvPTEuNDAgYXE9MACAAAACcGWIhDoMYADsQxR4UmWO1/oqCYGeAFabBmMbahAQIZEBAjAAcjLwpqiDMJQEov/w4ABMAAhkcAA2AAIDRnRhaCkIaVbUjeP/")
+    list.append(mut encoded, b"2kL04/KdS+PW//DgICMU4JcKN4h0p6vDgICMAqAaDuei3gRLH/fUoNMKM4j0r6vU4XxwdTljvV6QAAnxmMRTQb2/fJAAHHMducAZV++BAACAcAAgBQqEEAcY")
+    list.append(mut encoded, b"OAAbsZRolSi+GOLdjDm/QBSeLGJH/jAsSj//SAAx8Yapg3SADMArmhJlnLSIM5XIgWBLOCH0zKoBEVIV/exgOc1cLJu1/9wXwAcPilllgeqVZBbnkpag1HAA")
+    list.append(mut encoded, b"LAACAeZAdoAmFAaubauDMmCnFknaSs4shAAAQAYDOTkEACACmR4BmSAABABBnSwAlC9FJPYRTeOS2iIGzhQpBdwR9XqIw0Du9xYBDvq9gAGoYhxCsJAWuQRP")
+    list.append(mut encoded, b"QAR3Ge4PIO1WBeYSh3IcUAQp6vU4SlFF8QJEvV6ABHcahweQUqtgA8KxzetoKXIcPBBAAEAZwAAgIBEAeHxRiDbEexwdGb1wRtb0Ajm0CIoi2RigikJ/f/sB")
+    list.append(mut encoded, b"pjlOpAPkyV++6sxPbnCE9a+PG+DayyaDpbOYGudHtcCzFf+uBFUzEsKMmJjgw4cAAQBgoAAgZ0HAQEYeAWBwEBGDgFj/xwEBGDgFgcBARg4BY8QAEACRAACg")
+    list.append(mut encoded, b"AAgDyYQ9wsAOgVCHuDgB0CAjirggABcsA4RxVwcAAuWAXceAAdIADgACAime8AsRACx/8QAsRACx4hAAECiIQABAbiAAFgJAQAAkFgOAAWAkBwACQWBIAQ9w")
+    list.append(mut encoded, b"QABASBQAQ9wcABASEAAAAAVBmiAgiwAAAAVBmkBSLAAAAENtZnJhAAAAK3RmcmEBAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAC3QEBAQAAABBtZnJv")
+    list.append(mut encoded, b"AAAAAAAAAEM=")
+    option.unwrap(std.base64.decode(encoded))
+}

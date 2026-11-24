@@ -8,7 +8,7 @@
 // no decision after the restart.
 
 fn crash_options() -> store.Options {
-    let mut options = store.defaults()
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     options.group_bytes = 1048576
@@ -34,7 +34,7 @@ fn group(name: String) -> platform.NewGroup {
     platform.NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: take bindings, limits: limits, assembly: take image, activation: 1u64, args: list.new(), record: None)
 }
 
-fn has(h: platform.Host, name: String) -> bool {
+fn has(h: platform.Host, name: String) -> bool waits {
     for g in platform.group_names(h) {
         if g == name {
             return true

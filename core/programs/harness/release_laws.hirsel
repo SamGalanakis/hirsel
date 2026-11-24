@@ -1,63 +1,60 @@
 // Laws of the self-edit release path (fable-design 4.4): the release module's Inside
 // tools and settlement, and the cache diff of a session's projection.
-
-// With `releases`, the store also has the release module's tables.
-fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases: bool, take call: harness.Call) -> store.Db waits {
+fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, take call: harness.Call) -> store.Db waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    if releases {
-        result.unwrap(store.run_migration(mut db, tasks, code.describe(release_migrate)))
-    } else {
-        result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    }
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
+    let filled = store.run(mut db, None, (store.copy_env(call), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
         let mut calls: List[harness.Call] = list.new()
-        list.push(mut calls, clone(call))
+        list.push(mut calls, clone(call_env.0))
         let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
-        store.put(mut tx, h.entries, 0u64, User("go"))?
-        store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 2u64,
-            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64), round: 0u64, rounds_left: 4u64,
-            spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
+        store.put(mut tx, call_env.1.entries, 0u64, User("go"))?
+        store.put(mut tx, call_env.1.entries, 1u64, Assistant(clone(answer)))?
+        store.put(mut tx, call_env.1.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 2u64, active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None))?
+        store.put(mut tx, call_env.1.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64, 0u64), round: 0u64, rounds_left: 4u64, stalled: 0u64, spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
         let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
-        store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(head_pos: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None),
-            call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, reserve: 0u64))
+        store.put(mut tx, call_env.1.effects, model_key, harness.Effect(cutoff: harness.Cutoff(frame: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None, omit: list.new()), call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, stream: true, reserve: 0u64))
     })
-    match take filled { Ok(Committed(_)) => (), _ => fail("answered: fill did not commit") }
+    match take filled {
+        Ok(Committed(_)) => (),
+        _ => fail("answered: fill did not commit")
+    }
     take db
 }
 
-fn release_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    harness.migrate(mut phase)?
-    release.migrate(mut phase)
-}
-
-fn release_agent() -> harness.Agent[Grants] {
+fn release_agent() -> harness.Agent[Grants, ()] {
     let mut a = crash_agent()
     release.add_tools(mut a)
     a
 }
 
-fn inline_text(take s: String) -> harness.Payload { Inline(string.into_bytes(take s)) }
-
-fn put_file(mut db: store.Db, take path: String, take text: String) -> () waits {
-    let t = result.unwrap(store.with_schema(db, code.describe(release.tables)))
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.put(mut tx, t.files, clone(path), clone(text))?
-        Ok(())
-    })
-    match take ran { Ok(Committed(_)) => (), _ => fail("put_file: did not commit") }
+fn inline_text(take s: String) -> harness.Payload {
+    Inline(string.into_bytes(take s))
 }
 
-fn settling(mut db: store.Db, a: harness.Agent[Grants], take id: Bytes, take decided: release.State) -> harness.Filed waits {
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let t = result.unwrap(store.with_schema(db, code.describe(release.tables)))
-    let w = result.unwrap(wired())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, harness.Refused] {
-        release.settle(mut tx, h, t, a, w, clone(id), clone(decided))
+fn put_file(mut db: store.Db, take path: String, take text: String) -> () waits {
+    let opened = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let t = view opened.source
+    let ran = store.run(mut db, None, (store.copy_env(path), store.copy_env(text), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        let _ = store.put(mut tx, call_env.2.files, clone(call_env.0), clone(call_env.1))?
+        Ok(())
     })
-    match take ran { Ok(Committed(store.Done(value: take f, ..))) => take f, _ => fail("settle: transaction failed") }
+    match take ran {
+        Ok(Committed(_)) => (),
+        _ => fail("put_file: did not commit")
+    }
+}
+
+fn settling(mut db: store.Db, a: harness.Agent[Grants, ()], take id: Bytes, take decided: release.State) -> harness.Filed waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let t = view h.source
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(decided), store.copy_env(id), store.copy_env(h), store.copy_env(t), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Filed, harness.Refused] {
+        release.settle(mut tx, call_env.3, call_env.4, call_env.0, call_env.5, clone(call_env.2), clone(call_env.1))
+    })
+    match take ran {
+        Ok(Committed(store.Done(value: take f, ..))) => take f,
+        _ => fail("settle: transaction failed")
+    }
 }
 
 // Law R1 (fable-design 4.4, steps 1, 2 and 8): `write_source` writes the source row the
@@ -68,44 +65,58 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
     let a = release_agent()
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let mut db = answered_with(dir, clock, random, tasks, true, harness.Call(id: "w1", name: "write_source", args: inline_text("{\"path\":\"tools.hirsel\",\"text\":\"fn fetch() {}\"}")))
+    let mut db = answered_with(dir, clock, random, tasks, harness.Call(id: "w1", name: "write_source", args: inline_text("{\"path\":\"tools.hirsel\",\"text\":\"fn fetch() {}\"}")))
     kick(mut db, a)
     kick(mut db, a)
-    let t = result.unwrap(store.with_schema(db, code.describe(release.tables)))
-    let wrote = match result.unwrap(store.get(store.snapshot(db), store.shape(t.files), "tools.hirsel")) { Some(text) => text == "fn fetch() {}", None => false }
+    let opened = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let t = view opened.source
+    let wrote = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t.files, "tools.hirsel")) {
+        Some(text) => text == "fn fetch() {}",
+        None => false
+    }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
-
     let mut name2 = string.with_capacity(32u64)
     let dir2 = result.unwrap(host.mkdtemp(parent, mut name2))
-    let mut db2 = answered_with(dir2, clock, random, tasks, true, harness.Call(id: "c1", name: "propose_release", args: inline_text("{\"summary\":\"swap fetch\",\"grants\":[\"Clock\"],\"package\":\"app\",\"dirs\":[\"data\"]}")))
+    let mut db2 = answered_with(dir2, clock, random, tasks, harness.Call(id: "c1", name: "propose_release", args: inline_text("{\"summary\":\"swap fetch\",\"grants\":[\"Clock\"],\"package\":\"app\",\"dirs\":[\"data\"]}")))
     put_file(mut db2, "b.hirsel", "B")
     put_file(mut db2, "a.hirsel", "A")
     kick(mut db2, a)
     kick(mut db2, a)
     kick(mut db2, a)
-    let parked = match member(db2) { Parked => true, _ => false }
-    let t2 = result.unwrap(store.with_schema(db2, code.describe(release.tables)))
-    let filed = result.unwrap(release.pending(store.snapshot(db2), t2))
+    let parked = match member(mut db2) {
+        Parked(_) => true,
+        _ => false
+    }
+    let reopened = result.unwrap(store.bind_declaration(mut db2, Open, harness.declare_tables))
+    let t2 = view reopened.source
+    let filed = result.unwrap(release.pending(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2))
     let one = list.len(filed) == 1u64
     let (id, p): (Bytes, release.Proposal) = clone(filed[0])
-    let summary = p.summary == "swap fetch" && p.build.package == "app" &&
-        list.len(p.build.grants) == 1u64 && p.build.grants[0u64] == "Clock" &&
-        list.len(p.build.dirs) == 1u64 && p.build.dirs[0u64] == "data"
-    let named = match result.unwrap(release.source(store.snapshot(db2), t2, clone(p.tree))) {
+    let summary = p.summary == "swap fetch" && p.build.package == "app" && list.len(p.build.grants) == 1u64 && p.build.grants[0u64] == "Clock" && list.len(p.build.dirs) == 1u64 && p.build.dirs[0u64] == "data"
+    let named = match result.unwrap(release.source(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2, clone(p.tree))) {
         Some(files) => list.len(files) == 2u64 && files[0].path == "a.hirsel" && files[0].text == "A" && files[1].path == "b.hirsel" && files[1].text == "B",
         None => false,
     }
-    let first = match settling(mut db2, a, clone(id), Published("release 7")) { Recorded => true, _ => false }
-    let again = match settling(mut db2, a, clone(id), Rejected("late")) { Ignored => true, _ => false }
-    let h = result.unwrap(store.with_schema(db2, code.describe(harness.handles)))
-    let shown = match result.unwrap(store.get(store.snapshot(db2), store.shape(h.entries), 2u64)) {
-        Some(ToolResult(c, Returned(Inline(b)))) => c == "c1" && b == string.into_bytes("release 7"),
+    let first = match settling(mut db2, a, clone(id), Published("release 7")) {
+        Recorded => true,
+        _ => false
+    }
+    let again = match settling(mut db2, a, clone(id), Rejected("late")) {
+        Ignored => true,
+        _ => false
+    }
+    let h = result.unwrap(store.bind_declaration(mut db2, Open, harness.declare_tables))
+    let shown = match result.unwrap(store.get(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), h.entries, 2u64)) {
+        Some(ToolResult(c, Returned(Inline(b)), _)) => c == "c1" && b == string.into_bytes("release 7"),
         _ => false,
     }
-    let none_left = list.len(result.unwrap(release.pending(store.snapshot(db2), t2))) == 0u64
+    let none_left = list.len(result.unwrap(release.pending(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2))) == 0u64
     put_file(mut db2, "a.hirsel", "A2")
-    let moved = match result.unwrap(release.source(store.snapshot(db2), t2, clone(p.tree))) { None => true, Some(_) => false }
+    let moved = match result.unwrap(release.source(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2, clone(p.tree))) {
+        None => true,
+        Some(_) => false
+    }
     result.unwrap(store.close(take db2))
     result.unwrap(std.dir.remove_all(parent, name2))
     wrote && parked && one && summary && named && first && again && shown && none_left && moved
@@ -113,19 +124,38 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
 
 @test
 fn test_release_proposal_settles(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_release_proposal_settles(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+    if law_release_proposal_settles(parent, clock, random, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
-fn sec_alpha(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("alpha")) }
-fn sec_beta(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("beta")) }
-fn sec_beta_two(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("beta two")) }
-fn sec_gamma(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("gamma")) }
+fn sec_alpha(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    Ok(Some("alpha"))
+}
+
+fn sec_beta(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    Ok(Some("beta"))
+}
+
+fn sec_beta_two(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    Ok(Some("beta two"))
+}
+
+fn sec_gamma(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    Ok(Some("gamma"))
+}
 
 // The live agent and three candidates: one swaps the `bump` tool, one changes section s2's
 // text, one inserts a section s3 before s2.
-fn projected_agent(kind: u8) -> harness.Agent[Grants] {
-    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
-    let about: String = if kind == 1u8 { "adds two" } else { "adds one" }
+fn projected_agent(kind: u8) -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model), ())
+    let about: String = if kind == 1u8 {
+        "adds two"
+    } else {
+        "adds one"
+    }
     list.push(mut a.tools, harness.outside("bump", take about, "{}", Once, code.describe(bump)))
     list.push(mut a.sections, harness.Section(key: "s1", render: code.describe(sec_alpha)))
     if kind == 3u8 {
@@ -139,10 +169,15 @@ fn projected_agent(kind: u8) -> harness.Agent[Grants] {
     a
 }
 
-fn projecting(mut db: store.Db, a: harness.Agent[Grants]) -> harness.Projection waits {
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Projection, harness.Refused] { harness.project(tx, h, a) })
-    match take ran { Ok(Committed(store.Done(value: take p, ..))) => take p, _ => fail("project: transaction failed") }
+fn projecting(mut db: store.Db, a: harness.Agent[Grants, ()]) -> harness.Projection waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(h)), fn(mut tx, call_env) -> Result[harness.Projection, harness.Refused] {
+        harness.project(tx, call_env.1, call_env.0)
+    })
+    match take ran {
+        Ok(Committed(store.Done(value: take p, ..))) => take p,
+        _ => fail("project: transaction failed")
+    }
 }
 
 fn diff_is(d: harness.CacheDiff, first: Option[String], sections: List[String], tools: bool) -> bool {
@@ -169,29 +204,32 @@ pub fn law_project_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: 
     list.push(mut s2, "s2")
     let mut s3: List[String] = list.new()
     list.push(mut s3, "s3")
-    diff_is(harness.cache_diff(now_live, same), None, list.new(), false)
-        && diff_is(harness.cache_diff(now_live, swapped), None, list.new(), true)
-        && diff_is(harness.cache_diff(now_live, edited), Some("s2"), take s2, false)
-        && diff_is(harness.cache_diff(now_live, inserted), Some("s3"), take s3, false)
+    diff_is(harness.cache_diff(now_live, same), None, list.new(), false) && diff_is(harness.cache_diff(now_live, swapped), None, list.new(), true) && diff_is(harness.cache_diff(now_live, edited), Some("s2"), take s2, false) && diff_is(harness.cache_diff(now_live, inserted), Some("s3"), take s3, false)
 }
 
 @test
 fn test_project_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_project_cache_diff(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+    if law_project_cache_diff(parent, clock, random, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
-fn sec_alpha_two(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("alpha two")) }
+fn sec_alpha_two(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    Ok(Some("alpha two"))
+}
 
 // s2 as the row `release.files["s2"]` holds it, so the text depends on the rows it renders over.
-fn sec_row(tx: store.Tx) -> Result[Option[String], store.Error] {
-    let t = release.tables(store.tx_schema(tx))?
-    store.fetch(tx, store.shape(t.files), "s2")
+fn sec_row(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] {
+    let t = view h.source
+    store.fetch(tx, t.files, "s2")
 }
 
 // The live agent (s1 "alpha", s2 "beta") and two candidates that read s2 from its row: one
 // leaves s1 alone, one changes s1's text to "alpha two".
-fn fork_agent(kind: u8) -> harness.Agent[Grants] {
-    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
+fn fork_agent(kind: u8) -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model), ())
     list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
     if kind == 2u8 {
         list.push(mut a.sections, harness.Section(key: "s1", render: code.describe(sec_alpha_two)))
@@ -214,16 +252,22 @@ fn word(n: u64, fill: u8) -> Bytes {
 
 // Records one served call at the returned version; its body writes one source row.
 fn record_call(mut db: store.Db, bounds: store.Plan) -> u64 waits {
-    let t = result.unwrap(store.with_schema(db, code.describe(release.tables)))
-    let rec = store.CallRecord(key: word(32u64, 1u8), args: word(16u64, 2u8), stream: word(8u64, 5u8), revision: Some(word(32u64, 3u8)), code: word(48u64, 9u8))
+    let opened = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let t = view opened.source
+    let stream = store.StreamKey(caller: store.Caller(issuer: 2u8, subject: word(8u64, 5u8)), id: store.StreamId(t: store.keyed_time(db), n: 0u64))
+    let rec = store.CallRecord(key: word(32u64, 1u8), args: word(16u64, 2u8), stream: take stream, revision: Some(word(32u64, 3u8)), code: word(48u64, 9u8))
     let admission = result.unwrap(store.admit(mut db, clone(rec.stream), 0u64, store.request_digest(rec.key, rec.args)))
-    let Admitted(take complete) = take admission else { fail("record_call: not admitted") }
+    let Admitted(take complete) = take admission else {
+        fail("record_call: not admitted")
+    }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
-    let served = store.serve(mut db, take complete, bounds, Some(take rec), scoped fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
-        result.unwrap(store.put(mut tx, t.files, "other", "x"))
+    let served = store.serve(mut db, take complete, bounds, Some(take rec), t, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        result.unwrap(store.put(mut tx, call_env.files, "other", "x"))
         Ok(list.new())
     })
-    let Ok(Committed(receipt)) = take served else { fail("record_call: not committed") }
+    let Ok(Committed(receipt)) = take served else {
+        fail("record_call: not committed")
+    }
     result.unwrap(store.durable(mut db, receipt.ticket))
     store.version(store.snapshot(db))
 }
@@ -244,12 +288,12 @@ fn fork_diff_is(got: Result[harness.CacheDiff, harness.ForkDiffError], first: Op
 pub fn law_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let mut db = answered_with(dir, clock, random, tasks, true, harness.Call(id: "c1", name: "bump", args: inline_text("{}")))
+    let mut db = answered_with(dir, clock, random, tasks, harness.Call(id: "c1", name: "bump", args: inline_text("{}")))
     put_file(mut db, "s2", "beta")
     let bounds = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
     let v = record_call(mut db, bounds)
     put_file(mut db, "s2", "beta two")
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let b = store.main_branch(db)
     let unchanged = harness.fork_cache_diff(db, b, v, bounds, h, fork_agent(0u8), fork_agent(1u8))
     let edited = harness.fork_cache_diff(db, b, v, bounds, h, fork_agent(0u8), fork_agent(2u8))
@@ -262,5 +306,88 @@ pub fn law_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tas
 
 @test
 fn test_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_fork_cache_diff(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+    if law_fork_cache_diff(parent, clock, random, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn fork_projection_steps(mut db: store.Db) -> u64 waits {
+    put_file(mut db, "s2", "beta")
+    let bounds = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
+    let version = record_call(mut db, bounds)
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let b = store.main_branch(db)
+    let current_agent = fork_agent(0u8)
+    let candidate_agent = fork_agent(2u8)
+    let mut sections: List[String] = list.new()
+    list.push(mut sections, "s1")
+    let mut low = 0u64
+    let mut high = 4194304u64
+    while low < high {
+        let mid = low + (high - low) / 2
+        let diff = bound steps mid {
+            harness.fork_cache_diff(db, b, version, bounds, h, current_agent, candidate_agent)
+        }
+        match take diff {
+            Error(_) => {
+                low = mid + 1
+            },
+            Ok(Error(Overran)) => {
+                low = mid + 1
+            },
+            Ok(take got) => {
+                if !fork_diff_is(got, Some("s1"), sections) {
+                    fail("fork depth: incorrect cache diff")
+                }
+                high = mid
+            },
+        }
+    }
+    if low == 4194304u64 {
+        fail("fork depth: projection never completed")
+    }
+    low
+}
+
+// Each gateway fork adopts its selected prefix into a fresh session store.
+// Keep the same single entry at every cut. Even after 32 generations, the
+// same recorded call must project the same diff under the same step grant.
+@test
+fn test_fork_cache_diff_depth(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), (u64, u64)] waits {
+    let mut root_name = string.with_capacity(32u64)
+    let root_dir = result.unwrap(host.mkdtemp(parent, mut root_name))
+    let mut root = answered_with(root_dir, clock, random, tasks, harness.Call(id: "c1", name: "bump", args: inline_text("{}")))
+    let mut prefix = result.unwrap(exported(mut root, 1u64))
+    result.unwrap(store.close(take root))
+    result.unwrap(std.dir.remove_all(parent, root_name))
+    let mut shallow = 0u64
+    let mut deep = 0u64
+    for depth in 1u64 .. 33u64 {
+        let mut name = string.with_capacity(32u64)
+        let dir = result.unwrap(host.mkdtemp(parent, mut name))
+        let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+        let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
+        let adopted = store.run(mut db, None, (store.copy_env(prefix), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+            harness.adopt(mut tx, call_env.1, clone(call_env.0))
+        })
+        let Ok(Committed(_)) = adopted else {
+            fail("fork depth: adoption failed")
+        }
+        prefix = result.unwrap(exported(mut db, 1u64))
+        if depth == 1u64 {
+            shallow = fork_projection_steps(mut db)
+        }
+        if depth == 32u64 {
+            deep = fork_projection_steps(mut db)
+        }
+        result.unwrap(store.close(take db))
+        result.unwrap(std.dir.remove_all(parent, name))
+    }
+    if shallow == deep {
+        Ok(())
+    } else {
+        Error((shallow, deep))
+    }
 }

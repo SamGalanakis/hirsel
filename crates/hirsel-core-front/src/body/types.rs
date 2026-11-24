@@ -1,6 +1,26 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// MEM-29: an element outside core's element modules meets LANG-14's capture mask,
+    /// with rigid parameters read from their bounds. Refuses at `at` when it does not.
+    pub(super) fn element_refused(&mut self, at: NodeId, t: TyId) -> bool {
+        let p = self.p;
+        if crate::element::exempt(p.index, p.modules[self.at.module as usize].id)
+            || !crate::element::refused(&p.decls, &self.t, t, &self.params)
+        {
+            return false;
+        }
+        let a = self.shown(t);
+        self.refuse_compared(
+            "MEM-29",
+            at,
+            a,
+            crate::element::WANTED,
+            crate::element::MESSAGE,
+        );
+        true
+    }
+
     // Grouping does not change the identity of a region argument (MEM-6).
     pub(super) fn binder_path(&self, mut n: NodeId) -> Option<NodeId> {
         while self.kind(n) == NodeKind::Group {
@@ -433,22 +453,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_compared("LANG-12", at, "region", "type", message);
                 return ERROR;
             }
+            if decl.role == Some(Role::Cell) && self.element_refused(at, t) {
+                return ERROR;
+            }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
                 let a = self.shown(t);
-                let (rule, wanted, message) = if decl.role == Some(Role::Log) {
-                    (
-                        "MEM-29",
-                        "no view or scoped value",
-                        "a Log's element holds no view or scoped value",
-                    )
-                } else {
-                    (
-                        "OWN-19",
-                        "not scoped",
-                        "a scoped type is not a type argument of a generic other than Option and Result",
-                    )
-                };
-                self.refuse_compared(rule, at, a, wanted, message);
+                let message = "a scoped type is not a type argument of a generic other than Option and Result";
+                self.refuse_compared("OWN-19", at, a, "not scoped", message);
                 return ERROR;
             }
             let missing =

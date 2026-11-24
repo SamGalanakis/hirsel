@@ -1,5 +1,8 @@
 /// One fault per connection, selected before any request octets arrive.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64)
+/// Conflict interrupts an If-Match write. DeleteConflict interposes a delete on If-None-Match.
+/// IgnoreConditions applies every write as if it carried no If-Match or If-None-Match.
+/// CompleteExpired reports an embedded error and ends the upload without publishing it.
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CompleteExpired | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict | IgnoreConditions
 
 /// Kills the writer's connections at a wire cut. Requests to `address` are
 /// numbered from 1. The first `after` are served. Request `after + 1` is
@@ -12,6 +15,30 @@ pub type Cut: send {
     spare: Addr
 }
 
+/// Requests are counted from one for each method and decoded object key.
+pub type Hold: send {
+    method: String,
+    key: String,
+    from: u64,
+    count: u64,
+    until: Until,
+    then: Then
+}
+
+pub type Until: send = Requested(String, String, u64) | Applied(String, String, u64) | At(u64) | Never
+
+pub type Then: send = Apply | Drop | ApplyLoseReply
+
+/// A decision in application order. Status zero denotes a pre-dispatch reset.
+pub type Request: send {
+    request: u64,
+    method: String,
+    key: String,
+    status: u16,
+    applied: bool,
+    at_ns: u64
+}
+
 pub type Config: send {
     address: Addr,
     cut: Option[Cut],
@@ -20,6 +47,7 @@ pub type Config: send {
     credential: String,
     signing_key: Secret,
     faults: List[Fault],
+    holds: List[Hold],
     exists_status: u16,
     fragment_bytes: u64,
     max_body: u64
@@ -32,12 +60,152 @@ pub type Object: send {
 }
 
 pub type Report: send {
+    head_writes: List[sim.s3_history.HeadWrite],
+    requests: List[Request],
+    /// Served Net connect attempts with their virtual timestamps.
+    connects: List[(Addr, u64)],
     objects: Map[String, Object],
     // The keys of multipart uploads neither completed nor aborted.
     pending: List[String],
+    multipart_uploads: u64,
     writes: u64,
     attempts: u64,
-    withdrawn: u64
+    withdrawn: u64,
+    fragment_trace: u64
+}
+
+pub opaque type Endpoint: send {
+    network: Net
+}
+
+/// The request rules both serving modes share.
+type Rules: send {
+    exists_status: u16,
+    max_body: u64
+}
+
+/// How a served bucket checks SigV4. `Scoped` takes one fixed credential
+/// scope and its day key. `Rooted` derives the day key from the credential
+/// root for the date each request names, and proves each answer.
+type Signing: send = Scoped(String, Secret) | Rooted(Loopback)
+
+type Gate: send {
+    rules: Rules,
+    cut: Option[Cut],
+    signing: Signing
+}
+
+/// A bucket that other processes reach over real loopback sockets (STORE
+/// §12.2). It holds the credential root, checks each request's SigV4 for the
+/// date the request names, and answers each authenticated request with a
+/// proof that only a holder of that root can compute. Its clients are path
+/// style, so every target starts with `/<bucket>`.
+pub type Loopback: send {
+    bucket: String,
+    access_key: String,
+    aws_region: String,
+    root: Secret,
+    exists_status: u16,
+    max_body: u64
+}
+
+/// The response field that carries a loopback simulator's proof.
+pub const PROOF_FIELD: String = "x-hirsel-sim-proof"
+
+const PROOF_DOMAIN: String = "hirsel.sim.s3.proof"
+
+const PROOF_CONTEXT: String = "hirsel.sim.s3.v1\n"
+
+/// The key that proves answers for requests signed with `root`. Sealed for
+/// MAC use only; it reveals nothing about the signing keys.
+pub fn proof_key(root: Secret) -> Result[Secret, SecretError] {
+    secret.derive_hmac_sha256(root, string.as_bytes(PROOF_DOMAIN), string.as_bytes(""), "mac")
+}
+
+/// The message a proof authenticates: the context and the request's exact
+/// Authorization value.
+pub fn proof_message(authorization: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(string.byte_len(PROOF_CONTEXT) + list.len(authorization))
+    list.append(mut out, string.as_bytes(PROOF_CONTEXT))
+    list.append(mut out, authorization)
+    take out
+}
+
+fn rooted(service: Loopback, req: sim.s3_wire.WireRequest, raw_target: String, body: Bytes) -> Option[String] {
+    let Some(date) = map.get(req.fields, "x-amz-date") else {
+        return None
+    }
+    let Some(auth) = map.get(req.fields, "authorization") else {
+        return None
+    }
+    if string.byte_len(date) != 16 {
+        return None
+    }
+    let day = string.slice(date, 0, 8)
+    let Ok(take key) = sigv4.scope_signing_key(service.root, string.from(day), clone(service.aws_region), "s3") else {
+        return None
+    }
+    let mut scope = string.from(service.access_key)
+    string.push_char(mut scope, '/')
+    string.push(mut scope, day)
+    string.push_char(mut scope, '/')
+    string.push(mut scope, service.aws_region)
+    string.push(mut scope, "/s3/aws4_request")
+    if !sim.s3_wire.authenticated(scope, key, req, raw_target, body) {
+        return None
+    }
+    let Ok(take prover) = proof_key(service.root) else {
+        return None
+    }
+    let Ok(tag) = secret.hmac_sha256(prover, proof_message(string.as_bytes(auth))) else {
+        return None
+    }
+    Some(sim.s3_wire.hex(tag))
+}
+
+type Service: send {
+    tasks: Tasks,
+    network: Net,
+    config: Config,
+    plan: sim.world.Plan,
+    clock: Clock,
+    port: Served[NetOp]
+}
+
+fn endpoint_service(take service: Service) -> Report waits {
+    let Service(tasks, network, config: take config, plan: take initial, clock, port: take port) = take service
+    let mut plan = take initial
+    serve(tasks, network, config, mut plan, clock, take port)
+}
+
+/// Starts the simulator with exclusive ownership of its provider port.
+pub fn start_service(tasks: Tasks, take config: Config, take plan: sim.world.Plan, clock: Clock, queue_bytes: u64, service_bytes: u64) -> (Endpoint, Task[Report]) {
+    let (network, take port) = provide.net(bytes queue_bytes)
+    let service = Service(tasks, network, config: take config, plan: take plan, clock, port: take port)
+    let running = task.spawn(tasks, bytes service_bytes, take service, endpoint_service)
+    (Endpoint(network), take running)
+}
+
+pub fn endpoint_network(endpoint: Endpoint) -> Net {
+    endpoint.network
+}
+
+const REQUESTED_PATH: String = "sim-s3-requested"
+
+const CLOCK_PATH: String = "sim-s3-clock"
+
+/// Waits until the service receives the nth request for this method and key.
+pub fn requested(e: Endpoint, method: String, key: String, nth: u64) -> Result[(), NetError] waits {
+    let mut name = text_number(nth)
+    string.push(mut name, "\n")
+    string.push(mut name, method)
+    string.push(mut name, "\n")
+    string.push(mut name, key)
+    match host.connect_unix(e.network, name, REQUESTED_PATH, Never) {
+        Error(Refused) => Ok(()),
+        Error(problem) => Error(problem),
+        Ok(_) => Error(Denied),
+    }
 }
 
 type Upload {
@@ -47,22 +215,14 @@ type Upload {
 }
 
 type Bucket {
+    head_writes: List[sim.s3_history.HeadWrite],
+    requests: List[Request],
     objects: Map[String, Object],
     uploads: Map[String, Upload],
     next_upload: u64,
     writes: u64,
-    served: u64
-}
-
-type Target {
-    key: String,
-    query: Map[String, String]
-}
-
-type Request {
-    method: String,
-    target: Target,
-    fields: Map[String, String]
+    served: u64,
+    fragment_trace: u64
 }
 
 type Response {
@@ -82,353 +242,30 @@ fn error(status: u16, code: String) -> Response {
     reply(status, xml)
 }
 
-fn piece(data: Bytes, lo: u64, hi: u64) -> String {
-    result.unwrap(string.from_utf8(clone(list.slice(data, lo, hi))))
-}
-
-fn nibble(c: u8) -> Option[u8] {
-    if c >= b'0' && c <= b'9' {
-        return Some(c - b'0')
+fn conditional_failure(rules: Rules, req: sim.s3_wire.WireRequest, mut objects: Map[String, Object], fault: Fault, writing: bool) -> Option[Response] {
+    match (fault, writing) {
+        (Conflict, true) if map.contains(req.fields, "if-match") => return Some(error(409, "ConditionalRequestConflict")),
+        (DeleteConflict, true) if map.contains(req.fields, "if-none-match") && map.contains(objects, req.target.key) => {
+            let _ = map.remove(mut objects, req.target.key)
+            return Some(error(409, "ConditionalRequestConflict"))
+        },
+        (IgnoreConditions, true) => return None,
+        _ => (),
     }
-    let lower = int.to_ascii_lower(c)
-    if lower >= b'a' && lower <= b'f' {
-        return Some(lower - b'a' + 10)
-    }
-    None
-}
-
-fn decode(text: String) -> Option[String] {
-    let raw = string.as_bytes(text)
-    let mut octets: Bytes = list.with_capacity(list.len(raw))
-    let mut i = 0u64
-    while i < list.len(raw) {
-        if raw[i] == b'%' {
-            if i + 2 >= list.len(raw) {
-                return None
-            }
-            let Some(hi) = nibble(raw[i + 1]) else {
-                return None
-            }
-            let Some(lo) = nibble(raw[i + 2]) else {
-                return None
-            }
-            list.push(mut octets, (hi << 4) | lo)
-            i += 3
-        } else {
-            list.push(mut octets, raw[i])
-            i += 1
-        }
-    }
-    match string.from_utf8(take octets) {
-        Ok(take value) => Some(take value),
-        Error(_) => None
-    }
-}
-
-fn or_else(value: Option[u64], fallback: u64) -> u64 {
-    match value {
-        Some(n) => n,
-        None => fallback
-    }
-}
-
-fn parse_target(raw: String) -> Option[Target] {
-    let octets = string.as_bytes(raw)
-    let end = list.len(octets)
-    if end == 0 || octets[0] != b'/' {
-        return None
-    }
-    let cut = or_else(list.find_byte(octets, 0, end, b'?'), end)
-    let Some(take key) = decode(piece(octets, 1, cut)) else {
-        return None
-    }
-    let mut query: Map[String, String] = map.new()
-    let mut at = cut + 1
-    while at < end {
-        let stop = or_else(list.find_byte(octets, at, end, b'&'), end)
-        let eq = or_else(list.find_byte(octets, at, stop, b'='), stop)
-        let name = piece(octets, at, eq)
-        let value = piece(octets, order.min(eq + 1, stop), stop)
-        if name == "" || map.get(query, name) != None {
-            return None
-        }
-        map.insert(mut query, take name, take value)
-        at = stop + 1
-    }
-    Some(Target(key: take key, query: take query))
-}
-
-fn parse_headers(raw: Bytes, head: http1.Head) -> Option[Map[String, String]] {
-    let mut out: Map[String, String] = map.new()
-    for i in 0u64 .. head.count {
-        let h = head.fields[i]
-        let mut name = piece(raw, h.name.start, h.name.end)
-        string.make_ascii_lower(mut name)
-        let span = list.slice(raw, h.value.start, h.value.end)
-        let Ok(take value) = string.from_utf8(clone(span)) else {
-            return None
-        }
-        if map.get(out, name) != None {
-            return None
-        }
-        map.insert(mut out, take name, take value)
-    }
-    Some(take out)
-}
-
-fn u64_field(s: String) -> Option[u64] {
-    let parsed: Result[u64, ParseError] = int.parse(s)
-    match parsed {
-        Ok(n) => Some(n),
-        Error(_) => None
-    }
-}
-
-fn body_length(fields: Map[String, String]) -> Option[u64] {
-    if map.get(fields, "transfer-encoding") != None {
-        return None
-    }
-    match map.get(fields, "content-length") {
-        Some(n) => u64_field(n),
-        None => Some(0)
-    }
-}
-
-fn hex(digest: Inline[u8, 32]) -> String {
-    let digits = string.as_bytes("0123456789abcdef")
-    let mut out: Bytes = list.with_capacity(64)
-    for i in 0u64 .. 32 {
-        list.push(mut out, digits[int.widen(digest[i] >> 4)])
-        list.push(mut out, digits[int.widen(digest[i] & 15)])
-    }
-    result.unwrap(string.from_utf8(take out))
-}
-
-fn canonical_value(mut out: String, value: String) {
-    let octets = string.as_bytes(value)
-    let mut gap = false
-    let mut start = 0u64
-    for i in 0u64 .. list.len(octets) {
-        if octets[i] == b' ' || octets[i] == b'\t' {
-            if i > start {
-                if gap {
-                    string.push(mut out, " ")
-                }
-                string.push(mut out, string.slice(value, start, i))
-                gap = true
-            }
-            start = i + 1
-        }
-    }
-    if start < list.len(octets) {
-        if gap {
-            string.push(mut out, " ")
-        }
-        string.push(mut out, string.slice(value, start, list.len(octets)))
-    }
-}
-
-fn sorted_keys[V](m: Map[String, V]) -> List[String] {
-    let mut keys: List[String] = list.with_capacity(map.len(m))
-    for (key, _) in m {
-        list.push(mut keys, clone(key))
-    }
-    list.sort(mut keys, fn(a: String, b: String) -> Order {
-        order.compare(a, b)
-    })
-    take keys
-}
-
-fn append_query(mut out: String, query: Map[String, String]) {
-    let keys = sorted_keys(query)
-    for i in 0u64 .. list.len(keys) {
-        if i != 0 {
-            string.push(mut out, "&")
-        }
-        let key = keys[i]
-        string.push(mut out, key)
-        string.push(mut out, "=")
-        if let Some(value) = map.get(query, key) {
-            string.push(mut out, value)
-        }
-    }
-}
-
-fn canonical_headers(mut out: String, fields: Map[String, String], signed: String) -> bool {
-    let octets = string.as_bytes(signed)
-    let mut last = string.from("")
-    let mut has_host = false
-    let mut has_date = false
-    let mut at = 0u64
-    while at < list.len(octets) {
-        let stop = or_else(list.find_byte(octets, at, list.len(octets), b';'), list.len(octets))
-        let name = piece(octets, at, stop)
-        if order.compare(last, name) != Less || (stop + 1 == list.len(octets) && octets[stop] == b';') {
-            return false
-        }
-        let Some(value) = map.get(fields, name) else {
-            return false
-        }
-        string.push(mut out, name)
-        string.push(mut out, ":")
-        canonical_value(mut out, value)
-        string.push(mut out, "\n")
-        has_host = has_host || name == "host"
-        has_date = has_date || name == "x-amz-date"
-        last = take name
-        at = stop + 1
-    }
-    for (name, _) in fields {
-        if string.starts_with(name, "x-amz-") && name != "x-amz-content-sha256" {
-            let mut wanted = string.from(";")
-            string.push(mut wanted, name)
-            string.push(mut wanted, ";")
-            let mut names = string.from(";")
-            string.push(mut names, signed)
-            string.push(mut names, ";")
-            if string.find(names, 0, wanted) == None {
-                return false
-            }
-        }
-    }
-    has_host && has_date
-}
-
-fn authenticated(config: Config, req: Request, raw_target: String, body: Bytes) -> bool {
-    let fields = view req.fields
-    let Some(auth) = map.get(fields, "authorization") else {
-        return false
-    }
-    let Some(date) = map.get(fields, "x-amz-date") else {
-        return false
-    }
-    let Some(payload_digest) = map.get(fields, "x-amz-content-sha256") else {
-        return false
-    }
-    let Some((credential, rest)) = string.split_once(auth, ", SignedHeaders=") else {
-        return false
-    }
-    let Some((signed, signature)) = string.split_once(rest, ", Signature=") else {
-        return false
-    }
-    let mut prefix = string.from("AWS4-HMAC-SHA256 Credential=")
-    string.push(mut prefix, config.credential)
-    if credential != prefix || string.byte_len(signature) != 64 {
-        return false
-    }
-    let Some((_, scope)) = string.split_once(config.credential, "/") else {
-        return false
-    }
-    if string.byte_len(date) != 16 || string.byte_len(scope) < 8 || string.slice(date, 0, 8) != string.slice(scope, 0, 8) {
-        return false
-    }
-    if payload_digest != "UNSIGNED-PAYLOAD" && payload_digest != hex(sha256.hash(body)) {
-        return false
-    }
-    let mut canonical: String = clone(req.method)
-    string.push(mut canonical, "\n")
-    match string.split_once(raw_target, "?") {
-        Some((path, _)) => string.push(mut canonical, path),
-        None => string.push(mut canonical, raw_target)
-    }
-    string.push(mut canonical, "\n")
-    append_query(mut canonical, req.target.query)
-    string.push(mut canonical, "\n")
-    if !canonical_headers(mut canonical, fields, signed) {
-        return false
-    }
-    string.push(mut canonical, "\n")
-    string.push(mut canonical, signed)
-    string.push(mut canonical, "\n")
-    string.push(mut canonical, payload_digest)
-    let mut message = string.from("AWS4-HMAC-SHA256\n")
-    string.push(mut message, date)
-    string.push(mut message, "\n")
-    string.push(mut message, scope)
-    string.push(mut message, "\n")
-    string.push(mut message, hex(sha256.hash(string.as_bytes(canonical))))
-    let raw = string.as_bytes(signature)
-    let mut tag: Bytes = list.with_capacity(32)
-    for i in 0u64 .. 32 {
-        let Some(hi) = nibble(raw[2 * i]) else {
-            return false
-        }
-        let Some(lo) = nibble(raw[2 * i + 1]) else {
-            return false
-        }
-        list.push(mut tag, (hi << 4) | lo)
-    }
-    if let Ok(true) = secret.verify_hmac_sha256(config.signing_key, string.as_bytes(message), tag) {
-        return true
-    }
-    false
-}
-
-fn xml_text(mut xml: String, text: String) {
-    let octets = string.as_bytes(text)
-    let mut start = 0u64
-    for i in 0u64 .. list.len(octets) {
-        let escaped = match octets[i] {
-            b'&' => "&amp;",
-            b'<' => "&lt;",
-            b'>' => "&gt;",
-            b'"' => "&quot;",
-            b'\'' => "&apos;",
-            _ => ""
-        }
-        if escaped != "" {
-            string.push(mut xml, string.slice(text, start, i))
-            string.push(mut xml, escaped)
-            start = i + 1
-        }
-    }
-    string.push(mut xml, string.slice(text, start, list.len(octets)))
-}
-
-fn element(mut xml: String, tag: String, value: String) {
-    string.push(mut xml, "<")
-    string.push(mut xml, tag)
-    string.push(mut xml, ">")
-    xml_text(mut xml, value)
-    string.push(mut xml, "</")
-    string.push(mut xml, tag)
-    string.push(mut xml, ">")
-}
-
-fn metadata(fields: Map[String, String]) -> Map[String, String] {
-    let mut out: Map[String, String] = map.new()
-    for (name, value) in fields {
-        if string.starts_with(name, "x-amz-meta-") {
-            map.insert(mut out, clone(name), clone(value))
-        }
-    }
-    take out
-}
-
-fn etag(data: Bytes) -> String {
-    let mut out = string.from("\"")
-    let digest = hex(sha256.hash(data))
-    string.push(mut out, string.slice(digest, 0, 32))
-    string.push(mut out, "\"")
-    take out
-}
-
-fn conditional(config: Config, req: Request, objects: Map[String, Object]) -> Option[u16] {
     let old = map.get(objects, req.target.key)
     if let Some(tag) = map.get(req.fields, "if-match") {
-        if let Some(present) = old {
-            if tag != "*" && tag != present.etag {
-                return Some(409)
-            }
-        } else {
-            return Some(409)
+        match old {
+            Some(present) if tag == "*" || tag == present.etag => (),
+            _ => return Some(error(412, "PreconditionFailed")),
         }
     }
-    if let Some(tag) = map.get(req.fields, "if-none-match") {
-        if let Some(present) = old {
-            if tag == "*" || tag == present.etag {
-                return Some(config.exists_status)
-            }
+    if let (Some(tag), Some(present)) = (map.get(req.fields, "if-none-match"), old) {
+        if tag == "*" || tag == present.etag {
+            return Some(error(if req.method == "GET" || req.method == "HEAD" {
+                304u16
+            } else {
+                rules.exists_status
+            }, "PreconditionFailed"))
         }
     }
     None
@@ -443,7 +280,7 @@ fn text_number(n: u64) -> String {
 fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Response {
     let mut prefix = string.from("")
     if let Some(raw) = map.get(query, "prefix") {
-        let Some(take value) = decode(raw) else {
+        let Some(take value) = sim.s3_wire.decode(raw) else {
             return error(400, "InvalidArgument")
         }
         prefix = take value
@@ -455,13 +292,13 @@ fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Res
         map.get(query, "start-after")
     }
     if let Some(raw) = start {
-        let Some(take value) = decode(raw) else {
+        let Some(take value) = sim.s3_wire.decode(raw) else {
             return error(400, "InvalidArgument")
         }
         after = take value
     }
     let limit = if let Some(raw) = map.get(query, "max-keys") {
-        let Some(n) = u64_field(raw) else {
+        let Some(n) = sim.s3_wire.u64_field(raw) else {
             return error(400, "InvalidArgument")
         }
         order.min(n, 1000u64)
@@ -469,12 +306,12 @@ fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Res
         1000
     }
     let mut xml = string.from("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
-    element(mut xml, "Prefix", prefix)
-    element(mut xml, "MaxKeys", text_number(limit))
+    sim.s3_wire.element(mut xml, "Prefix", prefix)
+    sim.s3_wire.element(mut xml, "MaxKeys", text_number(limit))
     let mut count = 0u64
     let mut truncated = false
     let mut last = string.from("")
-    for key in sorted_keys(objects) {
+    for key in sim.s3_wire.sorted_keys(objects) {
         if string.starts_with(key, prefix) && order.compare(key, after) == Greater {
             if count == limit {
                 truncated = limit != 0
@@ -482,22 +319,22 @@ fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Res
             }
             let object = option.unwrap(map.get(objects, key))
             string.push(mut xml, "<Contents>")
-            element(mut xml, "Key", key)
-            element(mut xml, "ETag", object.etag)
-            element(mut xml, "Size", text_number(list.len(object.data)))
+            sim.s3_wire.element(mut xml, "Key", key)
+            sim.s3_wire.element(mut xml, "ETag", object.etag)
+            sim.s3_wire.element(mut xml, "Size", text_number(list.len(object.data)))
             string.push(mut xml, "</Contents>")
             last = clone(key)
             count += 1
         }
     }
-    element(mut xml, "KeyCount", text_number(count))
-    element(mut xml, "IsTruncated", if truncated {
+    sim.s3_wire.element(mut xml, "KeyCount", text_number(count))
+    sim.s3_wire.element(mut xml, "IsTruncated", if truncated {
         "true"
     } else {
         "false"
     })
     if truncated {
-        element(mut xml, "NextContinuationToken", last)
+        sim.s3_wire.element(mut xml, "NextContinuationToken", last)
     }
     string.push(mut xml, "</ListBucketResult>")
     reply(200, xml)
@@ -506,68 +343,109 @@ fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Res
 fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Response {
     let mut prefix = string.from("")
     if let Some(raw) = map.get(query, "prefix") {
-        let Some(take value) = decode(raw) else {
+        let Some(take value) = sim.s3_wire.decode(raw) else {
             return error(400, "InvalidArgument")
         }
         prefix = take value
     }
     let limit = if let Some(raw) = map.get(query, "max-uploads") {
-        let Some(n) = u64_field(raw) else {
+        let Some(n) = sim.s3_wire.u64_field(raw) else {
             return error(400, "InvalidArgument")
         }
         order.min(n, 1000u64)
     } else {
         1000
     }
+    let marker = match map.get(query, "key-marker") {
+        Some(raw) => {
+            let Some(take decoded) = sim.s3_wire.decode(raw) else {
+                return error(400, "InvalidArgument")
+            }
+            take decoded
+        },
+        None => string.new(),
+    }
+    let upload_marker = match map.get(query, "upload-id-marker") {
+        Some(raw) => {
+            let Some(take decoded) = sim.s3_wire.decode(raw) else {
+                return error(400, "InvalidArgument")
+            }
+            take decoded
+        },
+        None => string.new(),
+    }
+    let mut all = sim.s3_wire.sorted_keys(uploads)
+    list.sort(mut all, scoped fn(a: String, b: String) -> Order {
+        let first = option.unwrap(map.get(uploads, a))
+        let second = option.unwrap(map.get(uploads, b))
+        let by_key = order.compare(first.key, second.key)
+        if by_key == Equal {
+            order.compare(a, b)
+        } else {
+            by_key
+        }
+    })
     let mut xml = string.from("<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
-    element(mut xml, "Prefix", prefix)
+    sim.s3_wire.element(mut xml, "Prefix", prefix)
     let mut body = string.from("")
     let mut count = 0u64
     let mut truncated = false
-    for id in sorted_keys(uploads) {
+    let mut last_key = string.new()
+    let mut last_id = string.new()
+    for id in all {
         let upload = option.unwrap(map.get(uploads, id))
-        if string.starts_with(upload.key, prefix) {
+        let by_key = order.compare(upload.key, marker)
+        let beyond = by_key == Greater || (by_key == Equal && order.compare(id, upload_marker) == Greater)
+        if string.starts_with(upload.key, prefix) && beyond {
             if count == limit {
                 truncated = true
                 break
             }
             string.push(mut body, "<Upload>")
-            element(mut body, "Key", upload.key)
-            element(mut body, "UploadId", id)
+            sim.s3_wire.element(mut body, "Key", upload.key)
+            sim.s3_wire.element(mut body, "UploadId", id)
             string.push(mut body, "</Upload>")
+            last_key = clone(upload.key)
+            last_id = clone(id)
             count += 1
         }
     }
-    element(mut xml, "IsTruncated", if truncated {
+    sim.s3_wire.element(mut xml, "IsTruncated", if truncated {
         "true"
     } else {
         "false"
     })
+    if truncated {
+        sim.s3_wire.element(mut xml, "NextKeyMarker", last_key)
+        sim.s3_wire.element(mut xml, "NextUploadIdMarker", last_id)
+    }
     string.push(mut xml, body)
     string.push(mut xml, "</ListMultipartUploadsResult>")
     reply(200, xml)
 }
 
-fn put(mut bucket: Bucket, key: String, take data: Bytes, take meta: Map[String, String]) -> String {
-    let tag = etag(data)
-    map.insert(mut bucket.objects, clone(key), Object(data: take data, etag: clone(tag), metadata: take meta))
+fn put(mut bucket: Bucket, req: sim.s3_wire.WireRequest, request: u64, take data: Bytes, take meta: Map[String, String]) -> String {
+    let tag = sim.s3_wire.etag(data)
+    let key = view req.target.key
+    sim.s3_history.record(mut bucket.head_writes, request, key, req.fields, tag, data)
+    map.insert(mut bucket.objects, string.from(key), Object(data: take data, etag: clone(tag), metadata: take meta))
     bucket.writes += 1
     take tag
 }
 
-fn begin(mut bucket: Bucket, req: Request) -> Response {
+fn begin(mut bucket: Bucket, req: sim.s3_wire.WireRequest) -> Response {
     let id = text_number(bucket.next_upload)
     bucket.next_upload += 1
-    map.insert(mut bucket.uploads, clone(id), Upload(key: clone(req.target.key), metadata: metadata(req.fields), parts: map.new()))
+    map.insert(mut bucket.uploads, clone(id), Upload(key: clone(req.target.key), metadata: sim.s3_wire.metadata(req.fields), parts: map.new()))
     let mut xml = string.from("<InitiateMultipartUploadResult>")
-    element(mut xml, "Key", req.target.key)
-    element(mut xml, "UploadId", id)
+    sim.s3_wire.element(mut xml, "Key", req.target.key)
+    sim.s3_wire.element(mut xml, "UploadId", id)
     string.push(mut xml, "</InitiateMultipartUploadResult>")
     reply(200, xml)
 }
 
 fn put_part(mut upload: Upload, n: u64, take body: Bytes) -> Response {
-    let tag = etag(body)
+    let tag = sim.s3_wire.etag(body)
     map.insert(mut upload.parts, n, Object(data: take body, etag: clone(tag), metadata: map.new()))
     let mut response = reply(200, "")
     map.insert(mut response.fields, string.from("ETag"), take tag)
@@ -609,7 +487,7 @@ fn gather(upload: Upload, raw: Bytes, max_body: u64) -> Result[Bytes, String] {
         let Some(number) = tag_value(s, mut at, "<PartNumber>", "</PartNumber>") else {
             return Error(string.from("MalformedXML"))
         }
-        let Some(n) = u64_field(number) else {
+        let Some(n) = sim.s3_wire.u64_field(number) else {
             return Error(string.from("InvalidPart"))
         }
         let Some(expected) = tag_value(s, mut at, "<ETag>", "</ETag>") else {
@@ -639,7 +517,7 @@ fn gather(upload: Upload, raw: Bytes, max_body: u64) -> Result[Bytes, String] {
     Ok(take data)
 }
 
-fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take body: Bytes, fault: Fault) -> Response {
+fn multipart(rules: Rules, mut bucket: Bucket, req: sim.s3_wire.WireRequest, request: u64, id: String, take body: Bytes, fault: Fault) -> Response {
     let Some(take upload) = map.remove(mut bucket.uploads, id) else {
         return error(404, "NoSuchUpload")
     }
@@ -650,7 +528,7 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
         return reply(204, "")
     } else if req.method == "PUT" {
         let n = match map.get(req.target.query, "partNumber") {
-            Some(number) => or_else(u64_field(number), 0),
+            Some(number) => sim.s3_wire.or_else(sim.s3_wire.u64_field(number), 0),
             None => 0
         }
         if n == 0 || n > 10000 {
@@ -659,25 +537,23 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
             put_part(mut current, n, take body)
         }
     } else if req.method == "POST" {
-        if let CompleteError = fault {
+        if let CompleteExpired = fault {
+            return error(200, "InternalError")
+        } else if let CompleteError = fault {
             error(200, "InternalError")
         } else if let MalformedComplete = fault {
             reply(200, "<Error/>")
-        } else if let Some(status) = conditional(config, req, bucket.objects) {
-            error(status, if status == 409 {
-                "ConditionalRequestConflict"
-            } else {
-                "PreconditionFailed"
-            })
+        } else if let Some(take failed) = conditional_failure(rules, req, mut bucket.objects, fault, true) {
+            take failed
         } else {
-            match gather(current, body, config.max_body) {
+            match gather(current, body, rules.max_body) {
                 Error(code) => error(400, code),
                 Ok(take data) => {
                     let Upload(metadata: take meta, ..) = take current
-                    let tag = put(mut bucket, req.target.key, take data, take meta)
+                    let tag = put(mut bucket, req, request, take data, take meta)
                     let mut xml = string.from("<CompleteMultipartUploadResult>")
-                    element(mut xml, "Key", req.target.key)
-                    element(mut xml, "ETag", tag)
+                    sim.s3_wire.element(mut xml, "Key", req.target.key)
+                    sim.s3_wire.element(mut xml, "ETag", tag)
                     string.push(mut xml, "</CompleteMultipartUploadResult>")
                     return reply(200, xml)
                 }
@@ -698,7 +574,7 @@ fn ranged(object: Object, value: String) -> Response {
     let Some((raw_lo, raw_hi)) = string.split_once(range, "-") else {
         return error(416, "InvalidRange")
     }
-    let Some(lo) = u64_field(raw_lo) else {
+    let Some(lo) = sim.s3_wire.u64_field(raw_lo) else {
         return error(416, "InvalidRange")
     }
     let size = list.len(object.data)
@@ -708,7 +584,7 @@ fn ranged(object: Object, value: String) -> Response {
     let last = if raw_hi == "" {
         size - 1
     } else {
-        let Some(parsed) = u64_field(raw_hi) else {
+        let Some(parsed) = sim.s3_wire.u64_field(raw_hi) else {
             return error(416, "InvalidRange")
         }
         order.min(parsed, size - 1)
@@ -729,19 +605,22 @@ fn ranged(object: Object, value: String) -> Response {
     take response
 }
 
-fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
+fn dispatch(rules: Rules, mut bucket: Bucket, req: sim.s3_wire.WireRequest, take body: Bytes, fault: Fault, request: u64) -> Response {
     match fault {
         InternalError => return error(500, "InternalError"),
         SlowDown => return error(503, "SlowDown"),
         _ => ()
     }
     if let Some(id) = map.get(req.target.query, "uploadId") {
-        return multipart(config, mut bucket, req, id, take body, fault)
+        return multipart(rules, mut bucket, req, request, id, take body, fault)
     }
     if req.method == "POST" && map.get(req.target.query, "uploads") != None {
         return begin(mut bucket, req)
     }
     if req.method == "GET" && req.target.key == "" {
+        if map.contains(req.target.query, "location") {
+            return reply(200, "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">global</LocationConstraint>")
+        }
         if map.get(req.target.query, "uploads") != None {
             return list_uploads(bucket.uploads, req.target.query)
         }
@@ -754,15 +633,11 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
     if req.target.key == "" {
         return error(400, "InvalidArgument")
     }
-    if let Some(status) = conditional(config, req, bucket.objects) {
-        return error(status, if status == 409 {
-            "ConditionalRequestConflict"
-        } else {
-            "PreconditionFailed"
-        })
+    if let Some(take failed) = conditional_failure(rules, req, mut bucket.objects, fault, req.method == "PUT") {
+        return take failed
     }
     if req.method == "PUT" {
-        let tag = put(mut bucket, req.target.key, take body, metadata(req.fields))
+        let tag = put(mut bucket, req, request, take body, sim.s3_wire.metadata(req.fields))
         let mut out = reply(200, "")
         map.insert(mut out.fields, string.from("ETag"), take tag)
         return take out
@@ -776,13 +651,13 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
             return error(404, "NoSuchKey")
         }
         if req.method == "GET" {
-            let requested = map.get(req.fields, "range")
+            let byte_range = map.get(req.fields, "range")
             if let RequireResume(expected) = fault {
                 let mut range = string.from("bytes=")
                 string.push_u64(mut range, expected)
                 string.push_char(mut range, '-')
                 let expected_tag = map.get(req.fields, "if-match")
-                if let (Some(value), Some(tag)) = (requested, expected_tag) {
+                if let (Some(value), Some(tag)) = (byte_range, expected_tag) {
                     if value != range || tag != object.etag {
                         return error(400, "InvalidResume")
                     }
@@ -790,7 +665,7 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
                     return error(400, "InvalidResume")
                 }
             }
-            if let Some(value) = requested {
+            if let Some(value) = byte_range {
                 return ranged(object, value)
             }
         }
@@ -801,9 +676,51 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
     error(405, "MethodNotAllowed")
 }
 
-type ReadState = Reading | Body(u64) | Sending | ResetPeer
+type ReadState = Reading | Body(u64) | Parked | Sending | ResetPeer
+
+type RequestKey: key {
+    method: String,
+    key: String
+}
+
+type Progress {
+    received: u64,
+    applied: List[u64]
+}
+
+type Incoming {
+    target: RequestKey,
+    req: sim.s3_wire.WireRequest,
+    body: Bytes,
+    proof: Option[String],
+    rejection: Option[Response]
+}
+
+type Pending {
+    peer: u64,
+    nth: u64,
+    spare: bool,
+    fault: Fault,
+    incoming: Incoming,
+    until: Until,
+    then: Then
+}
+
+type Watch {
+    target: RequestKey,
+    nth: u64,
+    call: Call[NetOp]
+}
+
+type Schedule {
+    counts: Map[RequestKey, Progress],
+    pending: List[Pending],
+    watches: List[Watch],
+    timers: Map[u64, Task[()]]
+}
 
 type Peer {
+    request: u64,
     fault: Fault,
     plan: sim.world.Plan,
     state: ReadState,
@@ -811,14 +728,15 @@ type Peer {
     cursor: http1.Cursor,
     incoming: Bytes,
     outgoing: Bytes,
+    waiting: Option[(NetOp, Call[NetOp])],
     sent: u64,
     read_closed: bool,
     write_closed: bool,
     spare: bool
 }
 
-fn new_peer(fault: Fault, take plan: sim.world.Plan, spare: bool) -> Peer {
-    Peer(fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false, spare: spare)
+fn new_peer(request: u64, fault: Fault, take plan: sim.world.Plan, spare: bool) -> Peer {
+    Peer(request, fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), waiting: None, sent: 0, read_closed: false, write_closed: false, spare: spare)
 }
 
 fn respond(mut peer: Peer, response: Response, head: bool) {
@@ -831,7 +749,7 @@ fn respond(mut peer: Peer, response: Response, head: bool) {
         list.len(response.body)
     })
     string.push(mut line, "\r\n")
-    for name in sorted_keys(response.fields) {
+    for name in sim.s3_wire.sorted_keys(response.fields) {
         string.push(mut line, name)
         string.push(mut line, ": ")
         if let Some(value) = map.get(response.fields, name) {
@@ -853,78 +771,175 @@ fn respond(mut peer: Peer, response: Response, head: bool) {
     list.clear(mut peer.incoming)
 }
 
-fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
+// A path-style target without its `/<bucket>` segment, as the virtual-hosted
+// target the dispatcher routes.
+fn path_target(raw: String, name: String) -> Option[String] {
+    let octets = string.as_bytes(raw)
+    let n = string.byte_len(name) + 1
+    if list.len(octets) <= n || octets[0] != b'/' || string.slice(raw, 1, n) != name {
+        return None
+    }
+    let rest = string.slice(raw, n, list.len(octets))
+    if octets[n] == b'/' {
+        return Some(string.from(rest))
+    }
+    if octets[n] != b'?' {
+        return None
+    }
+    let mut target = string.from("/")
+    string.push(mut target, rest)
+    Some(take target)
+}
+
+fn request_key(method: String, target: sim.s3_wire.Target) -> RequestKey {
+    let listing = method == "GET" && target.key == "" && (map.contains(target.query, "list-type") || map.contains(target.query, "uploads"))
+    RequestKey(method: if listing {
+        string.from("LIST")
+    } else {
+        string.from(method)
+    }, key: clone(target.key))
+}
+
+fn routed_target(gate: Gate, raw: String) -> Option[String] {
+    match gate.signing {
+        Scoped(_, _) => Some(string.from(raw)),
+        Rooted(service) => path_target(raw, service.bucket),
+    }
+}
+
+fn received(gate: Gate, mut bucket: Bucket, mut peer: Peer, clock: Clock) -> Option[Incoming] {
     if let Reading = peer.state {
         match http1.resume(peer.incoming, mut peer.head, mut peer.cursor) {
-            Partial => return,
+            Partial => return None,
             Complete => (),
             _ => {
                 respond(mut peer, error(400, "MalformedRequest"), false)
-                return
+                return None
             }
         }
         if let ResetBeforeBody = peer.fault {
+            let raw = sim.s3_wire.piece(peer.incoming, peer.head.target.start, peer.head.target.end)
+            if let Some(path) = routed_target(gate, raw) {
+                if let Some(uri) = sim.s3_wire.parse_target(path) {
+                    let method = sim.s3_wire.piece(peer.incoming, peer.head.method.start, peer.head.method.end)
+                    let target = request_key(method, uri)
+                    record(mut bucket, peer.request, target, 0, false, clock)
+                }
+            }
             peer.state = ResetPeer
-            return
+            return None
         }
-        let Some(take fields) = parse_headers(peer.incoming, peer.head) else {
+        let Some(take fields) = sim.s3_wire.parse_headers(peer.incoming, peer.head) else {
             respond(mut peer, error(400, "MalformedRequest"), false)
-            return
+            return None
         }
-        let Some(size) = body_length(fields) else {
+        let Some(size) = sim.s3_wire.body_length(fields) else {
             respond(mut peer, error(400, "InvalidRequest"), false)
-            return
+            return None
         }
-        if size > config.max_body {
+        if size > gate.rules.max_body {
             respond(mut peer, error(413, "EntityTooLarge"), false)
-            return
+            return None
         }
         peer.state = Body(size)
     }
     let Body(size) = peer.state else {
-        return
+        return None
     }
     if list.len(peer.incoming) - peer.head.end < size {
-        return
+        return None
     }
-    let method = piece(peer.incoming, peer.head.method.start, peer.head.method.end)
+    let method = sim.s3_wire.piece(peer.incoming, peer.head.method.start, peer.head.method.end)
     let head = method == "HEAD"
     if list.len(peer.incoming) - peer.head.end != size {
         respond(mut peer, error(400, "InvalidRequest"), head)
-        return
+        return None
     }
-    let raw_target = piece(peer.incoming, peer.head.target.start, peer.head.target.end)
-    let Some(take uri) = parse_target(raw_target) else {
+    let raw_target = sim.s3_wire.piece(peer.incoming, peer.head.target.start, peer.head.target.end)
+    let Some(take path) = routed_target(gate, raw_target) else {
+        respond(mut peer, error(404, "NoSuchBucket"), head)
+        return None
+    }
+    let Some(take uri) = sim.s3_wire.parse_target(path) else {
         respond(mut peer, error(400, "InvalidURI"), head)
-        return
+        return None
     }
-    let fields = option.unwrap(parse_headers(peer.incoming, peer.head))
+    let target = request_key(method, uri)
+    let fields = option.unwrap(sim.s3_wire.parse_headers(peer.incoming, peer.head))
     let body: Bytes = clone(list.slice(peer.incoming, peer.head.end, list.len(peer.incoming)))
-    let req = Request(method: take method, target: take uri, fields: take fields)
-    if !authenticated(config, req, raw_target, body) {
-        respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
-        return
+    let req = sim.s3_wire.WireRequest(method: take method, target: take uri, fields: take fields)
+    let (proof, accepted): (Option[String], bool) = match gate.signing {
+        Scoped(credential_scope, key) => (None, sim.s3_wire.authenticated(credential_scope, key, req, raw_target, body)),
+        Rooted(service) => match rooted(service, req, raw_target, body) {
+            Some(take text) => (Some(take text), true),
+            None => (None, false),
+        },
     }
-    let mut silent = false
-    if let Some(cut) = config.cut {
-        if !peer.spare {
+    let rejection: Option[Response] = if accepted {
+        None
+    } else {
+        Some(error(403, "SignatureDoesNotMatch"))
+    }
+    peer.state = Parked
+    list.clear(mut peer.incoming)
+    Some(Incoming(target: take target, req: take req, body: take body, proof: take proof, rejection: take rejection))
+}
+
+fn record(mut bucket: Bucket, request: u64, target: RequestKey, status: u16, applied: bool, clock: Clock) {
+    list.push(mut bucket.requests, Request(request, method: clone(target.method), key: clone(target.key), status, applied, at_ns: host.mono_ns(clock)))
+}
+
+type Decision {
+    response: Option[Response],
+    reset: bool,
+    applied: bool,
+    head: bool
+}
+
+fn decide(gate: Gate, mut bucket: Bucket, take input: Incoming, fault: Fault, request: u64, spare: bool, clock: Clock, lose_reply: bool) -> Decision {
+    let Incoming(target: take target, req: take req, body: take body, proof: take proof, rejection: take rejection) = take input
+    let head = req.method == "HEAD"
+    if let Some(take response) = take rejection {
+        record(mut bucket, request, target, response.status, false, clock)
+        return Decision(response: Some(take response), reset: lose_reply, applied: false, head)
+    }
+    let mut reset = lose_reply
+    if let ResetAfterBody = fault {
+        reset = true
+    }
+    if let Some(cut) = gate.cut {
+        if !spare {
             bucket.served += 1
             if bucket.served > cut.after {
-                if !cut.apply || bucket.served > cut.after + 1 {
-                    peer.state = ResetPeer
-                    return
+                if !cut.apply || bucket.served - cut.after > 1 {
+                    record(mut bucket, request, target, 0, false, clock)
+                    return Decision(response: None, reset: true, applied: false, head)
                 }
-                silent = true
+                reset = true
             }
         }
     }
-    let response = dispatch(config, mut bucket, req, take body, peer.fault)
-    if silent {
+    let mut response = dispatch(gate.rules, mut bucket, req, take body, fault, request)
+    if let Some(take text) = take proof {
+        map.insert(mut response.fields, string.from(PROOF_FIELD), take text)
+    }
+    let status = response.status
+    let embedded_error = req.method == "POST" && map.contains(req.target.query, "uploadId") && bytes_prefix(response.body, string.as_bytes("<Error"))
+    let applied = status >= 200 && status < 300 && !embedded_error
+    record(mut bucket, request, target, status, applied, clock)
+    Decision(response: Some(take response), reset, applied, head)
+}
+
+fn bytes_prefix(value: Bytes, prefix: Bytes) -> bool {
+    let n = list.len(prefix)
+    list.len(value) >= n && list.slice(value, 0, n) == prefix
+}
+
+fn complete(mut peer: Peer, decision: Decision) {
+    if decision.reset {
         peer.state = ResetPeer
-    } else if let ResetAfterBody = peer.fault {
-        peer.state = ResetPeer
-    } else {
-        respond(mut peer, response, head)
+    } else if let Some(response) = view decision.response {
+        respond(mut peer, response, decision.head)
     }
 }
 
@@ -943,7 +958,7 @@ fn matches_closed(state: ReadState) -> bool {
     }
 }
 
-fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u64, mut served: Served[NetOp], take call: Call[NetOp]) {
+fn send(config: Config, mut peer: Peer, prefix: u64, tail: u64, mut served: Served[NetOp], take call: Call[NetOp]) {
     if matches_closed(peer.state) {
         let _ = answer(mut served, take call, Failed(Reset))
         return
@@ -953,9 +968,9 @@ fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u
         return
     }
     let mut data: Bytes = list.with_capacity(prefix + tail)
-    provide.payload(call, 1, mut data)
-    provide.payload(call, 2, mut data)
-    if list.len(data) != prefix + tail {
+    let prefix_omitted = provide.payload_prefix(call, 1, config.fragment_bytes, mut data)
+    let tail_omitted = provide.payload_prefix(call, 2, config.fragment_bytes, mut data)
+    if list.len(data) + prefix_omitted + tail_omitted != prefix + tail {
         let _ = answer(mut served, take call, Failed(Aborted))
         return
     }
@@ -963,14 +978,12 @@ fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u
     let count = 1 + sim.world.pick(mut peer.plan, limit)
     if answer(mut served, take call, Count(count)) {
         list.append(mut peer.incoming, list.slice(data, 0, count))
-        received(config, mut bucket, mut peer)
     }
 }
 
-fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut trace: u64, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
     let mut c = take call
     match peer.state {
-        ResetPeer => return answer(mut served, take c, Failed(Reset)),
         Sending => (),
         _ => return answer(mut served, take c, Failed(Reset))
     }
@@ -985,28 +998,34 @@ fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Ser
         }
     }
     let limit = order.min(config.fragment_bytes, order.min(room, list.len(peer.outgoing) - peer.sent))
-    let count: u64 = if limit == 0 {
-        0
-    } else {
-        1 + sim.world.pick(mut peer.plan, limit)
+    let count: u64 = match limit {
+        0 => 0,
+        _ => 1 + sim.world.pick(mut peer.plan, limit)
     }
     let staged = provide.fill(mut served, mut c, list.slice(peer.outgoing, peer.sent, peer.sent + count))
-    if answer(mut served, take c, Count(staged)) {
+    let accepted = answer(mut served, take c, Count(staged))
+    if accepted {
         peer.sent += staged
-        true
-    } else {
-        false
+        trace = int.wrapping_mul(trace ^ staged, 0x100000001b3)
     }
+    accepted
 }
 
 fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op: NetOp, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+    if is_parked(peer.state) && is_read(op) {
+        peer.waiting = Some((op, take call))
+        return true
+    }
     match op {
         Send(prefix: prefix, tail: tail, ..) => {
-            send(config, mut bucket, mut peer, prefix, tail, mut served, take call)
+            send(config, mut peer, prefix, tail, mut served, take call)
             true
         },
-        Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut served, take call),
+        Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut bucket.fragment_trace, mut served, take call),
         Ready(..) => {
+            if let ResetPeer = peer.state {
+                return answer(mut served, take call, Failed(Reset))
+            }
             if let Stall(until) = peer.fault {
                 if host.mono_ns(clock) < until {
                     host.sleep_until(clock, until)
@@ -1033,13 +1052,17 @@ fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op:
     }
 }
 
-fn same_addr(a: Addr, b: Addr) -> bool {
-    if a.port != b.port {
-        return false
+fn is_read(op: NetOp) -> bool {
+    match op {
+        Recv(..) => true,
+        Ready(..) => true,
+        _ => false,
     }
-    match (a.ip, b.ip) {
-        (V4(x), V4(y)) => x == y,
-        (V6(hi, lo), V6(other_hi, other_lo)) => hi == other_hi && lo == other_lo,
+}
+
+fn is_parked(state: ReadState) -> bool {
+    match state {
+        Parked => true,
         _ => false
     }
 }
@@ -1062,27 +1085,195 @@ fn socket(op: NetOp) -> Option[u64] {
     }
 }
 
+fn note_request(mut counts: Map[RequestKey, Progress], target: RequestKey) -> u64 {
+    map.update_or_insert(mut counts, clone(target), Progress(received: 0, applied: list.new()), fn(mut progress: Progress) -> u64 {
+        progress.received += 1
+        progress.received
+    })
+}
+
+fn ready_at(until: Until, counts: Map[RequestKey, Progress], clock: Clock) -> bool {
+    match until {
+        Never => false,
+        At(at) => host.mono_ns(clock) >= at,
+        Requested(method, key, n) => seen(counts, method, key, n, false),
+        Applied(method, key, n) => seen(counts, method, key, n, true),
+    }
+}
+
+fn seen(counts: Map[RequestKey, Progress], method: String, key: String, n: u64, applied: bool) -> bool {
+    let target = RequestKey(method: string.from(method), key: string.from(key))
+    reached(counts, target, n, applied)
+}
+
+fn reached(counts: Map[RequestKey, Progress], target: RequestKey, n: u64, applied: bool) -> bool {
+    if let Some(progress) = map.get(counts, target) {
+        return if applied {
+            list.contains(progress.applied, n)
+        } else {
+            progress.received >= n
+        }
+    }
+    false
+}
+
+type Timer: send {
+    network: Net,
+    clock: Clock,
+    at: u64
+}
+
+fn wake_at(take t: Timer) waits {
+    host.sleep_until(t.clock, t.at)
+    let _ = host.connect_unix(t.network, "clock", CLOCK_PATH, Never)
+}
+
+fn enqueue(holds: List[Hold], mut schedule: Schedule, peer: Peer, take input: Incoming, tasks: Tasks, network: Net, clock: Clock) {
+    let n = note_request(mut schedule.counts, input.target)
+    let mut until: Until = At(0)
+    let mut then: Then = Apply
+    for hold in holds {
+        if hold.method == input.target.method && hold.key == input.target.key && n >= hold.from && n - hold.from < hold.count {
+            until = clone(hold.until)
+            then = hold.then
+            break
+        }
+    }
+    if let At(at) = until {
+        if at > host.mono_ns(clock) && !map.contains(schedule.timers, at) {
+            let timer = task.spawn(tasks, bytes 0, Timer(network, clock, at), wake_at)
+            map.insert(mut schedule.timers, at, take timer)
+        }
+    }
+    list.push(mut schedule.pending, Pending(peer: peer.request, nth: n, spare: peer.spare, fault: peer.fault, incoming: take input, until: take until, then))
+}
+
+fn read_control(c: Call[NetOp], field: u64, size: u64) -> Option[String] {
+    let mut raw: Bytes = list.with_capacity(size)
+    provide.payload(c, field, mut raw)
+    match string.from_utf8(take raw) {
+        Ok(take text) => Some(take text),
+        Error(_) => None,
+    }
+}
+
+fn watch(call: Call[NetOp], size: u64) -> Option[(RequestKey, u64)] {
+    let text = read_control(call, 0, size)?
+    let (number, rest) = string.split_once(text, "\n")?
+    let (method, key) = string.split_once(rest, "\n")?
+    let nth = sim.s3_wire.u64_field(number)?
+    Some((RequestKey(method: string.from(method), key: string.from(key)), nth))
+}
+
+fn control(mut schedule: Schedule, mut port: Served[NetOp], take call: Call[NetOp], root: u64, path: u64) {
+    match read_control(call, 1, path) {
+        Some(value) if value == CLOCK_PATH => {
+            let _ = answer(mut port, take call, Failed(Refused))
+        },
+        Some(value) if value == REQUESTED_PATH => {
+            if let Some((take target, nth)) = watch(call, root) {
+                list.push(mut schedule.watches, Watch(target: take target, nth, call: take call))
+            } else {
+                let _ = answer(mut port, take call, Failed(Denied))
+            }
+        },
+        _ => {
+            let _ = answer(mut port, take call, Failed(Denied))
+        },
+    }
+}
+
+fn notify(mut schedule: Schedule, mut port: Served[NetOp]) {
+    let mut i = 0u64
+    while i < list.len(schedule.watches) {
+        let done = {
+            let w = schedule.watches[i]
+            reached(schedule.counts, w.target, w.nth, false)
+        }
+        if done {
+            let saved: Watch = list.remove(mut schedule.watches, i)
+            let Watch(call: take call, ..) = take saved
+            let _ = answer(mut port, take call, Failed(Refused))
+        } else {
+            i += 1
+        }
+    }
+}
+
+fn ready_pending(s: Schedule, clock: Clock) -> Option[u64] {
+    for i in 0u64 .. list.len(s.pending) {
+        if ready_at(s.pending[i].until, s.counts, clock) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn flush(config: Config, gate: Gate, mut schedule: Schedule, mut bucket: Bucket, mut peers: Map[u64, Peer], mut port: Served[NetOp], clock: Clock, mut withdrawn: u64) waits {
+    while let Some(i) = ready_pending(schedule, clock) {
+        let saved: Pending = list.remove(mut schedule.pending, i)
+        let Pending(peer: id, nth, fault, spare, incoming: take input, then, ..) = take saved
+        let decision = match then {
+            Drop => Decision(response: None, reset: true, applied: false, head: false),
+            _ => {
+                let target = RequestKey(method: clone(input.target.method), key: clone(input.target.key))
+                let lose = match then {
+                    ApplyLoseReply => true,
+                    _ => false
+                }
+                let resolved = decide(gate, mut bucket, take input, fault, id, spare, clock, lose)
+                if resolved.applied {
+                    let _ = map.update(mut schedule.counts, target, scoped fn(mut progress: Progress) {
+                        list.push(mut progress.applied, nth)
+                    })
+                }
+                take resolved
+            },
+        }
+        if let Some(take socket_peer) = map.remove(mut peers, id) {
+            let mut peer = take socket_peer
+            complete(mut peer, decision)
+            if let Some((op, take call)) = replace(mut peer.waiting, None) {
+                if !operate(config, mut bucket, mut peer, clock, op, mut port, take call) {
+                    withdrawn += 1
+                }
+            }
+            map.insert(mut peers, id, take peer)
+        }
+    }
+}
+
 /// Runs a single bucket over a served Net. A clock controller drives stalls.
-pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> Report waits {
+pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> Report waits {
     if n.fragment_bytes == 0 || (n.exists_status != 412 && n.exists_status != 304) {
         fail("sim.s3 needs a positive fragment size and a 412 or 304 dialect")
     }
     let mut port = take served
-    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0)
+    let gate = Gate(rules: Rules(exists_status: n.exists_status, max_body: n.max_body), cut: clone(n.cut), signing: Scoped(clone(n.credential), secret.share(n.signing_key)))
+    let mut bucket = new_bucket()
     let mut peers: Map[u64, Peer] = map.new()
+    let mut connects: List[(Addr, u64)] = list.new()
     let mut next = 1u64
+    let mut schedule = Schedule(counts: map.new(), pending: list.new(), watches: list.new(), timers: map.new())
     let mut dns_changed = false
     let mut withdrawn = 0u64
     while let Some(take call) = provide.next(mut port) {
         let op = provide.net_op(call)
         match op {
+            ConnectUnix(root, path) => control(mut schedule, mut port, take call, root, path),
             Connect(addr: addr) => {
+                list.push(mut connects, (addr, host.mono_ns(clock)))
                 let spare = match n.cut {
-                    Some(cut) => same_addr(addr, cut.spare),
+                    Some(cut) => addr == cut.spare,
                     None => false,
                 }
-                if !spare && !same_addr(addr, n.address) {
-                    let _ = answer(mut port, take call, Failed(Refused))
+                if !spare && addr != n.address {
+                    let refusal: NetError = match (addr.ip, n.address.ip) {
+                        (V4(_), V6(_, _)) => Unreachable,
+                        (V6(_, _), V4(_)) => Unreachable,
+                        _ => Refused,
+                    }
+                    let _ = answer(mut port, take call, Failed(refusal))
                 } else if answer(mut port, take call, Socket(next, addr)) {
                     let fault = if spare || list.len(n.faults) == 0 {
                         Clean
@@ -1090,14 +1281,14 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
                         n.faults[sim.world.pick(mut plan, list.len(n.faults))]
                     }
                     let stream = sim.world.plan(sim.world.pick(mut plan, 0xffffffffffffffff))
-                    map.insert(mut peers, next, new_peer(fault, take stream, spare))
+                    map.insert(mut peers, next, new_peer(next, fault, take stream, spare))
                     next += 1
                 }
             },
             _ if name_operation(op) => {
                 if dns_changed {
                     match n.after_resolve {
-                        Some(network) => sim.net.answer_name(network, mut port, take call),
+                        Some(model) => sim.net.answer_name(model, mut port, take call),
                         None => sim.net.answer_name(n.network, mut port, take call)
                     }
                 } else {
@@ -1114,6 +1305,16 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
                         if !operate(n, mut bucket, mut entry, clock, op, mut port, take call) {
                             withdrawn += 1
                         }
+                        if let Send(..) = op {
+                            let before = list.len(bucket.requests)
+                            if let Some(take input) = received(gate, mut bucket, mut entry, clock) {
+                                enqueue(n.holds, mut schedule, entry, take input, tasks, network, clock)
+                            } else if list.len(bucket.requests) != before {
+                                let done = bucket.requests[before]
+                                let target = RequestKey(method: clone(done.method), key: clone(done.key))
+                                let _ = note_request(mut schedule.counts, target)
+                            }
+                        }
                         if !entry.read_closed || !entry.write_closed {
                             map.insert(mut peers, id, take entry)
                         }
@@ -1125,11 +1326,80 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
                 }
             }
         }
+        notify(mut schedule, mut port)
+        flush(n, gate, mut schedule, mut bucket, mut peers, mut port, clock, mut withdrawn)
     }
-    let Bucket(objects: take objects, uploads: take uploads, writes, ..) = take bucket
+    report(take bucket, next - 1, withdrawn, take connects)
+}
+
+fn new_bucket() -> Bucket {
+    Bucket(head_writes: list.new(), requests: list.new(), objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
+}
+
+fn report(take bucket: Bucket, attempts: u64, withdrawn: u64, take connects: List[(Addr, u64)]) -> Report {
+    let Bucket(head_writes: take head_writes, requests: take requests, objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
-    for id in sorted_keys(uploads) {
+    for id in sim.s3_wire.sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(objects: take objects, pending: take pending, writes: writes, attempts: next - 1, withdrawn: withdrawn)
+    Report(head_writes: take head_writes, requests: take requests, connects: take connects, objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
+}
+
+const LOOPBACK_IO_NS: u64 = 30000000000
+
+fn serve_connection(request: u64, gate: Gate, mut bucket: Bucket, take conn: Socket, clock: Clock) waits {
+    let (take input, take output) = net.split(take conn)
+    let mut reader = take input
+    let mut writer = take output
+    let mut peer = new_peer(request, Clean, sim.world.plan(0), false)
+    let until: core.Until = At(clock, int.saturating_add(host.mono_ns(clock), LOOPBACK_IO_NS))
+    let limit = int.saturating_add(gate.rules.max_body, 65536u64)
+    while !matches_closed(peer.state) {
+        if list.len(peer.incoming) >= limit {
+            return
+        }
+        let room = order.min(65536u64, limit - list.len(peer.incoming))
+        // A receive appends into spare capacity only.
+        list.reserve(mut peer.incoming, room)
+        match host.recv_bounded(mut reader, mut peer.incoming, room, until) {
+            Ok(0) => return,
+            Ok(_) => {
+                if let Some(take prepared) = received(gate, mut bucket, mut peer, clock) {
+                    let decision = decide(gate, mut bucket, take prepared, peer.fault, peer.request, false, clock, false)
+                    complete(mut peer, decision)
+                }
+            },
+            Error(_) => return,
+        }
+    }
+    if let ResetPeer = peer.state {
+        return
+    }
+    let empty: Bytes = list.new()
+    while peer.sent < list.len(peer.outgoing) {
+        match host.send_pair(mut writer, list.slice(peer.outgoing, peer.sent, list.len(peer.outgoing)), empty, until) {
+            Ok(0) => return,
+            Ok(n) => {
+                peer.sent += n
+            },
+            Error(_) => return,
+        }
+    }
+}
+
+/// Serves one bucket to other processes over a loopback listener until the
+/// listener fails. Each connection carries one request; the answer closes it.
+/// Every answer to an authenticated request carries `PROOF_FIELD`.
+pub fn serve_loopback(mut listener: Listener, take service: Loopback, clock: Clock) -> Report waits {
+    if service.exists_status != 412 && service.exists_status != 304 {
+        fail("sim.s3 needs a 412 or 304 dialect")
+    }
+    let gate = Gate(rules: Rules(exists_status: service.exists_status, max_body: service.max_body), cut: None, signing: Rooted(take service))
+    let mut bucket = new_bucket()
+    let mut accepted = 0u64
+    while let Ok((take conn, _)) = host.accept(mut listener, Never) {
+        accepted += 1
+        serve_connection(accepted, gate, mut bucket, take conn, clock)
+    }
+    report(take bucket, accepted, 0, list.new())
 }

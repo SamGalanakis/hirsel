@@ -56,6 +56,8 @@ mod compact;
 mod compare;
 mod constants;
 mod control;
+mod exits;
+use exits::{Frame, FrameKind};
 pub(crate) mod core_ops;
 pub(crate) mod flow;
 mod frame_lists;
@@ -1117,36 +1119,6 @@ struct Join {
     /// The row of the own value its edges carry, which is a temporary after it.
     drop: Option<TypeId>,
     destination: Option<AddressId>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum FrameKind {
-    Loop,
-    While { condition: Option<NodeId> },
-    Block,
-}
-struct Frame {
-    label: Option<String>,
-    kind: FrameKind,
-    /// The loop header `continue` jumps to.
-    header: Option<BlockId>,
-    exit: usize,
-    /// The value type its exits carry, once one fixes it.
-    ty: Option<TyId>,
-    /// Expected payload constraints survive until the first exit fixes its type.
-    hint: Option<Want>,
-    /// Whether any exit names it, reachable or not.
-    left: bool,
-    /// The undo log's length and the declaration count at its start.
-    mark: usize,
-    born: u32,
-    /// Where its exit edges begin in `exits`.
-    exits: usize,
-    scopes: usize,
-    /// `scope_slots`' length at its start: the slots declared inside it follow.
-    slots: usize,
-    /// The owners begun before it.
-    owners: usize,
 }
 
 struct BodyInstance {

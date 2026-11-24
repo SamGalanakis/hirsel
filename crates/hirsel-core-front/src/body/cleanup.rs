@@ -714,6 +714,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `owners` and the region and limit scopes opened since `scopes`, innermost
     /// first, each scope closing after its owners are cleaned (FAIL-8, T5.3).
     pub(super) fn unwind(&mut self, owners: usize, scopes: usize, n: NodeId) {
+        self.unwind_keeping(owners, scopes, PoolRange::EMPTY, n);
+    }
+    /// As `unwind`, leaving the owners at the `retained` indexes of `retained_owners`
+    /// uncleaned: a `break` value's reached temporaries, carried to its frame's exit.
+    pub(super) fn unwind_keeping(
+        &mut self,
+        owners: usize,
+        scopes: usize,
+        retained: PoolRange<usize>,
+        n: NodeId,
+    ) {
         crate::cost_scope!("phase", "cleanup emission");
         if !self.live() {
             return;
@@ -724,13 +735,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for s in (scopes..self.patterns_len()).rev() {
             let at = self.scope_owners(s).max(owners).min(top);
             for i in (at..top).rev() {
+                if retained.get(&self.retained_owners).unwrap().contains(&i) {
+                    continue;
+                }
                 self.edge = Some(Edge {
                     from: i,
                     keep: None,
                     temps: false,
                     scopes: s + 1,
                     pending,
-                    retained: PoolRange::EMPTY,
+                    retained,
                 });
                 self.clean(self.owners[i], n);
             }
@@ -738,13 +752,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.pattern_scope_exits_one(s, n);
         }
         for i in (owners..top).rev() {
+            if retained.get(&self.retained_owners).unwrap().contains(&i) {
+                continue;
+            }
             self.edge = Some(Edge {
                 from: i,
                 keep: None,
                 temps: false,
                 scopes,
                 pending,
-                retained: PoolRange::EMPTY,
+                retained,
             });
             self.clean(self.owners[i], n);
         }

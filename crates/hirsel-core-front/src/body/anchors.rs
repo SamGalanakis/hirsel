@@ -572,6 +572,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .expect("declared slot")
             .anchors = fact;
     }
+    /// The first slot declared since `scope_slots[scope]` that `fact` reaches as a
+    /// place root.
+    pub(super) fn local_place_anchor(&mut self, fact: Fact, scope: usize) -> Option<u32> {
+        let mut roots = std::mem::take(&mut self.anchors.left);
+        roots.clear();
+        self.anchors.collect(fact, &mut roots);
+        // As at a block's close, only a slot whose cleanup drops something.
+        let local = roots.iter().find_map(|root| match root {
+            Root::Place(place) if self.scope_slots[scope..].contains(&place.slot) => {
+                let v = self.var(place.slot);
+                (matches!(v.avail, Avail::Live | Avail::Maybe)
+                    && !self.copies(v.ty)
+                    && v.lent.is_none())
+                .then_some(place.slot)
+            }
+            _ => None,
+        });
+        self.anchors.left = roots;
+        local
+    }
     pub(super) fn retain_anchor_owners(&mut self, fact: Fact) {
         if fact == 0 {
             return;

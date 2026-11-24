@@ -129,7 +129,7 @@ fn room_law_admit(tx: store.Tx, unused: (), author: Caller, take argument: ()) -
 
 fn room_law_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
     room(mut reg, code.describe(room_law_admit), slots(), std.codec.of_u32(), std.codec.of_u32(),
-        RoomBounds(peers: 2u32, state: 4u32, message: 4u32), 1024u64, DEFAULT_STEPS)?
+        RoomBounds(peers: 2u32, state: 4u32, message: 4u32), 4096u64, 1024u64, DEFAULT_STEPS)?
     compute(mut reg, code.describe(room_law_barrier), 4096u64, DEFAULT_STEPS)
 }
 
@@ -138,7 +138,7 @@ fn room_law_barrier(take v: u32) -> Result[u32, Capacity] { Ok(v) }
 fn room_law_large_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
     let state: std.codec.Codec[List[Bytes]] = std.codec.of()
     room(mut reg, code.describe(room_law_admit), slots(), state, std.codec.of_bytes(),
-        RoomBounds(peers: 9u32, state: STATE_MAX, message: MESSAGE_MAX), 1024u64, DEFAULT_STEPS)
+        RoomBounds(peers: 9u32, state: STATE_MAX, message: MESSAGE_MAX), 4096u64, 1024u64, DEFAULT_STEPS)
 }
 
 fn room_law_settings(c: Clock, random: Random, tasks: Tasks, net: Net, large_room: bool) -> PlaceConfig[(), (), (), ()] {
@@ -242,6 +242,13 @@ fn room_law_reached_barrier(connection: wire_client.Conn, c: Clock) -> bool wait
 
 @test
 fn first_admission_installs_adm(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let mut roomless = room_law_settings(c, random, tasks, net, false)
+    roomless.place = code.describe(empty_place)
+    let with_relay = operate_bytes(roomless) ?=> |_| 10u64
+    roomless.session.n_relay = 0u64
+    let without_relay = operate_bytes(roomless) ?=> |_| 10u64
+    if with_relay != without_relay { return Error(10u64) }
+    room_law_watch() ?=> |why| { 20u64 + why }
     let running = fixture.start(room_law_settings(c, random, tasks, net, false), 5000u64) ?=> |_| 1u64
     let sender = room_law_socket(tasks, net, c, random, running, false)
     let Some(author) = room_law_you(sender) else { return Error(2u64) }
@@ -402,7 +409,7 @@ fn room_law_reconnect_identity() -> Result[(), u64] {
     let (owner, _events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
     let watcher_id = RoomSession(low: 1u64, high: 0u64)
     let member_id = RoomSession(low: 2u64, high: 0u64)
-    let mut watcher = room_law_seed_desk(mut relay, rounds, watcher_id, to, inbox, owner, (2u32, 65536u64, Watch))
+    let mut watcher = room_law_seed_desk(mut relay, rounds, watcher_id, to, inbox, owner, (2u32, 65536u64, Join))
     let mut member = room_law_seed_desk(mut relay, rounds, member_id, to, inbox, owner, (2u32, 65536u64, Join))
     // Hand-written wire head: tape's first 16 bytes, 1 + 2 admissions in little endian, true.
     let head = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x03\x00\x00\x00\x00\x00\x00\x00\x01"
@@ -416,7 +423,7 @@ fn room_law_reconnect_identity() -> Result[(), u64] {
     let replacement_id = RoomSession(low: 3u64, high: 0u64)
     let reconnected_id = RoomSession(low: 4u64, high: 0u64)
     let _replacement = room_law_seed_desk(mut relay, rounds, replacement_id, to, inbox, owner, (2u32, 65536u64, Join))
-    let mut reconnected = room_law_seed_desk(mut relay, rounds, reconnected_id, to, inbox, owner, (2u32, 65536u64, Watch))
+    let mut reconnected = room_law_seed_desk(mut relay, rounds, reconnected_id, to, inbox, owner, (2u32, 65536u64, Join))
     let Some(after) = room_law_part(mut relay, rounds, mut reconnected, None) else { return Error(4u64) }
     if after.incarnation != (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64) ||
         after.incarnation == before.incarnation || after.you != Some(2u32) ||
@@ -436,18 +443,18 @@ fn room_law_churn_identity() -> Result[(), u64] {
     let mut watcher = room_law_seed_desk(mut relay, rounds, watcher_id, to, inbox, owner, (256u32, 192u64, Watch))
     let Some(initial) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(10u64) }
     let incarnation = (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64)
-    if initial.incarnation != incarnation || initial.revision != 2u64 || initial.you != Some(1u32) || !initial.snapshot { return Error(11u64) }
+    if initial.incarnation != incarnation || initial.revision != 1u64 || !none(initial.you) || !initial.snapshot { return Error(11u64) }
     for i in 0u64 .. 300u64 {
         let mut member = room_law_seed_desk(mut relay, rounds, member_id, to, inbox, owner, (256u32, 65536u64, Join))
         let Some(joined) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(12u64) }
-        let expected: u32 = int.narrow(2u64 + i)
-        if joined.incarnation != incarnation || joined.revision != 3u64 + 2u64 * i || !joined.snapshot ||
+        let expected: u32 = int.narrow(1u64 + i)
+        if joined.incarnation != incarnation || joined.revision != 2u64 + 2u64 * i || !joined.snapshot ||
             list.len(joined.joined) != 1u64 || list.len(joined.left) != 0u64 { return Error(13u64) }
         let (peer, _) = joined.joined[0u64]
         if peer != expected { return Error(14u64) }
         latest.publish(member.grants, arc.new(empty_room_grants()))
         let Some(left) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(15u64) }
-        if left.incarnation != incarnation || left.revision != 4u64 + 2u64 * i || !left.snapshot ||
+        if left.incarnation != incarnation || left.revision != 3u64 + 2u64 * i || !left.snapshot ||
             list.len(left.left) != 1u64 || left.left[0u64] != expected || list.len(left.joined) != 0u64 { return Error(16u64) }
         room_law_disconnect(mut relay, rounds, inbox, mut member)
     }
@@ -462,7 +469,7 @@ fn room_law_churn_identity() -> Result[(), u64] {
     let Some(first) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(17u64) }
     let Some(last) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(18u64) }
     if first.incarnation != incarnation || last.incarnation != incarnation ||
-        first.revision != 608u64 || last.revision != 608u64 || first.snapshot || !last.snapshot ||
+        first.revision != 607u64 || last.revision != 607u64 || first.snapshot || !last.snapshot ||
         list.len(first.joined) != 5u64 || list.len(last.joined) != 1u64 { return Error(19u64) }
     if let Some(_) = room_law_part(mut relay, rounds, mut watcher, None) { return Error(20u64) }
     Ok(())
@@ -472,6 +479,31 @@ fn room_law_churn_identity() -> Result[(), u64] {
 fn room_roster_identity() -> Result[(), u64] {
     room_law_reconnect_identity()?
     room_law_churn_identity()
+}
+
+fn room_law_watch() -> Result[(), u64] {
+    let mut relay = room_relay_state(provide.random(0u64), 1048576u64, 2u64)
+    let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))
+    let (relay_to, relay_in): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(2u64 * ROOM_RELAY_TOKENS)
+    let (to_owner, _inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(2u64)
+    let watched = RoomSession(low: 1u64, high: 0u64)
+    let watching = RoomSession(low: 2u64, high: 0u64)
+    let mut watcher = room_law_seed_desk(mut relay, rounds, watching, relay_to, relay_in, to_owner, (2u32, 65536u64, Watch))
+    let mut member = room_law_seed_desk(mut relay, rounds, watched, relay_to, relay_in, to_owner, (2u32, 65536u64, Join))
+    let Some(joined) = room_law_part(mut relay, rounds, mut member, None) else { return Error(1u64) }
+    let Some(peer) = joined.you else { return Error(2u64) }
+    let Some(snapshot) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(3u64) }
+    let payload = b"room message"
+    room_owner_send(mut watcher, 0u32, Some(peer), payload) ?=> |_| 4u64
+    if let Ok(_) = channel.try_receive(relay_in) { return Error(5u64) }
+    if peer != 1u32 || list.len(joined.joined) != 1u64 || !snapshot.complete || !none(snapshot.you) ||
+        list.len(snapshot.joined) != 1u64 || snapshot.joined[0u64].0 != 1u32 { return Error(6u64) }
+    room_owner_send(mut member, 0u32, None, payload) ?=> |_| 7u64
+    let Ok(take event) = channel.try_receive(relay_in) else { return Error(8u64) }
+    room_relay_event(mut relay, rounds, take event)
+    let Some(delivered) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(9u64) }
+    if list.len(delivered.msgs) != 1u64 || delivered.msgs[0u64] != (1u32, false, payload) { return Error(10u64) }
+    Ok(())
 }
 
 // Hold both output buffers while eight state changes and one message accumulate.
@@ -619,7 +651,8 @@ fn room_decode_capacity_reports_loss(c: Clock, random: Random, tasks: Tasks, net
 // The law's own isolate adds one 32-byte cause cell (MEM-24).
 @test
 fn room_session_charge_covers_maximum_session() -> Result[(), u64] {
-    let reserve = room_session_charge(RoomMaxima(state: STATE_MAX, message: MESSAGE_MAX, peers: PEERS_MAX), int.widen(LIVE_MAX))
+    let membership_bytes = room_membership_charge(RoomBounds(peers: PEERS_MAX, state: STATE_MAX, message: MESSAGE_MAX), ROOM_ARGS_MAX)
+    let reserve = room_session_charge(membership_bytes, int.widen(MESSAGE_MAX), int.widen(MESSAGE_MAX), int.widen(LIVE_MAX))
     let (relay_to, relay_in): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS)
     let (to_owner, _events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))

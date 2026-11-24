@@ -68,7 +68,11 @@ export class RoomMember {
   // Joined, then states, then messages, then left (one Part, in order).
   apply(part: Part, [states, msgs]: Decoded): void {
     const before = part.complete ? new Set(this.peers.keys()) : undefined;
-    if (part.complete) this.peers.clear();
+    if (part.complete) {
+      this.peers.clear();
+      this.self = undefined;
+      this.full = false;
+    }
     if (part.you.tag === 'Some') { this.self = part.you.value; this.full = false; this.owed = this.stored !== undefined; }
     const joined: number[] = [], set: number[] = [], left: number[] = [];
     for (const [peer, caller] of part.joined) { this.peers.set(peer, {caller, state: undefined}); joined.push(peer); }

@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.60: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.61: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.61 (room bounds and Watch, lane rooms-spec-gaps-2360)
+
+Rooms declare a view allowance and an argument limit. Places with room entries reserve owner and relay bytes from their declarations. Watch receives the roster and broadcasts without occupying a roster place. §1.1 also declares the existing HTTP binding error.
 
 ## CHANGES-v2.60 (JWT principals through a library binding; Runner D4; lane jwt-caller-spec-2373)
 
@@ -1056,7 +1060,7 @@ pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadlin
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone | Conflict(String)   // v2.45: Conflict at tag 4, a transact body that returned Ok after a unique Conflict (STORE-SPEC v2.57 §1.2)
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
-pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds   // v2.17: Bounds (an allowance sum overflows u64); v2.58: RoomBounds (a room's bounds out of range, §4 "Rooms")
+pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError)   // v2.17: Bounds (an allowance sum overflows u64); v2.58: RoomBounds (a room's bounds out of range, §4 "Rooms")
 pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | PublisherStopped   // v2.17: Migrate (v2.45: `on_migrate`, `schema` in Migrate, or `seal`); v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
 pub type Fence: shareable + send { prior: u64, latest: u64 }   // v2.19: a session's release fence (§3 "The release check")
 pub type Caller: codec + send { issuer: u8, subject: Bytes }   // not secret; subject ≤ SUBJECT_MAX; issuer 1 anonymous, later issuers take the next number (§3)
@@ -1090,7 +1094,7 @@ pub const STATE_MAX: u32 = 8192      // v2.58: GUESS
 pub const MESSAGE_MAX: u32 = 32768   // v2.58: GUESS
 pub const LIVE_MAX: u32 = 65536      // v2.58: the largest Live frame; GUESS
 pub const ROOM_ARGS_MAX: u64 = 1024  // v2.58: the largest `n` of a room; GUESS
-pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](mut r: Registry[G, H], admit: StaticFn[fn(Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]], take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, steps: u64) -> Result[(), RegisterError]   // v2.58: RoomBounds when peers is 0 or over PEERS_MAX, state over STATE_MAX, message over MESSAGE_MAX, n over ROOM_ARGS_MAX, or 144 + state + message over LIVE_MAX
+pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](mut r: Registry[G, H], admit: StaticFn[fn(Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]], take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, arg_limit: u64, steps: u64) -> Result[(), RegisterError]   // v2.58: RoomBounds when peers is 0 or over PEERS_MAX, state over STATE_MAX, message over MESSAGE_MAX, arg_limit over ROOM_ARGS_MAX, or 169 + state + message over LIVE_MAX
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity]   // v2.15: u8 issuer ‖ u8 len ‖ subject
 pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError]   // v2.24: the Caller
 pub type BoundCaller: send { caller: Caller, expires_at_ms: Option[u64] }   // v2.57: exclusive Unix-ms expiry, None never expires
@@ -1113,7 +1117,8 @@ pub fn place_head[G: send, H: shareable + inert + send](take db: Db, place: Stat
 pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity]
 ```
 
-- **Rooms (v2.58).** `room` registers a `Room` entry: an admission view `admit` of `query_as`'s shape, with its slots, plus the room's codecs and bounds. `n` is both the view's byte bound and the longest argument a Subscribe may carry. The slots, the view and its key are a `query_as` view's (§3 "Shared views"). The contract is §4 "Rooms".
+- `InvalidBinding(BindError)` reports a rejected HTTP operation binding, including the operation name and the failed check.
+- **Rooms (v2.58).** `room` registers a `Room` entry: an admission view `admit` of `query_as`'s shape, with its slots, plus the room's codecs and bounds. `n` is the admission view's byte allowance. `arg_limit` bounds the encoded Subscribe argument and may be at most `ROOM_ARGS_MAX`. The slots, the view and its key are a `query_as` view's (§3 "Shared views"). The contract is §4 "Rooms".
 
 
 - **Slot binding (v2.46, astra 1995 #11).** `place` is capability-free and runs before any store is open (rule 10), so a slot names its table through a static selector `fn(H) -> Table[K, V]`, never a `Table` value. Describe and the query key (rule 3) use only the slot's declaration-order name, its ordered key schema (`std.codec.key_of[K]()`) and its value schema (`std.codec.of[V]()`), so Describe needs no H and no open; its diagnostic `Migrate` run on an empty memory store (§5) installs nothing in the serving Registry. After the one `schema` call (rule 12), the publisher calls each selector with its share of H and checks that the returned Table's key schema and current value schema are byte-equal to the slot's, else `place_head` returns `Place(Bounds)` before it serves. Each `cover` a run records is checked against its bound slot's StoreId and table id (the incarnation, STORE-SPEC I3) before anything is enumerated; a name that is no slot, or a table that is not the bound one, ends the view like a faulted run, `Failed(Raised(5))`. So two same-typed tables can never satisfy each other's slot. A slot's image is the union of its covers, each (slot, key) emitted at most once, and its rows are the difference of two images (v2.53, §3 "Slot images").
@@ -1481,43 +1486,44 @@ bound bytes n {
 - On a `Reset` or transport loss, the client clears the public image immediately and issues a data-free invalidation after all affected subscriptions become Pending. It ignores groups for retired ids. A new instance's first `complete` publishes an image from empty (F11). A repair's `complete` carries a full image, and the SDK publishes its difference from the current image.
 - A token that names open, version and subscription state, with bounded retention, is a later rung. Its field and its meaning are added together.
 
-**Rooms (v2.58; rewritten in v2.59 as built at 54f8dc37).** A room carries live presence between the sessions that hold a membership in it. Each member has one typed State S that every member sees, and members send addressed Messages M to the whole room or to one peer. S and M belong to the application. The runner knows only their codecs and bounds and names no application type, so the primitive stays general and domain-agnostic (Sam's ruling). Nothing in a room is stored, replayed, recorded (§7) or ordered against commits. Evidence is READ from `core/programs/runner/runner-room-relay.hirsel` and the other `runner-room*.hirsel` files unless a law is named.
+**Rooms (v2.58; rewritten in v2.59 as built at 54f8dc37).** A room carries live presence between the sessions that hold a membership in it. Each `Join` member has one typed State S that every member sees and can send addressed Messages M to the whole room or to one peer. S and M belong to the application. The runner knows only their codecs and bounds and names no application type, so the primitive stays general and domain-agnostic (Sam's ruling). Nothing in a room is stored, replayed, recorded (§7) or ordered against commits. Evidence is READ from `core/programs/runner/runner-room-relay.hirsel` and the other `runner-room*.hirsel` files unless a law is named.
 
 - **The entry and its admission view.** `runner.room` (§1.1) registers a `Room` entry: an admission view of `query_as`'s shape, plus the room's codecs and bounds. A membership is a Subscribe to that entry with argument A. The room is named by (entry, A's bytes), so sessions that subscribe with equal argument bytes share one room. The admission view is an ordinary shared view (G2, G3, §3 "Shared views"). Its `Grant` value and slot rows arrive in ordinary Batch groups, its read set fences, and a commit that changes its answer re-grants. Under rule 13 the runner makes no auth decision. It enforces the Grant the view returns, mechanically:
 
   | Grant | holds a roster place | `Set` | `Send` to the room | `Send` to one peer | receives Parts |
   |---|---|---|---|---|---|
   | `Denied` | no | dropped | dropped | dropped | none |
-  | `Watch` | yes | dropped | dropped | yes | yes |
+  | `Watch` | no | dropped | dropped | dropped | yes |
   | `Join` | yes | yes | yes | yes | yes |
 
 - **When a grant takes effect.** Each round, the publisher stages every joined session's room grants with that round's version b. It does this after G2 step 2 and before step 3's fences. Each session has one grant register, which holds the prior set, the latest set and b. The owner and the relay read the latest set only once R ≥ b, so a grant change takes effect together with the round's fences and R = b. Changes from one round to the next:
   - any grant to `Denied` ends the membership;
-  - `Join` to `Watch` clears the member's state;
-  - `Denied` to a grant starts a new membership with a new peer id.
+  - `Join` to `Watch` frees the roster place and clears the member's state. The watcher receives a fresh complete image without `you`;
+  - `Watch` to `Join` waits for a roster place and receives a new peer id on admission;
+  - `Denied` to `Watch` or `Join` starts a new membership under that grant.
 
   A session that ends (`Left`), and a publisher `Halt`, revoke all of a session's grants.
 - **Refusals at Subscribe.** A room Subscribe is refused as any Subscribe is (§3: `max_subs`, the subscription quota), and also in these cases:
-  - an argument longer than the entry's `n`: `Ended(sub, Refused(Budget(Room{requested: |A|, available: n})))`;
+  - an encoded argument longer than the entry's `arg_limit`: `Ended(sub, Refused(Budget(Room{requested: |A|, available: arg_limit})))`;
   - a ninth live room membership on one session (`ROOMS_PER_SESSION` = 8): `Refused(NotAllowed)`;
   - an owner that cannot allocate its room state: `Refused(Budget(..))`.
 - **Admission to the roster.** One relay task per place holds every roster.
-  - **Waiting.** A granted membership waits in one FIFO across the place, ordered by when its grant took effect. The relay admits the oldest waiter whose room has a free place (`RoomBounds.peers`), or whose new roster record fits the relay's room bytes.
+  - **Waiting.** A granted membership waits in one FIFO across the place, ordered by when its grant took effect. The relay admits the oldest waiter that fits: a `Join` needs a free roster place (`RoomBounds.peers`), and a `Watch` can use a full roster. Either can start a roster record if it fits the relay's room bytes.
   - **`full`.** A waiter the relay cannot place gets one Part with `full` set, no `you` and `complete` false, once per wait.
-  - **Admission.** On admission the relay mints the member's peer id. The membership's first Part carries `complete` and `you` (law `first_admission_installs_adm`).
+  - **Admission.** On admission to a roster place the relay mints the member's peer id. Both kinds of membership receive a first Part with `complete`. A `Join` also receives `you` (law `first_admission_installs_adm`).
   - **Peer ids.** Ids increase from 1 within each incarnation. The pair (incarnation, peer id) identifies an admission. Peer 0 names no member.
-  - **Incarnation and revision.** A roster with no members and no waiters is dropped. The relay draws a 16-byte incarnation from the place's randomness on creation and before the first admission to a retained roster after it empties. Each incarnation starts with peer counter 1 and revision 1. Each admission and removal adds 1 to the revision.
-  - **Exhaustion.** A roster whose next id reaches 2³² − 1 admits no one more, and its waiters stay `full`.
-  - **The waiter guarantee.** The owner installs a membership only when it accepts the Part that carries `you`. So a `Set` or `Send` from a waiter, from a sub not yet live or from an earlier membership is dropped. A value set while waiting never becomes the member's state. The member's first state is its first `Set` after `you` (law `waiter_set_not_installed_after_promotion`).
+  - **Incarnation and revision.** A roster stays live while it has a peer, watcher or waiter. The relay draws a 16-byte incarnation from the place's randomness on creation and before the first admission to a retained roster after its last peer and watcher leave. Each incarnation starts with peer counter 1 and revision 1. Each roster join and removal adds 1 to the revision.
+  - **Exhaustion.** A roster whose next id reaches 2³² − 1 admits no more peers. Waiters with `Join` stay `full`.
+  - **The waiter guarantee.** A Join can publish only after the owner accepts the Part that carries `you`. So a `Set` or `Send` from a waiter, from a sub not yet live or from an earlier membership is dropped. A value set while waiting never becomes the member's state. The member's first state is its first `Set` after `you` (law `waiter_set_not_installed_after_promotion`).
 - **Roster diffs.** For each roster place, a member keeps the peer id it was last told and a changed mark. A join, a leave or a state change marks that place for every member. For each place a Part includes, the Part carries:
   - `joined`: (peer, Caller), for a peer id the receiver has not been told;
   - `states`: (peer, the current state bytes, or `None` for no state);
   - `left`: a told peer id that is gone.
 
-  The receiver applies `joined`, `states`, `msgs` and `left` in that order. The `complete` Part of a membership starts a new roster image of every occupied place. When that image does not fit one Part, the rest follows in later Parts. A state diff carries the current value, not each `Set`, so states coalesce and the newest wins. Every member's Caller is in `joined`, which is how a receiver knows who sent a message.
+  The receiver applies `joined`, `states`, `msgs` and `left` in that order. The `complete` Part of a membership starts a new roster image of every occupied place. When that image does not fit one Part, the rest follows in later Parts. A state diff carries the current value, not each `Set`, so states coalesce and the newest wins. Every peer's Caller is in `joined`, which is how a receiver knows who sent a message.
 - **Messages.**
   - **Message blocks.** Each session owner holds `ROOM_MSG_BLOCKS` = 4 message blocks of the place's largest message bound. A `Send` takes one. With none free, the `Send` is dropped and its sender's `lost` gains 1. The relay returns a block once it has copied the message.
-  - **Targets.** The relay copies the message into each target's ring. A `Send` to the room reaches every member except the sender. A `Send` to peer p reaches only the member whose id is p. Peer 0, and an id that is not a member, reach no one (law `direct_destination_survives_full_block`). The relay checks the sender's grant and each receiver's grant at the current round.
+  - **Targets.** The relay copies the message into each target's ring. A `Send` to the room reaches every other peer and every watcher. A `Send` to peer p reaches only the member whose id is p. Peer 0, and an id that is not a member, reach no one (law `direct_destination_survives_full_block`). The relay checks the sender's grant and each receiver's grant at the current round.
   - **The ring.** Each session has one receive ring of `ROOM_RING_BYTES` = 65,536 bytes, shared by all its rooms. Each message in the ring is tagged with the receiver's admission. A message that does not fit adds 1 to that receiver's `gap`. A message tagged with an earlier admission of the receiver is dropped silently.
   - **The sender's `joined` first.** A message is delivered only once the receiver has been told the sender's id, in an earlier Part or in the same one. A message whose sender left before that is dropped, and the receiver's `gap` gains 1.
   - **Order.** Messages from one sender to one receiver arrive in send order. No other order holds: none across senders, and none between `Live` and `Batch`.
@@ -1542,23 +1548,23 @@ bound bytes n {
 - **Frames.**
   - **Client to server.** `Set(sub, Option[Bytes])` has tag 9 and `Send(sub, Option[u32], Bytes)` has tag 10.
   - **Server to client.** `Live(List[Part])` has tag 11. A `Part` is `{sub: u32, complete: bool, you: Option[u32], incarnation: (u64, u64), revision: u64, snapshot: bool, joined: List[(u32, Caller)], states: List[(u32, Option[Bytes])], msgs: List[(u32, bool, Bytes)], left: List[u32], gap: u32, lost: u32, full: bool}`. Two little-endian words carry the 16 incarnation bytes in order. `snapshot` means all pending roster changes through the given revision have been told after applying this Part. A `full` Part for a waiter carries zero incarnation bytes and revision 0, with `snapshot` false. In `msgs`, the bool marks a direct send.
-  - **Size.** A `Live` frame is at most min(`LIVE_MAX`, `socket.max_frame`) bytes. A Part with a maximal state and a maximal message needs 169 + `state` + `message` bytes. If that does not fit, the place refuses to start with `Exceeds(Bound("socket.max_frame", ..))`.
+  - **Size.** A `Live` frame is at most min(`LIVE_MAX`, `socket.max_frame`) bytes. A Part with a room's maximal state and maximal message needs 169 + `state` + `message` bytes. If that does not fit, the place refuses to start with `Exceeds(Bound("socket.max_frame", ..))`.
   - **Vectors.** Law `frame_sizer_matches_vectors` pins the `Set`, `Send` and `Live` encodings against `core/programs/runner/frame-vectors.json`.
 - **Session charging (MEM-20, L15).**
-  - **The owner.** When `n_relay` > 0, every owner task is spawned with `room_session_charge`, computed at the runner-wide maxima (`STATE_MAX`, `MESSAGE_MAX`, `PEERS_MAX`, `LIVE_MAX`). That charge covers:
-    - the desk with its two Live buffers and its ring;
-    - the four message blocks;
-    - one largest decode;
-    - `ROOMS_PER_SESSION` memberships of the largest room.
+  - **The owner.** A place with no room entries reserves zero owner or relay bytes for rooms. For a place that declares rooms, each owner task reserves:
+    - the desk with two Live buffers at min(`LIVE_MAX`, `socket.max_frame`) and its ring;
+    - four message blocks at the largest declared message size;
+    - one decode at the largest declared state or message size;
+    - `ROOMS_PER_SESSION` times the largest membership charge of any declared room. Each charge uses that room's `arg_limit`, `state` and `peers`.
 
-    The blocks keep the owner's record when they move to the relay. The start check counts this reservation inside the session ceiling (`WIRE_SESSION_CEILING`), and `serving_bytes` counts it in each owner's floor (law `room_session_charge_covers_maximum_session`).
-  - **The relay.** `n_relay` must hold the relay's inbox, `ROOM_RELAY_TOKENS` per session, its desk table, and one roster at `ROOM_ARGS_MAX` and the place's largest `peers`. Otherwise the place refuses to start and names `n_relay`. Each roster is charged against the rest of `n_relay`. A room whose roster cannot be charged leaves its waiters `full`.
+    The blocks keep the owner's record when they move to the relay. The start check counts this reservation inside `WIRE_SESSION_CEILING`, and `operate_bytes` counts it in each owner's floor (law `room_session_charge_covers_maximum_session`).
+  - **The relay.** `n_relay` must hold the relay's inbox, `ROOM_RELAY_TOKENS` per session, its desk table, and the largest roster charge of any declared room. Each roster's bound uses that room's `arg_limit` and `peers`. If the budget is too small, the place refuses to start and names `n_relay`. Each live roster is charged against the rest of `n_relay` using its actual argument size and declared peer count. A room whose roster cannot be charged leaves its waiters `full`.
   - **The admission view.** It is charged on the session's `budget` ledger like any subscription.
-- **Leaving.** A membership ends on `Unsubscribe`, on a grant of `Denied`, or when the session ends. The relay frees the place and marks it changed, so every other member gets `left`. A room sub that is leaving does not block its successor (law `leaving_sub_does_not_block_successor`). Rooms exist only in sessions (§14.4), so `serve` votes idle only when no owner remains. A bound session's expiry ends its memberships with the session (L62; the room case is OPEN there).
-- **Not specified here.** A membership revision on the wire, a room incarnation and a kick API are new design that goes with runner slice R1 of docs/spec/webrtc.md ("Build slices"); until R1 lands, an application kicks by changing what its admission view answers.
+- **Leaving.** A membership ends on `Unsubscribe`, on a grant of `Denied`, or when the session ends. If it held a roster place, the relay frees it and marks it changed so receivers that saw the peer get `left`. A room sub that is leaving does not block its successor (law `leaving_sub_does_not_block_successor`). Rooms exist only in sessions (§14.4), so `serve` votes idle only when no owner remains. A bound session's expiry ends its memberships with the session (L62; the room case is OPEN there).
+- **Kick.** An application removes a member by making its admission view return `Denied`. The kick API is specified in docs/spec/webrtc.md ("Build slices").
 - **Constants** (GUESS values; changing one changes `hirsel.4` only where it bounds a frame): `PEERS_MAX` 256, `STATE_MAX` 8,192, `MESSAGE_MAX` 32,768, `LIVE_MAX` 65,536, `ROOM_ARGS_MAX` 1,024, `ROOMS_PER_SESSION` 8, `ROOM_MSG_BLOCKS` 4, `ROOM_RING_BYTES` 65,536.
 - **The nine room laws** (RUN: green at 54f8dc37 per the hirsel4-cutover-2276 REPORT, which counts nine room laws but names only laws 1–8 below. This spec counts the room frame vector law as the ninth; all in `core/programs/runner/runner_owner_laws.hirsel` except the vector law, which is in `core/programs/runner/runner-wire-protocol-law.hirsel`):
-  1. `first_admission_installs_adm`: the first member gets peer 1 and the second peer 2, each in a `complete` Part with `you`. A broadcast reaches the other member once. A third session gets `full`, and on a leave it is promoted as peer 3, whose broadcast then arrives once.
+  1. `first_admission_installs_adm`: the first member gets peer 1 and the second peer 2, each in a `complete` Part with `you`. A broadcast reaches the other member once. A third session gets `full`, and on a leave it is promoted as peer 3, whose broadcast then arrives once. The view allowance exceeds the argument limit. A roomless place costs the same with or without `n_relay`. A Watch member receives an image and a broadcast without appearing in the roster or sending a direct message.
   2. `waiter_set_not_installed_after_promotion`: a waiter's `Set` before promotion is never shown. An observer sees the promoted peer's state as `None`, then the value set after `you`.
   3. `direct_destination_survives_full_block`: two direct sends of a maximal message each reach their own peer once and no one else. Sends to peer 0 and to an id that is not a member reach no one.
   4. `message_delivered_under_full_state_churn`: one buffer is held, then eight maximal states and one maximal message arrive. The message is delivered with three state diffs and `gap` 0. The oracle is hand-derived: 65,536 − 42 − 32,777 bytes holds three 8,204-byte diffs.

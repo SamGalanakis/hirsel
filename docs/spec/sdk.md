@@ -112,7 +112,7 @@ view, so `value()` is its `Grant` (`{tag: 'Denied'}`, `{tag: 'Watch'}` or
 the State and Message types the room registered. The room's live part adds:
 
 - `self`: this membership's peer id, set by the Part that carries `you`, and
-  undefined while waiting, `full` or between sessions.
+  undefined with `Watch`, while waiting, when `full` or between sessions.
 - `peers()`: the roster, a map from peer id to `{caller, state}`, where `state`
   is the peer's newest State or undefined.
 - `set(state)`: the newest value wins. `undefined` clears. The SDK writes a

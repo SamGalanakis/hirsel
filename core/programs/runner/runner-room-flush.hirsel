@@ -50,7 +50,7 @@ fn room_head_message(relay: RoomRelay, peers: List[Option[RoomPeer]], member: Ro
 }
 
 fn reserve_room_part(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, room_bytes: u64, head: Option[RingMessage]) -> Option[RoomPartSlots] {
-    let you_bytes = if member.complete { 4u64 } else { 0u64 }
+    let you_bytes = if member.complete && member.peer != 0u32 { 4u64 } else { 0u64 }
     let capacity = int.checked_sub(room_bytes, ROOM_PART_FIXED + you_bytes)?
     let mut sender: Option[u64] = None
     let mut diff_size = 0u64
@@ -194,7 +194,7 @@ fn room_flush_part(relay: RoomRelay, seat: RoomSeat, mut ring: RoomRing, mut liv
     let mut room_to_send: u64 = plan.available
     if let Some(entry) = message { room_to_send += 9u64 + int.widen(entry.len) }
     room_live_append(mut live, identity, scoped fn(mut out: Bytes) {
-        let you = if member.complete { Some(member.peer) } else { None }
+        let you = if member.complete && member.peer != 0u32 { Some(member.peer) } else { None }
         // Every roster change marks its slot. An unblocked plan includes every pending slot.
         room_part_start(mut out, member.sub, member.complete, you, roster.incarnation, roster.revision, !plan.blocked_state)
         room_write_joins(relay, peers, member, plan, mut out)

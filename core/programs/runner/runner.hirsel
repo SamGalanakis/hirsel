@@ -208,7 +208,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     }
     if launch.dry_run && !launch_emit(b"hirsel dry-run\n") { return Error(Missing("dry-run report output")) }
     let sized_store = place_store(p, report)
-    let (take options, _, store_bytes, take follower_plan) = match take sized_store {
+    let (take options, _, store_bytes, take follower_plan, (claims, rooms)) = match take sized_store {
         Ok(take sized) => take sized,
         Error(take e) => {
             if let Some(_) = launch.install { return finish_install(Error(take e)) }
@@ -243,7 +243,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let serving_total = match serving_bytes(wire_config, limit, n_place) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
+    let serving_total = room_serving_bytes(wire_config, limit, n_place, rooms) ?=> Full
     let serve_slots = serve_inbox_capacity(limit)
     // The supervisor allocates this channel before the serving task starts.
     let serving_reserve = serving_total - option.unwrap(charge.channel(bytes[ServeInput], serve_slots))
@@ -260,7 +260,6 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     }
 
     let head = place_head_bytes(n_place, n_publisher, trigger_bytes(trigger_config)) ?=> Full
-    let claims = keyed_place_bytes(place, n_place) ?=> Full
     let funded_head = add_place_bytes(head, claims - recovery_inbox_slot()) ?=> Full
     let allowance = add_place_bytes(funded_head, store_bytes) ?=> Full
     let activity = cut_activity()?
@@ -335,7 +334,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
                     let (take addresses, take session_wire, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
                     let target = string.from(current.target)
                     let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
-                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place,
+                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms,
                         head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain),
                         status: latest.handle(status), idle: idle, first_write: match hosting { Some(host) => Some(channel.sender(host.ack)), None => None }, report: report)
                     let run: fn(take ServePlace[G, H, B]) -> () waits = run_serve_place
@@ -592,7 +591,7 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
 }
 
 pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
-    let (take options, _, _, _) = place_store(p, Some(errors))?
+    let (take options, _, _, _, _) = place_store(p, Some(errors))?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image)
 }
@@ -3674,19 +3673,6 @@ pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[O
 
 pub fn writer_bytes() -> u64 { 4096u64 }
 
-pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
-    if c.n_granted > WIRE_SESSION_CEILING { return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING)) }
-    if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
-    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + reserved_room_owner(c))
-    // Use less supervisor room when a caller deliberately serves fewer owners.
-    let metadata = 2097152u64 + owners * 6711u64
-    let overhead = if metadata < WIRE_OVERHEAD { metadata } else { WIRE_OVERHEAD }
-    // The place's one Registry, built once under bytes n_place for every session.
-    let fixed = match int.checked_add(overhead + floors, n_place) { Some(f) => f, None => return Error(Capacity(requested: n_place, available: 0xffffffffffffffffu64 - (overhead + floors))) }
-    let pooled = add_place_bytes(fixed, c.n_pool)?
-    add_place_bytes(pooled, c.n_relay)
-}
-
 pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
@@ -4716,7 +4702,7 @@ type SessionTask { handle: Task[Result[(), std.wsock.Error]], wake: Option[Sende
 
 type ServeTransport {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock,
-    limit: u64, proxies: List[std.wsock.Prefix], publisher: Sender[PubIn], inbox: Receiver[ServeInput], to: Sender[ServeInput],
+    limit: u64, room_owner_bytes: u64, proxies: List[std.wsock.Prefix], publisher: Sender[PubIn], inbox: Receiver[ServeInput], to: Sender[ServeInput],
 }
 
 type ServeDrain { events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]], report: Option[Stderr] }
@@ -4728,7 +4714,7 @@ fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
 type ServePlace[G: send, H: shareable + inert + send, B: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, random: Random, wire: Option[Wire[G, B]],
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[HeadInput],
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, rooms: RoomPlan, head: Sender[HeadInput],
     inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]], report: Option[Stderr],
 }
 
@@ -4740,17 +4726,17 @@ fn run_serve_place[G: send, H: shareable + inert + send, B: send](take seed: Ser
 
 fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
     let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
-        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
+        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
     let registered = match placed(place, n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
-    let relay = start_room_relay(registered, config, limit, pub_to, tasks, random)?
+    let relay = start_room_relay(rooms, config, limit, pub_to, tasks, random)?
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
         let mut service = wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
         if let Some((ports, _)) = relay { service.context.room_link = Some(copy_room_link(ports)) }
         take service
     }
     let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock,
-        limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
+        limit: limit, room_owner_bytes: rooms.owner_bytes, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
     let served = serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place))
     if let Some((_, take relay_task)) = take relay { let _ = task.cancel_join(take relay_task) }
     match take served {
@@ -4760,7 +4746,7 @@ fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: Ser
 
 fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[ServeDrain], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[u64, std.wsock.Error] waits {
     let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: time,
-        limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
+        limit: limit, room_owner_bytes, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
     let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, time, config.n_pool, 1024u64, take allocate)
     let (allocation, allocation_task) = match take allocated {
@@ -4893,7 +4879,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks,
                     control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle { Some(life) => life.report, None => None })
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
-                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted + reserved_room_owner(config)), take job, run)
+                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted + room_owner_bytes), take job, run)
                 map.insert(mut owners, id, SessionTask(handle: take handle, wake: None, retirement: take retirement))
             },
         }
@@ -4915,7 +4901,7 @@ pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, 
     let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
         let (to, inbox): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(serve_inbox_capacity(max_sessions))
         let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock,
-            limit: max_sessions, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
+            limit: max_sessions, room_owner_bytes: 0u64, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
         match serve_sockets(take transport, None, make, take allocate) { Ok(_) => Ok(()), Error(problem) => Error(problem) }
     }
     match take served { Ok(take ended) => take ended, Error(cap) => Error(Allocation(cap)) }

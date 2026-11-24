@@ -51,7 +51,7 @@ fn same_room_membership(a: RoomGrant, b: RoomGrant) -> bool {
 
 fn room_accept_state(member: RoomMember, effective: RoomGrant, admission: u64, publish_epoch: u32) -> bool {
     member.admission != 0u64 && member.admission == admission && same_room_membership(member.grant, effective) &&
-        effective.publish_epoch == publish_epoch && room_permits(ChangeState, effective.grant)
+        effective.publish_epoch == publish_epoch && room_joined(effective.grant)
 }
 
 fn room_update_state(mut member: RoomMember, value: Option[View[Bytes]]) {
@@ -66,14 +66,6 @@ fn room_update_state(mut member: RoomMember, value: Option[View[Bytes]]) {
 fn room_accept_loss(mut member: RoomMember, admission: u64, lost: u32) {
     if admission != 0u64 && member.admission == admission {
         member.lost = int.saturating_add(member.lost, lost)
-    }
-}
-
-fn room_target(destination: Option[u32], from_peer: u32, to_peer: u32) -> bool {
-    if to_peer == 0u32 { return false }
-    match destination {
-        Some(peer) => to_peer == peer,
-        None => to_peer != from_peer,
     }
 }
 

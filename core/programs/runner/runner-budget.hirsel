@@ -22,18 +22,54 @@ fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, C
     add_place_bytes(head, grant)
 }
 
+pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
+    room_serving_bytes(c, owners, n_place, no_rooms())
+}
+
+fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
+    if c.n_granted > WIRE_SESSION_CEILING { return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING)) }
+    if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
+    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + rooms.owner_bytes)
+    // Use less supervisor room when a caller deliberately serves fewer owners.
+    let metadata = 2097152u64 + owners * 6711u64
+    let overhead = if metadata < WIRE_OVERHEAD { metadata } else { WIRE_OVERHEAD }
+    // The place's one Registry, built once under bytes n_place for every session.
+    let fixed = match int.checked_add(overhead + floors, n_place) { Some(f) => f, None => return Error(Capacity(requested: n_place, available: 0xffffffffffffffffu64 - (overhead + floors))) }
+    let pooled = add_place_bytes(fixed, c.n_pool)?
+    add_place_bytes(pooled, rooms.relay_bytes)
+}
+
 pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    let (claims, rooms) = place_reservations(p.place, n_place, p.session)?
+    operate_reservation(p, n_place, claims, rooms)
+}
+
+fn place_reservations[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, c: WireConfig) -> Result[(u64, RoomPlan), Capacity] {
+    let (count, rooms) = match placed(place, n_place) {
+        Ok(reg) => (keyed_registry_count(reg), plan_rooms(reg, c)),
+        Error(_) => (Some(0u64), no_rooms()),
+    }
+    let capacity: Capacity = Capacity(requested: 18446744073709551615u64, available: n_place)
+    let Some(declared) = count else { return Error(capacity) }
+    let Some(claims) = claim_recovery_bytes(declared) else { return Error(capacity) }
+    Ok((claims, rooms))
+}
+
+fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
     let head = place_head_bytes(n_place, p.n_publisher, trigger_bytes(p.triggers))?
-    let funded_head = add_place_bytes(head, keyed_place_bytes(p.place, n_place)?)?
-    let serving = serving_bytes(p.session, p.max_sessions, n_place)?
+    let funded_head = add_place_bytes(head, claims)?
+    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms)?
     let tasks = add_place_bytes(funded_head, serving)?
     add_place_bytes(tasks, OPERATE_OWN_BYTES)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan]), StartError] waits {
-    let overhead = operate_bytes(p) ?=> Full
+fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
+    let launch = launch_env()
+    let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    let (claims, rooms) = place_reservations(p.place, n_place, p.session) ?=> Full
+    let overhead = operate_reservation(p, n_place, claims, rooms) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()
     let kind: store.Kind = match p.backing {
@@ -60,7 +96,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
     let head_store = if let Sim(_) = p.backing {
         store.planned_sim_bytes(plan, weak_room) ?=> Full
     } else { store.planned_bytes(plan) }
-    Ok((store.planned_options(plan), share, head_store, store.planned_capture(plan)))
+    Ok((store.planned_options(plan), share, head_store, store.planned_capture(plan), (claims, rooms)))
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {

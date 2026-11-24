@@ -221,11 +221,11 @@ fn room_owner_finish(take closing: RoomOwner) -> () waits {
     }
 }
 
-fn room_pen_grant(owner: RoomOwner, pen: RoomPen, action: RoomAction) -> Option[(RoomGrant, u64)] {
+fn room_pen_grant(owner: RoomOwner, pen: RoomPen) -> Option[(RoomGrant, u64)] {
     if pen.leaving { return None }
     let current = room_grant_at(owner.link.round_read, owner.grants, pen.sub)?
     let (epoch, adm) = pen.membership?
-    if current.instance != pen.instance || current.member_epoch != epoch || !room_permits(action, current.grant) { return None }
+    if current.instance != pen.instance || current.member_epoch != epoch || !room_joined(current.grant) { return None }
     Some((current, adm))
 }
 
@@ -242,7 +242,7 @@ fn room_owner_set(mut owner: RoomOwner, sub: u32, state: Option[Bytes]) -> Resul
     let (current, adm, validation) = {
         let pen = option.unwrap(list.get(owner.pens, index))
         let Some(pending) = pen else { return Ok(()) }
-        let Some((grant, adm)) = room_pen_grant(owner, pending, ChangeState) else { return Ok(()) }
+        let Some((grant, adm)) = room_pen_grant(owner, pending) else { return Ok(()) }
         let checked = match state {
             Some(value) => {
                 if list.len(value) > int.widen(pending.bounds.state) { return Error(1002u16) }
@@ -276,14 +276,10 @@ fn room_owner_set(mut owner: RoomOwner, sub: u32, state: Option[Bytes]) -> Resul
 fn room_owner_send(mut owner: RoomOwner, sub: u32, to: Option[u32], message: Bytes) -> Result[(), u16] {
     let Some(index) = room_owner_slot(owner, sub) else { return Ok(()) }
     if let Some(0u32) = to { return Ok(()) }
-    let action = if let Some(target) = to {
-        if target == 0u32 { return Ok(()) }
-        SendToPeer
-    } else { SendToRoom }
     let (current, adm, validation) = {
         let pen = option.unwrap(list.get(owner.pens, index))
         let Some(pending) = pen else { return Ok(()) }
-        let Some((grant, adm)) = room_pen_grant(owner, pending, action) else { return Ok(()) }
+        let Some((grant, adm)) = room_pen_grant(owner, pending) else { return Ok(()) }
         if list.len(message) > int.widen(pending.bounds.message) { return Error(1002u16) }
         (grant, adm, (pending.codec.message)(message))
     }

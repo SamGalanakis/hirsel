@@ -31,10 +31,11 @@ type RoomEntry: send {
 
 pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](
     mut r: Registry[G, H], admit: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]],
-    take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, steps: u64
+    take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds,
+    n: u64, arg_limit: u64, steps: u64
 ) -> Result[(), RegisterError] {
     if bounds.peers == 0u32 || bounds.peers > PEERS_MAX || bounds.state > STATE_MAX ||
-        bounds.message > MESSAGE_MAX || n > ROOM_ARGS_MAX || room_live_minimum(bounds.state, bounds.message) > int.widen(LIVE_MAX) {
+        bounds.message > MESSAGE_MAX || arg_limit > ROOM_ARGS_MAX || room_live_minimum(bounds.state, bounds.message) > int.widen(LIVE_MAX) {
         return Error(RoomBounds)
     }
     let state_schema = std.codec.schema(state) ?=> |_| Bounds
@@ -45,7 +46,7 @@ pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](
         let check_m = fn(raw: Bytes) -> RoomCodecCheck { decode_room_value(message, raw) }
         RoomCodecs(state: take check_s, message: take check_m)
     }
-    let definition = RoomEntry(bounds, arg_limit: n, state_schema: take state_schema, message_schema: take message_schema,
+    let definition = RoomEntry(bounds, arg_limit, state_schema: take state_schema, message_schema: take message_schema,
         codecs: take make, index)
     register_query(mut r, As(admit), take declarations, store.copy_env, n, steps, Some(take definition))
 }
@@ -91,20 +92,41 @@ fn encode_room_schema(value: Bytes, declarations: List[SlotSchema], definition: 
     Ok(take result)
 }
 
-type RoomMaxima { state: u32, message: u32, peers: u32 }
+type RoomPlan: send {
+    owner_bytes: u64,
+    relay_bytes: u64,
+    live_limit: u64,
+    min_frame: u64,
+    message: u64,
+    roster: u64,
+}
 
-fn room_maxima[G: send, H: shareable + inert + send](r: Registry[G, H]) -> RoomMaxima {
-    let mut result = RoomMaxima(state: 0u32, message: 0u32, peers: 0u32)
+fn no_rooms() -> RoomPlan {
+    RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64)
+}
+
+fn plan_rooms[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig) -> RoomPlan {
+    let mut plan = no_rooms()
+    let mut per_sub = 0u64
+    let mut decode = 0u64
     for (_, entry) in r.slots {
         if let Query(_, _, query_entry) = entry {
             if let Some(registered) = query_entry.ephemeral {
-                result.state = order.max(result.state, registered.bounds.state)
-                result.message = order.max(result.message, registered.bounds.message)
-                result.peers = order.max(result.peers, registered.bounds.peers)
+                let bounds = registered.bounds
+                per_sub = order.max(per_sub, room_membership_charge(bounds, registered.arg_limit))
+                decode = order.max(decode, int.widen(order.max(bounds.state, bounds.message)))
+                plan.message = order.max(plan.message, int.widen(bounds.message))
+                plan.min_frame = order.max(plan.min_frame, room_live_minimum(bounds.state, bounds.message))
+                plan.roster = order.max(plan.roster, room_roster_bytes(registered.arg_limit, int.widen(bounds.peers)))
             }
         }
     }
-    result
+    if plan.roster != 0u64 {
+        plan.live_limit = order.min(int.widen(LIVE_MAX), c.socket.max_frame)
+        plan.owner_bytes = room_session_charge(per_sub, plan.message, decode, plan.live_limit)
+        plan.relay_bytes = c.n_relay
+    }
+    plan
 }
 
 fn room_relay_charge(limit: u64) -> u64 {
@@ -116,10 +138,7 @@ fn room_decode_bytes(len: u64) -> u64 { 2u64 * len + 4096u64 }
 
 // The owner allocates every block below under the session's limit, and the
 // blocks keep that record when they move to the relay (MEM-20).
-fn room_session_charge(m: RoomMaxima, frame_limit: u64) -> u64 {
-    let state: u64 = int.widen(m.state)
-    let message: u64 = int.widen(m.message)
-    let peers: u64 = int.widen(m.peers)
+fn room_session_charge(per_sub: u64, message: u64, decode: u64, frame_limit: u64) -> u64 {
     let live = option.unwrap(charge.boxed(bytes[RoomLiveBuffer])) + option.unwrap(charge.seq(1u64, frame_limit + 10u64)) +
         option.unwrap(charge.seq(bytes[RoomPartRange], ROOMS_PER_SESSION))
     let desk = option.unwrap(charge.boxed(bytes[RoomDesk])) + 2u64 * live + option.unwrap(charge.seq(1u64, ROOM_RING_BYTES)) +
@@ -131,45 +150,42 @@ fn room_session_charge(m: RoomMaxima, frame_limit: u64) -> u64 {
     let block = option.unwrap(charge.boxed(bytes[RoomMsgBlock])) + option.unwrap(charge.seq(1u64, message))
     let owner = option.unwrap(charge.seq(bytes[Option[Box[RoomPen]]], ROOMS_PER_SESSION)) +
         option.unwrap(charge.seq(bytes[Box[RoomMsgBlock]], ROOM_MSG_BLOCKS)) + ROOM_MSG_BLOCKS * block +
-        room_decode_bytes(order.max(state, message))
-    // Pen, Carrier and Seat each hold one state; the Seat also holds the
-    // room key, the Caller and the per-peer told and changed slots. The two
-    // codec checks each capture one Codec, whose size does not depend on V.
-    let per_sub = 2u64 * option.unwrap(charge.round(bytes[std.codec.Codec[Bytes]])) + option.unwrap(charge.boxed(bytes[RoomPen])) + option.unwrap(charge.boxed(bytes[RoomCarrier])) +
-        option.unwrap(charge.boxed(bytes[RoomSeat])) + 3u64 * option.unwrap(charge.seq(1u64, state)) +
-        option.unwrap(charge.seq(1u64, ROOM_ARGS_MAX)) + option.unwrap(charge.seq(1u64, SUBJECT_MAX)) +
-        option.unwrap(charge.seq(bytes[u32], peers)) + option.unwrap(charge.seq(bytes[u8], peers))
+        room_decode_bytes(decode)
     desk + owner + ROOMS_PER_SESSION * per_sub
 }
 
-fn start_room_relay[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig,
+fn room_membership_charge(bounds: RoomBounds, arg_limit: u64) -> u64 {
+    let state: u64 = int.widen(bounds.state)
+    let peers: u64 = int.widen(bounds.peers)
+    // Pen, Carrier and Seat each hold one state; the Seat also holds the
+    // room key, the Caller and the per-peer told and changed slots. The two
+    // codec checks each capture one Codec, whose size does not depend on V.
+    2u64 * option.unwrap(charge.round(bytes[std.codec.Codec[Bytes]])) + option.unwrap(charge.boxed(bytes[RoomPen])) + option.unwrap(charge.boxed(bytes[RoomCarrier])) +
+        option.unwrap(charge.boxed(bytes[RoomSeat])) + 3u64 * option.unwrap(charge.seq(1u64, state)) +
+        option.unwrap(charge.seq(1u64, arg_limit)) + option.unwrap(charge.seq(1u64, SUBJECT_MAX)) +
+        option.unwrap(charge.seq(bytes[u32], peers)) + option.unwrap(charge.seq(bytes[u8], peers))
+}
+
+fn start_room_relay(plan: RoomPlan, c: WireConfig,
     limit: u64, pub_to: Sender[PubIn], tasks: Tasks, random: Random) -> Result[Option[(RoomLink, Task[()])], StartError] waits {
-    let maxima = room_maxima(r)
-    if maxima.peers == 0u32 { return Ok(None) }
-    let maximum: u64 = int.widen(LIVE_MAX)
-    let frame_limit = order.min(maximum, c.socket.max_frame)
-    let needed = room_live_minimum(maxima.state, maxima.message)
-    if needed > frame_limit { return Error(Exceeds(Bound(name: "socket.max_frame", value: needed, limit: frame_limit))) }
-    // Each owner task reserves the charge at the global maxima, so the check counts that.
-    let peak = int.saturating_add(wire_variable_peak(c), int.saturating_add(c.n_granted, reserved_room_owner(c)))
+    if plan.roster == 0u64 { return Ok(None) }
+    if plan.min_frame > plan.live_limit {
+        return Error(Exceeds(Bound(name: "socket.max_frame", value: plan.min_frame, limit: plan.live_limit)))
+    }
+    let peak = int.saturating_add(wire_variable_peak(c), int.saturating_add(c.n_granted, plan.owner_bytes))
     if peak > WIRE_SESSION_CEILING { return Error(Exceeds(Bound(name: "session peak", value: peak, limit: WIRE_SESSION_CEILING))) }
     let channel_bytes = room_relay_charge(limit)
     let relay_fixed = channel_bytes + option.unwrap(charge.seq(bytes[RoomSession], limit)) +
         option.unwrap(charge.map(bytes[RoomSession], bytes[Box[RoomDesk]], limit)) + 4096u64
-    let one_room = room_roster_bytes(ROOM_ARGS_MAX, int.widen(maxima.peers))
-    if c.n_relay < relay_fixed + one_room { return Error(Exceeds(Bound(name: "n_relay", value: relay_fixed + one_room, limit: c.n_relay))) }
+    let relay_min = relay_fixed + plan.roster
+    if plan.relay_bytes < relay_min { return Error(Exceeds(Bound(name: "n_relay", value: relay_min, limit: plan.relay_bytes))) }
     let (answer, reply): (Sender[Latest[RoundAt]], Receiver[Latest[RoundAt]]) = channel.new(1u64)
     if let Error(_) = channel.send(pub_to, PubIn(e: RoomRounds(take answer))) { return Error(Open(PublisherStopped)) }
     let Ok(take rounds) = channel.receive(reply) else { return Error(Open(PublisherStopped)) }
     let (to, inbox): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS * limit)
-    let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: int.widen(maxima.message), live_limit: frame_limit)
-    let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, random, room_bytes: c.n_relay - relay_fixed, max_sessions: limit)
-    let task_bytes = c.n_relay - channel_bytes
+    let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: plan.message, live_limit: plan.live_limit)
+    let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, random, room_bytes: plan.relay_bytes - relay_fixed, max_sessions: limit)
+    let task_bytes = plan.relay_bytes - channel_bytes
     let spawned = task.try_spawn(tasks, bytes task_bytes, take seed, room_relay_run) ?=> |(cap, _)| Full(cap)
     Ok(Some((take link, take spawned)))
-}
-
-fn reserved_room_owner(c: WireConfig) -> u64 {
-    if c.n_relay == 0u64 { return 0u64 }
-    room_session_charge(RoomMaxima(state: STATE_MAX, message: MESSAGE_MAX, peers: PEERS_MAX), int.widen(LIVE_MAX))
 }

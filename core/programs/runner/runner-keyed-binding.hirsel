@@ -223,17 +223,3 @@ fn keyed_open_report(mut line: String, name: Bytes, detail: String) {
     string.push(mut line, " ")
     string.push(mut line, detail)
 }
-
-fn keyed_place_bytes[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[u64, Capacity] {
-    let count = match placed(place, n_place) {
-        Ok(reg) => keyed_registry_count(reg),
-        Error(_) => Some(0u64),
-    }
-    let Some(declared) = count else {
-        return Error(Capacity(requested: 18446744073709551615, available: n_place))
-    }
-    let Some(requested_bytes) = claim_recovery_bytes(declared) else {
-        return Error(Capacity(requested: 18446744073709551615, available: n_place))
-    }
-    Ok(requested_bytes)
-}

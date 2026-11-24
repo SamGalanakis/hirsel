@@ -25,7 +25,7 @@ fn room_grant_epoch(prior: Option[RoomGrant], sub: u32, instance: u64, grant: Gr
         if old.instance == instance {
             member = old.member_epoch
             publish_epoch = old.publish_epoch
-            if !room_denied(old.grant) && room_denied(grant) { member = int.checked_add(member, 1u32)? }
+            if !room_denied(old.grant) && old.grant != grant { member = int.checked_add(member, 1u32)? }
             if room_joined(old.grant) && !room_joined(grant) { publish_epoch = int.checked_add(publish_epoch, 1u32)? }
         }
     }
@@ -34,16 +34,6 @@ fn room_grant_epoch(prior: Option[RoomGrant], sub: u32, instance: u64, grant: Gr
 
 fn room_denied(g: Grant) -> bool { match g { Denied => true, _ => false } }
 fn room_joined(g: Grant) -> bool { match g { Join => true, _ => false } }
-
-type RoomAction = ChangeState | SendToRoom | SendToPeer
-
-fn room_permits(action: RoomAction, grant: Grant) -> bool {
-    match grant {
-        Denied => false,
-        Watch => match action { SendToPeer => true, _ => false },
-        Join => true,
-    }
-}
 
 fn selected_room_grant(register: RoomGrantSet, committed: u64, sub: u32) -> Option[RoomGrant] {
     let side = if register.round <= committed { register.latest } else { register.prior }

@@ -45,7 +45,7 @@ fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.Regist
     let cursor: std.codec.Codec[Cursor] = std.codec.of()
     let note: std.codec.Codec[Note] = std.codec.of()
     runner.room(mut registry, code.describe(packed_room), query_slots()?, cursor, note,
-        runner.RoomBounds(peers: 4u32, state: 8u32, message: 64u32), 1024u64, runner.DEFAULT_STEPS)
+        runner.RoomBounds(peers: 4u32, state: 8u32, message: 64u32), 1024u64, 1024u64, runner.DEFAULT_STEPS)
 }
 
 fn by_id(id: u64, value: Item) -> Result[List[u64], Capacity] {

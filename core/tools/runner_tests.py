@@ -30,11 +30,10 @@ import shutil
 import subprocess
 import tempfile
 import time
-from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
-from runner_host import BUCKET_HOST_LAWS, cutover_survives_host_loss, runner_idle_stop, unpinned
+from runner_host import BUCKET_HOST_LAWS, cold_wake_trigger, cutover_survives_host_loss, runner_idle_stop, unpinned, wait_ready
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
 
@@ -340,7 +339,7 @@ POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
              'missing_store_mount', 'install_child', 'install_child_crash', 'cutover_survives_host_loss',
-             *BUCKET_HOST_LAWS)
+             'cold_wake_trigger', *BUCKET_HOST_LAWS)
 
 
 def host_law(args, root, work, engine, name):
@@ -366,10 +365,11 @@ def host_law(args, root, work, engine, name):
     operator = state / 'operator.sock'
 
     recovery_law = name == 'cutover_survives_host_loss'
+    entry = {'cutover_survives_host_loss': 'identity_main', 'cold_wake_trigger': 'cold_wake_main'}.get(name, 'host_main')
 
     def publish(n_place, root_limit=268435456):
         command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
-                   '--entry', 'store_crash@1/runner_crash/' + ('identity_main' if recovery_law else 'host_main'),
+                   '--entry', f'store_crash@1/runner_crash/{entry}',
                    '--backend', engine,
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
                    '--limit', str(root_limit), '--n-place', str(n_place), '--dir', 'live',
@@ -380,8 +380,10 @@ def host_law(args, root, work, engine, name):
 
     old_n_place, new_n_place = 1048576, 2097152
     old_recipe = publish(old_n_place)
-    new_recipe = publish(old_n_place, 269484032) if recovery_law else publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
-    if name not in ('missing_store_mount', 'install_child'):
+    if name in ('missing_store_mount', 'install_child', 'cold_wake_trigger'):
+        new_recipe = old_recipe
+    else:
+        new_recipe = publish(old_n_place, 269484032) if recovery_law else publish(new_n_place)
         assert old_recipe != new_recipe, 'OLD and NEW must have distinct recipes'
 
     with socket.socket() as probe:
@@ -394,18 +396,7 @@ def host_law(args, root, work, engine, name):
               '--code-store', str(publish_store)]
 
     def ready():
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                with urlopen(f'http://{address}/hirsel/status', timeout=5) as response:
-                    status = json.load(response)
-                if status['phase'] == 'ready':
-                    return status
-            except OSError:
-                if time.monotonic() > deadline:
-                    raise
-            assert time.monotonic() < deadline, 'the place did not become Ready'
-            time.sleep(0.05)
+        return wait_ready(address)
 
     def welcome_n_place():
         with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
@@ -439,9 +430,12 @@ def host_law(args, root, work, engine, name):
                 return False
 
     @contextmanager
-    def running_host():
+    def running_host(idle_ms=None):
         with tempfile.TemporaryFile(mode='w+') as log:
-            host = subprocess.Popen([compiler, 'host', '--state', str(state)], stdout=log, stderr=log)
+            command = [compiler, 'host', '--state', str(state)]
+            if idle_ms is not None:
+                command += ['--idle-ms', str(idle_ms)]
+            host = subprocess.Popen(command, stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 120
                 while time.monotonic() < deadline and host.poll() is None and not listening():
@@ -468,6 +462,9 @@ def host_law(args, root, work, engine, name):
         request = re.search(r'^request ([0-9a-f]{32})$', result.stderr, re.M)
         assert request, f'{case} did not name its request first: {result.stderr}'
         return request.group(1), json.loads(result.stdout.strip().splitlines()[-1])
+
+    if name == 'cold_wake_trigger':
+        return cold_wake_trigger(compiler, engine, state, address, old_n_place, register, running_host, outcome, ready)
 
     if recovery_law:
         return cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register,

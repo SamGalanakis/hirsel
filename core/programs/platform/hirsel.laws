@@ -1,18 +1,18 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=27d764f8d1a76b1d sig=6877e8df79e13c7b run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=fcb2dc77eef62954 sig=2f03d3804936410f run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_idle_unload src=96645c626483b4c8 sig=99c58785b5d490de run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_one_head src=5125014e3f5f1a38 sig=c171e2a8a690ac53 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=ec444f1c6f7233e4 sig=032132bec5b1c635 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_route_during_unload src=18a23113c65057cd sig=ca8a86ed7f840ba3 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_platform_serve_budgets src=0270c2bdaff3cb6b sig=20e826ef46c339a4 run=ad4c20fab40b1abf bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=fcb2dc77eef62954 sig=2f03d3804936410f run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=96645c626483b4c8 sig=99c58785b5d490de run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=5125014e3f5f1a38 sig=c171e2a8a690ac53 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=ec444f1c6f7233e4 sig=032132bec5b1c635 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=18a23113c65057cd sig=ca8a86ed7f840ba3 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_platform_serve_budgets src=0270c2bdaff3cb6b sig=20e826ef46c339a4 run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=aa20763357c03eb0 sig=86024ed6563bfe92 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=842a91a50ff4214a run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_activation_witness_distinguishes_prepared src=0499f1d40c74179e sig=122991e003d293a2 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_hand_install_adopts_at_12 src=2d3852ffffe59970 sig=d009e4d8a8b6747b run=dbf6722727633166 bug=- oracle=- rows=pending
 platform@1/platform/bucket_moved_activation_recovery src=92d2a9b907ac958f sig=c90955f9f0ff0a47 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=c6657ad788aa183c sig=d0c69e1a6f2eb909 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/deploy_admission_policy src=184178f58987a446 sig=73335017a35d22c2 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+platform@1/platform/deploy_admission_policy src=deb0a4ef78f29ae0 sig=acd6e56e63e47056 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=925d38d5439cc05f sig=2925fb1be6edd081 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_preview src=6f795ce6fd0472be sig=77acbab6dd420a23 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/front_catalog_routes_sni src=8a3f3c270e815751 sig=5e7dd7ec9ec9d506 run=b1818af2b24835d3 bug=- oracle=- rows=pending

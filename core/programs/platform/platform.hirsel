@@ -272,7 +272,9 @@ type Prep {
 // the verifier's Need parts so far and whether the last came, the approval text the
 // operator must confirm, the image being assembled, the launcher's failure with its
 // payload, or the host's own policy refusal.
-pub type AdmitStage: codec + send = Uploading(List[launcher.Wanted], bool) | Confirming(String) | Assembling | Unadmitted(launcher.Failure) | Rejected(String)
+// Uploading counts the keys the verifier has asked for and whether its last Need came:
+// the relay of each chunk reads this stage, so it holds no list that grows with the closure.
+pub type AdmitStage: codec + send = Uploading(u64, bool) | Confirming(String) | Assembling | Unadmitted(launcher.Failure) | Rejected(String)
 
 type Admitting {
     // The operator request this admission runs for.
@@ -1945,7 +1947,7 @@ fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher
     let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
     list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
     let mut w = vol_read(h, name)
-    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(list.new(), false), summary: None, ended: complete, genesis: genesis))
+    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(0u64, false), summary: None, ended: complete, genesis: genesis))
     vol_put(mut h, name, take w)
 }
 
@@ -2688,14 +2690,11 @@ fn needed(mut h: Host, a: launcher.Attempt, keys: List[launcher.Wanted], done: b
     let Some(d) = vol_read(h, name).admit else {
         return
     }
-    let mut parts: List[launcher.Wanted] = match d.stage {
-        Uploading(sofar, _) => clone(sofar),
+    let requested = match d.stage {
+        Uploading(sofar, _) => sofar + list.len(keys),
         _ => return,
     }
-    for k in keys {
-        list.push(mut parts, clone(k))
-    }
-    set_stage(mut h, name, Uploading(take parts, done))
+    set_stage(mut h, name, Uploading(requested, done))
     if let Some(conn) = owner_of(h, d.request) {
         say(mut h, conn, NeedAnswer(clone(d.request), a, clone(keys), done), false)
     }

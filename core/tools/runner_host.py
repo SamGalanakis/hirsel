@@ -5,9 +5,12 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
 import struct
 import tempfile
+import time
+from urllib.request import urlopen
 
 from case_progress import run_case
 from store_tests import inputs
@@ -64,6 +67,75 @@ def t1_release_identity(raw, expected_allowance):
     assert u32() == 0 and offset == len(raw)  # HTTP bindings
     return hashlib.sha256(b'\x12hirsel.identity.v1' + revision + allowance + exports
                           + raw[start:offset] + slots).digest()
+
+
+def wait_ready(address):
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            with urlopen(f'http://{address}/hirsel/status', timeout=5) as response:
+                status = json.load(response)
+            if status['phase'] == 'ready':
+                return status
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+        assert time.monotonic() < deadline, 'the place did not become Ready'
+        time.sleep(0.05)
+
+
+def cold_wake_trigger(compiler, engine, state, address, n_place, register, running_host, outcome, ready):
+    def serving_child(host):
+        children = Path(f'/proc/{host.pid}/task/{host.pid}/children')
+        found = []
+        for pid in children.read_text().split():
+            try:
+                argv = (Path('/proc') / pid / 'cmdline').read_bytes().split(b'\0')
+            except FileNotFoundError:
+                continue
+            if b'--hirsel-wake' in argv:
+                found.append(pid)
+        assert len(found) <= 1, found
+        return found[0] if found else None
+
+    with running_host(idle_ms=1000) as (host, _):
+        _, registered = outcome(register, 'cold_wake_trigger:register')
+        assert registered['phase'] == 'installed', registered
+        image = state / 'objects' / 'images' / ready()['digest']
+
+        def call(entry, arg):
+            result = checked([compiler, 'call', str(image), '--url', f'ws://{address}/hirsel',
+                              '--n-place', str(n_place), '--timeout', '10',
+                              '--', f'runner_crash/{entry}', '--arg', str(arg)],
+                             engine=engine, case=f'cold_wake_trigger:{entry}')
+            return json.loads(result.stdout)
+
+        first = serving_child(host)
+        assert first is not None, 'the first serving child did not start'
+        armed = call('cold_arm', 4000)
+        assert armed['tag'] == 'Returned' and armed['value']['tag'] == 'Ok', armed
+        due_ms = armed['value']['value']
+        due_ns = time.monotonic_ns() + due_ms * 1_000_000 - time.time_ns()
+        while serving_child(host) == first:
+            assert time.monotonic_ns() < due_ns, 'the place did not idle out before the trigger was due'
+            time.sleep(0.02)
+        assert serving_child(host) is None, 'the place restarted before going cold'
+        assert time.monotonic_ns() < due_ns, 'the place was never observed cold before the trigger was due'
+
+        # Connecting to the listener could wake it. Wait for the launcher to start
+        # a replacement before probing readiness or making any application call.
+        deadline = due_ns + 60_000_000_000
+        while (woken := serving_child(host)) is None:
+            assert time.monotonic_ns() < deadline, 'the due trigger did not wake the place'
+            time.sleep(0.02)
+        assert woken != first, 'the original process was still serving'
+        assert time.monotonic_ns() >= due_ns, 'the new process started before the trigger was due'
+        assert ready()['n_place'] == n_place
+        wake_ms = (time.monotonic_ns() - due_ns) / 1_000_000
+        answered = call('cold_probe', 5)
+        assert answered == {'tag': 'Returned', 'value': {'tag': 'Ok', 'value': 46}}, answered
+        assert serving_child(host) == woken, 'the answer did not come from the due-time launch'
+        print(f'cold_wake_trigger wake_to_ready_ms={wake_ms:.1f}', flush=True)
 
 
 def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register, deploy,

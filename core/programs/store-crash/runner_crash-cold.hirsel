@@ -1,0 +1,73 @@
+// The real-process cold-wake fixture: one transacted trigger writes a marker, one
+// ordinary entry arms it, and one ordinary entry answers with the marker it can read.
+// Its wire is unbound, so `hirsel call` (an anonymous Hello) reaches it.
+type ColdHandles: shareable + send {
+    data: store.Table[u64, u64],
+    triggers: runner.triggers.Tables
+}
+
+fn cold_schema(mut d: store.Declare) -> Result[ColdHandles, store.Error] {
+    let ts = runner.triggers.declare_tables(mut d)?
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    let declared = store.declare_table(mut d, "cold-wake-data", std.codec.key_u64(), codec)?
+    Ok(ColdHandles(data: store.finish(mut d, take declared)?, triggers: take ts))
+}
+
+fn cold_entry() -> runner.triggers.Entry[u64] {
+    result.unwrap(runner.triggers.transact(code.describe(cold_mark)))
+}
+
+fn cold_entries() -> runner.triggers.Entries {
+    let mut entries = runner.triggers.empty_entries()
+    result.unwrap(runner.triggers.allow(mut entries, cold_entry()))
+    entries
+}
+
+fn cold_arm(mut tx: store.Tx, h: ColdHandles, author: runner.Caller, take delay: u64) -> Result[u64, u32] {
+    let due = store.info(mut tx).at + delay
+    match runner.triggers.write(mut tx, clone(h.triggers), cold_entries(), cold_entry(), 41u64, At(due)) {
+        Ok(_) => Ok(due),
+        Error(_) => Error(3u32),
+    }
+}
+
+fn cold_mark(mut tx: store.Tx, h: ColdHandles, author: runner.Caller, take value: u64) -> Result[u64, u32] {
+    result.unwrap(store.put(mut tx, h.data, 1u64, value))
+    Ok(value)
+}
+
+fn cold_probe(mut tx: store.Tx, h: ColdHandles, author: runner.Caller, take arg: u64) -> Result[u64, u32] {
+    let marker = match store.fetch(tx, h.data, 1u64) {
+        Ok(Some(n)) => n,
+        _ => 0u64,
+    }
+    Ok(marker + arg)
+}
+
+fn cold_grants(seed: (), h: ColdHandles, take ctx: runner.TriggerContext) -> Result[(), Capacity] {
+    let _ = take ctx
+    Ok(())
+}
+
+fn cold_place(mut r: runner.Registry[(), ColdHandles]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: ColdHandles) -> runner.triggers.Tables {
+        clone(h.triggers)
+    })
+    runner.transact(mut r, code.describe(cold_arm), 131072u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(cold_mark), 131072u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(cold_probe), 131072u64, runner.DEFAULT_STEPS)
+}
+
+pub fn cold_wake_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let mut wire = runner.wire_defaults(131072u64)
+        wire.n_pool = 4194304u64
+        wire.socket.max_frame = 131072u64
+        let mut disk = options()
+        disk.lock_wait_ms = 10000u64
+        let config: runner.PlaceConfig[(), ColdHandles, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(cold_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(cold_schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: Some(runner.TriggerConfig(entries: cold_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: cold_grants, grant_bytes: 65536u64)), idle: None)
+        let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
+        Ok(ended)
+    }
+    runner.main(argv, process, errors, tasks, c, code.describe(cold_place), code.describe(cold_schema), serve)
+}

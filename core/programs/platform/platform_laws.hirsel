@@ -1611,7 +1611,7 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     }
     expect(needs == 2u64 && is_none(error_on(r5, up)), "slow upload: the operator was not relayed both Need parts")
     let waiting = match deploy_admission(r5.h, "g") {
-        Some(Uploading(keys, done)) => done && list.len(keys) == 2u64,
+        Some(Uploading(keys, done)) => done && keys == 2u64,
         _ => false
     }
     expect(waiting, "slow upload: the admission lost its Need parts across the end and the collection")

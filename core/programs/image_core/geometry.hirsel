@@ -1,0 +1,174 @@
+pub type Rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32
+}
+
+pub fn auto_orient(source: Raster, orientation: u8, limits: Limits) -> Result[Raster, Error] {
+    match (bound steps limits.max_steps {
+        orient_inner(source, orientation, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn orient_inner(source: Raster, orientation: u8, limits: Limits) -> Result[Raster, Error] {
+    let len = check_raster(source, limits)?
+    if orientation < 1 || orientation > 8 {
+        return Error(Malformed)
+    }
+    let w: u64 = int.widen(source.width)
+    let h: u64 = int.widen(source.height)
+    let (tw, th) = if orientation >= 5 {
+        (h, w)
+    } else {
+        (w, h)
+    }
+    let mut output = alloc_bytes(len)?
+    if orientation < 5 {
+        for y in 0u64 .. th {
+            let sy = if orientation >= 3 {
+                h - 1 - y
+            } else {
+                y
+            }
+            for x in 0u64 .. tw {
+                let sx = if orientation == 2 || orientation == 3 {
+                    w - 1 - x
+                } else {
+                    x
+                }
+                let word: u32 = list.word_be(source.rgba, (sy * w + sx) * 4)
+                list.put_word_be(mut output, word)
+            }
+        }
+    } else {
+        list.fill(mut output, len, 0)
+        for by in 0u64 .. (th + 63) / 64 {
+            for bx in 0u64 .. (tw + 63) / 64 {
+                for y in by * 64 .. order.min(th, (by + 1) * 64) {
+                    for x in bx * 64 .. order.min(tw, (bx + 1) * 64) {
+                        let sx = if orientation >= 7 {
+                            w - 1 - y
+                        } else {
+                            y
+                        }
+                        let sy = if orientation == 6 || orientation == 7 {
+                            h - 1 - x
+                        } else {
+                            x
+                        }
+                        let word: u32 = list.word_be(source.rgba, (sy * w + sx) * 4)
+                        list.set_word_be(mut output, (y * tw + x) * 4, word)
+                    }
+                }
+            }
+        }
+    }
+    Ok(Raster(width: int.narrow(tw), height: int.narrow(th), rgba: take output))
+}
+
+pub fn crop(source: Raster, area: Rect, limits: Limits) -> Result[Raster, Error] {
+    match (bound steps limits.max_steps {
+        crop_inner(source, area, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn crop_inner(source: Raster, area: Rect, limits: Limits) -> Result[Raster, Error] {
+    check_raster(source, limits)?
+    check_size(area.width, area.height, 1, limits)?
+    if area.x >= source.width || area.y >= source.height || area.width > source.width - area.x || area.height > source.height - area.y {
+        return Error(Malformed)
+    }
+    let len = rgba_size(area.width, area.height)?
+    let mut output = alloc_bytes(len)?
+    let width: u64 = int.widen(source.width)
+    let x: u64 = int.widen(area.x)
+    let y: u64 = int.widen(area.y)
+    let w: u64 = int.widen(area.width)
+    let h: u64 = int.widen(area.height)
+    for row in y .. y + h {
+        let at = (row * width + x) * 4
+        list.append(mut output, list.slice(source.rgba, at, at + w * 4))
+    }
+    Ok(Raster(width: area.width, height: area.height, rgba: take output))
+}
+
+// The fill color is an RGBA word in big-endian byte order.
+pub fn pad(source: Raster, width: u32, height: u32, x: u32, y: u32, fill: u32, limits: Limits) -> Result[Raster, Error] {
+    match (bound steps limits.max_steps {
+        pad_inner(source, width, height, x, y, fill, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn pad_inner(source: Raster, width: u32, height: u32, x: u32, y: u32, fill: u32, limits: Limits) -> Result[Raster, Error] {
+    check_raster(source, limits)?
+    check_size(width, height, 1, limits)?
+    if x >= width || y >= height || source.width > width - x || source.height > height - y {
+        return Error(Malformed)
+    }
+    let len = rgba_size(width, height)?
+    let mut output = alloc_bytes(len)?
+    for _ in 0u64 .. len / 4 {
+        list.put_word_be(mut output, fill)
+    }
+    let left: u64 = int.widen(x)
+    let top: u64 = int.widen(y)
+    let w: u64 = int.widen(width)
+    let sw: u64 = int.widen(source.width)
+    let sh: u64 = int.widen(source.height)
+    for row in 0u64 .. sh {
+        let at = (row + top) * w + left
+        list.copy_from_slice(mut output, at * 4, list.slice(source.rgba, row * sw * 4, (row + 1) * sw * 4))
+    }
+    Ok(Raster(width: width, height: height, rgba: take output))
+}
+
+// Porter-Duff source-over in linear light, clipped to the destination.
+pub fn composite(dest: Raster, source: Raster, x: i64, y: i64, limits: Limits) -> Result[Raster, Error] {
+    match (bound steps limits.max_steps {
+        composite_inner(dest, source, x, y, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn composite_inner(dest: Raster, source: Raster, x: i64, y: i64, limits: Limits) -> Result[Raster, Error] {
+    let len = check_raster(dest, limits)?
+    check_raster(source, limits)?
+    let mut output = alloc_bytes(len)?
+    list.append(mut output, dest.rgba)
+    let sw: i64 = int.widen(source.width)
+    let sh: i64 = int.widen(source.height)
+    let dw: i64 = int.widen(dest.width)
+    let dh: i64 = int.widen(dest.height)
+    if x < dw && y < dh && x > -sw && y > -sh {
+        for sy in order.max(0, y) .. order.min(dh, y + sh) {
+            for sx in order.max(0, x) .. order.min(dw, x + sw) {
+                let dst: u64 = int.narrow((sy * dw + sx) * 4)
+                let src: u64 = int.narrow(((sy - y) * sw + sx - x) * 4)
+                let alpha = source.rgba[src + 3]
+                if alpha == 255 {
+                    let fg: u32 = list.word_be(source.rgba, src)
+                    list.set_word_be(mut output, dst, fg)
+                } else if alpha != 0 {
+                    let front = premultiply(source.rgba, src)
+                    let back = premultiply(dest.rgba, dst)
+                    let factor = 65535 - front.a
+                    let mixed = LinearPixel(r: front.r + (back.r * factor + 32767) / 65535, g: front.g + (back.g * factor + 32767) / 65535, b: front.b + (back.b * factor + 32767) / 65535, a: front.a + (back.a * factor + 32767) / 65535)
+                    list.set_word_be(mut output, dst, straight(mixed))
+                }
+            }
+        }
+    }
+    Ok(Raster(width: dest.width, height: dest.height, rgba: take output))
+}

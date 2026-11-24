@@ -27,6 +27,10 @@ media_bits = { major = 1, path = "../media_bits" }
 "avif_sequence.hirsel" = "image"
 "avif_mux.hirsel" = "image"
 
+"geometry.hirsel" = "image"
+"linear.hirsel" = "image"
+"resize.hirsel" = "image"
+
 [tests]
 limit = 16777216
 grants = []
@@ -35,3 +39,4 @@ grants = []
 "probe_laws.hirsel" = "tests"
 "codec_laws.hirsel" = "tests"
 "container_laws.hirsel" = "tests"
+"resize_laws.hirsel" = "tests"

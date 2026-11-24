@@ -1,0 +1,232 @@
+// Window normalization and kernels follow fast_image_resize
+// src/convolution/{mod,filters}.rs. The separable fixed-point passes follow
+// pic-scale src/{filter_weights,fixed_point_horizontal,fixed_point_vertical}.rs. Intermediate rows
+// stay in a ring indexed by source row; the widest vertical window sets its size.
+pub type Filter = Lanczos3 | CatmullRom | Mitchell | Bilinear | Box
+
+type Axis {
+    scale: f64,
+    filter_scale: f64,
+    radius: f64,
+    source: u64,
+    identity: bool
+}
+
+type Weights {
+    first: u64,
+    lo: u64,
+    hi: u64
+}
+
+const PI: f64 = 3.141592653589793
+
+fn kernel_radius(filter: Filter) -> f64 {
+    match filter {
+        Lanczos3 => 3.0,
+        CatmullRom => 2.0,
+        Mitchell => 2.0,
+        Bilinear => 1.0,
+        Box => 0.5,
+    }
+}
+
+fn sinc(x: f64) -> f64 {
+    if float.eq(x, 0.0) {
+        1.0
+    } else {
+        std.float.sin(PI * x) / (PI * x)
+    }
+}
+
+fn kernel(filter: Filter, distance: f64) -> f64 {
+    let x = float.abs(distance)
+    match filter {
+        Box => if float.gt(distance, -0.5) && float.le(distance, 0.5) {
+            1.0
+        } else {
+            0.0
+        },
+        Bilinear => if float.lt(x, 1.0) {
+            1.0 - x
+        } else {
+            0.0
+        },
+        Lanczos3 => if float.lt(x, 3.0) {
+            sinc(x) * sinc(x / 3.0)
+        } else {
+            0.0
+        },
+        CatmullRom => {
+            if float.lt(x, 1.0) {
+                (1.5 * x - 2.5) * x * x + 1.0
+            } else if float.lt(x, 2.0) {
+                ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0
+            } else {
+                0.0
+            }
+        },
+        Mitchell => {
+            if float.lt(x, 1.0) {
+                (7.0 * x / 6.0 - 2.0) * x * x + 8.0 / 9.0
+            } else if float.lt(x, 2.0) {
+                ((2.0 - 7.0 * x / 18.0) * x - 10.0 / 3.0) * x + 16.0 / 9.0
+            } else {
+                0.0
+            }
+        },
+    }
+}
+
+fn axis(source: u64, target: u64, filter: Filter) -> Axis {
+    let a: f64 = float.from_int(source)
+    let b: f64 = float.from_int(target)
+    let scale = a / b
+    let filter_scale: f64 = if float.lt(scale, 1.0f64) {
+        1.0
+    } else {
+        scale
+    }
+    Axis(scale: scale, filter_scale: filter_scale, radius: filter_scale * kernel_radius(filter), source: source, identity: source == target)
+}
+
+fn tap_range(domain: Axis, pixel: u64) -> (u64, u64, f64) {
+    let pos: f64 = float.from_int(pixel)
+    if domain.identity {
+        return (pixel, pixel + 1, pos)
+    }
+    let canvas: f64 = float.from_int(domain.source)
+    let center = (pos + 0.5) * domain.scale
+    let left = center - domain.radius
+    let right = center + domain.radius
+    let start: u64 = if float.le(left, 0.0) {
+        0
+    } else {
+        result.unwrap(float.to_int(float.floor(left)))
+    }
+    let end: u64 = if float.ge(right, canvas) {
+        domain.source
+    } else {
+        result.unwrap(float.to_int(float.ceil(right)))
+    }
+    (start, end, center - 0.5)
+}
+
+fn fill_weights(domain: Axis, filter: Filter, output: u64, mut table: List[i64]) -> Result[Weights, Error] {
+    let (start, end, center) = tap_range(domain, output)
+    let mut sum: f64 = 0.0
+    for source in start .. end {
+        let x: f64 = float.from_int(source)
+        sum += kernel(filter, (x - center) / domain.filter_scale)
+    }
+    let lo = list.len(table)
+    if let Error(_) = list.try_reserve(mut table, end - start) {
+        return Error(ByteLimit)
+    }
+    let mut running: f64 = 0.0
+    let mut committed = 0i64
+    for source in start .. end {
+        let x: f64 = float.from_int(source)
+        running += kernel(filter, (x - center) / domain.filter_scale)
+        let rounded: i64 = if source + 1 == end {
+            16384
+        } else {
+            result.unwrap(float.to_int(float.round(running * 16384.0 / sum)))
+        }
+        list.push(mut table, rounded - committed)
+        committed = rounded
+    }
+    Ok(Weights(first: start, lo: lo, hi: list.len(table)))
+}
+
+fn weighted(mut total: LinearPixel, pixel: LinearPixel, weight: i64) {
+    total.r += pixel.r * weight
+    total.g += pixel.g * weight
+    total.b += pixel.b * weight
+    total.a += pixel.a * weight
+}
+
+fn normalized_component(value: i64) -> i64 {
+    order.max(0, order.min(65535, (value + 8192) >> 14))
+}
+
+fn normalized(p: LinearPixel) -> LinearPixel {
+    LinearPixel(r: normalized_component(p.r), g: normalized_component(p.g), b: normalized_component(p.b), a: normalized_component(p.a))
+}
+
+pub fn resize(source: Raster, width: u32, height: u32, filter: Filter, limits: Limits) -> Result[Raster, Error] {
+    match (bound steps limits.max_steps {
+        resize_inner(source, width, height, filter, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn resize_inner(source: Raster, width: u32, height: u32, filter: Filter, limits: Limits) -> Result[Raster, Error] {
+    check_raster(source, limits)?
+    check_size(width, height, 1, limits)?
+    let length = rgba_size(width, height)?
+    if width == source.width && height == source.height {
+        let mut unchanged = alloc_bytes(length)?
+        list.append(mut unchanged, source.rgba)
+        return Ok(Raster(width: width, height: height, rgba: take unchanged))
+    }
+    let sw: u64 = int.widen(source.width)
+    let sh: u64 = int.widen(source.height)
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    let horizontal = axis(sw, w, filter)
+    let vertical = axis(sh, h, filter)
+    let mut wx: List[Weights] = list.new()
+    if let Error(_) = list.try_reserve(mut wx, w) {
+        return Error(ByteLimit)
+    }
+    let mut x_coefficients: List[i64] = list.new()
+    for x in 0u64 .. w {
+        let window = fill_weights(horizontal, filter, x, mut x_coefficients)?
+        list.push(mut wx, window)
+    }
+    let radius: u64 = result.unwrap(float.to_int(float.ceil(vertical.radius)))
+    let slots = order.min(sh, radius * 2 + 2)
+    if slots > 0xffffffffffffffff / w {
+        return Error(ByteLimit)
+    }
+    let count = w * slots
+    let mut ring: List[LinearPixel] = list.new()
+    if let Error(_) = list.try_reserve(mut ring, count) {
+        return Error(ByteLimit)
+    }
+    list.fill(mut ring, count, black())
+    let mut rgba = alloc_bytes(length)?
+    let mut y_coefficients: List[i64] = list.new()
+    let mut next = 0u64
+    for y in 0u64 .. h {
+        list.clear(mut y_coefficients)
+        let window = fill_weights(vertical, filter, y, mut y_coefficients)?
+        let end = window.first + window.hi
+        next = order.max(next, window.first)
+        while next < end {
+            let dest = next % slots * w
+            for x in 0u64 .. w {
+                let span = wx[x]
+                let mut total = black()
+                let base = (next * sw + span.first) * 4
+                for i in span.lo .. span.hi {
+                    let pixel = premultiply(source.rgba, base + (i - span.lo) * 4)
+                    weighted(mut total, pixel, x_coefficients[i])
+                }
+                ring[dest + x] = normalized(total)
+            }
+            next += 1
+        }
+        for x in 0u64 .. w {
+            let mut total = black()
+            for k in 0u64 .. window.hi {
+                let pixel = ring[(window.first + k) % slots * w + x]
+                weighted(mut total, pixel, y_coefficients[k])
+            }
+            list.put_word_be(mut rgba, straight(normalized(total)))
+        }
+    }
+    Ok(Raster(width: width, height: height, rgba: take rgba))
+}

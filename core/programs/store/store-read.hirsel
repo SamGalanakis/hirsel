@@ -130,17 +130,22 @@ fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: PageRange) -> Page
     PageRows(cursor: take cursor, data: share_page_tree(s.roots.collections), decoder: table_decoder(t))
 }
 
+fn snapshot_pager(r: Reader, s: Snapshot, inventory: TieredReadInventory) -> Result[(TieredPageSource, Arc[TieredReaderGrant], TieredPinRoot), Error] {
+    let Some(pool) = view r.pool else {
+        return Error(Io(Closed))
+    }
+    let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: s.watermark, deadline: 0)
+    let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: tree_stamp(s.roots.collections))
+    Ok((take source, arc.share(pool.grant), root))
+}
+
 fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let tree = view s.roots.collections
     if let Some(inventory) = view tree.paging {
         if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
             if descriptor[53u64] == 1 {
-                let Some(pool) = view r.pool else {
-                    return Error(Io(Closed))
-                }
-                let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: s.watermark, deadline: 0)
-                let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: tree_stamp(tree))
-                let stored = read_tiered_point(source, pool.grant, root, tree, logical, inventory.touch_slots)?
+                let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
+                let stored = read_tiered_point(source, grant, root, tree, logical, inventory.touch_slots)?
                 return match stored {
                     Some(raw) => decode_row(Some(view raw)),
                     None => decode_row(None),
@@ -171,6 +176,22 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let tree = view s.roots.collections
+    if let Some(inventory) = view tree.paging {
+        let id = prefix(t.id)?
+        if let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) {
+            if descriptor[53u64] == 1 {
+                if high <= low {
+                    return Ok(0u64)
+                }
+                if low == id && list.slice(high, 0, 4) != id {
+                    return Ok(list.word_le(descriptor, 36))
+                }
+                let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
+                return read_tiered_count(source, grant, root, tree, edge, descriptor, id, low, high, inventory.touch_slots)
+            }
+        }
+    }
     count_page_rows(s.roots.collections, t.id, low, high)
 }
 

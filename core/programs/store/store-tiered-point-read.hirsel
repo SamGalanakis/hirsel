@@ -33,12 +33,19 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
         }
     }
     let key = list.slice(logical, 4, list.len(logical))
+    retry_tiered_read(source, root_grant, root, key, None, touch_slots, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[Arc[Bytes]], Error] {
+        tiered_point_path(mut attempt, visible, edge, None, key)
+    })
+}
+
+fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], touch_slots: u64,
+    read: scoped[view] fn(mut TieredTouchSet, Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
-        let (take attempt, take observed) = disk_allocation(scoped fn() -> Result[(TieredTouchSet, Result[Option[Arc[Bytes]], Error]), Error] {
+        let (take attempt, take observed) = disk_allocation(scoped fn() -> Result[(TieredTouchSet, Result[R, Error]), Error] {
             let mut attempt_state = capacity(tiered_touch_set(root_grant.pin_bytes, touch_slots))?
-            let result = tiered_point_path(mut attempt_state, pins.frames, edge, None, key)
+            let result = read(mut attempt_state, pins.frames)
             Ok((take attempt_state, take result))
         })?
         match attempt.stopped {
@@ -51,7 +58,8 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
                     let (_, take problem) = option.unwrap(replace(mut pending, None))
                     return Error(take problem)
                 }
-                let demand = TieredPointDemand(target: clone(target), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
+                let sought = if attempt.upper_bound { option.unwrap(upper) } else { view key }
+                let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
                 let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
                 for frame in frames {
                     let _ = tiered_install_pin(mut pins, root, attempt.stamps, frame)?

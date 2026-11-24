@@ -107,8 +107,7 @@ fn l62_snapshot_scan_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), E
     Ok(())
 }
 
-@test
-fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, read: scoped[view] fn(Db, Table[u64, u32]) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
@@ -126,8 +125,50 @@ fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks:
     let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     db.pager = Some(take requests)
-    let answer = l62_snapshot_scan_reads(db, rows_handle)
+    let answer = read(db, rows_handle)
     db.pager = None
     let _ = result.unwrap(task.join(take worker))
     answer
+}
+
+@test
+fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, l62_snapshot_scan_reads)
+}
+
+fn l62_snapshot_page_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let first = scan_page(read_handle, s, rows_handle, Unbounded, Unbounded, Limits(rows: 1, byte_limit: 1))?
+    if list.len(first.rows) != 1 || first.rows[0u64] != (1u64, 10u32) || first.byte_count != 18 {
+        fail("L62: a one-row page admits the first row even when it exceeds the byte limit")
+    }
+    let Some(first_resume) = view first.next else {
+        fail("L62: first page has more visible rows")
+    }
+    let limit = Limits(rows: 10, byte_limit: 18)
+    let Paged(second) = scan_next(read_handle, s, rows_handle, clone(first_resume), limit)? else {
+        fail("L62: a resume belongs to the same snapshot")
+    }
+    if list.len(second.rows) != 1 || second.rows[0u64] != (2u64, 20u32) || second.byte_count != 18 {
+        fail("L62: the next page picks the replay put and respects the byte limit")
+    }
+    let Some(second_resume) = view second.next else {
+        fail("L62: the byte-limited page must keep its resume")
+    }
+    let Paged(final_page) = scan_next(read_handle, s, rows_handle, clone(second_resume), limit)? else {
+        fail("L62: a resume belongs to the same snapshot")
+    }
+    if list.len(final_page.rows) != 1 || final_page.rows[0u64] != (5u64, 50u32) || final_page.byte_count != 18 {
+        fail("L62: resume excludes the replay tombstone and returns the last Cold row")
+    }
+    if let Some(_) = final_page.next {
+        fail("L62: an exhausted page has no resume")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_pages_resume_the_tiered_range(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, l62_snapshot_page_reads)
 }

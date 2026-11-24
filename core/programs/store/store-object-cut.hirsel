@@ -265,7 +265,7 @@ fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64
     Ok(())
 }
 
-fn history_write_page_cut(mut client: std.object.Client, head: HistoryHead, take prepared: PagedCutLayout, inherited: HistoryLocator, mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(PagedCutLayout, List[HistoryRef]), Error] waits {
+fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64, take prepared: PagedCutLayout, inherited: HistoryLocator, mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(PagedCutLayout, List[HistoryRef]), Error] waits {
     let (take uploaded, take covered_packs) = disk_allocation(scoped fn() -> Result[(Map[u64, HistoryRef], List[HistoryRef]), Error] {
         let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
         let mut refs: Map[u64, HistoryRef] = map.new()
@@ -278,9 +278,9 @@ fn history_write_page_cut(mut client: std.object.Client, head: HistoryHead, take
     let mut known = take locations
     let mut packs = take uploaded
     let mut rows = take covered_packs
-    history_write_pack_run(mut client, head.store, head.pair.epoch, blobs, mut known, mut packs, mut buffers, mut workspace, deadline)?
-    history_write_pack_run(mut client, head.store, head.pair.epoch, data_pages, mut known, mut packs, mut buffers, mut workspace, deadline)?
-    history_write_pack_run(mut client, head.store, head.pair.epoch, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, id, epoch, blobs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, id, epoch, data_pages, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, id, epoch, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
     let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, record)) = std.omap.next(mut cursor) {
         if record.live == 0 {

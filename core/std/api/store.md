@@ -386,6 +386,8 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
 - **Object authority (§12).** `open_authority` over an `object_authority` grant keeps the
   journal and checkpoints in a qualified bucket. Conditional replacement of HEAD fences the
   prior holder. A `follower` over the same authority reads the committed history without claiming.
+  `import_authority` publishes an image from `open_export` as the first checkpoint of a new
+  object store and returns its new identity.
 - **Offline read-only open.** `open_read_only` opens a Directory store without writing, exposing
   `read_only_table`, `read_only_get`, and `read_only_snapshot` (the captured `Snapshot`).
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.

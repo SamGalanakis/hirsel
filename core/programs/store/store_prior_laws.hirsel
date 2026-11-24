@@ -91,7 +91,7 @@ fn refuse_legacy4_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), 
     history_create(mut client, history_key("m-", manifest), mut workspace.packet, mut workspace.compare, deadline)?
     // Use a current checkpoint envelope to exercise the old MANIFEST's
     // refusal itself, even when the enclosing entry passes its format check.
-    let base = history_genesis_packet(mut workspace.packet, id, manifest)?
+    let base = history_genesis_packet(mut workspace.packet, id, manifest, HistoryLocateRoot(depth: 0, rows: list.new()))?
     history_create(mut client, history_key("e-", base), mut workspace.packet, mut workspace.compare, deadline)?
     let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding: [0; 32])
     let place = std.object.bucket_config(client)

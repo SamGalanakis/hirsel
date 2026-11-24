@@ -216,6 +216,75 @@ fn bucket_test_m2_multipart_refused_cut(c: Clock, r: Random, tasks: Tasks) -> Re
     outcome
 }
 
+fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), DeployError] waits {
+    let original = disk_test_directory(d)
+    deploy_result(crash_install_init(original, c, r, tasks))?
+    let log_options = disk_crash_options("install")
+    let mut writer = deploy_result(open(tasks, original, c, r, log_options))?
+    let original_id = writer.store
+    let attempt = install_fixture_bytes(16, 7)
+    let (export_dir, exported_head) = crash_install_prepared(mut writer, d, c, tasks, attempt)?
+    deploy_result(close(take writer))?
+    let options = bucket_law_options(true)
+    let prepared = open_export(export_dir, c, attempt, log_options)?
+    let primary = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 1))?
+    if let Error(Remote(Uncertain(Status(200, _)))) = import_authority(take primary, take prepared, r, options) {} else {
+        fail("the import did not refuse the failed pack upload")
+    }
+    let mut witness = deploy_result(bucket_law_client_with(sim, tasks, "spare.test", 2, true))?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = deploy_result(history_buffers(65536))?
+    if let Error(Remote(NotFound)) = history_fetch(mut witness, "head", mut workspace.witness, deadline) {} else {
+        fail("the failed import published an intermediate empty store")
+    }
+    let debris = history_key("p-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 77))
+    let mut orphan = string.into_bytes(string.from("x"))
+    deploy_result(history_create(mut witness, debris, mut orphan, mut workspace.compare, deadline))?
+    let clean = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 3))?
+    let admitted = open_export(export_dir, c, attempt, log_options)?
+    let id = deploy_result(import_authority(take clean, take admitted, r, options))?
+    let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let initial = deploy_result(history_decode_head(workspace.witness))?
+    if same(id, original_id) || !same(id, initial.head.store) || initial.head.entry.seq != 1 ||
+        initial.head.checkpoint.seq != 1 || initial.head.pair.epoch != 1 {
+        fail("import did not publish the new identity at the first checkpoint")
+    }
+    let repeated = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 4))?
+    let duplicate = open_export(export_dir, c, attempt, log_options)?
+    match import_authority(take repeated, take duplicate, r, options) {
+        Error(Exists(namespace)) if namespace == "authority" => (),
+        _ => fail("standalone import was allowed to replace an existing store"),
+    }
+    let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.body, deadline))?
+    if workspace.witness != workspace.body {
+        fail("the duplicate import changed the existing register")
+    }
+    let cold = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 5))?
+    let mut process = followers()
+    let follower_view = deploy_result(follower(mut process, tasks, take cold, sim.time, options))?
+    let visible = deploy_result(snapshot_follower(follower_view, Branch(store: id, id: 0)))?
+    let view_reader = deploy_result(follower_reader(follower_view, 0))?
+    let rows = deploy_result(follower_table(follower_view, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if version(visible) != exported_head { fail("the imported base lost the exported version") }
+    for row_id in 0u64 .. 96 {
+        if deploy_result(get(view_reader, visible, rows, row_id))? != Some(row_id + 1) {
+            fail("a cold follower did not read the original export rows")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_standalone_import(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, CompleteExpired)
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    let sim = bucket_law_sim(tasks, c, 1207, Some(uncut), take faults)
+    let outcome = object_import_law(d, c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}
+
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take client, 0)
@@ -236,7 +305,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let mut next_stamp = stamp_after(draft.next_node)?
     let planned = plan_page_cut(base, participants.holders, empty_paged_lists(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(planned, cut_manifest_size(draft, NoHolderChange), 65536)?
-    let (take layout, take packed) = history_write_page_cut(mut source.client, held.head, take planned, source.locator, mut buffers, mut workspace, source.deadline)?
+    let (take layout, take packed) = history_write_page_cut(mut source.client, held.head.store, held.head.pair.epoch, take planned, source.locator, mut buffers, mut workspace, source.deadline)?
     if list.len(packed) != 3 || std.page.stamp(std.page.image_of(layout.lists.roots.retired)) != 0 {
         fail("object cut did not emit exactly the three live pack classes")
     }

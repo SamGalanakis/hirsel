@@ -164,18 +164,27 @@ fn history_manifest_packet(mut raw: Bytes, id: StoreId) -> Result[HistoryRef, Er
     Ok(history_new_ref(1, 1, raw))
 }
 
-fn history_genesis_packet(mut raw: Bytes, id: StoreId, manifest: HistoryRef) -> Result[HistoryRef, Error] {
+fn history_genesis_packet(mut raw: Bytes, id: StoreId, manifest: HistoryRef, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
     let ctx = DiskContext(store: id, role: 2, seq: 1)
     let none = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
     let retained = HistoryRetention(floor: 1, earlier: list.new())
-    let locator = HistoryLocateRoot(depth: 0, rows: list.new())
     history_checkpoint_packet(mut raw, ctx, 1, none, manifest, retained, locator)
 }
 
 fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
     let manifest = history_manifest_packet(mut buffers.packet, id)?
     history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
-    let base = history_genesis_packet(mut buffers.packet, id, manifest)?
+    let locator = HistoryLocateRoot(depth: 0, rows: list.new())
+    history_publish_base(mut client, id, holder, authority, manifest, locator, mut buffers, deadline)
+}
+
+fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
+    let bytes_wanted = 189 + 32 * list.len(locator.rows)
+    list.clear(mut buffers.packet)
+    list.clear(mut buffers.compare)
+    capacity(list.try_reserve(mut buffers.packet, bytes_wanted + BINDING_BYTES))?
+    capacity(list.try_reserve(mut buffers.compare, bytes_wanted))?
+    let base = history_genesis_packet(mut buffers.packet, id, manifest, locator)?
     history_create(mut client, history_key("e-", base), mut buffers.packet, mut buffers.compare, deadline)?
     let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
     history_encode_head(mut buffers.body, head, authority)?

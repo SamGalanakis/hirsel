@@ -1,4 +1,5 @@
 hirsel.laws 1
+store@1/store/bucket_test_claim_cut src=c16f6c4e7d6b7187 sig=817e5133cd795d03 run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=bb4013cdbc181f0f sig=60e6e3e179b0f2f5 run=6677ce756ba8a915 bug=- oracle=- rows=pending
 store@1/store/bucket_test_l4_cuts src=c40ccff7d9a8254c sig=0b0ee51ebf012e83 run=6677ce756ba8a915 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_admitted_claim src=c0e73b6f6744b2e9 sig=f62270fef6fb85a4 run=bc0855e1b21bfb40 bug=- oracle=- rows=pending

@@ -139,6 +139,10 @@ grants = ["Clock", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]
 [tests.runs."store@1/store/bucket_test_soak"]
 limit = 536870912
 
+[tests.runs."store@1/store/bucket_test_claim_cut"]
+limit = 536870912
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]
+
 [tests.runs."store@1/store/disk_pack_bound"]
 limit = 536870912
 

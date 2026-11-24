@@ -697,3 +697,70 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     }
     Ok(())
 }
+
+// The head's raw bytes through the uncut address: (pair epoch, entry seq, AUTHORITY tail).
+fn bucket_law_head_authority(s: BucketSim, tasks: Tasks) -> Result[(u64, u64, Bytes), Error] waits {
+    let mut client = bucket_law_client(s, tasks, "spare.test", 17)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let _ = history_fetch(mut client, "head", mut raw, due)?
+    let captured = history_decode_head(raw)?
+    Ok((captured.head.pair.epoch, captured.head.entry.seq, copied(list.slice(raw, 240, list.len(raw)))?))
+}
+
+// STORE §12.3 claim crash cut. A writer acks every round through the uncut
+// address. A claimant opens through the cut address and dies at wire request
+// `after`, which is applied without a reply or dropped. Its open makes 11
+// requests, so 11 is past the end. Recovery through the uncut address must
+// find every acknowledged row, and the head's AUTHORITY must stay the
+// genesis bytes. `claimed` marks a cut that landed between the
+// claim's head replace and its CLAIM advance.
+@test
+fn bucket_test_claim_cut(c: Clock, r: Random, tasks: Tasks, e: Env, out: Stdout) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(e, 0)
+    let after = seed % 12
+    let apply = (seed / 12) % 2 == 0
+    let s = bucket_law_sim(tasks, c, seed, Some(bucket_law_wire_cut(after, apply)), list.new())
+    let writer = bucket_law_authority(s, tasks, "spare.test", 1)?
+    let mut db = open_authority(tasks, take writer, s.time, r, bucket_law_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    for k in 1u64 .. BUCKET_LAW_ROUNDS + 1 {
+        bucket_law_round(mut db, k)?
+    }
+    close(take db)?
+    let (genesis_epoch, written_seq, genesis) = bucket_law_head_authority(s, tasks)?
+    let claimant = bucket_law_authority(s, tasks, "s3.test", 2)?
+    let opened = match open_authority(tasks, take claimant, s.time, r, bucket_law_options(false)) {
+        Ok(take claimed) => {
+            let _ = close(take claimed)
+            true
+        },
+        Error(_) => false,
+    }
+    let (cut_epoch, cut_seq, _) = bucket_law_head_authority(s, tasks)?
+    let claimed = !opened && cut_epoch > genesis_epoch && cut_seq == written_seq
+    let recovered = bucket_law_recover(tasks, r, s, "spare.test", seed + 7)
+    let after_recovery = bucket_law_head_authority(s, tasks)
+    let _ = bucket_law_finish(take s)
+    let mut trace = string.from(if opened {
+        "claim beyond "
+    } else if claimed {
+        "claim claimed "
+    } else {
+        "claim reached "
+    })
+    string.push_u64(mut trace, after)
+    string.push(mut trace, if apply {
+        " apply\n"
+    } else {
+        " drop\n"
+    })
+    result.unwrap(stdout.write(out, trace))
+    if recovered? != BUCKET_LAW_ROUNDS {
+        fail("claim cut: recovery lost an acknowledged row")
+    }
+    let (_, _, recovered_authority) = after_recovery?
+    if recovered_authority != genesis {
+        fail("claim cut: AUTHORITY after recovery differs from the genesis bytes")
+    }
+    Ok(())
+}

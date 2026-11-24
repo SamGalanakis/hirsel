@@ -1820,19 +1820,10 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         unsafe { causes::record(&mut *context, causes::Cause::fail(Default::default(), site)) };
         return CANCELLED;
     };
-    let mut outcome = outcome;
     if p.vocab == Vocab::Net && udp::operation(p.calls[&id].words[0]) {
-        if let Err((needed, available)) = udp::deliver(&mut p, id, tag, w) {
-            let token = p.close_call(id);
-            drop(p);
-            ready_all(token.into_iter().collect());
-            return refused(needed, available);
-        }
-        let token = p.settle(id, outcome);
-        drop(p);
-        ready_all(token.into_iter().collect());
-        return Outcome::default();
+        return udp::reply(p, id, tag, w, outcome);
     }
+    let mut outcome = outcome;
     let kind = match (p.vocab, tag) {
         (Vocab::Dir, R_FILE) => Some(Kind::File),
         (Vocab::Dir, R_DIR) => Some(Kind::Dir),

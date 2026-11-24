@@ -199,7 +199,7 @@ pub(crate) unsafe fn valid(r: &Request, records: &[udp::Packet], bytes: usize) -
         let input = inputs(r);
         udp::valid_receive(
             call.endpoint.family == 1,
-            call.served.ingress.then_some(call.rules.as_ref()),
+            None,
             call.options.payload_room(),
             input.room,
             input.entries,
@@ -209,21 +209,34 @@ pub(crate) unsafe fn valid(r: &Request, records: &[udp::Packet], bytes: usize) -
     }
 }
 
-pub(crate) unsafe fn deliver_receive(r: &Request, records: &[udp::Packet], staged: &[u8]) {
+pub(crate) unsafe fn deliver_receive(
+    r: &Request,
+    records: &[udp::Packet],
+    mut staged: &[u8],
+) -> u64 {
     // SAFETY: successful validation established room for all the appends.
     unsafe {
         let call = &mut *r.path.cast_mut().cast::<Call>();
         let bytes = &mut *call.bytes;
         let packets = &mut *call.packets;
-        if !staged.is_empty() {
-            ptr::copy_nonoverlapping(staged.as_ptr(), bytes.data.add(bytes.len), staged.len());
-        }
-        let mut at = bytes.len as u64;
+        let mut count = 0;
         for packet in records {
+            let (payload, rest) = staged.split_at(packet.appended as usize);
+            staged = rest;
+            if call.served.ingress && !call.rules.permits_ingress(packet.peer, 1) {
+                continue;
+            }
+            if !payload.is_empty() {
+                ptr::copy_nonoverlapping(
+                    payload.as_ptr(),
+                    bytes.data.add(bytes.len),
+                    payload.len(),
+                );
+            }
             let value = PacketCarrier {
                 case: 0,
                 peer: packet.peer.into(),
-                at,
+                at: bytes.len as u64,
                 len: packet.len,
                 truncated: packet.len > packet.appended,
                 ecn: packet.ecn,
@@ -234,9 +247,10 @@ pub(crate) unsafe fn deliver_receive(r: &Request, records: &[udp::Packet], stage
                 .add(packets.len)
                 .write(value);
             packets.len += 1;
-            at += packet.appended;
+            bytes.len += payload.len();
+            count += 1;
         }
-        bytes.len += staged.len();
+        count
     }
 }
 

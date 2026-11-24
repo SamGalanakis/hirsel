@@ -137,7 +137,17 @@ impl ReceivePool {
             let metadata = controls.and_then(|control| metadata(control, header.msg_flags));
             let (stride, ecn) = metadata.unwrap_or((None, 0));
             let peer = peer.filter(|&peer| {
-                metadata.is_some() && ingress.is_none_or(|rules| rules.permits_send(peer))
+                metadata.is_some()
+                    && ingress.is_none_or(|rules| {
+                        let whole = stride.map_or(1, |stride| {
+                            if captured == length {
+                                length.div_ceil(stride)
+                            } else {
+                                captured / stride
+                            }
+                        });
+                        rules.permits_ingress(peer, whole as u64)
+                    })
             });
             self.queue.push_back(Record {
                 slot,

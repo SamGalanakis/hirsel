@@ -1,0 +1,266 @@
+// test-native-only: the UDP provider, virtual Clock and task scheduler are native.
+// test-env-fixture: {"HIRSEL_UDP_MEASURE_INGRESS": "1"}
+const loopback: Ip = V4(0x7f000001)
+
+const normal: UdpOptions = UdpOptions(slots: 32, slot_bytes: 1536)
+
+fn require(ok: bool, message: String) {
+    if !ok {
+        fail(clone(message))
+    }
+}
+
+fn timed_out(outcome: Result[u64, NetError]) -> bool {
+    match outcome {
+        Error(TimedOut) => true,
+        _ => false
+    }
+}
+
+fn gro_packet(packet: UdpPacket, source: Addr) -> bool {
+    let UdpPacket(peer, at, len, truncated, ecn) = packet
+    peer == source && at == 0 && len == 600 && !truncated && ecn == 3
+}
+
+fn start(tasks: Tasks, config: sim.udp.Config, seed: u64, take captures: List[sim.udp.Record]) -> (Net, Clock, Task[()]) {
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = sim.world.new(seed, 0, 0)
+    let server = sim.udp.Server(config, plan: sim.world.plan(seed), world: take world, clock, tasks, port: take port, captures: take captures)
+    (network, clock, task.spawn(tasks, bytes 8388608, take server, sim.udp.serve))
+}
+
+fn send_one(mut socket: UdpSocket, to: Addr, data: Bytes, ecn: u8) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn))
+    require((result.unwrap(host.udp_send(mut socket, data, tx, Never))) == (1u64), "single datagram committed")
+}
+
+fn batch(mut socket: UdpSocket, to: Addr, n: u64) waits {
+    let mut data: Bytes = list.with_capacity(n)
+    let mut tx: List[UdpTx] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut data, int.truncate(i))
+        list.push(mut tx, UdpTx(to, at: i, len: 1, ecn: int.truncate(i % 4)))
+    }
+    require((result.unwrap(host.udp_send(mut socket, data, tx, Never))) == (n), "batch committed")
+}
+
+fn trace(tasks: Tasks, seed: u64) -> Bytes waits {
+    let mut config = sim.udp.defaults()
+    config.delay_ns = 20
+    config.jitter_ns = 9
+    config.reorder = 500000
+    config.reorder_ns = 100
+    config.duplicate = 1000000
+    config.rebind = 1000000
+    let (network, clock, take server) = start(tasks, config, seed, list.new())
+    let (take socket, to) = result.unwrap(host.udp_bind(network, Addr(ip: loopback, port: 4000), normal))
+    let mut receiver = take socket
+    let mut sender = result.unwrap(host.udp_open(network, false, normal))
+    batch(mut sender, to, 12)
+    let mut data: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    let mut output: Bytes = list.new()
+    let mut observed: List[u16] = list.with_capacity(12)
+    list.fill(mut observed, 12, 0u16)
+    let mut copies: List[u8] = list.with_capacity(12)
+    list.fill(mut copies, 12, 0u8)
+    let mut reordered = false
+    let mut prior = 0u8
+    let mut earliest = 1000u64
+    let mut latest = 0u64
+    for _ in 0u64 .. 24 {
+        let count = result.unwrap(host.udp_recv(mut receiver, mut data, mut packets, At(clock, 1000)))
+        require((count) == (1u64), "one entry per receive")
+        let UdpPacket(peer, ecn, ..) = packets[0]
+        let i: u64 = int.widen(data[0])
+        require((ecn) == (int.truncate(i % 4)), "ECN preserved")
+        copies[i] += 1
+        let previous = observed[i]
+        if previous == 0u16 {
+            require(!list.contains(observed, peer.port), "rebind allocates a new source port")
+            observed[i] = peer.port
+        } else {
+            require((peer.port) == (previous), "duplicate keeps original source port")
+        }
+        reordered = reordered || data[0] < prior
+        prior = data[0]
+        let now = host.mono_ns(clock)
+        earliest = order.min(earliest, now)
+        latest = order.max(latest, now)
+        list.put_word_le(mut output, now)
+        list.put_word_le(mut output, peer.port)
+        list.push(mut output, ecn)
+        list.push(mut output, data[0])
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+    require(reordered && earliest >= 20 && earliest <= 29 && latest >= 120 && latest <= 129 && (earliest > 20 || latest > 120), "arrival times show delay, jitter and reordering")
+    for count in copies {
+        require(count == 2, "each datagram is delivered twice")
+    }
+    require(timed_out(host.udp_recv(mut receiver, mut data, mut packets, At(clock, 1000))), "duplicates stop after the expected deliveries")
+    let _ = take sender
+    let _ = take receiver
+    result.unwrap(task.join(take server))
+    take output
+}
+
+fn loss_rate(tasks: Tasks) waits {
+    let mut config = sim.udp.defaults()
+    config.loss = sim.udp.Loss(good_to_bad: 250000, bad_to_good: 750000, good_loss: 125000, bad_loss: 625000)
+    let (network, clock, take server) = start(tasks, config, 67021, list.new())
+    let opts = UdpOptions(slots: 4096, slot_bytes: 1536)
+    let (take socket, to) = result.unwrap(host.udp_bind(network, Addr(ip: loopback, port: 4001), opts))
+    let mut receiver = take socket
+    let mut sender = result.unwrap(host.udp_open(network, false, normal))
+    batch(mut sender, to, 4096)
+    let mut data: Bytes = list.with_capacity(4096)
+    let mut packets: List[UdpPacket] = list.with_capacity(4096)
+    let got = result.unwrap(host.udp_recv(mut receiver, mut data, mut packets, At(clock, 100)))
+    let lost = 4096 - got
+    // pi_bad = p/(p+q) = 1/4. Stationary loss is 1/4. With p+q = 1,
+    // subsequent states are IID. Use six binomial standard deviations and
+    // round up to account for the first packet starting in Good.
+    require(lost >= 1024 - 167 && lost <= 1024 + 167, "loss frequency lies within the stationary bound")
+    require((list.len(data)) == (got), "one byte for every surviving datagram")
+    list.clear(mut data)
+    list.clear(mut packets)
+    require(timed_out(host.udp_recv(mut receiver, mut data, mut packets, At(clock, 100))), "no additional datagrams")
+    let _ = take sender
+    let _ = take receiver
+    result.unwrap(task.join(take server))
+}
+
+fn ingress_grant(tasks: Tasks) waits {
+    let (network, clock, take server) = start(tasks, sim.udp.defaults(), 3, list.new())
+    let a = Addr(ip: loopback, port: 41000)
+    let b = Addr(ip: loopback, port: 41001)
+    let (take first, _) = result.unwrap(host.udp_bind(network, a, normal))
+    let (take second, _) = result.unwrap(host.udp_bind(network, b, normal))
+    let mut allowed_a = take first
+    let mut allowed_b = take second
+    let only_a = result.unwrap(net.narrow(network, Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, a.port))))
+    let both = result.unwrap(net.narrow(network, Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, b.port))))
+    let mut narrow = result.unwrap(host.udp_open(only_a, false, normal))
+    let mut broad = result.unwrap(host.udp_open(both, false, normal))
+    send_one(mut narrow, a, string.as_bytes("x"), 0)
+    send_one(mut broad, a, string.as_bytes("x"), 0)
+    let to_narrow = Addr(ip: loopback, port: result.unwrap(host.udp_local_addr(narrow)).port)
+    let to_broad = Addr(ip: loopback, port: result.unwrap(host.udp_local_addr(broad)).port)
+    send_one(mut allowed_b, to_narrow, string.as_bytes("b"), 1)
+    send_one(mut allowed_b, to_broad, string.as_bytes("b"), 1)
+    let mut data: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    require(timed_out(host.udp_recv(mut narrow, mut data, mut packets, At(clock, 20))), "narrow grant discards B and waits to its deadline")
+    require(list.len(data) == 0 && list.len(packets) == 0, "discard leaves both output buffers empty")
+    require(result.unwrap(host.udp_recv(mut broad, mut data, mut packets, At(clock, 40))) == 1, "broad grant receives from B")
+    require(list.len(data) == 1 && data[0] == 98u8, "broad grant receives the payload from B")
+    let UdpPacket(peer: source_b, ..) = packets[0]
+    require(source_b == b, "broad grant sees B as the peer")
+    list.clear(mut data)
+    list.clear(mut packets)
+    send_one(mut allowed_a, to_narrow, string.as_bytes("a"), 2)
+    require(result.unwrap(host.udp_recv(mut narrow, mut data, mut packets, At(clock, 40))) == 1, "provider remains available after the discard")
+    require(list.len(data) == 1 && data[0] == 97u8, "narrow grant receives the payload from A")
+    let UdpPacket(peer: source_a, ..) = packets[0]
+    require(source_a == a, "narrow grant sees A as the peer")
+    let _ = take narrow
+    let _ = take broad
+    let _ = take allowed_a
+    let _ = take allowed_b
+    result.unwrap(task.join(take server))
+}
+
+fn rebinding(tasks: Tasks) waits {
+    let mut config = sim.udp.defaults()
+    config.rebind = 1000000
+    let (network, clock, take server) = start(tasks, config, 4621, list.new())
+    let endpoint = Addr(ip: loopback, port: 4050)
+    let mut members: List[UdpSocket] = list.with_capacity(8)
+    require(result.unwrap(host.udp_bind_group(network, endpoint, normal, 8, Hash, mut members)) == endpoint, "bind rebind group")
+    let mut second = list.remove(mut members, 3)
+    let mut first = list.remove(mut members, 0)
+    let mut sender = result.unwrap(host.udp_open(network, false, normal))
+    send_one(mut sender, endpoint, string.as_bytes("x"), 0)
+    let original = result.unwrap(host.udp_local_addr(sender))
+    send_one(mut sender, endpoint, string.as_bytes("y"), 0)
+    require(result.unwrap(host.udp_local_addr(sender)) == original, "rebind preserves local endpoint")
+    let mut data: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    let until = At(clock, 100u64)
+    // Host FNV-1a over 04 7f000001 1dbe and 04 7f000001 1dbf
+    // gives members 0 and 3 respectively, for eight members.
+    require(result.unwrap(host.udp_recv(mut first, mut data, mut packets, until)) == 1, "first public port steers to member 0")
+    let UdpPacket(peer: old, ..) = packets[0]
+    require(old == Addr(ip: loopback, port: 7614) && data[0] == 120u8, "first public port and payload")
+    list.clear(mut data)
+    list.clear(mut packets)
+    require(result.unwrap(host.udp_recv(mut second, mut data, mut packets, until)) == 1, "new public port steers to member 3")
+    let UdpPacket(peer: new, ..) = packets[0]
+    require(new == Addr(ip: loopback, port: 7615) && data[0] == 121u8, "new public port and payload")
+    list.clear(mut data)
+    list.clear(mut packets)
+    send_one(mut second, old, string.as_bytes("z"), 0)
+    send_one(mut second, new, string.as_bytes("w"), 0)
+    require(result.unwrap(host.udp_recv(mut sender, mut data, mut packets, until)) == 1 && data[0] == 119u8, "traffic follows the new public port")
+    let _ = take sender
+    let _ = take first
+    let _ = take second
+    let _ = take members
+    result.unwrap(task.join(take server))
+}
+
+fn capture_law(tasks: Tasks) waits {
+    let destination = Addr(ip: loopback, port: 42000)
+    let source = Addr(ip: V4(0xc0000201), port: 443)
+    let mut payload: Bytes = list.with_capacity(1800)
+    list.fill(mut payload, 600, 65u8)
+    list.fill(mut payload, 600, 66u8)
+    list.fill(mut payload, 600, 67u8)
+    let mut captures: List[sim.udp.Record] = list.with_capacity(4)
+    list.push(mut captures, sim.udp.Record(at: 1, source, destination, payload: clone(payload), ecn: 3, capture: Gro(stride: 600, captured: 1300)))
+    list.push(mut captures, sim.udp.Record(at: 1, source, destination, payload: clone(payload), ecn: 2, capture: UnknownBoundaries))
+    list.push(mut captures, sim.udp.Record(at: 1, source, destination, payload: clone(payload), ecn: 1, capture: Ordinary))
+    list.push(mut captures, sim.udp.Record(at: 10, source: Addr(ip: V4(0xc6336407), port: 50000), destination, payload: clone(payload), ecn: 1, capture: Ordinary))
+    let (network, clock, take server) = start(tasks, sim.udp.defaults(), 55, take captures)
+    let mut members: List[UdpSocket] = list.with_capacity(8)
+    let opts = UdpOptions(slots: 2, slot_bytes: 1536)
+    // NET-16's 192.0.2.1:443 vector lands on member 2 of 8. The other
+    // source hashes to member 6 of 8. Retire it before its record arrives.
+    require((result.unwrap(host.udp_bind_group(network, destination, opts, 8, Hash, mut members))) == (destination), "bind capture group")
+    let mut member = list.remove(mut members, 2)
+    let _ = list.remove(mut members, 5)
+    let mut data: Bytes = list.with_capacity(629)
+    let mut packets: List[UdpPacket] = list.with_capacity(3)
+    require(result.unwrap(host.udp_recv(mut member, mut data, mut packets, At(clock, 8))) == 1, "first GRO segment arrives alone")
+    require(gro_packet(packets[0], source), "first GRO segment is whole")
+    require((data[599]) == (65u8), "first GRO segment payload")
+    list.clear(mut data)
+    list.clear(mut packets)
+    require(result.unwrap(host.udp_recv(mut member, mut data, mut packets, At(clock, 8))) == 1, "second GRO segment remains queued")
+    require(gro_packet(packets[0], source), "second GRO segment is whole")
+    require((data[599]) == (66u8), "second GRO segment payload")
+    list.clear(mut data)
+    list.clear(mut packets)
+    require(timed_out(host.udp_recv(mut member, mut data, mut packets, At(clock, 20))), "discarded records do not reach the group")
+    let _ = take member
+    let _ = take members
+    result.unwrap(task.join(take server))
+}
+
+// expect: stderr "UDP_INGRESS_DISCARD 1\n"
+// expect: run udp_network_laws(tasks) = true
+fn udp_network_laws(tasks: Tasks) -> bool waits {
+    let first = trace(tasks, 442278)
+    let second = trace(tasks, 442278)
+    require((first) == (second), "same seed produces byte-identical traces")
+    require((sim.udp.steer_member(Hash, 1024, Addr(ip: V6(0x20010db800000000, 1), port: 4433), string.as_bytes(""))) == (230u16), "NET-16 IPv6 Hash vector")
+    let long = option.unwrap(hex.decode(string.as_bytes("8000000000088394c8f03e515708")))
+    require((sim.udp.steer_member(Quic, 8, Addr(ip: loopback, port: 443), long)) == (0u16), "NET-16 QUIC DCID hash vector")
+    loss_rate(tasks)
+    ingress_grant(tasks)
+    rebinding(tasks)
+    capture_law(tasks)
+    true
+}

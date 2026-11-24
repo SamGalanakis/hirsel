@@ -1089,10 +1089,11 @@ Every receive delivery, recorded or
 served, passes one validator before any buffer changes. It checks that the count is from 1
 to the spare entries, and that the packet records satisfy the receive law for the recorded
 `r` and slot room. It checks each `len` against the family maximum, each `ecn` against 3,
-each peer's family against the socket's, and for an opened socket each peer against its
-`UdpSend` rules. Finally, the appended bytes must total the sum of the records' appended
-lengths. A send delivery passes when `k` is at most the number of packets. A delivery that
-fails is `Corrupt`.
+and each peer's family against the socket's. Finally, the appended bytes must total the
+sum of the records' appended lengths. A replay delivery also checks each peer against an
+opened socket's `UdpSend` rules, since recording captured the delivery after ingress
+filtering. A send delivery passes when `k` is at most the number of packets. A replay
+delivery that fails is `Corrupt`.
 
 **Served UDP.** A `provide.net` Net permits every UDP endpoint through one internal rule of
 each UDP direction, as served Unix does (NET-14); intersecting it with a concrete rule gives
@@ -1138,7 +1139,12 @@ running total of `appended`. So a receive with room 0 and one entry can still re
 peer, the whole length, the ECN bits and `truncated` (`len > appended`). A `UdpPackets(count)`
 reply passes when `count` equals the staged records and they and the staged bytes pass the
 validator above with `r` set to `room`. Otherwise the server fails with `Fail` before the
-caller changes. A `Count` reply to `UdpSend` above its packet count fails it the same way. A
+caller changes. After validation, the caller's runtime silently discards and counts every
+peer outside an opened socket's `UdpSend` rules, using the same check as the host. It
+appends the remaining packets and their bytes in order. When none remain, it queues the
+same receive again with its original deadline and cancellation state. The reply succeeds
+and settles its staging in either case. A `Count` reply to `UdpSend` above its packet count
+fails validation the same way. A
 `UdpSockets(first, count, addr)` reply answers `UdpOpen` or `UdpBind` and passes the creation
 validator above. `count` must be 1 for `UdpOpen` and equal the request's `members` for
 `UdpBind`. The ids `first` to `first + count − 1` must be nonzero, must not wrap, and must

@@ -2,6 +2,7 @@ use crate::{AddressDirection, EPHEMERAL_OUTSIDE_NET_GRANT, Rule};
 use std::{
     collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
 type Ports = Vec<(u16, u16)>;
@@ -12,6 +13,7 @@ type Family = BTreeMap<u8, HashMap<u128, Ports>>;
 pub struct UdpRules {
     bind: [Family; 2],
     send: [Family; 2],
+    ingress_discards: AtomicU64,
 }
 
 impl UdpRules {
@@ -60,6 +62,14 @@ impl UdpRules {
         matching(&self.send, addr, false).any(|ports| interval_end(ports, addr.port()).is_some())
     }
 
+    pub fn permits_ingress(&self, addr: SocketAddr, datagrams: u64) -> bool {
+        if self.permits_send(addr) {
+            return true;
+        }
+        self.ingress_discards.fetch_add(datagrams, Relaxed);
+        false
+    }
+
     pub fn bind_denial(&self, addr: SocketAddr) -> Option<u8> {
         if invalid_v6(addr) {
             return Some(1);
@@ -89,6 +99,17 @@ impl UdpRules {
                 return None;
             }
             next = end + 1;
+        }
+    }
+}
+
+impl Drop for UdpRules {
+    fn drop(&mut self) {
+        let count = *self.ingress_discards.get_mut();
+        if count != 0
+            && std::env::var_os("HIRSEL_UDP_MEASURE_INGRESS").as_deref() == Some("1".as_ref())
+        {
+            eprintln!("UDP_INGRESS_DISCARD {count}");
         }
     }
 }

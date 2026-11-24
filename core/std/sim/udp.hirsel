@@ -1,0 +1,610 @@
+/// Each probability is in parts per million. Loss is drawn from the current
+/// state, then the chain transitions. Each direction has its own chain.
+pub type Loss: send {
+    good_to_bad: u64,
+    bad_to_good: u64,
+    good_loss: u64,
+    bad_loss: u64
+}
+
+pub type Config: send {
+    loss: Loss,
+    delay_ns: u64,
+    jitter_ns: u64,
+    reorder: u64,
+    reorder_ns: u64,
+    duplicate: u64,
+    rebind: u64,
+    source_v4: u32,
+    source_v6: Ip
+}
+
+pub fn defaults() -> Config {
+    Config(loss: Loss(good_to_bad: 0, bad_to_good: 0, good_loss: 0, bad_loss: 0), delay_ns: 0, jitter_ns: 0, reorder: 0, reorder_ns: 0, duplicate: 0, rebind: 0, source_v4: 0x7f000001, source_v6: V6(0, 1))
+}
+
+const ppm: u64 = 1000000
+
+fn chance(mut plan: sim.world.Plan, probability: u64) -> bool {
+    probability == ppm || (probability != 0 && sim.world.pick(mut plan, ppm) < probability)
+}
+
+fn drop_one(loss: Loss, mut bad: bool, mut plan: sim.world.Plan) -> bool {
+    let dropped = chance(mut plan, if bad {
+        loss.bad_loss
+    } else {
+        loss.good_loss
+    })
+    if bad {
+        bad = !chance(mut plan, loss.bad_to_good)
+    } else {
+        bad = chance(mut plan, loss.good_to_bad)
+    }
+    dropped
+}
+
+fn v6(ip: Ip) -> bool {
+    match ip {
+        V6(_, _) => true,
+        _ => false
+    }
+}
+
+fn unspecified(ip: Ip) -> bool {
+    match ip {
+        V4(word) => word == 0,
+        V6(hi, lo) => hi == 0 && lo == 0
+    }
+}
+
+fn covers(local: Ip, peer: Ip) -> bool {
+    local == peer || (unspecified(local) && v6(local) == v6(peer))
+}
+
+fn fnv(payload: Bytes) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64
+    for byte in payload {
+        hash = int.wrapping_mul(hash ^ int.widen(byte), 0x100000001b3)
+    }
+    hash
+}
+
+/// NET-16's host steering function. Members must be positive.
+pub fn steer_member(steer: Steer, members: u16, peer: Addr, data: Bytes) -> u16 {
+    let count: u64 = int.widen(members)
+    let size = list.len(data)
+    if let Quic = steer {
+        if size == 0 {
+            return int.truncate(peer_hash(peer) % count)
+        }
+        if (data[0] & 128u8) != 0 {
+            if size >= 6 {
+                let d: u64 = int.widen(data[5])
+                if d > 0 && size >= 6 + d {
+                    if d >= 3 {
+                        let member: u16 = list.word_be(data, 7)
+                        if member < members {
+                            return member
+                        }
+                    }
+                    return int.truncate(fnv(list.slice(data, 6, 6 + d)) % count)
+                }
+            }
+        } else if size >= 4 {
+            let member: u16 = list.word_be(data, 2)
+            if member < members {
+                return member
+            }
+        }
+    }
+    int.truncate(peer_hash(peer) % count)
+}
+
+fn peer_hash(peer: Addr) -> u64 {
+    let mut key: Bytes = list.with_capacity(19)
+    match peer.ip {
+        V4(ip) => {
+            list.push(mut key, 4u8)
+            list.put_word_be(mut key, ip)
+        },
+        V6(hi, lo) => {
+            list.push(mut key, 6u8)
+            list.put_word_be(mut key, hi)
+            list.put_word_be(mut key, lo)
+        }
+    }
+    list.put_word_be(mut key, peer.port)
+    fnv(key)
+}
+
+type Binding {
+    local: Addr,
+    outside: Option[Addr],
+    opened: bool,
+    members: u16,
+    live: u64,
+    steer: Steer,
+    room: u64
+}
+
+type Socket {
+    binding: u64,
+    slots: u64,
+    room: u64,
+    queue: List[Datagram]
+}
+
+type Datagram: send {
+    peer: Addr,
+    to: Addr,
+    ecn: u8,
+    data: Bytes
+}
+
+/// A scripted capture of external traffic. A GRO record contributes only the
+/// datagrams wholly within both its captured prefix and the destination slot.
+pub type Capture: send = Ordinary | Gro(stride: u64, captured: u64) | UnknownBoundaries
+
+pub type Record: send {
+    at: u64,
+    source: Addr,
+    destination: Addr,
+    payload: Bytes,
+    ecn: u8,
+    capture: Capture
+}
+
+type InFlight: send = Packet(Datagram) | Captured(Record)
+
+type Arrival: ordered {
+    at: u64,
+    serial: u64
+}
+
+type Impairment {
+    bad: bool,
+    jitter: u64
+}
+
+type State {
+    next_id: u64,
+    ephemeral: u64,
+    serial: u64,
+    bindings: Map[u64, Binding],
+    sockets: Map[u64, Socket],
+    links: Map[u64, Map[Addr, Impairment]],
+    arrivals: Heap[Arrival],
+    flight: Map[u64, InFlight],
+    pending: Map[u64, Call[NetOp]]
+}
+
+fn answer(mut port: Served[NetOp], take call: Call[NetOp], reply: NetReply) -> bool {
+    match provide.reply(mut port, take call, provide.net_reply(reply)) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+fn target(state: State, to: Addr) -> Option[u64] {
+    for (id, binding) in state.bindings {
+        let addr = match binding.outside {
+            Some(outside) => outside,
+            None => binding.local
+        }
+        if addr.port == to.port && covers(addr.ip, to.ip) {
+            return Some(id)
+        }
+    }
+    None
+}
+
+fn conflicts(state: State, addr: Addr) -> bool {
+    for (_, binding) in state.bindings {
+        if binding.local.port == addr.port && (covers(binding.local.ip, addr.ip) || covers(addr.ip, binding.local.ip)) {
+            return true
+        }
+        if let Some(outside) = binding.outside {
+            if outside.port == addr.port && (covers(outside.ip, addr.ip) || covers(addr.ip, outside.ip)) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn ephemeral(state: State, ip: Ip) -> Option[(Addr, u64)] {
+    let start = state.ephemeral
+    let mut cursor = start
+    loop {
+        let addr = Addr(ip, port: int.truncate(1024 + cursor))
+        cursor = (cursor + 1) % 64512
+        if !conflicts(state, addr) {
+            return Some((addr, cursor))
+        }
+        if cursor == start {
+            return None
+        }
+    }
+}
+
+type Options {
+    slots: u32,
+    slot_bytes: u32,
+    members: u16,
+    steer: Steer
+}
+
+fn create(mut state: State, wanted: Addr, opened: bool, options: Options, mut port: Served[NetOp], take call: Call[NetOp]) {
+    let actual = if opened {
+        Some((wanted, state.ephemeral))
+    } else if wanted.port == 0 {
+        ephemeral(state, wanted.ip)
+    } else if conflicts(state, wanted) {
+        None
+    } else {
+        Some((wanted, state.ephemeral))
+    }
+    let Some((local, cursor)) = actual else {
+        let _ = answer(mut port, take call, Failed(InUse))
+        return
+    }
+    let first = state.next_id
+    let members: u64 = int.widen(options.members)
+    map.reserve(mut state.bindings, 1)
+    map.reserve(mut state.sockets, members)
+    if answer(mut port, take call, UdpSockets(first, count: options.members, addr: local)) {
+        state.ephemeral = cursor
+        state.next_id += members
+        let packet_room: u64 = int.widen(options.slot_bytes - 256u32)
+        map.insert(mut state.bindings, first, Binding(local, outside: None, opened, members: options.members, live: members, steer: options.steer, room: packet_room))
+        for id in first .. state.next_id {
+            map.insert(mut state.sockets, id, Socket(binding: first, slots: int.widen(options.slots), room: packet_room, queue: list.new()))
+        }
+    }
+}
+
+fn release(mut state: State, id: u64) {
+    let _ = map.remove(mut state.pending, id)
+    let Some(take socket) = map.remove(mut state.sockets, id) else {
+        return
+    }
+    let live: u64 = option.unwrap(map.get(state.bindings, socket.binding)).live
+    if live == 1 {
+        let _ = map.remove(mut state.bindings, socket.binding)
+        let _ = map.remove(mut state.links, socket.binding)
+    } else {
+        let _ = map.update(mut state.bindings, socket.binding, scoped fn(mut current: Binding) {
+            current.live -= 1
+        })
+    }
+}
+
+fn address(payload: Bytes, at: u64) -> Addr {
+    let ip = if payload[at] == 0u8 {
+        let low: u64 = list.word_le(payload, at + 9)
+        V4(int.truncate(low))
+    } else {
+        V6(list.word_le(payload, at + 1), list.word_le(payload, at + 9))
+    }
+    Addr(ip, port: list.word_le(payload, at + 17))
+}
+
+fn schedule(mut state: State, at: u64, take item: InFlight) {
+    let serial = state.serial
+    state.serial += 1
+    heap.push(mut state.arrivals, Arrival(at, serial))
+    map.insert(mut state.flight, serial, take item)
+}
+
+fn binding_id(sockets: Map[u64, Socket], id: u64) -> Option[u64] {
+    match map.get(sockets, id) {
+        Some(socket) => Some(socket.binding),
+        None => None
+    }
+}
+
+fn impair(config: Config, mut state: State, source: u64, to: Addr, mut plan: sim.world.Plan) -> (bool, u64) {
+    let empty: Map[Addr, Impairment] = map.new()
+    map.update_or_insert(mut state.links, source, take empty, scoped fn(mut links: Map[Addr, Impairment]) -> (bool, u64) {
+        map.update_or_insert(mut links, to, Impairment(bad: false, jitter: 0), scoped fn(mut effect: Impairment) -> (bool, u64) {
+            let dropped = drop_one(config.loss, mut effect.bad, mut plan)
+            if config.jitter_ns != 0 {
+                let draw = sim.world.pick(mut plan, config.jitter_ns + 1)
+                effect.jitter = (effect.jitter / 2) + (draw / 2) + ((effect.jitter & draw) & 1)
+            }
+            (dropped, effect.jitter)
+        })
+    })
+}
+
+fn transmit(config: Config, mut state: State, mut plan: sim.world.Plan, now: u64, id: u64, data_len: u64, count: u64, mut port: Served[NetOp], take call: Call[NetOp]) {
+    let c = take call
+    let Some(key) = binding_id(state.sockets, id) else {
+        let _ = answer(mut port, take c, Failed(Reset))
+        return
+    }
+    let mut binding: Binding = clone(option.unwrap(map.get(state.bindings, key)))
+    if count == 0 {
+        let _ = answer(mut port, take c, Count(0))
+        return
+    }
+    let mut cursor = state.ephemeral
+    if binding.local.port == 0 {
+        let Some((local, following)) = ephemeral(state, binding.local.ip) else {
+            let _ = answer(mut port, take c, Failed(InUse))
+            return
+        }
+        binding.local = local
+        cursor = following
+    }
+    let mut data: Bytes = list.with_capacity(data_len)
+    let mut packets: Bytes = list.with_capacity(count * 36)
+    provide.payload(c, 1, mut data)
+    provide.payload(c, 2, mut packets)
+    if !answer(mut port, take c, Count(count)) {
+        return
+    }
+    state.ephemeral = cursor
+    map.insert(mut state.bindings, key, clone(binding))
+    for i in 0u64 .. count {
+        let at = i * 36
+        let to = address(packets, at)
+        let peer_ip = if !unspecified(binding.local.ip) {
+            binding.local.ip
+        } else if v6(to.ip) {
+            config.source_v6
+        } else {
+            V4(config.source_v4)
+        }
+        if binding.opened && chance(mut plan, config.rebind) {
+            if let Some((outside, following)) = ephemeral(state, peer_ip) {
+                state.ephemeral = following
+                binding.outside = Some(outside)
+                map.insert(mut state.bindings, key, clone(binding))
+            }
+        }
+        let peer = match binding.outside {
+            Some(outside) => outside,
+            None => Addr(ip: peer_ip, port: binding.local.port)
+        }
+        let (dropped, jitter) = impair(config, mut state, key, to, mut plan)
+        if dropped {
+            continue
+        }
+        let mut arrive = int.saturating_add(now, int.saturating_add(config.delay_ns, jitter))
+        if chance(mut plan, config.reorder) {
+            arrive = int.saturating_add(arrive, config.reorder_ns)
+        }
+        let start: u64 = list.word_le(packets, at + 19)
+        let len: u64 = list.word_le(packets, at + 27)
+        let payload = list.slice(data, start, start + len)
+        let ecn = packets[at + 35]
+        schedule(mut state, arrive, Packet(Datagram(peer, to, ecn, data: clone(payload))))
+        if chance(mut plan, config.duplicate) {
+            schedule(mut state, arrive, Packet(Datagram(peer, to, ecn, data: clone(payload))))
+        }
+    }
+}
+
+fn receive(mut state: State, id: u64, room: u64, entries: u64, mut port: Served[NetOp], take call: Call[NetOp]) {
+    let mut c = take call
+    let count: u64 = match map.get(state.sockets, id) {
+        Some(sock) => stage(sock, room, entries, mut port, mut c),
+        None => {
+            let _ = answer(mut port, take c, Failed(Reset))
+            return
+        }
+    }
+    if count == 0 {
+        map.insert(mut state.pending, id, take c)
+        return
+    }
+    if answer(mut port, take c, UdpPackets(count)) {
+        let _ = map.update(mut state.sockets, id, scoped fn(mut socket: Socket) {
+            let total = list.len(socket.queue)
+            for at in count .. total {
+                list.swap(mut socket.queue, at - count, at)
+            }
+            list.truncate(mut socket.queue, total - count)
+        })
+    }
+}
+
+fn stage(socket: Socket, room: u64, entries: u64, mut port: Served[NetOp], mut call: Call[NetOp]) -> u64 {
+    let mut remaining = room
+    let mut records: List[UdpStaged] = list.new()
+    for p in socket.queue {
+        let len = list.len(p.data)
+        let appended = order.min(len, order.min(socket.room, remaining))
+        if list.len(records) == entries || (list.len(records) != 0 && appended < len) {
+            break
+        }
+        let staged = provide.fill(mut port, mut call, list.slice(p.data, 0, appended))
+        if staged != appended {
+            return 0
+        }
+        list.push(mut records, UdpStaged(peer: p.peer, len, appended, ecn: p.ecn))
+        remaining -= appended
+    }
+    provide.fill_packets(mut port, mut call, take records)
+}
+
+fn enqueue(mut state: State, first: u64, take datagram: Datagram) {
+    let binding = option.unwrap(map.get(state.bindings, first))
+    let member: u64 = int.widen(steer_member(binding.steer, binding.members, datagram.peer, datagram.data))
+    let id = first + member
+    let space = match map.get(state.sockets, id) {
+        Some(socket) => list.len(socket.queue) < socket.slots,
+        None => false
+    }
+    if space {
+        let mut current = option.unwrap(map.remove(mut state.sockets, id))
+        list.push(mut current.queue, take datagram)
+        map.insert(mut state.sockets, id, take current)
+    }
+}
+
+fn capture(mut state: State, r: Record) {
+    let Some(first) = target(state, r.destination) else {
+        return
+    }
+    if v6(r.source.ip) != v6(r.destination.ip) || r.ecn > 3 {
+        return
+    }
+    let limit = if v6(r.source.ip) {
+        65527u64
+    } else {
+        65507u64
+    }
+    let size = list.len(r.payload)
+    match r.capture {
+        Ordinary if size <= limit => enqueue(mut state, first, Datagram(peer: r.source, to: r.destination, ecn: r.ecn, data: clone(r.payload))),
+        Gro(stride, captured) if stride != 0 && stride <= limit => {
+            let room: u64 = option.unwrap(map.get(state.bindings, first)).room
+            let end = order.min(order.min(captured, room), size)
+            let mut at = 0u64
+            while at < end {
+                let next = at + order.min(stride, size - at)
+                if next > end {
+                    break
+                }
+                let payload: Bytes = clone(list.slice(r.payload, at, next))
+                enqueue(mut state, first, Datagram(peer: r.source, to: r.destination, ecn: r.ecn, data: take payload))
+                at = next
+            }
+        },
+        _ => (),
+    }
+}
+
+fn next_arrival(arrivals: Heap[Arrival]) -> Option[u64] {
+    match heap.peek(arrivals) {
+        Some(next) => Some(next.at),
+        None => None
+    }
+}
+
+fn drain(mut state: State, now: u64, mut port: Served[NetOp]) {
+    let mut arrived = false
+    while let Some(at) = next_arrival(state.arrivals) {
+        if at > now {
+            break
+        }
+        let arrival = option.unwrap(heap.pop(mut state.arrivals))
+        let item = option.unwrap(map.remove(mut state.flight, arrival.serial))
+        match take item {
+            Packet(take datagram) => {
+                if let Some(first) = target(state, datagram.to) {
+                    enqueue(mut state, first, take datagram)
+                }
+            },
+            Captured(take record) => capture(mut state, record),
+        }
+        arrived = true
+    }
+    if arrived {
+        let mut ready: List[u64] = list.new()
+        for (id, _) in state.pending {
+            if let Some(socket) = map.get(state.sockets, id) {
+                if list.len(socket.queue) != 0 {
+                    list.push(mut ready, id)
+                }
+            }
+        }
+        list.sort_stable(mut ready, order.compare)
+        for id in ready {
+            let call = option.unwrap(map.remove(mut state.pending, id))
+            if let UdpRecv(room: room, entries: entries, ..) = provide.net_op(call) {
+                receive(mut state, id, room, entries, mut port, take call)
+            }
+        }
+    }
+}
+
+fn incoming(config: Config, mut state: State, mut plan: sim.world.Plan, now: u64, mut port: Served[NetOp], take call: Call[NetOp]) {
+    match provide.net_op(call) {
+        UdpOpen(v6: ipv6, slots: slots, slot_bytes: slot_bytes) => {
+            let ip = if ipv6 {
+                V6(0, 0)
+            } else {
+                V4(0)
+            }
+            create(mut state, Addr(ip, port: 0), true, Options(slots, slot_bytes, members: 1, steer: Hash), mut port, take call)
+        },
+        UdpBind(addr: addr, slots: slots, slot_bytes: slot_bytes, members: members, steer: steer) => create(mut state, addr, false, Options(slots, slot_bytes, members, steer), mut port, take call),
+        UdpSend(socket: id, data: data, pkts: count) => transmit(config, mut state, mut plan, now, id, data, count, mut port, take call),
+        UdpRecv(socket: id, room: room, entries: entries) => {
+            let _ = map.remove(mut state.pending, id)
+            receive(mut state, id, room, entries, mut port, take call)
+        },
+        UdpLocal(socket: id) => {
+            let reply = match map.get(state.sockets, id) {
+                Some(socket) => Address(option.unwrap(map.get(state.bindings, socket.binding)).local),
+                None => Failed(Reset)
+            }
+            let _ = answer(mut port, take call, reply)
+        },
+        Released(id: id, part: Whole) => {
+            let _ = take call
+            release(mut state, id)
+        },
+        _ => {
+            let _ = answer(mut port, take call, Failed(Denied))
+        }
+    }
+}
+
+pub type Server: send {
+    config: Config,
+    plan: sim.world.Plan,
+    world: sim.world.World,
+    clock: Clock,
+    tasks: Tasks,
+    port: Served[NetOp],
+    captures: List[Record]
+}
+
+fn alarm(take timer: (Clock, u64)) waits {
+    host.sleep_until(timer.0, timer.1)
+}
+
+fn advance(mut world: sim.world.World, tasks: Tasks, clock: Clock, arrivals: Heap[Arrival]) -> bool waits {
+    if let Some(next) = heap.peek(arrivals) {
+        let mut timer = task.spawn(tasks, bytes 0, (clock, next.at), alarm)
+        let progressed = sim.world.step(mut world)
+        task.cancel(mut timer)
+        let _ = task.join(take timer)
+        return progressed
+    }
+    sim.world.step(mut world)
+}
+
+/// Runs the UDP provider and drives its virtual clock when the run is idle.
+pub fn serve(take server: Server) waits {
+    let Server(config, plan: take initial, world: take driver, clock, tasks, port: take served, captures: take records) = take server
+    if config.loss.good_to_bad > ppm || config.loss.bad_to_good > ppm || config.loss.good_loss > ppm || config.loss.bad_loss > ppm || config.reorder > ppm || config.duplicate > ppm || config.rebind > ppm || config.jitter_ns == 0xffffffffffffffff || !v6(config.source_v6) || unspecified(config.source_v6) || config.source_v4 == 0 {
+        fail("invalid sim.udp configuration")
+    }
+    let mut port = take served
+    let mut plan = take initial
+    let mut world = take driver
+    let start = sim.world.pick(mut plan, 64512)
+    let mut state = State(next_id: 1, ephemeral: start, serial: 0, bindings: map.new(), sockets: map.new(), links: map.new(), arrivals: heap.new(), flight: map.new(), pending: map.new())
+    for record in records {
+        schedule(mut state, record.at, Captured(clone(record)))
+    }
+    loop {
+        let now = host.mono_ns(clock)
+        drain(mut state, now, mut port)
+        match provide.next(mut port) {
+            Some(take call) => {
+                incoming(config, mut state, mut plan, now, mut port, take call)
+            },
+            None => {
+                if !advance(mut world, tasks, clock, state.arrivals) {
+                    break
+                }
+            },
+        }
+    }
+}

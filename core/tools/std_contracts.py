@@ -31,7 +31,7 @@ class Contract:
     # File-level `// test-env: NAME=VALUE`: each native law of the file runs once
     # more with NAME=VALUE set, e.g. to select a portable runtime path.
     run_env: tuple[tuple[str, str], ...] = ()
-    # Exact Env grant names. None means absent, and byte values can be non-UTF-8.
+    # Exact child environment, also the grant names for laws that take Env.
     env_fixture: tuple[tuple[str, bytes | None], ...] = ()
     # A per-law reason why the evaluator cannot run this native contract.
     native_only: str | None = None

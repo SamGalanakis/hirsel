@@ -765,6 +765,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     environment = {**os.environb, b'HIRSEL_GRANTED_SECRET': b'granted-token'}
                 if ':Env' in host_parameter(case)[0]:
                     command.extend(['--grant', 'Env=' + ','.join(name for name, _ in case.env_fixture)])
+                if case.env_fixture:
                     environment = os.environb.copy()
                     for name, value in case.env_fixture:
                         if value is None:

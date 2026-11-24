@@ -132,7 +132,46 @@ pub(super) fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option
     Some(out)
 }
 
-pub(super) fn deliver(p: &mut Port, id: u64, tag: u64, w: [u64; 6]) -> Result<(), (u64, u64)> {
+pub(super) fn reply(
+    mut p: MutexGuard<'_, Port>,
+    id: u64,
+    tag: u64,
+    w: [u64; 6],
+    mut outcome: Outcome,
+) -> Outcome {
+    let ready = match udp::deliver(&mut p, id, tag, w, &mut outcome) {
+        Ok(true) => {
+            // The server consumed its Call and the rejected datagrams. Requeue
+            // the same pinned request, preserving its caller token and deadline.
+            p.free_staged(id);
+            let mut call = p.calls.remove(&id).expect("live UDP receive");
+            call.taken = false;
+            let next = p.next_id;
+            p.next_id += 1;
+            p.calls.insert(next, call);
+            p.servers.iter().map(|&(t, _)| t).collect()
+        }
+        Ok(false) => p.settle(id, outcome).into_iter().collect(),
+        Err((needed, available)) => {
+            let token = p.close_call(id);
+            drop(p);
+            ready_all(token.into_iter().collect());
+            return refused(needed, available);
+        }
+    };
+    drop(p);
+    ready_all(ready);
+    Outcome::default()
+}
+
+/// True when the receive must wait again because ingress discarded its entire batch.
+fn deliver(
+    p: &mut Port,
+    id: u64,
+    tag: u64,
+    w: [u64; 6],
+    outcome: &mut Outcome,
+) -> Result<bool, (u64, u64)> {
     let call = &p.calls[&id];
     // SAFETY: the reply was validated and the caller cannot collect until settlement.
     unsafe {
@@ -154,11 +193,15 @@ pub(super) fn deliver(p: &mut Port, id: u64, tag: u64, w: [u64; 6]) -> Result<()
                 served::deliver_address(request, address(w).unwrap(), keys);
             }
             R_ADDRESS => served::deliver_address(request, address(w).unwrap(), Vec::new()),
-            PACKETS => served::deliver_receive(request, &call.staged_packets, &call.staged),
+            PACKETS => {
+                outcome.value =
+                    served::deliver_receive(request, &call.staged_packets, &call.staged);
+                return Ok(outcome.value == 0);
+            }
             _ => {}
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 pub(crate) fn release_udp(provider: &Provider, key: u64, retirement: Retirement) {

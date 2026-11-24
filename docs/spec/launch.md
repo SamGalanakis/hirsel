@@ -204,9 +204,23 @@ A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known release identity (an available `revision`)
 and returns `IdentityUnknown` if it is unavailable.
 
-A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest>`<!-- doc-ref: external -->
+**Held runs (RUNNER-SPEC v2.62 §14.6 "The activation fate").** An install whose store holds
+a run that this activation holds (one parked, or one started under another release identity)
+settles it in the install's own commit. `--hirsel-held=release|cancel`<!-- doc-ref: external --> gives every held run a
+fate, and each `--hirsel-held-entry=PATH=release|cancel`<!-- doc-ref: external --> gives one for that entry path. Both
+are run arguments, like `--hirsel-install`<!-- doc-ref: external -->. An install that finds a held run with no fate, or
+an entry option that matches no held run, exits 1 with `Unsettled` and the trigger report, and
+writes nothing. A hand install that recovers a hosted group therefore names a fate when the
+store holds held runs:
+
+```sh
+./place --hirsel-n-place=1048576 --hirsel-install --hirsel-held=release
+```
+
+A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest> <fates>`<!-- doc-ref: external -->
 as its place arguments. The attempt and image digest use lowercase hex for 16 and
-32 bytes. The native launcher binds directory designations to that export
+32 bytes. `<fates>` is the lowercase hex of the deploy's `Fates` in the value codec, which is
+the request's `held` field. The native launcher binds directory designations to that export
 directory. The child receives no listener or private endpoint. The place
 passes the scratch directory to `runner.prepare_deploy`. It verifies the image
 key, stages the migration, validates both handle sets, and
@@ -625,7 +639,9 @@ grant a temporary Store and holds a public loopback listener. The default
 address is `127.0.0.1:7700`, and `--listen ADDR` changes it. The server uses
 `runner.launch_selection` so the supervisor can run the ordinary install
 before restarting it. A build refusal leaves the current executable serving.
-A migration refusal before activation reopens the current executable. The
+A migration refusal before activation reopens the current executable.
+Its install passes `--hirsel-held=release`<!-- doc-ref: external -->, so a run in flight across a rebuild continues
+on the new code (RUNNER-SPEC §14.6 "The activation fate"). The
 supervisor retains each WebSocket, repeats its Hello and live Subscribe
 requests on the new connection, and forwards the complete groups with the
 original subscription numbers. It uses the new query's result fingerprint
@@ -791,7 +807,7 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, G, input, foreign, exec, held) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
@@ -807,7 +823,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Unsettled is a deploy whose trigger report has a held run with no fate, or an `entries` path that matches no held run; its report names them. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -893,18 +909,19 @@ activation, assembly and report.
   [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
   code store.
 - `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...
-  [--approve-grant +LINE|-LINE]... [--request-id HEX]` resolves G with LookupGroup, or with
+  [--approve-grant +LINE|-LINE]... [--held release|cancel]
+  [--held-entry PATH=release|cancel]... [--request-id HEX]` resolves G with LookupGroup, or with
   `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
   the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
   sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
-  exits 2. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
+  exits 2. `--held`<!-- doc-ref: planned --> sets `held.all`, and each `--held-entry`<!-- doc-ref: planned --> adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
   awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
 
 Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,
 and on Display check that the text is the one their own approvals produce, print it, and
 send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
 Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a
-local refusal or a `Failed(Denied)` that is a policy refusal (FFI or Exec), 1 for any other
+local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or a `Failed(Unsettled)`, which prints the trigger report so that the operator can choose the fates for a new request, 1 for any other
 `Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
 terminal phase, which prints `outcome unknown: request D`.
 
@@ -927,7 +944,10 @@ builds it; the agent or person who proposed the release holds no deploy authorit
   OLD's side is its describe answer, NEW's the preview child's.
 - **The triggers.** The prepare child's pending trigger report ("Preparing the pending
   trigger report"), which the launcher relays as that child's answer when it exits 0. A
-  prepare child that exits 0 without one fails the deploy.
+  prepare child that exits 0 without one fails the deploy. Each `held` group shows the fate
+  the activation gives it. A report with a `held` group that has no fate, or with an
+  `unmatched` path, fails the deploy `Unsettled`: OLD's export is aborted once, and OLD
+  keeps serving with its store unchanged (RUNNER-SPEC §14.6 "The activation fate").
 
 The report of every terminal phase carries the preview as far as it was computed.
 
@@ -957,7 +977,10 @@ Caller before forwarding to `release.pending_cover`, `release.source_cover` or
 `release.settle`.
 The publisher is an operator-side application with a connection to those entries and
 the operator socket. The app's tools propose the source rows and their build settings
-(`package`, `grants` and `dirs`). The publisher supplies no Foreign or Exec approvals.
+(`package`, `grants` and `dirs`). The publisher supplies no Foreign or Exec approvals, and no fates for held runs (`held` is
+`Fates(all: None, entries: [])`). A proposal deploy that would hold a run therefore fails
+`Unsettled`, and the publisher settles it as Rejected. Whether a run's recorded steps are still
+valid on new code is the operator's decision.
 
 Run one `harness.release_publish.Publisher` per group incarnation. Drive `poll` when
 work is available and while a request is outstanding. Reconnect the app client when
@@ -1193,9 +1216,11 @@ takes the first that applies:
 2. **`held`**: a granted trigger that is parked under a hold, or whose attempt is at least
    1 **and** whose revision stamp differs from NEW's identity digest. The stamp is the
    identity digest of the release that started it (or the one a release selected; RUNNER-SPEC
-   v2.42 §14.6). NEW
-   parks the second kind with a `Revision` hold at its next start, or keeps the first
-   parked, until a release. This class comes before `gone`: `triggers.start` runs before
+   v2.42 §14.6). The
+   activation commit settles every such row by its fate (RUNNER-SPEC §14.6 "The activation
+   fate"): `Release` restamps it with NEW's identity digest so that NEW runs its next attempt,
+   and `Cancel` requests its cancel so that NEW's head ends it `Cancelled`. So NEW never parks a
+   row that this activation would have held. This class comes before `gone`: `triggers.start` runs before
    the head looks for the entry, so a started granted run under another digest whose entry
    NEW removes is held, not consumed. A parked `Request` hold stays parked even when the
    digests are equal.
@@ -1210,7 +1235,13 @@ takes the first that applies:
 5. **`unchanged`**: every other row.
 
 The report gives the exact count and earliest due time for each (class, kind, entry path,
-argument schema). A report above the prepare child's bound fails
+argument schema). Each `held` group also carries `fate: Option[HeldFate]`, resolved from the
+deploy's `Fates` (the prepare launch's fourth argument). TRIGGERS is the value-codec
+`TriggerReport { rows: List[TriggerScanRow], unmatched: List[Bytes] }`, and `unmatched` lists
+each `entries` path that matches no held row. When every held group has a fate and `unmatched`
+is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.101
+§3.5a). Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
+`Unsettled`. A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
 whose entry revision covers changes in `handles` such as table names, bindings and key codecs,
 and which a rebuild of the same code by another backend leaves equal.

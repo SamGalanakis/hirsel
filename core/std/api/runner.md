@@ -458,10 +458,15 @@ invoke a fenced transaction and `trigger_boundary` to check its attempt and
 any committed cancel request before an outside step. `trigger_snapshot` returns a
 read-only store snapshot for the current attempt, with a `store.Reader` to read it through, so the run can read rows off
 the write lock; a stale or cancelled attempt gets an error instead. `trigger_hold` commits a
-request fingerprint hold. An operator or activation entry uses
+request fingerprint hold. A program's own entry may use
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a
 revision to release changes the stamp and clears the hold together. The next
-start keeps the trigger identity and increments the attempt.
+start keeps the trigger identity and increments the attempt. A deploy or install
+settles every run it would hold in its own activation commit, as the operator's
+`--held` fate directs: `release` restamps the run so that it continues on the new
+code, and `cancel` ends it `Cancelled`. A run therefore stays parked only when a
+`Request` hold is made on the code that is already running (RUNNER-SPEC §14.6
+"The activation fate").
 
 The store step library gives a granted trigger a confined process body.
 Include `steps.migrate` in the place migration and `steps.register` in the

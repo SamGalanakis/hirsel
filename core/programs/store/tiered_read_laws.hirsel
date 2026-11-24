@@ -293,11 +293,11 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
             fail("L62: pager lookup changed the row")
         }
     }
-    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
     let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
     let put_op = JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), prior: 7, trim: None)
-    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, put_op)?
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, put_op)?
     root.root_stamp = tree_stamp(tree)
     let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
     let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? else {
@@ -313,7 +313,7 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
         fail("L62: reading past an overlay changed a base row")
     }
     let deleted = JournalOp(key: clone(key), value: None, prior: 7, trim: None)
-    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 2, branch: 0), before, deleted)?
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, deleted)?
     root.root_stamp = tree_stamp(tree)
     if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? {
         fail("L62: a replay tombstone did not hide the base row")
@@ -437,12 +437,12 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
         fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
     }
 
-    let mut account = ReplayTieredAccount(total: 258, exact: false, ordinal: 0)
+    let mut account = ReplayTieredAccount(total: 258, exact: false)
     let mut ids = 102u64
     let before_edit = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
     let new_bytes = string.into_bytes(string.from("second"))
     let op = JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
-    replay_tiered_op("j-1", mut before, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before_edit, op)?
+    replay_tiered_op("j-1", mut before, mut ids, mut account, before_edit, op)?
     let folded = tiered_attempt(0, 0)
     let Error(Missed) = tiered_plan_prior(folded, visible, before, key) else {
         fail("L63: a write tried to plan through an overlay")
@@ -730,11 +730,11 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let mut tree = new_page_tree(CollectionMap, 1024)
     tree.root = page_result(std.page.attach(take image, take children, list.new()))?
 
-    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
     let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 1, next: 4)))
     let trim = JournalOp(key: take id, value: None, prior: 0, trim: Some(JournalTrim(floor: 2, dropped: 86)))
-    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, trim)?;
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, before, trim)?;
 
     // There is no pager to answer. The former first row is in the base but
     // the new descriptor masks it. A retained row still needs the pager.

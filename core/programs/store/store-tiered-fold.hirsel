@@ -130,7 +130,7 @@ fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Ar
     let pack_file = paged_pack_path(base.pack)?
     let mut checked = ()
     if let Some(root) = std.omap.root(overlay.trims) {
-        visit_fold_records(root, mut checked, scoped fn(mut state: (), ordinal: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), _index: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
             if evidence.lo < evidence.hi {
                 let low = fold_prefix_charge(cut, base, evidence.lo)?
                 let high = fold_prefix_charge(cut, base, evidence.hi)?

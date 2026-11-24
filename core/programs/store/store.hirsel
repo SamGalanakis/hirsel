@@ -5945,11 +5945,11 @@ fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Er
         }
         Ok((take names, total))
     })?
-    let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0, ordinal: 0)
+    let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
     Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered))
 }
 
-fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount, origin: ReplayOrigin) -> Result[(), Error] {
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount) -> Result[(), Error] {
     if list.len(ops) == 0 {
         return Ok(())
     }
@@ -5972,7 +5972,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 (descriptor[52u64], tiered_counts)
             }
             if let Some(before) = tiered_descriptor {
-                replay_tiered_op(file, mut tree, mut next_stamp, mut account, origin, before, op)?
+                replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op)?
                 continue
             }
             if let Some(trim) = op.trim {
@@ -6038,10 +6038,8 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
     if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
         return Error(disk_fault(file, 0, Gap(commit.version)))
     }
-    let origin = ReplayOrigin(ordinal: stamp_after(replay.tiered.ordinal)?, branch: commit.branch)
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, origin)?
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, origin)?
-    replay.tiered.ordinal = origin.ordinal
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered)?
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered)?
     replay.state.tips[i].head = commit.version
     replay.state.tips[i].at = commit.at
     Ok(())

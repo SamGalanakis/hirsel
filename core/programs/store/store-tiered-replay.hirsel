@@ -1,13 +1,13 @@
 type ReplayBranch: shareable + send {
     collections: std.omap.OMap[u32, Arc[ReplayOverlay]],
+    fork_time: Option[std.omap.OMap[u32, Arc[ReplayOverlay]]],
     ids: u64,
     charged: u64
 }
 
 type ReplayTieredAccount: shareable + send {
     total: u64,
-    exact: bool,
-    ordinal: u64
+    exact: bool
 }
 
 fn journal_replay_manifest(take state: State, manifest: PageManifest) -> Result[JournalReplay, Error] {
@@ -49,7 +49,7 @@ fn replay_charge(file: String, before: u64, removed: u64, added: u64) -> Result[
     Ok(total)
 }
 
-fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: ReplayOrigin, before: ReplayDescriptor, op: JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
+fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], before: ReplayDescriptor, op: JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
     let mut seq_bounds = before.seq_bounds
     if let Some(window) = before.seq_bounds {
         let Some(value) = view op.value else {
@@ -75,11 +75,11 @@ fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: Replay
     }
     let rows = replay_charge(file, before.rows, removed_rows, added_rows)?
     let row_bytes = replay_charge(file, before.row_bytes, removed, added)?
-    replay_overlay_edit(mut overlay, file, 0, origin, op.key, op.prior, now)?
+    replay_overlay_edit(mut overlay, file, 0, op.key, op.prior, now)?
     Ok((ReplayDescriptor(rows: rows, row_bytes: row_bytes, seq_bounds: seq_bounds), removed, added))
 }
 
-fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: ReplayOrigin, collection: u32, before: ReplayDescriptor, op: JournalOp, trim: JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
+fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], collection: u32, before: ReplayDescriptor, op: JournalOp, trim: JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
     let Some(window) = before.seq_bounds else {
         return Error(disk_fault(file, 0, Malformed))
     }
@@ -87,17 +87,17 @@ fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: Repla
         return Error(disk_fault(file, 0, Malformed))
     }
     let start = ReplayLogHead(first: window.first, next: window.next, cold_next: option.unwrap(overlay.cold_next), row_bytes: before.row_bytes)
-    let revised = replay_overlay_trim(mut overlay, file, 0, origin, collection, start, trim)?
+    let revised = replay_overlay_trim(mut overlay, file, 0, collection, start, trim)?
     let seq_bounds = LogBounds(first: revised.first, next: revised.next)
     Ok((ReplayDescriptor(rows: revised.next - revised.first, row_bytes: revised.row_bytes, seq_bounds: Some(seq_bounds)), trim.dropped, 0u64))
 }
 
-fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, origin: ReplayOrigin, before: ReplayDescriptor, op: JournalOp) -> Result[(), Error] {
+fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, before: ReplayDescriptor, op: JournalOp) -> Result[(), Error] {
     let id: u32 = list.word_be(op.key, 0)
     let (take ready_root, take next_branch_overlay, following_stamp, total) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], Arc[ReplayBranch], u64, u64), Error] {
         let previous = match tree.replay {
             Some(existing) => arc.share(existing),
-            None => arc.new(ReplayBranch(collections: std.omap.new(), ids: 0, charged: 0)),
+            None => arc.new(ReplayBranch(collections: std.omap.new(), fork_time: None, ids: 0, charged: 0)),
         }
         let (take current, previous_charge) = match std.omap.get(previous.collections, id) {
             Some(overlay) => (arc.share(overlay), overlay.charged),
@@ -108,8 +108,8 @@ fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut a
         }
         let mut overlay = take current
         let (after, removed, added) = match op.trim {
-            Some(trim) => replay_trim_edit(file, mut overlay, origin, id, before, op, trim)?,
-            None => replay_row_edit(file, mut overlay, origin, before, op)?,
+            Some(trim) => replay_trim_edit(file, mut overlay, id, before, op, trim)?,
+            None => replay_row_edit(file, mut overlay, before, op)?,
         }
         let new_total = replay_charge(file, account.total, if account.exact {
             removed
@@ -126,7 +126,7 @@ fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut a
         let charged = previous.charged - previous_charge + overlay.charged
         let mut ids = previous.ids
         let (take collections, _) = std.omap.insert(mut ids, previous.collections, id, take overlay)
-        Ok((take root, arc.new(ReplayBranch(collections: take collections, ids: ids, charged: charged)), stamp, new_total))
+        Ok((take root, arc.new(ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: charged)), stamp, new_total))
     })?
     tree.root = take ready_root
     tree.replay = Some(take next_branch_overlay)

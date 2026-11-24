@@ -96,7 +96,6 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take init
 
 fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
     let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
-    let ordinal = stamp_after(replay.tiered.ordinal)?
     let charge = branch_record_bytes(name)
     if id < replay.state.next_branch || id == 4294967295 || charge > META_LIMIT - replay.record_bytes || map.contains(replay.names, name) {
         return Error(disk_fault(file, 0, Malformed))
@@ -109,7 +108,11 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
             if source.head != forked_at {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            return Ok((share_roots(source.roots), source.at, string.from(name)))
+            let mut roots = share_roots(source.roots)
+            if let Some(layer) = view source.roots.collections.replay {
+                roots.collections.replay = Some(arc.new(ReplayBranch(collections: clone(layer.collections), fork_time: Some(clone(layer.collections)), ids: layer.ids, charged: layer.charged)))
+            }
+            return Ok((take roots, source.at, string.from(name)))
         }
         Error(disk_fault(file, 0, Malformed))
     })?
@@ -120,7 +123,6 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
     replay.record_bytes += charge
     replay.state.next_branch = id + 1
     replay.next_node = order.max(replay.next_node, watermark - 1)
-    replay.tiered.ordinal = ordinal
     replay.tiered.exact = false
     Ok(())
 }

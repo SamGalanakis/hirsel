@@ -25,8 +25,8 @@ fn l79_fold_parent(d: Dir, owner: StoreId, left: std.page.PagePtr) -> Result[(st
 fn l79_fold_trims(first_charge: u64, final_charge: u64) -> Result[Arc[ReplayOverlay], Error] {
     let mut overlay = empty_replay_overlay(Some(3u64))
     let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
-    let middle = replay_overlay_trim(mut overlay, "j-1", 72, ReplayOrigin(ordinal: 1, branch: 0), 9, initial, JournalTrim(floor: 2, dropped: first_charge))?
-    let _ = replay_overlay_trim(mut overlay, "j-1", 90, ReplayOrigin(ordinal: 2, branch: 0), 9, middle, JournalTrim(floor: 3, dropped: final_charge))?
+    let middle = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, JournalTrim(floor: 2, dropped: first_charge))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 90, 9, middle, JournalTrim(floor: 3, dropped: final_charge))?
     Ok(take overlay)
 }
 
@@ -39,10 +39,10 @@ fn l79_fold_checks(source: TieredPageSource, base: std.page.PagePtr) -> Result[(
     let mut overlay = empty_replay_overlay(None)
     // Force an internal overlay node before placing bad evidence in its last leaf.
     for absent in 3u64 .. 36 {
-        replay_overlay_edit(mut overlay, "j-1", 110, ReplayOrigin(ordinal: absent, branch: 0), log_key(9, absent)?, 0, ReplayAbsent)?
+        replay_overlay_edit(mut overlay, "j-1", 110, log_key(9, absent)?, 0, ReplayAbsent)?
     }
     let key = log_key(9, 36)?
-    replay_overlay_edit(mut overlay, "j-1", 110, ReplayOrigin(ordinal: 36, branch: 0), key, 7, ReplayAbsent)?
+    replay_overlay_edit(mut overlay, "j-1", 110, key, 7, ReplayAbsent)?
     let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(source, base, overlay) else {
         fail("L68: fold accepted a recorded prior for an absent key")
     }
@@ -52,9 +52,9 @@ fn l79_fold_checks(source: TieredPageSource, base: std.page.PagePtr) -> Result[(
 fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
     let mut overlay = empty_replay_overlay(Some(3u64))
     let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
-    let _ = replay_overlay_trim(mut overlay, "j-1", 72, ReplayOrigin(ordinal: 1, branch: 0), 9, initial, JournalTrim(floor: 2, dropped: 172))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 72, 9, initial, JournalTrim(floor: 2, dropped: 172))?
     let next_key = log_key(9, 3)?
-    replay_overlay_edit(mut overlay, "j-1", 90, ReplayOrigin(ordinal: 2, branch: 0), next_key, 0,
+    replay_overlay_edit(mut overlay, "j-1", 90, next_key, 0,
         ReplayPut(arc.new(string.into_bytes(string.from("next")))))?
     verify_tiered_fold(source, base, overlay)?
     let limits = LogBounds(first: 0, next: 3)
@@ -85,9 +85,9 @@ fn l79_cut_candidate(source: TieredPageSource, base: std.page.PagePtr, body: Byt
     list.push(mut kids, ColdPage(base))
     let mut roots = empty_roots()
     roots.collections.root = page_result(std.page.attach(take image, take kids, list.new()))?
-    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut account = ReplayTieredAccount(total: 258, exact: true)
     let change = JournalOp(key: log_key(9, 1)?, value: Some(clone(body)), prior: 7, trim: None)
-    replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, ReplayOrigin(ordinal: 1, branch: 0), ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
+    replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
     fold_page_tree(source, mut roots.collections, mut next_stamp)?
     Ok(take roots)
 }

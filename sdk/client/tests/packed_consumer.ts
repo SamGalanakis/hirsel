@@ -25,7 +25,7 @@ function openSocket(): Socket {
       const frame = Frame.decode(data);
       if (frame.tag === 'Hello') {
         assert.deepEqual(frame.values[1], want);
-        emit({tag: 'Welcome', values: [caller, 1, 262144n, identity.digest, identity.target, identity.n_place]});
+        emit({tag: 'Welcome', values: [caller, 1, 262144n, identity.digest, identity.target, identity.n_place, 14000000n, 5184000000n]});
         emit({tag: 'Placed', value: {tag: 'Ready', value: 0}});
         emit({tag: 'Placed', value: {tag: 'Ready', value: 1}});
       } else if (frame.tag === 'Subscribe') {

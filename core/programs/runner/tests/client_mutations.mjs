@@ -10,43 +10,43 @@ function replace(text, from, to) {
 }
 export const controls = {
   replay_under_new_principal: ['lost_stream_fences_generation', text => replace(text,
-    "if (state.generation !== this.generation || !stream || !sameCaller(stream.caller, this.record.caller)) {\n        await this.stop('Fenced', 'LocallyUnknown'); return;\n      }",
-    "if (state.generation !== this.generation || !stream || !sameCaller(stream.caller, this.record.caller)) {\n        Object.assign(this, {generation: state.generation}); \n        const record = structuredClone(this.record); if (record.pending) record.pending.generation = state.generation;\n        state.streams[this.stream] = record; this.record = record; await this.options.storage.write(state);\n      }")],
+    "        await this.stop('Fenced', 'LocallyUnknown'); return;\n      }\n      return await fn(state);",
+    "        Object.assign(this, {generation: state.generation});\n        state.directory.push(this.stream); state.streams[this.stream] = structuredClone(this.record);\n        await this.options.storage.write(state);\n      }\n      return await fn(state);")],
   shared_stream: ['stream_lease', text => replace(text,
-    'lease = await options.storage.lock(`stream-${state.generation}-${n}`, false);',
-    'lease = await options.storage.lock(`stream-${state.generation}-${n}`, false);\n        if (!lease) lease = {lost: new Promise<void>(() => {}), release: async () => {}};')],
+    'lease = await options.storage.lock(streamLock(state, n), false);',
+    'lease = await options.storage.lock(streamLock(state, n), false);\n        if (!lease) lease = {lost: new Promise<void>(() => {}), release: async () => {}};')],
   new_work_before_recovery: ['stream_lease', text => replace(text,
     "    if (this.state !== 'Ready' || this.record.pending) return;",
     "    if (this.state !== 'Ready') return;")],
   treat_as_superseded: ['history_unavailable_retires', text => replace(text,
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }",
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.installation(async state => { const record = state.streams[this.stream]; record.next = pending.p + 1n; delete record.pending; await this.options.storage.write(state); this.record = structuredClone(record); this.finish({tag: 'LocallyUnknown'}); }); continue; }")],
+    "            else await this.retire('LocallyUnknown');",
+    "            else await this.completeCall({tag: 'LocallyUnknown'}, true, false);")],
   drop_pending_answer: ['history_unavailable_retires', text => replace(text,
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }",
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { continue; }")],
+    "            else await this.retire('LocallyUnknown');",
+    "            else continue;")],
   retire_on_stale: ['history_unavailable_retires', text => replace(text,
-    'if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;',
-    "if (row.stream === this.stream && row.outcome.tag === 'Refused' && row.outcome.value.tag === 'HistoryUnavailable' && (!pending || row.p !== pending.p)) { await this.retire('LocallyUnknown'); continue; }\n      if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;")],
+    '      if (!pending?.inflight || pending.http || row.stream.t !== id?.t || row.stream.n !== id.n || row.p !== pending.p) continue;',
+    "      if (row.outcome.tag === 'Refused' && row.outcome.value.tag === 'HistoryUnavailable' && !pending) { await this.stop('Retired'); continue; }\n      if (!pending?.inflight || pending.http || row.stream.t !== id?.t || row.stream.n !== id.n || row.p !== pending.p) continue;")],
   no_directory: ['lost_stream_fences_generation', text => {
-    text=replace(text,'if (!state || !intact(state)) {\n        const generation', 'if (!state) {\n        const generation');
+    text=replace(text,'if (!state || !intact(state)) {\n        state = fresh', 'if (!state) {\n        state = fresh');
     return replace(text,'if (state.streams[n].retired) continue;',
-      'if (!state.streams[n]) state.streams[n] = {next: 0n, retired: false};\n        if (state.streams[n].retired) continue;');
+      'if (!state.streams[n]) state.streams[n] = emptyStream();\n        if (state.streams[n].retired) continue;');
   }],
   advance_on_refusal: ['refused_p_reused', text => replace(text,
-    'record.terminal = {p: pending.p, outcome: structuredClone(outcome)};\n          delete record.pending;\n          await this.options.storage.write(state);',
-    'record.terminal = {p: pending.p, outcome: structuredClone(outcome)};\n          record.next = pending.p + 1n;\n          delete record.pending;\n          await this.options.storage.write(state);')],
+    'if (advance && pending.p !== maxU64) record.next = pending.p + 1n;',
+    'if (pending.p !== maxU64) record.next = pending.p + 1n;')],
   send_then_commit: ['commit_before_send', text => replace(text,
-    'record.pending = pending;\n        await this.options.storage.write(state);',
-    "record.pending = pending;\n        this.socket!.send(this.options.frame.encode({tag: 'Call', values: [this.stream, pending.p, pending.slot, 30000, pending.args]}));\n        await this.options.storage.write(state);")],
+    '        record.pending = pending;\n        if (mint)',
+    "        record.pending = pending;\n        this.socket!.send(this.options.frame.encode({tag: 'Call', values: [record.id!, pending.p, pending.slot, 30000, pending.args]}));\n        if (mint)")],
   backoff_reset_at_welcome: ['backoff_requires_stable_session', text => replace(text,
     'this.welcomed = true; this.welcomedAt = this.clock.now();',
     'this.welcomed = true; this.welcomedAt = this.clock.now(); this.backoff = 100;')],
   resend_on_mismatch: ['request_mismatch_fences', text => replace(text,
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }",
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { this.sent = false; this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.sendPending()); }, 100); continue; }")],
+    "if (refusal.tag === 'RequestMismatch') await this.fence('RequestMismatch');",
+    "if (refusal.tag === 'RequestMismatch') await this.retryPending(true);")],
   advance_on_mismatch: ['request_mismatch_fences', text => replace(text,
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }",
-    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.installation(async state => { const record = state.streams[this.stream]; record.next = pending.p + 1n; delete record.pending; await this.options.storage.write(state); this.record = structuredClone(record); this.finish({tag: 'RequestMismatch'}); }); continue; }")],
+    "if (refusal.tag === 'RequestMismatch') await this.fence('RequestMismatch');",
+    "if (refusal.tag === 'RequestMismatch') await this.completeCall({tag:'RequestMismatch'}, true, false);")],
 };
 
 export async function mutations(codec,names) {
@@ -66,7 +66,7 @@ export async function mutations(codec,names) {
   return {cases:names.length};
 }
 
-export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries}) {
+export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries,savedStream}) {
   async function board(second=false) {
     const h=await setup(); await ready(h);
     const subscribe=()=>{
@@ -82,7 +82,7 @@ export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,re
       h.server.emit(h.server.sockets.at(-1),batch(BigInt(version),complete,groups,outcomes));
       await settle();
     };
-    const done=(p,outcome=returned(8))=>({stream:h.client.stream,p:BigInt(p),outcome});
+    const done=(p,outcome=returned(8))=>({stream:savedStream(h.storage.raw).id,p:BigInt(p),outcome});
     await emit(1,second ? [0,1] : [0],
       [group(0,[row(0,1,10)],bytes(4)),...(second ? [group(1,[row(0,1,20)])] : [])]);
     const call=optimistic=>h.client.call(want,bytes(8),x=>x,{optimistic});
@@ -151,7 +151,7 @@ export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,re
       assert.deepEqual(decodedChanges[0].rows,[{slot:'rows',key:'0000000000000007',new:inserted}]);
       const wire={slot:0,key:bytes(0,0,2,31,0,0,0,0,0,0,0,7),value:{tag:'Some',value:bytes(1,0,0,0,9)}};
       const outcome={tag:'Returned',value:bytes(8,0,0,0,0,0,0,0)};
-      await send(batch(2n,[],[group(0,[wire])],[{stream:h.client.stream,p:0n,outcome}]));
+      await send(batch(2n,[],[group(0,[wire])],[{stream:savedStream(h.storage.raw).id,p:0n,outcome}]));
       assert.deepEqual(await confirmation,{tag:'Returned',value:8n});
       assert.equal(decodedChanges.length,1,'confirming an empty-slot insert must emit no second change');
       assert.strictEqual(decoded.map('rows').value,index);

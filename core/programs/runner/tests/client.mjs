@@ -13,7 +13,11 @@ const want = {identity: bytes(1), args_fp: 1n, result_fp: 2n};
 const other = {identity: bytes(2), args_fp: 3n, result_fp: 4n};
 const credential = bytes(...Array(16).fill(1));
 const caller = {issuer:2,subject:bytes(...Array(16).fill(7))};
-const initial = () => ({version:3,generation:1n,directory:[],nextStream:0,streams:{}});
+const initial = () => ({version:4,installation:2n,generation:1n,directory:[],streams:{}});
+const birth = 14000000n, retention = 5184000000n;
+const streamKey = id => typeof id === 'object'
+  ? id.t.toString(16).padStart(16,'0') + id.n.toString(16).padStart(16,'0') : String(id);
+const savedStream = (state, position=0) => state.streams[state.directory[position]];
 const returned = n => ({tag:'Returned',value:bytes(n)});
 const refused = tag => ({tag:'Refused',value:{tag}});
 const call = (stream,p,arg,slot=0,deadline=30000) => ({tag:'Call',values:[stream,p,slot,deadline,bytes(arg)]});
@@ -64,16 +68,16 @@ class Server {
         if(f.tag==='Hello') {
           if(this.welcome===false)return;
           const identity=f.values[0].tag==='Some'?caller:{issuer:1,subject:bytes(...Array(16).fill(++this.anonymous))};
-          this.emit(s,{tag:'Welcome',values:[identity,4,262144n,bytes(3),'test',1024n]});
+          this.emit(s,{tag:'Welcome',values:[identity,4,262144n,bytes(3),'test',1024n,birth,retention]});
           s.principal=identity.subject;this.onHello?.(s,f);
           if(this.placed)for(const _ of f.values[1])this.emit(s,{tag:'Placed',value:{tag:'Ready',value:0}});
         } else if(f.tag==='Call') {
           this.calls.push({frame:f,socket:s});
-          const p=this.storage.raw?.streams[f.values[0]]?.pending;
+          const p=this.storage.raw?.streams[streamKey(f.values[0])]?.pending;
           try {
             assert(p,'a send requires a durable pending request');
             assert.equal(p.p,f.values[1]);assert.deepEqual(p.args,f.values[4]);
-            assert(p.attempts>0,'the send attempt must be durable');
+            assert(p.inflight,'the send attempt must be durable');
             this.onCall?.(f,s);
           }catch(e){this.errors.push(e);}
         }
@@ -84,6 +88,7 @@ class Server {
   };
   emit(socket,frame){const data=this.codec.encode(frame);queueMicrotask(()=>{if(!socket.closed)socket.onmessage?.({data:data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)});});}
   answer(socket,stream,p,outcome,tag='Batch'){
+    if(stream===0)stream=this.calls.findLast(row=>row.socket===socket)?.frame.values[0];
     this.emit(socket,tag==='Batch'?{tag,values:[1n,[],[],[{stream,p,outcome}]]}:{tag,values:[1n,[{stream,p,outcome}]]});
   }
   close(socket,code,reason){socket.closed=true;socket.onclose?.({code,reason});}
@@ -93,14 +98,15 @@ class Server {
 // The fixture implements STORE P1-P3 directly: one retained digest and reply
 // per principal/stream, consecutive positions, and no effects on AH1/AH2.
 class Ledger {
-  streams=new Map();effects=0;
+  streams=new Map();effects=0;byValue=new Map();
   attempt(principal,frame) {
-    const [stream,p,,,arg]=frame.values,k=Buffer.from(principal).toString('hex')+':'+stream;
+    const [stream,p,,,arg]=frame.values,k=Buffer.from(principal).toString('hex')+':'+streamKey(stream);
     const old=this.streams.get(k);
     if(old && p<old.p)return refused('HistoryUnavailable');
     if(old && p===old.p)return Buffer.from(arg).equals(Buffer.from(old.arg))?old.outcome:refused('RequestMismatch');
     assert.equal(p,old?old.p+1n:0n);
     this.effects++;
+    this.byValue.set(arg[0],(this.byValue.get(arg[0])??0)+1);
     const outcome=returned(arg[0]);this.streams.set(k,{p,arg:arg.slice(),outcome});return outcome;
   }
 }
@@ -137,6 +143,135 @@ export async function laws(codec, only, mutant, entries) {
     return {client,server,storage,time,events,diagnostics,opts};
   }
   async function ready(h){await h.client.whenReady();h.server.check();}
+  tests.fresh_installations_share_caller=async()=>{
+    const store=new Ledger();
+    const prepare=server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],store.attempt(s.principal,f));};
+    const first=await setup(new Memory(),{prepare});await ready(first);
+    const second=await setup(new Memory(),{prepare});await ready(second);
+    assert.deepEqual(await first.client.call(want,bytes(21),x=>x),returned(21));
+    assert.deepEqual(await second.client.call(want,bytes(22),x=>x),returned(22));
+    assert.notDeepEqual(first.server.calls[0].frame.values[0],second.server.calls[0].frame.values[0]);
+    assert.equal(store.effects,2);
+    assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
+    first.server.check();second.server.check();
+  };
+  tests.cleared_storage_restarts_under_same_caller=async()=>{
+    const store=new Ledger(),storage=new Memory();
+    const prepare=server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],store.attempt(s.principal,f));};
+    const h=await setup(storage,{prepare});await ready(h);
+    assert.deepEqual(await h.client.call(want,bytes(21),x=>x),returned(21));
+    const old=storage.raw.installation;
+    await h.client.close();storage.raw=null;
+    const reopened=await setup(storage,{prepare});await ready(reopened);
+    assert.deepEqual(await reopened.client.call(want,bytes(22),x=>x),returned(22));
+    assert.notEqual(storage.raw.installation,old);
+    assert.notDeepEqual(h.server.calls[0].frame.values[0],reopened.server.calls[0].frame.values[0]);
+    assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
+  };
+  tests.concurrent_same_caller_bridge=async()=>{
+    const store=new Ledger();
+    let finish;
+    const h=await setup(new Memory(),{prepare:server=>{server.onCall=(f,s)=>{
+      const returned=store.attempt(s.principal,f);
+      finish=()=>server.answer(s,f.values[0],f.values[1],returned);
+    };}});await ready(h);
+    const browser=h.client.call(want,bytes(21),x=>x);
+    await settle();
+    const bridgeId={t:birth,n:crypto.getRandomValues(new BigUint64Array(1))[0]};
+    assert.notDeepEqual(h.server.calls[0].frame.values[0],bridgeId);
+    assert.deepEqual(store.attempt(caller.subject,call(bridgeId,0n,22)),returned(22));
+    finish();
+    assert.deepEqual(await browser,returned(21));
+    assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
+  };
+  tests.unmarked_503_after_commit=async()=>{
+    const posts=[],effects=new Map();
+    const http={url:'https://scripted.invalid',fetch:async(_url,request)=>{
+      assert.equal(request.method,'POST');
+      const key=request.headers.get('Idempotency-Key');
+      posts.push(key);
+      if(posts.length===1){
+        effects.set('X',1);
+        return new Response('{}',{status:503});
+      }
+      if(posts.length===2)return new Response('{}',{status:410,headers:{'Hirsel-Refused':`history_unavailable;key=${key}`}});
+      effects.set('X',(effects.get('X')??0)+1);
+      return new Response('{}',{headers:{'Idempotent-Outcome':'committed'}});
+    }};
+    const h=await setup(new Memory(),{http});await ready(h);
+    const result=h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'});
+    await settle();
+    assert.equal(posts.length,1);
+    await h.time.advance(1000);
+    assert.deepEqual(await result,{tag:'LocallyUnknown'});
+    assert.deepEqual(posts,[posts[0],posts[0]]);
+    assert.equal(effects.get('X'),1);
+  };
+  tests.marked_410_after_invisible_delivery_through_reopen=async()=>{
+    const posts=[],effects=new Map(),storage=new Memory();
+    const http={url:'https://scripted.invalid',fetch:async(_url,request)=>{
+      const key=request.headers.get('Idempotency-Key');
+      assert.match(key,/^"[a-f0-9]{32}\.0"$/);
+      posts.push(key);
+      if(posts.length===1){
+        effects.set('X',1);
+        throw new TypeError('connection lost after the effect committed');
+      }
+      if(posts.length===2)return new Response(null,{status:410,headers:{'Hirsel-Refused':`history_unavailable;key=${key}`}});
+      assert.equal(request.body,'"Y"');
+      effects.set('Y',1);
+      return new Response('{}',{headers:{'Idempotent-Outcome':'committed'}});
+    }};
+    const h=await setup(storage,{http});await ready(h);
+    const x=h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'});
+    await settle();
+    assert.equal(posts.length,1);
+    await h.client.close();
+    assert.deepEqual(await x,{tag:'LocallyUnknown'});
+    const replay=await setup(storage,{http});await settle();
+    assert.equal(replay.client.state,'Retired');
+    assert.deepEqual(replay.events,[{tag:'LocallyUnknown'}]);
+    assert.deepEqual(posts,[posts[0],posts[0]]);
+    const fresh=await setup(storage,{http});await ready(fresh);
+    assert.equal((await fresh.client.callHttp(want,{path:'/.hirsel/op/put',body:'"Y"'})).tag,'Returned');
+    assert.notEqual(posts[2],posts[0]);
+    assert.deepEqual(effects,new Map([['X',1],['Y',1]]));
+  };
+  tests.first_marked_410_can_hide_an_upstream_retry=async()=>{
+    let posts=0,effects=0;
+    const http={url:'https://scripted.invalid',fetch:async(_url,request)=>{
+      const key=request.headers.get('Idempotency-Key');
+      posts++;
+      // A proxy delivered the original request and lost the reply. The
+      // response visible to the SDK belongs to the proxy's repeat delivery.
+      effects++;
+      return new Response(null,{status:410,headers:{'Hirsel-Refused':`history_unavailable;key=${key}`}});
+    }};
+    const h=await setup(new Memory(),{http});await ready(h);
+    assert.deepEqual(await h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'}),{tag:'LocallyUnknown'});
+    await h.time.advance(1000);
+    assert.equal(posts,1);assert.equal(effects,1);
+  };
+  tests.older_remint_refused_once=async()=>{
+    const store=new Ledger();
+    const h=await setup(new Memory(),{prepare:server=>{server.onCall=(f,s)=>{
+      const [id,p,,,arg]=f.values;
+      // The quota-one victim is ahead of both server samples. This first
+      // workload owns its mint, so the explicit refusal permits one remint.
+      const outcome=arg[0]===21?store.attempt(s.principal,f):refused('HistoryUnavailable');
+      server.answer(s,id,p,outcome);
+    };}});await ready(h);
+    assert.deepEqual(await h.client.call(want,bytes(21),x=>x),returned(21));
+    const x=h.client.call(want,bytes(22),x=>x);
+    await settle();await h.time.advance(1000);
+    assert.deepEqual(await x,refused('HistoryUnavailable'));
+    const [first,aged,replacement]=h.server.calls.map(row=>row.frame.values);
+    assert.deepEqual(aged[0],first[0]);assert.equal(aged[1],1n);
+    assert.notDeepEqual(replacement[0],aged[0]);assert.equal(replacement[1],0n);
+    assert.equal(replacement[0].t,birth);
+    assert.equal(h.server.calls.length,3);assert.equal(h.client.state,'Retired');
+    assert.deepEqual(store.byValue,new Map([[21,1]]));
+  };
   async function subscribed(decode) {
     const h=await setup();await ready(h);
     const changes=[];
@@ -151,8 +286,8 @@ export async function laws(codec, only, mutant, entries) {
   tests.lost_stream_fences_generation=async()=>{
     const h=await setup();await ready(h);
     const answer=h.client.call(want,bytes(7),x=>x);await settle();
-    assert.deepEqual(h.server.calls[0].frame,call(0,0n,7));
-    delete h.storage.raw.streams[0];
+    assert.deepEqual(h.server.calls[0].frame,call(savedStream(h.storage.raw).id,0n,7));
+    delete h.storage.raw.streams[h.storage.raw.directory[0]];
     const fresh=await setup(h.storage);await ready(fresh);
     assert.notEqual(fresh.client.generation,h.client.generation);
     assert.equal(fresh.server.calls.length,0,'lost bytes must not replay under the new principal');
@@ -164,12 +299,12 @@ export async function laws(codec, only, mutant, entries) {
     const h=await setup();await ready(h);
     let a=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.answer(h.server.sockets[0],0,0n,{tag:'Refused',value:{tag:'Malformed',value:{kind:1,at:0n}}});await settle();
-    assert.equal((await a).tag,'Refused');assert.equal(h.storage.raw.streams[0].next,0n);
+    assert.equal((await a).tag,'Refused');assert.equal(savedStream(h.storage.raw).next,0n);
     a=h.client.call(want,bytes(8),x=>x);await settle();
-    assert.deepEqual(h.server.calls[1].frame,call(0,0n,8));
+    assert.deepEqual(h.server.calls[1].frame,call(savedStream(h.storage.raw).id,0n,8));
     h.server.answer(h.server.sockets[0],0,0n,returned(8));await settle();await a;
-    assert.equal(h.storage.raw.streams[0].next,1n);
-    a=h.client.call(want,bytes(9),x=>x);await settle();assert.deepEqual(h.server.calls[2].frame,call(0,1n,9));
+    assert.equal(savedStream(h.storage.raw).next,1n);
+    a=h.client.call(want,bytes(9),x=>x);await settle();assert.deepEqual(h.server.calls[2].frame,call(savedStream(h.storage.raw).id,1n,9));
     h.server.answer(h.server.sockets[0],0,1n,returned(9));await settle();await a;h.server.check();
   };
   tests.commit_before_send=async()=>{
@@ -179,33 +314,33 @@ export async function laws(codec, only, mutant, entries) {
         const outcome=store.attempt(s.principal,f);
         if(cut==='outcome')server.answer(s,0,0n,outcome);
       };}});await ready(h);
-      if(cut==='commit')h.storage.afterWrite=state=>{if(state.streams[0].pending?.attempts===0)throw new Error('crash after durable commit');};
-      if(cut==='outcome')h.storage.beforeWrite=state=>{if(state.streams[0].terminal)throw new Error('crash before terminal commit');};
+      if(cut==='commit')h.storage.afterWrite=state=>{if(savedStream(state).pending?.inflight===false)throw new Error('crash after durable commit');};
+      if(cut==='outcome')h.storage.beforeWrite=state=>{if(savedStream(state).terminal)throw new Error('crash before terminal commit');};
       const answer=h.client.call(want,bytes(7),x=>x);void answer.catch(()=>{});await settle();
-      assert.equal(h.storage.raw.streams[0].pending.p,0n);
-      assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
+      assert.equal(savedStream(h.storage.raw).pending.p,0n);
+      assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
       if(cut==='commit')assert.equal(h.server.calls.length,0);else assert.equal(h.server.calls.length,1);
       h.storage.afterWrite=undefined;h.storage.beforeWrite=undefined;await h.client.close();await settle();
       const recovered=await setup(h.storage,{wants:[other,want],prepare:server=>{server.onCall=(f,s)=>server.answer(s,0,0n,store.attempt(s.principal,f));}});
       await ready(recovered);
-      assert.deepEqual(recovered.server.calls[0].frame,call(0,0n,7,1));
-      assert.equal(store.effects,1);assert.equal(h.storage.raw.streams[0].next,1n);
-      assert.deepEqual(h.storage.raw.streams[0].terminal,{p:0n,outcome:returned(7)});
+      assert.deepEqual(recovered.server.calls[0].frame,call(savedStream(h.storage.raw).id,0n,7,1));
+      assert.equal(store.effects,1);assert.equal(savedStream(h.storage.raw).next,1n);
+      assert.deepEqual(savedStream(h.storage.raw).terminal,{p:0n,outcome:returned(7)});
       assert.deepEqual(recovered.events,[returned(7)]);h.server.check();recovered.server.check();
       await recovered.client.close();
     }
   };
   tests.stream_lease=async()=>{
     const h=await setup();await ready(h);
-    const b=await setup(h.storage);await ready(b);assert.equal(b.client.stream,1);
+    const b=await setup(h.storage);await ready(b);assert.notEqual(h.storage.raw.directory[0],h.storage.raw.directory[1]);
     const a=h.client.call(want,bytes(7),x=>x);await settle();
     await h.client.close();await a;await settle();
-    const c=await setup(h.storage);await ready(c);assert.equal(c.client.stream,0);
+    const c=await setup(h.storage);await ready(c);assert.equal(h.storage.raw.directory.length,2);
     const next=c.client.call(want,bytes(8),x=>x);await settle();
-    assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
-    assert.deepEqual(c.server.calls.map(x=>x.frame),[call(0,0n,7)]);
+    assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
+    assert.deepEqual(c.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7)]);
     c.server.answer(c.server.sockets[0],0,0n,returned(7));await settle();
-    assert.deepEqual(c.server.calls[1].frame,call(0,1n,8));
+    assert.deepEqual(c.server.calls[1].frame,call(savedStream(h.storage.raw).id,1n,8));
     c.server.answer(c.server.sockets[0],0,1n,returned(8));await settle();await next;c.server.check();
   };
   tests.calls_wait_in_order=async()=>{
@@ -216,15 +351,15 @@ export async function laws(codec, only, mutant, entries) {
     const third=h.client.call(want,bytes(9),x=>x);
     const closed=assert.rejects(third,{code:'Closed'});
     await settle();
-    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(0,0n,7)]);
-    assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
+    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7)]);
+    assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
     h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();
     assert.deepEqual(await first,returned(7));
-    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(0,0n,7),call(0,1n,8)]);
+    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7),call(savedStream(h.storage.raw).id,1n,8)]);
     await h.client.close();
     assert.equal((await second).tag,'LocallyUnknown');
     await closed;
-    assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(8));
+    assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(8));
     assert.equal(h.server.calls.length,2);h.server.check();
   };
   tests.incompatible_is_terminal=async()=>{
@@ -238,7 +373,7 @@ export async function laws(codec, only, mutant, entries) {
     }
     const a=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.close(h.server.sockets.at(-1),1008);await settle();h.client.reconnect();await settle();
-    assert.deepEqual(h.server.calls.at(-1).frame,call(0,0n,7));
+    assert.deepEqual(h.server.calls.at(-1).frame,call(savedStream(h.storage.raw).id,0n,7));
     h.server.answer(h.server.sockets.at(-1),0,0n,returned(7));await settle();await a;
     h.server.check();
     const gone=await setup();await ready(gone);
@@ -268,13 +403,14 @@ export async function laws(codec, only, mutant, entries) {
     const h=await setup();await ready(h);
     let a=h.client.call(want,bytes(7),x=>x);await settle();h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();await a;
     h.server.answer(h.server.sockets[0],0,0n,refused('HistoryUnavailable'));await settle();
-    assert.equal(h.client.state,'Ready');assert.equal(h.storage.raw.streams[0].retired,false);
+    assert.equal(h.client.state,'Ready');assert.equal(savedStream(h.storage.raw).retired,false);
     a=h.client.call(want,bytes(8),x=>x);await settle();
-    h.server.answer(h.server.sockets[0],0,1n,refused('HistoryUnavailable'),'Reset');await settle();
-    assert.equal(h.client.state,'Retired');assert(h.storage.raw.streams[0].retired);assert.deepEqual(await a,{tag:'LocallyUnknown'});
+    h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
+    h.server.answer(h.server.sockets[1],0,1n,refused('HistoryUnavailable'),'Reset');await settle();
+    assert.equal(h.client.state,'Retired');assert(savedStream(h.storage.raw).retired);assert.deepEqual(await a,{tag:'LocallyUnknown'});
     await assert.rejects(h.client.call(want,bytes(9),x=>x),e=>e.code==='Retired');
-    const b=await setup(h.storage);await ready(b);assert.equal(b.client.stream,1);assert.equal(b.server.calls.length,0);
-    assert.equal(h.server.calls.length,2);h.server.check();
+    const b=await setup(h.storage);await ready(b);assert.notEqual(h.storage.raw.directory[0],h.storage.raw.directory[1]);assert.equal(b.server.calls.length,0);
+    assert.equal(h.server.calls.length,3);h.server.check();
   };
   tests.request_mismatch_fences=async()=>{
     const store=new Ledger(),storage=new Memory();
@@ -285,26 +421,26 @@ export async function laws(codec, only, mutant, entries) {
     // record to exercise AH1 against the first writer's real committed digest.
     const locked=storage.lock.bind(storage);
     storage.lock=async(name,wait)=>name.startsWith('stream-')?{lost:new Promise(()=>{}),release:async()=>{}}:locked(name,wait);
-    storage.raw.streams[0]={caller,next:0n,retired:false};
-    const b=await setup(storage,{prepare:configure});await ready(b);assert.equal(b.client.stream,0);
+    savedStream(storage.raw).next=0n;
+    const b=await setup(storage,{prepare:configure});await ready(b);assert.equal(storage.raw.directory.length,1);
     const rejected=b.client.call(want,bytes(8),x=>x);await settle();
     await b.time.advance(100);assert.equal(b.server.calls.length,1,'mismatched bytes must never be resent');
     assert.equal(b.client.state,'Fenced');
-    assert.deepEqual(await rejected,{tag:'RequestMismatch'});assert.equal(store.effects,1);assert.equal(storage.raw.generation,2n);
+    assert.deepEqual(await rejected,{tag:'RequestMismatch'});assert.equal(store.effects,1);assert.notEqual(storage.raw.generation,h.client.generation);
     await b.time.advance(120000);assert.equal(b.server.calls.length,1);
     assert.deepEqual(storage.raw.directory,[]);
     const c=await setup(storage);await ready(c);assert.equal(c.server.calls.length,0);b.server.check();h.server.check();
   };
   tests.anonymous_reconnect_does_not_replay=async()=>{
     const h=await setup(undefined,{credential:undefined});await ready(h);
-    const original=h.storage.raw.streams[0].caller;
+    const original=savedStream(h.storage.raw).caller;
     const pending=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
     assert.deepEqual(await pending,{tag:'LocallyUnknown'});
-    assert.notDeepEqual(h.storage.raw.streams[0].caller,original);
+    assert.notDeepEqual(savedStream(h.storage.raw,1).caller,original);
     assert.equal(h.server.calls.length,1);
     const fresh=h.client.call(want,bytes(8),x=>x);await settle();
-    assert.deepEqual(h.server.calls[1].frame,call(0,0n,8));
+    assert.deepEqual(h.server.calls[1].frame,call(savedStream(h.storage.raw,1).id,0n,8));
     h.server.answer(h.server.sockets[1],0,0n,returned(8));await settle();
     assert.deepEqual(await fresh,returned(8));h.server.check();
   };
@@ -316,10 +452,10 @@ export async function laws(codec, only, mutant, entries) {
     h.server.placed=false;await h.time.advance(50);
     assert.equal(h.server.calls.length,1,'must wait for every Placed');
     h.server.emit(h.server.sockets[1],{tag:'Placed',value:{tag:'Ready',value:0}});await settle();
-    assert.deepEqual(h.server.calls[1].frame,call(0,0n,7));
-    assert.deepEqual(h.server.sent.slice(-2),[call(0,0n,7),{tag:'Subscribe',values:[1,0,bytes(1),{tag:'None'}]}]);
+    assert.deepEqual(h.server.calls[1].frame,call(savedStream(h.storage.raw).id,0n,7));
+    assert.deepEqual(h.server.sent.slice(-2),[call(savedStream(h.storage.raw).id,0n,7),{tag:'Subscribe',values:[1,0,bytes(1),{tag:'None'}]}]);
     h.server.answer(h.server.sockets[1],0,0n,refused('Deadline'));await settle();await h.time.advance(100);
-    assert.deepEqual(h.server.calls[2].frame,call(0,0n,7));
+    assert.deepEqual(h.server.calls[2].frame,call(savedStream(h.storage.raw).id,0n,7));
     h.server.answer(h.server.sockets[1],0,0n,returned(7));await settle();await a;h.server.check();
   };
   tests.uncertain_refusal_retires=async()=>{
@@ -327,13 +463,13 @@ export async function laws(codec, only, mutant, entries) {
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
     h.server.answer(h.server.sockets[1],0,0n,refused('NoEntry'));await settle();
     assert.deepEqual(await a,{tag:'LocallyUnknown'});assert.equal(h.client.state,'Retired');
-    assert.equal(h.storage.raw.streams[0].next,0n);assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
+    assert.equal(savedStream(h.storage.raw).next,0n);assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
   };
   tests.batch_complete=async()=>{
     const h=await setup();await ready(h);const caches=[];
     h.client.subscribe(want,bytes(1),(sub,change)=>{if(!change.invalidated)caches.push(sub.rows(0).value);});await settle();
     const a=h.client.call(want,bytes(7),x=>x);await settle();
-    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}]}],[{stream:0,p:0n,outcome:returned(7)}]]});await settle();await a;
+    h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}]}],[{stream:savedStream(h.storage.raw).id,p:0n,outcome:returned(7)}]]});await settle();await a;
     assert.equal(caches[0][0].value.value[0],2);
     h.server.emit(h.server.sockets[0],{tag:'Reset',values:[2n,[]]});await settle();assert.equal(caches.length,1);
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'None'}}]}],[]]});await settle();assert.equal(caches.length,1);
@@ -511,9 +647,9 @@ export async function laws(codec, only, mutant, entries) {
     await settle();
     let release;
     h.storage.beforeWrite=state=>{
-      if(state.streams[0].terminal?.p===0n)return new Promise(resolve=>{release=resolve;});
+      if(savedStream(state).terminal?.p===0n)return new Promise(resolve=>{release=resolve;});
     };
-    await emit(first,batch(4n,[3],[group(3,[secret],bytes(91))],[{stream:0,p:0n,outcome:returned(5)}]));
+    await emit(first,batch(4n,[3],[group(3,[secret],bytes(91))],[{stream:savedStream(h.storage.raw).id,p:0n,outcome:returned(5)}]));
     try {
       assert.equal(typeof release,'function');
       const late=first.onmessage;
@@ -544,7 +680,7 @@ export async function laws(codec, only, mutant, entries) {
     const retired=await setup(undefined,{prepare:server=>{server.welcome=false;}});
     const ready=retired.client.whenReady();
     void ready.catch(()=>{});
-    retired.server.close(retired.server.sockets[0],1009,'hirsel.3');
+    retired.server.close(retired.server.sockets[0],1009,'hirsel.4');
     await assert.rejects(ready,{code:'Reload'});
     await retired.time.advance(60000);
     assert.equal(retired.server.sockets.length,1);
@@ -552,9 +688,9 @@ export async function laws(codec, only, mutant, entries) {
     const current=await setup(); await current.client.whenReady();
     const pending=current.client.call(want,bytes(3),data=>data);
     void pending.catch(()=>{}); await settle();
-    current.server.close(current.server.sockets[0],1009,'hirsel.3');
+    current.server.close(current.server.sockets[0],1009,'hirsel.4');
     await assert.rejects(pending,{code:'ReplyTooLarge'});
-    assert.equal(current.storage.raw.streams[0].pending.p,0n);
+    assert.equal(savedStream(current.storage.raw).pending.p,0n);
     assert.match(current.diagnostics.at(-1),/Stored reply/);
   };
   tests.subscription_end_after_reset=async()=>{
@@ -596,20 +732,20 @@ export async function laws(codec, only, mutant, entries) {
     const h=await setup();await ready(h);
     const arg=bytes(7),w=structuredClone(want);
     const a=h.client.call(w,arg,x=>x);arg[0]=9;w.identity[0]=9;await settle();
-    assert.deepEqual(h.server.calls[0].frame,call(0,0n,7));
-    assert.deepEqual(h.storage.raw.streams[0].pending.want,want);
+    assert.deepEqual(h.server.calls[0].frame,call(savedStream(h.storage.raw).id,0n,7));
+    assert.deepEqual(savedStream(h.storage.raw).pending.want,want);
     h.server.answer(h.server.sockets[0],0,0n,{tag:'Failed',value:{tag:'Raised',value:1}});await settle();
-    assert.deepEqual(await a,{tag:'Failed',value:{tag:'Raised',value:1}});assert.equal(h.storage.raw.streams[0].next,1n);
+    assert.deepEqual(await a,{tag:'Failed',value:{tag:'Raised',value:1}});assert.equal(savedStream(h.storage.raw).next,1n);
   };
   tests.retryable_outcomes_keep_identity=async()=>{
     const h=await setup();await ready(h);const a=h.client.call(want,bytes(7),x=>x);await settle();
     for(const outcome of [{tag:'Abandoned'},refused('Overloaded'),{tag:'Refused',value:{tag:'Budget',value:{requested:10n,available:0n}}}]) {
       const n=h.server.calls.length;
       h.server.answer(h.server.sockets[0],0,0n,outcome);await settle();
-      assert.equal(h.storage.raw.streams[0].next,0n);
+      assert.equal(savedStream(h.storage.raw).next,0n);
       await h.time.advance(1000);
-      assert.equal(h.server.calls.length,n+1);assert.deepEqual(h.server.calls.at(-1).frame,call(0,0n,7));
-      assert(h.storage.raw.streams[0].pending.possiblyAdmitted);
+      assert.equal(h.server.calls.length,n+1);assert.deepEqual(h.server.calls.at(-1).frame,call(savedStream(h.storage.raw).id,0n,7));
+      assert(!savedStream(h.storage.raw).pending.untouched);
     }
     h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();await a;h.server.check();
   };
@@ -670,7 +806,7 @@ export async function laws(codec, only, mutant, entries) {
       const c=await storage.lock('stream-1-0',true);assert(c);await c.release();
     }finally{await rm(dir,{recursive:true,force:true});}
   };
-  Object.assign(tests,optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries}));
+  Object.assign(tests,optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries,savedStream}));
   let cases=0;
   try {
     for(const [name,test] of Object.entries(tests)) {

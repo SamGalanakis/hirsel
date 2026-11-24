@@ -103,24 +103,43 @@ fn queue_due(ring: &Ring, mailbox: &Mutex<Submissions>) -> bool {
             .is_empty()
 }
 
-/// Publish one SQ batch and preserve the unconsumed prefix across short or failed enters.
-fn enter_queue(
-    ring: &Ring,
-    mailbox: &Mutex<Submissions>,
-    timeout_ns: Option<u64>,
-    refuse_submit: bool,
-) -> io::Result<usize> {
+/// Publish what fits of the mailbox; true when entries still wait for SQ room.
+fn publish(ring: &Ring, mailbox: &Mutex<Submissions>) -> bool {
     let mut pending = mailbox.lock().unwrap_or_else(|error| error.into_inner());
     while let Some(submission) = pending.entries.get(pending.published) {
         // SAFETY: the owner holds the turn and is the only SQ writer. The mailbox
         // pins each fd. Completion callers keep operand storage live until their
         // result, and zero-copy sends keep it through the notification.
         if !unsafe { ring.push(&submission.entry) } {
-            break;
+            return true;
         }
         pending.published += 1;
     }
-    drop(pending);
+    false
+}
+
+/// Submit the mailbox and preserve the unconsumed prefix across short or failed
+/// enters. A turn that may block first submits, without waiting, every SQ batch
+/// the mailbox fills: an entry left in the mailbox cannot complete to end the wait.
+fn enter_queue(
+    ring: &Ring,
+    mailbox: &Mutex<Submissions>,
+    mut timeout_ns: Option<u64>,
+    refuse_submit: bool,
+) -> io::Result<usize> {
+    while publish(ring, mailbox) && timeout_ns != Some(0) {
+        let before = ring.sq_len();
+        let result = ring.submit(0, None);
+        mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .consumed(ring.sq_len());
+        result?;
+        if ring.sq_len() == before {
+            // The kernel took nothing; come back next turn instead of sleeping.
+            timeout_ns = Some(0);
+        }
+    }
     if timeout_ns == Some(0) && ring.sq_len() == 0 && !ring.taskrun() && !ring.overflowed() {
         return Ok(0);
     }

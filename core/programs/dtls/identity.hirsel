@@ -1,3 +1,12 @@
+pub type Setup = Active | Passive | ActPass
+
+pub type HashFunc: key = Sha256 | Sha384 | Sha512
+
+pub type Fingerprint {
+    hash: HashFunc,
+    digest: Bytes
+}
+
 pub type DtlsError = Config | Setup | Fingerprint | Closed(Close) | NotConnected | Taken | NoSrtp | Key(KeyError) | Schedule(schedule.ScheduleError) | Packet(packet.PacketError) | Capacity(Capacity)
 
 pub opaque type Identity {
@@ -30,4 +39,144 @@ pub fn share_identity(i: Identity) -> Identity {
     let mut certificate: Bytes = list.with_capacity(list.len(i.certificate))
     list.append(mut certificate, i.certificate)
     Identity(key: secret.share(i.key), certificate: take certificate)
+}
+
+fn fingerprint_digest_len(hash: HashFunc) -> u64 {
+    match hash {
+        Sha256 => 32,
+        Sha384 => 48,
+        Sha512 => 64,
+    }
+}
+
+fn certificate_digest(certificate: Bytes, hash: HashFunc) -> Bytes {
+    let mut digest: Bytes = list.with_capacity(fingerprint_digest_len(hash))
+    match hash {
+        Sha256 => {
+            for byte in std.sha256.hash(certificate) {
+                list.push(mut digest, byte)
+            }
+        },
+        Sha384 => {
+            for byte in std.sha384.hash(certificate) {
+                list.push(mut digest, byte)
+            }
+        },
+        Sha512 => {
+            for byte in std.sha512.hash(certificate) {
+                list.push(mut digest, byte)
+            }
+        },
+    }
+    take digest
+}
+
+pub fn fingerprint(i: Identity, h: HashFunc) -> Fingerprint {
+    Fingerprint(hash: h, digest: certificate_digest(i.certificate, h))
+}
+
+/// Append the RFC 8122 representation. A digest of the wrong length writes zero bytes.
+pub fn fingerprint_text(f: Fingerprint, mut out: Bytes) -> u64 {
+    let size = fingerprint_digest_len(f.hash)
+    if list.len(f.digest) != size {
+        return 0
+    }
+    let written = 7 + size * 3
+    list.reserve(mut out, written)
+    match f.hash {
+        Sha256 => list.append(mut out, b"sha-256 "),
+        Sha384 => list.append(mut out, b"sha-384 "),
+        Sha512 => list.append(mut out, b"sha-512 "),
+    }
+    for i in 0u64 .. size {
+        if i != 0 {
+            list.push(mut out, b':')
+        }
+        let (hi, lo) = std.hex.encode_byte(f.digest[i], true)
+        list.push(mut out, hi)
+        list.push(mut out, lo)
+    }
+    written
+}
+
+fn fingerprint_digit(byte: u8) -> Option[u8] {
+    if int.is_ascii_digit(byte) {
+        return Some(byte - b'0')
+    }
+    let lower = int.to_ascii_lower(byte)
+    if lower >= b'a' && lower <= b'f' {
+        Some(lower - b'a' + 10)
+    } else {
+        None
+    }
+}
+
+pub fn parse_fingerprint(text: Bytes) -> Result[Fingerprint, DtlsError] {
+    let length = list.len(text)
+    if length < 8 || int.to_ascii_lower(text[0]) != b's' || int.to_ascii_lower(text[1]) != b'h' || int.to_ascii_lower(text[2]) != b'a' || text[3] != b'-' || text[7] != b' ' {
+        return Error(Fingerprint)
+    }
+    let hash = match (text[4], text[5], text[6]) {
+        (b'2', b'5', b'6') => Sha256,
+        (b'3', b'8', b'4') => Sha384,
+        (b'5', b'1', b'2') => Sha512,
+        _ => {
+            return Error(Fingerprint)
+        },
+    }
+    let size = fingerprint_digest_len(hash)
+    if length != 7 + size * 3 {
+        return Error(Fingerprint)
+    }
+    let mut digest: Bytes = list.with_capacity(size)
+    for i in 0u64 .. size {
+        let at = 8 + i * 3
+        if i != 0 && text[at - 1] != b':' {
+            return Error(Fingerprint)
+        }
+        let Some(hi) = fingerprint_digit(text[at]) else {
+            return Error(Fingerprint)
+        }
+        let Some(lo) = fingerprint_digit(text[at + 1]) else {
+            return Error(Fingerprint)
+        }
+        list.push(mut digest, hi << 4 | lo)
+    }
+    Ok(Fingerprint(hash: hash, digest: take digest))
+}
+
+pub fn negotiate_setup(offer: Setup, answer: Setup) -> Result[schedule.Side, DtlsError] {
+    match (offer, answer) {
+        (ActPass, Active) => Ok(Server),
+        (Passive, Active) => Ok(Server),
+        (ActPass, Passive) => Ok(Client),
+        (Active, Passive) => Ok(Client),
+        _ => Error(Setup),
+    }
+}
+
+fn matches_fingerprint_hash(certificate: Bytes, fingerprints: List[Fingerprint], hash: HashFunc) -> bool {
+    let size = fingerprint_digest_len(hash)
+    let mut digest: Option[Bytes] = None
+    for pin in fingerprints {
+        if pin.hash == hash && list.len(pin.digest) == size {
+            if let None = digest {
+                digest = Some(certificate_digest(certificate, hash))
+            }
+            if let Some(expected) = digest {
+                if pin.digest == expected {
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check the presented certificate against the pins supplied by signalling.
+pub fn matches_peer_fingerprint(certificate: Bytes, fingerprints: List[Fingerprint]) -> bool {
+    if let Invalid = std.x509_key.read(certificate) {
+        return false
+    }
+    matches_fingerprint_hash(certificate, fingerprints, Sha256) || matches_fingerprint_hash(certificate, fingerprints, Sha384) || matches_fingerprint_hash(certificate, fingerprints, Sha512)
 }

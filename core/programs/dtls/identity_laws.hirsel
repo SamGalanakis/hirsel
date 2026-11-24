@@ -35,3 +35,127 @@ fn identity_shares_key() -> Result[(), ()] {
     }
     Ok(())
 }
+
+fn peer_p384_certificate() -> Bytes {
+    option.unwrap(std.hex.decode(b"308201ae30820135a003020102020102300a06082a8648ce3d04030230183116301406035504030c0d64746c732d3338342e74657374301e170d3236313132343230333933315a170d3236313132353230333933315a30183116301406035504030c0d64746c732d3338342e746573743076301006072a8648ce3d020106052b8104002203620004b3304b373233fb4b0bb923b963aff39f6697e04aaeefd7bcf346fe8e70c56e1fa4a5388d19d330734e666e3d6511b85a1e607ab4e2520b25fca60b6185f6136dd7f9c25b1ab47109d7467fa1f48b535ce6000774345d11f0cc3f04f1b815d376a3533051301d0603551d0e04160414ad4e0085a22992246a35c0fc4c6783c58cd75e2a301f0603551d23041830168014ad4e0085a22992246a35c0fc4c6783c58cd75e2a300f0603551d130101ff040530030101ff300a06082a8648ce3d040302036700306402304591191d8728de39ddfa2bc39e8fae328f04c74c881e2ab519864c5348c8e3469dcb9716018903233f88da1c663280cd02302dd001b5ba6531426e9023937ce8ee5e16fdc6ee341d6c31a141e4320279d96b2be843737c095fbc1a2cbeacbee93af2"))
+}
+
+fn check_fingerprint_text(id: dtls.Identity, hash: dtls.HashFunc, expected: Bytes) {
+    let fp = dtls.fingerprint(id, hash)
+    let mut out = b"fingerprint:"
+    let written = dtls.fingerprint_text(fp, mut out)
+    let start = 12u64
+    let end = list.len(out)
+    if written != list.len(expected) || end != start + written || list.slice(out, 0, start) != b"fingerprint:" || list.slice(out, start, end) != expected {
+        fail("fingerprint text differs from OpenSSL")
+    }
+    let parsed = result.unwrap(dtls.parse_fingerprint(list.slice(out, start, end)))
+    if parsed.hash != hash || parsed.digest != fp.digest {
+        fail("formatted fingerprint did not round-trip")
+    }
+}
+
+fn refuse_fingerprint(text: Bytes) {
+    if let Error(Fingerprint) = dtls.parse_fingerprint(text) {} else {
+        fail("malformed fingerprint accepted")
+    }
+}
+
+/// bug: authenticate a different certificate, reject a later matching pin, or hash less than the whole DER.
+/// oracle: RFC 8122 sections 5 and 6.2 and openssl x509 -noout -fingerprint for each algorithm.
+@test
+fn fingerprint_pins_peer() -> Result[(), ()] {
+    let sha256 = b"sha-256 20:DC:80:97:A3:0B:C8:EE:78:6A:0D:01:BA:8F:D6:31:EC:92:F9:67:63:BE:9A:AF:A1:37:02:1C:A6:3B:AD:AC"
+    let sha384 = b"sha-384 2D:7C:A9:AC:B3:4E:6F:64:90:3B:80:CA:DE:CF:0E:97:2F:C6:7E:50:81:D3:FA:F3:33:EC:A3:09:28:DC:CD:F4:AD:F3:4E:BB:16:B3:CA:A6:56:E1:04:5F:C4:43:B9:EC"
+    let sha512 = b"sha-512 36:07:64:AE:EA:AA:43:45:C9:57:4C:97:27:94:34:41:4F:DB:4C:41:E0:D2:CA:04:A0:54:6D:62:5F:B9:C1:E6:66:E8:F0:2A:8F:B0:A5:60:7A:2F:C4:3F:A2:65:95:95:17:AE:B2:F1:0B:83:7B:44:D3:A1:3F:D7:1A:FE:0E:F6"
+    let r = identity_random()
+    let original = result.unwrap(dtls.identity(identity_key(r), identity_certificate(), r))
+    let id = dtls.share_identity(original)
+    drop(take original)
+    check_fingerprint_text(id, Sha256, sha256)
+    check_fingerprint_text(id, Sha384, sha384)
+    check_fingerprint_text(id, Sha512, sha512)
+    let cert = identity_certificate()
+    let mut pins: List[dtls.Fingerprint] = list.new()
+    if dtls.matches_peer_fingerprint(cert, pins) {
+        fail("empty pin list authenticated a certificate")
+    }
+    list.push(mut pins, result.unwrap(dtls.parse_fingerprint(b"sha-256 20:DC:80:97:A3:0B:C8:EE:78:6A:0D:01:BA:8F:D6:31:EC:92:F9:67:63:BE:9A:AF:A1:37:02:1C:A6:3B:AD:AD")))
+    if dtls.matches_peer_fingerprint(cert, pins) {
+        fail("one-byte fingerprint mismatch authenticated a certificate")
+    }
+    let mixed = result.unwrap(dtls.parse_fingerprint(b"sHa-256 20:dc:80:97:a3:0b:c8:ee:78:6a:0d:01:ba:8f:d6:31:ec:92:f9:67:63:be:9a:af:a1:37:02:1c:a6:3b:ad:ac"))
+    list.push(mut pins, take mixed)
+    if !dtls.matches_peer_fingerprint(cert, pins) || dtls.matches_peer_fingerprint(peer_p384_certificate(), pins) {
+        fail("multiple pins did not authenticate only the matching certificate")
+    }
+    let mut altered = identity_certificate()
+    let last = list.len(altered) - 1
+    altered[last] = altered[last] ^ 1
+    if dtls.matches_peer_fingerprint(altered, pins) {
+        fail("certificate signature was omitted from the digest")
+    }
+    list.clear(mut pins)
+    list.push(mut pins, result.unwrap(dtls.parse_fingerprint(sha384)))
+    if !dtls.matches_peer_fingerprint(cert, pins) {
+        fail("SHA-384 pin did not match")
+    }
+    list.clear(mut pins)
+    list.push(mut pins, result.unwrap(dtls.parse_fingerprint(sha512)))
+    if !dtls.matches_peer_fingerprint(cert, pins) {
+        fail("SHA-512 pin did not match")
+    }
+    list.clear(mut pins)
+    list.push(mut pins, result.unwrap(dtls.parse_fingerprint(b"sha-256 BD:5F:BF:0F:24:1A:06:C7:F1:BC:3A:D0:D2:85:CD:43:83:60:89:07:6B:AC:84:08:1B:F8:5F:98:8E:8B:8A:1E")))
+    if !dtls.matches_peer_fingerprint(peer_p384_certificate(), pins) {
+        fail("P-384 peer certificate did not match")
+    }
+    let invalid_pin = dtls.Fingerprint(hash: Sha256, digest: b"")
+    let mut text = b"prefix"
+    if dtls.fingerprint_text(invalid_pin, mut text) != 0 || text != b"prefix" {
+        fail("formatter wrote a fingerprint with the wrong digest length")
+    }
+    refuse_fingerprint(b"")
+    refuse_fingerprint(b"sha-256 20")
+    let mut malformed = b"sha-256 20:DC:80:97:A3:0B:C8:EE:78:6A:0D:01:BA:8F:D6:31:EC:92:F9:67:63:BE:9A:AF:A1:37:02:1C:A6:3B:AD:AC"
+    malformed[7] = b'\t'
+    refuse_fingerprint(malformed)
+    malformed[7] = b' '
+    malformed[10] = b'-'
+    refuse_fingerprint(malformed)
+    malformed[10] = b':'
+    malformed[8] = b'G'
+    refuse_fingerprint(malformed)
+    malformed[8] = b'2'
+    malformed[6] = b'4'
+    refuse_fingerprint(malformed)
+    malformed[6] = b'6'
+    list.push(mut malformed, b' ')
+    refuse_fingerprint(malformed)
+    Ok(())
+}
+
+fn check_setup(offer: dtls.Setup, answer: dtls.Setup, expected: Option[schedule.Side]) {
+    match (dtls.negotiate_setup(offer, answer), expected) {
+        (Ok(Client), Some(Client)) => (),
+        (Ok(Server), Some(Server)) => (),
+        (Error(Setup), None) => (),
+        _ => fail("setup negotiation differs from the offer/answer table"),
+    }
+}
+
+/// bug: accept an actpass answer or reverse the active role.
+/// oracle: RFC 5763 section 5 and RFC 8842 section 5 setup rules.
+@test
+fn setup_roles() -> Result[(), ()] {
+    check_setup(Active, Active, None)
+    check_setup(Active, Passive, Some(Client))
+    check_setup(Active, ActPass, None)
+    check_setup(Passive, Active, Some(Server))
+    check_setup(Passive, Passive, None)
+    check_setup(Passive, ActPass, None)
+    check_setup(ActPass, Active, Some(Server))
+    check_setup(ActPass, Passive, Some(Client))
+    check_setup(ActPass, ActPass, None)
+    Ok(())
+}

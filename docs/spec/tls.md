@@ -1414,7 +1414,11 @@ with `AeadAes128Gcm`. Its labels 0 and 2 give `077c6143cb221bc355ff23d5f984a16e`
 **Imports.** A key from outside the run enters only through an import:
 
 - an SRTP master key and salt from SDES, or from a pre-shared configuration;
-- a TLS 1.3 or QUIC traffic secret from a test vector or an interop harness.
+- a TLS 1.3, DTLS 1.3 or QUIC traffic secret from a test vector or an interop harness.
+
+`import_traffic` accepts `Tls13`, `Dtls13`, `Quic` and `QuicMultipath` with their
+suite's hash length and labels. A `Dtls13` import holds the `Application` space
+and uses the full 64-bit protected-record sequence number.
 
 Two uses join TLS-5's table:
 

@@ -1,9 +1,10 @@
 //! Packet key ownership for one epoch. Issued resources keep their own keys.
 use crate::{
+    ImportUse,
     packet_cipher::HeaderMask,
     packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
     secret_aead::AeadAlg,
-    tls_kdf::Tls13PacketKeys,
+    tls_kdf::{Tls13Labels, Tls13PacketKeys},
 };
 use std::collections::BTreeMap;
 
@@ -41,6 +42,12 @@ pub enum IssueError {
     Capacity { requested: u64, available: u64 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportError {
+    Denied,
+    Invalid,
+}
+
 pub struct Epoch<C> {
     format: NonceFormat,
     algorithm: AeadAlg,
@@ -64,6 +71,34 @@ pub struct Opener<'a, C> {
 }
 
 impl<C> Epoch<C> {
+    pub fn import_traffic(
+        format: NonceFormat,
+        algorithm: AeadAlg,
+        authority: ImportUse,
+        secret: &[u8],
+    ) -> Result<Self, ImportError> {
+        let send = match authority {
+            ImportUse::TrafficSend => true,
+            ImportUse::TrafficReceive => false,
+            _ => return Err(ImportError::Denied),
+        };
+        let labels = match format {
+            NonceFormat::Quic | NonceFormat::QuicMultipath => Tls13Labels::Quic,
+            NonceFormat::Tls13 => Tls13Labels::Tls,
+            NonceFormat::Dtls13 => Tls13Labels::Dtls,
+            _ => return Err(ImportError::Invalid),
+        };
+        let live = Tls13PacketKeys::import(labels, algorithm, secret)
+            .map(DirectionKeys::Live)
+            .ok_or(ImportError::Invalid)?;
+        let (send, receive) = if send {
+            (live, DirectionKeys::Missing)
+        } else {
+            (DirectionKeys::Missing, live)
+        };
+        Ok(Self::new(format, algorithm, send, receive))
+    }
+
     pub fn new(
         format: NonceFormat,
         algorithm: AeadAlg,

@@ -328,3 +328,74 @@ fn dtls12_record_keys_finished_and_exporter_match_openssl() {
         assert!(keys.finished(Side::Server, &[]).is_none());
     }
 }
+
+#[test]
+fn dtls13_seq_beyond_48_bits() {
+    use crate::{
+        ImportUse,
+        packet_cipher::{PacketCipher, TAG_LEN},
+        packet_epoch::{Epoch, IssueError},
+        packet_nonce::{CounterError, NonceFormat},
+        secret_aead::AeadAlg,
+    };
+
+    let algorithm = AeadAlg::Aes128Gcm;
+    let format = NonceFormat::Dtls13;
+    let secret: [u8; 32] = std::array::from_fn(|i| i as u8);
+    let mut send =
+        Epoch::<()>::import_traffic(format, algorithm, ImportUse::TrafficSend, &secret).unwrap();
+    let mut receive =
+        Epoch::<()>::import_traffic(format, algorithm, ImportUse::TrafficReceive, &secret).unwrap();
+    assert_eq!(
+        send.opener(|_| panic!("send policy authorizes no opener"))
+            .err(),
+        Some(IssueError::Invalid)
+    );
+    assert_eq!(
+        receive
+            .sealer(0, 0, |_| panic!("receive policy authorizes no sealer"))
+            .err(),
+        Some(IssueError::Invalid)
+    );
+    assert_eq!(
+        send.header_mask(false, |_| panic!("send policy authorizes no receiver mask"))
+            .err(),
+        Some(IssueError::Invalid)
+    );
+    assert_eq!(
+        receive
+            .header_mask(true, |_| panic!("receive policy authorizes no sender mask"))
+            .err(),
+        Some(IssueError::Invalid)
+    );
+    let (_, _) = send.header_mask(true, |_| Ok(())).unwrap();
+    let (_, _) = receive.header_mask(false, |_| Ok(())).unwrap();
+    let mut sealer = send.sealer(0, 0, |_| Ok(((), ()))).unwrap();
+    let opener = receive.opener(|_| Ok(())).unwrap();
+    let encryption = PacketCipher::new(algorithm, sealer.key.unwrap()).unwrap();
+    let decryption = PacketCipher::new(algorithm, opener.key.unwrap()).unwrap();
+    let aad = [0x2c, 0, 1];
+    let plain = b"dtls13 width";
+    // Python hmac with RFC 9147 §5.9's label prefix, and OpenSSL AES-GCM.
+    for (seq, expected) in [
+        (
+            1u64 << 48,
+            "3b9f811ad532922364df49738c048631aa857afa5ef2d2d2009a38c9",
+        ),
+        (
+            u64::MAX,
+            "530d0f604f3ba02a4e41432937e18849fb7f48778b51d0d557b46679",
+        ),
+    ] {
+        let nonce = sealer.counter.check(seq).unwrap();
+        let mut body = plain.to_vec();
+        let tag = encryption.seal(nonce, &aad, &mut body).unwrap();
+        assert_eq!([body.as_slice(), tag.as_slice()].concat(), bytes(expected));
+        let nonce = opener.nonce.nonce(0, seq).unwrap();
+        decryption.open(nonce, &aad, &mut body, &tag).unwrap();
+        assert_eq!(body.as_slice(), plain);
+        assert_eq!(tag.len(), TAG_LEN);
+        sealer.counter.commit(seq);
+    }
+    assert_eq!(sealer.counter.check(u64::MAX), Err(CounterError::Reused));
+}

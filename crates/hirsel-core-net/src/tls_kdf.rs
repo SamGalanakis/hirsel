@@ -174,6 +174,19 @@ pub struct Tls13PacketKeys {
 }
 
 impl Tls13PacketKeys {
+    pub(super) fn import(labels: Tls13Labels, algorithm: AeadAlg, secret: &[u8]) -> Option<Self> {
+        let hash = match algorithm {
+            AeadAlg::Aes128Gcm | AeadAlg::ChaCha20Poly1305 => TlsHash::Sha256,
+            AeadAlg::Aes256Gcm => TlsHash::Sha384,
+        };
+        if secret.len() != hash.output_len() {
+            return None;
+        }
+        let mut bytes = Zeroizing::new([0; MAX_HASH_LEN]);
+        bytes[..secret.len()].copy_from_slice(secret);
+        Some(DigestSecret { hash, bytes }.packet_keys(labels, algorithm))
+    }
+
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.key_len]
     }

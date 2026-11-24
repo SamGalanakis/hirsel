@@ -36,6 +36,8 @@ pub(crate) mod ledger;
 mod report;
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
+#[path = "units_sync_cells.rs"]
+mod sync_cells;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -44,6 +46,7 @@ use std::{
     time::Duration,
 };
 use sync::{AtomicU64, Mutex};
+pub(crate) use sync_cells::{track_sync, untrack_sync};
 
 /// The running pool unit's id, or NONE outside the pool.
 #[inline(never)]
@@ -687,37 +690,6 @@ pub(crate) fn unit_id(u: &Unit) -> u32 {
     u.id
 }
 
-/// Record an in-flight sync cell on the running pooled unit so unit teardown
-/// detaches it if the unit ends before completion. Returns `true` if tracked.
-pub(crate) fn track_sync(cell: *mut crate::os_sync::SyncCell) -> bool {
-    if !untied() {
-        return false;
-    }
-    let u = cur();
-    if u.is_null() {
-        return false;
-    }
-    // SAFETY: only the running unit's worker touches its `sync_cells`.
-    unsafe { (*u).sync_cells.borrow_mut().push(cell) };
-    true
-}
-
-/// Remove a completed sync cell from the running pooled unit's tracking list.
-pub(crate) fn untrack_sync(cell: *mut crate::os_sync::SyncCell) {
-    if !untied() {
-        return;
-    }
-    let u = cur();
-    if u.is_null() {
-        return;
-    }
-    // SAFETY: only the running unit's worker touches its `sync_cells`.
-    let mut cells = unsafe { (*u).sync_cells.borrow_mut() };
-    if let Some(i) = cells.iter().position(|&c| c == cell) {
-        cells.swap_remove(i);
-    }
-}
-
 fn work_waiting(p: &Pool, ix: usize) -> bool {
     p.queued.load(Ordering::Relaxed) != 0 || !p.lifo[ix].load(Ordering::Relaxed).is_null()
 }
@@ -835,8 +807,14 @@ fn push_arrival(u: &Unit, id: u64, flags: u32) {
 }
 /// Readiness queued for the running unit, as (reactor identity, flags), in
 /// the order it reached the unit. A push after the check wakes the unit, so
-/// it is taken at the unit's next switch.
+/// it is taken at the unit's next switch. Nobody else takes the readiness of
+/// the slot this unit runs on, so each scheduler turn takes it here first
+/// rather than going dry, parking and resuming for readiness already there.
 pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
+    let (p, ix) = (pool(), worker_ix());
+    if ix < p.w {
+        check_slot(p, ix);
+    }
     // SAFETY: called by the running unit's scheduler.
     let u = unsafe { &*cur() };
     if !u.xpending.load(Ordering::Acquire) {

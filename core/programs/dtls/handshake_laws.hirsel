@@ -516,9 +516,12 @@ fn refusals() -> Result[(), ()] {
         if is_plain_message(flight11[i], 15) {
             finished_seq = seq_of(flight11[i]) + 1
         }
-        if flight11[i][0] == 22 && flight11[i][4] == 1 {
+        // An epoch-0 Finished ahead of the ChangeCipherSpec; after it, DTLS-4 would
+        // discard it as stale_epoch.
+        if flight11[i][0] == 20 {
             list.push(mut early, plain_record(22, 91, hs_fragment(20, 12, finished_seq, 0, unhex("000000000000000000000000"))))
-        } else {
+        }
+        if flight11[i][0] != 22 || flight11[i][4] != 1 {
             list.push(mut early, owned(flight11[i]))
         }
     }
@@ -674,7 +677,7 @@ fn impostor(seed: u64, certificate: Bytes, take holder: List[dtls.Fingerprint], 
     list.push(mut datagrams, take tail)
     let mut delivered = 0u64
     for i in 0u64 .. list.len(datagrams) {
-        // Datagram 2 is the first one the server must refuse: the CCS in (a), the CV in (b).
+        // Datagram 2 is the first one that must not connect: the CCS in (a), the CV in (b).
         if i == 2 {
             not_connected(mut server)
         }
@@ -685,7 +688,17 @@ fn impostor(seed: u64, certificate: Bytes, take holder: List[dtls.Fingerprint], 
             fail("impostor connected")
         }
     }
-    refused(mut server, rs, code, "impostor flight 5")
+    if signed {
+        refused(mut server, rs, code, "impostor flight 5")
+    } else {
+        // (a) The early ChangeCipherSpec is discarded; without CertificateVerify no keys
+        // exist, so the server waits for its deadline.
+        let mut out: Bytes = list.with_capacity(1200)
+        match dtls.poll(mut server, 60 * SECOND, rs, mut out) {
+            Error(Closed(Timeout)) => (),
+            _ => fail("impostor without CertificateVerify outlived the deadline"),
+        }
+    }
     let mut late: Bytes = list.new()
     let _ = dtls.receive(mut server, 0, rs, datagrams[list.len(datagrams) - 1], mut late)
     if delivered + list.len(late) != 0 {
@@ -698,13 +711,13 @@ fn impostor(seed: u64, certificate: Bytes, take holder: List[dtls.Fingerprint], 
 
 /// bug: treat CertificateVerify as optional, or pin on the presented certificate alone.
 /// oracle: RFC 5246 section 7.4.8 and RFC 8122 section 6.2 by hand: only CertificateVerify
-/// proves possession; a fingerprint is public. (a) alert 10, (b) alert 51.
+/// proves possession; a fingerprint is public. (a) Timeout, (b) alert 51.
 @test
 fn possession_before_keys() -> Result[(), ()] {
     let a = party(81)
     let Party(id: take a_id, certificate: a_certificate) = take a
     let recorded = certificate_of(82, take a_id)
-    impostor(85, recorded, pin_list(a_certificate), false, 10)
+    impostor(85, recorded, pin_list(a_certificate), false, 0)
     impostor(88, recorded, pin_list(a_certificate), true, 51)
     Ok(())
 }

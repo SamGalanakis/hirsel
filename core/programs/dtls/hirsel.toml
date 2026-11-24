@@ -25,3 +25,5 @@ limit = 16777216
 "identity_laws.hirsel" = "laws"
 "handshake_laws.hirsel" = "laws"
 "timer_laws.hirsel" = "laws"
+"attack_laws.hirsel" = "laws"
+"loss_laws.hirsel" = "laws"

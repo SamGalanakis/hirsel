@@ -65,6 +65,12 @@ fn first_hello_cookie(datagram: Bytes) -> Option[CookieField] {
         return None
     }
     let total = read_u24(datagram, at + 1)
+    // A first ClientHello is message 0, or 1 after a HelloVerifyRequest; a larger
+    // message_seq would carry past u16 when flight 4 is numbered (OpenSSL d1_lib.c, same rule).
+    let message_seq: u16 = list.word_be(datagram, at + 4)
+    if message_seq > 1 {
+        return None
+    }
     let offset = read_u24(datagram, at + 6)
     let count = read_u24(datagram, at + 9)
     let body = at + HANDSHAKE_HEADER

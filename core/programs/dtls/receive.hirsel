@@ -199,9 +199,14 @@ fn retransmitted(mut e: Endpoint, epoch: u16, kind: u8) -> Result[(), Failure] {
     }
 }
 
+/// A ChangeCipherSpec before the flight that precedes it is complete is discarded as
+/// `overflow`, not refused: on UDP it is usually just reordered, and the peer's
+/// retransmission brings it back. A skipped CertificateVerify still never connects, since
+/// keys need a verified one.
 fn on_cipher_spec(mut e: Endpoint) -> Result[(), Failure] {
     let CipherSpec = e.want else {
-        return Error(refuse(UNEXPECTED_MESSAGE))
+        let _ = overflow(mut e.layer.dropped)
+        return Ok(())
     }
     if let Some(k) = e.keys {
         if let Error(x) = start_receiving_protected(mut e.layer, k, e.suite) {

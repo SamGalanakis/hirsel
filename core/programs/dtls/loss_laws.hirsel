@@ -1,0 +1,208 @@
+/// xorshift64 (Marsaglia 2003); each left shift masks first so no bit overflows.
+fn next_roll(seed: u64) -> u64 {
+    let mut x = seed
+    x = x ^ ((x & 0x7ffffffffffff) << 13)
+    x = x ^ (x >> 7)
+    x = x ^ ((x & 0x7fffffffffff) << 17)
+    x
+}
+
+/// One direction of the network: each datagram dropped below `loss` (of 100), duplicated in
+/// the next five, and each copy delayed behind up to three later ones.
+fn network(seed: u64, loss: u64, take sent: List[Bytes]) -> List[Bytes] {
+    let mut roll = seed
+    let mut out: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(sent) {
+        roll = next_roll(roll)
+        let chance = roll % 100
+        if chance < loss {
+            continue
+        }
+        let mut n = 1u64
+        if chance < loss + 5 {
+            n = 2
+        }
+        for _ in 0u64 .. n {
+            roll = next_roll(roll)
+            let mut back = roll % 4
+            if back > list.len(out) {
+                back = list.len(out)
+            }
+            let at = list.len(out) - back
+            list.insert(mut out, at, owned(sent[i]))
+        }
+    }
+    out
+}
+
+const NEVER: u64 = 0xffffffffffffffff
+
+/// Everything `e` sends at `now` into `out`; then its next wake, or NEVER when idle or closed.
+fn pump(mut e: dtls.Endpoint, r: Random, now: u64, mut out: List[Bytes]) -> u64 {
+    while true {
+        let mut d: Bytes = list.with_capacity(70000)
+        match dtls.poll(mut e, now, r, mut d) {
+            Ok(Send(_)) => list.push(mut out, take d),
+            Ok(WakeAt(at)) => return at,
+            _ => return NEVER,
+        }
+    }
+    NEVER
+}
+
+fn closed_by_timeout(e: dtls.Endpoint) -> bool {
+    match dtls.state(e) {
+        Closed(Timeout) => true,
+        _ => false,
+    }
+}
+
+/// Application data from `a` arrives intact at `b`.
+fn carries(mut a: dtls.Endpoint, mut b: dtls.Endpoint, rb: Random, now: u64) {
+    let mut wire: Bytes = list.with_capacity(1200)
+    let _ = result.unwrap(dtls.send(mut a, b"cross check", mut wire))
+    let mut data: Bytes = list.new()
+    let _ = dtls.receive(mut b, now, rb, wire, mut data)
+    if data != b"cross check" {
+        fail("application data did not cross")
+    }
+}
+
+/// One pinned pair over the lossy network until neither side will wake again; returns
+/// whether it connected, after failing on any end outside DTLS-5's list.
+fn lossy_handshake(seed: u64, loss: u64, c: dtls.Config) -> bool {
+    let a = party(seed)
+    let b = party(seed + 1)
+    let rc = provide.random(seed + 2)
+    let rs = provide.random(seed + 3)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, c, address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, c, address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let mut roll = seed * 2654435761 + 1
+    let mut now = 0u64
+    let mut t_c = NEVER
+    let mut t_s = NEVER
+    let mut client_closed = NEVER
+    let mut server_closed = NEVER
+    let mut steps = 0u64
+    while true {
+        steps += 1
+        if steps > 10000 {
+            fail("lossy handshake did not settle")
+        }
+        let mut to_server: List[Bytes] = list.new()
+        let client_wake = pump(mut client, rc, now, mut to_server)
+        if t_c == NEVER && list.len(to_server) != 0 {
+            t_c = now
+        }
+        let sent_up = list.len(to_server)
+        roll = next_roll(roll)
+        let _ = deliver(mut server, rs, now, network(roll, loss, take to_server))
+        let mut to_client: List[Bytes] = list.new()
+        let server_wake = pump(mut server, rs, now, mut to_client)
+        if t_s == NEVER && list.len(to_client) != 0 {
+            t_s = now
+        }
+        let sent_down = list.len(to_client)
+        roll = next_roll(roll)
+        let _ = deliver(mut client, rc, now, network(roll, loss, take to_client))
+        if client_closed == NEVER && closed_by_timeout(client) {
+            client_closed = now
+        }
+        if server_closed == NEVER && closed_by_timeout(server) {
+            server_closed = now
+        }
+        if sent_up == 0 && sent_down == 0 {
+            let mut next = client_wake
+            if server_wake < next {
+                next = server_wake
+            }
+            if next == NEVER {
+                break
+            }
+            now = next
+        }
+    }
+    let limit = 60 * SECOND
+    if is_connected(client) {
+        // (1): the client connects only after a verified flight 6, so the server is too.
+        if !is_connected(server) {
+            fail("client connected without the server")
+        }
+        result.unwrap(dtls.take_srtp(mut client))
+        result.unwrap(dtls.take_srtp(mut server))
+        carries(mut client, mut server, rs, now)
+        carries(mut server, mut client, rc, now)
+        return true
+    }
+    if client_closed != t_c + limit {
+        fail("client neither connected nor timed out at t_c + 60 s")
+    }
+    if is_connected(server) {
+        // (3): flight 5 arrived and every flight 6 was lost.
+        return false
+    }
+    if t_s == NEVER {
+        // (4): no ClientHello reached the server.
+        match dtls.state(server) {
+            Handshaking => (),
+            _ => fail("server left Handshaking with no ClientHello"),
+        }
+        return false
+    }
+    // (2)
+    if server_closed != t_s + limit {
+        fail("server neither connected nor timed out at t_s + 60 s")
+    }
+    false
+}
+
+/// bug: lost, duplicated or reordered datagrams strand or wrongly close a handshake: an
+/// early ChangeCipherSpec alerted (attack 2434 F3), a resend not scheduled, a duplicate
+/// flight refused. oracle: DTLS-5's exhaustive list of ends, by hand from RFC 6347 section
+/// 4.2.4; with no loss every seed connects.
+@test
+fn handshake_survives_loss() -> Result[(), ()] {
+    // Flight 5 at mtu 300 spans two datagrams; delivered last first, the ChangeCipherSpec
+    // arrives before CertificateVerify and is discarded until the client resends.
+    let a = party(801)
+    let b = party(802)
+    let rc = provide.random(803)
+    let rs = provide.random(804)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, small_mtu(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, small_mtu(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    let mut flight5 = drain(mut client, rc, 0)
+    if list.len(flight5) < 2 {
+        fail("flight 5 in one datagram at mtu 300")
+    }
+    list.reverse(mut flight5)
+    let _ = deliver(mut server, rs, 0, flight5)
+    match dtls.state(server) {
+        Handshaking => (),
+        _ => fail("reordered flight 5 closed the server"),
+    }
+    if dtls.discards(server).overflow != 1 {
+        fail("early ChangeCipherSpec not counted as overflow")
+    }
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    run(mut client, rc, mut server, rs, SECOND)
+    if !is_connected(client) || !is_connected(server) {
+        fail("reordered flight 5 did not recover by retransmission")
+    }
+    for seed in 0u64 .. 32 {
+        let _ = lossy_handshake(900 + seed * 10, 20, dtls.defaults())
+        if !lossy_handshake(900 + seed * 10, 0, dtls.defaults()) {
+            fail("a handshake without loss did not connect")
+        }
+    }
+    Ok(())
+}

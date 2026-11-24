@@ -1,5 +1,14 @@
 # DTLS and SRTP
 
+Version note (2026-11-24, dtls-s3-handshake-2371, from attack 2434): a ChangeCipherSpec
+that arrives before the flight preceding it is complete is now discarded as `overflow`
+instead of refused with 10, as OpenSSL does (`ssl/record/rec_layer_d1.c` 649-657), and
+`possession_before_keys` (a) ends in `Timeout`. Plain reordering is normal on UDP and the
+peer's retransmission brings the ChangeCipherSpec again; a CertificateVerify can still never
+be skipped silently, because keys are derived only after it verifies. Once the peer's
+ChangeCipherSpec has arrived, every other epoch-0 record is `stale_epoch` (DTLS-4 Replay),
+and a first ClientHello with `message_seq` above 1 is not admitted (DTLS-3).
+
 Version note (2026-11-24, media-dtls-spec-2317): first text of DTLS-1 to DTLS-9 and SRTP-1
 to SRTP-6, the Wave 1 rows 1.2 and 1.3 of the real-time media track. Not yet built: every
 fence is `unbuilt`, and every test path is planned. The sections end with
@@ -230,7 +239,11 @@ authenticate, so a window there would let one forged record numbered `2^48 − 1
 later genuine epoch-0 record below the window and stall the handshake until `Timeout`.
 Instead an unauthenticated record number changes no state at all: handshake messages are
 deduplicated by `message_seq` and fragment range (DTLS-5 Fragmentation), a repeated
-ChangeCipherSpec is a no-op, and alerts follow Alerts below. After `Connected`, every
+ChangeCipherSpec is a no-op, and alerts follow Alerts below. Once the peer's
+ChangeCipherSpec has arrived, every epoch-0 record except a repeated ChangeCipherSpec is
+discarded as `stale_epoch`: nothing genuine can follow it in epoch 0, and acting on a forged
+one would let anyone on the path close the handshake with 10, or make the endpoint seal one
+alert for each 12-byte fragment of a datagram. After `Connected`, every
 epoch-0 record is discarded as `stale_epoch`; the only retransmission an endpoint answers
 then is the authenticated one in DTLS-5 Final flights.
 
@@ -272,7 +285,12 @@ peer's messages only in this order (RFC 5246 §7.3, §7.4.8, §7.4.9; RFC 6347 �
 
 A handshake message whose type is not the next one this list expects, or a Finished in epoch
 0, is `unexpected_message` (10). A Finished in epoch 1 that arrives before the peer's
-ChangeCipherSpec is not refused: DTLS-4 Records holds it until that ChangeCipherSpec. In
+ChangeCipherSpec is not refused: DTLS-4 Records holds it until that ChangeCipherSpec. A
+ChangeCipherSpec that arrives before the messages this list puts ahead of it is not refused
+either: it is discarded as `overflow` and the peer's retransmission brings it again, since
+plain reordering on UDP delivers it early (OpenSSL `ssl/record/rec_layer_d1.c` 649-657).
+This cannot skip CertificateVerify: the server derives no keys before one verifies, so a
+flight 5 without it never connects and ends in `Timeout`. In
 particular a non-empty client Certificate followed by anything other than
 ClientKeyExchange and then CertificateVerify is 10: CertificateVerify is the only proof
 that the peer holds the certificate's key, since a certificate and its fingerprint are
@@ -426,7 +444,10 @@ HelloVerifyRequest takes its record sequence number from the ClientHello record 
 (RFC 6347 §4.2.1), since `admit` keeps no counter, and its `message_seq` is 0. The
 ServerHello and the rest of flight 4 take the cookie ClientHello's record sequence number for
 their first record and continue from its `message_seq` (1). After that the
-server's record numbers continue from the copied one, and its message numbers from 1.
+server's record numbers continue from the copied one, and its message numbers from 1. A
+ClientHello whose `message_seq` is above 1 is `Discard`, as in OpenSSL
+(`ssl/d1_lib.c:1009-1013`): a first ClientHello is 0 and its cookie copy 1, and admitting
+`0xFFFF` would push flight 4's numbering past 16 bits.
 
 **Why stateless, against OpenSSL, pion and webrtc-rs.** OpenSSL's `DTLSv1_listen` is
 stateless in the same way and is the model here. pion's listener creates a connection per
@@ -918,7 +939,8 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   `client_version` is `{254, 255}`; a ServerHello choosing a suite the client did not offer;
   a ServerHello without `use_srtp` to a client that offered it; a ServerKeyExchange with a
   broken signature; a server flight 4 with no ServerKeyExchange; a client flight 5 with an
-  empty Certificate; a client flight 5 whose Finished is sent in epoch 0. *Oracle:* the
+  empty Certificate; a client flight 5 whose Finished is sent in epoch 0, ahead of its
+  ChangeCipherSpec (after it, DTLS-4 Replay discards it). *Oracle:* the
   DTLS-5 failure table and RFC 5246 §7.3, §7.4.1.2 and Appendix E.1 by hand: alerts 40, 47,
   40, 40, 70, 47, 40, 51, 10, 42 and 10.
 - **`possession_before_keys`.** *Scenario:* a genuine handshake between client A and server
@@ -929,7 +951,8 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   application record that C seals under keys it derived itself; (b) a CertificateVerify
   signed by C's key instead. *Oracle:* RFC 5246 §7.4.8 and RFC 8122 §6.2 by hand: only
   CertificateVerify proves possession, and the fingerprint is public. The server closes as
-  `SentAlert(10)` in (a) and `SentAlert(51)` in (b), and in both it never reports
+  `Timeout` at the 60 s deadline in (a), its ChangeCipherSpec discarded as early, and
+  `SentAlert(51)` in (b), and in both it never reports
   `Connected`, delivers 0 bytes of C's application record, and answers `take_srtp` with
   `NotConnected` before closing and `Closed(_)` after. Red on any state machine that treats
   CertificateVerify as optional or pins on the certificate alone.

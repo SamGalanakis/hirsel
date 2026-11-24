@@ -243,7 +243,9 @@ fn receive_plain(mut r: Records, datagram: Bytes, h: RecordHeader) -> Result[Rec
         Some(_) => true,
         None => false
     }
-    if r.connected || (after_ccs && h.kind == ALERT) {
+    // Once the peer's ChangeCipherSpec has installed the opener, only a repeated
+    // ChangeCipherSpec may still arrive in epoch 0; nothing else there can authenticate.
+    if r.connected || (after_ccs && h.kind != CCS) {
         r.dropped.stale_epoch += 1
         return Ok(Discarded)
     }

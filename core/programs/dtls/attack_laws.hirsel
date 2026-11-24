@@ -1,0 +1,110 @@
+/// `n` empty handshake fragments of type `kind` in one epoch-0 record, message_seq `from`,
+/// `from + step`, ...
+fn empties(kind: u8, from: u16, n: u16, step: u16) -> Bytes {
+    let mut payload: Bytes = list.with_capacity(1200)
+    for i in 0u16 .. n {
+        list.append(mut payload, hs_fragment(kind, 0, from + i * step, 0, b""))
+    }
+    plain_record(22, 1000, payload)
+}
+
+/// bug: a cookie ClientHello with message_seq 0xFFFF is admitted and numbering flight 4
+/// past u16 fails the task (attack 2434 F1). oracle: RFC 6347 section 4.2.2 and OpenSSL
+/// ssl/d1_lib.c:1009-1013 by hand: a first ClientHello has message_seq 0 or 1.
+@test
+fn atk_cookie_seq_overflow() -> Result[(), ()] {
+    let c = dtls.cookie_for(cookie_key(), address(20), hello_random())
+    let mut cookie: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut cookie, c[i])
+    }
+    let mut out: Bytes = list.with_capacity(100)
+    if let Discard = dtls.admit(cookie_key(), address(20), whole_hello(7, 2, cookie), mut out) {} else {
+        fail("message_seq 2 admitted")
+    }
+    let hello = whole_hello(7, 0xffff, cookie)
+    if let Discard = dtls.admit(cookie_key(), address(20), hello, mut out) {} else {
+        fail("message_seq 0xFFFF admitted")
+    }
+    if list.len(out) != 0 {
+        fail("Discard wrote a reply")
+    }
+    let p = party(711)
+    let Party(id: take sid, ..) = take p
+    let rs = provide.random(712)
+    let mut server = result.unwrap(dtls.server(take sid, dtls.defaults(), address(20), Cookie(cookie_key())))
+    let _ = deliver(mut server, rs, 0, single(hello))
+    if list.len(drain(mut server, rs, 0)) != 0 {
+        fail("Cookie server answered message_seq 0xFFFF")
+    }
+    match dtls.state(server) {
+        Handshaking => (),
+        _ => fail("Cookie server left Handshaking on message_seq 0xFFFF"),
+    }
+    Ok(())
+}
+
+type Pair {
+    client: dtls.Endpoint,
+    server: dtls.Endpoint
+}
+
+/// Client connected; the server verified Finished but has no fingerprints yet.
+fn unpinned_server_pair(seed: u64, rc: Random, rs: Random) -> Pair {
+    let a = party(seed)
+    let b = party(seed + 1)
+    let Party(id: take client_id, ..) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    run(mut client, rc, mut server, rs, 0)
+    if !is_connected(client) {
+        fail("setup: client not connected")
+    }
+    if let Handshaking = dtls.state(server) {} else {
+        fail("setup: server not Handshaking")
+    }
+    Pair(client: take client, server: take server)
+}
+
+/// After the peer's ChangeCipherSpec, `spoof` is one stale_epoch discard: nothing sent and
+/// the server still Handshaking.
+fn ignored_after_ccs(seed: u64, spoof: Bytes) {
+    let rc = provide.random(seed + 10)
+    let rs = provide.random(seed + 11)
+    let pair = unpinned_server_pair(seed, rc, rs)
+    let Pair(client: take client, server: take found) = take pair
+    let mut server = take found
+    let before = dtls.discards(server).stale_epoch
+    let _ = deliver(mut server, rs, SECOND, single(spoof))
+    if list.len(drain(mut server, rs, SECOND)) != 0 || dtls.discards(server).stale_epoch != before + 1 {
+        fail("epoch-0 handshake record acted after ChangeCipherSpec")
+    }
+    match dtls.state(server) {
+        Handshaking => (),
+        _ => fail("spoofed epoch-0 record moved the server out of Handshaking"),
+    }
+    drop(take client)
+}
+
+/// bug: an unauthenticated epoch-0 handshake record still acts after the peer's
+/// ChangeCipherSpec: one closes the server with 10 (attack 2434 F2a). oracle: DTLS-4
+/// Replay and RFC 6347 section 4.1 by hand: epoch 0 can no longer carry anything genuine.
+@test
+fn atk_epoch0_message_after_ccs_closes() -> Result[(), ()] {
+    ignored_after_ccs(733, empties(11, 5, 1, 1))
+    Ok(())
+}
+
+/// bug: 90 empty ClientHello fragments in one 1,093-byte datagram make the server seal and
+/// queue 90 no_renegotiation alerts (attack 2434 F2b). oracle: as above, by hand.
+@test
+fn atk_epoch0_hello_after_ccs_seals() -> Result[(), ()] {
+    let spoof = empties(1, 5, 90, 1)
+    if list.len(spoof) != 13 + 90 * 12 {
+        fail("spoof size")
+    }
+    ignored_after_ccs(723, spoof)
+    Ok(())
+}

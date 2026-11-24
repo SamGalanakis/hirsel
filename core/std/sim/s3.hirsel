@@ -34,6 +34,7 @@ pub type Object: send {
 }
 
 pub type Report: send {
+    head_writes: List[sim.s3_history.HeadWrite],
     objects: Map[String, Object],
     // The keys of multipart uploads neither completed nor aborted.
     pending: List[String],
@@ -165,6 +166,7 @@ type Upload {
 }
 
 type Bucket {
+    head_writes: List[sim.s3_history.HeadWrite],
     objects: Map[String, Object],
     uploads: Map[String, Upload],
     next_upload: u64,
@@ -713,9 +715,11 @@ fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Res
     reply(200, xml)
 }
 
-fn put(mut bucket: Bucket, key: String, take data: Bytes, take meta: Map[String, String]) -> String {
+fn put(mut bucket: Bucket, req: Request, request: u64, take data: Bytes, take meta: Map[String, String]) -> String {
     let tag = etag(data)
-    map.insert(mut bucket.objects, clone(key), Object(data: take data, etag: clone(tag), metadata: take meta))
+    let key = view req.target.key
+    sim.s3_history.record(mut bucket.head_writes, request, key, req.fields, tag, data)
+    map.insert(mut bucket.objects, string.from(key), Object(data: take data, etag: clone(tag), metadata: take meta))
     bucket.writes += 1
     take tag
 }
@@ -804,7 +808,7 @@ fn gather(upload: Upload, raw: Bytes, max_body: u64) -> Result[Bytes, String] {
     Ok(take data)
 }
 
-fn multipart(rules: Rules, mut bucket: Bucket, req: Request, id: String, take body: Bytes, fault: Fault) -> Response {
+fn multipart(rules: Rules, mut bucket: Bucket, req: Request, request: u64, id: String, take body: Bytes, fault: Fault) -> Response {
     let Some(take upload) = map.remove(mut bucket.uploads, id) else {
         return error(404, "NoSuchUpload")
     }
@@ -837,7 +841,7 @@ fn multipart(rules: Rules, mut bucket: Bucket, req: Request, id: String, take bo
                 Error(code) => error(400, code),
                 Ok(take data) => {
                     let Upload(metadata: take meta, ..) = take current
-                    let tag = put(mut bucket, req.target.key, take data, take meta)
+                    let tag = put(mut bucket, req, request, take data, take meta)
                     let mut xml = string.from("<CompleteMultipartUploadResult>")
                     element(mut xml, "Key", req.target.key)
                     element(mut xml, "ETag", tag)
@@ -892,14 +896,14 @@ fn ranged(object: Object, value: String) -> Response {
     take response
 }
 
-fn dispatch(rules: Rules, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
+fn dispatch(rules: Rules, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault, request: u64) -> Response {
     match fault {
         InternalError => return error(500, "InternalError"),
         SlowDown => return error(503, "SlowDown"),
         _ => ()
     }
     if let Some(id) = map.get(req.target.query, "uploadId") {
-        return multipart(rules, mut bucket, req, id, take body, fault)
+        return multipart(rules, mut bucket, req, request, id, take body, fault)
     }
     if req.method == "POST" && map.get(req.target.query, "uploads") != None {
         return begin(mut bucket, req)
@@ -927,7 +931,7 @@ fn dispatch(rules: Rules, mut bucket: Bucket, req: Request, take body: Bytes, fa
         return take failed
     }
     if req.method == "PUT" {
-        let tag = put(mut bucket, req.target.key, take body, metadata(req.fields))
+        let tag = put(mut bucket, req, request, take body, metadata(req.fields))
         let mut out = reply(200, "")
         map.insert(mut out.fields, string.from("ETag"), take tag)
         return take out
@@ -969,6 +973,7 @@ fn dispatch(rules: Rules, mut bucket: Bucket, req: Request, take body: Bytes, fa
 type ReadState = Reading | Body(u64) | Sending | ResetPeer
 
 type Peer {
+    request: u64,
     fault: Fault,
     plan: sim.world.Plan,
     state: ReadState,
@@ -982,8 +987,8 @@ type Peer {
     spare: bool
 }
 
-fn new_peer(fault: Fault, take plan: sim.world.Plan, spare: bool) -> Peer {
-    Peer(fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false, spare: spare)
+fn new_peer(request: u64, fault: Fault, take plan: sim.world.Plan, spare: bool) -> Peer {
+    Peer(request, fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false, spare: spare)
 }
 
 fn respond(mut peer: Peer, response: Response, head: bool) {
@@ -1123,7 +1128,7 @@ fn received(gate: Gate, mut bucket: Bucket, mut peer: Peer) {
             }
         }
     }
-    let mut response = dispatch(gate.rules, mut bucket, req, take body, peer.fault)
+    let mut response = dispatch(gate.rules, mut bucket, req, take body, peer.fault, peer.request)
     if let Some(take text) = take proof {
         map.insert(mut response.fields, string.from(PROOF_FIELD), take text)
     }
@@ -1239,17 +1244,6 @@ fn operate(config: Config, gate: Gate, mut bucket: Bucket, mut peer: Peer, clock
     }
 }
 
-fn same_addr(a: Addr, b: Addr) -> bool {
-    if a.port != b.port {
-        return false
-    }
-    match (a.ip, b.ip) {
-        (V4(x), V4(y)) => x == y,
-        (V6(hi, lo), V6(other_hi, other_lo)) => hi == other_hi && lo == other_lo,
-        _ => false
-    }
-}
-
 fn name_operation(op: NetOp) -> bool {
     match op {
         Resolve(..) => true,
@@ -1285,10 +1279,10 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
         match op {
             Connect(addr: addr) => {
                 let spare = match n.cut {
-                    Some(cut) => same_addr(addr, cut.spare),
+                    Some(cut) => addr == cut.spare,
                     None => false,
                 }
-                if !spare && !same_addr(addr, n.address) {
+                if !spare && addr != n.address {
                     let _ = answer(mut port, take call, Failed(Refused))
                 } else if answer(mut port, take call, Socket(next, addr)) {
                     let fault = if spare || list.len(n.faults) == 0 {
@@ -1297,7 +1291,7 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
                         n.faults[sim.world.pick(mut plan, list.len(n.faults))]
                     }
                     let stream = sim.world.plan(sim.world.pick(mut plan, 0xffffffffffffffff))
-                    map.insert(mut peers, next, new_peer(fault, take stream, spare))
+                    map.insert(mut peers, next, new_peer(next, fault, take stream, spare))
                     next += 1
                 }
             },
@@ -1337,25 +1331,25 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
 }
 
 fn new_bucket() -> Bucket {
-    Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
+    Bucket(head_writes: list.new(), objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
 }
 
 fn report(take bucket: Bucket, attempts: u64, withdrawn: u64) -> Report {
-    let Bucket(objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
+    let Bucket(head_writes: take head_writes, objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
     for id in sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
+    Report(head_writes: take head_writes, objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
 }
 
 const LOOPBACK_IO_NS: u64 = 30000000000
 
-fn serve_connection(gate: Gate, mut bucket: Bucket, take conn: Socket, clock: Clock) waits {
+fn serve_connection(request: u64, gate: Gate, mut bucket: Bucket, take conn: Socket, clock: Clock) waits {
     let (take input, take output) = net.split(take conn)
     let mut reader = take input
     let mut writer = take output
-    let mut peer = new_peer(Clean, sim.world.plan(0), false)
+    let mut peer = new_peer(request, Clean, sim.world.plan(0), false)
     let until: Until = At(clock, int.saturating_add(host.mono_ns(clock), LOOPBACK_IO_NS))
     let limit = int.saturating_add(gate.rules.max_body, 65536u64)
     while !matches_closed(peer.state) {
@@ -1398,7 +1392,7 @@ pub fn serve_loopback(mut listener: Listener, take service: Loopback, clock: Clo
     let mut accepted = 0u64
     while let Ok((take conn, _)) = host.accept(mut listener, Never) {
         accepted += 1
-        serve_connection(gate, mut bucket, take conn, clock)
+        serve_connection(accepted, gate, mut bucket, take conn, clock)
     }
     report(take bucket, accepted, 0)
 }

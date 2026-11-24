@@ -1,0 +1,21 @@
+/// An applied write to a key named head. The request id is the connection number;
+/// each connection accepts one request, even when its reply is lost.
+pub type HeadWrite: send {
+    request: u64,
+    key: String,
+    if_match: Option[String],
+    if_none_match: Option[String],
+    etag: String,
+    data: Bytes
+}
+
+fn copy_header(fields: Map[String, String], name: String) -> Option[String] {
+    let value = map.get(fields, name)?
+    Some(string.from(value))
+}
+
+pub fn record(mut writes: List[HeadWrite], request: u64, key: String, fields: Map[String, String], tag: String, data: Bytes) {
+    if key == "head" || string.ends_with(key, "/head") {
+        list.push(mut writes, HeadWrite(request, key: string.from(key), if_match: copy_header(fields, "if-match"), if_none_match: copy_header(fields, "if-none-match"), etag: clone(tag), data: clone(data)))
+    }
+}

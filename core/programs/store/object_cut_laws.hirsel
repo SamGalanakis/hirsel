@@ -649,6 +649,9 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     let expected = winner?
     let stored = option.unwrap(map.get(raced.objects, "head"))
     let captured = history_decode_head(stored.data)?
+    if list.len(raced.head_writes) != 3 || raced.head_writes[2].request != 9 || raced.head_writes[2].data != expected {
+        fail("VP1: the HEAD history missed the applied write whose reply was lost")
+    }
     // L54 negative control: replaying with a fresh tag after the lost reply
     // adds a ninth write even when the final bytes happen to agree.
     if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 15 {

@@ -231,7 +231,65 @@ fn bucket_law_finish(take s: BucketSim) -> std.sim.s3.Report waits {
     result.unwrap(channel.send(stop, ()))
     let report = result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
+    result.unwrap(bucket_law_head_history(report))
     take report
+}
+
+// Validate in application order. Connection numbers identify requests but
+// can be out of order when connections deliver their final bytes concurrently.
+fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
+    let mut last_head: Map[String, u64] = map.new()
+    let mut requests: Map[u64, ()] = map.new()
+    for i in 0u64 .. list.len(report.head_writes) {
+        let event = view report.head_writes[i]
+        if event.request == 0 || event.request > report.attempts || map.contains(requests, event.request) {
+            fail("VP1: duplicate or invalid applied HEAD request id")
+        }
+        map.insert(mut requests, event.request, ())
+        let captured = history_decode_head(event.data)?
+        let current = captured.head
+        if let Some(previous_index) = map.get(last_head, event.key) {
+            let prior = view report.head_writes[previous_index]
+            let prior_capture = history_decode_head(prior.data)?
+            let previous = prior_capture.head
+            let Some(precondition) = event.if_match else { fail("VP1: HEAD replaced without an If-Match") }
+            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || list.slice(prior.data, 256, list.len(prior.data)) != list.slice(event.data, 256, list.len(event.data)) {
+                fail("VP1: HEAD did not condition on its predecessor or changed the authority")
+            }
+            if current.pair.epoch == previous.pair.epoch {
+                if !same(current.pair.holder, previous.pair.holder) || current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
+                    fail("VP1: HEAD did not advance the incumbent's prefix")
+                }
+                if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
+                    fail("VP1: HEAD did not publish the checkpoint at its new entry")
+                }
+                // Reclaim can erase earlier entries. Where an entry remains,
+                // the bucket's bytes must link to the previous applied tip.
+                let offset = string.byte_len(event.key) - 4
+                let mut entry_key = string.from(string.slice(event.key, 0, offset))
+                string.push(mut entry_key, history_key("e-", current.entry))
+                if let Some(stored_entry) = map.get(report.objects, entry_key) {
+                    let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
+                    if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
+                        fail("VP1: the applied advance omitted its predecessor")
+                    }
+                }
+            } else if current.pair.epoch != previous.pair.epoch + 1 || !history_ref_matches(current.entry, previous.entry) || !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+                fail("VP1: a claim reused an epoch, applied from a stale epoch, or changed the inherited prefix")
+            }
+        } else if event.if_match != None || event.if_none_match != Some("*") || current.pair.epoch != 1 || current.entry.seq != 1 || !history_ref_matches(current.entry, current.checkpoint) {
+            fail("VP1: genesis was not a create-only checkpoint")
+        }
+        map.insert(mut last_head, string.from(event.key), i)
+    }
+    for (key, at) in last_head {
+        let event = view report.head_writes[at]
+        let Some(present) = map.get(report.objects, key) else { fail("VP1: the applied HEAD disappeared") }
+        if event.etag != present.etag || event.data != present.data {
+            fail("VP1: the last applied HEAD differs from the stored HEAD")
+        }
+    }
+    Ok(())
 }
 
 // At most one serial GROUP can apply without an answer. Cold recovery has

@@ -173,15 +173,48 @@ fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
 }
 
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {
-    let (take options, _) = sized_reservation(kind, share, o)?
+    let (take options, _) = writer_reservation(kind, share, o)?
     Ok(take options)
 }
 
-// The task starting the store reserves the plan's actual cost. Explicit
-// overrides may leave some of the share unused.
-pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, u64), Shortage] {
+pub opaque type PlacePlan: send {
+    options: Options,
+    writer: WriterPlan,
+    capture: Option[FollowerPlan],
+    capture_extra: u64
+}
+
+pub fn planned(kind: Kind, share: u64, o: Overrides) -> Result[PlacePlan, Shortage] {
+    if let Bucket(lanes) = kind {
+        let service = option.unwrap(service_bytes(list.new()))
+        let starter = follower_starter_bytes()
+        let extra = service + starter
+        let writer_share = int.saturating_sub(share, extra)
+        let (take options, take writer) = writer_reservation(kind, writer_share, o) ?=> |short| {
+            let Shortage(parts: take writer_terms, ..) = take short
+            let mut parts = take writer_terms
+            add_size(mut parts, "follower_service", service)
+            add_size(mut parts, "follower_starter", starter)
+            shortage(share, take parts)
+        }
+        let transport = option.unwrap(std.object.lane_reservation(lanes))
+        let capture = follower_from_options(kind, clone(options), writer_bytes(writer) - transport)?
+        return Ok(PlacePlan(options: take options, writer: take writer, capture: Some(take capture), capture_extra: extra))
+    }
     let (take options, take writer) = writer_reservation(kind, share, o)?
-    Ok((take options, writer_bytes(writer)))
+    Ok(PlacePlan(options: take options, writer: take writer, capture: None, capture_extra: 0))
+}
+
+pub fn planned_options(p: PlacePlan) -> Options {
+    clone(p.options)
+}
+
+pub fn planned_bytes(p: PlacePlan) -> u64 {
+    writer_bytes(p.writer) + p.capture_extra
+}
+
+pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan] {
+    clone(p.capture)
 }
 
 pub fn writer_plan(kind: Kind, o: Options) -> Result[WriterPlan, Shortage] {
@@ -374,9 +407,17 @@ pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
         group_bytes: Some(int.widen(o.group_bytes)), group_commits: Some(o.group_commits), lock_wait_ms: Some(o.lock_wait_ms),
         cache_bytes: Some(o.cache_bytes), writer_pin_bytes: Some(o.writer_pin_bytes),
         dirty_bytes: Some(o.dirty_bytes), pager_task_bytes: Some(o.pager_task_bytes), readers: Some(0))
-    let (take sized_options, total) = sized_reservation(kind, 18446744073709551615u64, effective)?
+    let (take sized_options, writer) = writer_reservation(kind, 18446744073709551615u64, effective)?
     let transport = if let Bucket(lanes) = kind { option.unwrap(std.object.lane_reservation(lanes)) } else { 0u64 }
-    let envelope = total - transport
+    let mut effective_options = take sized_options
+    effective_options.claim_ms = o.claim_ms
+    effective_options.head_poll_ms = o.head_poll_ms
+    effective_options.checkpoint_entries = o.checkpoint_entries
+    effective_options.retain = o.retain
+    follower_from_options(kind, take effective_options, writer_bytes(writer) - transport)
+}
+
+fn follower_from_options(kind: Kind, take options: Options, envelope: u64) -> Result[FollowerPlan, Shortage] {
     let control = follower_control_bytes()
     let task_bytes = follower_task_bytes(0)
     let overhead = control + task_bytes
@@ -386,12 +427,7 @@ pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
         add_size(mut parts, "follower_task", task_bytes)
         return Error(shortage(envelope, take parts))
     }
-    let mut effective_options = take sized_options
-    effective_options.claim_ms = o.claim_ms
-    effective_options.head_poll_ms = o.head_poll_ms
-    effective_options.checkpoint_entries = o.checkpoint_entries
-    effective_options.retain = o.retain
-    Ok(FollowerPlan(kind, options: take effective_options, envelope, root: envelope - overhead))
+    Ok(FollowerPlan(kind, options: take options, envelope, root: envelope - overhead))
 }
 
 pub fn plan_bytes(p: FollowerPlan) -> u64 {

@@ -32,8 +32,8 @@ fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collectio
     }
     let starts_index = draft.index_room == 0 || row_width > PACK_INDEX_LIMIT - draft.index_room
     let index_step = if starts_index { 16 + PACK_INDEX_PREFIX } else { 0u64 }
-    let planned = int.saturating_add(draft.planned_bytes, 16 + frame.size + row_width + index_step)
-    if list.len(draft.rows) != 0 && (planned > draft.cap || list.len(draft.rows) == 4294967295) {
+    let next_size = int.saturating_add(draft.planned_bytes, 16 + frame.size + row_width + index_step)
+    if list.len(draft.rows) != 0 && (next_size > draft.cap || list.len(draft.rows) == 4294967295) {
         return Ok(None)
     }
     let logical = copied(key)?
@@ -49,7 +49,7 @@ fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collectio
         },
     }
     list.push(mut draft.rows, PackIndexRow(offset: place.offset, len: place.len, kind: kind, collection: collection, stamp: place.stamp, key: take logical))
-    draft.planned_bytes = planned
+    draft.planned_bytes = next_size
     draft.index_room = if starts_index { PACK_INDEX_PREFIX + row_width } else { draft.index_room + row_width }
     draft.live += frame.size
     Ok(Some(place))

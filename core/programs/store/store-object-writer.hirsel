@@ -306,17 +306,17 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let mut next_stamp = stamp_after(db.next_node)?
     let mut workspace = history_buffers(65536)?
     let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
-        let planned = {
+        let cut_plan = {
             let installed = disk_state(db).pages
             plan_page_cut(base, participants.holders, installed.lists, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
-        let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
+        let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // Once upload starts, this epoch must never issue these numbers again,
         // even if a refused cut leaves orphaned objects.
         let generation = history_next_id(lane.issued_generation)?
         lane.issued_generation = generation
-        lane.next_pack = planned.lists.run_packs.next_pack
-        let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take planned, object_state(db).locator, mut buffers, mut workspace, now)?
+        lane.next_pack = cut_plan.lists.run_packs.next_pack
+        let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, mut buffers, mut workspace, now)?
         fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, participants.holders, None, list.new(), seq, seq)

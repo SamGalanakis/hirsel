@@ -710,15 +710,15 @@ fn this_open(db: Db, s: Snapshot) -> Result[(), Error] {
 
 // A cut-made operation reserves its holder storage before the cut and
 // changes the installed holder records only after publication.
-fn cut_install(mut db: Db, take planned: HolderDelta) -> Result[Ticket, Error] waits {
+fn cut_install(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] waits {
     if is_disk(db) {
-        return disk_cut_state(mut db, take planned, seal_page_manifest_file)
+        return disk_cut_state(mut db, take delta, seal_page_manifest_file)
     }
-    prepare_holder_slot(mut db, planned)?
+    prepare_holder_slot(mut db, delta)?
     let proposed = disk_allocation(scoped fn() -> Result[State, Error] {
-        capacity(state_with_delta(db, planned))
+        capacity(state_with_delta(db, delta))
     })?
-    let admission = match planned {
+    let admission = match delta {
         AddHead(_, _) => true,
         AddPin(_) => true,
         ReplacePin(_, _) => true,
@@ -729,7 +729,7 @@ fn cut_install(mut db: Db, take planned: HolderDelta) -> Result[Ticket, Error] w
         over_ceiling(live_bytes, db.ceiling)?
     }
     let commit_ticket = record_memory_cut(mut db, live_bytes, pages)
-    install_holder_delta(mut db, take planned)
+    install_holder_delta(mut db, take delta)
     Ok(commit_ticket)
 }
 
@@ -938,24 +938,20 @@ pub type CallReserve {
     steps: u64
 }
 
-// AM5. The body isolate's cause cell is the only allocation outside E.
-// A finalized issued ID takes one loop latch, and its log cell is eight bytes.
-const CALL_CAUSE_BYTES: u64 = 32
-
 // MEM-30 calls on the longest path outside the body's scope: draft_call (1),
 // the isolate (2), and log finish twice plus finish_stage (3).
 const CALL_FIXED_STEPS: u64 = 6
 
-const ISSUED_ID_BYTES: u64 = 8
-
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
-    let Some(retained) = int.checked_add(plan.n_e, CALL_CAUSE_BYTES) else {
+    // The isolate needs only the cause cell that a block charge includes.
+    let cause = charge.block(bytes[()], 0)?
+    let Some(retained) = int.checked_add(plan.n_e, cause) else {
         return None
     }
     let Some(fixed) = int.checked_add(plan.s_e, CALL_FIXED_STEPS) else {
         return None
     }
-    let Some(steps) = int.checked_add(fixed, plan.n_e / ISSUED_ID_BYTES) else {
+    let Some(steps) = int.checked_add(fixed, plan.n_e / bytes[u64]) else {
         return None
     }
     Some(CallReserve(retained: retained, steps: steps))
@@ -2673,7 +2669,7 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], tiered: Opt
     for slot_order in 0u64 .. ops.count {
         let op = ordered_row(ops, order, slot_order)
         let delta = match tiered {
-            Some(planned) => planned[slot_order],
+            Some(slots) => slots[slot_order],
             None => None,
         }
         if let Some(trim) = op.trim {
@@ -4459,18 +4455,18 @@ type PreparedRow: codec + send {
     value: Bytes
 }
 
-fn catalog_changes(base: Roots, planned: Roots) -> Result[List[CatalogChange], Error] {
+fn catalog_changes(base: Roots, target: Roots) -> Result[List[CatalogChange], Error] {
     let mut edits: List[CatalogChange] = list.new()
     let mut before = open_page_range(base.catalog, None, true, false, None)?
     while let Some((take key, old_arc)) = next_page_range(mut before)? {
-        match get_page_row(planned.catalog, key) {
+        match get_page_row(target.catalog, key) {
             Some(new) => if list.compare_bytes(new, old_arc) != Equal {
                 list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old_arc)?), after: Some(copied(new)?)))
             },
             None => list.push(mut edits, CatalogChange(key: take key, before: Some(copied(old_arc)?), after: None)),
         }
     }
-    let mut after = open_page_range(planned.catalog, None, true, false, None)?
+    let mut after = open_page_range(target.catalog, None, true, false, None)?
     while let Some((take key, new)) = next_page_range(mut after)? {
         let exists = match get_page_row(base.catalog, key) {
             Some(_) => true,
@@ -5886,11 +5882,11 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         None => disk_state(db).record_cut,
     }
     let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
-        let planned = {
+        let cut_plan = {
             let installed = disk_state(db).pages
             plan_page_cut(base, holders, installed.lists, Some(view installed.carried), installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
-        let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
+        let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // A retry after emission reuses the segment created by the first attempt.
         if db.file_seq != seq {
             let previous = db.file_end
@@ -5898,7 +5894,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
             db.file_seq = seq
             db.file_end = 72
         }
-        let layout = write_page_cut(d, id, take planned, mut buffers)?
+        let layout = write_page_cut(d, id, take cut_plan, mut buffers)?
         let PackBuffers(out: take out, ..) = take buffers
         let mut manifest = take out
         let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {

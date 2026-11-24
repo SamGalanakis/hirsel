@@ -43,14 +43,14 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(FullNew(Journal(problem)))
     }
     let disk_limit = disk_state(db).options.resident_limit
-    let mut planned = schema_plan(db)
-    planned.ceiling = disk_limit
-    planned_catalog(mut planned, staged.delta)?
-    planned_ranges(mut planned, staged.ranges)?
-    planned.next_table = staged.meta.next_table
-    planned.live = install_account(db, planned.roots)?
-    deploy_result(over_ceiling(planned.live, disk_limit))?
-    let mut installation = StagedMigration(base: declaration_base(db), plan: take planned, declared: false)
+    let mut schema_change = schema_plan(db)
+    schema_change.ceiling = disk_limit
+    planned_catalog(mut schema_change, staged.delta)?
+    planned_ranges(mut schema_change, staged.ranges)?
+    schema_change.next_table = staged.meta.next_table
+    schema_change.live = install_account(db, schema_change.roots)?
+    deploy_result(over_ceiling(schema_change.live, disk_limit))?
+    let mut installation = StagedMigration(base: declaration_base(db), plan: take schema_change, declared: false)
     let Some(release_at) = int.checked_add(base.head, 1u64) else { return Error(Store(Limit(Ids))) }
     let activation_update = if object_writer_open(db) {
         let Some(schema_binding) = target_binding else { return Error(Store(Missing("binding"))) }

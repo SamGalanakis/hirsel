@@ -254,13 +254,13 @@ fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, m
 }
 
 fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, pack_layout: PackRun, mut known: PageLocations, mut pack_objects: Map[u64, HistoryRef], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    for planned in pack_layout.packs {
-        encode_pack(id, pack_layout, planned, mut known, mut buffers.out)?
-        history_copy_header(mut buffers.out, DiskContext(store: id, role: 3, seq: planned.seq), epoch, kind)?
-        let item = history_new_ref(planned.seq, epoch, buffers.out)
+    for pack in pack_layout.packs {
+        encode_pack(id, pack_layout, pack, mut known, mut buffers.out)?
+        history_copy_header(mut buffers.out, DiskContext(store: id, role: 3, seq: pack.seq), epoch, kind)?
+        let item = history_new_ref(pack.seq, epoch, buffers.out)
         history_fill_key(mut workspace.key, "p-", item)
         history_upload_pack(mut client, workspace.key, buffers.out, mut workspace.compare, deadline)?
-        map.insert(mut pack_objects, planned.seq, item)
+        map.insert(mut pack_objects, pack.seq, item)
     }
     Ok(())
 }

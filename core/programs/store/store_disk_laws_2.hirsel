@@ -543,11 +543,11 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     for file in listed_entries {
         list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
     }
-    let planned = 72u64 + 16 + 8 + 6 + 1024
+    let pack_size = 72u64 + 16 + 8 + 6 + 1024
     let pack = paged_pack_path(disk_state(db).pages.next_pack)?
     let mut timing: Option[CutTiming] = None
-    match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, planned - 1, mut timing) {
-        Error(Full(Allocation(problem))) if problem.requested == planned && problem.available == planned - 1 => (),
+    match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, pack_size - 1, mut timing) {
+        Error(Full(Allocation(problem))) if problem.requested == pack_size && problem.available == pack_size - 1 => (),
         _ => return Error(Foreign),
     }
     let after = result.unwrap(std.dir.list(directory, None))
@@ -560,14 +560,14 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         }
     }
     let committed_at = disk_cut_with_limit(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
-        if list.capacity(raw) != planned {
+        if list.capacity(raw) != pack_size {
             return Error(Foreign)
         }
         seal_page_manifest_file(mut raw, context, fence)
-    }, None, options.pack_bytes, planned, mut timing)?
+    }, None, options.pack_bytes, pack_size, mut timing)?
     durable(mut db, committed_at)?
-    let written = disk_read_paged_file(directory, pack, planned)?
-    if list.len(written) != planned || read_le(written, 72, 2) != 0x0022 {
+    let written = disk_read_paged_file(directory, pack, pack_size)?
+    if list.len(written) != pack_size || read_le(written, 72, 2) != 0x0022 {
         return Error(Foreign)
     }
     close(take db)
@@ -740,8 +740,8 @@ fn law_location_cow_charge() -> Result[bool, Error] {
     }
     let mut candidate = share_page_locations(installed)
     add_page_source(mut candidate, 1, HolderSource(0, 0, 0))?
-    let before = std.omap.storage_charge(installed.frames.values, 8, 87)
-    let after = std.omap.storage_charge(candidate.frames.values, 8, 87)
+    let before = std.omap.storage_charge(installed.frames.values, bytes[u64], bytes[FrameLocation])
+    let after = std.omap.storage_charge(candidate.frames.values, bytes[u64], bytes[FrameLocation])
     Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed) && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
 }
 

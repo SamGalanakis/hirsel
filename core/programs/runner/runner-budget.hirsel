@@ -1,10 +1,8 @@
-// What a disk store opened with these options holds at most: its resident pages, a pack
-// and a journal group.
 pub fn disk_store_bytes(options: store.Options) -> u64 {
-    let journal: u64 = int.widen(options.group_bytes)
-    let mut total = int.saturating_add(options.resident_limit, order.max(options.pack_bytes, 16777476))
-    total = int.saturating_add(total, journal)
-    int.saturating_add(total, 2097152u64)
+    match store.writer_plan(Directory, options) {
+        Ok(plan) => store.writer_bytes(plan),
+        Error(_) => 18446744073709551615u64,
+    }
 }
 
 const PLACE_KEEP: u64 = 1048576
@@ -51,19 +49,12 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
         _ => Directory,
     }
     let weak_room = match p.backing { Sim(b) => store.sim_level_reservation(b.declaration), _ => 0u64 }
-    let empty: List[store.FollowerPlan] = list.new()
-    let capture = if let Bucket(_) = kind {
-        let Some(service) = store.service_bytes(empty) else {
-            return Error(Full(Capacity(requested: 18446744073709551615u64, available: limit)))
-        }
-        add_place_bytes(service, store.follower_starter_bytes()) ?=> Full
-    } else { 0u64 }
-    let required = add_place_bytes(add_place_bytes(reserved, capture) ?=> Full, weak_room) ?=> Full
+    let required = add_place_bytes(reserved, weak_room) ?=> Full
     let Some(share) = int.checked_sub(limit, required) else {
         return Error(Full(Capacity(requested: required, available: limit)))
     }
-    let (take options, reserved_store) = match store.sized_reservation(kind, share, p.sizes) {
-        Ok(take sized) => take sized,
+    let plan = match store.planned(kind, share, p.sizes) {
+        Ok(take store_plan) => take store_plan,
         Error(short) => {
             let cap: Capacity = if let Bucket(_) = kind {
                 Capacity(requested: int.saturating_add(required, short.need), available: limit)
@@ -72,34 +63,16 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
             return Error(Full(cap))
         },
     }
-    if let Bucket(lanes) = kind {
-        let plan = match store.follower_plan(kind, options) {
-            Ok(take made) => take made,
-            Error(short) => {
-                let cap: Capacity = Capacity(requested: short.need, available: short.have)
-                report_store_shortage(report, short, cap)
-                return Error(Full(cap))
-            },
-        }
-        let mut plans: List[store.FollowerPlan] = list.with_capacity(1u64)
-        list.push(mut plans, clone(plan))
-        let Some(service) = store.service_bytes(plans) else {
-            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
-        }
-        let Some(client) = std.object.lane_reservation(lanes) else {
-            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
-        }
-        let peak_bytes = if let Some(transport_and_service) = int.checked_add(client, service) {
-            int.checked_add(transport_and_service, store.follower_starter_bytes())
-        } else { None }
-        let Some(peak) = peak_bytes else {
-            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
-        }
-        let sim_writer_room = add_place_bytes(reserved_store, weak_room) ?=> Full
-        let shared_client = match p.backing { Sim(_) => client, _ => 0u64 }
-        return Ok((take options, share, order.max(sim_writer_room, peak) - shared_client, Some(take plan)))
-    }
-    Ok((take options, share, reserved_store, None))
+    let store_bytes = store.planned_bytes(plan)
+    let capture = store.planned_capture(plan)
+    let head_store = if let Sim(b) = p.backing {
+        // The simulator's request lanes are already running outside the head.
+        let client = option.unwrap(std.object.lane_reservation(std.object.request_lanes(b.requests)))
+        let writer = store.plan_bytes(option.unwrap(clone(capture)))
+        let sim_writer = add_place_bytes(writer, weak_room) ?=> Full
+        order.max(store_bytes - client, sim_writer)
+    } else { store_bytes }
+    Ok((store.planned_options(plan), share, head_store, take capture))
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {

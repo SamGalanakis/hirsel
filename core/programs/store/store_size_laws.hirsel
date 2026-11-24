@@ -34,7 +34,11 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
     let open_charge = before - writer_law_room()
     // The worker, timer and five live channels take 67,174,752 + 4,384
     // + (27,264 - 88). The ready channel's 88 B have been refunded.
-    let fixed = open_charge - 67174752 - 4384 - (27264 - 88)
+    let group: u64 = int.widen(input.options.group_bytes)
+    let commits: u64 = int.widen(input.options.group_commits)
+    let worker = option.unwrap(charge.task(bytes[Result[(), Error]], group + JOURNAL_WORKER_SLACK))
+    let timer = option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT))
+    let fixed = open_charge - worker - timer - (journal_channel_bytes(commits) - journal_ready_bytes())
     if fixed != GENESIS_WRITER_STATE || fixed != directory_writer_state_bytes() {
         fail("§1.1: fixed writer state at genesis")
     }
@@ -73,15 +77,17 @@ fn group_override(group: u64) -> Overrides {
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let o = group_override(67108864)
     let need = 102006452u64
-    match sized_reservation(Directory, 39839262, o) {
+    match planned(Directory, 39839262, o) {
         Error(short) if short.need == need && short.have == 39839262 => (),
         _ => fail("§1.1: a 64 MiB group sized inside a share its journal worker exceeds"),
     }
-    match sized_reservation(Directory, need - 1, o) {
+    match planned(Directory, need - 1, o) {
         Error(short) if short.need == need && short.have == need - 1 => (),
         _ => fail("§1.1: one byte below the Directory peak was admitted"),
     }
-    let (take options, total) = sized_reservation(Directory, need, o) ?=> |_| Missing("directory sizing")
+    let place = planned(Directory, need, o) ?=> |_| Missing("directory sizing")
+    let options = planned_options(place)
+    let total = planned_bytes(place)
     let plan = writer_plan(Directory, options) ?=> |_| Missing("writer plan")
     if total != need || writer_bytes(plan) != need || options.group_bytes != 67108864u32 || options.resident_limit != 1048576 {
         fail("§1.1: the Directory peak at its exact share")
@@ -89,4 +95,46 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
     let input = GrantedOpen(tasks, d: disk_test_directory(d), c, r, options: take options)
     let running = task.spawn(tasks, bytes total, take input, granted_open_commit)
     result.unwrap(task.join(take running))
+}
+
+// §1.1 and §12.9, one 1 MiB lane with 64 KiB pack and group limits.
+//   journal and frame: (65,536 + 16,777,296) + 16,777,296
+//   pack and PUT buffer: 2 × 65,536
+//   cut: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
+//   resident and lane: 2 × 1,048,576
+//   entries, heads, key: 2 × round8(65,536 + 112 + 33) + 2 × 65,776 + round8(60)
+//   timer and worker: (4,096 + 288) + (4 × 65,536 + 524,288 + 288 + 64)
+//   reclaim page: round8(1,000 × ((1,024 + 8) + 8 + (64 + 8)))
+//   T_floor = 54,986,476. The place needs T_floor + 80 + 1,098 = 54,987,654.
+@test
+fn bucket_place_plan_at_floor() -> Result[(), Error] {
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let kind: Kind = Bucket(lanes)
+    let mut o = group_override(65536)
+    o.pack_bytes = Some(65536)
+    let need = 54987654u64
+    let place = result.unwrap(planned(kind, need, o))
+    if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
+        fail("§1.1: the Bucket place plan at its exact share")
+    }
+    let capture = option.unwrap(planned_capture(place))
+    let writer = result.unwrap(writer_plan(kind, planned_options(place)))
+    if plan_bytes(capture) != writer_bytes(writer) - lanes.lane_bytes {
+        fail("§1.1: the capture envelope must use the sized writer grant")
+    }
+    let Error(refused) = planned(kind, need - 1, o) else {
+        fail("§1.1: one byte below the Bucket floor was admitted")
+    }
+    if refused.need != need || refused.have != need - 1 {
+        fail("§1.1: the Bucket shortage must name the whole place grant")
+    }
+    let n = list.len(refused.parts)
+    if n < 2 { fail("§1.1: the Bucket shortage must itemize capture") }
+    let service = view refused.parts[n - 2]
+    let starter = view refused.parts[n - 1]
+    if service.0 != "follower_service" || service.1 != follower_service_bytes() ||
+        starter.0 != "follower_starter" || starter.1 != follower_starter_bytes() {
+        fail("§1.1: the Bucket shortage must itemize both capture terms")
+    }
+    Ok(())
 }

@@ -612,11 +612,11 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
         fail("L68: a Tiered root entered the Memory location table or account")
     }
     let mut ids = 101u64
-    let mut planned = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
-    if list.len(planned.data_pages.frames) != 1 || list.len(planned.blobs.frames) != 0 || list.len(planned.lists.removals) != 0 {
+    let mut cut_plan = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    if list.len(cut_plan.data_pages.frames) != 1 || list.len(cut_plan.blobs.frames) != 0 || list.len(cut_plan.lists.removals) != 0 {
         fail("L68: a Memory cut tried to re-emit or retire a Tiered frame")
     }
-    let Some(kept) = std.page.lookup(planned.lists.roots.packs, key_word(8)) else {
+    let Some(kept) = std.page.lookup(cut_plan.lists.roots.packs, key_word(8)) else {
         fail("L68: a Tiered pack retired without a probe")
     }
     if list.len(kept) != 29 || kept[0u64] != 3 || read_le(kept, 5, 8) != 0 || read_le(kept, 13, 8) != 220 || read_le(kept, 21, 8) != 168 {
@@ -624,7 +624,7 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     }
     let owner = StoreId(hi: 3, lo: 4)
     let mut output: Bytes = list.with_capacity(179)
-    encode_pack(owner, planned.data_pages, planned.data_pages.packs[0u64], mut planned.locations, mut output)?
+    encode_pack(owner, cut_plan.data_pages, cut_plan.data_pages.packs[0u64], mut cut_plan.locations, mut output)?
     if list.len(output) != 179 || list.slice(output, 88, 179) != raw {
         fail("L68: the emitted Memory map did not retain the Cold pointer")
     }
@@ -677,9 +677,9 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let mut installed = new_page_locations()
     capacity(disk_index_put(mut installed.packs, 8, inventory, pack_edge_charge))?
     let base = page_retry_base(installed, map.new(), holders, held_roots)?
-    let planned = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
-    let mut buffers = cut_output_buffers(planned, 1048576, 1048576)?
-    let layout = write_page_cut(fixtures, owner, take planned, mut buffers)?
+    let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut buffers = cut_output_buffers(cut_plan, 1048576, 1048576)?
+    let layout = write_page_cut(fixtures, owner, take cut_plan, mut buffers)?
     let mut manifest = page_manifest_empty()
     manifest.next_pack = layout.lists.run_packs.next_pack
     manifest.next_stamp = ids

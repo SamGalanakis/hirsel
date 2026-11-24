@@ -1,7 +1,7 @@
 # STORE-SPEC v2.76: the M4 store library (lane store-spec-1001)
 
 v2.76 (admission-plans-2113, budget-complexitysmash findings 3, 5 and 6): text only, **not yet built**. Store returns its admission plans, and every price in them comes from a MEM-24 recipe through MEM-33's `bytes[T]` and `charge.*`:
-- **The plan.** `sized_reservation` is replaced by `planned`, which returns a `Plan`. A `Plan` holds the sized `Options`, the writer's grant T with its maximizing phase and terms, and, on `Bucket`, the capture's `FollowerPlan` and X = S + R. Its `planned_bytes` is the place's store term T + X. Store solves the share with X inside it, and `writer_plan` prices a given `Options` with the same function. Runner and Platform name no Store figure: RUNNER v2.76 deletes `disk_store_bytes` and its own X, and Platform's `host_bytes` doubles `writer_bytes`. The 64-byte drift that RUNNER law L60 carries (49,616,253 against 49,616,317) came from a Runner literal that restated Store's `follower_starter_bytes`. That class of drift has no place to live now: a Store figure is pinned only in a Store law, and a caller's law composes with the published figure.
+- **The plan.** `sized_reservation` is replaced by `planned`, which returns a `PlacePlan`. A `PlacePlan` holds the sized `Options`, the writer's grant T with its maximizing phase and terms, and, on `Bucket`, the capture's `FollowerPlan` and X = S + R. Its `planned_bytes` is the place's store term T + X. Store solves the share with X inside it, and `writer_plan` prices a given `Options` with the same function. Runner and Platform name no Store figure: RUNNER v2.76 deletes `disk_store_bytes` and its own X, and Platform's `host_bytes` doubles `writer_bytes`. The 64-byte drift that RUNNER law L60 carries (49,616,253 against 49,616,317) came from a Runner literal that restated Store's `follower_starter_bytes`. That class of drift has no place to live now: a Store figure is pinned only in a Store law, and a caller's law composes with the published figure.
 - **Derived constants.** The follower constants (`FOLLOWER_*`, §12.5), the journal channels (§1.1), the journal worker's and timer's task charges, and the writer's fixed state are derived from their types. The writer's fixed state is a new lifetime term, which prices part of v2.75's open item.
 - **Tiered cache from the remainder.** C's floor is W + U, and C takes up to 4q of what r has left above the other floors. The default floor drops from 268,030,824 to **182,375,272** bytes (§1.1, §13.8). K is unchanged. §13.8 prices each cut step's peak on both payers, and the cut phase gains `CUT_STEP_BYTES` for a step's copy. The writer's growing lists are charged where they grow, and their bounds are still open.
 
@@ -1165,11 +1165,11 @@ pub type Overrides { resident_limit: Option[u64], journal_limit: Option[u64], ch
 pub type Shortage { need: u64, have: u64, parts: List[(String, u64)] }
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage]            // v2.57 DX Q6a: replaces defaults(); every byte figure derived from share
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage]   // each Some replaces its derived figure; the sum must still fit share
-pub opaque type Plan: send                                                     // v2.76: sized Options, the writer plan and (Bucket) the capture; holds no heap storage beyond its Options
-pub fn planned(kind: Kind, share: u64, o: Overrides) -> Result[Plan, Shortage] // v2.76: replaces sized_reservation; planned_bytes(p) ≤ share
-pub fn planned_options(p: Plan) -> Options
-pub fn planned_bytes(p: Plan) -> u64                                           // T + X: the caller's whole store term
-pub fn planned_capture(p: Plan) -> Option[FollowerPlan]                           // Bucket: the capture's plan, F = T − L; other kinds None
+pub opaque type PlacePlan: send                                                // v2.76: sized Options, the writer plan and (Bucket) the capture; holds no heap storage beyond its Options
+pub fn planned(kind: Kind, share: u64, o: Overrides) -> Result[PlacePlan, Shortage] // v2.76: replaces sized_reservation; planned_bytes(p) ≤ share
+pub fn planned_options(p: PlacePlan) -> Options
+pub fn planned_bytes(p: PlacePlan) -> u64                                           // T + X: the caller's whole store term
+pub fn planned_capture(p: PlacePlan) -> Option[FollowerPlan]                           // Bucket: the capture's plan, F = T − L; other kinds None
 pub opaque type WriterPlan: send                                               // v2.76: T, its lifetime terms and its maximizing phase
 pub fn writer_plan(kind: Kind, o: Options) -> Result[WriterPlan, Shortage]    // the same pricing `planned` uses, for a caller that holds Options
 pub fn writer_bytes(p: WriterPlan) -> u64                                      // T

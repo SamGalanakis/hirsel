@@ -72,11 +72,11 @@ fn layout_packs(take frames: List[PackFrame], class: u8, first_pack: u64, cap: u
 }
 
 fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Error] {
-    for planned in layout.packs {
+    for pack_plan in layout.packs {
         let mut offset = 72u64
-        for slot in planned.first .. planned.end {
+        for slot in pack_plan.first .. pack_plan.end {
             let frame = layout.frames[slot]
-            let place = std.page.PagePtr(pack: planned.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
+            let place = std.page.PagePtr(pack: pack_plan.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
             let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
                 replace(mut location.place, place)
             }))?)
@@ -87,12 +87,12 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
                     pack.live -= width
                 }))?
             }
-            capacity(disk_index_put(mut known.members, (planned.seq, frame.stamp), (), member_charge))?
+            capacity(disk_index_put(mut known.members, (pack_plan.seq, frame.stamp), (), member_charge))?
             offset += 16 + frame.size
         }
-        let frame_count: u32 = int.truncate(planned.end - planned.first)
-        let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes, index: 0)
-        capacity(disk_index_put(mut known.packs, planned.seq, record, pack_edge_charge))?
+        let frame_count: u32 = int.truncate(pack_plan.end - pack_plan.first)
+        let record = PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
+        capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge))?
     }
     Ok(())
 }
@@ -148,14 +148,14 @@ fn install_emitted_place(mut known: PageLocations, located: std.page.PagePtr) ->
     Ok(())
 }
 
-fn encode_pack(id: StoreId, layout: PackRun, planned: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
+fn encode_pack(id: StoreId, layout: PackRun, pack: PlannedPack, mut known: PageLocations, mut out: Bytes) -> Result[(), Error] {
     list.clear(mut out)
-    let context = DiskContext(store: id, role: 3, seq: planned.seq)
+    let context = DiskContext(store: id, role: 3, seq: pack.seq)
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         capacity(disk_header_bytes(context, 0, 0))
     })?
     list.append(mut out, header)
-    for slot in planned.first .. planned.end {
+    for slot in pack.first .. pack.end {
         let located = emit_pack_frame(mut out, context, layout.frames[slot], known)?
         install_emitted_place(mut known, located)?
     }
@@ -188,11 +188,11 @@ fn cut_output_buffers(cut: PagedCutLayout, manifest_bytes: u64, limit: u64) -> R
 }
 
 fn write_pack_run(d: Dir, id: StoreId, layout: PackRun, mut known: PageLocations, mut buffers: PackBuffers) -> Result[(), Error] waits {
-    for planned in layout.packs {
-        encode_pack(id, layout, planned, mut known, mut buffers.out)?
+    for pack in layout.packs {
+        encode_pack(id, layout, pack, mut known, mut buffers.out)?
         string.truncate(mut buffers.destination, 0)
         string.push(mut buffers.destination, "p-")
-        string.push_u64(mut buffers.destination, planned.seq)
+        string.push_u64(mut buffers.destination, pack.seq)
         string.truncate(mut buffers.temporary, 0)
         string.push(mut buffers.temporary, buffers.destination)
         string.push(mut buffers.temporary, ".tmp")

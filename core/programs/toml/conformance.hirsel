@@ -1,0 +1,193 @@
+type Cases {
+    notes: String,
+    valid: u64,
+    invalid: u64
+}
+
+fn issue(mut cases: Cases, name: String, problem: String) {
+    string.push(mut cases.notes, name)
+    string.push(mut cases.notes, ": ")
+    string.push(mut cases.notes, problem)
+    string.push(mut cases.notes, "\n")
+}
+
+fn number(node: std.json.Json) -> u64 {
+    let Num(spelling) = node else {
+        fail("TOML oracle: expected number")
+    }
+    result.unwrap(int.parse(text.as_string(spelling)))
+}
+
+fn component(parts: IndexedSpan[std.json.Json], at: u64) -> u64 {
+    let Some(item) = indexed.get(parts, at) else {
+        fail("TOML oracle: missing date or time field")
+    }
+    number(item)
+}
+
+fn date_matches(day: std.time.Date, parts: IndexedSpan[std.json.Json]) -> bool {
+    component(parts, 0) == int.widen(std.time.year(day)) && component(parts, 1) == int.widen(std.time.month(day)) && component(parts, 2) == int.widen(std.time.day(day))
+}
+
+fn time_matches(clock: toml.Time, parts: IndexedSpan[std.json.Json], at: u64) -> bool {
+    component(parts, at) == int.widen(clock.hour) && component(parts, at + 1) == int.widen(clock.minute) && component(parts, at + 2) == int.widen(clock.second) && component(parts, at + 3) == int.widen(clock.nanos)
+}
+
+fn scalar_matches[in a](actual: toml.Value, fields: IndexedSpan[std.json.Member] in a) -> bool {
+    let Some(Str(tag)) = std.json.find(fields, "type") else {
+        return false
+    }
+    let Some(payload) = std.json.find(fields, "value") else {
+        return false
+    }
+    let kind = text.as_string(tag)
+    match (view actual, view payload) {
+        (Text(s), Str(t)) => kind == "string" && s == text.as_string(t),
+        (Boolean(true), True) => kind == "bool",
+        (Boolean(false), False) => kind == "bool",
+        (Integer(n), Num(spelling)) => {
+            let parsed: Result[i64, ParseError] = int.parse(text.as_string(spelling))
+            if let Ok(x) = parsed {
+                kind == "integer" && n == x
+            } else {
+                false
+            }
+        },
+        (Float(bits), Num(_)) => kind == "float" && bits == number(payload),
+        (Date(day), Arr(parts)) => kind == "date-local" && date_matches(day, parts),
+        (LocalTime(clock), Arr(parts)) => kind == "time-local" && time_matches(clock, parts, 0),
+        (LocalDateTime(day, clock), Arr(parts)) => kind == "datetime-local" && date_matches(day, parts) && time_matches(clock, parts, 3),
+        (OffsetDateTime(day, clock, offset), Arr(parts)) => {
+            kind == "datetime" && date_matches(day, parts) && time_matches(clock, parts, 3) && (component(parts, 7) == 1) == offset.negative && component(parts, 8) == int.widen(offset.minutes)
+        },
+        _ => false,
+    }
+}
+
+fn matches(doc: toml.Document, at: u64, expected: std.json.Json) -> bool {
+    let Some(actual) = toml.value(doc, at) else {
+        return false
+    }
+    match (view actual, view expected) {
+        (Table(entries), Obj(fields)) => {
+            if list.len(entries) != seq.len(fields) {
+                return false
+            }
+            for entry in entries {
+                let Some(wanted) = std.json.find(fields, entry.key) else {
+                    return false
+                }
+                if !matches(doc, entry.child, wanted) {
+                    return false
+                }
+            }
+            true
+        },
+        (Array(items), Arr(wanted)) => {
+            if list.len(items) != seq.len(wanted) {
+                return false
+            }
+            for i in 0u64 .. list.len(items) {
+                let Some(wanted_item) = indexed.get(wanted, i) else {
+                    return false
+                }
+                if !matches(doc, items[i], wanted_item) {
+                    return false
+                }
+            }
+            true
+        },
+        (_, Obj(fields)) => scalar_matches(actual, fields),
+        _ => false,
+    }
+}
+
+fn check_case(mut cases: Cases, name: String, input: Bytes, expected: String) {
+    let budget = toml.limits()
+    let answer = toml.parse(input, budget)
+    if expected == "" {
+        cases.invalid += 1
+        match answer {
+            Ok(_) => issue(mut cases, name, "accepted invalid input"),
+            Error(reason) => match reason {
+                Syntax(_) => {},
+                InvalidUtf8(_) => {},
+                InvalidEscape(_) => {},
+                Redefined(_) => {},
+                NumberRange(_) => {},
+                _ => issue(mut cases, name, "resource refusal instead of syntax refusal"),
+            },
+        }
+        return
+    }
+    cases.valid += 1
+    let Ok(doc) = answer else {
+        issue(mut cases, name, "refused valid input")
+        return
+    }
+    region r {
+        let want = result.unwrap(std.json.parse(r, expected))
+        if !matches(doc, 0, want) {
+            issue(mut cases, name, "tree disagrees with JSON expectation")
+        }
+    }
+    let Ok(serialized) = toml.serialize(doc, budget) else {
+        issue(mut cases, name, "serialization failed")
+        return
+    }
+    let Ok(decoded) = toml.parse(string.as_bytes(serialized), budget) else {
+        issue(mut cases, name, "serialized text was refused")
+        return
+    }
+    if !result.unwrap(toml.equal(doc, decoded, budget.steps)) {
+        issue(mut cases, name, "serialization changed the tree")
+    }
+}
+
+fn check_limits() {
+    let short_bytes = toml.Limits(byte_limit: 2, depth: 64, steps: 10000)
+    let shallow = toml.Limits(byte_limit: 1024, depth: 1, steps: 10000)
+    let no_steps = toml.Limits(byte_limit: 1024, depth: 64, steps: 0)
+    let Error(ByteLimit) = toml.parse(b"a=1", short_bytes) else {
+        fail("TOML input byte limit")
+    }
+    let Error(Depth(3)) = toml.parse(b"a=[1]", shallow) else {
+        fail("TOML parse depth limit")
+    }
+    let Error(StepLimit) = toml.parse(b"a=1", no_steps) else {
+        fail("TOML parse step limit")
+    }
+    let doc = result.unwrap(toml.parse(b"a=[1]", toml.limits()))
+    let Error(ByteLimit) = toml.serialize(doc, short_bytes) else {
+        fail("TOML output byte limit")
+    }
+    let Error(Depth(_)) = toml.serialize(doc, shallow) else {
+        fail("TOML output depth limit")
+    }
+    let Error(StepLimit) = toml.serialize(doc, no_steps) else {
+        fail("TOML output step limit")
+    }
+    let Error(Redefined(4)) = toml.parse(b"a=1\na=2", toml.limits()) else {
+        fail("TOML duplicate key position")
+    }
+    let Error(InvalidEscape(3)) = toml.parse(b"a=\"\\q\"", toml.limits()) else {
+        fail("TOML invalid escape position")
+    }
+}
+
+/// bug: Incorrect TOML grammar, declaration state, scalar values or round-trip encoding.
+/// oracle: The TOML 1.0.0 upstream vectors and their tagged JSON expectations. See VECTORS.md.
+@test
+fn toml_1_0_conformance() -> Result[(), ()] {
+    check_limits()
+    let mut cases = Cases(notes: string.new(), valid: 0, invalid: 0)
+    vectors.visit(mut cases, check_case)
+    if cases.valid != 208 || cases.invalid != 509 {
+        fail("TOML corpus count changed")
+    }
+    if cases.notes != "" {
+        let Cases(notes: take messages, valid: _, invalid: _) = take cases
+        fail(take messages)
+    }
+    Ok(())
+}

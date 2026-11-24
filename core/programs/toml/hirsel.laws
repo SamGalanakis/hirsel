@@ -1,0 +1,2 @@
+hirsel.laws 1
+toml@1/conformance/toml_1_0_conformance src=ca2db24fbe6e42b7 sig=84cd2cbe084bb8a0 run=c2c0c6612d4cbb79 bug=3462f4ff3421fa6c oracle=709487a05735e5a4 rows=pending

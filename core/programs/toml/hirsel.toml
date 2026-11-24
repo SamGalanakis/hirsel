@@ -1,0 +1,18 @@
+[package]
+name = "toml"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"toml.hirsel" = "toml"
+
+[tests]
+limit = 67108864
+grants = []
+
+[tests.sources]
+"conformance.hirsel" = "conformance"
+"vectors.hirsel" = "vectors"

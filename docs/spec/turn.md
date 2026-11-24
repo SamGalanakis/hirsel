@@ -1,6 +1,10 @@
 # TURN, long-term credentials and the TCP fallback
 
-Version note (2026-11-24, turn-amend3-2424): recheck 2406's R1 to R5 applied (uses are the
+Version note (2026-11-24, net-public-only-amend-2441): review 2431's F1 applied. An
+IPv4-mapped peer is checked as its IPv4 address against `deny`, `local` and `allow`, and an
+embedded IPv4 address in `deny` or `local` denies its NAT64, 6to4 or Teredo form;
+`peer_policy` gains those cases.
+Earlier (turn-amend3-2424): recheck 2406's R1 to R5 applied (uses are the
 one mechanism, with no per-policy `kdf` exclusion; no `digest` in a `derive_digest` child; one
 place holding `mac kdf`; the relay-only recording; `streams_per_source` behind one NAT).
 Earlier (turn-amend2-2399): recheck 2383's N1 to N7 applied (`derive_digest`
@@ -590,7 +594,10 @@ token bucket fits TURN-7's paths without changing a signature other than `RelayC
 ([NET-18](net.md#net-18-public-only-connects)'s table, through `net.class`), a `deny` prefix
 contains it, or its IP is in `local`, and no `allow` entry covers it and its port. The
 table is the one a `public` Net rule uses, so an IPv4-mapped, NAT64, 6to4 or Teredo
-address is judged by the IPv4 address inside it. `local` is the relay host's own addresses: the caller lists every address
+address is judged by the IPv4 address inside it. An IPv4-mapped address is checked as its
+IPv4 address against `deny`, `local` and `allow` too. A NAT64, 6to4 or Teredo address is
+also denied when an IPv4 address inside it is in `deny` or `local`, and `allow` covers it
+only as written. `local` is the relay host's own addresses: the caller lists every address
 assigned to the host, and `relay` adds every pool IP. Without it a client could send UDP from the
 relay to any service on the relay's own public addresses, its pool or its TURN port, and
 the host would deliver it locally past its firewall. The check is made on the full address
@@ -807,7 +814,8 @@ not re-pinned; U0 must leave it green.
   50000 to 50100. Then, with the relay's public address in `local` and its media ports in
   `allow`: CreatePermission or Send to a pool address, to the TURN port, and to the public
   address on a port outside `allow`; and a datagram to a relayed address from an admitted
-  IP's uncovered port. *Oracle:* NET-18's table and the IANA registries for the
+  IP's uncovered port. Then the IPv4-mapped and `64:ff9b::` forms of a `local` address and
+  of a `deny` entry: 403. *Oracle:* NET-18's table and the IANA registries for the
   class; LiveKit's `isRestrictedPeerIP` and `turnRelayPolicy.allows`, run in Go from the
   clone, where they agree with the table (the differences listed in TURN-7 excepted), with
   their answers written into the case: 403 for each local case, and the inbound datagram

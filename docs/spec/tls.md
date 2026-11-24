@@ -167,7 +167,8 @@ Two things are required for a handshake. The socket must exist, which means its
   name (a DNS name or an IP literal, normalised as in TLS-1) or `*.` followed by a DNS
   name. `*.example.com` covers every name with at least one more label that ends in
   `.example.com`. It does not cover `example.com` itself.
-  A bare `*` covers every name ([NET-18](net.md#net-18-public-only-connects)).
+  A bare `*` covers every name ([NET-18](net.md#net-18-public-only-connects)). It is
+  not a `tls_send` pattern (TLS-5).
 - `<lo>-<hi>` is checked against the peer port of the socket.
 - `<trust>` is `System`, or `Roots=sha256:<64 hex>`. In the second form, the handshake's
   `Roots(b)` must have exactly that SHA-256 over `b`'s bytes. A rule that pins `System`
@@ -274,6 +275,9 @@ When they come, the client key is a `Secret` that only the provider reads.
 
 ### TLS-5: Secrets
 
+*Version note (2026-11-24, net-public-only-amend-2441): review 2431's F4 applied. A bare
+`*` is not a `tls_send` pattern.*
+
 ```hirsel core
 pub fn seal(take b: Bytes, uses: String) -> Result[Secret, (SecretError, Bytes)]
 pub fn narrow(s: Secret, uses: String) -> Result[Secret, SecretError]
@@ -306,6 +310,9 @@ most once:
 | `srtp_import(<dir>)` | `schedule.import_srtp`, with the secret as SRTP master key and salt, making a schedule of direction `<dir>`, `send` or `receive` ([TLS-8](#tls-8-packet-ciphers-and-key-agreement)) |
 | `traffic_import(<dir>)` | `schedule.import_traffic`, with the secret as a TLS 1.3 or QUIC traffic secret, making a schedule of direction `<dir>` (TLS-8) |
 | `mtls_client_id` | use as a TLS client identity |
+
+A bare `*` is not a `tls_send` pattern: `hirsel run` refuses a grant that has it, and a
+`seal` or `unwrap` policy that has it is `Invalid`.
 
 `mac` includes `verify`, so the two are not written together, and `aead(<alg>)` includes
 `open(<alg>)` for the same `<alg>`, so neither are those. A holder's authority over a secret's bytes is every use it holds on

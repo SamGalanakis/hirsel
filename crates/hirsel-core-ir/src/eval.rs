@@ -15,6 +15,7 @@ mod frame;
 mod launch;
 mod map;
 mod provide;
+mod signature;
 mod simd;
 
 pub use map::run_map_hash;
@@ -6849,29 +6850,13 @@ impl Machine<'_> {
             }
             RtOp::Crc32cCombine => vec![crc_combine::<32>(a[0], a[1], a[2], 0x82f63b78)],
             RtOp::Crc64NvmeCombine => vec![crc_combine::<64>(a[0], a[1], a[2], 0x9a6c9329ac4bc9b5)],
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
-                use hirsel_core_net::SignatureAlgorithm;
-                let algorithm = match op {
-                    RtOp::Ed25519Verify => SignatureAlgorithm::Ed25519,
-                    RtOp::P256Verify => SignatureAlgorithm::P256Fixed,
-                    RtOp::P256VerifyDer => SignatureAlgorithm::P256Der,
-                    _ => unreachable!(),
-                };
-                let range = |data, len| {
-                    if len == 0 {
-                        &[]
-                    } else {
-                        self.get(data, len as usize)
-                    }
-                };
-                let valid = hirsel_core_net::verify_signature(
-                    algorithm,
-                    range(a[0], a[1]),
-                    range(a[2], a[3]),
-                    range(a[4], a[5]),
-                );
-                vec![u64::from(valid)]
-            }
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer
+            | RtOp::RsaVerifyPkcs1Sha256
+            | RtOp::RsaVerifyPssSha256 => vec![u64::from(self.verify_signature(op, a))],
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);
                 if a[0] == 0 {

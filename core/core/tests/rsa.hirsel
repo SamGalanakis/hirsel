@@ -1,0 +1,109 @@
+// test-vectors
+// SV13. The full SV14 walk covers tcIds 1 to 7. Both components of
+// tcId 1 also work with an extra leading zero byte.
+// expect: run sv13_leading_zeroes() = true
+fn sv13_leading_zeroes() -> bool {
+    let (n, e, msg, sig) = pkcs1_tc1()
+    let (padded_n, padded_e) = pkcs1_tc1_padded()
+    rsa.verify_pkcs1_sha256(padded_n, e, msg, sig) && rsa.verify_pkcs1_sha256(n, padded_e, msg, sig)
+}
+
+// expect: run sv13_rfc7515() = true
+fn sv13_rfc7515() -> bool {
+    let (n, e, msg, sig, edited) = rfc7515_a2()
+    rsa.verify_pkcs1_sha256(n, e, msg, sig) && !rsa.verify_pkcs1_sha256(n, e, edited, sig)
+}
+
+// SV14. The pinned cases include tcId 8 (missing NULL), which RFC 8017's
+// encoding rejects. A nonzero return identifies the first mismatch.
+// expect: run sv14_pkcs1() = 0
+fn sv14_pkcs1() -> u64 {
+    check_rsa(wycheproof_pkcs1(), false)
+}
+
+// SV15. Include the all-zero and all-one salts (tcIds 73 and 74).
+// expect: run sv15_pss() = 0
+fn sv15_pss() -> u64 {
+    check_rsa(wycheproof_pss(), true)
+}
+
+// expect: run sv15_empty_salt() = 0
+fn sv15_empty_salt() -> u64 {
+    check_rsa(wycheproof_empty_salt(), true)
+}
+
+// SV16. The signatures were generated with SHA-256 and 1024-bit keys.
+// expect: run sv16_small_modulus() = 0
+fn sv16_small_modulus() -> u64 {
+    check_rsa(wycheproof_small_modulus(), false)
+}
+
+fn check_rsa(records: Bytes, pss: bool) -> u64 {
+    let len = list.len(records)
+    let mut at = 0u64
+    while at < len {
+        let id: u64 = list.word_le(records, at)
+        let verdict: u64 = list.word_le(records, at + 8)
+        let n_at = at + 48
+        let e_at = n_at + list.word_le(records, at + 16)
+        let msg_at = e_at + list.word_le(records, at + 24)
+        let sig_at = msg_at + list.word_le(records, at + 32)
+        let end = sig_at + list.word_le(records, at + 40)
+        let n = list.slice(records, n_at, e_at)
+        let e = list.slice(records, e_at, msg_at)
+        let msg = list.slice(records, msg_at, sig_at)
+        let sig = list.slice(records, sig_at, end)
+        let observed = if pss {
+            rsa.verify_pss_sha256(n, e, msg, sig)
+        } else {
+            rsa.verify_pkcs1_sha256(n, e, msg, sig)
+        }
+        if observed != (verdict == 1) {
+            return id
+        }
+        at = end
+    }
+    0
+}
+
+// expect: run sv16_key_and_signature_bounds() = true
+fn sv16_key_and_signature_bounds() -> bool {
+    let (n, e, msg, sig) = pkcs1_tc1()
+    let mut even: Bytes = list.with_capacity(256)
+    list.append(mut even, n)
+    let _ = list.set(mut even, 255, 0u8)
+    let mut oversized: Bytes = list.with_capacity(1025)
+    list.push(mut oversized, 1u8)
+    list.fill(mut oversized, 1023, 0u8)
+    list.push(mut oversized, 1u8)
+    !rsa.verify_pkcs1_sha256(n, b"\x01\x00\x00", msg, sig) && !rsa.verify_pkcs1_sha256(n, b"\x01", msg, sig) && !rsa.verify_pkcs1_sha256(n, b"\x01\x00\x00\x00\x00\x00\x00\x00\x01", msg, sig) && !rsa.verify_pkcs1_sha256(n, e, msg, list.slice(sig, 0, 255)) && !rsa.verify_pkcs1_sha256(even, e, msg, sig) && !rsa.verify_pkcs1_sha256(oversized, e, msg, sig)
+}
+
+// SV17. One step and zero bytes suffice for tcId 1 of each RSA corpus.
+// expect: reference run sv17_pkcs1_charge() = true
+fn sv17_pkcs1_charge() -> bool {
+    let (n, e, msg, sig) = pkcs1_tc1()
+    let work = bound bytes 0 {
+        bound steps 1 {
+            rsa.verify_pkcs1_sha256(n, e, msg, sig)
+        }
+    }
+    match work {
+        Ok(Ok(true)) => true,
+        _ => false,
+    }
+}
+
+// expect: reference run sv17_pss_charge() = true
+fn sv17_pss_charge() -> bool {
+    let (n, e, msg, sig) = pss_tc1()
+    let work = bound bytes 0 {
+        bound steps 1 {
+            rsa.verify_pss_sha256(n, e, msg, sig)
+        }
+    }
+    match work {
+        Ok(Ok(true)) => true,
+        _ => false,
+    }
+}

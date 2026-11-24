@@ -525,11 +525,17 @@ impl FunctionEmitter<'_> {
                 &[U],
                 &[u(&args[0]), u(&args[1]), u(&args[2])],
             ),
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer => {
                 let name = match op {
                     RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
                     RtOp::P256Verify => "hirsel_core_p256_verify",
                     RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
+                    RtOp::P384Verify => "hirsel_core_p384_verify",
+                    RtOp::P384VerifyDer => "hirsel_core_p384_verify_der",
                     _ => unreachable!(),
                 };
                 self.native_call(
@@ -542,6 +548,27 @@ impl FunctionEmitter<'_> {
                         u(&args[3]),
                         p(&args[4]),
                         u(&args[5]),
+                    ],
+                )
+            }
+            RtOp::RsaVerifyPkcs1Sha256 | RtOp::RsaVerifyPssSha256 => {
+                let name = if op == RtOp::RsaVerifyPkcs1Sha256 {
+                    "hirsel_core_rsa_verify_pkcs1_sha256"
+                } else {
+                    "hirsel_core_rsa_verify_pss_sha256"
+                };
+                self.native_call(
+                    name,
+                    &[U],
+                    &[
+                        p(&args[0]),
+                        u(&args[1]),
+                        p(&args[2]),
+                        u(&args[3]),
+                        p(&args[4]),
+                        u(&args[5]),
+                        p(&args[6]),
+                        u(&args[7]),
                     ],
                 )
             }

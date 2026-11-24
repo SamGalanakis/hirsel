@@ -183,7 +183,8 @@ pub use reactor::{
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 mod signature;
 pub use signature::{
-    SignatureAlgorithm, verify_ed25519, verify_p256_asn1, verify_p256_fixed, verify_signature,
+    SignatureAlgorithm, verify_ed25519, verify_p256_asn1, verify_p256_fixed, verify_p384_asn1,
+    verify_p384_fixed, verify_rsa_pkcs1_sha256, verify_rsa_pss_sha256, verify_signature,
 };
 mod split_mix;
 pub use split_mix::SplitMix64;

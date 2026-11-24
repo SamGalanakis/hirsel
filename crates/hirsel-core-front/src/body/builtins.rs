@@ -143,10 +143,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ([m], "verify") if m == "ed25519" => Some(hirsel_core_ir::RtOp::Ed25519Verify),
             ([m], "verify") if m == "p256" => Some(hirsel_core_ir::RtOp::P256Verify),
             ([m], "verify_der") if m == "p256" => Some(hirsel_core_ir::RtOp::P256VerifyDer),
+            ([m], "verify") if m == "p384" => Some(hirsel_core_ir::RtOp::P384Verify),
+            ([m], "verify_der") if m == "p384" => Some(hirsel_core_ir::RtOp::P384VerifyDer),
             _ => None,
         };
         if let Some(op) = verifier {
             return Some(self.verify_signature(op, [vals[0]?, vals[1]?, vals[2]?], n));
+        }
+        if module == ["rsa"] {
+            let op = match name {
+                "verify_pkcs1_sha256" => hirsel_core_ir::RtOp::RsaVerifyPkcs1Sha256,
+                "verify_pss_sha256" => hirsel_core_ir::RtOp::RsaVerifyPssSha256,
+                _ => return None,
+            };
+            return Some(self.verify_signature(op, [vals[0]?, vals[1]?, vals[2]?, vals[3]?], n));
         }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
@@ -163,6 +173,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(self.unwrap_value(input, result, vals[0], module == ["option"], n));
         }
         None
+    }
+
+    fn verify_signature<const N: usize>(
+        &mut self,
+        op: RtOp,
+        carriers: [ValueId; N],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let args = carriers.map(|carrier| {
+            [
+                Arg::Value(self.read_sequence_word(carrier, 0, Ty::Ptr, n)),
+                Arg::Value(self.read_sequence_word(carrier, 8, u64_, n)),
+            ]
+        });
+        let word = self.runtime_row(op, args.as_flattened(), n)?[0];
+        self.runtime_nonzero(u64_, word, n)
     }
 
     /// Shared class-A carrier lowering, also used by string rows at T = u8.

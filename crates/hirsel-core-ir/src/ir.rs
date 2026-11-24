@@ -13,6 +13,7 @@ pub(crate) use flow::for_each_successor;
 #[cfg(any(test, feature = "wf"))]
 pub(crate) use flow::successors;
 mod host_op;
+mod runtime_types;
 pub use host_op::HostOp;
 
 use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
@@ -1075,6 +1076,14 @@ pub enum RtOp {
     P256Verify,
     /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
     P256VerifyDer,
+    /// Verify a fixed-width P-384 ECDSA signature over a message with SHA-384.
+    P384Verify,
+    /// Verify a DER P-384 ECDSA signature over a message with SHA-384.
+    P384VerifyDer,
+    /// Verify an RSA PKCS#1 v1.5 signature over a message with SHA-256.
+    RsaVerifyPkcs1Sha256,
+    /// Verify an RSA-PSS signature with SHA-256 and a 32-byte salt.
+    RsaVerifyPssSha256,
     /// The running task's frame record (`crate::returnable`). Takes the area
     /// size and `u8` flags for network and connection-send state. Allocated
     /// on first entry, reused on resume, and freed when the root ends.
@@ -1194,7 +1203,8 @@ impl RtOp {
     /// | `crc64nvme` | `crc: u64`, `data: ptr`, `len: u64` | `u64`: updated CRC-64/NVME |
     /// | `crc32c_combine` | `a: u32`, `b: u32`, `len_b: u64` | `u32`: concatenated CRC-32C |
     /// | `crc64nvme_combine` | `a: u64`, `b: u64`, `len_b: u64` | `u64`: concatenated CRC-64/NVME |
-    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
+    /// | `ed25519_verify`, `p256_verify`, `p256_verify_der`, `p384_verify`, `p384_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
+    /// | `rsa_verify_pkcs1_sha256`, `rsa_verify_pss_sha256` | modulus, exponent, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
@@ -1306,8 +1316,16 @@ impl RtOp {
                 (vec![V(u32_), V(u32_), V(u64_)], vec![u32_])
             }
             RtOp::Crc64NvmeCombine => (vec![V(u64_), V(u64_), V(u64_)], vec![u64_]),
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer => (
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
+                vec![u64_],
+            ),
+            RtOp::RsaVerifyPkcs1Sha256 | RtOp::RsaVerifyPssSha256 => (
+                vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
                 vec![u64_],
             ),
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
@@ -1620,80 +1638,6 @@ impl RtOp {
                 | RtOp::IsolateCatch
                 | RtOp::Flow(_)
         ) || matches!(self, RtOp::Host(_) | RtOp::Returnable(_))
-    }
-
-    pub fn types(self) -> Vec<TypeId> {
-        match self {
-            RtOp::Returnable(wait) => wait.row().types(),
-            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } | RtOp::Transfer { x, r } => vec![x, r],
-            RtOp::Join { r } => vec![r],
-            RtOp::ConnNew { item }
-            | RtOp::ConnSend { item }
-            | RtOp::ConnTrySend { item }
-            | RtOp::ConnReceive { item }
-            | RtOp::ConnTryReceive { item }
-            | RtOp::ChannelNew { item }
-            | RtOp::Send { item }
-            | RtOp::TrySend { item }
-            | RtOp::Receive { item }
-            | RtOp::ReceiveRec { item }
-            | RtOp::TryReceive { item }
-            | RtOp::LatestNew { item }
-            | RtOp::SharedNew { item }
-            | RtOp::SharedRelease { item } => vec![item],
-            RtOp::LaunchTarget { view } => vec![view],
-            RtOp::Cancel
-            | RtOp::CheckCancel
-            | RtOp::ChannelSender
-            | RtOp::ConnClient
-            | RtOp::LatestHandle
-            | RtOp::LatestPublish
-            | RtOp::LatestRead
-            | RtOp::SharedShare
-            | RtOp::DestId
-            | RtOp::CompareBytes
-            | RtOp::MapHashBytes
-            | RtOp::MapHashWord
-            | RtOp::MapHashStart
-            | RtOp::MapHashAddWord
-            | RtOp::MapHashAddBytes
-            | RtOp::MapHashFinish
-            | RtOp::MapPlaceWord
-            | RtOp::MapPlaceBytes
-            | RtOp::MapStrongWord
-            | RtOp::MapStrongBytes
-            | RtOp::MapStrongStart
-            | RtOp::Xxh3Short
-            | RtOp::Xxh3Stripes
-            | RtOp::Sha1Blocks
-            | RtOp::ZeroBytes
-            | RtOp::Sha256Blocks
-            | RtOp::Crc32c
-            | RtOp::Crc64Nvme
-            | RtOp::Crc32cCombine
-            | RtOp::Crc64NvmeCombine
-            | RtOp::Ed25519Verify
-            | RtOp::P256Verify
-            | RtOp::P256VerifyDer
-            | RtOp::CauseNext
-            | RtOp::CauseValue
-            | RtOp::ArgsLen
-            | RtOp::ArgsGet
-            | RtOp::RootLimit
-            | RtOp::LaunchWord
-            | RtOp::LaunchHandle
-            | RtOp::SecretShare
-            | RtOp::DescribeEmit
-            | RtOp::Flow(_)
-            | RtOp::Host(_)
-            | RtOp::FrameRecord
-            | RtOp::IsolateEnter
-            | RtOp::IsolateLeave
-            | RtOp::IsolateCatch
-            | RtOp::StepEnter
-            | RtOp::StepLeave
-            | RtOp::StepCatch => vec![],
-        }
     }
 }
 

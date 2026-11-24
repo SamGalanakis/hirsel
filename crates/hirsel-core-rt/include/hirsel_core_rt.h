@@ -118,6 +118,20 @@ uint64_t hirsel_core_p256_verify(const uint8_t *key, uint64_t key_len,
 uint64_t hirsel_core_p256_verify_der(const uint8_t *key, uint64_t key_len,
                                     const uint8_t *msg, uint64_t msg_len,
                                     const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p384_verify(const uint8_t *key, uint64_t key_len,
+                                const uint8_t *msg, uint64_t msg_len,
+                                const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_p384_verify_der(const uint8_t *key, uint64_t key_len,
+                                    const uint8_t *msg, uint64_t msg_len,
+                                    const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_rsa_verify_pkcs1_sha256(const uint8_t *n, uint64_t n_len,
+                                            const uint8_t *e, uint64_t e_len,
+                                            const uint8_t *msg, uint64_t msg_len,
+                                            const uint8_t *sig, uint64_t sig_len);
+uint64_t hirsel_core_rsa_verify_pss_sha256(const uint8_t *n, uint64_t n_len,
+                                          const uint8_t *e, uint64_t e_len,
+                                          const uint8_t *msg, uint64_t msg_len,
+                                          const uint8_t *sig, uint64_t sig_len);
 
 /* XXH3-64 seed zero for a span of at most 240 bytes. */
 uint64_t hirsel_core_xxh3_short(const uint8_t *data, uint64_t len);

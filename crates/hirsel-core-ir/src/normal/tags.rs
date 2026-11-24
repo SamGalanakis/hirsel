@@ -393,6 +393,10 @@ tags!(RtOp {
     73 => SharedShare,
     74 => SharedRelease { item },
     75 => RootLimit,
+    77 => P384Verify,
+    78 => P384VerifyDer,
+    79 => RsaVerifyPkcs1Sha256,
+    80 => RsaVerifyPssSha256,
 });
 
 tags!(Wait {

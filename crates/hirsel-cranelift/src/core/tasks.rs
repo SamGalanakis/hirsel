@@ -1,6 +1,7 @@
 //! Closed runtime rows bind the published task and provider C ABI. Provider
 //! carriers stay run-owned; only waiting host operations observe failure status.
 mod map_placement;
+mod signature;
 
 use super::abi::op_signature;
 use super::function::Function;
@@ -700,14 +701,14 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
-            RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
-                let name = match op {
-                    RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",
-                    RtOp::P256Verify => "hirsel_core_p256_verify",
-                    RtOp::P256VerifyDer => "hirsel_core_p256_verify_der",
-                    _ => unreachable!(),
-                };
-                outputs[0] = self.c_call(name, &[P, U, P, U, P, U], &[U], &args[..6])?[0];
+            RtOp::Ed25519Verify
+            | RtOp::P256Verify
+            | RtOp::P256VerifyDer
+            | RtOp::P384Verify
+            | RtOp::P384VerifyDer
+            | RtOp::RsaVerifyPkcs1Sha256
+            | RtOp::RsaVerifyPssSha256 => {
+                outputs[0] = self.signature_call(op, &args)?;
                 1
             }
             RtOp::CauseNext | RtOp::CauseValue => {

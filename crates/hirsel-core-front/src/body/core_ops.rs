@@ -325,6 +325,10 @@ operations! {
     ("ed25519", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify_der", Lane::Value, "A", "crypto-verify-impl-1595", false),
+    ("p384", "verify", Lane::Value, "A", "crypto-sr-2122", false),
+    ("p384", "verify_der", Lane::Value, "A", "crypto-sr-2122", false),
+    ("rsa", "verify_pkcs1_sha256", Lane::Value, "A", "crypto-sr-2122", false),
+    ("rsa", "verify_pss_sha256", Lane::Value, "A", "crypto-sr-2122", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "try_regrow", Lane::Value, "A", "capacity-unwind-1492", true),
@@ -1004,23 +1008,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.runtime_outputs(op, args, n)
     }
 
-    pub(super) fn verify_signature(
-        &mut self,
-        op: RtOp,
-        carriers: [ValueId; 3],
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u64_ = Ty::Scalar(Scalar::U64);
-        let args = carriers.map(|carrier| {
-            [
-                Arg::Value(self.read_sequence_word(carrier, 0, Ty::Ptr, n)),
-                Arg::Value(self.read_sequence_word(carrier, 8, u64_, n)),
-            ]
-        });
-        let word = self.runtime_row(op, args.as_flattened(), n)?[0];
-        self.runtime_nonzero(u64_, word, n)
-    }
-
     fn runtime_outputs<const N: usize>(
         &mut self,
         op: RtOp,
@@ -1164,7 +1151,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
-    fn runtime_nonzero(&mut self, ty: Ty, value: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn runtime_nonzero(&mut self, ty: Ty, value: ValueId, n: NodeId) -> Option<ValueId> {
         let right = self.konst(ty, 0, n)?;
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(

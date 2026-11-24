@@ -82,6 +82,10 @@ fn runtime_probes() -> Module {
         RtOp::SharedNew { item: ITEM },
         RtOp::SharedShare,
         RtOp::SharedRelease { item: ITEM },
+        RtOp::P384Verify,
+        RtOp::P384VerifyDer,
+        RtOp::RsaVerifyPkcs1Sha256,
+        RtOp::RsaVerifyPssSha256,
     ]
     .into_iter()
     .chain(HostOp::ALL.iter().copied().map(RtOp::Host))

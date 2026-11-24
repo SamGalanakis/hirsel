@@ -1,0 +1,6 @@
+// Module `rsa`: RSA signature verification with SHA-256.
+/// Verify a PKCS#1 v1.5 signature. The modulus and exponent are unsigned big-endian.
+pub fn verify_pkcs1_sha256(n: Bytes, e: Bytes, msg: Bytes, sig: Bytes) -> bool
+
+/// Verify a PSS signature using SHA-256 for MGF1 and a 32-byte salt.
+pub fn verify_pss_sha256(n: Bytes, e: Bytes, msg: Bytes, sig: Bytes) -> bool

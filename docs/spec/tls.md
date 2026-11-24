@@ -373,8 +373,11 @@ bytes. When the last of them is released, the runtime zeroes the bytes and refun
 charge that `seal` or the derivation admitted. So a program that seals a fresh token every hour and drops
 the old one holds the storage of one token, not of every token it has sealed.
 
-A release is not a provider operation: it passes no replay point, takes no step, cannot
-fail and adds no frame to a recording. A designation is recorded by its origin (the
+A release is not a provider operation: it passes no replay point, takes no step and cannot
+fail. Its refund is a `refund` take in the stream of the unit that pays the charge, at the
+drop when that unit drops the last holder and at a drain of its mailbox otherwise, because
+whether a drop is the last depends on drops in every unit
+([unit recordings](../recording.md#unit-recordings)). A designation is recorded by its origin (the
 grant, seal ordinal or derivation delivery position), never by where the runtime keeps it, so a release
 changes no recorded value ([recording](../recording.md#credentials)). Each charge is paid
 by the limit that admitted it ([MEM-19](budgets.md#mem-19-limits)). A refund from
@@ -1790,14 +1793,15 @@ reads key material without bytes on replay (any opaque object, or a `Secret` as 
 observes an agreement registry verdict at a `tls13` or `dtls12` constructor, or is an
 `import_srtp` or `import_traffic`, which observes the run-wide spent mark. A virtual `Random`
 counts as a host one in a unit where its operations pass the replay point
-([unit recordings](../recording.md#unit-recordings): one made in another unit, or one that
-another unit has drawn from), and a `Secret` or key object that arrived from another unit
+([unit recordings](../recording.md#unit-recordings): one made in another unit, or one
+whose home has sent it out of its unit), and a `Secret` or key object that arrived from another unit
 has no bytes on replay there.
 The registry is a run-wide input to the unit. The root records each verdict, including
 a verdict for a wholly virtual agreement. Replay reads the verdict from the tape and
 never recomputes it. An entry's retirement depends on shares in every unit, so its refund
 is an input of the unit that paid it, supplied from that unit's stream; replay never
-retires an entry from its own share count.
+retires an entry from its own share count. The same holds for a `Secret` designation and
+the sealed bytes behind it, whose holders are counted run-wide.
 Helper units record the same input in their own streams once
 [unit recordings](../recording.md#unit-recordings) are built. Today the run tape records
 the root alone. Every other TLS-8 operation is **wholly virtual**. It is recomputed on replay as it

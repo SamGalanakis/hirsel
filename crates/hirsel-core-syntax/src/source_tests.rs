@@ -280,3 +280,16 @@ fn lang_1_raw_literals_close_on_their_line() {
         assert_eq!(l.tokens[0].span, Span { start: 0, end });
     }
 }
+
+#[test]
+fn qualified_bytes_of_names_the_bare_spelling() {
+    for text in [
+        "const N: u64 = charge.bytes[u64]",
+        "fn f() -> u64 { core.bytes[u64] }",
+    ] {
+        let p = parsed(text);
+        let d = p.diagnostics.first().expect(text);
+        assert_eq!(d.rule, "LANG-2", "{text}");
+        assert!(d.message.contains("write it bare"), "{text}: {}", d.message);
+    }
+}

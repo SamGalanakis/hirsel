@@ -396,14 +396,7 @@ impl Parser<'_> {
                 "LANG-5"
             },
             "non-keyword identifier",
-            if self.token(0).kind.is_keyword() {
-                format!(
-                    "`{}` is a reserved word and cannot be used as a name",
-                    self.text_token(self.index())
-                )
-            } else {
-                format!("expected a name, found `{}`", self.text_token(self.index()))
-            },
+            self.name_message(),
         )
     }
     fn newline(&self) -> bool {

@@ -53,4 +53,17 @@ impl Parser<'_> {
         self.whitespace -= 1;
         result
     }
+
+    /// The message for a missing name. `bytes[T]` written as a module member
+    /// names its bare spelling.
+    pub(super) fn name_message(&self) -> String {
+        let found = self.text_token(self.index());
+        if self.at(sym::BYTES) && self.word(1) == sym::LBRACKET {
+            "`bytes[T]` is not a member of any module; write it bare, as `bytes[T]` (MEM-33)".into()
+        } else if self.token(0).kind.is_keyword() {
+            format!("`{found}` is a reserved word and cannot be used as a name")
+        } else {
+            format!("expected a name, found `{found}`")
+        }
+    }
 }

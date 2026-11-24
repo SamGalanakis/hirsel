@@ -13,6 +13,25 @@ const VARIANT_BYTES: u64 = bytes[Slotted]
 
 const OPAQUE_BYTES: u64 = bytes[std.time.Timestamp]
 
+type Pair {
+    a: u64,
+    b: u32
+}
+
+type Node {
+    key: u64,
+    left: Option[Box[Node]],
+    right: Option[Box[Node]],
+    height: u8
+}
+
+// Hand-derived from MEM-24: a record sums its fields, a variant is 8 plus its
+// largest payload, Box counts 8. Pair 8 + 4; Option[Pair] 8 + 12; Node
+// 8 + (8 + 8) + (8 + 8) + 1.
+fn sizes_match_the_spec() -> bool {
+    bytes[Pair] == 12 && bytes[Option[Pair]] == 20 && bytes[Node] == 41
+}
+
 fn admit[T: plain + send](cap: u64, bytes budget: u64, _sample: T) -> Result[bool, Capacity] {
     bound bytes budget {
         let (_tx, _rx): (Sender[T], Receiver[T]) = channel.new(cap)
@@ -51,5 +70,5 @@ fn overflow_returns_none() -> bool {
 fn channel_charge_matches_admission() -> bool {
     let empty: Slotted = Empty
     let timestamp = option.unwrap(std.time.from_unix(0, 0))
-    matches_admission(Record(small: 0, wide: 0), RECORD_BYTES) && matches_admission(empty, VARIANT_BYTES) && matches_admission(timestamp, OPAQUE_BYTES) && overflow_returns_none()
+    matches_admission(Record(small: 0, wide: 0), RECORD_BYTES) && matches_admission(empty, VARIANT_BYTES) && matches_admission(timestamp, OPAQUE_BYTES) && overflow_returns_none() && sizes_match_the_spec()
 }

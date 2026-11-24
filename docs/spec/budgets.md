@@ -296,7 +296,9 @@ of another package is accepted, because its size is already observable through e
 that counts it; opacity hides fields, not size ([PROG-2](programs.md#prog-2-visibility)). A
 resource type counts 8 here, as wherever it is held; its block is priced by `charge.block`
 below. `bytes[T]` is a source of truth for what a type counts and never a prediction of an
-engine's layout: an engine may hold fewer bytes (MEM-28).
+engine's layout: an engine may hold fewer bytes (MEM-28). `bytes` is a keyword, so the form
+is always written bare: `charge.bytes[T]` or `core.bytes[T]` is refused (LANG-2) with a
+diagnostic naming `bytes[T]`.
 
 ```hirsel
 type Pair { a: u64, b: u32 }

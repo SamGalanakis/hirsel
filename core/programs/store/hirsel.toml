@@ -224,3 +224,6 @@ limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_q5_matrix"]
 limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_genesis_debris"]
+limit = 134217728

@@ -271,3 +271,71 @@ fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Op
 fn q5_applies(fault: Q5Fault) -> bool {
     match fault { OvertakeApply => true, _ => false }
 }
+
+type GenesisPhase: send = AfterManifest | AfterCheckpoint | ConcurrentList
+
+fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: GenesisPhase) -> Result[(), DeployError] waits {
+    let first_seed = 1u64
+    let second_seed = 2u64
+    let predict = provide.random(first_seed)
+    let _ = capacity(disk_identity(predict)) ?=> Store
+    let identity_bytes = capacity(disk_identity(predict)) ?=> Store
+    let mut manifest: Bytes = list.new()
+    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, identity_bytes))?
+    let mut entry_bytes: Bytes = list.new()
+    let no_packs = HistoryLocateRoot(depth: 0, rows: list.new())
+    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, identity_bytes, manifest_ref, no_packs))?
+    let manifest_name = history_key("m-", manifest_ref)
+    let entry_name = history_key("e-", checkpoint_ref)
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    let hold = match phase {
+        AfterManifest => std.sim.s3.Hold(method: "PUT", key: clone(entry_name), from: 1, count: 1, until: Never, then: Drop),
+        AfterCheckpoint => std.sim.s3.Hold(method: "PUT", key: "head", from: 1, count: 1, until: Never, then: Drop),
+        ConcurrentList => std.sim.s3.Hold(method: "LIST", key: "", from: 1, count: 1, until: Applied("PUT", clone(entry_name), 1), then: Apply),
+    }
+    list.push(mut holds, take hold)
+    let sim = bucket_law_sim_holds(tasks, real, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let first = Q5Actor(operation: GenesisWrite, dir: d, clock: sim.time, tasks, r: provide.random(first_seed), endpoint: sim.endpoint)
+    let second = Q5Actor(operation: GenesisWrite, dir: d, clock: sim.time, tasks, r: provide.random(second_seed), endpoint: sim.endpoint)
+    match phase {
+        ConcurrentList => {
+            let queued = task.spawn(tasks, bytes 33554432, take second, q5_actor)
+            result.unwrap(std.sim.s3.requested(sim.endpoint, "LIST", "", 1))
+            let original = q5_actor(take first)
+            let challenger = result.unwrap(task.join(take queued))
+            match (view original.outcome, view challenger.outcome) {
+                (Ok(1), Error(Store(Lost))) => (),
+                (Error(Store(Lost)), Ok(1)) => (),
+                _ => fail("L54-G: concurrent genesis did not complete one epoch-1 open"),
+            }
+        },
+        _ => {
+            let mut running = task.spawn(tasks, bytes 33554432, take first, q5_actor)
+            let parked_key: String = match phase { AfterManifest => string.from(entry_name), _ => string.from("head") }
+            result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", parked_key, 1))
+            task.cancel(mut running)
+            let _ = task.join(take running)
+            if q5_open(second, true)? != 1 { fail("L54-G: the completing open did not create epoch 1") }
+        },
+    }
+    let report = bucket_law_finish(take sim)
+    if list.len(report.head_writes) != 2 || !q5_selects(GenesisWrite, report.head_writes[0].data) {
+        fail("L54-G: the register did not record exactly one genesis and its claim")
+    }
+    let mut left_manifest = false
+    let mut left_checkpoint = false
+    let mut debris_listed = false
+    for req in report.requests {
+        if req.method == "PUT" && req.applied && req.key == manifest_name { left_manifest = true }
+        if req.method == "PUT" && req.applied && req.key == entry_name { left_checkpoint = true }
+        if req.method == "LIST" && req.status == 200 && left_manifest && left_checkpoint { debris_listed = true }
+    }
+    if !left_manifest { fail("L54-G: the first creator never applied its manifest") }
+    match phase {
+        AfterManifest if left_checkpoint => fail("L54-G: the first creator's checkpoint survived the cut"),
+        AfterCheckpoint if !left_checkpoint => fail("L54-G: the test cut preceded the checkpoint"),
+        ConcurrentList if !debris_listed => fail("L54-G: the second LIST did not observe both debris objects"),
+        _ => (),
+    }
+    Ok(())
+}

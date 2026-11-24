@@ -970,3 +970,11 @@ fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_gran
     }
     Ok(())
 }
+
+@test
+fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
+    let seed = bucket_law_seed(seed_grant, 542)
+    genesis_debris_case(d, c, tasks, seed, AfterManifest)?
+    genesis_debris_case(d, c, tasks, seed, AfterCheckpoint)?
+    genesis_debris_case(d, c, tasks, seed, ConcurrentList)
+}

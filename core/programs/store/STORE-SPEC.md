@@ -1,4 +1,6 @@
-# STORE-SPEC v2.67: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.68: the M4 store library (lane store-spec-1001)
+
+v2.68 (lane runner-slot-union-spec-2050, with RUNNER-SPEC v2.53): text only. §14.9's cover semantics now point to RUNNER §3 "Slot images": a slot's rows are the difference of two images, and `window_changes` is that difference only for a tail-only slot whose widest t is the same on both sides. See CHANGES-v2.68.
 
 v2.67 (m3-s3-slots-2010, reader-reserve-advice-2039): Reader constructors wait for one pager admission on Tiered opens. A Reader owns a grant marker and releases it mechanically. See CHANGES-v2.67.
 
@@ -155,6 +157,10 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.68 (slot images; with RUNNER-SPEC v2.53)
+
+- §14.9's "Cover-only hit" and "Rerun" bullets are replaced by a pointer to RUNNER v2.53 §3 "Slot images". The image of a slot that has both a fixed range and a tail is the union of the two, so `window_changes` alone is wrong for it. A slot never switches Logs. The store API is unchanged. §14.9.
 
 ## CHANGES-v2.67 (Tiered Reader reservations)
 
@@ -5010,13 +5016,13 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
 
 Its size is at most 2t plus the overlap's differences. Its cost (v2.61, astra 1998 #14) is O(map height) for the windows, plus O(height) and the value bytes per inserted row, plus, across branches, the overlap descent charged as §14.8 charges it: unshared pages, compared keys and value bytes examined. Two forks that appended identical values pay for that comparison and return no row. It does not depend on the Log's length or on what was trimmed. The Foreign rules are `changes`'s.
 
-**The cover semantics the runner implements (store side specified here; RUNNER-SPEC v2.46 §1.1 and §4 G2 restate them, W3B-O1):**
+**The cover semantics the runner implements (store side specified here; the runner's rule is RUNNER-SPEC v2.53 §3 "Slot images", W3B-O1):**
 - A Cell slot covers `Span(id, id ‖ 0x00)`, its one key. A Log slot covers a fixed sequence range as a Span of row keys, or a **tail cover** of length t.
 - A tail cover is indexed on the whole Log, `Span(id, id + 1)`, because the window moves with every append and trim. Its initial rows are `span_changes(s, id ‖ lo, id ‖ hi)` for (lo, hi) = `tail_window(s, t)`.
-- **Cover-only hit.** A round from a to b in which a `Change` or a `Trimmed` falls in a tail cover's Log, and no read set is hit, sends `window_changes(a, b, l, t)` with the registered (l, t) on both sides as that slot's rows. It reruns nothing.
-- **Rerun (v2.61, astra 1998 #4).** A read-set hit reruns the query as G2 says. Its slot diff compares the old slot at a, under its old registration, with the new slot at b, under its new one, by full logical key: a tail cover contributes its window at its own side's Snapshot and Log, a fixed range its span, and an absent slot the empty set. The runner enumerates each side with `tail_window` and `span_changes`. Every removal and insertion is sent, and a key in both sides whose stored value differs is sent with b's value. This holds even when no Log was written: a Cell that sets t, a switch to another Log, a tail turned into a fixed range, or a dropped slot. The single-(l, t) `window_changes` is used only when the two registrations are equal. Example: L holds 0 … 9 and a Cell sets t. At a, t = 1 and W = [9, 10). At b only the Cell changed, to 3, so W = [7, 10) and the rerun inserts 7 and 8. Shrinking back to 1 deletes them.
+- **Slot rows (v2.68).** A slot's rows from a to b are the difference of its two images, each key once. The image is the keys present in its fixed spans together with the window of its widest tail. This holds on a Cover-only hit and on a rerun alike (RUNNER v2.53 §3 "Slot images"). `window_changes(a, b, l, t)` equals that difference exactly when neither side's registration has a fixed span and both have the same widest t. That is the runner's only use of it. A Cover-only hit reruns nothing.
+- **Rerun (v2.61, astra 1998 #4; v2.68).** A read-set hit reruns the query as G2 says, and its slot rows are the same difference, old registration at a against new at b. The runner enumerates each side with `tail_window` and `span_changes`. This holds even when no Log was written: a Cell that sets t, a tail turned into a fixed range, or a dropped slot. A slot is bound to one Log, so a query moving to another Log moves its coverage to another slot (RUNNER §1.1). Example: L holds 0 … 9 and a Cell sets t. At a, t = 1 and W = [9, 10). At b only the Cell changed, to 3, so W = [7, 10) and the rerun inserts 7 and 8. Shrinking back to 1 deletes them.
 - A `Trimmed` hits a read set or cover when its span overlaps a Point or Span. On a cover-only hit of a fixed-range cover, its rows are deletions of each key in span ∩ cover, enumerated from a.
-- A bounds item `id` hits a read set's `Point(id)` or a Span that holds `id`. It hits no CoverSet, and it adds no slot row: when an empty tail's bounds move, the rerun's row diff is empty. A round that spans an append commit and a separate trim commit compares the bounds at a and at b, the same way.
+- A bounds item `id` hits a read set's `Point(id)` or a read set's Span that holds `id`. It is never matched against a CoverSet, a tail cover's `Span(id, id + 1)` included, and it adds no slot row: when an empty tail's bounds move, the rerun's row diff is empty. A round that spans an append commit and a separate trim commit compares the bounds at a and at b, the same way.
 - The subscription retains (l, t) and no rows (L20). The tail cover's `cover_tail(c, name, l, t)` API, its CoverSet entry and its `slot` registration over a `Log` are RUNNER-SPEC's to name, with no change to hirsel.3's rows.
 
 ### 14.10 Tiered Logs, compaction, reclaim, archival, export and install

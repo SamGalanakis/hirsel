@@ -9,11 +9,14 @@ type ValueCollection[V]: shareable + send {
 }
 
 pub opaque type Cell[V]: shareable + send {
-    binding: ValueCollection[V]
+    binding: ValueCollection[V],
+    key: Arc[Bytes]
 }
 
 pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Cell[V], Error] {
-    Ok(Cell(binding: declare_value_collection(mut d, name, 3, list.new(), take value)?))
+    let cell_binding = declare_value_collection(mut d, name, 3, list.new(), take value)?
+    let key = arc.new(prefix(cell_binding.id)?)
+    Ok(Cell(binding: take cell_binding, key: take key))
 }
 
 fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
@@ -121,9 +124,8 @@ fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
 
 pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
     readable_value(tx.store, tx.roots, c.binding)?
-    let key = prefix(c.binding.id)?
-    note_read(tx, Point(copied(key)?))?
-    let value = match cell_current(tx, c.binding.id, key) {
+    note_read(tx, Point(copied(c.key)?))?
+    let value = match cell_current(tx, c.binding.id, c.key) {
         Some(raw) => Some(row_value(c.binding.readers, c.binding.id, raw)?),
         None => None,
     }
@@ -133,7 +135,7 @@ pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
 pub fn cell_get[V](r: Reader, s: Snapshot, c: Cell[V]) -> Result[Option[V], Error] waits {
     read_access(r, s)?
     readable_value(s.store, s.roots, c.binding)?
-    match get_page_row(s.roots.collections, prefix(c.binding.id)?) {
+    match get_page_row(s.roots.collections, c.key) {
         Some(raw) => Ok(Some(row_value(c.binding.readers, c.binding.id, raw)?)),
         None => Ok(None),
     }

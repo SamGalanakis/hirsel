@@ -71,7 +71,7 @@ fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[Tiere
         if n != 0 {
             let previous = windows[n - 1].range
             let end = order.max(previous.hi, window.hi)
-            if end - previous.lo <= TIERED_GET_MAX {
+            if window == previous || end - previous.lo <= TIERED_GET_MAX {
                 capacity(list.try_reserve(mut windows[n - 1].demands, 1))?
                 windows[n - 1].range.hi = end
                 list.push(mut windows[n - 1].demands, slot)

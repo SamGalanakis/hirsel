@@ -1,4 +1,6 @@
-# STORE-SPEC v2.98: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.99: the M4 store library (lane store-spec-1001)
+
+v2.99 (store-list-collections-2287) adds read-only enumeration of the staged migration catalog (§1.2). The catalog format stays the same.
 
 v2.98 (store-ring-amend2-2269): text only, **not yet built**. It closes the Fable recheck of v2.95 §3.3b (store-ring-recheck-2249: NO-GO with 1 blocker, 1 high, 4 medium and 3 low), in the shape Sam ruled for hirsel.4 (Option A). The fence held. The holes were in the reader protocol and in law case (d). The reader protocol is rewritten as one current-state rule (§3.3b "Reader captures"), and every item is now a numbered build law (§3.3b "Build laws", BL1–BL18) that the slot-ring build satisfies and tests.
 - **The terminal segment's fence decides the bound (2249 M3; BL5, BL6).** A reader tries the terminal segment's fence first. If it is free, no handle will write that segment again, so the reader syncs it and reads to the torn tail, whether or not `LOCK` is held. Only a refused fence leads to the `LOCK` probe: with `LOCK` held the capture is END-bounded, and with `LOCK` free it waits out a dead owner's last write. A poisoned owner's journal task has closed its segment, so followers reach every acked commit while that Db stays open. v2.95's lag bound under poison was false. The poison case needed no exception, so none is stated.
@@ -727,7 +729,7 @@ Each row closes the counterexample of the finding it names (`w3a-check-astra-199
 | Item | Change | Where |
 |---|---|---|
 | Q1 | One `Table[K, V]` (StoreId, id, catalog key, `Key[K]`, `Arc[Readers]`) for reads and writes; `Shape`, `shape`, `spec`, `with_index`, `TableSpec`, `create_table`, `create_index`, `table`, the epoch and the store-level `migrate`/`drop_table` are deleted. Extractors live in the `Db`'s registry, reached by a write Tx | §1.2 |
-| Q1 | `Declare` with modes `Migrate`, `Open`, `Follower`; `declare_table`, `index`, `covering`, `covering_row`, `finish`, `seal`; `Migration` with `migrate_table`, `drop_table`, `rename_table`. `follower_table` and `follower_index` are deleted (mode `Follower`) | §1.2, §12.5 |
+| Q1 | `Declare` with modes `Migrate`, `Open`, `Follower`; `declare_table`, `index`, `covering`, `covering_row`, `finish`, `seal`; `Migration` with `migrate_table`, `drop_named_table`, `rename_table`, `list_collections`. `follower_table` and `follower_index` are deleted (mode `Follower`) | §1.2, §12.5 |
 | Q1 | The catalog stores each index's kind, payload schema list and the `code.identity` and `code.revision` of `by` and `project` (Format 4, with M3). An edited body is `Changed(name)` in `Open` and a rebuild in `Migrate` | §1.2 |
 | Q1 | `key_of[K]` and `Desc[T]` (key-schema opcode 21) order keys (codec.md); `range_prefix`, `lookup_prefix`, `count` and `entries` are added; `lookup` records index gaps in full (J, K) order and a primary Point per row | §1.3; codec.md |
 | Q3 | Index kinds `Many` (`ix ‖ J ‖ K => payload`) and `Unique` (`ix ‖ J => u32 len(K) ‖ K ‖ payload`); payloads `()`, a projection or the row. `put` preflights the full edit and probes unique entries; a `Conflict(name)` stages nothing and makes the Tx abort-only; `Ok` after a conflict is `Failed` with cause `Conflict`. Backfill checks uniqueness per J | §1.2, §1.3 |
@@ -1624,14 +1626,21 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits  // Migr
 pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error]  // checks undeclared names at the captured base
 
 pub opaque type Migration                        // not send: made for `on_migrate` only, in Migrate mode (AL4)
+pub type CollectionKind: send = Table() | Cell() | Log()
+pub type CollectionInfo: send { name: String, kind: CollectionKind }
+pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error]
 pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take key: codec.Key[K], take value: codec.Codec[V],
         to: String, take key2: codec.Key[K2], take value2: codec.Codec[V2],
         f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error]
-pub fn drop_table(mut m: Migration, name: String) -> Result[(), Error]
+pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error]
 pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Error]
 ```
 
 A `mut` lend lasts for one call (OWN-7, OWN-8), so `declare` captures a private base through a view. `seal` takes a fresh mutable lend and checks the exact base before publishing.
+
+`list_collections` returns an owned list of top-level application collections in unsigned UTF-8 byte order by name. It reads the current staged catalog, so it sees collections created, renamed or dropped earlier in the same migration. It skips `hirsel.*` names and secondary indexes. An Edge appears once as `Table`, and Cells and Logs appear under their own kinds.
+
+The call checks `Tiered(Migrate)` before opening the catalog cursor (§13.10). It scans only the top-level key range and reads no collection rows. The scan and result allocations spend steps and bytes under the migration grant. The step cost grows with the top-level catalog scanned. A capacity refusal aborts the listing through the migration's `Full(Allocation(...))` path. Listing never changes the staged catalog.
 
 **The registry (DX Q1, Fable 5).** Each `Db` and each `Follower` owns one index registry: a map from table id to the erased extractors and projections of that table's indexes, in declaration order. Each entry is an owning `own[send] fn(K, V) -> Result[(List[Bytes], Bytes), Capacity]` that returns the sorted, deduplicated encoded keys and the encoded payload. `seal` installs it. A write `Tx` made by `run`, `run_on` or `serve` borrows the registry of its `Db` for its lifetime. `put` and `delete` look up the table id there, once per call. A table id the registry lacks (a `Table` from another `Declare` of this open) is `Stale(id)`. So there is no epoch: the catalog and the registry change together, at `seal`, and a handle names only an id. A `Follower`'s registry has no extractors, and its Tx cannot be a write Tx.
 
@@ -6395,7 +6404,7 @@ pub type TieredRefusal = Memory | Migrate | Export | Install | Authority
 // Error gains:  | Tiered(TieredRefusal)
 ```
 
-- `migrate_table`, `drop_table` and `rename_table` in a `Migration` (§1.2, v2.57; the store-level `migrate` they replace is deleted), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, upload, journal write or head write, and every byte is left unchanged. Building them is M3b.
+- `migrate_table`, `drop_named_table`, `rename_table` and `list_collections` in a `Migration` (§1.2), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, catalog scan, upload, journal write or head write, and every byte is left unchanged. Building the Tiered versions is M3b.
 - `Tiered(Memory)` is the answer for Tiered residency on a memory store.
 - `Tiered(Authority)` is the answer for `archive` on log@1 or memory.
 - Because install is refused, astra #21's Fenced or Undecided install has no M3 case.
@@ -6537,7 +6546,7 @@ pub fn declare_log[V](mut d: Declare, name: String, take value: codec.Codec[V]) 
 - `declare_cell` and `declare_log` follow `declare_table`'s rules in every mode (§1.2): names, the reserved `hirsel.` namespace, value schemas (D1), `Missing`, `Schema(i)`, `Undeclared`. They return the handle at once, because there is nothing more to declare.
 - Declaring a name whose catalog entry has another kind is `Changed(name)` in `Open` and `Follower`. In `Migrate` it is `Exists(name)`: a kind is never converted. A program that wants another kind drops the name and declares it again.
 - `Migrate` creates a Cell empty, and a Log empty with next_seq = first_seq = 0.
-- `drop_table` and `rename_table` (§1.2 `Migration`) take any collection name. `migrate_table` names tables only: a Cell or Log name is `Missing(name)`. A Cell's or Log's value type changes by D1 schema resolution, as a table's does.
+- `drop_named_table` and `rename_table` (§1.2 `Migration`) take any application collection name. `migrate_table` names tables only: a Cell or Log name is `Missing(name)`. A Cell's or Log's value type changes by D1 schema resolution, as a table's does.
 - Handles carry no extractor. A read or write checks the handle's catalog key as a table's does, and is `Stale(id)` or `Foreign` by the same rules (I3, §1.12).
 - `set_residency` (§13.8) on a Cell is `Missing("residency")` (D-Q2-7), before any admission or load, so nothing is paid.
 

@@ -8,6 +8,82 @@ fn declaration_law_rename(mut m: Migration) -> Result[(), Error] {
     rename_table(mut m, "items", "renamed")
 }
 
+fn migration_list_baseline(mut m: Migration) -> Result[(), Error] {
+    let found = list_collections(m)?
+    if list.len(found) != 3 || found[0].name != "Z" || found[1].name != "a" || found[2].name != "é" {
+        fail("migration listing: expected only Z, a, é in byte order")
+    }
+    let (Table(), Cell(), Log()) = (found[0].kind, found[1].kind, found[2].kind) else {
+        fail("migration listing: expected Edge as Table, Cell, Log")
+    }
+    Ok(())
+}
+
+fn migration_list_fits(m: Migration, steps: u64) -> bool {
+    let probe = bound steps steps {
+        list_collections(m)
+    }
+    match take probe {
+        Ok(Ok(_)) => true,
+        Error(OutOfTime(steps: _)) => false,
+        _ => fail("migration listing: step probe failed without exhausting steps"),
+    }
+}
+
+fn migration_list_staged(mut m: Migration) -> Result[(), Error] {
+    let mut low = 0u64
+    let mut high = 65536u64
+    while low < high {
+        let mid = low + (high - low) / 2
+        if migration_list_fits(m, mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    if !migration_list_fits(m, low) {
+        fail("migration listing: baseline did not fit the step probe")
+    }
+    migration_create_table(mut m, spec("b", std.codec.key_u64(), std.codec.of_u64()))?
+    let found = list_collections(m)?
+    if list.len(found) != 4 || found[2].name != "b" {
+        fail("migration listing: expected newly staged b")
+    }
+    let Table() = found[2].kind else {
+        fail("migration listing: expected b to be a Table")
+    }
+    if migration_list_fits(m, low) {
+        fail("migration listing: a larger catalog did not spend more steps")
+    }
+    Ok(())
+}
+
+@test
+fn test_migration_list_collections(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let _ = create_table(mut db, spec("hirsel.internal", std.codec.key_u64(), std.codec.of_u64()))?
+    let mut d = declare(db, Migrate)?
+    let log = declare_log(mut d, "é", std.codec.of_u64())?
+    let cell = declare_cell(mut d, "a", std.codec.of_u64())?
+    let pair_key: std.codec.Key[(u64, u64)] = std.codec.key_of()
+    let _ = declare_edge(mut d, "Z", "reverse", pair_key, std.codec.key_u64(), std.codec.key_u64())?
+    let _ = seal(mut db, take d)?
+    let before = version(snapshot(db))
+    run_migration(mut db, tasks, code.describe(migration_list_baseline))?
+    if version(snapshot(db)) != before {
+        fail("migration listing: a read-only migration published a new version")
+    }
+    let _ = stage_migration(db, tasks, code.describe(migration_list_staged))?
+    let (_, log_id) = log_identity(log)
+    let (_, cell_id) = cell_identity(cell)
+    refusal_attach_descriptors(mut db, log_id, cell_id)?
+    if let Error(Tiered(Migrate)) = stage_migration(db, tasks, code.describe(migration_list_baseline)) {
+        Ok(())
+    } else {
+        fail("migration listing: expected Tiered(Migrate)")
+    }
+}
+
 @test
 fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)

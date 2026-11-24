@@ -3,6 +3,40 @@ pub opaque type Migration {
     tiered: bool
 }
 
+pub type CollectionKind: send = Table() | Cell() | Log()
+
+pub type CollectionInfo: send {
+    name: String,
+    kind: CollectionKind
+}
+
+pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
+    require_memory_collections(m.tiered, Migrate)?
+    let mut rows = top_level_catalog(m.plan.roots.catalog)?
+    let mut collections: List[CollectionInfo] = list.new()
+    while let Some((take key, take raw)) = next_bytes(mut rows)? {
+        let name = catalog_collection_name(key, 1)?
+        if !std.string.starts_with(name, "hirsel.") {
+            let mut at = 0u64
+            let kind: CollectionKind = match take_le(raw, mut at, 1)? {
+                1 => Table(),
+                3 => Cell(),
+                4 => Log(),
+                _ => return Error(malformed(0)),
+            }
+            capacity(list.try_reserve(mut collections, 1))?
+            list.push(mut collections, CollectionInfo(name: take name, kind: kind))
+        }
+    }
+    Ok(take collections)
+}
+
+fn top_level_catalog(catalog: PageTree) -> Result[PageRange, Error] {
+    let mut upper: Bytes = list.new()
+    list.push(mut upper, 2u8)
+    byte_cursor(catalog, Included(table_key("")?), upper)
+}
+
 type SchemaPlan: send {
     store: StoreId,
     roots: Roots,

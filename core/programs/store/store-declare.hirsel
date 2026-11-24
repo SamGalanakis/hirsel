@@ -413,12 +413,9 @@ fn complete_declaration(d: Declare) -> Result[(), Error] {
     if d.failed {
         return Error(MigrationFault)
     }
-    let mut upper: Bytes = list.new()
-    list.push(mut upper, 2u8)
-    let mut cursor = byte_cursor(d.plan.roots.catalog, Included(table_key("")?), upper)?
+    let mut cursor = top_level_catalog(d.plan.roots.catalog)?
     while let Some((take key, take raw)) = next_bytes(mut cursor)? {
-        let name_bytes = copied(list.slice(key, 1, list.len(key)))?
-        let name = string.from_utf8(take name_bytes) ?=> |_| malformed(0)
+        let name = catalog_collection_name(key, 1)?
         if !std.string.starts_with(name, "hirsel.") {
             let id: u32 = int.truncate(read_le(raw, 1, 4))
             if option.copied(map.get(d.tables, id)) != Some(true) {

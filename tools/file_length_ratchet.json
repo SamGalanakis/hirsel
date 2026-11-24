@@ -46,8 +46,8 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7169,
-    "raise_revision": 16,
+    "lines": 7178,
+    "raise_revision": 17,
     "reason": "m3-s3-slots-2010"
   },
   "core/std/char.hirsel": {

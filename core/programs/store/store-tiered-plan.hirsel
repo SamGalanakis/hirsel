@@ -1,0 +1,92 @@
+type TieredDataDelta = TieredPrior(u32) | TieredDropped(u64)
+
+type TieredWritePlan {
+    tree: PageTree,
+    deltas: List[Option[TieredDataDelta]],
+    next_stamp: u64
+}
+
+fn tiered_staged_value(op: DataOp) -> Result[ReplayValue, Error] {
+    match op.value {
+        Some(BlobBody(raw)) => Ok(ReplayPut(arc.share(raw))),
+        Some(PageValue(raw)) => Ok(ReplayPut(arc.new(copied(raw)?))),
+        None => Ok(ReplayAbsent),
+    }
+}
+
+fn tiered_stage_collection_edit(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], staged: PageTree, logical: DataOp, prior: u32, private_from: u64, mut next_stamp: u64) -> Result[(Arc[std.page.Page], Bytes, TieredDataDelta), Error] {
+    let id = list.slice(logical.key, 0, 4)
+    let Some((root, descriptor)) = std.page.collection_slot(staged.root, id) else {
+        return Error(Stale(list.word_be(id, 0)))
+    }
+    let Some(empty_root) = view staged.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let kind = descriptor[52u64]
+    if let Some(trim) = logical.trim {
+        let limits = descriptor_bounds(descriptor)
+        let before: u64 = list.word_le(descriptor, 44)
+        let (take ready, dropped) = stage_tiered_trim(mut attempt, visible, root, empty_root, limits, before, trim.floor, mut next_stamp)?
+        let revised = log_record(ready, trim.floor, order.max(limits.next, trim.floor), 1)?
+        return Ok((take ready, take revised, TieredDropped(dropped)))
+    }
+    let key = list.slice(logical.key, 4, list.len(logical.key))
+    let value = tiered_staged_value(logical)?
+    let ready = stage_tiered_row(mut attempt, visible, root, empty_root, key, value, staged.inline, kind == 4, private_from, mut next_stamp)?
+    let revised = if kind == 4 {
+        let limits = descriptor_bounds(descriptor)
+        log_record(ready, limits.first, stamp_after(limits.next)?, 1)?
+    } else {
+        rooted_collection_record(ready, kind, 1)?
+    }
+    Ok((take ready, take revised, TieredPrior(prior)))
+}
+
+fn tiered_wait_for_fold(mut attempt: TieredTouchSet, base: PageTree, operations: DataRows, order: DataOrder) -> Result[(), Error] {
+    if let Some(_) = attempt.stopped {
+        return Error(Missed)
+    }
+    let Some(overlays) = view base.replay else {
+        return Ok(())
+    }
+    for slot in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot)
+        let collection: u32 = list.word_be(op.key, 0)
+        if let Some(_) = std.omap.get(overlays.collections, collection) {
+            attempt.stopped = Some(AttemptFold(collection))
+            return Error(Missed)
+        }
+    }
+    Ok(())
+}
+
+// The original root supplies every previous value. Sequential edits take
+// siblings from the private candidate's shape, including after an earlier merge.
+fn prepare_tiered_writes(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], base: PageTree, operations: DataRows, first_stamp: u64) -> Result[TieredWritePlan, Error] {
+    let order = capacity(data_order(operations))?
+    tiered_wait_for_fold(mut attempt, base, operations, order)?
+    let mut staged = share_page_tree(base)
+    let mut deltas: List[Option[TieredDataDelta]] = list.new()
+    capacity(list.try_reserve(mut deltas, operations.count))?
+    let inline = staged.inline
+    let mut draw = first_stamp
+    for slot in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot)
+        let id = list.slice(op.key, 0, 4)
+        let Some(descriptor) = std.page.lookup(base.root, id) else {
+            return Error(Stale(list.word_be(id, 0)))
+        }
+        if descriptor[53u64] == 0 {
+            list.push(mut deltas, None)
+            continue
+        }
+        let prior = match op.trim {
+            None => tiered_plan_prior(mut attempt, visible, base, op.key)?,
+            Some(_) => 0u32,
+        }
+        let (take ready, take revised, delta) = tiered_stage_collection_edit(mut attempt, visible, staged, op, prior, first_stamp, mut draw)?
+        page_result(std.page.insert(mut staged.root, id, revised, Some(take ready), inline, first_stamp, mut draw))?
+        list.push(mut deltas, Some(delta))
+    }
+    Ok(TieredWritePlan(tree: take staged, deltas: take deltas, next_stamp: draw))
+}

@@ -1424,7 +1424,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
         Prepared(take ready) => {
             let mut prepared = take ready
             if is_disk(db) {
-                prepared.frame = Some(encode_staged(ci, Some(view base), mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
+                prepared.frame = Some(encode_staged(ci, Some(view base), None, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
             }
             Ok(Prepared(take prepared))
         },
@@ -2686,24 +2686,33 @@ fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
     }
 }
 
-fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
+fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
     le(mut payload, 0, 1)?
     le(mut payload, ops.count, 4)?
     for slot_order in 0u64 .. ops.count {
         let op = ordered_row(ops, order, slot_order)
+        let delta = match tiered {
+            Some(planned) => planned[slot_order],
+            None => None,
+        }
         if let Some(trim) = op.trim {
-            encode_log_trim(mut payload, op.key, trim.floor, trim.dropped)
+            let dropped = match delta {
+                Some(TieredDropped(bytes_dropped)) => bytes_dropped,
+                _ => trim.dropped,
+            }
+            encode_log_trim(mut payload, op.key, trim.floor, dropped)
             continue
         }
-        let prior = match base {
-            Some(head) => {
+        let prior = match (delta, base) {
+            (Some(TieredPrior(prior)), _) => prior,
+            (_, Some(head)) => {
                 if collection_kind(head, list.slice(op.key, 0, 4)) == Some(4u8) {
                     0u32
                 } else {
                     stored_prior(get_page_row(head, op.key))
                 }
             },
-            None => 0,
+            (_, None) => 0,
         }
         encode_data_op(mut payload, op.key, op.value, Some(prior))?
     }
@@ -2782,17 +2791,17 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
     }
 }
 
-fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
-        return encode_frame(ci, base, mut ops, tail, streams, Some(view record), settlement, seq, offset)
+        return encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view record), settlement, seq, offset)
     }
     match call {
-        Some(section) => encode_frame(ci, base, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
-        None => encode_frame(ci, base, mut ops, tail, streams, None, None, seq, offset),
+        Some(section) => encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
+        None => encode_frame(ci, base, tiered, mut ops, tail, streams, None, None, seq, offset),
     }
 }
 
-fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let data = ops.count != 0 || streams.count == 0
     let stream = streams.count != 0
     let sections = (if data {
@@ -2838,7 +2847,7 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], mut ops: DataRows, t
     le(mut out, ci.at, 8)?
     le(mut out, sections, 1)?
     if data {
-        encode_data_ops(mut out, base, ops, order)?
+        encode_data_ops(mut out, base, tiered, ops, order)?
     }
     if stream {
         encode_stream_ops(mut out, streams, call, settlement)?

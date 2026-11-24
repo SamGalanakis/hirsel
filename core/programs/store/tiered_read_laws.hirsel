@@ -254,3 +254,54 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let _ = result.unwrap(task.join(take worker))
     checked
 }
+
+@test
+fn test_l68_fold_reuses_cold_edges() -> Result[(), Error] {
+    let dropped = std.page.BlobRef(stamp: 31, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let retained = std.page.BlobRef(stamp: 32, len: 1025, checksum: 102, pack: 7, offset: 1121, body: 1)
+    let mut rows: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(dropped)))
+    list.push(mut rows, std.page.Entry(key: key_word(2), cell: BlobValue(retained)))
+    let formed = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let original = page_result(std.page.attach_cold(take formed))?
+    let mut edited = arc.share(original)
+    let mut next_stamp = 41u64
+    if !page_result(std.page.remove(mut edited, key_word(1), 0, mut next_stamp))? {
+        fail("L68: a fold delete must find a Cold BLOB row by key")
+    }
+    page_result(std.page.canonicalize(mut edited))?
+    let Some(ColdBlob(after)) = std.page.blob_slot(edited, 0) else {
+        fail("L68: the surviving BLOB was lost or forced")
+    }
+    let Some(ColdBlob(before)) = std.page.blob_slot(original, 1) else {
+        fail("L68: the earlier capture lost its BLOB")
+    }
+    let mut expected = retained
+    expected.body = 0
+    if before != retained || after != expected || std.page.totals(edited) != (1u64, 1110u64) {
+        fail("L68: fold did not preserve the surviving BLOB location and rebind its ordinal")
+    }
+    let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(id: u64) -> std.page.PagePtr {
+        fail("L68: Cold edges have no entry in the new pack's location table")
+    }
+    let sealed = sealed_tiered_root(edited, locate)?
+    let Some(ColdBlob(installed)) = std.page.blob_slot(sealed, 0) else {
+        fail("L68: sealing lost the retained BLOB")
+    }
+    if installed != expected {
+        fail("L68: sealing rewrote an unmodified Cold BLOB's location")
+    }
+    let child = std.page.PagePtr(pack: 8, offset: 72, len: 79, checksum: 103, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: child, rows: 1, charge: 1110))))
+    let parent = page_result(std.page.encode(branches, 1, 42, Collection))?
+    let root = page_result(std.page.attach_cold(take parent))?
+    let installed_root = sealed_tiered_root(root, locate)?
+    let Some(ColdPage(inherited)) = std.page.child_slot(installed_root, 0) else {
+        fail("L68: sealing lost a Cold child")
+    }
+    if inherited != child {
+        fail("L68: sealing changed an unmodified child PAGE location")
+    }
+    Ok(())
+}

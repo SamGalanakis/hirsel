@@ -1260,7 +1260,8 @@ fn canonical_page(mut page: Page) -> Result[(), Error] {
     if list.len(bodies) != 0 {
         let mut blobs: List[BlobSlot] = list.with_capacity(list.len(bodies))
         for held in bodies {
-            list.push(mut blobs, clone(page.blobs[int.widen(held)]))
+            let slot = numbered_blob_slot(page.blobs[int.widen(held)], int.truncate(list.len(blobs)))
+            list.push(mut blobs, take slot)
         }
         page.blobs = take blobs
     }
@@ -1268,13 +1269,14 @@ fn canonical_page(mut page: Page) -> Result[(), Error] {
     Ok(())
 }
 
-/// Append a canonical PAGE to the pack buffer, filling edges from the
-/// selected generation and numbering its blob references in slot order.
+/// Append a canonical PAGE with intact Cold edges and locations for Hot
+/// children. Number its blob references in slot order.
 pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64) -> PagePtr) -> Result[(), Error] {
     let image = view page.image
     let (size, extension) = checked_sealed_shape(image)?
     let branch = level(image) != 0
     let collection_map = image.domain == CollectionMap
+    let mut attached_slot = 0u64
     let mut next_body = 0u16
     write_sealed(mut raw, image, size, extension, scoped fn(mut out: Bytes, value: u64) {
         if branch || collection_map {
@@ -1283,18 +1285,31 @@ pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64
             } else {
                 value + 3
             }
-            let child_stamp = ptr_at(out, field).stamp
-            let ptr = if child_stamp == 0 {
-                unlocated(0)
-            } else {
-                locate(child_stamp)
+            let ptr = match page.kids[attached_slot] {
+                ColdPage(located) => located,
+                HotPage(_) => {
+                    let child_stamp = ptr_at(out, field).stamp
+                    if child_stamp == 0 {
+                        unlocated(0)
+                    } else {
+                        locate(child_stamp)
+                    }
+                },
             }
             put_ptr(mut out, field, ptr)
+            attached_slot += 1
         } else if out[value] == 1 {
             let field = value + 1
             let edge = ref_at(out, field)
-            let loc = locate(edge.stamp)
-            put_ref(mut out, field, BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: next_body))
+            let mut reference = match page.blobs[int.widen(edge.body)] {
+                ColdBlob(located) => located,
+                HotBlob(_) => {
+                    let loc = locate(edge.stamp)
+                    BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: edge.body)
+                },
+            }
+            reference.body = next_body
+            put_ref(mut out, field, reference)
             next_body += 1
         }
     })
@@ -1314,10 +1329,30 @@ fn blob_field(image: Image, slot: u64) -> Option[u64] {
     }
 }
 
+fn numbered_blob_slot(slot: BlobSlot, ordinal: u16) -> BlobSlot {
+    match slot {
+        HotBlob(value) => HotBlob(arc.share(value)),
+        ColdBlob(located) => {
+            let mut reference = located
+            reference.body = ordinal
+            ColdBlob(reference)
+        },
+    }
+}
+
 fn move_last_body(mut page: Page, removed: u64, slot: u64) {
     let last = list.len(page.blobs) - 1
     if removed != last {
         list.swap(mut page.blobs, removed, last)
+        let relocated: Option[BlobRef] = match page.blobs[removed] {
+            ColdBlob(located) => Some(located),
+            HotBlob(_) => None,
+        }
+        if let Some(located) = relocated {
+            let mut reference = located
+            reference.body = int.truncate(removed)
+            let _ = list.set(mut page.blobs, removed, ColdBlob(reference))
+        }
         for i in 0u64 .. count(page.image) {
             if i != slot {
                 if let Some(at) = blob_field(page.image, i) {
@@ -2245,7 +2280,7 @@ fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], s
                 HotBlob(arc.share(staged_blob))
             } else {
                 let ordinal = u16_at(image.raw, at)
-                clone(page.blobs[ordinal])
+                numbered_blob_slot(page.blobs[ordinal], int.truncate(list.len(blobs)))
             }
             put16(mut image.raw, at, list.len(blobs))
             list.push(mut blobs, take blob_bytes)
@@ -2474,11 +2509,7 @@ pub fn remove_with_empty(mut root: Arc[Page], key: Bytes, empty_root: Arc[Page],
 }
 
 fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]], private_from: u64, mut next: u64) -> Result[bool, Error] {
-    let present = match lookup(root, key) {
-        Some(_) => true,
-        None => false
-    }
-    if !present {
+    if !contains_row(root, key) {
         return Ok(false)
     }
     if let Some(parts) = remove_path(mut root, key, private_from, mut next)? {
@@ -2493,6 +2524,14 @@ fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]
         root = arc.share(hot_child(root.kids[0u64]))
     }
     Ok(true)
+}
+
+fn contains_row(root: Arc[Page], key: Bytes) -> bool {
+    if let Some(slot) = descend(root.image, key) {
+        return contains_row(hot_child(root.kids[slot]), key)
+    }
+    let (_, hit) = search(root.image, key)
+    hit
 }
 
 /// Upsert one row, copying a shared path and keeping private pages editable.

@@ -524,12 +524,13 @@ fn refused_of(r: platform.Refused) -> Refused {
         Missing(what) => Failed(string.from(what)),
         Denied(why) => Failed(string.from(why)),
         Store(_) => Failed(string.from("store")),
+        FrontConfig(_) => Failed("invalid front configuration"),
     }
 }
 
 fn group_spec(name: String) -> platform.NewGroup {
     platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted,
-        listen: string.new(), store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
+        listen: string.new(), front: None, store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
 }
 
 fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {

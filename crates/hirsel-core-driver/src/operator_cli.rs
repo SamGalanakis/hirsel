@@ -8,7 +8,9 @@ use crate::code_admission::{AdmissionError, ObjectKey, ObjectKind, send_release}
 use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group, Input};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
-use crate::operator::{self, Answer, Ask, Class, Pause, Phase, Record, Registration, Report};
+use crate::operator::{
+    self, Answer, Ask, Class, Forward, Front, Pause, Phase, Record, Registration, Report,
+};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::Recipe;
 use sha2::{Digest, Sha256};
@@ -177,7 +179,7 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
     let mut workdir = std::env::current_dir()?;
     let mut trusted = false;
     let mut memory = None;
-    let mut record = None;
+    let (mut record, mut front) = (None, None);
     let mut retention_days = 30u64;
     let mut grants = crate::package_dir::Grants::default();
     let mut d = None;
@@ -188,6 +190,21 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::GroupName => name = Some(text),
             Opt::Tenant => tenant = text,
             Opt::Listen => listen = Some(text),
+            Opt::FrontHttp | Opt::FrontStream => {
+                let forward = if option == Opt::FrontHttp {
+                    Forward::Http
+                } else {
+                    Forward::Stream
+                };
+                let front = front.get_or_insert_with(|| Front {
+                    names: Vec::new(),
+                    forward,
+                });
+                if front.forward != forward {
+                    return Err("a group cannot use both --front-http and --front-stream".into());
+                }
+                front.names.push(text);
+            }
             Opt::GroupStore => store_dir = Some(std::path::absolute(text)?),
             Opt::CodeStore => code = Some(PathBuf::from(text)),
             Opt::Workdir => workdir = PathBuf::from(text).canonicalize()?,
@@ -237,6 +254,7 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
             dir: dir.to_string_lossy().into_owned(),
             retention_s: retention_days.saturating_mul(86400),
         }),
+        front,
     };
     let d = request_id(d)?;
     eprintln!("request {}", hex(&d));

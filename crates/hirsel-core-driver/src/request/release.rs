@@ -5,6 +5,22 @@ use crate::request_record::{self, Answer, Value};
 use crate::{CheckProduct, GapStop, NativeStop, Reachable};
 use hirsel_core_ids::ContentHash;
 
+/// Local loading still parses disk input under CA4's decoder. Size limits
+/// follow the process allowance. Bound recursive decoder stack use explicitly.
+pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits {
+    crate::code_admission::AdmissionLimits {
+        recipe_bytes: usize::MAX,
+        closure_objects: usize::MAX,
+        object_bytes: u64::MAX,
+        decoded_bytes: usize::MAX,
+        members: usize::MAX,
+        edges: usize::MAX,
+        nesting: 512,
+        outstanding: 0,
+        timeout: None,
+    }
+}
+
 pub(super) struct Report {
     root: String,
     files: usize,

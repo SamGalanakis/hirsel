@@ -307,7 +307,7 @@ fn restart(take r: Rig, max_places: u64) -> Rig waits {
 }
 
 fn add(mut r: Rig, name: String, tenant: String) waits {
-    let spec = NewGroup(name: string.from(name), tenant: string.from(tenant), workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", store: string.new(), memory: None, assembly: image(), activation: 1u64, args: list.new(), record: None)
+    let spec = NewGroup(name: string.from(name), tenant: string.from(tenant), workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 1u64, args: list.new(), record: None)
     let reqs = must(add_group(mut r.h, spec), "add_group")
     pump(mut r, take reqs)
 }
@@ -637,7 +637,7 @@ fn wake_only_clean_stop(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] w
 
 // A group added for its genesis at activation 0, as `store.local` adds every group.
 fn add_genesis(mut r: Rig, name: String) waits {
-    let spec = NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", store: string.new(), memory: None, assembly: image(), activation: 0u64, args: list.new(), record: None)
+    let spec = NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 0u64, args: list.new(), record: None)
     let reqs = must(add_group(mut r.h, spec), "add_group")
     pump(mut r, take reqs)
 }
@@ -1134,7 +1134,6 @@ fn deploy_drift_retry(c: Clock, rnd: Random) -> Result[(), ()] waits {
     answer(mut r, old, PlaceDrift)
     expect(failed_with(r, "drift") && is_dirty(r, "g", 1u64), "L52: the second drift did not fail the deploy at Dirty(g)")
     expect(asked_of(r, 3u64) == 1u64 && launcher.held(r.f) == 0u64, "L52: the second drift did not abort OLD once and release the held answer")
-
     // Lose the host after the fresh Preparing commit, before delivering its retry export.
     // OLD still knows the attempt from the first cutover. The reconnect abort must work
     // whether OLD kept that ID or already changed it while accepting the retry export.
@@ -1250,16 +1249,16 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 for i in call_env.2 .. call_env.1 {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
-                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", store: string.new(), memory: None, assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
-                    st(store.put(mut tx, call_env.3.groups, name, g))?
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
+                    st(store.put(mut tx, call_env.3 .groups, name, g))?
                     let at: Option[u64] = if i < call_env.0 {
                         Some(T0 + 10u64)
                     } else {
                         Some(T0 + 86400000u64)
                     }
-                    st(store.put(mut tx, call_env.3.wake, name, WakeRow(wake: Clean(at), gen: 1u64)))?
+                    st(store.put(mut tx, call_env.3 .wake, name, WakeRow(wake: Clean(at), gen: 1u64)))?
                     if let Some(when) = at {
-                        st(store.put(mut tx, call_env.3.due, DueKey(at: when, name: string.from(name)), 0u8))?
+                        st(store.put(mut tx, call_env.3 .due, DueKey(at: when, name: string.from(name)), 0u8))?
                     }
                 }
                 Ok(())
@@ -1453,7 +1452,7 @@ fn helpers_started(r: Rig) -> u64 {
 // A group g serving at gen 1 whose release memory allowance is `memory`, by `author`.
 fn admission_case(c: Clock, rnd: Random, memory: Option[u64], author: Author) -> Rig waits {
     let mut r = rig(c, rnd, 4u64)
-    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, listen: "127.0.0.1:0", store: string.new(), memory: memory, assembly: image(), activation: 1u64, args: list.new(), record: None)
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, listen: "127.0.0.1:0", front: None, store: string.new(), memory: memory, assembly: image(), activation: 1u64, args: list.new(), record: None)
     let reqs = must(add_group(mut r.h, spec), "add_group")
     pump(mut r, take reqs)
     op_wake(mut r, "g")
@@ -1694,7 +1693,7 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
 }
 
 fn registration(name: String, store_dir: String) -> operator.Registration {
-    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, listen: "127.0.0.1:0", store: string.from(store_dir), memory: None, args: list.new(), record: None)
+    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, listen: "127.0.0.1:0", store: string.from(store_dir), memory: None, args: list.new(), record: None, front: None)
 }
 
 // Registers `spec` under request `d` with NEW attested, on a new connection; the rig's

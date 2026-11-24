@@ -2,6 +2,21 @@
 // group"). A caller that keeps its own rows in the host's store commits them in the same
 // transaction as the group's.
 
+pub type NewGroup: send {
+    name: String,
+    tenant: String,
+    workdir: String,
+    author: Author,
+    listen: String,
+    front: Option[operator.Front],
+    store: String,
+    memory: Option[u64],
+    assembly: Bytes,
+    activation: u64,
+    args: List[String],
+    record: Option[operator.Record],
+}
+
 // Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
 // then the launcher binds its listener.
 pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
@@ -22,6 +37,7 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
             if let Some(_) = st(store.fetch(tx, call_env.2.groups, call_env.1.name))? {
                 return Error(Exists)
             }
+            check_front_registration(tx, call_env.2, call_env.1 .listen, call_env.1 .front)?
             let mut u = usage_of(tx, call_env.2, call_env.1.tenant)?
             if let Some(q) = quota_of(tx, call_env.2, call_env.1.tenant)? {
                 if u.groups >= q.groups {
@@ -29,7 +45,7 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
                 }
             }
             let mut meta = meta_of(tx, call_env.2)?
-            let g = GroupRow(tenant: string.from(call_env.1.tenant), workdir: string.from(call_env.1.workdir), author: call_env.1.author, listen: string.from(call_env.1.listen), store: string.from(call_env.1.store), memory: call_env.1.memory, assembly: clone(call_env.1.assembly), activation: call_env.1.activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1.args), record: clone(call_env.1.record))
+            let g = GroupRow(tenant: string.from(call_env.1.tenant), workdir: string.from(call_env.1.workdir), author: call_env.1.author, listen: string.from(call_env.1.listen), front: clone(call_env.1 .front), store: string.from(call_env.1.store), memory: call_env.1.memory, assembly: clone(call_env.1.assembly), activation: call_env.1.activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1.args), record: clone(call_env.1.record))
             meta.next_incarnation += 1u64
             st(store.put(mut tx, call_env.2.meta, 0u64, meta))?
             st(store.put(mut tx, call_env.2.groups, call_env.1.name, g))?

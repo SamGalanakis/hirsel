@@ -22,6 +22,7 @@ pub type GroupRow: codec + send {
     workdir: String,
     author: Author,
     listen: String,
+    front: Option[operator.Front],
     store: String,
     memory: Option[u64],
     assembly: Bytes,
@@ -153,7 +154,7 @@ pub type Retired: codec + send {
 
 pub type Limit: send = Count(u64) | Live(String, u64) | Groups(String, u64)
 
-pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Denied(String) | Store(store.Error)
+pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Denied(String) | Store(store.Error) | FrontConfig(FrontError)
 
 // Wall time for the due index, monotonic time for backoff and the Ready reset.
 pub type Now: send {
@@ -164,20 +165,6 @@ pub type Now: send {
 pub type Timers: send {
     wall_ms: Option[u64],
     mono_ns: Option[u64]
-}
-
-pub type NewGroup: send {
-    name: String,
-    tenant: String,
-    workdir: String,
-    author: Author,
-    listen: String,
-    store: String,
-    memory: Option[u64],
-    assembly: Bytes,
-    activation: u64,
-    args: List[String],
-    record: Option[operator.Record],
 }
 
 pub type Queued: send {
@@ -2036,6 +2023,8 @@ fn class_of(e: Refused) -> operator.Class {
         Missing(_) => StoreClass,
         Denied(_) => DeniedClass,
         Store(_) => StoreClass,
+        FrontConfig(NameTaken(_)) => ConflictClass,
+        FrontConfig(_) => InvalidClass,
     }
 }
 
@@ -2905,6 +2894,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             if let Some(_) = st(store.fetch(tx, call_env.5 .groups, call_env.3 .name))? {
                 return Error(Exists)
             }
+            check_front_registration(tx, call_env.5, call_env.3 .listen, call_env.3 .front)?
             let mut u = usage_of(tx, call_env.5, call_env.3 .tenant)?
             if let Some(q) = quota_of(tx, call_env.5, call_env.3 .tenant)? {
                 if u.groups >= q.groups {
@@ -2943,7 +2933,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, listen: string.from(spec.listen), store: string.from(spec.store), memory: spec.memory, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
 }
 
 // Whether a catalog group already holds store directory `path`.
@@ -3005,6 +2995,11 @@ fn refused_text(e: Refused) -> String {
         Missing(w) => joined("missing ", w),
         Denied(w) => string.from(w),
         Store(_) => "store error",
+        FrontConfig(NameTaken(name)) => joined("SNI name already registered: ", name),
+        FrontConfig(InvalidName(name)) => joined("invalid SNI name: ", name),
+        FrontConfig(NoNames) => "a front needs at least one SNI name",
+        FrontConfig(InvalidListener(addr)) => joined("invalid front listener: ", addr),
+        FrontConfig(_) => "invalid front configuration",
     }
 }
 

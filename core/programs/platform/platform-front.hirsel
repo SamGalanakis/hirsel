@@ -1,0 +1,183 @@
+pub type Route: send {
+    group: String,
+    listen: String,
+    front: Option[operator.Front]
+}
+
+pub type FrontError: send = NoNames | InvalidName(String) | NameTaken(String) | InvalidListener(String) | InvalidCertificates | InvalidIdleTimeout
+
+// One catalog snapshot, with the configured listener of each group still accepting routes.
+pub fn routing_table(h: Host) -> Result[List[Route], Refused] waits {
+    let reader = st(store.reader(h.db, 0u64))?
+    let mut rows = st(store.scan(reader, store.snapshot(h.db), h.t.groups, Unbounded, Unbounded))?
+    let mut routes: List[Route] = list.new()
+    while let Some((take name, take row)) = st(store.next(reader, mut rows))? {
+        let GroupRow(listen: take listen, front: take front, retiring: retiring, ..) = take row
+        if let None = retiring {
+            list.push(mut routes, Route(group: take name, listen: take listen, front: take front))
+        }
+    }
+    Ok(take routes)
+}
+
+// RFC 6066 HostName uses DNS labels in ASCII without a trailing dot.
+fn front_name_valid(name: String) -> bool {
+    let raw = string.as_bytes(name)
+    if list.len(raw) > 253u64 {
+        return false
+    }
+    let mut width = 0u64
+    let mut last_hyphen = false
+    for b in raw {
+        if b == b'.' {
+            if width == 0u64 || last_hyphen {
+                return false
+            }
+            width = 0u64
+        } else {
+            let hyphen = b == b'-'
+            if width == 63u64 || (!(int.is_ascii_alpha(b) || int.is_ascii_digit(b)) && !(hyphen && width > 0u64)) {
+                return false
+            }
+            width += 1u64
+            last_hyphen = hyphen
+        }
+    }
+    width > 0u64 && !last_hyphen
+}
+
+fn lower_front_name(name: String) -> String {
+    let mut lower = string.from(name)
+    string.make_ascii_lower(mut lower)
+    take lower
+}
+
+fn front_listener_valid(listen: String) -> bool {
+    let endpoint = joined("//", listen)
+    let Ok(parsed) = std.uri.parse(endpoint) else {
+        return false
+    }
+    if parsed.userinfo != None || parsed.path.start != parsed.path.end || parsed.query != None || parsed.fragment != None {
+        return false
+    }
+    let Some(port) = std.uri.port_number(endpoint, parsed) else {
+        return false
+    }
+    // HAProxy treats unspecified server addresses as the client's original destination.
+    port != 0u16 && match parsed.host {
+        Some(Name(span)) => {
+            let host = string.slice(endpoint, span.start, span.end)
+            host != "0.0.0.0" && front_name_valid(host)
+        },
+        Some(Ip6(span)) => match std.net.parse_ip(list.slice(string.as_bytes(endpoint), span.start, span.end)) {
+            Ok(V6(0u64, 0u64)) => false,
+            Ok(_) => true,
+            Error(_) => false,
+        },
+        None => false,
+    }
+}
+
+fn check_front(listen: String, front: operator.Front) -> Result[(), FrontError] {
+    if !front_listener_valid(listen) {
+        return Error(InvalidListener(string.from(listen)))
+    }
+    if list.len(front.names) == 0u64 {
+        return Error(NoNames)
+    }
+    for name in front.names {
+        let is_ip = match std.net.parse_ip(string.as_bytes(name)) {
+            Ok(_) => true,
+            Error(_) => false,
+        }
+        if !front_name_valid(name) || is_ip {
+            return Error(InvalidName(string.from(name)))
+        }
+    }
+    Ok(())
+}
+
+// Check in the same transaction that claims the group's name and inserts its row.
+fn check_front_registration(tx: store.Tx, t: Tables, listen: String, front: Option[operator.Front]) -> Result[(), Refused] {
+    let Some(f) = view front else {
+        return Ok(())
+    }
+    check_front(listen, f) ?=> |e| FrontConfig(take e)
+    let mut proposed: Map[String, ()] = map.new()
+    for name in f.names {
+        map.insert(mut proposed, lower_front_name(name), ())
+    }
+    let mut rows = store.range(tx, t.groups, Unbounded, Unbounded) ?=> |e| Store(take e)
+    while let Some((_, g)) = st(store.next_in(tx, mut rows))? {
+        if let Some(other) = g.front {
+            for name in other.names {
+                let lower = lower_front_name(name)
+                if let Some(_) = map.get(proposed, lower) {
+                    return Error(FrontConfig(NameTaken(take lower)))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render a TLS front on port 443. Supply an HAProxy PEM file or directory and
+/// an idle timeout longer than each stream listener's own idle rule.
+pub fn haproxy(routes: List[Route], certificates: String, idle_ms: u32) -> Result[String, FrontError] {
+    if string.byte_len(certificates) == 0u64 {
+        return Error(InvalidCertificates)
+    }
+    for b in string.as_bytes(certificates) {
+        if b == 0u8 || b == b'\n' || b == b'\r' || b == 39u8 {
+            return Error(InvalidCertificates)
+        }
+    }
+    if idle_ms == 0u32 || idle_ms > 2147483647u32 {
+        return Error(InvalidIdleTimeout)
+    }
+    let mut config = string.from("defaults\n    timeout connect 5s\n    timeout client ")
+    string.push_u64(mut config, int.widen(idle_ms))
+    string.push(mut config, "ms\n    timeout server ")
+    string.push_u64(mut config, int.widen(idle_ms))
+    string.push(mut config, "ms\n\nfrontend tls_front\n    mode tcp\n    bind :443 ssl crt '")
+    string.push(mut config, certificates)
+    string.push(mut config, "'\n")
+    let mut names: Map[String, u64] = map.new()
+    let mut backends = string.new()
+    for i in 0u64 .. list.len(routes) {
+        let route = view routes[i]
+        if let Some(f) = route.front {
+            check_front(route.listen, f)?
+            for name in f.names {
+                let lower = lower_front_name(name)
+                if let Some(other) = map.get(names, lower) {
+                    if other != i {
+                        return Error(NameTaken(take lower))
+                    }
+                    continue
+                }
+                string.push(mut config, "    use_backend front_group_")
+                string.push_u64(mut config, i)
+                string.push(mut config, " if { ssl_fc_sni -i -m str ")
+                string.push(mut config, lower)
+                string.push(mut config, " }\n")
+                map.insert(mut names, take lower, i)
+            }
+            string.push(mut backends, "\nbackend front_group_")
+            string.push_u64(mut backends, i)
+            match f.forward {
+                Http => string.push(mut backends, "\n    mode http\n    http-request set-header X-Forwarded-For %[src]\n"),
+                Stream => string.push(mut backends, "\n    mode tcp\n"),
+            }
+            string.push(mut backends, "    server listener ")
+            string.push(mut backends, route.listen)
+            if let Stream = f.forward {
+                string.push(mut backends, " send-proxy-v2")
+            }
+            string.push(mut backends, "\n")
+        }
+    }
+    string.push(mut config, "    default_backend front_default\n\nbackend front_default\n    mode tcp\n    tcp-request content reject\n")
+    string.push(mut config, backends)
+    Ok(take config)
+}

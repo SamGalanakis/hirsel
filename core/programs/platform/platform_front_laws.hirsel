@@ -1,0 +1,57 @@
+fn front_with(name: String, forward: operator.Forward) -> operator.Front {
+    let mut names: List[String] = list.new()
+    list.push(mut names, string.from(name))
+    operator.Front(names: take names, forward: forward)
+}
+
+fn group_with_front(name: String, listen: String, take front: operator.Front) -> NewGroup {
+    NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, listen: string.from(listen), front: Some(take front), store: string.new(), memory: None, assembly: image(), activation: 1u64, args: list.new(), record: None)
+}
+
+// launch.md H1: DNS case cannot split name ownership, and only a matching SNI
+// can reach a stream listener. HTTP and stream forwarding carry different peer metadata.
+@test
+fn front_catalog_routes_sni(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    let mut stream = registration("audio", "/audio")
+    stream.listen = "127.0.0.1:6443"
+    stream.front = Some(front_with("Audio.Example", Stream))
+    let d = request_id(1u64)
+    let _ = register_as(mut r, d, take stream)
+    expect(bind_then_admit(r, "audio"), "H1: a valid stream registration never bound its listener")
+    let duplicate = group_with_front("other", "127.0.0.1:7443", front_with("audio.example", Stream))
+    let Error(FrontConfig(NameTaken(used))) = add_group(mut r.h, duplicate) else {
+        fail("H1: two stream groups claimed the same SNI")
+    }
+    expect(used == "audio.example", "H1: the conflict named another SNI")
+    let mut mixed = registration("other", "/other")
+    mixed.listen = "127.0.0.1:8443"
+    mixed.front = Some(front_with("audio.example", Http))
+    let other_req = request_id(2u64)
+    let conflict = register_as(mut r, other_req, take mixed)
+    expect(errored(r, conflict, ConflictClass), "H1: the operator accepted HTTP and stream on the same SNI")
+    let web = group_with_front("web", "127.0.0.1:8080", front_with("web.example", Http))
+    let web_requests = must(add_group(mut r.h, web), "H1: valid HTTP group refused")
+    pump(mut r, take web_requests)
+    add(mut r, "local", "t")
+    let reopened = restart(take r, 4u64)
+    let routes = must(routing_table(reopened.h), "H1: catalog routing table unavailable")
+    expect(list.len(routes) == 3u64, "H1: missing catalog route or refused group escaped into the table")
+    expect(routes[0u64].group == "audio" && routes[1u64].group == "local" && routes[2u64].group == "web", "H1: wrong catalog groups in the routing table")
+    let Ok(config) = haproxy(routes, "/etc/haproxy/certs", 300000u32) else {
+        fail("H1: valid routes did not generate a front")
+    }
+    expect(std.string.find(config, 0u64, "use_backend front_group_0 if { ssl_fc_sni -i -m str audio.example }\n") != None, "H1: the stream backend is not an exact SNI match")
+    expect(std.string.find(config, 0u64, "backend front_group_0\n    mode tcp\n    server listener 127.0.0.1:6443 send-proxy-v2\n") != None, "H1: stream forwarding omitted PROXY v2")
+    expect(std.string.find(config, 0u64, "use_backend front_group_2 if { ssl_fc_sni -i -m str web.example }\n") != None, "H1: the HTTP backend is not an exact SNI match")
+    expect(std.string.find(config, 0u64, "backend front_group_2\n    mode http\n    http-request set-header X-Forwarded-For %[src]\n    server listener 127.0.0.1:8080\n") != None, "H1: HTTP forwarding omitted X-Forwarded-For")
+    expect(std.string.find(config, 0u64, "    default_backend front_default\n\nbackend front_default\n    mode tcp\n    tcp-request content reject\n\nbackend ") != None, "H1: missing or unknown SNI did not go to a closing default")
+    expect(std.string.find(config, 0u64, "alpn") == None, "H1: the front depends on ALPN")
+    let mut ambiguous = take routes
+    list.push(mut ambiguous, Route(group: "other", listen: "127.0.0.1:8443", front: Some(front_with("audio.example", Http))))
+    let Error(NameTaken(name)) = haproxy(ambiguous, "/etc/haproxy/certs", 300000u32) else {
+        fail("H1: the generator emitted a configuration with ambiguous SNI")
+    }
+    expect(name == "audio.example", "H1: the generator named the wrong conflict")
+    Ok(())
+}

@@ -21,7 +21,7 @@ fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(phase_failed(status_of(mut r, compiled), UncompiledClass, "main.hirsel:1:37-41: LANG-11 found `u64`"), "untrusted: a refused compile did not fail the request Uncompiled with its diagnostics")
     // A recording group's source is refused before any compile.
     let mut rec = rig(c, rnd, 4u64)
-    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: Untrusted, listen: "127.0.0.1:0", store: string.new(), memory: None, assembly: image(), activation: 1u64, args: list.new(), record: Some(operator.Record(dir: "rec", retention_s: 60u64)))
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: Untrusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 1u64, args: list.new(), record: Some(operator.Record(dir: "rec", retention_s: 60u64)))
     let reqs = must(add_group(mut rec.h, spec), "add_group")
     pump(mut rec, take reqs)
     op_wake(mut rec, "g")

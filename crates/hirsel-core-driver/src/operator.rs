@@ -23,6 +23,18 @@ pub(crate) struct Record {
     pub(crate) retention_s: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Forward {
+    Http,
+    Stream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Front {
+    pub(crate) names: Vec<String>,
+    pub(crate) forward: Forward,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Registration {
     pub(crate) name: String,
@@ -34,6 +46,7 @@ pub(crate) struct Registration {
     pub(crate) memory: Option<u64>,
     pub(crate) args: Vec<String>,
     pub(crate) record: Option<Record>,
+    pub(crate) front: Option<Front>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,6 +255,13 @@ impl Wire for Registration {
             w.bytes(record.dir.as_bytes());
             w.u64(record.retention_s);
         });
+        w.option(&self.front, |w, front| {
+            w.strings(&front.names);
+            w.u32(match front.forward {
+                Forward::Http => 0,
+                Forward::Stream => 1,
+            });
+        });
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(Self {
@@ -258,6 +278,15 @@ impl Wire for Registration {
                     dir: r.string()?,
                     retention_s: r.u64()?,
                 })
+            })?,
+            front: r.option(|r| {
+                let names = r.strings()?;
+                let forward = match r.u32()? {
+                    0 => Forward::Http,
+                    1 => Forward::Stream,
+                    _ => return Err(malformed("front forwarding mode")),
+                };
+                Ok(Front { names, forward })
             })?,
         })
     }
@@ -737,12 +766,16 @@ mod tests {
                             dir: "/tapes".into(),
                             retention_s: 60,
                         }),
+                        front: Some(Front {
+                            names: vec!["edge.example".into()],
+                            forward: Forward::Stream,
+                        }),
                     }),
                     Input::Publication(vec![1]),
                     Vec::new(),
                     Vec::new(),
                 ),
-                "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c000000000000000100000001000000010000000000000000",
+                "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c0000000000000001000000010000000c000000656467652e6578616d706c65010000000100000001000000010000000000000000",
             ),
         ];
         let answers = [

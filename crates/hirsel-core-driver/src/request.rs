@@ -16,6 +16,7 @@ use std::time::Duration;
 
 mod lean;
 mod release;
+pub(crate) use release::local_admission_limits;
 #[derive(Serialize)]
 struct Output<'a> {
     accepted: bool,
@@ -41,21 +42,6 @@ struct ReachableOutput<'a> {
 }
 pub(crate) fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
-}
-/// Local loading still parses disk input under CA4's decoder. Size limits
-/// follow the process allowance. Bound recursive decoder stack use explicitly.
-pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits {
-    crate::code_admission::AdmissionLimits {
-        recipe_bytes: usize::MAX,
-        closure_objects: usize::MAX,
-        object_bytes: u64::MAX,
-        decoded_bytes: usize::MAX,
-        members: usize::MAX,
-        edges: usize::MAX,
-        nesting: 512,
-        outstanding: 0,
-        timeout: None,
-    }
 }
 fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut invocation = match crate::cli::parse(args.into_iter())? {
@@ -493,6 +479,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::IdleMs
             | Opt::Workdir
             | Opt::Listen
+            | Opt::FrontHttp
+            | Opt::FrontStream
             | Opt::ApproveGrant
             | Opt::RefuseGrants
             | Opt::HostMemory

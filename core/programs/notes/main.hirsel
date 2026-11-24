@@ -52,7 +52,6 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     harness.migrate(mut phase)?
-    harness.release.migrate(mut phase)?
     let c_note: std.codec.Codec[String] = std.codec.of()
     let c_count: std.codec.Codec[u64] = std.codec.of()
     created(store.migration_create_table(mut phase, store.spec(notes_name(), std.codec.key_u64(), c_note)))?
@@ -61,7 +60,6 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
 
 fn schema(mut d: store.Declare) -> Result[harness.Handles, store.Error] {
     let handles = harness.declare_tables(mut d)?
-    let _ = harness.release.declare_tables(mut d)?
     let c_note: std.codec.Codec[String] = std.codec.of()
     let notes = store.declare_table(mut d, notes_name(), std.codec.key_u64(), c_note)?
     let _ = store.finish(mut d, take notes)?
@@ -508,11 +506,11 @@ pub fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runn
     runner.transact(mut r, code.describe(decide_entry), BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(settle_release_entry), BYTES, runner.DEFAULT_STEPS)?
     let proposals: std.codec.Codec[harness.release.Proposal] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(harness.release.dev_proposals), harness.release.proposal_slots()?, BYTES, runner.DEFAULT_STEPS)?
     harness.pending_waits_entry(mut r, BYTES, runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.window), harness.window_slots()?, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(harness.history_cuts), harness.cut_slots()?, BYTES, runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----

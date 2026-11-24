@@ -17,13 +17,21 @@ fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
     Ok(Value(Some(None), 9007199254740993u64))
 }
 
-fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(h.items, Unbounded, Unbounded)
+fn query_table(h: Handles) -> store.Table[u64, Item] {
+    clone(h.items)
+}
+
+fn query_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("items", code.describe(query_table))
+}
+
+fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("items", h.items, Unbounded, Unbounded)
 }
 
 fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
     runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?
-    runner.query(mut registry, code.describe(packed_rows), std.codec.key_u64(), item_codec(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut registry, code.describe(packed_rows), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
 fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
@@ -42,7 +50,7 @@ fn first_batch(take publisher: Publisher) -> runner.Frame waits {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(packed_rows)))
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_unit())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), item_codec()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     runner.fixture_subscribe(owner, 0u32, take key, list.new())
     let frame: runner.Frame = match result.unwrap(runner.fixture_receive(owner)) {

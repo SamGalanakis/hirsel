@@ -295,43 +295,47 @@ pub type DevSettlement: codec + send { id: Bytes, decision: DevDecision }
 pub type FiledProposal: codec + send { id: Bytes, proposal: Proposal }
 
 // The development gateway delegates release decisions to the session's readers.
-pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
-    let t = tables(store.tx_schema(tx)) ?=> |_| read_failed()
-    let shape = view t.proposals
+fn proposal_table(h: harness.Handles) -> store.Table[Bytes, Proposal] { clone(h.source.proposals) }
+
+pub fn proposal_slots() -> Result[runner.Slots[harness.Handles], runner.RegisterError] {
+    runner.table_slot("proposals", code.describe(proposal_table))
+}
+
+pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Answer[()], Capacity] {
+    let shape = view h.source.proposals
     if harness.reader_allowed(tx, h, caller)? {
-        return runner.cover(shape, Unbounded, Unbounded)
+        return runner.table_answer("proposals", shape, Unbounded, Unbounded)
     }
-    runner.cover(shape, Included(list.new()), Excluded(list.new()))
+    runner.table_answer("proposals", shape, Included(list.new()), Excluded(list.new()))
 }
 
 pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
     if !(harness.reader_allowed(tx, h, caller) ?=> |_| Storage) {
         return Error(NotAllowed)
     }
-    let t = tables(store.tx_schema(tx)) ?=> |_| Storage
     let DevSettlement(id: take id, decision: take decision) = take ask
     let state = match take decision {
         Publish => Published("approved, not deployed"),
         Reject(take why) => Rejected(take why),
     }
-    settle(mut tx, h, t, a, w, id, take state)
+    settle(mut tx, h, h.source, a, w, id, take state)
 }
 
 // WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
 // Each Cover is published against the same transaction snapshot as the scan that chose it.
-pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] {
+pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Answer[()], Capacity] {
     let shape = view t.proposals
     let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
     while let Some((id, proposal)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
         if let Filed = proposal.state {
-            return runner.cover(shape, Included(clone(id)), Included(clone(id)))
+            return runner.table_answer("proposals", shape, Included(clone(id)), Included(clone(id)))
         }
     }
-    runner.cover(shape, Included(list.new()), Excluded(list.new()))
+    runner.table_answer("proposals", shape, Included(list.new()), Excluded(list.new()))
 }
 
 // Publish one source row per WIRE query, so a full tree need not fit in one batch.
-pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Cover, Capacity] {
+pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Answer[()], Capacity] {
     let shape = view t.files
     let low: store.Bound[String] = match after {
         Some(path) => Excluded(string.from(path)),
@@ -339,9 +343,9 @@ pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[ru
     }
     let mut rows = store.range(tx, shape, low, Unbounded) ?=> |_| read_failed()
     if let Some((path, _)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
-        return runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
+        return runner.table_answer("files", shape, Included(string.from(path)), Included(string.from(path)))
     }
-    runner.cover(shape, Included(""), Excluded(""))
+    runner.table_answer("files", shape, Included(""), Excluded(""))
 }
 
 fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }

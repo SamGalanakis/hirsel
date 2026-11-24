@@ -51,7 +51,7 @@ fn mcp_blob_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness
 fn mcp_blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(mcp_blob_advance), code.describe(mcp_blob_effect), code.describe(mcp_blob_settle), BYTES, 8388608u64)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), views, BYTES, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.window), harness.window_slots()?, BYTES, runner.DEFAULT_STEPS)
 }
 
 fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: store.Caller) waits {
@@ -99,7 +99,7 @@ fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: 
     let keys = result.unwrap(runner.fixture.entry_keys(code.describe(mcp_blob_place)))
     let mut client = result.unwrap(runner.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), 0u64, 3000u64))
     let codec: std.codec.Codec[harness.View] = std.codec.of()
-    let entry = runner.fixture.query_as_entry(code.describe(harness.window), std.codec.key_u64(), codec)
+    let entry = runner.fixture.query_as_entry(code.describe(harness.window), result.unwrap(harness.window_slots()))
     let sub = result.unwrap(runner.fixture.subscribe(mut client, entry, Status, 3000u64))
     let image = result.unwrap(runner.fixture.seen_at(mut client, sub, 0u64, 3000u64))
     runner.fixture.close(take client)

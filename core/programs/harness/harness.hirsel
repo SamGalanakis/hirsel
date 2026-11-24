@@ -247,7 +247,7 @@ pub type Effect: codec + send {
     reserve: u64,
 }
 
-pub type WaitKey: codec + send {
+pub type WaitKey: codec + key + send {
     run: u64,
     slot: u64,
     kind: u8,
@@ -275,6 +275,7 @@ pub type Handles: shareable + send {
     fork_cuts: store.Table[u64, u64],
     mcp_catalog: store.Table[String, mcp_tools.Remote],
     triggers: runner.triggers.Tables,
+    source: release.Tables
 }
 
 fn session_name() -> String {
@@ -393,6 +394,7 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     runner.triggers.migrate(mut phase)?
     mcp_tools.migrate(mut phase)?
+    release.migrate(mut phase)?
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
     let c_received: std.codec.Codec[Received] = std.codec.of()
@@ -441,6 +443,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         fork_cuts: store.schema_table(schema, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
         mcp_catalog: mcp_tools.catalog(schema)?,
         triggers: runner.triggers.tables(schema)?,
+        source: release.tables(schema)?,
     ))
 }
 
@@ -476,6 +479,7 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Handles, store.Error] {
         fork_cuts: declare_table(mut d, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
         mcp_catalog: take mcp_catalog,
         triggers: take trigger_tables,
+        source: release.declare_tables(mut d)?,
     ))
 }
 

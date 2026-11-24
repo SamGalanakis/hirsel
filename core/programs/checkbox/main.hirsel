@@ -60,13 +60,21 @@ fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> R
     Ok(checked)
 }
 
-fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(h.chunks, Unbounded, Unbounded)
+fn query_table(h: Handles) -> store.Table[u32, Bytes] {
+    clone(h.chunks)
+}
+
+fn query_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("chunks", code.describe(query_table))
+}
+
+fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("chunks", h.chunks, Unbounded, Unbounded)
 }
 
 fn place(mut registry: Registry) -> Result[(), runner.RegisterError] {
     runner.transact(mut registry, code.describe(toggle), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut registry, code.describe(board), std.codec.key_u32(), std.codec.of_bytes(), 1048576u64, runner.DEFAULT_STEPS)
+    runner.query(mut registry, code.describe(board), query_slots()?, 1048576u64, runner.DEFAULT_STEPS)
 }
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {

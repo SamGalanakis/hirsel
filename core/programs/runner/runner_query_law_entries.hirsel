@@ -1,0 +1,102 @@
+fn law_query_table(h: Qh) -> store.Table[u64, u64] { clone(h.t) }
+
+fn law_query_slots() -> Result[Slots[Qh], RegisterError] {
+    table_slot("data", code.describe(law_query_table))
+}
+
+fn q1(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Answer[()], Capacity] {
+    let allowed = match store.fetch(tx, h.t, 0u64) {
+        Ok(Some(p)) => p != 0u64,
+        Ok(None) => false,
+        Error(_) => fail("subs: q1 reads perm"),
+    }
+    if allowed {
+        table_answer("data", h.t, Included(1u64), Included(2u64))
+    } else {
+        table_answer("data", h.t, Included(1u64), Excluded(1u64))
+    }
+}
+
+fn qf(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Answer[()], Capacity] {
+    match store.fetch(tx, h.t, 2u64) {
+        Ok(Some(v)) => if v == 2u64 {
+            fail("subs: qf at row1 = 2")
+        },
+        _ => (),
+    }
+    table_answer("data", h.t, Included(2u64), Included(2u64))
+}
+
+// q_late reads row1 and covers it. When row1 is 2 it also reads perm, then faults, so its
+// partial read log holds a key its last good run never read.
+fn q_late(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Answer[()], Capacity] {
+    match store.fetch(tx, h.t, 2u64) {
+        Ok(Some(v)) => if v == 2u64 {
+            let _ = store.fetch(tx, h.t, 0u64)
+            fail("subs: q_late at row1 = 2")
+        },
+        _ => (),
+    }
+    table_answer("data", h.t, Included(2u64), Included(2u64))
+}
+
+fn q_moving(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Answer[()], Capacity] {
+    let selector = option.unwrap(result.unwrap(store.fetch(tx, h.t, 0u64)))
+    let key = if selector == 0u64 {
+        3u64
+    } else {
+        4u64
+    }
+    let mut scan = match store.range(tx, h.t, Included(key), Excluded(key + 1u64)) {
+        Ok(take rows) => take rows,
+        Error(_) => fail("subs: q_moving range")
+    }
+    let chosen = match result.unwrap(store.next_in(tx, mut scan)) {
+        Some((_, _)) => 2u64,
+        None => 1u64
+    }
+    table_answer("data", h.t, Included(chosen), Included(chosen))
+}
+
+fn q_range_prefix(tx: store.Tx, h: Qh, take limit: u32) -> Result[Answer[()], Capacity] {
+    let mut rows = match store.range(tx, h.t, Included(1u64), Excluded(10u64)) {
+        Ok(take cursor) => take cursor,
+        Error(_) => fail("subs: prefix range")
+    }
+    let mut key = 0u64
+    for _ in 0u64 .. int.widen(limit) {
+        match result.unwrap(store.next_in(tx, mut rows)) {
+            Some((k, _)) => {
+                key = k
+            },
+            None => {
+                break
+            }
+        }
+    }
+    table_answer("data", h.t, Included(key), Included(key))
+}
+
+fn q_loss(tx: store.Tx, h: Qh, take arg: u32) -> Result[Answer[()], Capacity] {
+    q1(tx, h, take arg)
+}
+
+fn q_fault(tx: store.Tx, h: Qh, take arg: u32) -> Result[Answer[()], Capacity] {
+    q1(tx, h, take arg)
+}
+
+fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(q1), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(qf), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_late), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_moving), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_range_prefix), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_loss), law_query_slots()?, 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_fault), law_query_slots()?, 65536u64, DEFAULT_STEPS)
+}
+
+fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Qh(t: clone(t)))
+}

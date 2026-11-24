@@ -34,7 +34,7 @@ fn routes_entries(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(),
     place(mut r)?
     runner.transact(mut r, code.describe(settle_release_entry), BYTES, runner.DEFAULT_STEPS)?
     let proposals: std.codec.Codec[harness.release.Proposal] = std.codec.of()
-    runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.release.dev_proposals), harness.release.proposal_slots()?, BYTES, runner.DEFAULT_STEPS)
 }
 
 fn routes_place(take supplied: platform.local.Supplied, s: Services) -> Result[runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {

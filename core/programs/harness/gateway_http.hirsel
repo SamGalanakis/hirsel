@@ -100,7 +100,7 @@ fn copy_front(f: Front) -> Front {
 
 fn window_entry() -> runner.client.Callee[harness.Window, ()] {
     let codec: std.codec.Codec[harness.View] = std.codec.of()
-    runner.client.query_as_entry(code.describe(harness.window), std.codec.key_u64(), codec)
+    runner.client.query_as_entry(code.describe(harness.window), result.unwrap(harness.window_slots()))
 }
 
 fn copy_preview(p: Option[preview.Door]) -> Option[preview.Door] {

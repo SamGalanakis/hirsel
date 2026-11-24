@@ -24,7 +24,7 @@ fn read_cover[A: codec](mut client: runner.client.Client, f: Front, entry: runne
 
 fn history_page(mut client: runner.client.Client, f: Front, before: u64, lines: u64) -> Result[Page, u16] waits {
     let mut from = harness.page_from(before, lines)
-    let cuts = runner.client.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
+    let cuts = runner.client.query_as_entry(code.describe(harness.history_cuts), result.unwrap(harness.cut_slots()))
     let cut_image = read_cover(mut client, f, cuts, (from, before))?
     for r in cut_image.rows {
         if let Some(raw) = view r.value {
@@ -54,7 +54,7 @@ fn history_page(mut client: runner.client.Client, f: Front, before: u64, lines: 
 
 fn waits_page(mut client: runner.client.Client, f: Front) -> Result[List[harness.PendingWait], u16] waits {
     let codec: std.codec.Codec[harness.Wait] = std.codec.of()
-    let entry = runner.client.query_as_entry(code.describe(harness.pending_waits), harness.wait_key(), codec)
+    let entry = runner.client.query_as_entry(code.describe(harness.pending_waits), result.unwrap(harness.wait_slots()))
     let image = read_cover(mut client, f, entry, ())?
     let _ = checked_status(mut client, f)?
     let mut waits: List[harness.PendingWait] = list.new()
@@ -86,7 +86,7 @@ fn visible_sessions(d: harness.gateway.Door, f: Front, identity: Identity) -> Re
 
 fn releases_page(mut client: runner.client.Client, f: Front) -> Result[List[release.FiledProposal], u16] waits {
     let codec: std.codec.Codec[release.Proposal] = std.codec.of()
-    let entry = runner.client.query_as_entry(code.describe(release.dev_proposals), std.codec.key_bytes(), codec)
+    let entry = runner.client.query_as_entry(code.describe(release.dev_proposals), result.unwrap(release.proposal_slots()))
     let image = read_cover(mut client, f, entry, ())?
     let _ = checked_status(mut client, f)?
     let mut filed: List[release.FiledProposal] = list.new()

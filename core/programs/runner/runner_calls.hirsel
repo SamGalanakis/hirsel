@@ -145,28 +145,28 @@ fn place_with_hung_steps(mut r: Calls, steps: u64) -> Result[(), runner.Register
     runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(hung), 65536u64, steps)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut r, code.describe(everything), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(everything), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
 // subs_wired's query: keys 0 to 1,000 of "data".
-fn everything(tx: store.Tx, h: Hd, take _arg: u32) -> Result[runner.Cover, Capacity] {
-    runner.cover(h.t, Included(0u64), Included(1000u64))
+fn everything(tx: store.Tx, h: Hd, take _arg: u32) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.t, Included(0u64), Included(1000u64))
 }
 
 // query_as_caller's query, caller-dependent: keys from the Caller's first subject byte to
 // 1,000. It reads key 0 first, so a write to key 0 re-runs it (G2).
-fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[runner.Cover, Capacity] {
+fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[runner.Answer[()], Capacity] {
     let _ = store.fetch(tx, h.t, 0u64)
     let low: u64 = int.widen(caller.subject[0])
-    runner.cover(h.t, Included(low), Included(1000u64))
+    runner.table_answer("data", h.t, Included(low), Included(1000u64))
 }
 
 fn query_key(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u32())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
 }
@@ -822,7 +822,7 @@ fn held_body(grant: HeldGrant, caller: runner.Caller, take value: u64) -> Result
 
 fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(held_body), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
 fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.Caller, ()] {

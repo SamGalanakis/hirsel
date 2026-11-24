@@ -72,20 +72,21 @@ pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.
     callee(f, std.codec.of(), std.codec.of())
 }
 
-fn query_callee[F, A: codec, K, V](f: StaticFn[F], key_codec: std.codec.Key[K], value_codec: std.codec.Codec[V]) -> Callee[A, ()] {
+fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner.Slots[H]) -> Callee[A, R] {
     let args: std.codec.Codec[A] = std.codec.of()
-    let schema = result.unwrap(runner.query_result_schema(key_codec, value_codec))
+    let reply: std.codec.Codec[R] = std.codec.of()
+    let schema = result.unwrap(runner.query_result_schema(reply, declared))
     let identity = code.identity(f)
     let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
-    Callee(key: take key, args: args, reply: std.codec.of_unit())
+    Callee(key: take key, args: args, reply: reply)
 }
 
-pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
-    query_callee(f, key, value)
+pub fn query_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
+    query_callee(f, declared)
 }
 
-pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, runner.Caller, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
-    query_callee(f, key, value)
+pub fn query_as_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, runner.Caller, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
+    query_callee(f, declared)
 }
 
 // The place's entry keys in registration order, as its Hello lists them.

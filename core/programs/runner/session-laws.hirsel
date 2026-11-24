@@ -84,7 +84,7 @@ fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
 fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, network: Net, config: WireConfig,
     pool: Sender[WireAllocation[()]], pending: std.wsock.PendingPool, take payload: Bytes,
     probe: scoped fn() -> bool waits) -> bool waits {
-    let slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
+    let wire_slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
     let (take listening, address) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take listening
     let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
@@ -93,7 +93,7 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, network: Net, co
     let peer = PoolCallPeer(stream: take stream, clock: clock, random: random, socket: config.socket, payload: take payload)
     let sending = task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer)
     let socket = result.unwrap(std.net.accept_from(mut listener, addr, deadline))
-    let upgraded = result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
+    let upgraded = result.unwrap(std.wsock.server(take socket, take wire_slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
     let (ready, heard): (Sender[bool], Receiver[bool]) = channel.new(1u64)
     let (go, proceed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let state = PoolCallOwner(tasks: tasks, clock: clock, config: config.socket, pool: channel.sender(pool),
@@ -326,7 +326,7 @@ type WriteRig { writer: Box[std.wsock.Writer], reader: std.wsock.Reader, peer: T
 
 fn write_rig(tasks: Tasks, clock: Clock, random: Random, network: Net, config: std.wsock.Config) -> WriteRig waits {
     let pending = result.unwrap(std.wsock.pending(config))
-    let slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
+    let wire_slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
     let (take listening, address) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take listening
     let (go, go_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
@@ -338,7 +338,7 @@ fn write_rig(tasks: Tasks, clock: Clock, random: Random, network: Net, config: s
     let running = task.spawn(tasks, bytes 2097152u64, take peer, write_peer)
     let socket = result.unwrap(std.net.accept_from(mut listener, addr, deadline))
     let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: _) =
-        result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config, clock, host.mono_ns(clock)))
+        result.unwrap(std.wsock.server(take socket, take wire_slot, addr.ip, list.new(), config, clock, host.mono_ns(clock)))
     WriteRig(writer: box.new(take writer), reader: take reader, peer: take running, go: take go, heard: take heard)
 }
 

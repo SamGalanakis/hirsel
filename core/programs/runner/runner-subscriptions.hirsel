@@ -13,7 +13,7 @@ resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(
 // but its read set stays indexed and its input stays charged until the owner retires it.
 // `due` (§3 "Repair"): a full owner inbox bounced content of this live sub. Its hits still
 // fence, its diffs stop, and on its owner's progress one full `complete` replaces it.
-type Sub { generation: u64, input: SubscriptionInput, cover: Option[Cover], routes: List[RouteKey], due: bool }
+type Sub { serial: u64, generation: u64, input: SubscriptionInput, cover: Option[List[Cover]], routes: List[RouteKey], due: bool }
 
 type SubId { who: u64, sub: u32, serial: u64 }
 
@@ -21,7 +21,7 @@ type SubId { who: u64, sub: u32, serial: u64 }
 // Points have an inclusive upper endpoint and Covers and Spans have an exclusive one.
 // Each node also holds the greatest upper endpoint in its subtree.
 type RouteEnd { at: Arc[Bytes], included: bool }
-type RouteKey { low: Arc[Bytes], serial: u64, slot: u64 }
+type RouteKey { low: Arc[Bytes], serial: u64, route_position: u64 }
 type Route {
     key: RouteKey,
     id: SubId,
@@ -43,7 +43,7 @@ fn route_before(a: RouteKey, b: RouteKey) -> bool {
     let low_b: View[Bytes] = b.low
     if low_a != low_b { return low_a < low_b }
     if a.serial != b.serial { return a.serial < b.serial }
-    a.slot < b.slot
+    a.route_position < b.route_position
 }
 
 fn end_reaches(end: RouteEnd, key: Bytes) -> bool {
@@ -161,7 +161,7 @@ fn drop_route(take top: Option[Box[Route]], key: RouteKey) -> Option[Box[Route]]
 }
 
 // Allocate before changing the tree. An insertion or removal only moves boxes.
-fn stage_route(mut nodes: List[Box[Route]], id: SubId, slot: u64, take interval: store.Read) -> Result[(), Capacity] {
+fn stage_route(mut nodes: List[Box[Route]], id: SubId, route_position: u64, take interval: store.Read) -> Result[(), Capacity] {
     let (take low, take end) = match take interval {
         Point(take point) => {
             let endpoint = arc.new(take point)
@@ -174,31 +174,36 @@ fn stage_route(mut nodes: List[Box[Route]], id: SubId, slot: u64, take interval:
         },
     }
     let max = RouteEnd(at: arc.share(end.at), included: end.included)
-    let node = Route(key: RouteKey(low: take low, serial: id.serial, slot: slot), id: id,
+    let node = Route(key: RouteKey(low: take low, serial: id.serial, route_position: route_position), id: id,
         end: take end, max: take max, height: 1u64, left: None, right: None)
     Ok(list.push(mut nodes, box.new(take node)))
 }
 
-fn cover_view(c: Option[Cover]) -> Option[View[Cover]] in c {
+fn cover_view(c: Option[List[Cover]]) -> Option[View[List[Cover]]] in c {
     match c {
         Some(x) => Some(x),
         None => None,
     }
 }
 
-// Slot 0 is the Cover's route, which an ended entry does not have; reads take slots from 1.
-fn stage_routes(id: SubId, c: Option[View[Cover]], take reads: List[store.Read]) -> Result[(List[Box[Route]], List[RouteKey]), Capacity] {
-    let mut nodes: List[Box[Route]] = list.with_capacity(list.len(reads) + 1u64)
-    if let Some(span) = c { stage_route(mut nodes, id, 0u64, Span(clone(span.low), clone(span.high)))? }
-    let mut slot = 0u64
+// Cover route numbers come first so ending a sub can remove them without allocating.
+fn stage_routes(id: SubId, c: Option[View[List[Cover]]], take reads: List[store.Read]) -> Result[(List[Box[Route]], List[RouteKey]), Capacity] {
+    let count = match c { Some(spans) => list.len(spans), None => 0u64 }
+    let mut nodes: List[Box[Route]] = list.with_capacity(list.len(reads) + count)
+    if let Some(spans) = c {
+        for i in 0u64 .. count {
+            stage_route(mut nodes, id, i, Span(clone(spans[i].low), clone(spans[i].high)))?
+        }
+    }
+    let mut route_position = COVER_MAX
     for take read in reads {
-        slot += 1u64
-        stage_route(mut nodes, id, slot, take read)?
+        route_position += 1u64
+        stage_route(mut nodes, id, route_position, take read)?
     }
     let mut keys: List[RouteKey] = list.with_capacity(list.len(nodes))
     for node in nodes {
         let key = node.key
-        list.push(mut keys, RouteKey(low: arc.share(key.low), serial: key.serial, slot: key.slot))
+        list.push(mut keys, RouteKey(low: arc.share(key.low), serial: key.serial, route_position: key.route_position))
     }
     Ok((take nodes, take keys))
 }
@@ -224,7 +229,7 @@ fn route_key(root: Option[Box[Route]], key: Bytes, mut hits: Map[u64, (SubId, bo
     let low: View[Bytes] = node.key.low
     if key < low { return Ok(()) }
     if end_reaches(node.end, key) {
-        let read = node.key.slot != 0u64
+        let read = node.key.route_position > COVER_MAX
         if read || !map.contains(hits, node.id.serial) {
             map.insert(mut hits, node.id.serial, (node.id, read))
         }
@@ -266,23 +271,23 @@ fn remove_sub(mut subs: Subscriptions, who: u64, sub: u32) -> Option[Sub] {
     take removed
 }
 
-// The publisher ends a live sub (§3 "Ended entries"): its Cover's route leaves the index and
-// its read routes stay, as an ended entry. Nothing is allocated.
+// An ended entry retains its read routes until its last outstanding unit retires.
 fn end_entry(mut subs: Subscriptions, who: u64, sub: u32) {
-    let dropped = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> Option[RouteKey] {
-        match map.update(mut group, sub, scoped fn(mut entry: Sub) -> Option[RouteKey] {
+    end_routes(mut subs.by_session, mut subs.root, who, sub)
+}
+
+fn end_routes(mut sessions: Map[u64, Map[u32, Sub]], mut root: Option[Box[Route]], who: u64, sub: u32) {
+    let _ = map.update(mut sessions, who, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, sub, scoped fn(mut entry: Sub) {
             entry.cover = None
             entry.due = false
-            if list.len(entry.routes) > 0u64 && entry.routes[0].slot == 0u64 { Some(list.remove(mut entry.routes, 0u64)) } else { None }
-        }) {
-            Some(take key) => take key,
-            None => None,
-        }
+            while list.len(entry.routes) != 0u64 && entry.routes[0u64].route_position < COVER_MAX {
+                let key = list.remove(mut entry.routes, 0u64)
+                let previous = replace(mut root, None)
+                root = drop_route(take previous, key)
+            }
+        })
     })
-    if let Some(Some(take key)) = take dropped {
-        let previous = replace(mut subs.root, None)
-        subs.root = drop_route(take previous, key)
-    }
 }
 
 // A publisher-made Reset ends every live sub of the session; each stays as an ended entry.
@@ -378,11 +383,12 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
     i
 }
 
-fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads, read_handle: store.Reader, s: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried waits {
-    match map.get(r.slots, input.key) {
-        Some(Query(_, _, go)) => go(access, read_handle, s, h, input.caller, input.arg, prior, old, sub, rows),
-        _ => Stopped(Refused(NoEntry)),
-    }
+fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads,
+    read_handle: store.Reader, at: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot,
+    old: Option[View[List[Cover]]], rows: Log[SlotRow]) -> Queried waits {
+    let Some(Query(_, _, registered)) = map.get(r.slots, input.key) else { return Stopped(Refused(NoEntry)) }
+    let bindings = option.unwrap(map.get(r.bound_slots, input.key))
+    (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
 }
 
 fn projection_error(take e: store.Error) -> Queried {
@@ -390,38 +396,6 @@ fn projection_error(take e: store.Error) -> Queried {
         Full(c) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
         take other => Lost(take other),
     }
-}
-
-// The log's backing list belongs to the publisher. The row bytes and codec
-// scratch created during projection are charged to the subscription's bound.
-fn row_log() -> Result[Log[Row], Capacity] {
-    let output: Log[Row] = log.new()
-    log.append(output, Row(sub: 0u32, key: list.new(), value: None))
-    Ok(take output)
-}
-
-fn read_rows(take output: Log[Row]) -> List[Row] {
-    let mut rows = log.finish(take output)
-    let _ = list.remove(mut rows, 0u64)
-    take rows
-}
-
-fn projection_row(out: Log[Row], sub: u32, take ch: store.Change, take value: Option[Bytes]) -> Result[(), store.Error] {
-    let store.Change(tree_key: take key, value: _) = take ch
-    log.append(out, Row(sub: sub, key: take key, value: take value))
-    Ok(())
-}
-
-// The rows inside a Cover at s, each with its published value (F10).
-fn cover_rows(access: PublisherReads, read_handle: store.Reader, s: store.Snapshot, c: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] waits {
-    let mut rows = store.open_span_changes(read_handle, s, c.low, c.high)?
-    let mut first = true
-    while let Some(take ch) = (access.span)(read_handle, mut rows, first)? {
-        first = false
-        let value = (c.value)(ch)?
-        projection_row(out, sub, take ch, take value)?
-    }
-    Ok(())
 }
 
 fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe waits {
@@ -434,13 +408,13 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
             return take o
         },
     }
-    match run_query(b.r, b.h, b.reads, b.read_handle, b.base, input, b.base, None, sub, rows) {
+    match run_query(b.r, b.h, b.reads, b.read_handle, b.base, input, b.base, None, rows) {
         Covered(take v) => {
-            let Viewed(cover: take c, reads: take reads) = take v
+            let Viewed(covers: take c, reads: take reads, ..) = take v
             let _ = remove_sub(mut b.subs, who, sub)
             match add_subscription(mut b.subs, who, sub, generation, take input, Some(take c), take reads) {
                 Ok(()) => {
-                    o.rows = read_rows(take rows)
+                    o.rows = read_rows(take rows, sub)
                     stamp_rows(mut o.generations, sub, generation)
                     list.push(mut o.complete, sub)
                 },
@@ -469,86 +443,21 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
     take o
 }
 
-fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput, take c: Option[Cover], take reads: List[store.Read]) -> Result[(), Capacity] {
+fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput, take c: Option[List[Cover]], take reads: List[store.Read]) -> Result[(), Capacity] {
     subs.serial += 1u64
     let id = SubId(who: who, sub: sub, serial: subs.serial)
     let (take nodes, take keys) = stage_routes(id, cover_view(c), take reads)?
-    put_sub(mut subs, id, Sub(generation: generation, input: take input, cover: take c, routes: take keys, due: false))?
+    put_sub(mut subs, id, Sub(serial: id.serial, generation: generation, input: take input, cover: take c, routes: take keys, due: false))?
     install_routes(mut subs.root, take nodes)
     Ok(())
 }
 
-// The rerun's difference: the keys inside the old Cover at a against the keys inside the new
-// Cover at b, removals included, each new or changed key with its published value at b.
-fn rerun_rows(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, old: Cover, b: store.Snapshot, new: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] waits {
-    let mut before = store.open_span_changes(read_handle, a, old.low, old.high)?
-    let mut after = store.open_span_changes(read_handle, b, new.low, new.high)?
-    let mut previous = (access.span)(read_handle, mut before, true)?
-    let mut next = (access.span)(read_handle, mut after, true)?
-    loop {
-        let order = match (view previous, view next) {
-            (Some(x), Some(y)) => if x.tree_key < y.tree_key { 0u8 } else if x.tree_key == y.tree_key { 1u8 } else { 2u8 },
-            (Some(_), None) => 0u8,
-            (None, Some(_)) => 2u8,
-            (None, None) => return Ok(()),
-        }
-        if order == 0u8 {
-            let removed = option.unwrap(replace(mut previous, None))
-            projection_row(out, sub, take removed, None)?
-            previous = (access.span)(read_handle, mut before, false)?
-            continue
-        }
-        let was = if order == 1u8 {
-            let row = option.unwrap(replace(mut previous, None))
-            let v = (old.value)(row)?
-            previous = (access.span)(read_handle, mut before, false)?
-            take v
-        } else {
-            None
-        }
-        let row = option.unwrap(replace(mut next, None))
-        let now = (new.value)(row)?
-        if was != now {
-            projection_row(out, sub, take row, take now)?
-        }
-        next = (access.span)(read_handle, mut after, false)?
-    }
-}
-
-fn covered_rows(d: List[store.Change], c: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] {
-    for ch in d {
-        let v = (c.value)(ch)?
-        let copied: Bytes = clone(ch.tree_key)
-        log.append(out, Row(sub: sub, key: take copied, value: take v))
-    }
-    Ok(())
-}
-
-fn covered_pages(access: PublisherReads, read_handle: store.Reader, a: store.Snapshot, b: store.Snapshot, c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] waits {
-    let base: Option[store.Snapshot] = Some(clone(a))
-    let mut low: Bytes = clone(c.low)
-    loop {
-        let page = (access.changes)(read_handle, base, b, low, c.high, publication_page_limits()) ?=> |e| projection_error(take e)
-        let projected = isolate(scoped fn() -> Result[(), store.Error] { covered_rows(page.changes, c, sub, rows) })
-        match take projected {
-            Ok(Ok(Ok(()))) => (),
-            Ok(Ok(Error(take e))) => return Error(projection_error(take e)),
-            Ok(Error(cs)) => return Error(Stopped(Failed(Raised(raised(cs))))),
-            Error(f) => return Error(Stopped(Failed(OutOfBytes(room(f))))),
-        }
-        let store.ChangePage(next: take resume, ..) = take page
-        match take resume {
-            Some(take continuation) => { low = take continuation },
-            None => return Ok(()),
-        }
-    }
-}
-
-fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] waits {
+fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: List[Cover], rows: Log[SlotRow]) -> Result[(), Queried] waits {
     match map.get(b.r.slots, key) {
         Some(Query(allowance, steps, _)) => {
+            let bindings = option.unwrap(map.get(b.r.bound_slots, key))
             let projected = bound bytes allowance {
-                bound steps steps { covered_pages(b.reads, b.read_handle, b.base, newest, c, sub, rows) }
+                bound steps steps { covered_all_pages(b.reads, b.read_handle, b.base, newest, c, bindings, rows) }
             }
             match take projected {
                 Ok(Ok(take value)) => take value,
@@ -615,7 +524,7 @@ fn affected_subscriptions[G: send, H: shareable + inert + send](b: Board[G, H], 
 
 // A re-run's Cover and read set replace the sub's, or, with no Cover, its partial read log
 // makes it an ended entry.
-fn replace_routes(mut subs: Subscriptions, id: SubId, take c: Option[Cover], take reads: List[store.Read]) -> Result[(), Capacity] {
+fn replace_routes(mut subs: Subscriptions, id: SubId, take c: Option[List[Cover]], take reads: List[store.Read]) -> Result[(), Capacity] {
     let (take nodes, take keys) = stage_routes(id, cover_view(c), take reads)?
     let mut incoming = Some((take c, take keys))
     let old = option.unwrap(option.unwrap(map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> Option[List[RouteKey]] {
@@ -636,13 +545,13 @@ fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u
     end_entry(mut subs, id.who, id.sub)
 }
 
-fn append_round_rows(mut out: Owe, id: SubId, generation: u64, take rows: Log[Row]) {
+fn append_round_rows(mut out: Owe, id: SubId, generation: u64, take rows: Log[SlotRow]) {
     let before = list.len(out.rows)
-    for take row in read_rows(take rows) { list.push(mut out.rows, take row) }
+    for take row in read_rows(take rows, id.sub) { list.push(mut out.rows, take row) }
     if list.len(out.rows) != before { stamp_rows(mut out.generations, id.sub, generation) }
 }
 
-type SubUpdate = Rows(Log[Row]) | Refreshed(Viewed, Log[Row]) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
+type SubUpdate = Rows(Log[SlotRow]) | Refreshed(Viewed, Log[SlotRow]) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
 
 fn advance_sub[G: send, H: shareable + inert + send](b: Board[G, H], newest: store.Snapshot, id: SubId, read: bool) -> Option[(u64, SubUpdate)] waits {
     let Some(entry) = sub_at(b.subs, id.who, id.sub) else { return None }
@@ -652,7 +561,7 @@ fn advance_sub[G: send, H: shareable + inert + send](b: Board[G, H], newest: sto
         Error(f) => return Some((generation, EndSub(Refused(Budget(room(f)))))),
     }
     let advanced = if read {
-        match run_query(b.r, b.h, b.reads, b.read_handle, newest, entry.input, b.base, cover_view(entry.cover), id.sub, rows) {
+        match run_query(b.r, b.h, b.reads, b.read_handle, newest, entry.input, b.base, cover_view(entry.cover), rows) {
             Covered(take v) => Refreshed(take v, take rows),
             Stopped(take why) => EndSub(take why),
             Faulted(take why, take reads) => EndRead(take why, take reads),
@@ -660,7 +569,7 @@ fn advance_sub[G: send, H: shareable + inert + send](b: Board[G, H], newest: sto
         }
     } else {
         let Some(c) = entry.cover else { return None }
-        match project_changes(b, entry.input.key, newest, c, id.sub, rows) {
+        match project_changes(b, entry.input.key, newest, c, rows) {
             Ok(()) => Rows(take rows),
             Error(Stopped(take why)) => EndSub(take why),
             Error(Lost(problem)) => ResetSubs(read_failed(problem)),
@@ -707,7 +616,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
         let k = owe(mut owes, id.who, version)
         match take advanced {
             Rows(take rows) => append_round_rows(mut owes[k], id, generation, take rows),
-            Refreshed(Viewed(cover: take c, reads: take reads), take rows) => {
+            Refreshed(Viewed(covers: take c, reads: take reads, ..), take rows) => {
                 match replace_routes(mut b.subs, id, Some(take c), take reads) {
                     Ok(()) => append_round_rows(mut owes[k], id, generation, take rows),
                     Error(f) => end_round_sub(mut b.subs, mut owes[k], id, generation, Refused(Budget(room(f)))),

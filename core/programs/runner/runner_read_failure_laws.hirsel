@@ -67,7 +67,9 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let a = store.version(base)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let reader = result.unwrap(store.reader(db, 0u64))
-    let mut b = Board(r: take reg, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(),
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(store.copy_env(h)), read_handle: take reader, reads: publisher_reads(),
         base: take base, newest: None, subs: subscriptions())
 
     let Mailbox(rounds: take reserved, ..) = result.unwrap(mailbox(8u64))
@@ -81,10 +83,10 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let first = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
     if list.len(first.complete) != 1u64 || first.complete[0u64] != 1u32 || list.len(first.rows) != 2u64 || !release_load(register, owner.fence, a) { return false }
 
-    let mut answers: List[Answer] = list.new()
-    list.push(mut answers, Answer(recipient: Recipient(owner: 1u64, to: channel.sender(owner.to)),
+    let mut answers: List[CallAnswer] = list.new()
+    list.push(mut answers, CallAnswer(recipient: Recipient(owner: 1u64, to: channel.sender(owner.to)),
         row: KeyedDone(stream: no_arg(), p: 17u64, outcome: Abandoned)))
-    list.push(mut answers, Answer(recipient: Recipient(owner: 1u64, to: channel.sender(owner.to)),
+    list.push(mut answers, CallAnswer(recipient: Recipient(owner: 1u64, to: channel.sender(owner.to)),
         row: KeyedDone(stream: no_arg(), p: 18u64, outcome: Refused(Overloaded))))
     let mut waiting: List[Replies] = list.new()
     keep_answers(mut waiting, take answers)

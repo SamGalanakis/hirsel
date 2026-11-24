@@ -1,3 +1,7 @@
+pub fn table_identity[K, V](t: Table[K, V]) -> (StoreId, u32) {
+    (t.store, t.id)
+}
+
 type ReadAccess {
     store: StoreId,
     opened: u64,

@@ -52,7 +52,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
         let mut arg: Bytes = list.new()
         std.codec.put_u32(8168u32, mut arg)
         let at = host.mono_ns(clock)
-        result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
+        result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: stream, p: 0u64, wire_slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     }
     if wire_units(s) != 5u64 { return false }
     for completed in 0u64 .. 5u64 {
@@ -70,7 +70,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
         let mut arg: Bytes = list.new()
         std.codec.put_u32(8164u32, mut arg)
         let at = host.mono_ns(clock)
-        result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
+        result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: stream, p: 0u64, wire_slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
         let RunRequest(Req(e: take input)) = result.unwrap(channel.try_receive(requests)) else { return false }
         let Requested(Request(stream: take named, p: p, ..)) = take input else {
             return false
@@ -157,7 +157,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     if !wire_can_read(s) { return false }
     if let Error(1008u16) = wire_step(mut s, mut work, WClient(Hello(None, list.new()), 0u64)) {} else { return false }
     let at = host.mono_ns(clock)
-    result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: 1u32, p: 2u64, slot: 0xffffffffu32, deadline: 10u32, arg: list.new(), at: at, grows: true)))
+    result.unwrap(wire_call_ready(mut s, reg, mut work, WirePending(stream: 1u32, p: 2u64, wire_slot: 0xffffffffu32, deadline: 10u32, arg: list.new(), at: at, grows: true)))
     let refused = match transport_receive(mut s, mut work) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
     let empty = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
     let mut old: Bytes = list.new()
@@ -268,9 +268,9 @@ fn w3c_arg(n: u32) -> Bytes {
     b
 }
 
-fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) -> Frame waits {
+fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, wire_slot: u32, take arg: Bytes) -> Frame waits {
     let at = host.mono_ns(rig.owner.clock)
-    result.unwrap(wire_call_ready(mut rig.owner, rig.head.r, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
+    result.unwrap(wire_call_ready(mut rig.owner, rig.head.r, mut rig.work, WirePending(stream: stream, p: p, wire_slot: wire_slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     if let Some(take out) = transport_receive(mut rig.owner, mut rig.work) { return take out }
     let RunRequest(take q) = result.unwrap(channel.try_receive(rig.requests)) else { fail("W3c: expected request") }
     result.unwrap(head_arrival(mut rig.head, take q, false, false))
@@ -337,7 +337,7 @@ pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool w
     }
     for stream in 0u32 .. 5u32 {
         let at = host.mono_ns(clock)
-        let pending = WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: w3c_arg(7u32), at: at, grows: true)
+        let pending = WirePending(stream: stream, p: 0u64, wire_slot: 0u32, deadline: 10000u32, arg: w3c_arg(7u32), at: at, grows: true)
         result.unwrap(wire_call_ready(mut rig.owner, rig.head.r, mut rig.work, take pending))
         if let Some(_) = transport_receive(mut rig.owner, mut rig.work) { return false }
     }
@@ -754,7 +754,9 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     set(mut db, t, 1u64, 0u64)
     let h = result.unwrap(subs_handles(mut db))
     let board_reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take board_reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut bound_registry = take board_reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
 
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)

@@ -13,7 +13,7 @@ type S3ReadTrial {
     owner: FailedReadOwner,
     other: FailedReadOwner,
     release: store.Snapshot,
-    answers: List[Answer],
+    answers: List[CallAnswer],
     subscription: SubscriptionInput
 }
 

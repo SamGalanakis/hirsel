@@ -22,13 +22,21 @@ fn schema(mut d: store.Declare) -> Result[Hc, store.Error] {
 
 
 // Keys 0 to n - 1 of "data".
-fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
-    runner.cover(h.t, Included(0u64), Excluded(n))
+fn query_table(h: Hc) -> store.Table[u64, u64] {
+    clone(h.t)
+}
+
+fn query_slots() -> Result[runner.Slots[Hc], runner.RegisterError] {
+    runner.table_slot("data", code.describe(query_table))
+}
+
+fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.t, Included(0u64), Excluded(n))
 }
 
 // The query's bound also holds the rows it projects into the initial Batch: 1,954 in mode 1.
 fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
-    runner.query(mut r, code.describe(span), std.codec.key_u64(), std.codec.of_u64(), 524288u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(span), query_slots()?, 524288u64, runner.DEFAULT_STEPS)
 }
 
 // identity ++ fingerprint(A) ++ fingerprint(row schemas), as a client builds a query's key.
@@ -36,7 +44,7 @@ fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(span)))
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
-    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
 }

@@ -6,20 +6,18 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 0u64, 1u64)
     let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
-    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_loss)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
     let schema = 7u64
     let rejected = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] { Error(Schema(schema)) }
     let value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take rejected
     let mut next = Some(take value)
-    let _ = map.update(mut b.subs.by_session, 2u64, scoped fn(mut group: Map[u32, Sub]) {
-        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
-            let mut kept = option.unwrap(replace(mut entry.cover, None))
-            kept.value = option.unwrap(replace(mut next, None))
-            entry.cover = Some(take kept)
-        })
+    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_loss)), scoped fn(mut entries: List[BoundSlot]) {
+        entries[0u64].publish_value = option.unwrap(replace(mut next, None))
     })
     set(mut db, t, 1u64, 7u64)
     let owes = step(mut b, db)
@@ -87,7 +85,9 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
             return false
         }
     }
-    publisher(take reg, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds)
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    publisher(take bound_registry, arc.new(take h), result.unwrap(store.reader(db, 0u64)), take base, take from, take rounds)
     match channel.try_receive(told_from) {
         Ok(a) => if a.who != 1u64 { return false },
         _ => return false,
@@ -274,7 +274,9 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
         Ok(take x) => take x,
         Error(_) => return false,
     }
-    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let k1 = query_key(code.describe(q1))
     let _ = at_base(mut b, 1u64, 1u32, clone(k1), no_arg())
     let _ = at_base(mut b, 2u64, 1u32, clone(k1), no_arg())
@@ -342,7 +344,7 @@ fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
         let WireEvent(e: take input_event) = take event
         let input = match take input_event {
             // As the real owner does, a Subscribe is planned against the Registry and stepped prepared.
-            Input(Subscribe(sub, slot, take arg, take resume), _) => WPrepared(box.new(result.unwrap(wire_service_allocate(mut service.context, places, ValidateSubscribe(sub, slot, take arg, take resume))))),
+            Input(Subscribe(sub, wire_slot, take arg, take resume), _) => WPrepared(box.new(result.unwrap(wire_service_allocate(mut service.context, places, ValidateSubscribe(sub, wire_slot, take arg, take resume))))),
             Input(take frame, at) => WClient(take frame, at),
             FromRunner(take notice) => WRunner(take notice),
             JoinReady => WPoll(false),
@@ -534,9 +536,11 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     set(mut db, t, 2u64, 0u64)
     let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
-    let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
-    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q_fault)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_loss)), no_arg())
     let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q_late)), no_arg())
     let _ = at_base(mut b, 4u64, 1u32, query_key(code.describe(q1)), no_arg())
     let schema = 7u64
@@ -549,19 +553,11 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let losing_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take loses
     let mut faulting = Some(take faulting_value)
     let mut losing = Some(take losing_value)
-    let _ = map.update(mut b.subs.by_session, 1u64, scoped fn(mut group: Map[u32, Sub]) {
-        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
-            let mut kept = option.unwrap(replace(mut entry.cover, None))
-            kept.value = option.unwrap(replace(mut faulting, None))
-            entry.cover = Some(take kept)
-        })
+    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_fault)), scoped fn(mut entries: List[BoundSlot]) {
+        entries[0u64].publish_value = option.unwrap(replace(mut faulting, None))
     })
-    let _ = map.update(mut b.subs.by_session, 2u64, scoped fn(mut group: Map[u32, Sub]) {
-        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
-            let mut kept = option.unwrap(replace(mut entry.cover, None))
-            kept.value = option.unwrap(replace(mut losing, None))
-            entry.cover = Some(take kept)
-        })
+    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_loss)), scoped fn(mut entries: List[BoundSlot]) {
+        entries[0u64].publish_value = option.unwrap(replace(mut losing, None))
     })
     set(mut db, t, 2u64, 2u64)
     b.newest = Some(store.snapshot(db))
@@ -649,10 +645,10 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
         Error(_) => return false,
     }
     let before = latest.read(register).at == v0
-    let mut answers: List[Answer] = list.new()
+    let mut answers: List[CallAnswer] = list.new()
     for i in 0u64 .. 16384u64 {
         let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
-        list.push(mut answers, Answer(recipient: Recipient(owner: 999u64, to: channel.sender(s_to)), row: take row))
+        list.push(mut answers, CallAnswer(recipient: Recipient(owner: 999u64, to: channel.sender(s_to)), row: take row))
     }
     let _ = channel.send(to, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
     let trapped = match task.join(take publishing) {
@@ -779,7 +775,7 @@ fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.DecodeError] {
 }
 
 fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), std.codec.EncodeError] {
-    std.codec.define(mut s, "runner.tests.Account", 0)?
+    std.codec.define(mut s, "runner.runner.New", 0)?
     if std.codec.record(mut s, 1)? {
         return Ok(())
     }
@@ -802,25 +798,24 @@ fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
 }
 
 fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), std.codec.EncodeError] {
-    std.codec.define(mut s, "runner.tests.Account", 0)?
-    if std.codec.record(mut s, 2)? {
-        return Ok(())
-    }
-    std.codec.field(mut s, "balance")?
-    std.codec.schema_u64(mut s)
-    std.codec.field_default(mut s, "bonus", std.codec.of_u64(), 7)?
-    std.codec.close(mut s)
-    Ok(())
+    let derived: std.codec.Codec[New] = std.codec.of()
+    std.codec.schema_of(mut s, derived)
 }
 
 type Ah: shareable + send { t: store.Table[u64, New] }
 
-fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Cover, Capacity] {
-    cover(h.t, Included(1u64), Included(2u64))
+fn account_table(h: Ah) -> store.Table[u64, New] { clone(h.t) }
+
+fn account_slots() -> Result[Slots[Ah], RegisterError] {
+    table_slot("accounts", code.describe(account_table))
+}
+
+fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Answer[()], Capacity] {
+    table_answer("accounts", h.t, Included(1u64), Included(2u64))
 }
 
 fn accounts_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, DEFAULT_STEPS)
+    query(mut r, code.describe(accounts_q), account_slots()?, 65536u64, DEFAULT_STEPS)
 }
 
 fn push_bytes(mut out: Bytes, x: u8, n: u64) {
@@ -882,9 +877,11 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
         Error(_) => return false,
     }
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(account_slots())))
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
-    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
     if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
@@ -915,7 +912,7 @@ fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError
 }
 
 fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, 4096u64)
+    query(mut r, code.describe(accounts_q), account_slots()?, 65536u64, 4096u64)
 }
 
 fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
@@ -931,9 +928,11 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let h = Ah(t: clone(current))
     let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(account_slots())))
     let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
-    let mut b = Board(r: take reg, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64
         && list.len(o.ended) == 1u64 && o.ended[0].0 == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64))

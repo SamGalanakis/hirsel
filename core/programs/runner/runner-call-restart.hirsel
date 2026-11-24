@@ -1,0 +1,638 @@
+// R5 (RUNNER-SPEC §7's table, rows Committed, Aborted(u) and Failed) on a disk store, since a
+// memory store keeps no record. One stream's three positions, as in refusals: write(10)
+// commits at 3, refuse(7)'s aborted run keeps its reply alone at 5, and crash(2)'s fault
+// leaves the runner's reply-only Failed commit at 7, each admit the commit before. After a
+// reopen, `recorded` gives a record at exactly 3, 5 and 7 (none at 1, 2, 4, 6 or 8), each
+// with the requested key, the exact argument bytes, the stream, and the code.revision of
+// the entry that ran.
+fn drive_recorded(take d: Drive) -> () waits {
+    let s0 = conn(d, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(3u64), "recorded: write committed at 3")
+    ask(s0, d.clock, 0u64, 1u64, k_refuse(), u64_arg(7u64), LATER)
+    want(err_value(frame(s0).outcome) == Some(7u32), "recorded: refuse's Error kept")
+    ask(s0, d.clock, 0u64, 2u64, k_crash(), u64_arg(2u64), LATER)
+    want(is(frame(s0).outcome, Failed(Raised(2u32))), "recorded: crash's Failed(Raised(2))")
+    hang(take s0)
+}
+
+// The record names this entry's revision: Some, 32 bytes, and code.revision's own.
+fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
+    match code.revision(s) {
+        Some(v) => match got {
+            Some(b) => {
+                let mut w: Bytes = list.new()
+                list.append(mut w, v)
+                list.len(b) == 32u64 && b == w
+            },
+            None => false,
+        },
+        None => false,
+    }
+}
+
+fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
+    match got {
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)).caller, 0u32) && if entry == 0u64 {
+            revision_is(c.record.revision, code.describe(write))
+        } else if entry == 1u64 {
+            revision_is(c.record.revision, code.describe(refuse))
+        } else {
+            revision_is(c.record.revision, code.describe(crash))
+        },
+        None => false,
+    }
+}
+
+fn disk_options() -> store.Options {
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
+    o.resident_limit = 1048576u64
+    o.pack_bytes = 512u64
+    o.group_commits = 2u32
+    o.group_bytes = 1048576u32
+    o
+}
+
+fn drained(take fresh: store.Db, tasks: Tasks, birth: u64) -> bool waits {
+    let mut db = take fresh
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8u64)
+    let first = drain_send(to, "held", birth, 0u64, 40u64)
+    let fifo = drain_send(to, "held", birth, 1u64, 41u64)
+    result.unwrap(channel.send(to, HeadClose))
+    let join = drain_send(to, "held", birth, 0u64, 40u64)
+    let fresh_request = drain_send(to, "new", birth, 0u64, 42u64)
+    let _ = take to
+    let mail = result.unwrap(runner.mailbox(4u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take from, take mail, tasks, 1048576u64))
+    let admitted = drain_answer(first, "held", birth, 0u64)
+    let joined = drain_answer(join, "held", birth, 0u64)
+    match (admitted, joined, drain_answer(fifo, "held", birth, 1u64), drain_answer(fresh_request, "new", birth, 0u64)) {
+        (Returned(original), Returned(same), Refused(Overloaded), Refused(Overloaded)) => original == same,
+        _ => false,
+    }
+}
+
+pub fn law_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    drained(store.memory(c, r, disk_options()), tasks, host.wall_ms(c))
+}
+
+@test
+fn test_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_drain_answers_once(c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let birth = host.wall_ms(c)
+    if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks, birth) {
+        return Error(())
+    }
+    let mut options = disk_options()
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
+    let table = result.unwrap(open_data(mut db))
+    let snap = store.snapshot(db)
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
+    let key = k_write()
+    let (take held, take fresh_stream) = (drain_stream("held", birth), drain_stream("new", birth))
+    if let Duplicate(_) = result.unwrap(store.admit(mut db, held, 0u64, store.request_digest(key, u64_arg(40u64)))) {} else {
+        fail("drain: admitted reply did not survive reopen")
+    }
+    if let Admitted(_) = result.unwrap(store.admit(mut db, held, 1u64, store.request_digest(key, u64_arg(41u64)))) {} else {
+        fail("drain: refused FIFO position left a row")
+    }
+    if let Admitted(_) = result.unwrap(store.admit(mut db, fresh_stream, 0u64, store.request_digest(key, u64_arg(42u64)))) {} else {
+        fail("drain: refused fresh position left a row")
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}
+
+fn no_trigger_grant(seed: (), unused_handles: Hd, take unused: runner.TriggerContext) -> Result[(), Capacity] {
+    fail("an empty trigger list cannot start a trigger")
+}
+
+fn probe_ready(network: Net, address: Addr, clock: Clock) -> () waits {
+    let until: Until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 1000u64))
+    let socket = result.unwrap(host.connect(network, address, until))
+    let (take rx, take tx) = net.split(take socket)
+    let mut reader = take rx
+    let mut writer = take tx
+    let request = string.as_bytes("GET /hirsel/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    let mut sent = 0u64
+    while sent < list.len(request) {
+        sent += result.unwrap(host.send_pair(mut writer, list.slice(request, sent, list.len(request)), string.as_bytes(""), until))
+    }
+    let mut response: Bytes = list.with_capacity(1024u64)
+    while list.len(response) < 1024u64 {
+        let remaining = 1024u64 - list.len(response)
+        if result.unwrap(host.recv_bounded(mut reader, mut response, remaining, until)) == 0u64 {
+            break
+        }
+    }
+    let prefix = string.as_bytes("HTTP/1.1 200 OK\r\n")
+    want(list.len(response) > list.len(prefix) && list.slice(response, 0u64, list.len(prefix)) == prefix, "ready: unauthenticated status probe did not return 200")
+}
+
+fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[(), ()]]) -> runner.PlaceConfig[(), Hd, (), ()] {
+    let mut session = runner.wire_defaults(65536u64)
+    session.n_pool = 4194304u64
+    session.n_granted = 131072u64
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)
+}
+
+// RUNNER-SPEC §12.3: a fixture's typed Callee names the key registration computes, a
+// granted call runs only when the place's PlaceConfig.wire is Some, and V4 releases a
+// reply that reports a commit only at or after that commit's version.
+pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let put_entry = fixture.transact_entry(code.describe(write))
+    let ping_entry = fixture.granted_entry(code.describe(ping))
+    let with_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding())), 5000u64))
+    let mut c = result.unwrap(fixture.client(with_wire, Some(ingress.credential(random)), 5000u64))
+    let put_reply = result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32))
+    let put_durable = match put_reply.answer {
+        Returned(Ok(at)) => at >= 1u64 && put_reply.version >= at,
+        _ => false
+    }
+    let ping_ran = match result.unwrap(fixture.call(mut c, ping_entry, 9u64, 2000u32)).answer {
+        Returned(9u64) => true,
+        _ => false
+    }
+    fixture.close(take c)
+    let wired_stopped = match fixture.end(take with_wire, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }
+    let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None), 5000u64))
+    let mut d = result.unwrap(fixture.client(without_wire, None, 5000u64))
+    let ping_refused = match result.unwrap(fixture.call(mut d, ping_entry, 9u64, 2000u32)).answer {
+        Refused(NotAllowed) => true,
+        _ => false
+    }
+    // The client stays open across end: the drain ends its session, so the next call is Closed.
+    let bare_stopped = match fixture.end(take without_wire, 5000u64) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    let after_end = match fixture.call(mut d, ping_entry, 9u64, 2000u32) {
+        Error(Closed) => true,
+        _ => false
+    }
+    fixture.close(take d)
+    put_durable && ping_ran && wired_stopped && ping_refused && bare_stopped && after_end
+}
+
+@test
+fn test_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_fixture_granted(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
+    let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: no_trigger_grant, grant_bytes: 0u64))
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
+    if let Ok(Starting(Recovering)) = channel.receive(phases) {} else {
+        fail("expected Recovering")
+    }
+    if let Ok(Starting(Activating)) = channel.receive(phases) {} else {
+        fail("expected Activating")
+    }
+    if let Ok(Starting(Publishing)) = channel.receive(phases) {} else {
+        fail("expected Publishing")
+    }
+    let port = match channel.receive(phases) {
+        Ok(Starting(Listening(known))) => known.port,
+        _ => fail("expected bound listener")
+    }
+    if let Ok(Ready) = channel.receive(phases) {} else {
+        fail("expected Ready")
+    }
+    if port == 0u16 || managed_address(latest.read(status)).port != port {
+        fail("wrong bound address")
+    }
+    let address = managed_address(latest.read(status))
+    probe_ready(net, address, clock)
+    result.unwrap(channel.send(stop_to, ()))
+    if let Ok(Draining) = channel.receive(phases) {} else {
+        fail("expected Draining")
+    }
+    match task.join(take running) {
+        Ok(Ok(Stopped(_))) => (),
+        Ok(Ok(Forced(_))) => fail("empty place forced"),
+        Ok(Ok(Unstarted)) => fail("ready place returned Unstarted"),
+        Ok(Error(Full(_))) => fail("place allowance exhausted"),
+        Ok(Error(_)) => fail("place returned a start error"),
+        Error(_) => fail("operate task failed"),
+    }
+    let mut restarted_settings = managed_settings(dir, clock, random, tasks, net, address, bounds)
+    restarted_settings.selection = Current(1u64)
+    let (blocking, rebound) = result.unwrap(host.listen(net, address, 1u16))
+    want(rebound.port == port, "ready: place left listener bound")
+    let (failed_bind, held_stop, failed_phases, _) = start_managed(tasks, take restarted_settings, false)
+    match task.join(take failed_bind) {
+        Ok(Error(Listen(InUse))) => (),
+        Ok(Error(problem)) => fail(runner.start_text(problem)),
+        _ => fail("ready: occupied address not reported"),
+    }
+    while let Ok(phase) = channel.try_receive(failed_phases) {
+        if let Ready = phase {
+            fail("ready: published despite listen failure")
+        }
+    }
+    let _ = take held_stop
+    let _ = take blocking
+    let (early, early_stop, early_phases, _) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, address, bounds), true)
+    if let Ok(Ok(Unstarted)) = task.join(take early) {} else {
+        fail("ready: queued stop did not cleanly stop")
+    }
+    if let Ok(Starting(Recovering)) = channel.try_receive(early_phases) {} else {
+        fail("ready: early stop did not start at Recovering")
+    }
+    if let Ok(Draining) = channel.try_receive(early_phases) {} else {
+        fail("ready: early stop passed recovery")
+    }
+    if let Ok(_) = channel.try_receive(early_phases) {
+        fail("ready: early stop continued")
+    }
+    let _ = take early_stop
+    let mut reopened = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let codec: std.codec.Codec[Bytes] = std.codec.of_list()
+    let table = result.unwrap(store.table(mut reopened, "hirsel.runner.activation", std.codec.key_u8(), codec))
+    let stored = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), table, 0u8))
+    let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut reopened, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
+    let snap = store.snapshot(reopened)
+    let version = store.version(snap)
+    let installed = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), snap, releases, version))
+    result.unwrap(store.close(take reopened))
+    result.unwrap(std.dir.remove_all(parent, name))
+    if let Some(raw) = stored {
+        let described: std.codec.Codec[runner.Describe] = std.codec.of()
+        let activation = result.unwrap(std.codec.decode(described, raw))
+        let release = result.unwrap(runner.release_digest(activation.exported))
+        let revision = option.unwrap(code.revision(code.describe(write)))
+        if let Some(row) = installed {
+            if version == 1u64 && activation.exported[0u64].revision == revision && row.release == release && row.digest == activation.digest && release == managed_release(latest.read(status)) {
+                return std.codec.fingerprint_of(release)
+            }
+        }
+    }
+    0u64
+}
+
+fn managed_release(status: runner.Status) -> Bytes {
+    clone(status.release)
+}
+
+fn serve_until_ready(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, (), ()]) -> u64 waits {
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
+    loop {
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("restart: no Ready")
+        }
+    }
+    let observed = latest.read(status)
+    // The launch word is the 16 MiB default here; the place configures N_PLACE.
+    want(observed.n_place == N_PLACE, "restart: Status reports the launch n_place, not the place's")
+    let activation = observed.activation
+    result.unwrap(channel.send(stop_to, ()))
+    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else {
+        fail("restart: place did not stop cleanly")
+    }
+    activation
+}
+
+// RUNNER-SPEC §6 "Restart and rebuild": a launch without --hirsel-activation (Reopen)
+// runs genesis on an empty store, reopens the same registry's store at its current
+// activation without writing, and refuses another registry's Describe before handles.
+// That registry's documented upgrade, one --hirsel-install start, keeps the rows and is
+// then what a plain restart reopens.
+pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
+    let mut first = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    first.selection = Reopen
+    let installed = serve_until_ready(tasks, take first)
+    // One application commit between the starts: genesis is version 1, this row is version 2.
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let h = result.unwrap(open_data(mut db))
+    let seeded = result.unwrap(store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.t, 7u64, 70u64)
+    }))
+    if let Committed(done) = seeded {
+        result.unwrap(store.durable(mut db, done.ticket))
+    } else {
+        fail("restart: seed row did not commit")
+    }
+    result.unwrap(store.close(take db))
+    let mut second = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    second.selection = Reopen
+    let reopened = serve_until_ready(tasks, take second)
+    let mut other = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    other.selection = Reopen
+    other.place = code.describe(fixture_place)
+    let (refusing, _held, _phases, _) = start_managed(tasks, take other, false)
+    let refused = match task.join(take refusing) {
+        Ok(Error(Open(NotCurrent(Active(version, _, _))))) => version == installed,
+        _ => false,
+    }
+    let mut check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let read = result.unwrap(open_data(mut check))
+    let snap = store.snapshot(check)
+    let survived = result.unwrap(store.get(result.unwrap(store.reader(check, 0u64)), snap, read.t, 7u64)) == Some(70u64)
+    let unwritten = store.version(snap) == 2u64
+    result.unwrap(store.close(take check))
+    let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    upgrade.selection = Install
+    upgrade.place = code.describe(fixture_place)
+    let (_keep, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let installed_only = runner.operate(take upgrade, take stop, result.unwrap(runner.status_root()), None)
+    if let Ok(Unstarted) = installed_only {} else {
+        fail("restart: install did not exit successfully")
+    }
+    let mut after = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    after.selection = Reopen
+    after.place = code.describe(fixture_place)
+    let resumed = serve_until_ready(tasks, take after)
+    let mut last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let rows = result.unwrap(open_data(mut last))
+    let carried = result.unwrap(store.get(result.unwrap(store.reader(last, 0u64)), store.snapshot(last), rows.t, 7u64)) == Some(70u64)
+    result.unwrap(store.close(take last))
+    result.unwrap(std.dir.remove_all(parent, name))
+    want(resumed == 3u64, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
+    want(carried, "restart: installing the other registry lost the row written before it")
+    want(installed == 1u64 && reopened == installed, "restart: reopen did not select the installed activation")
+    want(survived, "restart: the row written before the restart is gone")
+    want(unwritten, "restart: a plain reopen or a refused registry wrote to the store")
+    want(refused, "restart: another registry was not refused NotCurrent at the installed version")
+    true
+}
+
+@test
+fn test_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_restart_reopens(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_ready_after_activation(parent, clock, random, tasks, net) != 0u64 {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let bounds = runner.Stop(lag_ms: 500u64, grace_ms: 2000u64)
+    let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let settings = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    let socket = settings.session.socket
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
+    loop {
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("lag: place did not become ready")
+        }
+    }
+    let address = managed_address(latest.read(status))
+    let before = host.mono_ns(clock)
+    result.unwrap(channel.send(stop_to, ()))
+    if let Ok(Draining) = channel.receive(phases) {} else {
+        fail("lag: readiness not withdrawn")
+    }
+    let connection = match wire_client.connect(tasks, net, address, clock, random, client_keys(), Some(ingress.credential(random)), socket) {
+        Ok(take connected) => take connected,
+        Error(_) => fail("lag: connection refused inside the lag window"),
+    }
+    wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
+    match wire_client.next(connection) {
+        Ok(Batch(_, _, _, done)) => {
+            want(list.len(done) == 1u64 && done[0u64].p == 0u64, "lag: wrong outcome count")
+            if let Returned(_) = done[0u64].outcome {} else {
+                fail("lag: send refused before admission closed")
+            }
+        },
+        _ => fail("lag: send not answered"),
+    }
+    want(host.mono_ns(clock) < before + 500000000u64, "lag: this test did not exercise an answer inside the lag window")
+    let _ = wire_client.close(take connection)
+    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else {
+        fail("lag: idle place did not stop")
+    }
+    if let Ok(_) = wire_client.connect(tasks, net, address, clock, random, client_keys(), Some(ingress.credential(random)), socket) {
+        fail("lag: accepted a connection after the drain")
+    }
+    let clipped = runner.Stop(lag_ms: 10000u64, grace_ms: 100u64)
+    let mut restarted_settings = managed_settings(dir, clock, random, tasks, net, address, clipped)
+    // The first launch installed release 1 (RUNNER-SPEC §6).
+    restarted_settings.selection = Current(1u64)
+    let (cutting, cut_to, cut_phases, cut_status) = start_managed(tasks, take restarted_settings, false)
+    loop {
+        match channel.receive(cut_phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("lag: clipped place did not become ready")
+        }
+    }
+    result.unwrap(channel.send(cut_to, ()))
+    if let Ok(Draining) = channel.receive(cut_phases) {} else {
+        fail("lag: clipped place did not drain")
+    }
+    host.sleep_until(clock, host.mono_ns(clock) + 100000000u64)
+    if let Ok(_) = wire_client.connect(tasks, net, managed_address(latest.read(cut_status)), clock, random, client_keys(), Some(ingress.credential(random)), socket) {
+        fail("lag: served a connection past the grace cut")
+    }
+    if let Ok(Ok(Forced(0u64))) = task.join(take cutting) {} else {
+        fail("lag: clipped place did not force at the cut")
+    }
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}
+
+// A place whose granted trigger run has finished stops gracefully (RUNNER-SPEC §12.1).
+// The finished run leaves a removed entry in the head's map of active runs, which the
+// stop walks with a consuming loop. A client stays connected through the stop.
+// The run hands its argument through a channel, so it waits as a granted entry must.
+fn ping(g: (), caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(to, k))
+    Ok(result.unwrap(channel.receive(from)))
+}
+
+fn ping_entries() -> (triggers.Entries, triggers.Entry[u64]) {
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(ping)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    (take entries, take target)
+}
+
+// Schedules one ping run after this commit and returns that commit's version.
+fn schedule_ping(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
+    let Some(t) = view h.triggers else {
+        return Error(1u32)
+    }
+    let (entries, target) = ping_entries()
+    match triggers.write(mut tx, t, entries, target, k, AfterCommit) {
+        Ok(id) => Ok(id.version),
+        Error(_) => Error(2u32),
+    }
+}
+
+// Returns the ping's result once the run scheduled at `version` has its terminal row, else 0.
+fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u64) -> Result[u64, u32] {
+    let Some(t) = view h.triggers else {
+        return Error(1u32)
+    }
+    let info = store.info(mut tx)
+    let id = triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
+    match triggers.fetch_outcome(tx, t, id) {
+        Ok(None) => Ok(0u64),
+        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) {
+            Ok(value) => Ok(value),
+            _ => Error(3u32)
+        },
+        _ => Error(4u32),
+    }
+}
+
+fn ping_schema(mut d: store.Declare) -> Result[Hd, store.Error] {
+    let tables = triggers.declare_tables(mut d)?
+    let mut h = schema(mut d)?
+    h.triggers = Some(take tables)
+    Ok(take h)
+}
+
+fn ping_tables(h: Hd) -> triggers.Tables {
+    option.unwrap(clone(h.triggers))
+}
+
+fn ping_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables {
+        ping_tables(h)
+    })
+    runner.transact(mut r, code.describe(schedule_ping), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(ping_outcome), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext) -> Result[(), Capacity] {
+    let _ = take context
+    Ok(())
+}
+
+fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
+    wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    loop {
+        match wire_client.next(client) {
+            Ok(Batch(_, _, _, done)) => for item in done {
+                if item.p == position {
+                    let Returned(raw) = view item.outcome else {
+                        fail("stop: call not returned")
+                    }
+                    match std.codec.decode(reply(), raw) {
+                        Ok(Ok(value)) => return value,
+                        _ => fail("stop: call refused")
+                    }
+                }
+            },
+            Ok(_) => (),
+            Error(_) => fail("stop: wire call lost"),
+        }
+    }
+}
+
+pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut settings = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+    settings.place = code.describe(ping_place)
+    settings.schema = code.describe(ping_schema)
+    let (entries, _) = ping_entries()
+    settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: unit_grant, grant_bytes: 65536u64))
+    let socket = settings.session.socket
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
+    loop {
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("stop: place did not become ready")
+        }
+    }
+    let k_schedule = key_of(code.identity(code.describe(schedule_ping)), std.codec.of_u64(), reply())
+    let k_outcome = key_of(code.identity(code.describe(ping_outcome)), std.codec.of_u64(), reply())
+    let mut ping_keys: List[Bytes] = list.new()
+    list.push(mut ping_keys, clone(k_schedule))
+    list.push(mut ping_keys, clone(k_outcome))
+    let client = match wire_client.connect(tasks, net, managed_address(latest.read(status)), clock, random, ping_keys, Some(ingress.credential(random)), socket) {
+        Ok(take connected) => take connected,
+        Error(_) => fail("stop: connection refused"),
+    }
+    let version = ping_call(client, ping_keys, k_schedule, 0u64, 7u64)
+    let mut position = 1u64
+    while ping_call(client, ping_keys, k_outcome, position, version) != 7u64 {
+        position += 1u64
+        host.sleep_until(clock, host.mono_ns(clock) + 10000000u64)
+    }
+    // The connected client keeps reading: a session that owes no send ends at Close (§12.1
+    // step 5), so the client sees its connection end, and operate closes the Db.
+    result.unwrap(channel.send(stop_to, ()))
+    let ended = match wire_client.next(client) {
+        Error(Closed) => true,
+        _ => false
+    }
+    let stopped = match task.join(take running) {
+        Ok(Ok(Stopped(_))) => true,
+        _ => false
+    }
+    let _ = wire_client.close(take client)
+    // Stopped means operate closed the Db, so the store opens again here.
+    let mut options = disk_options()
+    options.create = false
+    result.unwrap(store.close(result.unwrap(store.open(tasks, dir, clock, random, options))))
+    result.unwrap(std.dir.remove_all(parent, name))
+    ended && stopped
+}
+
+@test
+fn test_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_stop_after_trigger_run(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

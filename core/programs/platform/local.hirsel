@@ -13,23 +13,41 @@
 // its key and id rows commit in the transaction that adds or removes the group, so the
 // sessions and the groups never disagree. A create seeds the session's store first; one
 // that dies before its commit leaves a directory the next create of that id clears.
-
 // What a factory's `make` gets to build its PlaceConfig from. The launcher replaces the
 // config's backing, selection, idle bound and wire session count with the host's (§14.9).
 // `name` is the group being started, so a place can name itself to the services it is given.
-pub type Supplied: send { name: String, tasks: Tasks, clock: Clock, random: Random, net: Net }
+pub type Supplied: send {
+    name: String,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    net: Net
+}
 
 // A start sees a view of the host's seed: the services a place's grants are made from.
-pub opaque type Factory[T: send]: send { start: own[send] fn(take Launch[T], T) -> Result[Started, String] }
+pub opaque type Factory[T: send]: send {
+    start: own[send] fn(take Launch[T], T) -> Result[Started, String]
+}
 
-pub type Unloaded: send { name: String, ended: Result[runner.Ended, runner.StartError] }
+pub type Unloaded: send {
+    name: String,
+    ended: Result[runner.Ended, runner.StartError]
+}
+
 // What the host has seen of a session since it started: its place's starts and ends, and
 // the nudges a front sent after it changed the session.
-pub type Marks: codec + send { ups: u64, downs: u64, nudges: u64 }
+pub type Marks: codec + send {
+    ups: u64,
+    downs: u64,
+    nudges: u64
+}
+
 // Seeds a new session's store, migrated and open, before its group is added.
 pub type Seed = own[send] fn(mut store.Db) -> Result[(), String] waits
+
 // Up: a child reached Ready and the host accepted it. Down: a child ended.
 pub type Change: send = Up(String) | Down(Unloaded)
+
 pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Failed(String) | Stopping
 
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
@@ -37,34 +55,74 @@ pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Fa
 // and is, with `idle_ms`, the host's Config (§14.2, §14.4). `sessions` is the wire
 // sessions every place admits at once (`PlaceConfig.max_sessions`).
 pub type Config[T: send]: send {
-    root: Dir, options: store.Options, factory: Factory[T], seed: T,
-    max_places: u64, idle_ms: u64, place_bytes: u64, sessions: u64,
-    tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
+    root: Dir,
+    options: store.Options,
+    factory: Factory[T],
+    seed: T,
+    max_places: u64,
+    idle_ms: u64,
+    place_bytes: u64,
+    sessions: u64,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    net: Net,
+    watch: Option[Sender[Change]],
 }
 
-pub opaque type Local { to: Sender[In], actor: Task[()] }
-pub opaque type Door: send { to: Sender[In] }
+pub opaque type Local {
+    to: Sender[In],
+    actor: Task[()]
+}
+
+pub opaque type Door: send {
+    to: Sender[In]
+}
+
 // A host's inbox, made before the host so that its seed can hold a door to it.
-pub opaque type Doorway: send { to: Sender[In], inbox: Receiver[In] }
+pub opaque type Doorway: send {
+    to: Sender[In],
+    inbox: Receiver[In]
+}
+
 // A lease is a view of one child's status: its phase and address. It does not hold the
 // child; the host drains an idle child whether or not a lease on it lives.
-pub opaque type Lease: send { status: Latest[runner.Status] }
+pub opaque type Lease: send {
+    status: Latest[runner.Status]
+}
 
 // The child task's own bytes on top of operate's: the operate task's charge, the phase
 // handoff and its last message.
 const PLACE_TASK_BYTES: u64 = 65536u64
+
 // The host task's own bytes on top of the place budget, its catalog store and the store a
 // create seeds: its timers, inboxes and the bookkeeping of each child and session.
 const LOCAL_BYTES: u64 = 1048576u64
+
 const NEXT_ID: u64 = 0u64
 
 type Launch[T: send]: send {
-    supplied: Supplied, backing: runner.Backing, sizes: store.Overrides, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
-    stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64,
+    supplied: Supplied,
+    backing: runner.Backing,
+    sizes: store.Overrides,
+    selection: runner.Selection,
+    idle: u64,
+    sessions: u64,
+    available: u64,
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    to: Sender[In],
+    name: String,
+    gen: u64,
 }
-type Started { task: Task[()], charge: u64 }
+
+type Started {
+    task: Task[()],
+    charge: u64
+}
 
 type AccessReply = Sender[Result[Option[Lease], Refused]]
+
 pub type ColdCheck: send {
     caller: store.Caller,
     check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error] waits],
@@ -83,26 +141,57 @@ type Downs = Sender[Result[u64, Refused]]
 type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
 type PlaceJob[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
-    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64, need: u64,
+    config: runner.PlaceConfig[G, H, S, B],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    to: Sender[In],
+    name: String,
+    gen: u64,
+    need: u64,
 }
+
 type Operated[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
-    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+    config: runner.PlaceConfig[G, H, S, B],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    watch: Sender[Receiver[runner.Phase]],
 }
 
 // A live child: the host's identity for it, its stop, its status and its task.
 type Kid {
-    child: launcher.Child, stop: Option[Sender[()]], status: Latest[runner.Status], task: Option[Task[()]], charge: u64,
-    expect: Option[(u64, u64)], ready: bool, selected: launcher.Selection,
+    child: launcher.Child,
+    stop: Option[Sender[()]],
+    status: Latest[runner.Status],
+    task: Option[Task[()]],
+    charge: u64,
+    expect: Option[(u64, u64)],
+    ready: bool,
+    selected: launcher.Selection,
 }
 
-type Catalog: send { sessions: store.Table[u64, Bytes], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
+type Catalog: send {
+    sessions: store.Table[u64, Bytes],
+    keys: store.Table[Bytes, u64],
+    meta: store.Table[u64, u64]
+}
 
 // The durable catalog as the host opened it; every later change commits with a group's.
-type Sessions { catalog: Catalog, by_id: Map[u64, Bytes], by_key: Map[Bytes, u64], next_id: u64 }
+type Sessions {
+    catalog: Catalog,
+    by_id: Map[u64, Bytes],
+    by_key: Map[Bytes, u64],
+    next_id: u64
+}
 
 type Actor[T: send] {
-    h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
-    max_sessions: u64, s: Sessions,
+    h: platform.Host,
+    driving: platform.Driver,
+    factory: Factory[T],
+    seed: T,
+    root: Dir,
+    options: store.Options,
+    max_sessions: u64,
+    s: Sessions,
     // Each session's marks since the host started, who watches them and who waits for its next end.
     marks: Map[u64, Marks],
     watching: Map[u64, Map[u64, Sender[()]]],
@@ -127,10 +216,14 @@ type Actor[T: send] {
     unloaded: List[Unloaded],
 }
 
-type Begin[T: send]: send { config: Config[T], inbox: Receiver[In], me: Sender[In], ready: Sender[Result[(), Refused]] }
+type Begin[T: send]: send {
+    config: Config[T],
+    inbox: Receiver[In],
+    me: Sender[In],
+    ready: Sender[Result[(), Refused]]
+}
 
 // ---- names ----
-
 pub fn name_of(id: u64) -> String {
     let mut s = string.from("s")
     string.push_u64(mut s, id)
@@ -138,14 +231,21 @@ pub fn name_of(id: u64) -> String {
 }
 
 fn id_of(name: String) -> Option[u64] {
-    let Some(digits) = string.strip_prefix(name, "s") else { return None }
-    match (int.parse(string.from(digits)) : Result[u64, ParseError]) { Ok(n) => Some(n), Error(_) => None }
+    let Some(digits) = string.strip_prefix(name, "s") else {
+        return None
+    }
+    match (int.parse(string.from(digits)) : Result[u64, ParseError]) {
+        Ok(n) => Some(n),
+        Error(_) => None
+    }
 }
 
-type Forward: send { from: Receiver[platform.Input], to: Sender[In] }
+type Forward: send {
+    from: Receiver[platform.Input],
+    to: Sender[In]
+}
 
 // ---- factories ----
-
 pub fn factory[T: send, G: send, H: shareable + inert + send, S: send, B: shareable + send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
     let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
         let config = make(clone(request.supplied))
@@ -166,20 +266,28 @@ pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send, B:
 
 fn start_made[T: send, G: send, H: shareable + inert + send, S: send, B: shareable + send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
     let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
-    let mut config = match take made { Ok(take m) => take m, Error(_) => return Error(string.from("Full")) }
+    let mut config = match take made {
+        Ok(take m) => take m,
+        Error(_) => return Error(string.from("Full"))
+    }
     config.backing = take backing
     config.sizes = sizes
     config.selection = selection
     config.idle = Some(idle)
     config.max_sessions = sessions
-    let overhead = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
+    let overhead = match runner.operate_bytes(config) {
+        Ok(total) => total,
+        Error(_) => return Error(string.from("Full"))
+    }
     let share = match store.sized_with(Directory, 0u64, sizes) {
         Error(short) => short.need,
         Ok(_) => 0u64,
     }
     let need = int.saturating_add(overhead, int.saturating_add(share, 1048576u64))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
-    if charge > available { return Error(string.from("Full")) }
+    if charge > available {
+        return Error(string.from("Full"))
+    }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
     let run: fn(take PlaceJob[G, H, S, B]) -> () waits = run_place
     let running = task.spawn(supplied.tasks, bytes charge, take job, run)
@@ -205,7 +313,9 @@ fn operated[G: send, H: shareable + inert + send, S: send, B: shareable + send](
     let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
-            if let Ready = phase { let _ = channel.send(to, Up(string.from(name), gen)) }
+            if let Ready = phase {
+                let _ = channel.send(to, Up(string.from(name), gen))
+            }
         }
     }
     match task.join(take running) {
@@ -220,12 +330,15 @@ fn run_operate[G: send, H: shareable + inert + send, S: send, B: shareable + sen
 }
 
 // ---- the launcher side ----
-
-fn now[T: send](a: Actor[T]) -> platform.Now { platform.Now(wall_ms: host.wall_ms(a.clock), mono_ns: host.mono_ns(a.clock)) }
+fn now[T: send](a: Actor[T]) -> platform.Now {
+    platform.Now(wall_ms: host.wall_ms(a.clock), mono_ns: host.mono_ns(a.clock))
+}
 
 fn kid_index[T: send](a: Actor[T], c: launcher.Child) -> Option[u64] {
     for i in 0u64 .. list.len(a.kids) {
-        if launcher.same_child(a.kids[i].child, c) { return Some(i) }
+        if launcher.same_child(a.kids[i].child, c) {
+            return Some(i)
+        }
     }
     None
 }
@@ -234,22 +347,34 @@ fn kid_of[T: send](a: Actor[T], name: String, gen: u64) -> Option[u64] {
     for i in 0u64 .. list.len(a.kids) {
         let c = a.kids[i].child
         if c.group.name == name {
-            if let Serving(g) = c.role { if g == gen { return Some(i) } }
+            if let Serving(g) = c.role {
+                if g == gen {
+                    return Some(i)
+                }
+            }
         }
     }
     None
 }
 
 fn group_has_kid[T: send](a: Actor[T], name: String) -> bool {
-    for k in a.kids { if k.child.group.name == name { return true } }
+    for k in a.kids {
+        if k.child.group.name == name {
+            return true
+        }
+    }
     false
 }
 
 fn stop_kid(mut k: Kid) {
-    if let Some(take s) = replace(mut k.stop, None) { let _ = channel.try_send(s, ()) }
+    if let Some(take s) = replace(mut k.stop, None) {
+        let _ = channel.try_send(s, ())
+    }
 }
 
-fn selection_of(activation: u64) -> runner.Selection { Current(activation) }
+fn selection_of(activation: u64) -> runner.Selection {
+    Current(activation)
+}
 
 // Carries out a Start of a serving child: the group's store at root/<workdir>, the
 // activation the host names, and the host's idle bound.
@@ -281,18 +406,18 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let root = match runner.status_root() {
         Ok(take made) => take made,
-        Error(_) => { list.push(mut events, Refused(take child, Spawn(string.from("Full")))); return },
+        Error(_) => {
+            list.push(mut events, Refused(take child, Spawn(string.from("Full"))));
+            return
+        },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms),
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
-        available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions, available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
             a.used += charged
-            list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged,
-                expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
+            list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
             list.push(mut events, Launched(take child, Started))
         },
         Error(take why) => list.push(mut events, Refused(take child, Spawn(take why))),
@@ -305,7 +430,9 @@ fn retire[T: send](mut a: Actor[T], take g: launcher.Group, mut events: List[lau
         return
     }
     for i in 0u64 .. list.len(a.kids) {
-        if a.kids[i].child.group.name == g.name { stop_kid(mut a.kids[i]) }
+        if a.kids[i].child.group.name == g.name {
+            stop_kid(mut a.kids[i])
+        }
     }
     list.push(mut a.retiring, take g)
 }
@@ -313,11 +440,17 @@ fn retire[T: send](mut a: Actor[T], take g: launcher.Group, mut events: List[lau
 // A removed group's listener closes: its store goes too when the host retired it Delete.
 fn closed[T: send](mut a: Actor[T], take g: launcher.Group) waits {
     if let Some(r) = platform.retirement(a.h, g.name) {
-        if let Delete = r.disposition { let _ = std.dir.remove_all(a.root, r.workdir) }
+        if let Delete = r.disposition {
+            let _ = std.dir.remove_all(a.root, r.workdir)
+        }
     }
     let mut kept: List[(String, Sender[Result[(), Refused]])] = list.new()
     while let Some((name, take reply)) = list.pop(mut a.removes) {
-        if name == g.name { let _ = channel.try_send(reply, Ok(())) } else { list.push(mut kept, (take name, take reply)) }
+        if name == g.name {
+            let _ = channel.try_send(reply, Ok(()))
+        } else {
+            list.push(mut kept, (take name, take reply))
+        }
     }
     a.removes = take kept
 }
@@ -329,16 +462,22 @@ fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: Lis
     match take r {
         Hello => {
             let mut children: List[launcher.ChildState] = list.new()
-            for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None)) }
+            for k in a.kids {
+                list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None))
+            }
             list.push(mut events, Inventory(take children, list.new(), list.new()))
         },
         Bind(take g, _) => list.push(mut events, Bound(take g)),
         Close(take g) => closed(mut a, take g),
         Start(take l) => start(mut a, take l, mut events),
-        Stop(take c) => if let Some(i) = kid_index(a, c) { stop_kid(mut a.kids[i]) },
+        Stop(take c) => if let Some(i) = kid_index(a, c) {
+            stop_kid(mut a.kids[i])
+        },
         // A place task cannot be cut without its drain: a kill is the drain, which ends at
         // the place's own grace deadline (§14.9).
-        Kill(take c) => if let Some(i) = kid_index(a, c) { stop_kid(mut a.kids[i]) },
+        Kill(take c) => if let Some(i) = kid_index(a, c) {
+            stop_kid(mut a.kids[i])
+        },
         Acknowledge(_) => (),
         // HostStoreAccepted: a place here is accepted when its Placed is applied (§14.9).
         Command(_, _) => (),
@@ -361,25 +500,38 @@ fn apply[T: send](mut a: Actor[T], take reqs: List[launcher.Request]) waits {
     let mut todo = take reqs
     while list.len(todo) > 0u64 {
         let mut events: List[launcher.Event] = list.new()
-        for take r in take todo { carry_out(mut a, take r, mut events) }
+        for take r in take todo {
+            carry_out(mut a, take r, mut events)
+        }
         todo = list.new()
         for take e in take events {
             let n = now(a)
-            for take more in platform.event(mut a.h, take e, n) { list.push(mut todo, take more) }
+            for take more in platform.event(mut a.h, take e, n) {
+                list.push(mut todo, take more)
+            }
         }
     }
     platform.settle(mut a.driving, a.h)
     answer_routes(mut a)
 }
 
-fn lease_of(k: Kid) -> Lease { Lease(status: latest.handle(k.status)) }
+fn lease_of(k: Kid) -> Lease {
+    Lease(status: latest.handle(k.status))
+}
 
 // A child a lease may name: accepted by the host, not asked to stop and not draining by
 // its own idle stop. A route that finds the child draining waits for the next one.
 fn serves(k: Kid) -> bool {
-    if !k.ready { return false }
-    if let None = k.stop { return false }
-    match latest.read(k.status).phase { Draining => false, _ => true }
+    if !k.ready {
+        return false
+    }
+    if let None = k.stop {
+        return false
+    }
+    match latest.read(k.status).phase {
+        Draining => false,
+        _ => true
+    }
 }
 
 // A route is answered once the host has accepted a child of its group as Ready, and is
@@ -389,13 +541,22 @@ fn answer_routes[T: send](mut a: Actor[T]) waits {
     while let Some((take name, take reply)) = list.pop(mut a.routes) {
         let answer: Option[Result[Option[Lease], Refused]] = match platform.serving_ready(a.h, name) {
             Some(gen) => match kid_of(a, name, gen) {
-                Some(i) => if serves(a.kids[i]) { Some(Ok(Some(lease_of(a.kids[i])))) } else { None },
+                Some(i) => if serves(a.kids[i]) {
+                    Some(Ok(Some(lease_of(a.kids[i]))))
+                } else {
+                    None
+                },
                 None => None,
             },
-            None => match platform.wake_row(a.h, name) { Some(_) => None, None => Some(Error(Unknown)) },
+            None => match platform.wake_row(a.h, name) {
+                Some(_) => None,
+                None => Some(Error(Unknown))
+            },
         }
         match take answer {
-            Some(take answered) => { let _ = channel.try_send(reply, take answered) },
+            Some(take answered) => {
+                let _ = channel.try_send(reply, take answered)
+            },
             None => list.push(mut kept, (take name, take reply)),
         }
     }
@@ -405,13 +566,21 @@ fn answer_routes[T: send](mut a: Actor[T]) waits {
 fn refuse_routes[T: send](mut a: Actor[T], name: String, why: Refused) {
     let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take at, take reply)) = list.pop(mut a.routes) {
-        if at == name { let _ = channel.try_send(reply, Error(clone(why))) } else { list.push(mut kept, (take at, take reply)) }
+        if at == name {
+            let _ = channel.try_send(reply, Error(clone(why)))
+        } else {
+            list.push(mut kept, (take at, take reply))
+        }
     }
     a.routes = take kept
 }
 
 fn routed[T: send](a: Actor[T], name: String) -> bool {
-    for r in a.routes { if r.0 == name { return true } }
+    for r in a.routes {
+        if r.0 == name {
+            return true
+        }
+    }
     false
 }
 
@@ -419,12 +588,19 @@ fn routed[T: send](a: Actor[T], name: String) -> bool {
 // on its private endpoint. A store other than the one the host recorded for the group is
 // reported as a mismatch and the child is stopped.
 fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
-    let Some(i) = kid_of(a, name, gen) else { return }
-    if a.kids[i].ready { return }
+    let Some(i) = kid_of(a, name, gen) else {
+        return
+    }
+    if a.kids[i].ready {
+        return
+    }
     let s = latest.read(a.kids[i].status)
     let child: launcher.Child = clone(a.kids[i].child)
     let mut events: List[launcher.Event] = list.new()
-    let mismatch = match a.kids[i].expect { Some(want) => want.0 != s.store_id.0 || want.1 != s.store_id.1, None => false }
+    let mismatch = match a.kids[i].expect {
+        Some(want) => want.0 != s.store_id.0 || want.1 != s.store_id.1,
+        None => false
+    }
     if mismatch {
         let want = option.unwrap(a.kids[i].expect)
         stop_kid(mut a.kids[i])
@@ -433,13 +609,19 @@ fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
         a.kids[i].ready = true
         let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock), read: list.new())
         list.push(mut events, Placed(take child, PlaceOpened(take ready)))
-        if let Some(id) = id_of(name) { count_up(mut a, id) }
-        if let Some(w) = a.watch { let _ = channel.try_send(w, Up(string.from(name))) }
+        if let Some(id) = id_of(name) {
+            count_up(mut a, id)
+        }
+        if let Some(w) = a.watch {
+            let _ = channel.try_send(w, Up(string.from(name)))
+        }
     }
     let mut reqs: List[launcher.Request] = list.new()
     for take e in take events {
         let n = now(a)
-        for take r in platform.event(mut a.h, take e, n) { list.push(mut reqs, take r) }
+        for take r in platform.event(mut a.h, take e, n) {
+            list.push(mut reqs, take r)
+        }
     }
     apply(mut a, take reqs)
 }
@@ -472,9 +654,13 @@ fn start_text(e: runner.StartError) -> String {
 // once: a first failure is retried at once, and a start at 0 refused because genesis had
 // already run relaunches at the store's activation (§14.5 "Genesis").
 fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[runner.Ended, runner.StartError]) waits {
-    let Some(i) = kid_of(a, name, gen) else { return }
+    let Some(i) = kid_of(a, name, gen) else {
+        return
+    }
     let mut k = list.remove(mut a.kids, i)
-    if let Some(take t) = replace(mut k.task, None) { let _ = task.join(take t) }
+    if let Some(take t) = replace(mut k.task, None) {
+        let _ = task.join(take t)
+    }
     a.used -= k.charge
     answer_reads(mut a, name)
     let mut events: List[launcher.Event] = list.new()
@@ -483,328 +669,69 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
         if let Error(Open(NotCurrent(Active(version, _, read)))) = ended {
             list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(read))))
         }
-        if let Error(e) = ended { failed = Some(start_text(e)) }
+        if let Error(e) = ended {
+            failed = Some(start_text(e))
+        }
     }
     let readable = !a.halting && routed(a, name)
     list.push(mut events, Ended(clone(k.child), end_of(ended, readable)))
     let mut kept: List[launcher.Group] = list.new()
     while let Some(take g) = list.pop(mut a.retiring) {
-        if g.name == name && !group_has_kid(a, name) { list.push(mut events, Retired(take g)) } else { list.push(mut kept, take g) }
+        if g.name == name && !group_has_kid(a, name) {
+            list.push(mut events, Retired(take g))
+        } else {
+            list.push(mut kept, take g)
+        }
     }
     a.retiring = take kept
     let unloaded = Unloaded(name: string.from(name), ended: clone(ended))
     let mut waiting: List[(String, Sender[Result[Unloaded, Refused]])] = list.new()
     while let Some((take at, take reply)) = list.pop(mut a.unloads) {
-        if at == name { let _ = channel.try_send(reply, Ok(clone(unloaded))) } else { list.push(mut waiting, (take at, take reply)) }
+        if at == name {
+            let _ = channel.try_send(reply, Ok(clone(unloaded)))
+        } else {
+            list.push(mut waiting, (take at, take reply))
+        }
     }
     a.unloads = take waiting
-    if a.halting { list.push(mut a.unloaded, clone(unloaded)) }
-    if let Some(id) = id_of(name) { count_down(mut a, id) }
-    if let Some(w) = a.watch { let _ = channel.try_send(w, Down(take unloaded)) }
+    if a.halting {
+        list.push(mut a.unloaded, clone(unloaded))
+    }
+    if let Some(id) = id_of(name) {
+        count_down(mut a, id)
+    }
+    if let Some(w) = a.watch {
+        let _ = channel.try_send(w, Down(take unloaded))
+    }
     let mut reqs: List[launcher.Request] = list.new()
     for take e in take events {
         let n = now(a)
-        for take r in platform.event(mut a.h, take e, n) { list.push(mut reqs, take r) }
+        for take r in platform.event(mut a.h, take e, n) {
+            list.push(mut reqs, take r)
+        }
     }
     apply(mut a, take reqs)
     if let Some(take why) = take failed {
-        if !group_has_kid(a, name) { refuse_routes(mut a, name, Failed(take why)) }
-    }
-}
-
-// ---- the door's requests ----
-
-fn refused_of(r: platform.Refused) -> Refused {
-    match r {
-        Full(_) => Full,
-        Busy(_) => Busy,
-        Unknown => Unknown,
-        Exists => Exists,
-        Retiring => Retiring,
-        Missing(what) => Failed(string.from(what)),
-        Denied(why) => Failed(string.from(why)),
-        Store(_) => Failed(string.from("store")),
-        FrontConfig(_) => Failed("invalid front configuration"),
-    }
-}
-
-fn group_spec(name: String) -> platform.NewGroup {
-    platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted,
-        listen: string.new(), front: None, store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
-}
-
-fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
-    let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Failed("seed store")) }
-    let seeded = seed(mut db)
-    let _ = store.close(take db)
-    match take seeded { Ok(()) => Ok(()), Error(take why) => Error(Failed(take why)) }
-}
-
-fn add_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.add_group_with(mut h, group_spec(name_of(id)), (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
-        store.put(mut tx, env.0.sessions, env.1, clone(env.2))?
-        store.put(mut tx, env.0.keys, clone(env.2), env.1)?
-        store.put(mut tx, env.0.meta, NEXT_ID, env.1 + 1u64)
-    })
-}
-
-fn remove_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.remove_with(mut h, name_of(id), Delete, (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
-        let _ = store.delete(mut tx, env.0.keys, clone(env.2))?
-        let _ = store.delete(mut tx, env.0.sessions, env.1)?
-        Ok(())
-    })
-}
-
-// A create is idempotent by its key, and an id is never reused once committed.
-fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seed: Seed) -> Result[u64, Refused] waits {
-    if let Some(id) = map.get(a.s.by_key, key) { return Ok(id) }
-    if map.len(a.s.by_id) >= a.max_sessions { return Error(Full) }
-    let id = a.s.next_id
-    let name = name_of(id)
-    let _ = std.dir.remove_all(a.root, name)
-    if let Error(_) = std.dir.create_dir(a.root, name) { return Error(Failed("session dir")) }
-    let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Failed("session dir")) }
-    seed_store(a, dir, seed)?
-    let reqs = match add_listed(mut a.h, a.s.catalog, id, key) { Ok(take r) => take r, Error(r) => return Error(refused_of(r)) }
-    a.s.next_id = id + 1u64
-    map.insert(mut a.s.by_id, id, clone(key))
-    map.insert(mut a.s.by_key, take key, id)
-    apply(mut a, take reqs)
-    Ok(id)
-}
-
-// Unlists a session and removes its group in one commit. The answer comes when the host
-// has closed the group, after its child, if any, has drained, and its store is deleted.
-fn on_delete[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[(), Refused]]) waits {
-    let key: Bytes = match map.get(a.s.by_id, id) { Some(k) => clone(k), None => { let _ = channel.try_send(reply, Error(Unknown)); return } }
-    let name = name_of(id)
-    let reqs = match remove_listed(mut a.h, a.s.catalog, id, key) { Ok(take r) => take r, Error(r) => { let _ = channel.try_send(reply, Error(refused_of(r))); return } }
-    let _ = map.remove(mut a.s.by_id, id)
-    let _ = map.remove(mut a.s.by_key, key)
-    let _ = map.remove(mut a.marks, id)
-    let _ = map.remove(mut a.watching, id)
-    if let Some(take waiting) = map.remove(mut a.waiters, id) {
-        for take (_, r) in take waiting { let _ = channel.try_send(r, Error(Unknown)) }
-    }
-    list.push(mut a.removes, (string.from(name), take reply))
-    refuse_reads(mut a, name)
-    apply(mut a, take reqs)
-    refuse_routes(mut a, name, Unknown)
-}
-
-fn on_listing[T: send](a: Actor[T]) -> List[u64] {
-    let mut ids: List[u64] = list.new()
-    for (id, _) in a.s.by_id { list.push(mut ids, id) }
-    ids
-}
-
-// The group of a listed session; a session not listed is Unknown.
-fn listed[T: send](a: Actor[T], id: u64) -> Result[String, Refused] {
-    if map.contains(a.s.by_id, id) { Ok(name_of(id)) } else { Error(Unknown) }
-}
-
-// ---- marks ----
-
-fn marks_of[T: send](a: Actor[T], id: u64) -> Marks {
-    match map.get(a.marks, id) {
-        Some(m) => Marks(ups: m.ups, downs: m.downs, nudges: m.nudges),
-        None => Marks(ups: 0u64, downs: 0u64, nudges: 0u64),
-    }
-}
-
-fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) {
-    map.insert(mut a.marks, id, take m)
-    if let Some(watchers) = map.get(a.watching, id) {
-        for (_, to) in watchers { let _ = channel.try_send(to, ()) }
-    }
-}
-
-fn count_up[T: send](mut a: Actor[T], id: u64) {
-    if !map.contains(a.s.by_id, id) { return }
-    let m = marks_of(a, id)
-    put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
-}
-
-fn on_nudge[T: send](mut a: Actor[T], id: u64) {
-    if !map.contains(a.s.by_id, id) { return }
-    let m = marks_of(a, id)
-    put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
-}
-
-fn count_down[T: send](mut a: Actor[T], id: u64) {
-    if !map.contains(a.s.by_id, id) { return }
-    let m = marks_of(a, id)
-    let n = m.downs + 1u64
-    put_marks(mut a, id, Marks(ups: m.ups, downs: n, nudges: m.nudges))
-    let Some(take waiting) = map.remove(mut a.waiters, id) else { return }
-    let mut kept: List[(u64, Downs)] = list.new()
-    for take (after, r) in take waiting {
-        if n > after { let _ = channel.try_send(r, Ok(n)) } else { list.push(mut kept, (after, take r)) }
-    }
-    if list.len(kept) > 0u64 { map.insert(mut a.waiters, id, take kept) }
-}
-
-fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Downs) {
-    if !map.contains(a.s.by_id, id) { let _ = channel.try_send(reply, Error(Unknown)); return }
-    let n = marks_of(a, id).downs
-    if n > after { let _ = channel.try_send(reply, Ok(n)); return }
-    let mut waiting = match map.remove(mut a.waiters, id) { Some(take w) => take w, None => list.new() }
-    list.push(mut waiting, (after, take reply))
-    map.insert(mut a.waiters, id, take waiting)
-}
-
-fn on_watch[T: send](mut a: Actor[T], id: u64, take notify: Sender[()], reply: Sender[u64]) {
-    a.next_watch += 1u64
-    let mut watchers = match map.remove(mut a.watching, id) { Some(take old) => take old, None => map.new() }
-    if let Ok(()) = channel.try_send(reply, a.next_watch) {
-        map.insert(mut watchers, a.next_watch, take notify)
-    }
-    if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
-}
-
-fn on_unwatch[T: send](mut a: Actor[T], id: u64, token: u64) {
-    if let Some(take old) = map.remove(mut a.watching, id) {
-        let mut watchers = take old
-        let _ = map.remove(mut watchers, token)
-        if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
-    }
-}
-
-// Wakes the group (§14.3, an operator request) and answers when the host has a Ready child
-// for it. A route during a child's drain waits for the next child, which the drain's end
-// starts because the route makes it readable.
-fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
-    let name = match listed(a, id) { Ok(take n) => take n, Error(why) => { let _ = channel.try_send(reply, Error(why)); return } }
-    let n = now(a)
-    match platform.wake(mut a.h, name, n) {
-        Ok(take reqs) => {
-            list.push(mut a.routes, (take name, take reply))
-            apply(mut a, take reqs)
-        },
-        Error(r) => { let _ = channel.try_send(reply, Error(refused_of(r))) },
-    }
-}
-
-fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
-    let name = listed(a, id)?
-    let Some(gen) = platform.serving_ready(a.h, name) else {
-        return match platform.wake_row(a.h, name) { Some(_) => Error(Busy), None => Error(Unknown) }
-    }
-    match kid_of(a, name, gen) {
-        Some(i) => if serves(a.kids[i]) { Ok(lease_of(a.kids[i])) } else { Error(Busy) },
-        None => Error(Busy),
-    }
-}
-
-// The local actor owns all child starts. A cold read runs in that actor after
-// the prior child has closed its store and before any next child can open it.
-fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[(), Refused] waits {
-    if group_has_kid(a, name) {
-        return Error(Busy)
-    }
-    let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Unknown) }
-    let Ok(take reader) = store.open_read_only(dir, a.options) else {
-        return Error(Failed("read cold store"))
-    }
-    match code.callable(check.check)(reader, check.caller) {
-        Ok(true) => Ok(()),
-        Ok(false) => Error(Denied),
-        Error(_) => Error(Failed("check cold store")),
-    }
-}
-
-fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
-    let Ok(dir) = std.dir.narrow(a.root, name) else {
-        return Error(Unknown)
-    }
-    let Ok(take reader) = store.open_read_only(dir, a.options) else {
-        return Error(Failed(string.from("read cold store")))
-    }
-    match code.callable(r.read)(reader, r.arg) {
-        Ok(take out) => Ok(take out),
-        Error(take why) => Error(Failed(take why))
-    }
-}
-
-// A read waits while a child of the session lives. It runs once that child has closed
-// the store, before the host can start the next, so it never reads beside a head.
-fn on_read[T: send](mut a: Actor[T], id: u64, take r: ColdRead, take reply: ReadReply) waits {
-    let name = match listed(a, id) {
-        Ok(take n) => take n,
-        Error(why) => {
-            let _ = channel.try_send(reply, Error(why));
-            return
+        if !group_has_kid(a, name) {
+            refuse_routes(mut a, name, Failed(take why))
         }
-    }
-    if group_has_kid(a, name) {
-        list.push(mut a.reads, (take name, take r, take reply));
-        return
-    }
-    let _ = channel.try_send(reply, run_read(a, name, r))
-}
-
-fn answer_reads[T: send](mut a: Actor[T], name: String) waits {
-    if group_has_kid(a, name) {
-        return
-    }
-    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
-    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
-        if at == name {
-            let _ = channel.try_send(reply, run_read(a, at, r))
-        } else {
-            list.push(mut kept, (take at, take r, take reply))
-        }
-    }
-    a.reads = take kept
-}
-
-fn refuse_reads[T: send](mut a: Actor[T], name: String) {
-    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
-    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
-        if at == name {
-            let _ = channel.try_send(reply, Error(Unknown))
-        } else {
-            list.push(mut kept, (take at, take r, take reply))
-        }
-    }
-    a.reads = take kept
-}
-
-fn on_access[T: send](mut a: Actor[T], id: u64, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
-    match on_peek(a, id) {
-        Ok(take lease) => { let _ = channel.try_send(reply, Ok(Some(take lease))); return },
-        Error(Busy) => (),
-        Error(take why) => { let _ = channel.try_send(reply, Error(take why)); return },
-    }
-    if let Error(take why) = check_cold(a, name_of(id), check) {
-        let _ = channel.try_send(reply, Error(take why))
-    } else if wake {
-        on_route(mut a, id, take reply)
-    } else {
-        let _ = channel.try_send(reply, Ok(None))
-    }
-}
-
-fn on_unload[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[Unloaded, Refused]]) waits {
-    let name = match listed(a, id) { Ok(take n) => take n, Error(why) => { let _ = channel.try_send(reply, Error(why)); return } }
-    match platform.unload(mut a.h, name) {
-        Ok(take reqs) => {
-            list.push(mut a.unloads, (take name, take reply))
-            apply(mut a, take reqs)
-        },
-        Error(r) => { let _ = channel.try_send(reply, Error(refused_of(r))) },
     }
 }
 
 fn forward_host(take f: Forward) -> () waits {
     while let Ok(take i) = channel.receive(f.from) {
-        if let Error(_) = channel.send(f.to, Host(take i)) { return }
+        if let Error(_) = channel.send(f.to, Host(take i)) {
+            return
+        }
     }
 }
 
 fn created(take r: Result[store.Ticket, store.Error]) -> Result[(), store.Error] {
-    match take r { Ok(_) => Ok(()), Error(Exists(_)) => Ok(()), Error(take e) => Error(take e) }
+    match take r {
+        Ok(_) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take e) => Error(take e)
+    }
 }
 
 fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
@@ -813,11 +740,12 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
     created(store.create_table(mut db, store.spec("local.sessions", std.codec.key_u64(), c_key)))?
     created(store.create_table(mut db, store.spec("local.keys", std.codec.key_bytes(), c_id)))?
     created(store.create_table(mut db, store.spec("local.meta", std.codec.key_u64(), c_id)))?
-    let catalog = Catalog(sessions: store.table(mut db, "local.sessions", std.codec.key_u64(), std.codec.of())?,
-        keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?,
-        meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
+    let catalog = Catalog(sessions: store.table(mut db, "local.sessions", std.codec.key_u64(), std.codec.of())?, keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?, meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
     let snap = store.snapshot(db)
-    let next_id = match store.get(result.unwrap(store.reader(db, 0u64)), snap, catalog.meta, NEXT_ID)? { Some(n) => n, None => 0u64 }
+    let next_id = match store.get(result.unwrap(store.reader(db, 0u64)), snap, catalog.meta, NEXT_ID)? {
+        Some(n) => n,
+        None => 0u64
+    }
     let mut by_id: Map[u64, Bytes] = map.new()
     let mut by_key: Map[Bytes, u64] = map.new()
     let mut rows = store.scan(result.unwrap(store.reader(db, 0u64)), snap, catalog.sessions, Unbounded, Unbounded)?
@@ -830,9 +758,20 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
 
 fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: store.Options, first: platform.Config) -> Result[(platform.Host, Sessions, List[launcher.Request]), Refused] waits {
     let _ = std.dir.create_dir(root, "host")
-    let Ok(dir) = std.dir.narrow(root, "host") else { return Error(Failed(string.from("host dir"))) }
-    let mut db = match store.open(tasks, dir, clock, random, clone(options)) { Ok(take v) => take v, Error(_) => return Error(Failed(string.from("host store"))) }
-    let sessions = match open_sessions(mut db) { Ok(take v) => take v, Error(_) => { let _ = store.close(take db); return Error(Failed(string.from("host catalog"))) } }
+    let Ok(dir) = std.dir.narrow(root, "host") else {
+        return Error(Failed(string.from("host dir")))
+    }
+    let mut db = match store.open(tasks, dir, clock, random, clone(options)) {
+        Ok(take v) => take v,
+        Error(_) => return Error(Failed(string.from("host store")))
+    }
+    let sessions = match open_sessions(mut db) {
+        Ok(take v) => take v,
+        Error(_) => {
+            let _ = store.close(take db);
+            return Error(Failed(string.from("host catalog")))
+        }
+    }
     match platform.open(take db, first) {
         Ok((take h, take hello)) => Ok((take h, take sessions, take hello)),
         Error(r) => Error(refused_of(r)),
@@ -841,12 +780,14 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
 
 fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
-        sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
+    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes, sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, listed_sessions, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
         Ok(take opened) => take opened,
-        Error(take why) => { let _ = channel.send(ready, Error(take why)); return },
+        Error(take why) => {
+            let _ = channel.send(ready, Error(take why));
+            return
+        },
     }
     let (host_to, host_from): (Sender[platform.Input], Receiver[platform.Input]) = channel.new(64u64)
     let fwd: fn(take Forward) -> () waits = forward_host
@@ -868,17 +809,47 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
             Up(take name, gen) => on_up(mut a, name, gen),
             Down(take name, gen, take ended) => on_down(mut a, name, gen, take ended),
             Create(take key, take seeding, take reply) => {
-                let answer: Result[u64, Refused] = if a.halting { Error(Stopping) } else { on_create(mut a, take key, take seeding) }
+                let answer: Result[u64, Refused] = if a.halting {
+                    Error(Stopping)
+                } else {
+                    on_create(mut a, take key, take seeding)
+                }
                 let _ = channel.try_send(reply, take answer)
             },
-            Delete(id, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_delete(mut a, id, take reply) },
-            Listing(take reply) => { let _ = channel.try_send(reply, on_listing(a)) },
-            Route(id, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_route(mut a, id, take reply) },
-            Access(id, take check, wake, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_access(mut a, id, check, wake, take reply) },
-            Peek(id, take reply) => { let _ = channel.try_send(reply, if a.halting { Error(Stopping) } else { on_peek(a, id) }) },
-            Unload(id, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_unload(mut a, id, take reply) },
+            Delete(id, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_delete(mut a, id, take reply)
+            },
+            Listing(take reply) => {
+                let _ = channel.try_send(reply, on_listing(a))
+            },
+            Route(id, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_route(mut a, id, take reply)
+            },
+            Access(id, take check, wake, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_access(mut a, id, check, wake, take reply)
+            },
+            Peek(id, take reply) => {
+                let _ = channel.try_send(reply, if a.halting {
+                    Error(Stopping)
+                } else {
+                    on_peek(a, id)
+                })
+            },
+            Unload(id, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_unload(mut a, id, take reply)
+            },
             Nudge(id) => on_nudge(mut a, id),
-            Marked(id, take reply) => { let _ = channel.try_send(reply, marks_of(a, id)) },
+            Marked(id, take reply) => {
+                let _ = channel.try_send(reply, marks_of(a, id))
+            },
             WatchMarks(id, take notify, take reply) => on_watch(mut a, id, take notify, reply),
             UnwatchMarks(id, token) => on_unwatch(mut a, id, token),
             Read(id, take r, take reply) => if a.halting {
@@ -894,11 +865,17 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
             Halt(take reply) => {
                 a.halting = true
                 halted = Some(take reply)
-                for i in 0u64 .. list.len(a.kids) { stop_kid(mut a.kids[i]) }
-                while let Some((_, take r)) = list.pop(mut a.routes) { let _ = channel.try_send(r, Error(Stopping)) }
+                for i in 0u64 .. list.len(a.kids) {
+                    stop_kid(mut a.kids[i])
+                }
+                while let Some((_, take r)) = list.pop(mut a.routes) {
+                    let _ = channel.try_send(r, Error(Stopping))
+                }
             },
         }
-        if a.halting && list.len(a.kids) == 0u64 { break }
+        if a.halting && list.len(a.kids) == 0u64 {
+            break
+        }
     }
     while let Some((_, take r)) = list.pop(mut a.unloads) {
         let _ = channel.try_send(r, Error(Stopping))
@@ -911,11 +888,15 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     }
     let Actor(h: take ended_host, driving: take ended_timers, unloaded: take unloaded, waiters: take waiters, ..) = take a
     for take (_, waiting) in take waiters {
-        for take (_, r) in take waiting { let _ = channel.try_send(r, Error(Stopping)) }
+        for take (_, r) in take waiting {
+            let _ = channel.try_send(r, Error(Stopping))
+        }
     }
     platform.stop(take ended_timers)
     let _ = store.close(platform.close(take ended_host))
     let _ = take inbox
     let _ = task.join(take forwarding)
-    if let Some(reply) = take halted { let _ = channel.send(reply, take unloaded) }
+    if let Some(reply) = take halted {
+        let _ = channel.send(reply, take unloaded)
+    }
 }

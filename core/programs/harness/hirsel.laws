@@ -1,13 +1,13 @@
 hirsel.laws 1
-harness@1/gateway_laws/test_front_fork_history src=a40ec7d86662fa52 sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_front_holds_stream src=62ae1339e78d0297 sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_front_shows_tool_progress src=585d8f14162c8c2e sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_gateway_route_acl src=d41d0033fe9671e6 sig=70e65659e16c96e6 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_preview_journal_and_reconnect src=9db0db58a1471d93 sig=dfb7e027037cc641 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_front_fork_history src=df3dec28859ad705 sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_front_holds_stream src=e3e30f5533ab1d62 sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_front_shows_tool_progress src=c0ed440ebafc7951 sig=fdd6c6d1f600d4e4 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_gateway_route_acl src=916d7a80e7180456 sig=70e65659e16c96e6 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_preview_journal_and_reconnect src=261440454c7b7651 sig=dfb7e027037cc641 run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_preview_slow_observer_and_retry src=8d012fd6e52f9a5d sig=76968b11c2e3aea2 run=5336b0f3b09409a1 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_subagent_once_child_crash src=237cf81d0fca3758 sig=71fc0b2fe6773555 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_subagent_once_parent_crash src=b0fa4454a66e06f2 sig=71fc0b2fe6773555 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_wake_resumes_transcript src=7602b9bc62300eba sig=8b12e449591b967d run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_subagent_once_child_crash src=b0193a8f81bcfc4d sig=71fc0b2fe6773555 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_subagent_once_parent_crash src=6a5f518da3723a18 sig=71fc0b2fe6773555 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_wake_resumes_transcript src=875aa1bf6550997b sig=8b12e449591b967d run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/laws/test_approval_bound_to_arguments src=31dbc00339110d97 sig=7b72f073f7e797ad run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_crash_matrix src=7b8cd1c37867aba3 sig=7637eac54695896b run=a0d9dc8ef6049e3c bug=- oracle=- rows=pending
 harness@1/laws/test_deadline_races src=1ddfd6e78c48fa87 sig=d03aff0fdc977de3 run=3806a14949dd9b41 bug=- oracle=- rows=pending

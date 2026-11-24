@@ -1,0 +1,168 @@
+// ---- one request ----
+type Request {
+    input: Bytes,
+    head: std.http1.Head,
+    body_at: u64,
+    body_len: u64
+}
+
+fn read_request(mut r: ReadHalf, f: Front) -> Result[Request, u16] waits {
+    let until = At(f.clock, deadline_ms(f.clock, f.within_ms))
+    let mut input: Bytes = list.with_capacity(f.head_max + f.body_max)
+    let mut head = std.http1.head()
+    let mut cursor = std.http1.cursor()
+    loop {
+        match std.http1.resume(input, mut head, mut cursor) {
+            Complete => break,
+            Partial => (),
+            Bad => return Error(400u16),
+            TooLarge => return Error(431u16),
+        }
+        if list.len(input) >= f.head_max {
+            return Error(431u16)
+        }
+        let room = f.head_max - list.len(input)
+        match host.recv_bounded(mut r, mut input, room, until) {
+            Ok(0u64) => return Error(400u16),
+            Ok(_) => (),
+            Error(_) => return Error(408u16)
+        }
+    }
+    let body_at = head.end
+    let body_len = match std.http.framing(input, view head, f.body_max) {
+        Ok(Empty) => 0u64,
+        Ok(ContentLength(n)) => n,
+        Ok(_) => return Error(411u16),
+        Error(_) => return Error(413u16),
+    }
+    while list.len(input) < body_at + body_len {
+        let want = body_at + body_len - list.len(input)
+        match host.recv_bounded(mut r, mut input, want, until) {
+            Ok(0u64) => return Error(400u16),
+            Ok(_) => (),
+            Error(_) => return Error(408u16)
+        }
+    }
+    Ok(Request(input: take input, head: take head, body_at: body_at, body_len: body_len))
+}
+
+fn part(req: Request, s: std.http1.Span) -> Bytes {
+    std.http.copy_bytes(list.slice(req.input, s.start, s.end))
+}
+
+fn field(req: Request, name: String) -> Option[Bytes] {
+    for i in 0u64 .. req.head.count {
+        let h = req.head.fields[i]
+        if std.http1.equal_ascii(part(req, h.name), string.as_bytes(name)) {
+            return Some(part(req, h.value))
+        }
+    }
+    None
+}
+
+fn body(req: Request) -> Bytes {
+    std.http.copy_bytes(list.slice(req.input, req.body_at, req.body_at + req.body_len))
+}
+
+fn text_of(take b: Bytes) -> String {
+    match string.from_utf8(take b) {
+        Ok(take t) => take t,
+        Error(_) => string.new()
+    }
+}
+
+// The path's segments after the leading slash, without the query.
+fn segments(target: Bytes) -> List[String] {
+    let mut out: List[String] = list.new()
+    let mut current: Bytes = list.new()
+    let mut started = false
+    for b in target {
+        if b == 63u8 {
+            break
+        }
+        if b == 47u8 {
+            if started {
+                list.push(mut out, text_of(replace(mut current, list.new())))
+            }
+            started = true
+        } else {
+            list.push(mut current, b)
+        }
+    }
+    if started {
+        list.push(mut out, text_of(take current))
+    }
+    out
+}
+
+// The value of `name=` in the target's query, as a decimal.
+fn query_uint(target: Bytes, name: String) -> Option[u64] {
+    let mut at = 0u64
+    while at < list.len(target) && target[at] != 63u8 {
+        at += 1u64
+    }
+    let key = string.as_bytes(name)
+    while at < list.len(target) {
+        let start = at + 1u64
+        let mut end = start
+        while end < list.len(target) && target[end] != 38u8 {
+            end += 1u64
+        }
+        let n = list.len(key)
+        if end > start + n && target[start + n] == 61u8 && std.http.copy_bytes(list.slice(target, start, start + n)) == key {
+            return match std.int.parse_uint(text_of(std.http.copy_bytes(list.slice(target, start + n + 1u64, end))), 10) {
+                Ok(v) => Some(v),
+                Error(_) => None
+            }
+        }
+        at = end
+    }
+    None
+}
+
+// The fresh status query follows the data queries and applies the same ACL.
+fn history(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, before: u64, lines: u64) -> Result[Page, u16] waits {
+    let mut client = option.unwrap(reach(d, f, id, identity, 0u64, true)?)
+    let page = history_page(mut client, f, before, lines)
+    runner.client.close(take client)
+    take page
+}
+
+fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {
+    reply_with_retry(mut w, f, status, take payload, false)
+}
+
+fn reply_with_retry(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes, retry: bool) -> () waits {
+    let mut head = string.from("HTTP/1.1 ")
+    string.push_uint(mut head, int.widen(status), 10u32, 3u64, '0')
+    string.push(mut head, " \r\nContent-Length: ")
+    string.push_u64(mut head, list.len(payload))
+    if list.len(payload) > 0u64 {
+        string.push(mut head, "\r\nContent-Type: application/json")
+    }
+    if retry {
+        string.push(mut head, "\r\nRetry-After: 5")
+    }
+    string.push(mut head, "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+    let _ = std.http.write_wire(mut w, string.into_bytes(take head), payload, f.clock, deadline_ms(f.clock, f.within_ms))
+}
+
+fn json_reply[V: codec](mut w: WriteHalf, f: Front, status: u16, v: V) -> () waits {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else {
+        return reply(mut w, f, 500u16, list.new())
+    }
+    match std.json.to_string(format, v) {
+        Ok(take text) => reply(mut w, f, status, string.into_bytes(take text)),
+        Error(_) => reply(mut w, f, 500u16, list.new()),
+    }
+}
+
+fn json_body[V: codec](req: Request, f: Front) -> Option[V] {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else {
+        return None
+    }
+    match std.json.decode_typed(format, body(req), f.body_max) {
+        Ok(take v) => Some(take v),
+        Error(_) => None
+    }
+}

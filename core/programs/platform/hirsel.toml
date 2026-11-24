@@ -21,6 +21,7 @@ runner = { major = 1, path = "../runner" }
 "platform_main.hirsel" = "platform_main"
 "local.hirsel" = "local"
 "local-api.hirsel" = "local"
+"local-requests.hirsel" = "local"
 
 [tests]
 limit = 67108864

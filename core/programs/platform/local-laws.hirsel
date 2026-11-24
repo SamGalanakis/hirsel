@@ -1,7 +1,6 @@
 // In-process host laws (RUNNER-SPEC §14.9, ported from the directory's PD1 to PD4). Each
 // creates one session, `A`, over a disk store, so a second live child of it cannot open the
 // store: it is refused `Held`.
-
 fn local_wire() -> runner.WireConfig {
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
@@ -9,10 +8,7 @@ fn local_wire() -> runner.WireConfig {
 }
 
 fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], schema_fn: StaticFn[fn(mut store.Declare) -> Result[Hd, store.Error]], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install, place: place_fn, n_place: N_PLACE,
-        on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64,
-        proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install, place: place_fn, n_place: N_PLACE, on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
@@ -25,7 +21,12 @@ fn lagged_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), 
     Ok(local_config(supplied, code.describe(place), code.describe(schema), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
-type LocalRun { local: local.Local, door: local.Door, dir_name: String, changes: Receiver[local.Change] }
+type LocalRun {
+    local: local.Local,
+    door: local.Door,
+    dir_name: String,
+    changes: Receiver[local.Change]
+}
 
 // The one session of a law's host: the first a host's catalog lists.
 const A: u64 = 0u64
@@ -49,12 +50,21 @@ fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied)
     // 256 KiB for operate, a 1 MiB keep and 1 MiB of fixture slack.
     let serving = result.unwrap(runner.serving_bytes(local_wire(), 1u64, N_PLACE))
     let place_bytes = writer + serving + N_PLACE + 1048576u64 + 2097152u64 + 262144u64 + 2 * 1048576u64
-    let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
-        place_bytes: place_bytes, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
-    let made = match local.local(local.doorway(), take config) { Ok(take made) => take made, Error(_) => fail("local: refused a valid configuration") }
+    let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
+    let made = match local.local(local.doorway(), take config) {
+        Ok(take made) => take made,
+        Error(_) => fail("local: refused a valid configuration")
+    }
     let door = local.door(made)
-    let unseeded: local.Seed = fn(mut db: store.Db) -> Result[(), String] { Ok(()) }
-    match local.create(door, string.into_bytes(string.from("a")), take unseeded) { Ok(id) => if id != A { fail("local: create took another id") }, Error(_) => fail("local: create refused") }
+    let unseeded: local.Seed = fn(mut db: store.Db) -> Result[(), String] {
+        Ok(())
+    }
+    match local.create(door, string.into_bytes(string.from("a")), take unseeded) {
+        Ok(id) => if id != A {
+            fail("local: create took another id")
+        },
+        Error(_) => fail("local: create refused")
+    }
     LocalRun(local: take made, door: take door, dir_name: take dir_name, changes: take changes)
 }
 
@@ -64,32 +74,48 @@ fn end_local(parent: Dir, take run: LocalRun) -> bool waits {
     let ended = local.stop(take made)
     let mut stopped = true
     for unloaded in ended {
-        if let Ok(Stopped(_)) = unloaded.ended {} else { stopped = false }
+        if let Ok(Stopped(_)) = unloaded.ended {} else {
+            stopped = false
+        }
     }
     result.unwrap(std.dir.remove_all(parent, dir_name))
     stopped
 }
 
-fn lease_phase(l: local.Lease) -> runner.Phase { latest.read(local.status(l)).phase }
+fn lease_phase(l: local.Lease) -> runner.Phase {
+    latest.read(local.status(l)).phase
+}
 
 fn lease_port(l: local.Lease) -> u16 {
-    match latest.read(local.status(l)).addr { Some(address) => address.port, None => 0u16 }
+    match latest.read(local.status(l)).addr {
+        Some(address) => address.port,
+        None => 0u16
+    }
 }
 
 fn wait_draining(status: Latest[runner.Status], clock: Clock) -> () waits {
     loop {
-        if let Draining = latest.read(status).phase { return }
+        if let Draining = latest.read(status).phase {
+            return
+        }
         host.sleep_until(clock, host.mono_ns(clock) + 5000000u64)
     }
 }
 
 fn next_change(changes: Receiver[local.Change]) -> local.Change waits {
-    match channel.receive(changes) { Ok(take change) => take change, Error(_) => fail("local: watch closed") }
+    match channel.receive(changes) {
+        Ok(take change) => take change,
+        Error(_) => fail("local: watch closed")
+    }
 }
 
 // Sends the port of the child this route leased, or 0 if it was refused, and holds the
 // lease until `release` closes, so both routes hold theirs at once.
-type Opening: send { door: local.Door, port: Sender[u16], release: Receiver[()] }
+type Opening: send {
+    door: local.Door,
+    port: Sender[u16],
+    release: Receiver[()]
+}
 
 fn open_port(take job: Opening) -> () waits {
     match local.route(job.door, A) {
@@ -97,16 +123,24 @@ fn open_port(take job: Opening) -> () waits {
             let _ = channel.send(job.port, lease_port(held))
             let _ = channel.receive(job.release)
         },
-        Error(_) => { let _ = channel.send(job.port, 0u16) },
+        Error(_) => {
+            let _ = channel.send(job.port, 0u16)
+        },
     }
 }
 
 fn change_is_up(changes: Receiver[local.Change]) -> bool {
-    match channel.try_receive(changes) { Ok(Up(_)) => true, _ => false }
+    match channel.try_receive(changes) {
+        Ok(Up(_)) => true,
+        _ => false
+    }
 }
 
 fn change_is_down(changes: Receiver[local.Change]) -> bool {
-    match channel.try_receive(changes) { Ok(Down(_)) => true, _ => false }
+    match channel.try_receive(changes) {
+        Ok(Down(_)) => true,
+        _ => false
+    }
 }
 
 // PD1 (§14.9): concurrent first routes to one cold group coalesce into one child. Wrong
@@ -122,7 +156,10 @@ pub fn law_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Task
     let a = result.unwrap(channel.receive(ports))
     let b = result.unwrap(channel.receive(ports))
     let started = change_is_up(run.changes)
-    let once = match channel.try_receive(run.changes) { Error(_) => true, Ok(_) => false }
+    let once = match channel.try_receive(run.changes) {
+        Error(_) => true,
+        Ok(_) => false
+    }
     let _ = take release_to
     let _ = take second_to
     let _ = task.join(take first)
@@ -132,11 +169,21 @@ pub fn law_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Task
 
 @test
 fn test_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_local_one_head(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_local_one_head(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn close_a(take door: local.Door) -> bool waits {
-    match local.unload(door, A) { Ok(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
+    match local.unload(door, A) {
+        Ok(unloaded) => match unloaded.ended {
+            Ok(Stopped(_)) => true,
+            _ => false
+        },
+        Error(_) => false
+    }
 }
 
 // PD2 (§14.9): a route during an unload waits for the drain and gets a fresh child.
@@ -144,13 +191,22 @@ fn close_a(take door: local.Door) -> bool waits {
 // Draining.
 pub fn law_local_route_during_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let run = start_local(parent, lagged_place, 60000u64, clock, random, tasks, net)
-    let first = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let first = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: first route refused")
+    }
     let old = local.status(first)
     let _ = take first
     let closing = task.spawn(tasks, bytes 65536u64, local.copy_door(run.door), close_a)
     wait_draining(old, clock)
-    let second = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: route during an unload refused") }
-    let fresh = match lease_phase(second) { Ready => true, _ => false }
+    let second = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: route during an unload refused")
+    }
+    let fresh = match lease_phase(second) {
+        Ready => true,
+        _ => false
+    }
     let closed = result.unwrap(task.join(take closing))
     let order = change_is_up(run.changes) && change_is_down(run.changes) && change_is_up(run.changes)
     let _ = take second
@@ -159,7 +215,11 @@ pub fn law_local_route_during_unload(parent: Dir, clock: Clock, random: Random, 
 
 @test
 fn test_local_route_during_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_local_route_during_unload(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_local_route_during_unload(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // PD3 (§14.4, §14.9): an idle child unloads through operate's drain, and its group routes
@@ -168,18 +228,32 @@ fn test_local_route_during_unload(parent: Dir, clock: Clock, random: Random, tas
 // still held.
 pub fn law_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let run = start_local(parent, lagged_place, 50u64, clock, random, tasks, net)
-    let first = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let first = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: first route refused")
+    }
     let old = local.status(first)
     let _ = take first
     wait_draining(old, clock)
     let reopened = match local.route(run.door, A) {
-        Ok(take held) => match lease_phase(held) { Ready => true, _ => false },
+        Ok(take held) => match lease_phase(held) {
+            Ready => true,
+            _ => false
+        },
         Error(_) => false,
     }
     // A refused route already breaks the law; the watch would never hear the Down.
-    if !reopened { return false }
+    if !reopened {
+        return false
+    }
     let _ = next_change(run.changes)
-    let unloaded_ok = match next_change(run.changes) { Down(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Up(_) => false }
+    let unloaded_ok = match next_change(run.changes) {
+        Down(unloaded) => match unloaded.ended {
+            Ok(Stopped(_)) => true,
+            _ => false
+        },
+        Up(_) => false
+    }
     end_local(parent, take run) && reopened && unloaded_ok
 }
 
@@ -212,7 +286,10 @@ fn path_in(dir: String, name: String) -> String {
 // the same way, so the place never serves without an operator.
 pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let run = start_local(parent, quick_place, 60000u64, clock, random, tasks, net)
-    let first = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let first = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: first route refused")
+    }
     let installed = latest.read(local.status(first)).activation
     let _ = take first
     let LocalRun(local: take made, door: _, dir_name: take dir_name, changes: _) = take run
@@ -234,7 +311,10 @@ pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tas
     let answered = match local.route(again.door, A) {
         Ok(take held) => {
             let s = latest.read(local.status(held))
-            match s.phase { Ready => s.activation == installed, _ => false }
+            match s.phase {
+                Ready => s.activation == installed,
+                _ => false
+            }
         },
         Error(_) => false,
     }
@@ -243,19 +323,31 @@ pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tas
 
 @test
 fn test_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_local_genesis_recovers(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_local_genesis_recovers(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
 fn test_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_local_idle_unload(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_local_idle_unload(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // The reopen law's place: `keep` writes k and schedules a ping of k one second after its
 // commit's wall time; `kept` reads k back.
 fn keep(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
-    if let Error(_) = store.put(mut tx, h.t, k, k) { return Error(1u32) }
-    let Some(t) = view h.triggers else { return Error(2u32) }
+    if let Error(_) = store.put(mut tx, h.t, k, k) {
+        return Error(1u32)
+    }
+    let Some(t) = view h.triggers else {
+        return Error(2u32)
+    }
     let (entries, target) = ping_entries()
     let due = store.info(mut tx).at + 1000u64
     match runner.triggers.write(mut tx, t, entries, target, k, At(due)) {
@@ -265,13 +357,21 @@ fn keep(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u
 }
 
 fn kept(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
-    match store.fetch(tx, h.t, k) { Ok(Some(value)) => Ok(value), Ok(None) => Ok(0u64), Error(_) => Error(1u32) }
+    match store.fetch(tx, h.t, k) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Ok(0u64),
+        Error(_) => Error(1u32)
+    }
 }
 
-fn ping_tables(h: Hd) -> runner.triggers.Tables { option.unwrap(clone(h.triggers)) }
+fn ping_tables(h: Hd) -> runner.triggers.Tables {
+    option.unwrap(clone(h.triggers))
+}
 
 fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
-    runner.use_trigger_tables(mut r, fn(h: Hd) -> runner.triggers.Tables { ping_tables(h) })
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> runner.triggers.Tables {
+        ping_tables(h)
+    })
     runner.transact(mut r, code.describe(keep), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(kept), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(ping_outcome), 65536u64, runner.DEFAULT_STEPS)?
@@ -281,8 +381,7 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 fn keeping_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     let mut config = local_config(supplied, code.describe(kept_place), code.describe(ping_schema), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
-    config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: (), grant: unit_grant, grant_bytes: 65536u64))
+    config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: unit_grant, grant_bytes: 65536u64))
     Ok(take config)
 }
 
@@ -308,16 +407,28 @@ fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: R
 pub fn law_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let run = start_local(parent, keeping_place, 60000u64, clock, random, tasks, net)
     let wanted = kept_keys()
-    let first = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let first = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: first route refused")
+    }
     let client = connect_lease(first, tasks, net, clock, random, wanted)
     let before = host.mono_ns(clock)
     let version = ping_call(client, wanted, wanted[0u64], 0u64, 7u64)
     let _ = runner.wire_client.close(take client)
     let _ = take first
-    let unloaded = match local.unload(run.door, A) { Ok(done) => match done.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
+    let unloaded = match local.unload(run.door, A) {
+        Ok(done) => match done.ended {
+            Ok(Stopped(_)) => true,
+            _ => false
+        },
+        Error(_) => false
+    }
     want(host.mono_ns(clock) < before + 1000000000u64, "local: the child was not unloaded before its trigger came due")
     host.sleep_until(clock, before + 1200000000u64)
-    let second = match local.route(run.door, A) { Ok(take held) => take held, Error(_) => fail("local: second route refused") }
+    let second = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: second route refused")
+    }
     let reader = connect_lease(second, tasks, net, clock, random, wanted)
     let kept_write = ping_call(reader, wanted, wanted[1u64], 0u64, 7u64) == 7u64
     let mut position = 1u64
@@ -332,11 +443,18 @@ pub fn law_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: 
 
 @test
 fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_local_reopen_keeps(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+    if law_local_reopen_keeps(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // The laws' place: one u64 table, "data", and the reads and writes the laws call.
-type Hd: shareable + send { t: store.Table[u64, u64], triggers: Option[runner.triggers.Tables] }
+type Hd: shareable + send {
+    t: store.Table[u64, u64],
+    triggers: Option[runner.triggers.Tables]
+}
 
 type Calls = runner.Registry[(), Hd]
 
@@ -405,12 +523,17 @@ fn ping_entries() -> (runner.triggers.Entries, runner.triggers.Entry[u64]) {
 
 // Returns the ping's result once the run scheduled at `version` has its terminal row, else 0.
 fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u64) -> Result[u64, u32] {
-    let Some(t) = view h.triggers else { return Error(1u32) }
+    let Some(t) = view h.triggers else {
+        return Error(1u32)
+    }
     let info = store.info(mut tx)
     let id = runner.triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
     match runner.triggers.fetch_outcome(tx, t, id) {
         Ok(None) => Ok(0u64),
-        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) { Ok(value) => Ok(value), _ => Error(3u32) },
+        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) {
+            Ok(value) => Ok(value),
+            _ => Error(3u32)
+        },
         _ => Error(4u32),
     }
 }
@@ -433,8 +556,13 @@ fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes
         match runner.wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {
                 if item.p == position {
-                    let Returned(raw) = view item.outcome else { fail("local: call not returned") }
-                    match std.codec.decode(reply(), raw) { Ok(Ok(value)) => return value, _ => fail("local: call refused") }
+                    let Returned(raw) = view item.outcome else {
+                        fail("local: call not returned")
+                    }
+                    match std.codec.decode(reply(), raw) {
+                        Ok(Ok(value)) => return value,
+                        _ => fail("local: call refused")
+                    }
                 }
             },
             Ok(_) => (),
@@ -443,24 +571,32 @@ fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes
     }
 }
 
-fn budget_place(mut calls: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] { Ok(()) }
-fn budget_schema(mut declaration: store.Declare) -> Result[(), store.Error] { Ok(()) }
-
-fn serve_budget_config(take backing: runner.Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> runner.PlaceConfig[(), (), (), ()] {
-    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64,
-        on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64,
-        proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+fn budget_place(mut calls: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    Ok(())
 }
 
-type ServeReady: send { phases: Receiver[Receiver[runner.Phase]], stop: Sender[()] }
+fn budget_schema(mut declaration: store.Declare) -> Result[(), store.Error] {
+    Ok(())
+}
+
+fn serve_budget_config(take backing: runner.Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> runner.PlaceConfig[(), (), (), ()] {
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64, on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+}
+
+type ServeReady: send {
+    phases: Receiver[Receiver[runner.Phase]],
+    stop: Sender[()]
+}
 
 fn stop_ready_place(take request: ServeReady) -> bool waits {
     let ServeReady(phases: take handoff, stop: take stopping) = take request
     if let Ok(take phases) = channel.receive(handoff) {
         while let Ok(phase) = channel.receive(phases) {
             if let Ready = phase {
-                return match channel.send(stopping, ()) { Ok(()) => true, Error(_) => false }
+                return match channel.send(stopping, ()) {
+                    Ok(()) => true,
+                    Error(_) => false
+                }
             }
         }
     }
@@ -472,8 +608,14 @@ fn serve_fits(take config: runner.PlaceConfig[(), (), (), ()], tasks: Tasks) -> 
     let (watch, phases): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let observe = task.spawn(tasks, bytes 4096u64, ServeReady(phases: take phases, stop: take stopping), stop_ready_place)
     let served = platform.serve(take config, take stop, result.unwrap(runner.status_root()), Some(take watch))
-    if let Ok(Stopped(_)) = served {} else { return Error("L60: platform.serve did not drain") }
-    if let Ok(true) = task.join(take observe) { Ok(()) } else { Error("L60: platform.serve never reached Ready") }
+    if let Ok(Stopped(_)) = served {} else {
+        return Error("L60: platform.serve did not drain")
+    }
+    if let Ok(true) = task.join(take observe) {
+        Ok(())
+    } else {
+        Error("L60: platform.serve never reached Ready")
+    }
 }
 
 fn serve_shortfall(take config: runner.PlaceConfig[(), (), (), ()]) -> Result[runner.Ended, runner.StartError] waits {
@@ -484,7 +626,9 @@ fn serve_shortfall(take config: runner.PlaceConfig[(), (), (), ()]) -> Result[ru
 
 @test
 fn test_platform_serve_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
-    if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
+    if runtime.root_limit() != 67108864u64 {
+        return Error("L60: executable limit")
+    }
     serve_fits(serve_budget_config(Memory, c, r, tasks, n), tasks)?
     serve_fits(serve_budget_config(Temp(d), c, r, tasks, n), tasks)?
     let limited = serve_budget_config(Memory, c, r, tasks, n)

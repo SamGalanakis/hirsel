@@ -8,10 +8,6 @@
   "core/core/tests/provide.hirsel": {
     "lines": 2344
   },
-  "core/programs/harness/gateway_laws.hirsel": {
-    "lines": 1485,
-    "reason": "gateway-push-1905"
-  },
   "core/programs/harness/laws.hirsel": {
     "lines": 1901,
     "raise_revision": 2,
@@ -33,9 +29,6 @@
     "lines": 7042,
     "raise_revision": 8,
     "reason": "m3-s3-slots-2010"
-  },
-  "core/programs/runner/runner_calls.hirsel": {
-    "lines": 2507
   },
   "core/programs/search/unicode.hirsel": {
     "lines": 1936

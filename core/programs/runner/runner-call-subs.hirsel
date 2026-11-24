@@ -1,0 +1,490 @@
+// L17 on the wire (RUNNER-SPEC §8.2; v2.12's one publisher inbox): a Subscribe reaches the
+// publisher in order with the head's Releases. Query `everything` covers keys 0 to 1,000 of
+// "data". On stream 0: write(10) commits at 3; Subscribe 1 is then answered by one Batch at
+// 3 naming 1 in `complete`, holding row 10; write(20) commits at 5, its row in a Batch at 5
+// with the outcome; after Unsubscribe 1, write(30) commits at 7 with no row; Subscribe 2
+// is one Batch at 7 holding rows 10, 20 and 30 in key order; a Subscribe on a transact key
+// is Ended(3, Refused(NoEntry)). A row's key is "data"'s table id 1 as 4 bytes big-endian,
+// then the u64 key big-endian; its value is the u64 codec's 8 bytes little-endian (L16).
+fn data_key(k: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    for x in[0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, k] {
+        list.push(mut out, x)
+    }
+    out
+}
+
+fn data_value(k: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    for x in[k, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8] {
+        list.push(mut out, x)
+    }
+    out
+}
+
+fn keyed(take outcomes: List[runner.Done]) -> List[runner.KeyedDone] {
+    let mut out: List[runner.KeyedDone] = list.new()
+    for take d in outcomes {
+        let runner.Done(stream: stream, p: p, outcome: take o) = take d
+        list.push(mut out, runner.KeyedDone(stream: sid(stream.n), p: p, outcome: take o))
+    }
+    take out
+}
+
+fn projected(take f: runner.Frame) -> runner.Down {
+    match take f {
+        Batch(v, take complete, take groups, take outcomes) => Batched(runner.KeyedBatch(version: v, complete: take complete, rows: runner.publication_rows(take groups), outcomes: keyed(take outcomes))),
+        Ended(sub, take o) => Ended(sub, take o),
+        Reset(v, take outcomes) => KeyedReset(v, keyed(take outcomes)),
+        _ => fail("calls: unexpected wire frame"),
+    }
+}
+
+fn down(cn: Conn) -> runner.Down waits {
+    let got: Result[runner.Down, ReceiveError] = match cn {
+        Socket(wire, _) => match wire_client.next(wire) {
+            Ok(take f) => Ok(projected(take f)),
+            Error(e) => Error(e)
+        },
+        Held(owner) => runner.fixture_receive(owner),
+    }
+    match take got {
+        Ok(take d) => take d,
+        Error(_) => Batched(runner.KeyedBatch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())),
+    }
+}
+
+fn try_down(cn: Conn) -> Result[runner.Down, ReceiveError] waits {
+    match cn {
+        Socket(wire, _) => match wire_client.try_next(wire) {
+            Ok(take f) => Ok(projected(take f)),
+            Error(e) => Error(e)
+        },
+        Held(owner) => runner.fixture_try_receive(owner),
+    }
+}
+
+fn subscribe(cn: Conn, sub: u32, take key: Bytes) -> () waits {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let mut arg: Bytes = list.new()
+    result.unwrap(std.codec.encode(ca, 0u32, mut arg))
+    match cn {
+        Socket(wire, _) => wire_client.send_frame(wire, Subscribe(sub, wire_client.slot(client_keys(), key), take arg, None)),
+        Held(owner) => runner.fixture_subscribe(owner, sub, take key, take arg),
+    }
+}
+
+fn unsubscribe(cn: Conn, sub: u32) -> () waits {
+    match cn {
+        Socket(wire, _) => wire_client.send_frame(wire, Unsubscribe(sub)),
+        Held(owner) => runner.fixture_unsubscribe(owner, sub),
+    }
+}
+
+// A content Batch at `version`: `complete` as given, no outcome, and exactly sub's rows for
+// `keys`, in order.
+fn content(d: runner.Down, version: u64, complete: Option[u32], sub: u32, want_keys: List[u8]) -> bool {
+    match d {
+        Batched(b) => {
+            let completes = match complete {
+                Some(c) => list.len(b.complete) == 1u64 && b.complete[0] == c,
+                None => list.len(b.complete) == 0u64,
+            }
+            if b.version != version || !completes || list.len(b.outcomes) != 0u64 || list.len(b.rows) != list.len(want_keys) {
+                return false
+            }
+            let mut i = 0u64
+            while i < list.len(want_keys) {
+                if b.rows[i].sub != sub || b.rows[i].key != data_key(want_keys[i]) || b.rows[i].value != Some(data_value(want_keys[i])) {
+                    return false
+                }
+                i += 1u64
+            }
+            true
+        },
+        _ => false,
+    }
+}
+
+// Keys from, from + 10, ... (n of them).
+fn keys(from: u8, n: u8) -> List[u8] {
+    let mut out: List[u8] = list.new()
+    for i in 0u8 .. n {
+        list.push(mut out, from + 10u8 * i)
+    }
+    out
+}
+
+fn written(g: Got, version: u64) -> bool {
+    g.version == version && ok_value(g.outcome) == Some(version)
+}
+
+fn drive_subs_wired(take d: Drive) -> () waits {
+    let s0 = conn(d, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    want(written(frame(s0), 3u64), "wired: write(10) at 3")
+    subscribe(s0, 1u32, k_everything())
+    want(content(down(s0), 3u64, Some(1u32), 1u32, keys(10u8, 1u8)), "wired: Subscribe 1 is one Batch at 3 naming it (L17)")
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(20u64), LATER)
+    want(match down(s0) {
+        Batched(b) => b.version == 5u64 && list.len(b.complete) == 0u64 && list.len(b.rows) == 1u64 && b.rows[0].sub == 1u32 && b.rows[0].key == data_key(20u8) && b.rows[0].value == Some(data_value(20u8)) && list.len(b.outcomes) == 1u64 && b.outcomes[0].stream == sid(0u64) && b.outcomes[0].p == 1u64 && ok_value(b.outcomes[0].outcome) == Some(5u64),
+        _ => false,
+    }, "wired: row 20 and the outcome are in the same Batch at 5")
+    unsubscribe(s0, 1u32)
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(30u64), LATER)
+    want(written(frame(s0), 7u64), "wired: write(30) at 7, with no row after Unsubscribe 1")
+    subscribe(s0, 2u32, k_everything())
+    want(content(down(s0), 7u64, Some(2u32), 2u32, keys(10u8, 3u8)), "wired: Subscribe 2 is one Batch at 7 naming it")
+    subscribe(s0, 3u32, k_write())
+    want(match down(s0) {
+        Ended(sub, o) => sub == 3u32 && is(o, Refused(NoEntry)),
+        _ => false,
+    }, "wired: a transact key is no query")
+    hang(take s0)
+}
+
+// Enough writes to fill A's owner inbox (64), with room to spare.
+const STALL_WRITES: u64 = 150u64
+
+// write(k)'s row: "data"'s table id 1 as 4 bytes big-endian, then k big-endian (L16).
+fn row_key(k: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    for x in[0u8, 0u8, 0u8, 1u8] {
+        list.push(mut out, x)
+    }
+    std.codec.put_key_u64(k, mut out)
+    out
+}
+
+// write(k)'s value: the u64 codec's 8 bytes, little-endian.
+fn row_value(k: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.put_u64(k, mut out)
+    out
+}
+
+// A's cache of sub 1 as a client keeps it (WIRE §3): every `complete` replaces it from empty,
+// and a row sets or removes its key. `at` is the version the cache is current at; a diff is
+// applied only at `at` + 2 (each of B's writes is one round, two versions apart), so a
+// diff past a hole fails. `repairs` counts the `complete`s after the first.
+type Cache {
+    rows: Map[Bytes, Bytes],
+    at: u64,
+    completes: u64
+}
+
+fn cache() -> Cache {
+    Cache(rows: map.new(), at: 0u64, completes: 0u64)
+}
+
+fn apply(mut c: Cache, take d: runner.Down) {
+    match take d {
+        Batched(take x) => {
+            let runner.KeyedBatch(version: version, complete: complete, rows: take rows, outcomes: _) = take x
+            want(version != NEVER, "repair: A's channel closed")
+            let replaces = list.len(complete) == 1u64 && complete[0] == 1u32
+            want(replaces || list.len(complete) == 0u64, "repair: A's complete names only sub 1")
+            if replaces {
+                c.rows = map.new()
+                c.completes += 1u64
+            } else {
+                want(version == c.at + 2u64, "repair: a diff crosses a hole in A's cache")
+            }
+            for take row in rows {
+                want(row.sub == 1u32, "repair: A's rows are sub 1's")
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
+                match take value {
+                    Some(take v) => map.insert(mut c.rows, take key, take v),
+                    None => {
+                        let _ = map.remove(mut c.rows, key)
+                    },
+                }
+            }
+            c.at = version
+        },
+        Ended(_, _) => fail("repair: A's sub ended"),
+        _ => fail("repair: A got a Reset"),
+    }
+}
+
+// The exact image after writes 0 .. n: every key once, with its value, at write n - 1's version.
+fn exact(c: Cache, n: u64) -> bool {
+    if c.at != 3u64 + 2u64 * (n - 1u64) || map.len(c.rows) != n {
+        return false
+    }
+    for k in 0u64 .. n {
+        match map.get(c.rows, row_key(k)) {
+            Some(v) => if v != row_value(k) {
+                return false
+            },
+            None => return false,
+        }
+    }
+    true
+}
+
+// B's write i, answered in its own round with its row and outcome.
+fn wrote(b: Conn, clock: Clock, i: u64) -> () waits {
+    ask(b, clock, 0u64, i, k_write(), u64_arg(i), LATER)
+    let v = 3u64 + 2u64 * i
+    want(match down(b) {
+        Batched(x) => x.version == v && list.len(x.rows) == 1u64 && list.len(x.outcomes) == 1u64 && x.outcomes[0].p == i && ok_value(x.outcomes[0].outcome) == Some(v),
+        _ => false,
+    }, "never_blocks: B's row and outcome arrive in their round while A is full")
+}
+
+// B's writes from `from` while A reads nothing: A's inbox fills and a round bounces.
+fn stall(b: Conn, clock: Clock, from: u64) -> () waits {
+    for i in from .. from + STALL_WRITES {
+        wrote(b, clock, i)
+    }
+}
+
+// A reads in a quiet place until its cache is current: only the owner's wake can carry the
+// repair (L24).
+fn quiet_repair(a: Conn, mut c: Cache, n: u64) -> () waits {
+    let before = c.completes
+    while c.at != 3u64 + 2u64 * (n - 1u64) || c.completes == before {
+        apply(mut c, down(a))
+    }
+    want(exact(c, n), "repair: A's image after a quiet drain is exact")
+}
+
+// L23 (RUNNER-SPEC v2.20, publisher_never_blocks): A subscribes sub 1 and stops reading; B's
+// writes each reach B in their round while A's inbox is full. A then drains while B keeps
+// writing: A's sub is never ended or reset, no diff crosses the hole the bounce made, and
+// one replacing `complete` brings A's cache to the exact rows.
+fn drive_publisher_never_blocks(take d: Drive) -> () waits {
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
+    let b = conn(d, 1u64)
+    subscribe(a, 1u32, k_everything())
+    subscribe(b, 1u32, k_everything())
+    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "never_blocks: B's empty initial Batch at 1")
+    stall(b, d.clock, 0u64)
+    let mut c = cache()
+    let mut n = STALL_WRITES
+    while c.completes < 2u64 {
+        match try_down(a) {
+            Ok(take x) => apply(mut c, take x),
+            Error(_) => {
+                want(n < STALL_WRITES + 16u64, "never_blocks: A's repair never came")
+                wrote(b, d.clock, n)
+                n += 1u64
+            },
+        }
+    }
+    while c.at != 3u64 + 2u64 * (n - 1u64) {
+        apply(mut c, down(a))
+    }
+    want(exact(c, n), "never_blocks: A's image is exact after its repair")
+    hang(take a)
+    hang(take b)
+}
+
+// L24 (RUNNER-SPEC v2.20, repair_delivered): L23's stall, then B stops and the place is quiet;
+// A's repair still comes, after the rounds that fit, with the exact rows. Then again, with a
+// replacing Subscribe of sub 1 while it is due, so a wake spent on the first bounce cannot
+// carry the second. Then a third stall, with an Unsubscribe while sub 1 is due: A drains the
+// rounds that fit and nothing names sub 1 after them.
+fn drive_repair_delivered(take d: Drive) -> () waits {
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
+    let b = conn(d, 1u64)
+    subscribe(a, 1u32, k_everything())
+    subscribe(b, 1u32, k_everything())
+    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "repair: B's empty initial Batch at 1")
+    let mut c = cache()
+    stall(b, d.clock, 0u64)
+    quiet_repair(a, mut c, STALL_WRITES)
+    stall(b, d.clock, STALL_WRITES)
+    subscribe(a, 1u32, k_everything())
+    quiet_repair(a, mut c, 2u64 * STALL_WRITES)
+    stall(b, d.clock, 2u64 * STALL_WRITES)
+    unsubscribe(a, 1u32)
+    let completes = c.completes
+    // B's write after the Unsubscribe is ordered after it on PubIn, so once B has its answer
+    // the publisher holds no sub 1 of A.
+    wrote(b, d.clock, 3u64 * STALL_WRITES)
+    while let Ok(take x) = try_down(a) {
+        apply(mut c, take x)
+    }
+    wrote(b, d.clock, 3u64 * STALL_WRITES + 1u64)
+    while let Ok(take x) = try_down(a) {
+        apply(mut c, take x)
+    }
+    want(c.completes == completes, "repair: nothing names sub 1 after its Unsubscribe")
+    hang(take a)
+    hang(take b)
+}
+
+pub fn law_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    if !runner.law_owner_take_wakes() || !runner.law_owner_takes_queued() {
+        return false
+    }
+    served(c, r, tasks, n, drive_repair_delivered)
+}
+
+@test
+fn test_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_repair_delivered(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// The keys `first` and then `rest`, in order.
+fn key_list(first: Option[u64], rest: Option[u64]) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    if let Some(k) = first {
+        list.push(mut out, k)
+    }
+    if let Some(k) = rest {
+        list.push(mut out, k)
+    }
+    out
+}
+
+// A Caller whose subject is the one byte `first`.
+fn subject_caller(first: u8) -> runner.Caller {
+    let mut subject: Bytes = list.new()
+    list.push(mut subject, first)
+    store.Caller(issuer: 2u8, subject: take subject)
+}
+
+// One owner's image of sub 1: a `complete` replaces it, a row sets or removes its key.
+type Image {
+    rows: Map[Bytes, Bytes],
+    at: u64,
+    completes: u64
+}
+
+fn follow(mut i: Image, take d: runner.Down, who: String) {
+    match take d {
+        Batched(take x) => {
+            let runner.KeyedBatch(version: version, complete: complete, rows: take rows, outcomes: _) = take x
+            want(version != NEVER, clone(who))
+            if list.len(complete) != 0u64 {
+                want(list.len(complete) == 1u64 && complete[0] == 1u32, clone(who))
+                i.rows = map.new()
+                i.completes += 1u64
+            }
+            for take row in rows {
+                want(row.sub == 1u32, clone(who))
+                let runner.SubRow(sub: _, key: take key, value: take value) = take row
+                match take value {
+                    Some(take v) => map.insert(mut i.rows, take key, take v),
+                    None => {
+                        let _ = map.remove(mut i.rows, key)
+                    },
+                }
+            }
+            i.at = version
+        },
+        _ => want(false, clone(who)),
+    }
+}
+
+// Follow `cn` until its image is at `version` with at least `completes` completes, then
+// check it holds exactly `ks`, each with write(k)'s value.
+fn image_at(cn: Conn, mut i: Image, version: u64, completes: u64, ks: List[u64], take who: String) -> () waits {
+    while i.at != version || i.completes < completes {
+        follow(mut i, down(cn), clone(who))
+    }
+    want(map.len(i.rows) == list.len(ks), clone(who))
+    for k in ks {
+        match map.get(i.rows, row_key(k)) {
+            Some(v) => want(v == row_value(k), clone(who)),
+            None => want(false, clone(who)),
+        }
+    }
+}
+
+// W's write of key k at position p, committed at 3 + 2p.
+fn put_at(w: Conn, clock: Clock, p: u64, k: u64) -> () waits {
+    ask(w, clock, 0u64, p, k_write(), u64_arg(k), LATER)
+    want(written(frame(w), 3u64 + 2u64 * p), "query_as: W's write commits in order")
+}
+
+// query_as_caller (RUNNER-SPEC rule 2, L32 for subscriptions): A and B, bound to Callers with
+// subject bytes 1 and 2, subscribe the same sub id to the same caller-dependent query with the
+// same argument. `mine` covers keys from the subject byte up, so each image is worked out by
+// hand from the writes: key 1 is A's alone.
+// - Subscribe: W wrote key 1 at 3. A's image is {1}; B's is empty.
+// - Rerun: W writes key 0 at 5, which both runs read, so both re-run; then key 3 at 7. Run
+//   with its own Caller, each Cover is unchanged, so A's image is {1, 3} and B's is {3}.
+// - Repair: A and B stop reading while W writes keys 100 to 249 at 9 to 307, so both inboxes
+//   fill and both subs fall due. Each one's replacing `complete` at 307 holds its own rows:
+//   A's {1, 3, 100..249} and B's {3, 100..249}.
+fn drive_query_as_caller(take d: Drive) -> () waits {
+    let w = conn(d, 1u64)
+    put_at(w, d.clock, 0u64, 1u64)
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
+    let b: Conn = Held(runner.fixture_owner(d.post, subject_caller(2u8)))
+    subscribe(a, 1u32, k_mine())
+    subscribe(b, 1u32, k_mine())
+    let mut ia = Image(rows: map.new(), at: 0u64, completes: 0u64)
+    let mut ib = Image(rows: map.new(), at: 0u64, completes: 0u64)
+    image_at(a, mut ia, 3u64, 1u64, key_list(Some(1u64), None), string.from("query_as: A's initial image is {1} at 3"))
+    image_at(b, mut ib, 3u64, 1u64, list.new(), string.from("query_as: B's initial image is empty at 3"))
+    put_at(w, d.clock, 1u64, 0u64)
+    put_at(w, d.clock, 2u64, 3u64)
+    image_at(a, mut ia, 7u64, 1u64, key_list(Some(1u64), Some(3u64)), string.from("query_as: A's image after the rerun is {1, 3} at 7"))
+    image_at(b, mut ib, 7u64, 1u64, key_list(Some(3u64), None), string.from("query_as: B's image after the rerun is {3} at 7"))
+    let mut shared: List[u64] = list.new()
+    for p in 3u64 .. 3u64 + STALL_WRITES {
+        let k = 97u64 + p
+        put_at(w, d.clock, p, k)
+        list.push(mut shared, k)
+    }
+    let last = 3u64 + 2u64 * (2u64 + STALL_WRITES)
+    let mut own_a = key_list(Some(1u64), Some(3u64))
+    let mut own_b = key_list(Some(3u64), None)
+    for k in shared {
+        list.push(mut own_a, k)
+        list.push(mut own_b, k)
+    }
+    image_at(a, mut ia, last, 2u64, own_a, string.from("query_as: A's repaired image holds key 1 and the stall"))
+    image_at(b, mut ib, last, 2u64, own_b, string.from("query_as: B's repaired image holds the stall without key 1"))
+    hang(take a)
+    hang(take b)
+    hang(take w)
+}
+
+pub fn law_query_as_caller(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_query_as_caller)
+}
+
+@test
+fn test_query_as_caller(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_query_as_caller(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_publisher_never_blocks)
+}
+
+@test
+fn test_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_publisher_never_blocks(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+pub fn law_subs_wired(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_subs_wired)
+}
+
+@test
+fn test_subs_wired(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_subs_wired(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

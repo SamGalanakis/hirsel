@@ -1,13 +1,18 @@
 // Module local (package store): the host's request API. Each call asks the host task
 // through its inbox and waits for the answer; `local` starts the task (local.hirsel).
-
 // What a host spends: its places' budget, its catalog store, the store a create seeds
 // and its own task.
 pub fn host_bytes(options: store.Options, place_bytes: u64) -> Result[u64, Refused] {
     let plan = store.writer_plan(Directory, options) ?=> |_| Full
-    let Some(stores) = int.checked_mul(store.writer_bytes(plan), 2u64) else { return Error(Full) }
-    let Some(owned) = int.checked_add(stores, LOCAL_BYTES) else { return Error(Full) }
-    let Some(need) = int.checked_add(place_bytes, owned) else { return Error(Full) }
+    let Some(stores) = int.checked_mul(store.writer_bytes(plan), 2u64) else {
+        return Error(Full)
+    }
+    let Some(owned) = int.checked_add(stores, LOCAL_BYTES) else {
+        return Error(Full)
+    }
+    let Some(need) = int.checked_add(place_bytes, owned) else {
+        return Error(Full)
+    }
     Ok(need)
 }
 
@@ -16,10 +21,14 @@ pub fn doorway() -> Doorway {
     Doorway(to: take to, inbox: take inbox)
 }
 
-pub fn door_of(w: Doorway) -> Door { Door(to: channel.sender(w.to)) }
+pub fn door_of(w: Doorway) -> Door {
+    Door(to: channel.sender(w.to))
+}
 
 pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local, Refused] waits {
-    if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 { return Error(Full) }
+    if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 {
+        return Error(Full)
+    }
     let tasks = config.tasks
     let need = host_bytes(config.options, config.place_bytes)?
     let Doorway(to: take to, inbox: take inbox) = take way
@@ -32,20 +41,37 @@ pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local
     }
     match channel.receive(started) {
         Ok(Ok(())) => Ok(Local(to: take to, actor: take actor)),
-        Ok(Error(take why)) => { let _ = task.join(take actor); Error(take why) },
-        Error(_) => { let _ = task.join(take actor); Error(Stopping) },
+        Ok(Error(take why)) => {
+            let _ = task.join(take actor);
+            Error(take why)
+        },
+        Error(_) => {
+            let _ = task.join(take actor);
+            Error(Stopping)
+        },
     }
 }
 
-pub fn door(l: Local) -> Door { Door(to: channel.sender(l.to)) }
+pub fn door(l: Local) -> Door {
+    Door(to: channel.sender(l.to))
+}
 
-pub fn copy_door(d: Door) -> Door { Door(to: channel.sender(d.to)) }
+pub fn copy_door(d: Door) -> Door {
+    Door(to: channel.sender(d.to))
+}
 
-pub fn status(l: Lease) -> Latest[runner.Status] { latest.handle(l.status) }
+pub fn status(l: Lease) -> Latest[runner.Status] {
+    latest.handle(l.status)
+}
 
 fn ask[A: send](d: Door, take m: In, answer: Receiver[A], take stopped: A) -> A waits {
-    if let Error(_) = channel.send(d.to, take m) { return take stopped }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => take stopped }
+    if let Error(_) = channel.send(d.to, take m) {
+        return take stopped
+    }
+    match channel.receive(answer) {
+        Ok(take answered) => take answered,
+        Error(_) => take stopped
+    }
 }
 
 // Creates the session `key` names, or finds it: a new one's store is migrated and seeded
@@ -97,7 +123,9 @@ pub fn unload(d: Door, id: u64) -> Result[Unloaded, Refused] waits {
 }
 
 // Tells the host that a front changed a session, so streams that follow it look again.
-pub fn nudge(d: Door, id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
+pub fn nudge(d: Door, id: u64) -> () waits {
+    let _ = channel.send(d.to, Nudge(id))
+}
 
 pub fn marks(d: Door, id: u64) -> Marks waits {
     let (reply, answer): (Sender[Marks], Receiver[Marks]) = channel.new(1u64)
@@ -108,11 +136,18 @@ pub fn marks(d: Door, id: u64) -> Marks waits {
 // because marks contain the cumulative counts.
 pub fn watch_marks(d: Door, id: u64, notify: Sender[()]) -> Option[u64] waits {
     let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) { return None }
-    match channel.receive(answer) { Ok(token) => Some(token), Error(_) => None }
+    if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) {
+        return None
+    }
+    match channel.receive(answer) {
+        Ok(token) => Some(token),
+        Error(_) => None
+    }
 }
 
-pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits { let _ = channel.send(d.to, UnwatchMarks(id, token)) }
+pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits {
+    let _ = channel.send(d.to, UnwatchMarks(id, token))
+}
 
 // Waits until the session's child has ended more than `after` times, and answers how many.
 pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits {
@@ -133,7 +168,10 @@ pub fn stop(take l: Local) -> List[Unloaded] waits {
     let Local(to: take to, actor: take actor) = take l
     let (reply, answer): (Sender[List[Unloaded]], Receiver[List[Unloaded]]) = channel.new(1u64)
     let _ = channel.send(to, Halt(take reply))
-    let ended = match channel.receive(answer) { Ok(take done) => take done, Error(_) => list.new() }
+    let ended = match channel.receive(answer) {
+        Ok(take done) => take done,
+        Error(_) => list.new()
+    }
     let _ = task.join(take actor)
     take ended
 }

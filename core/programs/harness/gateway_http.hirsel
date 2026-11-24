@@ -146,7 +146,10 @@ fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, first_p
                         }
                         match checked_status(mut client, f) {
                             Ok(_) => return Ok(Some(take client)),
-                            Error(403u16) => { runner.client.close(take client); return Error(403u16) },
+                            Error(403u16) => {
+                                runner.client.close(take client);
+                                return Error(403u16)
+                            },
                             Error(_) => runner.client.close(take client),
                         }
                     }
@@ -171,7 +174,9 @@ type Identity {
 }
 
 fn request_position(req: Request) -> Result[u64, u16] {
-    let Some(at) = field(req, "hirsel-position") else { return Error(400u16) }
+    let Some(at) = field(req, "hirsel-position") else {
+        return Error(400u16)
+    }
     Ok(std.int.parse_uint(text_of(take at), 10) ?=> |_| 400u16)
 }
 
@@ -342,11 +347,19 @@ fn send_rows(mut w: WriteHalf, f: Front, image: runner.client.Seen, mut sent: Ma
             continue
         }
         if let Some(old) = map.get(sent, at) {
-            if old == raw { continue }
+            if old == raw {
+                continue
+            }
         }
-        let Ok(take v) = std.codec.decode(codec, raw) else { continue }
-        let Some(take event) = event_of(Shown(at: at, line: take v), None) else { return false }
-        if !send_out(mut w, f, take event) { return false }
+        let Ok(take v) = std.codec.decode(codec, raw) else {
+            continue
+        }
+        let Some(take event) = event_of(Shown(at: at, line: take v), None) else {
+            return false
+        }
+        if !send_out(mut w, f, take event) {
+            return false
+        }
         map.insert(mut sent, at, clone(raw))
     }
     true
@@ -413,15 +426,17 @@ fn send_preview(mut w: WriteHalf, f: Front, mut client: runner.client.Client, se
     if start == Some(end) {
         return true
     }
-
     // Read the ACL after fetching the draft. A status image already held by the
     // follow loop might precede a revocation that raced the hub read.
-    let Ok(take present) = runner.client.fence(mut client, window_entry(), Status, f.tasks, f.within_ms) else { return false }
-    let Some(status) = visible_status(present) else { return false }
+    let Ok(take present) = runner.client.fence(mut client, window_entry(), Status, f.tasks, f.within_ms) else {
+        return false
+    }
+    let Some(status) = visible_status(present) else {
+        return false
+    }
     if !busy(status) {
         return clear_preview(mut w, f, mut watch)
     }
-
     let encoded = match start {
         Some(held) => {
             let more = PreviewDelta(seq: draft.seq, at: held, text: string.from(string.slice(draft.text, held - draft.offset, end - draft.offset)))
@@ -490,20 +505,26 @@ fn follow_loop(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, qui
             let Following(client: take client, ..) = take place
             runner.client.close(take client)
             unwatch(mut watch)
-            if !ending || !clear_preview(mut w, f, mut watch) { return }
+            if !ending || !clear_preview(mut w, f, mut watch) {
+                return
+            }
         } else {
             let m = harness.gateway.marks(d, id)
             if m.nudges != last.nudges || m.ups != last.ups {
                 let nudged = m.nudges != last.nudges
                 last = m
                 match follow_from(d, f, id, nudged, nudged, identity, tail, mut first) {
-                    Ok(take next) => { following = take next },
+                    Ok(take next) => {
+                        following = take next
+                    },
                     Error(403u16) => return,
                     Error(_) => (),
                 }
                 continue
             }
-            if !heartbeat(mut w, f, mut beat_at) { return }
+            if !heartbeat(mut w, f, mut beat_at) {
+                return
+            }
             let alarm = std.clock.alarm(f.tasks, f.clock, beat_at, notify, ())
             let _ = channel.receive(changed)
             let _ = task.cancel_join(take alarm)
@@ -512,7 +533,9 @@ fn follow_loop(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, qui
 }
 
 fn heartbeat(mut w: WriteHalf, f: Front, mut at: u64) -> bool waits {
-    if host.mono_ns(f.clock) < at { return true }
+    if host.mono_ns(f.clock) < at {
+        return true
+    }
     at = deadline_ms(f.clock, f.beat_ms)
     beat(mut w, f)
 }
@@ -523,17 +546,31 @@ fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, qu
     let mut active = false
     let mut draft_changed = false
     while !halted(quit) {
-        let at = if place.fresh { 0u64 } else { place.version + 1u64 }
-        let Ok(take status_image) = runner.client.current(place.client, place.status, at) else { return false }
-        let Ok(take pending_image) = runner.client.current(place.client, place.pending, at) else { return false }
+        let at = if place.fresh {
+            0u64
+        } else {
+            place.version + 1u64
+        }
+        let Ok(take status_image) = runner.client.current(place.client, place.status, at) else {
+            return false
+        }
+        let Ok(take pending_image) = runner.client.current(place.client, place.pending, at) else {
+            return false
+        }
         match runner.client.current(place.client, place.sub, at) {
             Error(_) => return true,
             Ok(None) => (),
             Ok(Some(take image)) => {
                 let next = image.version
-                let Some(take head) = take status_image else { return false }
-                let Some(take queued) = take pending_image else { return false }
-                let Some(status) = visible_status(head) else { return false }
+                let Some(take head) = take status_image else {
+                    return false
+                }
+                let Some(take queued) = take pending_image else {
+                    return false
+                }
+                let Some(status) = visible_status(head) else {
+                    return false
+                }
                 marks = harness.gateway.marks(d, id)
                 // Finishing a turn publishes its answer before the queued turn's Kick runs.
                 // A tool or approval wait still lets the place go idle.
@@ -544,203 +581,50 @@ fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, qu
                         draft_changed = true
                     }
                 }
-                if !send_rows(mut w, f, head, mut sent) ||
-                    !send_rows(mut w, f, image, mut sent) ||
-                    !send_batch(mut w, f, next) {
+                if !send_rows(mut w, f, head, mut sent) || !send_rows(mut w, f, image, mut sent) || !send_batch(mut w, f, next) {
                     return false
                 }
                 place.fresh = false
                 place.version = next
                 if !active {
                     unwatch(mut watch)
-                    if !clear_preview(mut w, f, mut watch) { return false }
+                    if !clear_preview(mut w, f, mut watch) {
+                        return false
+                    }
                 } else if let Some((key, _)) = watch.sent {
-                    if map.contains(sent, key.entry + 1u64) && !clear_preview(mut w, f, mut watch) { return false }
+                    if map.contains(sent, key.entry + 1u64) && !clear_preview(mut w, f, mut watch) {
+                        return false
+                    }
                 }
             },
         }
-        if !active && host.mono_ns(f.clock) >= place.hold_until { return true }
+        if !active && host.mono_ns(f.clock) >= place.hold_until {
+            return true
+        }
         if active && draft_changed {
             draft_changed = false
-            if !send_preview(mut w, f, mut place.client, sent, mut watch) { return false }
+            if !send_preview(mut w, f, mut place.client, sent, mut watch) {
+                return false
+            }
             // The ordered ACL check can have advanced the live subscription.
             continue
         }
-        if !heartbeat(mut w, f, mut beat_at) { return false }
-        let until = if !active && place.hold_until < beat_at { place.hold_until } else { beat_at }
+        if !heartbeat(mut w, f, mut beat_at) {
+            return false
+        }
+        let until = if !active && place.hold_until < beat_at {
+            place.hold_until
+        } else {
+            beat_at
+        }
         match runner.client.wait_for(mut place.client, f.tasks, until) {
-            Ok(woken) => { draft_changed = woken },
+            Ok(woken) => {
+                draft_changed = woken
+            },
             Error(_) => return true,
         }
     }
     false
-}
-
-// ---- one request ----
-type Request {
-    input: Bytes,
-    head: std.http1.Head,
-    body_at: u64,
-    body_len: u64
-}
-
-fn read_request(mut r: ReadHalf, f: Front) -> Result[Request, u16] waits {
-    let until = At(f.clock, deadline_ms(f.clock, f.within_ms))
-    let mut input: Bytes = list.with_capacity(f.head_max + f.body_max)
-    let mut head = std.http1.head()
-    let mut cursor = std.http1.cursor()
-    loop {
-        match std.http1.resume(input, mut head, mut cursor) {
-            Complete => break,
-            Partial => (),
-            Bad => return Error(400u16),
-            TooLarge => return Error(431u16),
-        }
-        if list.len(input) >= f.head_max {
-            return Error(431u16)
-        }
-        let room = f.head_max - list.len(input)
-        match host.recv_bounded(mut r, mut input, room, until) {
-            Ok(0u64) => return Error(400u16),
-            Ok(_) => (),
-            Error(_) => return Error(408u16)
-        }
-    }
-    let body_at = head.end
-    let body_len = match std.http.framing(input, view head, f.body_max) {
-        Ok(Empty) => 0u64,
-        Ok(ContentLength(n)) => n,
-        Ok(_) => return Error(411u16),
-        Error(_) => return Error(413u16),
-    }
-    while list.len(input) < body_at + body_len {
-        let want = body_at + body_len - list.len(input)
-        match host.recv_bounded(mut r, mut input, want, until) {
-            Ok(0u64) => return Error(400u16),
-            Ok(_) => (),
-            Error(_) => return Error(408u16)
-        }
-    }
-    Ok(Request(input: take input, head: take head, body_at: body_at, body_len: body_len))
-}
-
-fn part(req: Request, s: std.http1.Span) -> Bytes {
-    std.http.copy_bytes(list.slice(req.input, s.start, s.end))
-}
-
-fn field(req: Request, name: String) -> Option[Bytes] {
-    for i in 0u64 .. req.head.count {
-        let h = req.head.fields[i]
-        if std.http1.equal_ascii(part(req, h.name), string.as_bytes(name)) {
-            return Some(part(req, h.value))
-        }
-    }
-    None
-}
-
-fn body(req: Request) -> Bytes {
-    std.http.copy_bytes(list.slice(req.input, req.body_at, req.body_at + req.body_len))
-}
-
-fn text_of(take b: Bytes) -> String {
-    match string.from_utf8(take b) {
-        Ok(take t) => take t,
-        Error(_) => string.new()
-    }
-}
-
-// The path's segments after the leading slash, without the query.
-fn segments(target: Bytes) -> List[String] {
-    let mut out: List[String] = list.new()
-    let mut current: Bytes = list.new()
-    let mut started = false
-    for b in target {
-        if b == 63u8 {
-            break
-        }
-        if b == 47u8 {
-            if started {
-                list.push(mut out, text_of(replace(mut current, list.new())))
-            }
-            started = true
-        } else {
-            list.push(mut current, b)
-        }
-    }
-    if started {
-        list.push(mut out, text_of(take current))
-    }
-    out
-}
-
-// The value of `name=` in the target's query, as a decimal.
-fn query_uint(target: Bytes, name: String) -> Option[u64] {
-    let mut at = 0u64
-    while at < list.len(target) && target[at] != 63u8 {
-        at += 1u64
-    }
-    let key = string.as_bytes(name)
-    while at < list.len(target) {
-        let start = at + 1u64
-        let mut end = start
-        while end < list.len(target) && target[end] != 38u8 {
-            end += 1u64
-        }
-        let n = list.len(key)
-        if end > start + n && target[start + n] == 61u8 && std.http.copy_bytes(list.slice(target, start, start + n)) == key {
-            return match std.int.parse_uint(text_of(std.http.copy_bytes(list.slice(target, start + n + 1u64, end))), 10) {
-                Ok(v) => Some(v),
-                Error(_) => None
-            }
-        }
-        at = end
-    }
-    None
-}
-
-// The fresh status query follows the data queries and applies the same ACL.
-fn history(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, before: u64, lines: u64) -> Result[Page, u16] waits {
-    let mut client = option.unwrap(reach(d, f, id, identity, 0u64, true)?)
-    let page = history_page(mut client, f, before, lines)
-    runner.client.close(take client)
-    take page
-}
-
-fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {
-    reply_with_retry(mut w, f, status, take payload, false)
-}
-
-fn reply_with_retry(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes, retry: bool) -> () waits {
-    let mut head = string.from("HTTP/1.1 ")
-    string.push_uint(mut head, int.widen(status), 10u32, 3u64, '0')
-    string.push(mut head, " \r\nContent-Length: ")
-    string.push_u64(mut head, list.len(payload))
-    if list.len(payload) > 0u64 {
-        string.push(mut head, "\r\nContent-Type: application/json")
-    }
-    if retry { string.push(mut head, "\r\nRetry-After: 5") }
-    string.push(mut head, "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
-    let _ = std.http.write_wire(mut w, string.into_bytes(take head), payload, f.clock, deadline_ms(f.clock, f.within_ms))
-}
-
-fn json_reply[V: codec](mut w: WriteHalf, f: Front, status: u16, v: V) -> () waits {
-    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else {
-        return reply(mut w, f, 500u16, list.new())
-    }
-    match std.json.to_string(format, v) {
-        Ok(take text) => reply(mut w, f, status, string.into_bytes(take text)),
-        Error(_) => reply(mut w, f, 500u16, list.new()),
-    }
-}
-
-fn json_body[V: codec](req: Request, f: Front) -> Option[V] {
-    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else {
-        return None
-    }
-    match std.json.decode_typed(format, body(req), f.body_max) {
-        Ok(take v) => Some(take v),
-        Error(_) => None
-    }
 }
 
 type Conn: send {
@@ -899,15 +783,24 @@ fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: W
 // ---- serving ----
 type FrontEvent: send = Accepted(Socket) | ListenerEnded | Finished(u64) | Halt
 
-type Acceptor: send { listener: Listener, permit: Receiver[()], to: Sender[FrontEvent] }
+type Acceptor: send {
+    listener: Listener,
+    permit: Receiver[()],
+    to: Sender[FrontEvent]
+}
 
 fn accept_sockets(take job: Acceptor) waits {
     let Acceptor(listener: take listener, permit: take permit, to: take to) = take job
     let mut l = take listener
     while let Ok(()) = channel.receive(permit) {
         match host.accept(mut l, Never) {
-            Ok((take socket, _)) => if let Error(_) = channel.send(to, Accepted(take socket)) { return },
-            Error(_) => { let _ = channel.send(to, ListenerEnded); return },
+            Ok((take socket, _)) => if let Error(_) = channel.send(to, Accepted(take socket)) {
+                return
+            },
+            Error(_) => {
+                let _ = channel.send(to, ListenerEnded);
+                return
+            },
         }
     }
 }
@@ -945,14 +838,20 @@ fn serve_front(take job: FrontJob) -> () waits {
                 }
                 let _ = channel.try_send(permit, ())
             },
-            Finished(slot) => if let Some((_, take t)) = map.remove(mut conns, slot) { let _ = task.join(take t) },
+            Finished(slot) => if let Some((_, take t)) = map.remove(mut conns, slot) {
+                let _ = task.join(take t)
+            },
             Halt => break,
             ListenerEnded => break,
         }
     }
     let _ = task.cancel_join(take accepting)
-    for (_, (h, _)) in conns { let _ = channel.try_send(h, ()) }
-    for take (_, (_, take t)) in take conns { let _ = task.join(take t) }
+    for (_, (h, _)) in conns {
+        let _ = channel.try_send(h, ())
+    }
+    for take (_, (_, take t)) in take conns {
+        let _ = task.join(take t)
+    }
 }
 
 // Serves the gateway behind `d` on `listener` until `halt`.

@@ -1,0 +1,187 @@
+# hirsel.lock: written by hirsel; do not edit.
+version = 1
+
+[[package]]
+id = "archive@1"
+source = "member:archive"
+edges = ["std@1"]
+
+[[package]]
+id = "av1@1"
+source = "member:av1"
+edges = []
+
+[[package]]
+id = "dtls@1"
+source = "member:dtls"
+edges = ["std@1"]
+
+[[package]]
+id = "ffi_laws@1"
+source = "member:ffi_laws"
+edges = []
+
+[[package]]
+id = "h264@1"
+source = "member:h264"
+edges = ["media_bits@1", "std@1"]
+
+[[package]]
+id = "harness@1"
+source = "member:harness"
+edges = ["mcp@1", "platform@1", "runner@1", "search@1", "std@1", "store@1"]
+
+[[package]]
+id = "harness_dev_serve@1"
+source = "member:harness/serve"
+edges = ["harness@1", "notes@1", "platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "harness_ts_gateway@1"
+source = "member:harness/ts-client/gateway"
+edges = ["harness@1", "notes@1", "platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "image_core@1"
+source = "member:image_core"
+edges = ["media_bits@1", "media_container@1", "std@1"]
+
+[[package]]
+id = "image_jpeg@1"
+source = "member:image_jpeg"
+edges = ["image_core@1"]
+
+[[package]]
+id = "image_pipeline@1"
+source = "member:image_pipeline"
+edges = ["av1@1", "image_core@1", "image_jpeg@1", "image_webp@1", "media_bits@1", "std@1", "video_yuv@1"]
+
+[[package]]
+id = "image_webp@1"
+source = "member:image_webp"
+edges = ["image_core@1"]
+
+[[package]]
+id = "mcp@1"
+source = "member:mcp"
+edges = ["std@1"]
+
+[[package]]
+id = "media_bits@1"
+source = "member:media_bits"
+edges = ["std@1"]
+
+[[package]]
+id = "media_container@1"
+source = "member:media_container"
+edges = ["media_bits@1", "std@1"]
+
+[[package]]
+id = "notes@1"
+source = "member:notes"
+edges = ["harness@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "opus@1"
+source = "member:opus"
+edges = []
+
+[[package]]
+id = "platform@1"
+source = "member:platform"
+edges = ["runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "postgres@1"
+source = "member:postgres"
+edges = ["std@1"]
+
+[[package]]
+id = "rtp@1"
+source = "member:rtp"
+edges = ["std@1"]
+
+[[package]]
+id = "runner@1"
+source = "member:runner"
+edges = ["std@1", "store@1"]
+
+[[package]]
+id = "search@1"
+source = "member:search"
+edges = ["std@1", "store@1"]
+
+[[package]]
+id = "sqlite@1"
+source = "member:sqlite"
+edges = []
+
+[[package]]
+id = "srtp@1"
+source = "member:srtp"
+edges = ["std@1"]
+
+[[package]]
+id = "std@1"
+source = "toolchain"
+edges = []
+
+[[package]]
+id = "store@1"
+source = "member:store"
+edges = ["std@1"]
+
+[[package]]
+id = "store_crash@1"
+source = "member:store-crash"
+edges = ["platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
+id = "stun_ice@1"
+source = "member:stun_ice"
+edges = ["std@1"]
+
+[[package]]
+id = "toml@1"
+source = "member:toml"
+edges = ["std@1"]
+
+[[package]]
+id = "tz@1"
+source = "member:tz"
+edges = ["std@1"]
+
+[[package]]
+id = "video_packager@1"
+source = "member:video_packager"
+edges = ["media_bits@1", "media_container@1", "std@1"]
+
+[[package]]
+id = "video_thumb@1"
+source = "member:video_thumb"
+edges = ["av1@1", "h264@1", "image_core@1", "image_pipeline@1", "image_webp@1", "media_bits@1", "media_container@1", "std@1", "video_yuv@1"]
+
+[[package]]
+id = "video_transcode@1"
+source = "member:video_transcode"
+edges = ["av1@1", "h264@1", "media_bits@1", "media_container@1", "std@1", "video_packager@1", "video_yuv@1"]
+
+[[package]]
+id = "video_yuv@1"
+source = "member:video_yuv"
+edges = []
+
+[[package]]
+id = "webrtc_sfu@1"
+source = "member:webrtc_sfu"
+edges = ["std@1"]
+
+[[package]]
+id = "xml@1"
+source = "member:xml"
+edges = []
+
+[[package]]
+id = "yaml@1"
+source = "member:yaml"
+edges = ["std@1"]

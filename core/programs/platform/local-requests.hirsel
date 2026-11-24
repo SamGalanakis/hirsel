@@ -1,0 +1,381 @@
+// ---- the door's requests ----
+fn refused_of(r: platform.Refused) -> Refused {
+    match r {
+        Full(_) => Full,
+        Busy(_) => Busy,
+        Unknown => Unknown,
+        Exists => Exists,
+        Retiring => Retiring,
+        Missing(what) => Failed(string.from(what)),
+        Denied(why) => Failed(string.from(why)),
+        Store(_) => Failed(string.from("store")),
+        FrontConfig(_) => Failed("invalid front configuration"),
+    }
+}
+
+fn group_spec(name: String) -> platform.NewGroup {
+    platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted, listen: string.new(), front: None, store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
+}
+
+fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
+    let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) {
+        Ok(take v) => take v,
+        Error(_) => return Error(Failed("seed store"))
+    }
+    let seeded = seed(mut db)
+    let _ = store.close(take db)
+    match take seeded {
+        Ok(()) => Ok(()),
+        Error(take why) => Error(Failed(take why))
+    }
+}
+
+fn add_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
+    platform.add_group_with(mut h, group_spec(name_of(id)), (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        store.put(mut tx, env.0 .sessions, env.1, clone(env.2))?
+        store.put(mut tx, env.0 .keys, clone(env.2), env.1)?
+        store.put(mut tx, env.0 .meta, NEXT_ID, env.1 + 1u64)
+    })
+}
+
+fn remove_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
+    platform.remove_with(mut h, name_of(id), Delete, (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        let _ = store.delete(mut tx, env.0 .keys, clone(env.2))?
+        let _ = store.delete(mut tx, env.0 .sessions, env.1)?
+        Ok(())
+    })
+}
+
+// A create is idempotent by its key, and an id is never reused once committed.
+fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seed: Seed) -> Result[u64, Refused] waits {
+    if let Some(id) = map.get(a.s.by_key, key) {
+        return Ok(id)
+    }
+    if map.len(a.s.by_id) >= a.max_sessions {
+        return Error(Full)
+    }
+    let id = a.s.next_id
+    let name = name_of(id)
+    let _ = std.dir.remove_all(a.root, name)
+    if let Error(_) = std.dir.create_dir(a.root, name) {
+        return Error(Failed("session dir"))
+    }
+    let Ok(dir) = std.dir.narrow(a.root, name) else {
+        return Error(Failed("session dir"))
+    }
+    seed_store(a, dir, seed)?
+    let reqs = match add_listed(mut a.h, a.s.catalog, id, key) {
+        Ok(take r) => take r,
+        Error(r) => return Error(refused_of(r))
+    }
+    a.s.next_id = id + 1u64
+    map.insert(mut a.s.by_id, id, clone(key))
+    map.insert(mut a.s.by_key, take key, id)
+    apply(mut a, take reqs)
+    Ok(id)
+}
+
+// Unlists a session and removes its group in one commit. The answer comes when the host
+// has closed the group, after its child, if any, has drained, and its store is deleted.
+fn on_delete[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[(), Refused]]) waits {
+    let key: Bytes = match map.get(a.s.by_id, id) {
+        Some(k) => clone(k),
+        None => {
+            let _ = channel.try_send(reply, Error(Unknown));
+            return
+        }
+    }
+    let name = name_of(id)
+    let reqs = match remove_listed(mut a.h, a.s.catalog, id, key) {
+        Ok(take r) => take r,
+        Error(r) => {
+            let _ = channel.try_send(reply, Error(refused_of(r)));
+            return
+        }
+    }
+    let _ = map.remove(mut a.s.by_id, id)
+    let _ = map.remove(mut a.s.by_key, key)
+    let _ = map.remove(mut a.marks, id)
+    let _ = map.remove(mut a.watching, id)
+    if let Some(take waiting) = map.remove(mut a.waiters, id) {
+        for take (_, r) in take waiting {
+            let _ = channel.try_send(r, Error(Unknown))
+        }
+    }
+    list.push(mut a.removes, (string.from(name), take reply))
+    refuse_reads(mut a, name)
+    apply(mut a, take reqs)
+    refuse_routes(mut a, name, Unknown)
+}
+
+fn on_listing[T: send](a: Actor[T]) -> List[u64] {
+    let mut ids: List[u64] = list.new()
+    for (id, _) in a.s.by_id {
+        list.push(mut ids, id)
+    }
+    ids
+}
+
+// The group of a listed session; a session not listed is Unknown.
+fn listed[T: send](a: Actor[T], id: u64) -> Result[String, Refused] {
+    if map.contains(a.s.by_id, id) {
+        Ok(name_of(id))
+    } else {
+        Error(Unknown)
+    }
+}
+
+// ---- marks ----
+fn marks_of[T: send](a: Actor[T], id: u64) -> Marks {
+    match map.get(a.marks, id) {
+        Some(m) => Marks(ups: m.ups, downs: m.downs, nudges: m.nudges),
+        None => Marks(ups: 0u64, downs: 0u64, nudges: 0u64),
+    }
+}
+
+fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) {
+    map.insert(mut a.marks, id, take m)
+    if let Some(watchers) = map.get(a.watching, id) {
+        for (_, to) in watchers {
+            let _ = channel.try_send(to, ())
+        }
+    }
+}
+
+fn count_up[T: send](mut a: Actor[T], id: u64) {
+    if !map.contains(a.s.by_id, id) {
+        return
+    }
+    let m = marks_of(a, id)
+    put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
+}
+
+fn on_nudge[T: send](mut a: Actor[T], id: u64) {
+    if !map.contains(a.s.by_id, id) {
+        return
+    }
+    let m = marks_of(a, id)
+    put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
+}
+
+fn count_down[T: send](mut a: Actor[T], id: u64) {
+    if !map.contains(a.s.by_id, id) {
+        return
+    }
+    let m = marks_of(a, id)
+    let n = m.downs + 1u64
+    put_marks(mut a, id, Marks(ups: m.ups, downs: n, nudges: m.nudges))
+    let Some(take waiting) = map.remove(mut a.waiters, id) else {
+        return
+    }
+    let mut kept: List[(u64, Downs)] = list.new()
+    for take (after, r) in take waiting {
+        if n > after {
+            let _ = channel.try_send(r, Ok(n))
+        } else {
+            list.push(mut kept, (after, take r))
+        }
+    }
+    if list.len(kept) > 0u64 {
+        map.insert(mut a.waiters, id, take kept)
+    }
+}
+
+fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Downs) {
+    if !map.contains(a.s.by_id, id) {
+        let _ = channel.try_send(reply, Error(Unknown));
+        return
+    }
+    let n = marks_of(a, id).downs
+    if n > after {
+        let _ = channel.try_send(reply, Ok(n));
+        return
+    }
+    let mut waiting = match map.remove(mut a.waiters, id) {
+        Some(take w) => take w,
+        None => list.new()
+    }
+    list.push(mut waiting, (after, take reply))
+    map.insert(mut a.waiters, id, take waiting)
+}
+
+fn on_watch[T: send](mut a: Actor[T], id: u64, take notify: Sender[()], reply: Sender[u64]) {
+    a.next_watch += 1u64
+    let mut watchers = match map.remove(mut a.watching, id) {
+        Some(take old) => take old,
+        None => map.new()
+    }
+    if let Ok(()) = channel.try_send(reply, a.next_watch) {
+        map.insert(mut watchers, a.next_watch, take notify)
+    }
+    if map.len(watchers) > 0u64 {
+        map.insert(mut a.watching, id, take watchers)
+    }
+}
+
+fn on_unwatch[T: send](mut a: Actor[T], id: u64, token: u64) {
+    if let Some(take old) = map.remove(mut a.watching, id) {
+        let mut watchers = take old
+        let _ = map.remove(mut watchers, token)
+        if map.len(watchers) > 0u64 {
+            map.insert(mut a.watching, id, take watchers)
+        }
+    }
+}
+
+// Wakes the group (§14.3, an operator request) and answers when the host has a Ready child
+// for it. A route during a child's drain waits for the next child, which the drain's end
+// starts because the route makes it readable.
+fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
+    let name = match listed(a, id) {
+        Ok(take n) => take n,
+        Error(why) => {
+            let _ = channel.try_send(reply, Error(why));
+            return
+        }
+    }
+    let n = now(a)
+    match platform.wake(mut a.h, name, n) {
+        Ok(take reqs) => {
+            list.push(mut a.routes, (take name, take reply))
+            apply(mut a, take reqs)
+        },
+        Error(r) => {
+            let _ = channel.try_send(reply, Error(refused_of(r)))
+        },
+    }
+}
+
+fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
+    let name = listed(a, id)?
+    let Some(gen) = platform.serving_ready(a.h, name) else {
+        return match platform.wake_row(a.h, name) {
+            Some(_) => Error(Busy),
+            None => Error(Unknown)
+        }
+    }
+    match kid_of(a, name, gen) {
+        Some(i) => if serves(a.kids[i]) {
+            Ok(lease_of(a.kids[i]))
+        } else {
+            Error(Busy)
+        },
+        None => Error(Busy),
+    }
+}
+
+// The local actor owns all child starts. A cold read runs in that actor after
+// the prior child has closed its store and before any next child can open it.
+fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[(), Refused] waits {
+    if group_has_kid(a, name) {
+        return Error(Busy)
+    }
+    let Ok(dir) = std.dir.narrow(a.root, name) else {
+        return Error(Unknown)
+    }
+    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+        return Error(Failed("read cold store"))
+    }
+    match code.callable(check.check)(reader, check.caller) {
+        Ok(true) => Ok(()),
+        Ok(false) => Error(Denied),
+        Error(_) => Error(Failed("check cold store")),
+    }
+}
+
+fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
+    let Ok(dir) = std.dir.narrow(a.root, name) else {
+        return Error(Unknown)
+    }
+    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+        return Error(Failed(string.from("read cold store")))
+    }
+    match code.callable(r.read)(reader, r.arg) {
+        Ok(take out) => Ok(take out),
+        Error(take why) => Error(Failed(take why))
+    }
+}
+
+// A read waits while a child of the session lives. It runs once that child has closed
+// the store, before the host can start the next, so it never reads beside a head.
+fn on_read[T: send](mut a: Actor[T], id: u64, take r: ColdRead, take reply: ReadReply) waits {
+    let name = match listed(a, id) {
+        Ok(take n) => take n,
+        Error(why) => {
+            let _ = channel.try_send(reply, Error(why));
+            return
+        }
+    }
+    if group_has_kid(a, name) {
+        list.push(mut a.reads, (take name, take r, take reply));
+        return
+    }
+    let _ = channel.try_send(reply, run_read(a, name, r))
+}
+
+fn answer_reads[T: send](mut a: Actor[T], name: String) waits {
+    if group_has_kid(a, name) {
+        return
+    }
+    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
+    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
+        if at == name {
+            let _ = channel.try_send(reply, run_read(a, at, r))
+        } else {
+            list.push(mut kept, (take at, take r, take reply))
+        }
+    }
+    a.reads = take kept
+}
+
+fn refuse_reads[T: send](mut a: Actor[T], name: String) {
+    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
+    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
+        if at == name {
+            let _ = channel.try_send(reply, Error(Unknown))
+        } else {
+            list.push(mut kept, (take at, take r, take reply))
+        }
+    }
+    a.reads = take kept
+}
+
+fn on_access[T: send](mut a: Actor[T], id: u64, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
+    match on_peek(a, id) {
+        Ok(take lease) => {
+            let _ = channel.try_send(reply, Ok(Some(take lease)));
+            return
+        },
+        Error(Busy) => (),
+        Error(take why) => {
+            let _ = channel.try_send(reply, Error(take why));
+            return
+        },
+    }
+    if let Error(take why) = check_cold(a, name_of(id), check) {
+        let _ = channel.try_send(reply, Error(take why))
+    } else if wake {
+        on_route(mut a, id, take reply)
+    } else {
+        let _ = channel.try_send(reply, Ok(None))
+    }
+}
+
+fn on_unload[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[Unloaded, Refused]]) waits {
+    let name = match listed(a, id) {
+        Ok(take n) => take n,
+        Error(why) => {
+            let _ = channel.try_send(reply, Error(why));
+            return
+        }
+    }
+    match platform.unload(mut a.h, name) {
+        Ok(take reqs) => {
+            list.push(mut a.unloads, (take name, take reply))
+            apply(mut a, take reqs)
+        },
+        Error(r) => {
+            let _ = channel.try_send(reply, Error(refused_of(r)))
+        },
+    }
+}

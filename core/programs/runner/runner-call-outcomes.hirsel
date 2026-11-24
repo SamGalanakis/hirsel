@@ -1,0 +1,575 @@
+pub fn wake_report_main(a: Args, process: Process, err: Stderr, d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), Exit] waits {
+    let run = scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        match args.get(a, 0u64) {
+            Some(mode) if mode == "clean" => {
+                let settings = managed_settings(d, c, r, tasks, n, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+                let ended = runner.operate(take settings, take stop, result.unwrap(runner.status_root()), None) ?=> Start
+                Ok(ended)
+            },
+            Some(mode) if mode == "due" => Ok(Stopped(Some(123456u64))),
+            Some(mode) if mode == "forced" => Ok(Forced(2u64)),
+            Some(mode) if mode == "unstarted" => Ok(Unstarted),
+            Some(mode) if mode == "error" => Error(Start(Missing("test"))),
+            _ => Error(Usage(Exit(status: 2u8))),
+        }
+    }
+    runner.main(a, process, err, tasks, c, code.describe(place), code.describe(schema), run)
+}
+
+pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "runner-recorded-")
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let db = result.unwrap(store.open(tasks, dir, c, r, disk_options()))
+    let mut token: Bytes = list.new()
+    if !served_on(take db, c, tasks, n, r, mut token, 0u64, drive_recorded) {
+        return false
+    }
+    let mut o = disk_options()
+    o.create = false
+    let again = result.unwrap(store.open(tasks, dir, c, r, o))
+    let b = store.main_branch(again)
+    for v in 1u64 .. 9u64 {
+        let got = result.unwrap(store.recorded(again, b, v))
+        let held = if v == 3u64 {
+            record_is(got, k_write(), 10u64, 0u64, token)
+        } else if v == 5u64 {
+            record_is(got, k_refuse(), 7u64, 1u64, token)
+        } else if v == 7u64 {
+            record_is(got, k_crash(), 2u64, 2u64, token)
+        } else {
+            match got {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        if !held {
+            return false
+        }
+    }
+    result.unwrap(store.close(take again))
+    true
+}
+
+@test
+fn test_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_recorded(d, c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L3 (§8): a Failed position re-sent k times runs its handler exactly once. A Failed
+// run's effects are aborted, so no row the body writes survives to count its runs
+// (followups to runner-spec-1020). The count is tally's TRY_SEND events, which the
+// harness reads from the evaluator's event log: exactly 1 for this case. A head that
+// runs the body again for a Duplicate and discards the run gives 4. The data half runs
+// on every engine: p0 is admitted at 3 and its reply kept alone at 4, and each of the
+// three re-sends returns that stored reply.
+fn drive_runs_once(take d: Drive) -> () waits {
+    let s0 = conn(d, 0u64)
+    for _ in 0u64 .. 4u64 {
+        ask(s0, d.clock, 0u64, 0u64, k_tally(), u64_arg(5u64), LATER)
+        let f = frame(s0)
+        want(is(f.outcome, Failed(Raised(2u32))) && f.version == 3u64, "runs_once: Failed(Raised(2)) at 3")
+    }
+    hang(take s0)
+}
+
+pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_runs_once)
+}
+
+// refusals' store refusal (C3): the store refuses p0's effect commit
+// (resident_limit), so the session gets Refused(Overloaded) in a frame at the publisher's
+// base (V3), the open's version 1, and p0 stays admitted with no reply. p1 is not admitted while p0 is unreplied (STORE-SPEC §1.8, S7):
+// it waits in the FIFO and is Abandoned at its deadline. A re-send of p0 runs it again
+// and is refused again; it is not HistoryUnavailable, which C3 allows only for a replied position.
+fn drive_store_refusal(take d: Drive) -> () waits {
+    let s0 = conn(d, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
+    let a = frame(s0)
+    want(is(a.outcome, Refused(Overloaded)) && a.version == 1u64, "store_refusal: p0 refused by the store")
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(1u64), 2000000u64)
+    let b = frame(s0)
+    want(b.p == 1u64 && is(b.outcome, Abandoned), "store_refusal: p1 not admitted while p0 is unreplied")
+    ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
+    let c = frame(s0)
+    want(c.p == 0u64 && is(c.outcome, Refused(Overloaded)), "store_refusal: re-sent p0 runs again, not HistoryUnavailable")
+    hang(take s0)
+}
+
+// Each row's resident charge is 62 + 16 (key) + 8 (value) bytes.
+// This exceeds the 32,768-byte resident limit while the draft fits the entry grant.
+const FLOOD: u64 = 512u64
+
+pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
+    o.resident_limit = 32768u64
+    served_in(c, r, tasks, n, o, drive_store_refusal)
+}
+
+fn joins(cn: Conn, stream: Bytes, p: u64, version: u64) -> () waits {
+    want(match down(cn) {
+        Batched(b) => b.version == version && list.len(b.rows) == 0u64 && list.len(b.outcomes) == 2u64 && b.outcomes[0].stream == stream && b.outcomes[1].stream == stream && b.outcomes[0].p == p && b.outcomes[1].p == p && ok_value(b.outcomes[0].outcome) == Some(version) && is(b.outcomes[0].outcome, b.outcomes[1].outcome),
+        _ => false,
+    }, "one_outcome: both joined sends are in the same Batch")
+}
+
+// Rule 5: every send ends in exactly one Outcome (review 1042, law_abandoned_no_resend).
+// Each position runs once, as an admit and an effect commit after the schema commit.
+// - p1 sent alone before p0 is Abandoned at its deadline. It runs behind p0 and
+//   produces no further outcome row.
+// - Another stream proceeds, then p2 commits at 9.
+// - Two sends of p1 wait behind p0 and receive two outcomes in one frame at 13.
+// - A p1 that expires and is re-sent twice receives two outcomes at 17. Its next
+//   position commits at 19.
+// - p1 Abandoned in a session that then ends: a different session can send p0, p1
+//   and p2, with one answer for each position.
+fn drive_one_outcome_per_send(take d: Drive) -> () waits {
+    let s0 = conn(d, 2u64)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(1u64), 2000000u64)
+    let a = frame(s0)
+    want(a.p == 1u64 && is(a.outcome, Abandoned), "one_outcome: p1 Abandoned")
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(0u64), LATER)
+    let b = frame(s0)
+    want(b.p == 0u64 && ok_value(b.outcome) == Some(3u64), "one_outcome: p0 at 3")
+    ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(100u64), LATER)
+    let other = frame(s0)
+    want(other.stream == sid(1u64) && other.p == 0u64 && ok_value(other.outcome) != None, "one_outcome: another stream proceeds, and p1's run has no Outcome")
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(2u64), LATER)
+    let c = frame(s0)
+    want(c.stream == sid(0u64) && c.p == 2u64 && ok_value(c.outcome) == Some(9u64), "one_outcome: p2 next, and p1 ran once with no Outcome")
+    ask(s0, d.clock, 2u64, 1u64, k_write(), u64_arg(201u64), LATER)
+    ask(s0, d.clock, 2u64, 1u64, k_write(), u64_arg(201u64), LATER)
+    ask(s0, d.clock, 2u64, 0u64, k_write(), u64_arg(200u64), LATER)
+    let d0 = frame(s0)
+    want(d0.stream == sid(2u64) && d0.p == 0u64 && ok_value(d0.outcome) == Some(11u64), "one_outcome: the predecessor runs at 11")
+    joins(s0, sid(2u64), 1u64, 13u64)
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), 2000000u64)
+    let e = frame(s0)
+    want(e.p == 1u64 && is(e.outcome, Abandoned), "one_outcome: stream 3 p1 Abandoned")
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), LATER)
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), LATER)
+    ask(s0, d.clock, 3u64, 0u64, k_write(), u64_arg(300u64), LATER)
+    let e0 = frame(s0)
+    want(e0.p == 0u64 && ok_value(e0.outcome) == Some(15u64), "one_outcome: stream 3 p0 at 15")
+    joins(s0, sid(3u64), 1u64, 17u64)
+    ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), LATER)
+    let e3 = frame(s0)
+    want(e3.p == 2u64 && ok_value(e3.outcome) == Some(19u64), "one_outcome: stream 3 p2 next")
+    let s1 = conn(d, 1u64)
+    ask(s1, d.clock, 4u64, 1u64, k_write(), u64_arg(401u64), 2000000u64)
+    let f = frame(s1)
+    want(f.p == 1u64 && is(f.outcome, Abandoned), "one_outcome: stream 4 p1 Abandoned")
+    hang(take s1)
+    ask(s0, d.clock, 4u64, 0u64, k_write(), u64_arg(400u64), LATER)
+    let f0 = frame(s0)
+    want(f0.p == 0u64 && ok_value(f0.outcome) == Some(21u64), "one_outcome: stream 4 p0 at 21")
+    ask(s0, d.clock, 4u64, 1u64, k_write(), u64_arg(401u64), LATER)
+    let f1 = frame(s0)
+    want(f1.p == 1u64 && ok_value(f1.outcome) == Some(23u64), "one_outcome: replacement session sends p1")
+    ask(s0, d.clock, 4u64, 2u64, k_write(), u64_arg(402u64), LATER)
+    let f2 = frame(s0)
+    want(f2.p == 2u64 && ok_value(f2.outcome) == Some(25u64), "one_outcome: stream 4 p2 after the replacement p1")
+    hang(take s0)
+}
+
+pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_one_outcome_per_send)
+}
+
+// L7/deadline_held (v2.4), on the real head. p1 of a fresh stream, sent before p0, waits
+// in the head's FIFO (S7: Rejected(0)); the session answers Abandoned at its deadline
+// (V1), at its last version 0, and keeps the slot (V2). Then p0 is sent and p1 re-sent:
+// p0 commits at 4, and p1, which the re-send joins locally, runs once and commits at 6.
+// The next position is the next frame, at 8, so p1 was answered once.
+fn drive_deadline_held(take d: Drive) -> () waits {
+    let s0 = conn(d, 1u64)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), 2000000u64)
+    let a = frame(s0)
+    want(is(a.outcome, Abandoned) && a.p == 1u64 && a.version == 0u64, "deadline_held: Abandoned at the deadline")
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), LATER)
+    let f0 = frame(s0)
+    want(f0.p == 0u64 && ok_value(f0.outcome) == Some(3u64) && f0.version == 3u64, "deadline_held: p0 at 3")
+    let f1 = frame(s0)
+    want(f1.p == 1u64 && ok_value(f1.outcome) == Some(5u64) && f1.version == 5u64, "deadline_held: p1 once, at 5")
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(12u64), LATER)
+    let f2 = frame(s0)
+    want(f2.p == 2u64 && ok_value(f2.outcome) == Some(7u64), "deadline_held: p1 answered once")
+    hang(take s0)
+}
+
+pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_deadline_held)
+}
+
+// The session's V1 and V2 logic against a head that holds every request and answers none
+// (a held-head case; not L7/deadline_hung, which waits on D5):
+// - q = 0: A p0 is Abandoned at its deadline (V1) and keeps its slot (V2), so B p0 is
+//   Overloaded at once, and the head holds one request (C6, queue_outside_account);
+//   a re-send of A p0 joins locally and is Abandoned again, still one request;
+// - q = 1: p0 and p1 of one stream both forwarded and both Abandoned at their deadlines,
+//   though the head answers neither (deadline_rides_release);
+// - L15, each send at its own deadline: A (2 ms) then B (50 ms) of one held position, and
+//   A's Abandoned arrives before B's deadline, then B's (latest_deadline);
+// - L15, a joined send takes a slot: with q = 0 a second send of a held position is
+//   Overloaded at once, and the first is Abandoned at its deadline (join_outside_account).
+pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let mail = result.unwrap(runner.mailbox(1u64))
+    let post = runner.post(mail)
+    let credential = ingress.credential(r)
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: None)
+    let s0 = conn(d, 0u64)
+    ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    let a = frame(s0)
+    want(is(a.outcome, Abandoned) && a.version == 0u64, "held_head: Abandoned at the deadline")
+    ask(s0, c, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
+    want(is(frame(s0).outcome, Refused(Overloaded)), "held_head: the slot stays held")
+    let mut held = 0u64
+    while !empty(inbox) {
+        held += 1u64
+    }
+    want(held == 1u64, "held_head: the head holds 1 + q")
+    ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    want(is(frame(s0).outcome, Abandoned), "held_head: a re-send joins locally")
+    want(empty(inbox), "held_head: a re-send is not forwarded")
+    hang(take s0)
+    let s1 = conn(d, 1u64)
+    ask(s1, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    ask(s1, c, 0u64, 1u64, k_write(), u64_arg(2u64), 2000000u64)
+    want(is(frame(s1).outcome, Abandoned) && is(frame(s1).outcome, Abandoned), "held_head: both answered by the session")
+    hang(take s1)
+    let s3 = conn(d, 1u64)
+    ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 2000000u64)
+    let b_at = host.mono_ns(c) + 50000000u64
+    ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 50000000u64)
+    let first = frame(s3)
+    want(is(first.outcome, Abandoned) && host.mono_ns(c) < b_at, "held_head: the first send is Abandoned at its own deadline")
+    want(is(frame(s3).outcome, Abandoned) && host.mono_ns(c) >= b_at, "held_head: the second send at its own")
+    hang(take s3)
+    let s2 = conn(d, 0u64)
+    ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
+    ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
+    want(is(frame(s2).outcome, Refused(Overloaded)), "held_head: with q = 0 a join takes the second slot")
+    want(is(frame(s2).outcome, Abandoned), "held_head: the first send is still answered")
+    hang(take s2)
+    true
+}
+
+// H2 and V2: a live successor may wait for a predecessor from another session.
+// A departed session's successor no longer owns a position in that FIFO.
+fn drive_retired_head(take d: Drive) -> () waits {
+    let old = conn(d, 0u64)
+    ask(old, d.clock, 0u64, 1u64, k_write(), u64_arg(99u64), 2000000u64)
+    want(is(frame(old).outcome, Abandoned), "retired head: the parked send reaches its deadline")
+    hang(take old)
+    let next = conn(d, 1u64)
+    let prior = conn(d, 1u64)
+    ask(prior, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    want(ok_value(frame(prior).outcome) == Some(3u64), "retired head: the predecessor commits")
+    ask(prior, d.clock, 1u64, 0u64, k_write(), u64_arg(11u64), LATER)
+    want(ok_value(frame(prior).outcome) == Some(5u64), "retired head: the departed successor consumed no commit")
+    ask(next, d.clock, 0u64, 2u64, k_write(), u64_arg(13u64), LATER)
+    ask(prior, d.clock, 0u64, 1u64, k_write(), u64_arg(12u64), LATER)
+    want(ok_value(frame(prior).outcome) == Some(7u64), "retired head: the replacement commits")
+    want(ok_value(frame(next).outcome) == Some(9u64), "retired head: the live successor follows on its other session")
+    hang(take next)
+    hang(take prior)
+}
+
+pub fn law_calls_retired_head(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_retired_head)
+}
+
+@test
+fn test_calls_retired_head(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_retired_head(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_two_streams(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_session_charge(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_group_version(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_joiners(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_duplicate(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_refusals(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_one_outcome_per_send(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_store_refusal(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> Result[(), ()] waits {
+    if law_calls_held_head(c, tasks, n, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_deadline_held(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_runs_once(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Error] {
+    store.migration_create_table(mut phase, store.spec("first", std.codec.key_u64(), std.codec.of_u64()))?
+    let second = store.spec("second", std.codec.key_u64(), std.codec.of_u64())
+    let attempted = bound bytes 0u64 {
+        store.migration_create_table(mut phase, take second)
+    }
+    match take attempted {
+        Ok(take outcome) => take outcome,
+        Error(c) => Error(Full(Allocation(c))),
+    }
+}
+
+// L33. The second operation refuses. Reopen the backing store and look for
+// both table names in the recovered catalog.
+pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = disk_options()
+    let db = result.unwrap(store.open(tasks, d, c, r, options))
+    let (_, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1)
+    let mail = result.unwrap(runner.mailbox(1))
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, Some(code.describe(migration_second_refuses)), code.describe(schema), take inbox, take mail, tasks, 1048576)
+    if let Error(Migrate(Full(_))) = opened {} else {
+        return false
+    }
+    let reopened = result.unwrap(store.open(tasks, d, c, r, options))
+    let snapshot = store.snapshot(reopened)
+    let unchanged = store.version(snapshot) == 0 && !result.unwrap(store.has_table(snapshot, "first")) && !result.unwrap(store.has_table(snapshot, "second"))
+    result.unwrap(store.close(take reopened))
+    unchanged
+}
+
+@test
+fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32)
+    let directory = result.unwrap(host.mkdtemp(parent, mut name))
+    let good = law_atomic_migration(directory, c, r, tasks)
+    result.unwrap(std.dir.remove_all(parent, name))
+    if good {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L32 (RUNNER-SPEC v2.19.1, `duplicate_own_reply`). note_write refuses a Caller
+// with no membership row and otherwise counts that Caller's writes, so a re-run
+// or a re-check of a duplicate answers differently from the saved reply.
+type NoteHandles: shareable + send {
+    notes: store.Table[u64, u64],
+    members: store.Table[u64, u64]
+}
+
+type NoteRegistry = runner.Registry[(), NoteHandles]
+
+fn note_schema(mut d: store.Declare) -> Result[NoteHandles, store.Error] {
+    let notes = store.declare_table(mut d, "notes", std.codec.key_u64(), std.codec.of_u64())?
+    let note_table = store.finish(mut d, take notes)?
+    let members = store.declare_table(mut d, "members", std.codec.key_u64(), std.codec.of_u64())?
+    let member_table = store.finish(mut d, take members)?
+    Ok(NoteHandles(notes: take note_table, members: take member_table))
+}
+
+fn note_write(mut tx: store.Tx, hd: NoteHandles, caller: runner.Caller, take unused: u64) -> Result[u64, u32] {
+    let owner: u64 = int.widen(caller.subject[0])
+    if result.unwrap(store.fetch(tx, hd.members, owner)) != Some(1u64) {
+        return Error(17u32)
+    }
+    let count = match result.unwrap(store.fetch(tx, hd.notes, owner)) {
+        Some(previous) => previous + 1u64,
+        None => 1u64,
+    }
+    result.unwrap(store.put(mut tx, hd.notes, owner, count))
+    Ok(owner * 1000u64 + count)
+}
+
+fn note_revoke(mut tx: store.Tx, hd: NoteHandles, caller: runner.Caller, take owner: u64) -> Result[u64, u32] {
+    if caller.subject[0] != 0u8 {
+        return Error(18u32)
+    }
+    if result.unwrap(store.delete(mut tx, hd.members, owner)) {
+        Ok(owner)
+    } else {
+        Error(19u32)
+    }
+}
+
+fn note_place(mut r: NoteRegistry) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(note_write), 65536u64, 8192u64)?
+    runner.transact(mut r, code.describe(note_revoke), 65536u64, 8192u64)
+}
+
+type NoteDriver: send {
+    head: Sender[runner.HeadInput]
+}
+
+fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut store.Tx, NoteHandles, runner.Caller, take u64) -> Result[u64, u32]], arg: u64) -> runner.Outcome waits {
+    let mut subject: Bytes = list.new()
+    list.push(mut subject, owner)
+    let caller = store.Caller(issuer: 1u8, subject: take subject)
+    let name = store.StreamId(t: 0u64, n: int.widen(stream))
+    let key = key_of(code.identity(f), std.codec.of_u64(), reply())
+    let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1u64)
+    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, name, p, take key, u64_arg(arg), take to))))
+    let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
+    let runner.KeyedDone(outcome: take outcome, ..) = take delivery
+    take outcome
+}
+
+// Caller 1 is A, caller 2 is B, caller 0 is the administrator. A and B are members.
+fn drive_notes(take d: NoteDriver) -> () waits {
+    let entry = code.describe(note_write)
+    let first = note_send(d, 1u8, 7u32, 0u64, entry, 0u64)
+    want(ok_value(first) == Some(1001u64), "L32: A's first call counts one")
+    want(ok_value(note_send(d, 0u8, 0u32, 0u64, code.describe(note_revoke), 1u64)) == Some(1u64), "L32: the administrator removes A")
+    want(is(note_send(d, 1u8, 7u32, 0u64, entry, 0u64), first), "L32: A's duplicate is its saved reply, unchanged")
+    want(err_value(note_send(d, 1u8, 7u32, 1u64, entry, 0u64)) == Some(17u32), "L32: A's next position runs and refuses")
+    want(is(note_send(d, 1u8, 7u32, 0u64, entry, 0u64), Refused(HistoryUnavailable)), "L32: A's older position is unavailable")
+    want(ok_value(note_send(d, 2u8, 7u32, 0u64, entry, 0u64)) == Some(2001u64), "L32: B's position runs fresh")
+}
+
+pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let hd = result.unwrap(note_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
+    let seeded = result.unwrap(store.run(mut db, None, hd, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.members, 1u64, 1u64)?
+        store.put(mut tx, call_env.members, 2u64, 1u64)
+    }))
+    if let Committed(_) = seeded {} else {
+        return false
+    }
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(4u64)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let driving = task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes)
+    let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, None, code.describe(note_schema), take inbox, take mail, tasks, 1048576u64)
+    let drove = task.join(take driving)
+    match (take ended, take drove) {
+        (Ok(()), Ok(())) => true,
+        _ => false
+    }
+}
+
+@test
+fn test_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_duplicate_own_reply(c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn reserve_registration() -> bool {
+    // The byte reserve is n + A_b with A_b = 32 (L33): 2^64 - 32 is the
+    // smallest n whose reserve does not fit in u64, and s + 6 overflows at
+    // s = u64::MAX.
+    let wrap = 18446744073709551584u64
+    let entry = code.describe(write)
+    let mut first: Calls = runner.registry()
+    if let Error(Bounds) = runner.transact(mut first, entry, wrap, 8192) {} else {
+        return false
+    }
+    match runner.transact(mut first, entry, 8, 18446744073709551615u64) {
+        Error(Bounds) => true,
+        _ => false,
+    }
+}
+
+pub fn law_serve_bounded_and_settled(c: Clock) -> bool waits {
+    reserve_registration() && store.law_call_reserve(c)
+}
+
+@test
+fn test_serve_bounded_and_settled(c: Clock) -> Result[(), ()] waits {
+    if law_serve_bounded_and_settled(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

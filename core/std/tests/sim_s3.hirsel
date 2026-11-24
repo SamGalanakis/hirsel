@@ -485,6 +485,10 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let mut ips: List[Ip] = list.with_capacity(1)
     list.push(mut ips, address.ip)
     sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take ips)
+    object_network_fixture(tasks, seed, tape, dialect, address, take net_model, None)
+}
+
+fn object_network_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16, address: Addr, take net_model: sim.net.Network, cut: Option[sim.s3.Cut]) -> (object.Client, Clock, Task[sim.s3.Report], Task[()]) waits {
     let key = signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
     let mut faults: List[sim.s3.Fault] = list.with_capacity(16)
@@ -508,7 +512,7 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let mut scripts: List[List[u64]] = list.with_capacity(1)
     list.push(mut scripts, take words)
     let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
-    let config = sim.s3.Config(address, cut: None, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let config = sim.s3.Config(address, cut, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: dialect, fragment_bytes: 64, max_body: 65536)
     let (world, time) = sim.world.new(seed, 0, 1369353600000)
     let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
     let (endpoint, server_task) = sim.s3.start_service(tasks, take config, take plan, time, 131072, 8388608)
@@ -518,6 +522,69 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let credentials_set = cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
     let client = result.unwrap(object.start_simulated(endpoint, tasks, take bucket, take credentials_set, time, provide.random(seed), object.LaneConfig(requested_lanes: 0, lane_bytes: 1048576), 1000000000))
     (take client, time, take server_task, take driver)
+}
+
+// expect: run object_peer_fallback(tasks) = true
+fn object_peer_fallback(tasks: Tasks) -> bool waits {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let spare = Addr(ip: V4(2130706434), port: 8080)
+    let mut network = sim.net.new(sim.net.defaults())
+    let mut ips: List[Ip] = list.with_capacity(5)
+    for peer in 1u64 .. 4 {
+        list.push(mut ips, V6(0x20010db800000000, peer))
+    }
+    list.push(mut ips, address.ip)
+    list.push(mut ips, spare.ip)
+    sim.net.resolve_as(mut network, string.from("bucket.s3.test"), take ips)
+    let cut = Some(sim.s3.Cut(after: 0xffffffffffffffff, apply: false, spare))
+    let (client, time, server, driver) = object_network_fixture(tasks, 44, "00000000", 412, address, take network, cut)
+    let mut c = take client
+    let mut ok = true
+    for _ in 0u64 .. 3 {
+        let end = host.mono_ns(time) + OBJECT_END
+        let (stored, _) = object.store(mut c, "fallback", string.into_bytes(string.from("payload")), end)
+        let (fetched, data) = object.fetch(mut c, "fallback", list.with_capacity(7), end)
+        if let (Ok(_), Ok(_)) = (take stored, take fetched) {
+            ok = ok && data == string.as_bytes("payload")
+        } else {
+            ok = false
+        }
+        host.sleep_until(time, host.mono_ns(time) + 5000000000)
+    }
+    let _ = take c
+    let seen = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    let mut failed: List[u64] = list.with_capacity(3)
+    let mut repeated = false
+    let mut reached = false
+    let mut trace = string.from("connects")
+    for (addr, at) in seen.connects {
+        let peer = match addr.ip {
+            V6(_, peer) => {
+                for previous in failed {
+                    repeated = repeated || previous == peer
+                }
+                list.push(mut failed, peer)
+                peer
+            },
+            V4(_) => {
+                reached = true
+                if addr == address {
+                    4u64
+                } else {
+                    5u64
+                }
+            },
+        }
+        string.push(mut trace, " ")
+        string.push_uint(mut trace, peer, 10, 0, '0')
+        string.push(mut trace, "@")
+        string.push_uint(mut trace, at, 10, 0, '0')
+    }
+    if !ok || repeated || !reached || list.len(failed) == 0 {
+        fail(take trace)
+    }
+    true
 }
 
 fn has_saved(report: sim.s3.Report, key: String, body: String) -> bool {

@@ -62,6 +62,8 @@ pub type Object: send {
 pub type Report: send {
     head_writes: List[sim.s3_history.HeadWrite],
     requests: List[Request],
+    /// Served Net connect attempts with their virtual timestamps.
+    connects: List[(Addr, u64)],
     objects: Map[String, Object],
     // The keys of multipart uploads neither completed nor aborted.
     pending: List[String],
@@ -1250,6 +1252,7 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
     let gate = Gate(rules: Rules(exists_status: n.exists_status, max_body: n.max_body), cut: clone(n.cut), signing: Scoped(clone(n.credential), secret.share(n.signing_key)))
     let mut bucket = new_bucket()
     let mut peers: Map[u64, Peer] = map.new()
+    let mut connects: List[(Addr, u64)] = list.new()
     let mut next = 1u64
     let mut schedule = Schedule(counts: map.new(), pending: list.new(), watches: list.new(), timers: map.new())
     let mut dns_changed = false
@@ -1259,12 +1262,18 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
         match op {
             ConnectUnix(root, path) => control(mut schedule, mut port, take call, root, path),
             Connect(addr: addr) => {
+                list.push(mut connects, (addr, host.mono_ns(clock)))
                 let spare = match n.cut {
                     Some(cut) => addr == cut.spare,
                     None => false,
                 }
                 if !spare && addr != n.address {
-                    let _ = answer(mut port, take call, Failed(Refused))
+                    let refusal: NetError = match (addr.ip, n.address.ip) {
+                        (V4(_), V6(_, _)) => Unreachable,
+                        (V6(_, _), V4(_)) => Unreachable,
+                        _ => Refused,
+                    }
+                    let _ = answer(mut port, take call, Failed(refusal))
                 } else if answer(mut port, take call, Socket(next, addr)) {
                     let fault = if spare || list.len(n.faults) == 0 {
                         Clean
@@ -1320,20 +1329,20 @@ pub fn serve(tasks: Tasks, network: Net, n: Config, mut plan: sim.world.Plan, cl
         notify(mut schedule, mut port)
         flush(n, gate, mut schedule, mut bucket, mut peers, mut port, clock, mut withdrawn)
     }
-    report(take bucket, next - 1, withdrawn)
+    report(take bucket, next - 1, withdrawn, take connects)
 }
 
 fn new_bucket() -> Bucket {
     Bucket(head_writes: list.new(), requests: list.new(), objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
 }
 
-fn report(take bucket: Bucket, attempts: u64, withdrawn: u64) -> Report {
+fn report(take bucket: Bucket, attempts: u64, withdrawn: u64, take connects: List[(Addr, u64)]) -> Report {
     let Bucket(head_writes: take head_writes, requests: take requests, objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
     for id in sim.s3_wire.sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(head_writes: take head_writes, requests: take requests, objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
+    Report(head_writes: take head_writes, requests: take requests, connects: take connects, objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
 }
 
 const LOOPBACK_IO_NS: u64 = 30000000000
@@ -1392,5 +1401,5 @@ pub fn serve_loopback(mut listener: Listener, take service: Loopback, clock: Clo
         accepted += 1
         serve_connection(accepted, gate, mut bucket, take conn, clock)
     }
-    report(take bucket, accepted, 0)
+    report(take bucket, accepted, 0, list.new())
 }

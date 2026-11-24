@@ -1290,15 +1290,18 @@ type Held: send {
     idle_at: u64
 }
 
-type PoolMessage: send = Acquire(u64) | Release(Addr, bool) | Measured(u64, Addr, u64) | Resolved(List[Ip])
+type PoolMessage: send = Acquire(u64, List[Ip]) | Connected(Addr) | Release(Addr, bool) | Measured(u64, Addr, u64) | Resolved(List[Ip])
 
 type PoolReply: send = Address(Option[Addr]) | Rotate(bool)
+
+type PeerHealth: send = Untried | Working | ConnectFailed
 
 type Peer: send {
     ip: Ip,
     listed: bool,
     open: u64,
     blocked: u64,
+    health: PeerHealth,
     count: u64,
     next: u64,
     rates: Inline[u64, 9]
@@ -1355,7 +1358,7 @@ fn update_peers(mut peers: List[Peer], ips: List[Ip]) {
         if let Some(index) = peer_index(peers, ip) {
             peers[index].listed = true
         } else {
-            list.push(mut peers, Peer(ip, listed: true, open: 0, blocked: 0, count: 0, next: 0, rates:[0; 9]))
+            list.push(mut peers, Peer(ip, listed: true, open: 0, blocked: 0, health: Untried, count: 0, next: 0, rates:[0; 9]))
         }
     }
     list.retain(mut peers, fn(p: Peer) -> bool {
@@ -1409,20 +1412,69 @@ fn rate(p: Peer) -> u64 {
     ordered[p.count / 2]
 }
 
-fn preferred(peers: List[Peer], i: u64, now: u64) -> bool {
-    if !peers[i].listed || peers[i].blocked > now {
+fn family_mask(ip: Ip) -> u8 {
+    match ip {
+        V4(_) => 1,
+        V6(_, _) => 2,
+    }
+}
+
+fn failing_families(peers: List[Peer]) -> u8 {
+    let mut failed = 0u8
+    let mut working = 0u8
+    for peer in peers {
+        if peer.listed {
+            match peer.health {
+                Untried => (),
+                Working => {
+                    working = working | family_mask(peer.ip)
+                },
+                ConnectFailed => {
+                    failed = failed | family_mask(peer.ip)
+                },
+            }
+        }
+    }
+    failed & ~working
+}
+
+fn peer_priority(peer: Peer, failed_families: u8) -> u8 {
+    // A peer's own failure outranks any family penalty.
+    let address_penalty = match peer.health {
+        ConnectFailed => 2u8,
+        _ => 0u8,
+    }
+    let family_penalty = if failed_families & family_mask(peer.ip) != 0 {
+        1u8
+    } else {
+        0u8
+    }
+    address_penalty + family_penalty
+}
+
+fn available(peer: Peer, now: u64, tried: List[Ip]) -> bool {
+    peer.listed && peer.blocked <= now && !list.contains(tried, peer.ip)
+}
+
+fn preferred(peers: List[Peer], i: u64, now: u64, tried: List[Ip], failed_families: u8) -> bool {
+    if !available(peers[i], now, tried) {
         return false
     }
+    let priority = peer_priority(peers[i], failed_families)
     let this_rate = rate(peers[i])
-    if this_rate == 0 {
-        return true
-    }
     let mut faster = 0u64
     let mut measured = 0u64
     for p in peers {
-        if p.listed && p.blocked <= now {
-            let other = rate(p)
-            if other != 0 {
+        if available(p, now, tried) {
+            let other_priority = peer_priority(p, failed_families)
+            if other_priority < priority {
+                return false
+            }
+            if other_priority == priority && this_rate != 0 {
+                let other = rate(p)
+                if other == 0 {
+                    continue
+                }
                 measured += 1
                 if other > this_rate {
                     faster += 1
@@ -1430,14 +1482,15 @@ fn preferred(peers: List[Peer], i: u64, now: u64) -> bool {
             }
         }
     }
-    faster < (measured + 1) / 2
+    this_rate == 0 || faster < (measured + 1) / 2
 }
 
-fn acquire(mut pool: Pool) -> Option[Addr] {
+fn acquire(mut pool: Pool, tried: List[Ip]) -> Option[Addr] {
     let now = host.mono_ns(pool.clock)
+    let failed_families = failing_families(pool.peers)
     let mut chosen: Option[u64] = None
     for i in 0u64 .. list.len(pool.peers) {
-        if preferred(pool.peers, i, now) {
+        if preferred(pool.peers, i, now, tried, failed_families) {
             if let Some(old) = chosen {
                 if pool.peers[i].open < pool.peers[old].open {
                     chosen = Some(i)
@@ -1460,14 +1513,21 @@ fn pool_loop(take setup: Pool) waits {
     let resolver = task.spawn(pool.tasks, bytes 65536, take dns, dns_loop)
     while let Ok(take message) = channel.receive(pool.input) {
         match take message {
-            Acquire(lane) => {
-                let address = acquire(mut pool)
+            Acquire(lane, tried) => {
+                let address = acquire(mut pool, tried)
                 let _ = channel.try_send(pool.replies[lane], Address(address))
+            },
+            Connected(address) => {
+                if let Some(i) = peer_index(pool.peers, address.ip) {
+                    pool.peers[i].health = Working
+                    pool.peers[i].blocked = 0
+                }
             },
             Release(address, blocked) => {
                 if let Some(i) = peer_index(pool.peers, address.ip) {
                     pool.peers[i].open -= 1
                     if blocked {
+                        pool.peers[i].health = ConnectFailed
                         pool.peers[i].blocked = int.saturating_add(host.mono_ns(pool.clock), COOL_DOWN_NS)
                     }
                     if pool.peers[i].open == 0 && !pool.peers[i].listed {
@@ -1485,7 +1545,7 @@ fn pool_loop(take setup: Pool) waits {
                         pool.peers[i].next = (at + 1) % 9
                         pool.peers[i].count = order.min(9, pool.peers[i].count + 1)
                     }
-                    rotate = !preferred(pool.peers, i, now)
+                    rotate = !preferred(pool.peers, i, now, list.new(), failing_families(pool.peers))
                 }
                 let _ = channel.try_send(pool.replies[lane], Rotate(rotate))
             },
@@ -1565,31 +1625,19 @@ fn validate_credentials(n: Net, server: Endpoint, c: Clock, pool: Sender[PoolMes
         Ok(take req) => take req,
         Error(_) => return false,
     }
-    if let Error(_) = channel.send(pool, Acquire(index)) {
-        reclaim_request(mut wire, take request)
-        return false
-    }
-    let address = match channel.receive(lease) {
-        Ok(Address(Some(addr))) => addr,
-        _ => {
-            reclaim_request(mut wire, take request)
-            return false
-        },
-    }
-    let connection = connect_to(n, server, address, c, deadline)
+    let connection = connect_pool(n, server, c, pool, lease, index, deadline)
     let mut accepted = false
-    let mut blocked = true
-    if let Ok(take stream) = take connection {
+    if let Ok(take held) = take connection {
+        let Held(connection: take stream, address, ..) = take held
         let mut conn = take stream
-        blocked = false
         if let Ok(()) = http_client.start(mut conn, request, deadline) {
             if let Ok(()) = http_client.finish_request(mut conn, MAX_U64) {
                 accepted = http_client.status(http_client.head(conn)) != 403
             }
         }
         http_client.close(take conn)
+        let _ = channel.send(pool, Release(address, false))
     }
-    let _ = channel.send(pool, Release(address, blocked))
     reclaim_request(mut wire, take request)
     accepted
 }
@@ -1740,24 +1788,39 @@ fn connect_to(n: Net, server: Endpoint, address: Addr, clock: Clock, end: u64) -
     }
 }
 
-fn open_connection(mut lane: Lane, end: u64) -> Result[Held, Failure] waits {
-    let _ = channel.send(lane.pool, Acquire(lane.index))
-    let address = match channel.receive(lane.lease) {
-        Ok(Address(Some(address))) => address,
-        _ => return Error(Failure(phase: BeforeRequest, reason: Net(Reset), status: 0, code: list.new(), server_time: None)),
-    }
-    let connection = connect_to(lane.network, lane.server, address, lane.clock, end)
-    match connection {
-        Ok(take c) => Ok(Held(connection: take c, address, idle_at: host.mono_ns(lane.clock))),
-        Error(e) => {
-            let _ = channel.send(lane.pool, Release(address, true))
-            let reason: Reason = match e {
-                Deadline => Deadline,
-                Cancelled => Cancelled,
-                _ => Http(e),
-            }
-            Error(Failure(phase: BeforeRequest, reason: take reason, status: 0, code: list.new(), server_time: None))
-        },
+fn connect_pool(n: Net, server: Endpoint, clock: Clock, pool: Sender[PoolMessage], lease: Receiver[PoolReply], index: u64, end: u64) -> Result[Held, Reason] waits {
+    // No request has been sent. Try each available address once before charging a retry.
+    let mut tried: List[Ip] = list.new()
+    let mut last: Reason = Net(Reset)
+    loop {
+        if let Error(_) = channel.send(pool, Acquire(index, clone(tried))) {
+            return Error(take last)
+        }
+        let address = match channel.receive(lease) {
+            Ok(Address(Some(addr))) => addr,
+            _ => return Error(take last),
+        }
+        match connect_to(n, server, address, clock, end) {
+            Ok(take stream) => {
+                let _ = channel.send(pool, Connected(address))
+                return Ok(Held(connection: take stream, address, idle_at: host.mono_ns(clock)))
+            },
+            Error(problem) => {
+                if let Cancelled = problem {
+                    let _ = channel.send(pool, Release(address, false))
+                    return Error(Cancelled)
+                }
+                let _ = channel.send(pool, Release(address, true))
+                if let Deadline = problem {
+                    return Error(Deadline)
+                }
+                last = Http(problem)
+                if host.mono_ns(clock) >= end {
+                    return Error(Deadline)
+                }
+                list.push(mut tried, address.ip)
+            },
+        }
     }
 }
 
@@ -1788,9 +1851,9 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let mut h = match take current {
         Some(take held) => take held,
         None => {
-            match open_connection(mut lane, job.deadline) {
+            match connect_pool(lane.network, lane.server, lane.clock, lane.pool, lane.lease, lane.index, job.deadline) {
                 Ok(take held) => take held,
-                Error(take f) => return Refused(take f),
+                Error(take reason) => return Refused(Failure(phase: BeforeRequest, reason: take reason, status: 0, code: list.new(), server_time: None)),
             }
         },
     }

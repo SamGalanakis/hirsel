@@ -42,6 +42,7 @@ pub opaque type Entry[A] {
 }
 
 type EntryRef: send { path: Bytes, schema: Bytes, granted: bool }
+pub opaque type Destination: codec + send { path: Bytes, schema: Bytes, granted: bool }
 
 pub opaque type Entries: send { listed: List[EntryRef] }
 
@@ -175,6 +176,29 @@ fn listed(entries: Entries, path_bytes: Bytes, schema: Bytes, carries_grants: bo
 }
 
 pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A], arg: A, when: Due) -> Result[Id, Error] {
+    let (id, at) = allocate_id(mut tx, t, entries, target)?
+    write_at(mut tx, t, target, id, arg, when, at)
+}
+
+pub fn destination[A](target: Entry[A]) -> Destination {
+    Destination(path: clone(target.ref.path), schema: clone(target.ref.schema), granted: target.ref.granted)
+}
+
+pub fn write_saved[A: codec](mut tx: store.Tx, t: Tables, entries: Entries, saved: Destination, arg: A, when: Due) -> Result[Id, Error] {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    let schema = std.codec.schema(codec) ?=> |_| Store(Limit(Value))
+    if schema != saved.schema { return Error(MissingEntry) }
+    let target = Entry(ref: EntryRef(path: clone(saved.path), schema: take schema, granted: saved.granted), codec: codec)
+    write(mut tx, t, entries, target, arg, when)
+}
+
+/// Builds a trigger's argument from the id assigned to it in this transaction.
+pub fn write_with_id[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A], make_arg: scoped fn(Id) -> A, when: Due) -> Result[Id, Error] {
+    let (id, at) = allocate_id(mut tx, t, entries, target)?
+    write_at(mut tx, t, target, id, make_arg(id), when, at)
+}
+
+fn allocate_id[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A]) -> Result[(Id, u64), Error] {
     if !listed(entries, target.ref.path, target.ref.schema, target.ref.granted) { return Error(MissingEntry) }
     let info = store.info(mut tx)
     let mut id = Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: info.id.version, index: 0u64)
@@ -182,7 +206,11 @@ pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A],
         let Some(next) = int.checked_add(id.index, 1u64) else { return Error(IndexLimit) }
         id.index = next
     }
-    let due = match when { AfterCommit => info.at, At(at) => at }
+    Ok((id, info.at))
+}
+
+fn write_at[A](mut tx: store.Tx, t: Tables, target: Entry[A], id: Id, arg: A, when: Due, at: u64) -> Result[Id, Error] {
+    let due = match when { AfterCommit => at, At(due) => due }
     let mut encoded: Bytes = list.new()
     std.codec.encode(target.codec, arg, mut encoded) ?=> |_| Store(Limit(Value))
     let row = SubRow(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,

@@ -762,9 +762,8 @@ fn step_held[G: send, H: shareable + inert + send](mut b: Board[G, H]) -> List[O
 
 pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     let empty = store.snapshot(db)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
@@ -773,10 +772,6 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let mut keys: List[Bytes] = list.new()
     for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
         list.push(mut keys, clone(ch.tree_key))
-    }
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
     }
     let reg = match placed(code.describe(subs_place), 1048576u64) {
         Ok(take x) => take x,
@@ -864,13 +859,11 @@ fn range_limit(n: u32) -> Bytes {
 // None. An insert before the prefix's first row also changes its Cover.
 pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv = std.codec.of_u64()
-    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 3, 30)
     set(mut db, t, 7, 70)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
-    let h = result.unwrap(subs_handles(mut db))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
     let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())

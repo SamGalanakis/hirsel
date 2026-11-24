@@ -15,8 +15,7 @@ fn shared_input(key: Bytes, limit: u64, issuer: u8, refund: Sender[u64]) -> Subs
 
 fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u64())))
-    let h = result.unwrap(subs_handles(mut db))
+    let h = result.unwrap(install_subs_data(mut db))
     set(mut db, h.t, 0u64, 0u64)
     set(mut db, h.t, 1u64, 9u64)
     let key = query_key(code.describe(shared_count_query))

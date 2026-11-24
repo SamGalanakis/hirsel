@@ -30,8 +30,7 @@ fn group_number(encoded_value: Bytes, expected: u64) -> bool {
 @test
 fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u64())))
-    let h = result.unwrap(subs_handles(mut db))
+    let h = result.unwrap(install_subs_data(mut db))
     set(mut db, h.t, 0u64, 1u64)
     set(mut db, h.t, 1u64, 5u64)
     set(mut db, h.t, 2u64, 0u64)

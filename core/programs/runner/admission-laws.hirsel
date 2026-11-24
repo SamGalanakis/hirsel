@@ -429,9 +429,8 @@ fn wire_initial_count(frame: Option[Frame], sub: u32, count: u64) -> bool {
 // frames waiting for the writer can outlive the query that produced them.
 pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let codec = std.codec.of_u64()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), codec))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
     set(mut db, t, 2u64, 0u64)
@@ -439,7 +438,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
     let pub_job = Publish(place: code.describe(subs_place), n_place: 1048576u64, staging: 1048576u64,
-        h: arc.new(result.unwrap(subs_handles(mut db))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+        h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
@@ -753,12 +752,10 @@ fn owner_takes(mut owner: WireSession[(), ()], mut work: WireWork, inbox: Receiv
 // repairs on the drain token alone (v2.20), which queues a second whole repair behind the first.
 pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
-    let h = result.unwrap(subs_handles(mut db))
     let board_reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut bound_registry = take board_reg
     result.unwrap(bind_query_slots(mut bound_registry, h))

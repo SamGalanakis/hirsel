@@ -95,8 +95,15 @@ fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
     query(mut r, code.describe(q_fault), law_query_slots()?, 65536u64, DEFAULT_STEPS)
 }
 
-fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
-    Ok(Qh(t: clone(t)))
+fn subs_data(mut d: store.Declare) -> Result[Qh, store.Error] {
+    let table = store.declare_table(mut d, "data", std.codec.key_u64(), std.codec.of_u64())?
+    Ok(Qh(t: store.finish(mut d, take table)?))
+}
+
+fn install_subs_data(mut db: store.Db) -> Result[Qh, store.Error] waits {
+    let mut declaration = store.declare(db, Migrate)?
+    let handles = subs_data(mut declaration)?
+    let ticket = store.seal(mut db, take declaration)?
+    store.durable(mut db, ticket)?
+    Ok(take handles)
 }

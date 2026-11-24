@@ -57,8 +57,7 @@ fn failed_read_reset(owner: FailedReadOwner, at: u64) -> bool {
 
 fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u64())))
-    let h = result.unwrap(subs_handles(mut db))
+    let h = result.unwrap(install_subs_data(mut db))
     let t = view h.t
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 11u64)

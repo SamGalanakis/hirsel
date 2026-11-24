@@ -1,10 +1,8 @@
 pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
-    let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
@@ -41,9 +39,8 @@ fn test_subs_reset_keeps_diff(c: Clock, r: Random) -> Result[(), ()] waits {
 // version.
 pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     let empty = store.snapshot(db)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
@@ -52,10 +49,6 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut keys: List[Bytes] = list.new()
     for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
         list.push(mut keys, clone(ch.tree_key))
-    }
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
     }
     let reg = match placed(code.describe(subs_place), 1048576u64) {
         Ok(take x) => take x,
@@ -161,18 +154,13 @@ fn drain_content(from: Receiver[WireEvent], mut versions: List[u64], sub: u32, m
 // nothing. Then c2's round reaches L.
 fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
     set(mut db, t, 2u64, 0u64)
     let base = store.snapshot(db)
     let v0 = store.version(base)
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
-    }
     set(mut db, t, 1u64, 1u64)
     let c1 = store.snapshot(db)
     set(mut db, t, 2u64, 7u64)
@@ -259,17 +247,12 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
 // (with its waiting Ended and its mark) and its waiting Told.
 fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
     let base = store.snapshot(db)
     let at = store.version(base)
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
-    }
     let reg = match placed(code.describe(subs_place), 1048576u64) {
         Ok(take x) => take x,
         Error(_) => return false,
@@ -529,13 +512,11 @@ pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits
 // 4's drain token and then owes q1's full image at the base, rows 1 and 2 in one `complete`.
 fn ended_trace(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
     set(mut db, t, 2u64, 0u64)
-    let h = result.unwrap(subs_handles(mut db))
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let mut bound_registry = take reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
@@ -620,16 +601,11 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
 // keep_answers' push unwraps the refusal.
 fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     let base = store.snapshot(db)
     let v0 = store.version(base)
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
-    }
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
     let p = Publish(place: code.describe(subs_place), n_place: 131072u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
@@ -666,18 +642,13 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 
 fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
     set(mut db, t, 0u64, 1u64)
     set(mut db, t, 1u64, 0u64)
     set(mut db, t, 2u64, 0u64)
     let base = store.snapshot(db)
     let v0 = store.version(base)
-    let h = match subs_handles(mut db) {
-        Ok(take x) => take x,
-        Error(_) => return false,
-    }
     set(mut db, t, 1u64, 5u64)
     let cs = store.snapshot(db)
     set(mut db, t, 0u64, 0u64)

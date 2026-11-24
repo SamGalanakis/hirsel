@@ -1,0 +1,69 @@
+type ManagedRun[G: send, S: send, B: send]: send {
+    settings: runner.PlaceConfig[G, Hd, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+}
+
+fn run_managed[G: send, S: send, B: send](take job: ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+    let ManagedRun(settings: take settings, stop: take stop, status: take status, watch: take watch) = take job
+    runner.operate(take settings, take stop, status, Some(take watch))
+}
+
+fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
+
+fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
+    let mut wire = runner.wire_defaults(65536u64)
+    wire.n_pool = 4194304u64
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
+        on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64,
+        proxies: list.new(), n_publisher: 1048576u64, listen: listen,
+        net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
+}
+
+fn try_start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool, allowance: u64) -> Result[(Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]), runner.StartError] waits {
+    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    if stop_pending { result.unwrap(channel.send(stop_to, ())) }
+    let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
+    let status = result.unwrap(runner.status_root())
+    let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
+    let run: fn(take ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits = run_managed
+    let running = task.try_spawn(tasks, bytes allowance, take request, run) ?=> |(cap, _)| Full(cap)
+    match channel.receive(phase_rx) {
+        Ok(take phases) => Ok((take running, take stop_to, take phases, take status)),
+        Error(_) => match task.join(take running) {
+            Ok(Error(take why)) => Error(take why),
+            _ => fail("managed fixture exited before handing off its phases"),
+        },
+    }
+}
+
+fn start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
+    // Directory: checkpoint + two frames + pack + resident + cut work
+    // = 4,194,304 + 2 * 16,777,296 + 512 + 1,048,576 + 256,188.
+    // Runner: head + serving + supervisor + keep + optional trigger grant.
+    let allowance = 39054172u64 + 4194304u64 + 7412279u64 + 262144u64 + 1048576u64 + 65536u64
+    match try_start_managed(tasks, take settings, stop_pending, allowance) {
+        Ok(take started) => take started,
+        Error(take why) => fail(runner.start_text(why)),
+    }
+}
+
+@test
+fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let listen = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let stop = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
+    let small = managed_settings(dir, clock, random, tasks, net, listen, stop)
+    // The old 48 MiB root leaves 37,414,345 bytes after the 12,917,303 bytes above.
+    if let Error(Full(Capacity(requested: 39054172u64, available: 37414345u64))) = try_start_managed(tasks, take small, true, 50331648u64) {} else {
+        fail("stop: sizing refusal lost before the phase handoff")
+    }
+    let config = managed_settings(dir, clock, random, tasks, net, listen, stop)
+    let (running, stop_to, phases, _) = start_managed(tasks, take config, true)
+    if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("stop: expected Unstarted") }
+    if let Ok(Starting(Recovering)) = channel.try_receive(phases) {} else { fail("stop: expected Recovering") }
+    if let Ok(Draining) = channel.try_receive(phases) {} else { fail("stop: expected Draining") }
+    if let Error(Closed) = channel.try_receive(phases) {} else { fail("stop: place continued after Draining") }
+    let _ = take stop_to
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}

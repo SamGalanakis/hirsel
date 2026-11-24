@@ -52,6 +52,7 @@ dirs = ["."]
 "runner-call-query-slots.hirsel" = "runner_calls"
 "runner_hung_laws.hirsel" = "runner_calls"
 "runner-idle-law.hirsel" = "runner_calls"
+"runner-managed-law.hirsel" = "runner_calls"
 "session-laws.hirsel" = "runner"
 "runner-wire-protocol-law.hirsel" = "runner"
 "site-laws.hirsel" = "site_laws"

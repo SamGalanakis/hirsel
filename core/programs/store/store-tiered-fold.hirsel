@@ -1,0 +1,109 @@
+type TieredFoldSource {
+    pager: Sender[TieredPagerMessage],
+    packs: std.omap.OMap[u64, TieredPagerPack],
+    next_stamp: u64,
+    deadline: u64
+}
+
+fn fold_cold_path(source: TieredFoldSource, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
+    if base.stamp == 0 {
+        return Ok(list.new())
+    }
+    let demand = TieredPointDemand(target: TieredPage(base), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
+    match tiered_point_delivery(source.pager, take demand) {
+        Error(Corrupt(take fault)) => {
+            let mut malformed_fault = take fault
+            malformed_fault.why = Malformed
+            Error(Corrupt(take malformed_fault))
+        },
+        take outcome => take outcome,
+    }
+}
+
+fn fold_page(frame: TieredFrame) -> View[Arc[std.page.Page]] in frame {
+    let TieredImage(page) = view frame.payload else {
+        fail("store: expected a PAGE on the fold's path")
+    }
+    page
+}
+
+fn fold_base_prior(source: TieredFoldSource, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
+    let sought = list.slice(logical, 4, list.len(logical))
+    let path = fold_cold_path(source, base, sought)?
+    if list.len(path) == 0 {
+        return Ok(0u32)
+    }
+    let leaf_page = fold_page(path[list.len(path) - 1])
+    let image = std.page.image_of(leaf_page)
+    let (slot, hit) = std.page.search(image, sought)
+    if !hit {
+        return Ok(0u32)
+    }
+    if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+        return Ok(int.truncate(1 + reference.len))
+    }
+    let Some(stored) = std.page.value_at(leaf_page, slot) else {
+        fail("store: missing value in the fold's leaf")
+    }
+    Ok(int.truncate(1 + list.len(stored)))
+}
+
+// Sum the strict prefixes encountered while descending one boundary path.
+// Interior entries carry the charges for every subtree the path passes.
+fn fold_prefix_charge(source: TieredFoldSource, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
+    let key = key_word(sequence_limit)
+    let path = fold_cold_path(source, base, key)?
+    let mut total = 0u64
+    for frame in path {
+        let image = std.page.image_of(fold_page(frame))
+        let end = match std.page.descend(image, key) {
+            Some(slot) => slot,
+            None => {
+                let (slot, _) = std.page.search(image, key)
+                slot
+            },
+        }
+        let path_name = paged_pack_path(frame.identity.pack)?
+        total = disk_allocation(scoped fn() -> Result[u64, Error] {
+            let mut charge = total
+            for slot in 0u64 .. end {
+                let row = option.unwrap(std.page.entry(image, slot))
+                if std.page.level(image) == 0 && list.len(row.key) != 8 {
+                    return Error(disk_fault(path_name, frame.identity.offset, Malformed))
+                }
+                let width = match row.cell {
+                    Child(child_entry) => child_entry.charge,
+                    InlineValue(value) => 62 + 16 + round8(list.len(value)),
+                    BlobValue(reference) => 62 + 16 + round8(reference.len),
+                }
+                let Some(following) = int.checked_add(charge, width) else {
+                    return Error(disk_fault(path_name, frame.identity.offset, Malformed))
+                }
+                charge = following
+            }
+            Ok(charge)
+        })?
+    }
+    Ok(total)
+}
+
+fn verify_tiered_fold(source: TieredFoldSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+    let pack_file = paged_pack_path(base.pack)?
+    let mut trim_records = std.omap.range(overlay.trims, Unbounded, Unbounded)
+    while let Some((_, evidence)) = std.omap.next(mut trim_records) {
+        if evidence.lo < evidence.hi {
+            let low = fold_prefix_charge(source, base, evidence.lo)?
+            let high = fold_prefix_charge(source, base, evidence.hi)?
+            if int.checked_sub(high, low) != Some(evidence.cold_charge) {
+                return Error(disk_fault(pack_file, base.offset, Malformed))
+            }
+        }
+    }
+    let mut items = std.omap.range(overlay.entries, Unbounded, Unbounded)
+    while let Some((key, row)) = std.omap.next(mut items) {
+        if fold_base_prior(source, base, key)? != row.base {
+            return Error(disk_fault(pack_file, base.offset, Malformed))
+        }
+    }
+    Ok(())
+}

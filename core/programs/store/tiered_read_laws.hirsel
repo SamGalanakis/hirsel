@@ -204,3 +204,53 @@ fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Err
     let _ = result.unwrap(task.join(take worker))
     admitted
 }
+
+fn l79_fold_base(d: Dir, owner: StoreId) -> Result[std.page.PagePtr, Error] waits {
+    let mut rows: List[std.page.Entry] = list.with_capacity(3)
+    for seq in 0u64 .. 3 {
+        list.push(mut rows, std.page.Entry(key: key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
+    }
+    let image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    l68_write_page_pack(d, owner, 8, 40, std.page.payload(image))
+}
+
+fn l79_fold_trims(first_charge: u64, final_charge: u64) -> Result[Arc[ReplayOverlay], Error] {
+    let mut overlay = empty_replay_overlay(Some(3u64))
+    let initial = ReplayLogHead(first: 0, next: 3, cold_next: 3, row_bytes: 258)
+    let middle = replay_overlay_trim(mut overlay, "j-1", 72, ReplayOrigin(ordinal: 1, branch: 0), 9, initial, JournalTrim(floor: 2, dropped: first_charge))?
+    let _ = replay_overlay_trim(mut overlay, "j-1", 90, ReplayOrigin(ordinal: 2, branch: 0), 9, middle, JournalTrim(floor: 3, dropped: final_charge))?
+    Ok(take overlay)
+}
+
+fn l79_fold_checks(source: TieredFoldSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    // Each of the three rows costs 62 + round8(12) + round8(6) = 86.
+    verify_tiered_fold(source, base, l79_fold_trims(172, 86)?)?
+    let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(source, base, l79_fold_trims(180, 78)?) else {
+        fail("L79: individually wrong trim charges passed with the right sum")
+    }
+    let mut overlay = empty_replay_overlay(None)
+    let key = log_key(9, 4)?
+    replay_overlay_edit(mut overlay, "j-1", 110, ReplayOrigin(ordinal: 1, branch: 0), key, 7, ReplayAbsent)?
+    let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(source, base, overlay) else {
+        fail("L68: fold accepted a recorded prior for an absent key")
+    }
+    Ok(())
+}
+
+@test
+fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = l79_fold_base(fixtures, owner)?
+    let width: u64 = int.widen(base.len)
+    let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let source = TieredFoldSource(pager: take requests, packs: take packs, next_stamp: 41, deadline: 0)
+    let checked = l79_fold_checks(source, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}

@@ -19,9 +19,12 @@ bookkeeping: drop flags and the limit records of MEM-20. The one provider memory
 cover is a `UdpSocket`'s receive pool and a group's queues, whose size the program chooses
 ([NET-16](net.md#net-16-udp-sockets-and-batches)). That charge is refunded at the pool's
 recorded retirement, not at the drop, so its credit never funds new storage while the old
-storage is live. The kernel's socket queues behind a `UdpSocket` are not charged here; the
-run's UDP host allowance bounds them, and a refusal there is a provider error, not a refused
-admission.
+storage is live. A limit that ends before the retirement hands the charge over to its parent
+like any surviving charge (MEM-20), so a helper's join does not refund it
+([CONC-15](tasks.md#conc-15-units)). The kernel's socket queues behind a `UdpSocket` are not
+charged here. The run's UDP host allowance admits them nominally, at each socket's default
+sizes read at run start. That is a per-run count, not a ceiling on kernel memory (NET-16), and
+a refusal there is a provider error, not a refused admission.
 
 ### MEM-20: Limit records and hand-over
 
@@ -383,7 +386,8 @@ is core's plain record `{ steps: u64 }`.
   its `out` spare capacity, and one for each 16 KiB, or part, of the most it can deliver
   (`min(r, e × (slot_bytes − 256))`). `host.udp_send` takes one for each 64 packets, or part
   of 64, of its `pkts`, and after validating them one for each 16 KiB, or part, of the sum of
-  their lengths. All are taken at the call and before issue
+  their lengths. The product and the sum are exact (128-bit) before rounding, so neither
+  wraps. All are taken at the call and before issue
   ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
   takes no steps. This is the **reference count**, the count the reference evaluator takes;
   a build may count otherwise (Determinism, below).

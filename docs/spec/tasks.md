@@ -445,8 +445,13 @@ helper, waits for its end with cancellation shielded, and drops its result or ca
 `join` returns or that cleaning ends, all of the task charge has been refunded to the limit
 that admitted it, except the charges for the result's content, any delivered causes, and
 each connection the helper made that is still open (CONC-17), each `Secret` designation
-it made that is still held ([TLS-5](tls.md#tls-5-secrets)) and each `Shared` node it made
-that another unit still holds. These charges are refunded when their owners are cleaned.
+it made that is still held ([TLS-5](tls.md#tls-5-secrets)), each `Shared` node it made
+that another unit still holds, and each `UdpSocket` pool and group queue it paid for that
+has not yet retired ([NET-16](net.md#net-16-udp-sockets-and-batches)). The last covers a
+socket whatever route its handle left by, and one whose drop has started a retirement that
+is still pending at the join. These charges are refunded when their owners are cleaned; a
+UDP charge is refunded at its recorded retirement, to the limit its record then leads to
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
 
 `Shared[T]`, where `T` is `shareable` ([OWN-4](ownership.md#own-4-bounds)) and `cross`,
 holds one value that every unit holding it may read and none may change: being shareable,

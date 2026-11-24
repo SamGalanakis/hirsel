@@ -1037,7 +1037,9 @@ pub fn trigger(take t: StopTrigger)
   reply. A `Call` dropped without a reply settles its caller as a sealed port does.
 - **Sealing.** Cleaning the `Served` end, or the end of its task, seals the port: every
   queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
-  (`Net`), and drops of its handles still succeed. `provide.next` returns `None` only at
+  (`Net`), and drops of its handles still succeed. A sealed `Net` port retires its dropped
+  `UdpSocket` ids at the seal and later ones at their drop, since no server will take their
+  `Released` ([NET-16](net.md#net-16-udp-sockets-and-batches)). `provide.next` returns `None` only at
   quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
 - **Terminal bit.** `provide.stdout` and `provide.stderr` take the stream's terminal bit
   explicitly, and `stdout.is_terminal` and `stderr.is_terminal` on the result return it for

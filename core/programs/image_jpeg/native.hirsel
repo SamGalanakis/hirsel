@@ -1,0 +1,23 @@
+pub fn decoder_create(f: Foreign[image_jpeg.Jpeg], memory: u64) -> Option[foreign.Ptr[image_jpeg.DecoderHandle]]
+
+pub fn decoder_destroy(f: Foreign[image_jpeg.Jpeg], take d: foreign.Ptr[image_jpeg.DecoderHandle])
+
+pub fn decoder_start(f: Foreign[image_jpeg.Jpeg], d: foreign.Ptr[image_jpeg.DecoderHandle], input: Bytes, scale: u32) -> i32
+
+pub fn decoder_width(f: Foreign[image_jpeg.Jpeg], d: foreign.Ptr[image_jpeg.DecoderHandle]) -> u32
+
+pub fn decoder_height(f: Foreign[image_jpeg.Jpeg], d: foreign.Ptr[image_jpeg.DecoderHandle]) -> u32
+
+pub fn decode_strip(f: Foreign[image_jpeg.Jpeg], d: foreign.Ptr[image_jpeg.DecoderHandle], input: Bytes, mut rgb: Bytes) -> i32
+
+pub fn encoder_create(f: Foreign[image_jpeg.Jpeg], memory: u64) -> Option[foreign.Ptr[image_jpeg.EncoderHandle]]
+
+pub fn encoder_destroy(f: Foreign[image_jpeg.Jpeg], take e: foreign.Ptr[image_jpeg.EncoderHandle])
+
+pub fn encoder_start(f: Foreign[image_jpeg.Jpeg], e: foreign.Ptr[image_jpeg.EncoderHandle], width: u32, height: u32, quality: i32, mode: u32, mut output: Bytes) -> i32
+
+pub fn encode_strip(f: Foreign[image_jpeg.Jpeg], e: foreign.Ptr[image_jpeg.EncoderHandle], rgb: Bytes, mut output: Bytes) -> i32
+
+pub fn encode_finish(f: Foreign[image_jpeg.Jpeg], e: foreign.Ptr[image_jpeg.EncoderHandle], mut output: Bytes) -> i64
+
+pub fn encode_finish_progressive(f: Foreign[image_jpeg.Jpeg], e: foreign.Ptr[image_jpeg.EncoderHandle], mut output: Bytes) -> i64 waits

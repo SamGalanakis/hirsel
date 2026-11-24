@@ -1,0 +1,163 @@
+fn load(d: Dir, name: String) -> Bytes waits {
+    result.unwrap(std.file.read(d, name))
+}
+
+fn buffer(size: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(size)
+    list.fill(mut out, size, 0)
+    out
+}
+
+fn limits() -> image_jpeg.DecodeLimits {
+    image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 131072, max_pixels: 1000000, max_native_bytes: 2097152)
+}
+
+fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size {
+    for _ in 0u64 .. 64 {
+        if let Some(size) = result.unwrap(image_jpeg.start_decode(mut decoder)) {
+            return size
+        }
+    }
+    fail("decoder header made no progress")
+}
+
+fn check_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, expected: Bytes, eighths: u32) {
+    let source = result.unwrap(image_jpeg.probe(input, limits()))
+    let target = if eighths == 8 {
+        source
+    } else {
+        image_jpeg.Size(width: ((source.width * eighths + 7) / 8) / 2, height: ((source.height * eighths + 7) / 8) / 2)
+    }
+    if image_jpeg.shrink_eighths(source, target) != eighths {
+        fail("wrong DCT scale")
+    }
+    let mut decoder = result.unwrap(image_jpeg.decoder(f, take input, target, limits()))
+    let size = dimensions(mut decoder)
+    let width: u32 = list.word_be(expected, 0)
+    let height: u32 = list.word_be(expected, 4)
+    if size.width != width || size.height != height {
+        fail("scaled dimensions differ from libjpeg")
+    }
+    let stride: u64 = int.widen(3 * width)
+    let mut rgb = buffer(16 * stride)
+    let mut at = 8u64
+    for _ in 0u64 .. 4096 {
+        match result.unwrap(image_jpeg.decode_strip(mut decoder, mut rgb)) {
+            Pending => (),
+            End => {
+                if at != list.len(expected) {
+                    fail("decoded length differs from libjpeg")
+                }
+                return
+            },
+            Rows(n) => {
+                let count = stride * int.widen(n)
+                if n == 0 || n > 16 || at + count > list.len(expected) || list.slice(rgb, 0, count) != list.slice(expected, at, at + count) {
+                    fail("decoded RGB differs from libjpeg")
+                }
+                at += count
+            },
+        }
+    }
+    fail("decoder did not finish")
+}
+
+fn check_encode(f: Foreign[image_jpeg.Jpeg], rgb: Bytes, expected: Bytes, size: image_jpeg.Size, mode: u32) waits {
+    let sampling: image_jpeg.Sampling = if mode % 2 == 0 {
+        S444
+    } else {
+        S420
+    }
+    let coding: image_jpeg.Coding = if mode < 2 {
+        Sequential
+    } else {
+        Progressive
+    }
+    let mut encoder = result.unwrap(image_jpeg.encoder(f, size, 95, sampling, coding, 2097152, buffer(524288)))
+    let stride: u64 = int.widen(3 * size.width)
+    let mut at = 0u64
+    for _ in 0u64 .. 4096 {
+        if at == list.len(rgb) {
+            let actual = if mode < 2 {
+                result.unwrap(image_jpeg.finish_encode(take encoder))
+            } else {
+                result.unwrap(image_jpeg.finish_progressive(take encoder))
+            }
+            if actual != expected {
+                fail("encoded JPEG differs from libjpeg")
+            }
+            return
+        }
+        let candidate = at + 16 * stride
+        let end = if candidate < list.len(rgb) {
+            candidate
+        } else {
+            list.len(rgb)
+        }
+        let rows = result.unwrap(image_jpeg.encode_strip(mut encoder, list.slice(rgb, at, end)))
+        at += stride * int.widen(rows)
+    }
+    fail("encoder did not finish")
+}
+
+fn check_limits(f: Foreign[image_jpeg.Jpeg], take input: Bytes, big_app: Bytes) {
+    let bomb: Bytes = b"\xff\xd8\xff\xc0\x00\x0b\x08\xc3\x50\xc3\x50\x01\x01\x11\x00\xff\xda\x00\x02"
+    let size = image_jpeg.Size(width: 800, height: 600)
+    let no_native = image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 131072, max_pixels: 1000000, max_native_bytes: 0)
+    if let Error(Limit) = image_jpeg.probe(bomb, no_native) {
+        ()
+    } else {
+        fail("accepted a 2.5 gigapixel header")
+    }
+    if let Error(Limit) = image_jpeg.decoder(f, take bomb, size, limits()) {
+        ()
+    } else {
+        fail("pixel cap did not gate decode")
+    }
+    let short_header = image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 4096, max_pixels: 1000000, max_native_bytes: 2097152)
+    if let Error(Limit) = image_jpeg.probe(big_app, short_header) {
+        ()
+    } else {
+        fail("header byte limit did not gate decode")
+    }
+    if let Error(Limit) = image_jpeg.decoder(f, take input, size, no_native) {
+        ()
+    } else {
+        fail("zero native allocation budget admitted a decoder")
+    }
+}
+
+@test
+fn libjpeg_vectors(f: Foreign[image_jpeg.Jpeg], dir: Dir) -> Result[(), ()] waits {
+    let long_app = load(dir, "long-app.jpg")
+    check_limits(f, load(dir, "baseline.jpg"), long_app)
+    for vector in 0u64 .. 2 {
+        let stem = if vector == 0 {
+            "baseline"
+        } else {
+            "encode-2"
+        }
+        let mut jpeg = string.from(stem)
+        string.push(mut jpeg, ".jpg")
+        for scale in 1u64 .. 9 {
+            let mut rgb = string.from(stem)
+            string.push(mut rgb, "-")
+            string.push_u64(mut rgb, scale)
+            string.push(mut rgb, ".rgb")
+            check_decode(f, load(dir, jpeg), load(dir, rgb), int.narrow(scale))
+        }
+    }
+    check_decode(f, take long_app, load(dir, "long-app-8.rgb"), 8)
+    check_decode(f, load(dir, "wide.jpg"), load(dir, "wide-8.rgb"), 8)
+    check_decode(f, load(dir, "flat.jpg"), load(dir, "flat-8.rgb"), 8)
+    let rgb = load(dir, "source.rgb")
+    let size = image_jpeg.Size(width: 227, height: 149)
+    for mode in 0u64 .. 4 {
+        let mut name = string.from("encode-")
+        string.push_u64(mut name, mode)
+        string.push(mut name, ".jpg")
+        check_encode(f, rgb, load(dir, name), size, int.narrow(mode))
+    }
+    check_encode(f, load(dir, "wide.rgb"), load(dir, "wide.jpg"), image_jpeg.Size(width: 2048, height: 37), 0)
+    Ok(())
+}

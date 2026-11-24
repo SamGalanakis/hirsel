@@ -1,0 +1,253 @@
+pub opaque type Jpeg {}
+
+pub opaque type DecoderHandle {}
+
+pub opaque type EncoderHandle {}
+
+pub type Error = Invalid | Limit | ShortBuffer | BadState
+
+pub type Size {
+    width: u32,
+    height: u32
+}
+
+pub type DecodeLimits {
+    max_input_bytes: u64,
+    max_header_bytes: u64,
+    max_pixels: u64,
+    max_native_bytes: u64
+}
+
+pub type DecodeStep = Pending | Rows(u32) | End
+
+pub type Sampling = S444 | S420
+
+pub type Coding = Sequential | Progressive
+
+pub opaque resource type Decoder: send {
+    f: Foreign[Jpeg],
+    p: foreign.Ptr[DecoderHandle],
+    input: Bytes,
+    eighths: u32
+} drop(d) {
+    native.decoder_destroy(d.f, d.p)
+}
+
+pub opaque resource type Encoder: send {
+    f: Foreign[Jpeg],
+    p: foreign.Ptr[EncoderHandle],
+    output: Bytes
+} drop(e) {
+    native.encoder_destroy(e.f, e.p)
+}
+
+fn status(code: i64) -> Error {
+    match code {
+        - 2 => Limit,
+        - 3 => ShortBuffer,
+        - 4 => BadState,
+        _ => Invalid,
+    }
+}
+
+/// Checks the first 8-bit, one- or three-component DCT frame through SOS.
+/// Runs before any native decoder allocation.
+pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
+    let length = list.len(input)
+    if length > limits.max_input_bytes {
+        return Error(Limit)
+    }
+    if length < 2 || input[0] != 255 || input[1] != 216 {
+        return Error(Invalid)
+    }
+    let end = if length < limits.max_header_bytes {
+        length
+    } else {
+        limits.max_header_bytes
+    }
+    let mut at = 2u64
+    let mut frame: Option[Size] = None
+    while at < end {
+        if input[at] != 255 {
+            return Error(Invalid)
+        }
+        at += 1
+        while at < end && input[at] == 255 {
+            at += 1
+        }
+        if end - at < 3 {
+            break
+        }
+        let marker = input[at]
+        at += 1
+        let span: u64 = int.widen((list.word_be(input, at) : u16))
+        if span < 2 {
+            return Error(Invalid)
+        }
+        if span > end - at {
+            break
+        }
+        if marker == 218 {
+            match frame {
+                Some(size) => return Ok(size),
+                None => return Error(Invalid),
+            }
+        }
+        if marker == 192 || marker == 193 || marker == 194 {
+            if let Some(_) = frame {
+                return Error(Invalid)
+            }
+            if span < 8 || input[at + 2] != 8 {
+                return Error(Invalid)
+            }
+            let height: u32 = int.widen((list.word_be(input, at + 3) : u16))
+            let width: u32 = int.widen((list.word_be(input, at + 5) : u16))
+            let components: u64 = int.widen(input[at + 7])
+            if (components != 1 && components != 3) || span != 8 + 3 * components || width == 0 || height == 0 {
+                return Error(Invalid)
+            }
+            let w: u64 = int.widen(width)
+            let h: u64 = int.widen(height)
+            if w * h > limits.max_pixels {
+                return Error(Limit)
+            }
+            frame = Some(Size(width: width, height: height))
+        } else {
+            if marker != 196 && marker != 204 && marker != 219 && marker != 221 && marker != 254 && (marker < 224 || marker > 239) {
+                return Error(Invalid)
+            }
+        }
+        at += span
+    }
+    if end < length {
+        Error(Limit)
+    } else {
+        Error(Invalid)
+    }
+}
+
+/// Chooses the smallest DCT scale that leaves at least 2× the target size
+/// on both axes. Uses full size if the source has insufficient headroom.
+pub fn shrink_eighths(source: Size, target: Size) -> u32 {
+    let width: u64 = int.widen(source.width)
+    let height: u64 = int.widen(source.height)
+    let target_width: u64 = int.widen(target.width)
+    let target_height: u64 = int.widen(target.height)
+    if target_width == 0 || target_height == 0 {
+        return 8
+    }
+    for eighths in 1u64 .. 8 {
+        if (width * eighths + 7) / 8 >= 2 * target_width && (height * eighths + 7) / 8 >= 2 * target_height {
+            return int.narrow(eighths)
+        }
+    }
+    8
+}
+
+/// Takes ownership of the bounded input. Only transient loans cross the FFI.
+pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: DecodeLimits) -> Result[Decoder, Error] {
+    let size = probe(input, limits)?
+    let eighths = shrink_eighths(size, target)
+    match native.decoder_create(f, limits.max_native_bytes) {
+        None => Error(Limit),
+        Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths) {
+            Ok(take d) => Ok(take d),
+            Error((_, (grant, handle, _, _))) => {
+                native.decoder_destroy(grant, handle)
+                Error(Limit)
+            },
+        },
+    }
+}
+
+/// Advances header processing. Some contains the RGB output dimensions.
+/// Call until it returns Some before requesting strips.
+pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] {
+    let code = native.decoder_start(d.f, d.p, d.input, d.eighths)
+    if code < 0 {
+        return Error(status(int.widen(code)))
+    }
+    if code == 0 {
+        return Ok(None)
+    }
+    Ok(Some(Size(width: native.decoder_width(d.f, d.p), height: native.decoder_height(d.f, d.p))))
+}
+
+/// Writes at most 16 RGB rows to the initialized destination. The destination
+/// must fit all remaining rows up to 16. Pending can occur without output.
+pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error] {
+    let code = native.decode_strip(d.f, d.p, d.input, mut rgb)
+    if code == -5 {
+        return Ok(End)
+    }
+    if code < 0 {
+        return Error(status(int.widen(code)))
+    }
+    if code == 0 {
+        Ok(Pending)
+    } else {
+        Ok(Rows(int.narrow(code)))
+    }
+}
+
+/// Takes an initialized output buffer. Its length bounds the JPEG size.
+pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, coding: Coding, max_native_bytes: u64, take output: Bytes) -> Result[Encoder, Error] {
+    let sampling_bit: u32 = match sampling {
+        S444 => 0,
+        S420 => 1,
+    }
+    let mode = sampling_bit + match coding {
+        Sequential => 0u32,
+        Progressive => 2u32,
+    }
+    let Some(p) = native.encoder_create(f, max_native_bytes) else {
+        return Error(Limit)
+    }
+    let mut e = match Encoder(f: f, p: p, output: take output) {
+        Ok(take e) => e,
+        Error((_, (grant, handle, _))) => {
+            native.encoder_destroy(grant, handle)
+            return Error(Limit)
+        },
+    }
+    let code = native.encoder_start(e.f, e.p, size.width, size.height, quality, mode, mut e.output)
+    if code < 0 {
+        Error(status(int.widen(code)))
+    } else {
+        Ok(take e)
+    }
+}
+
+/// Accepts 1–16 whole RGB rows. Supply any unconsumed rows again.
+pub fn encode_strip(mut e: Encoder, rgb: Bytes) -> Result[u32, Error] {
+    let code = native.encode_strip(e.f, e.p, rgb, mut e.output)
+    if code < 0 {
+        Error(status(int.widen(code)))
+    } else {
+        Ok(int.narrow(code))
+    }
+}
+
+fn packet(mut e: Encoder, code: i64) -> Result[Bytes, Error] {
+    if code < 0 {
+        return Error(status(code))
+    }
+    let mut output = replace(mut e.output, list.new())
+    list.truncate(mut output, int.narrow(code))
+    Ok(take output)
+}
+
+/// Completes a sequential image after all its rows are accepted.
+pub fn finish_encode(take session: Encoder) -> Result[Bytes, Error] {
+    let mut e = take session
+    let code = native.encode_finish(e.f, e.p, mut e.output)
+    packet(mut e, code)
+}
+
+/// Completes a progressive image on a helper. The remaining whole-image
+/// entropy passes can take longer than a strip call.
+pub fn finish_progressive(take session: Encoder) -> Result[Bytes, Error] waits {
+    let mut e = take session
+    let code = native.encode_finish_progressive(e.f, e.p, mut e.output)
+    packet(mut e, code)
+}

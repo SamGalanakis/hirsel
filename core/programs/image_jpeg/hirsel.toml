@@ -1,0 +1,14 @@
+[package]
+name = "image_jpeg"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"image_jpeg.hirsel" = "image_jpeg"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hjpg_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_jpeg.a", sha256 = "0ffb9a5f0d75fe18622c05dcf7b0108833d8c5093c1928dbcc1ba9ff231b933e" },
+]

@@ -1685,7 +1685,7 @@ package. Each law is carried by exactly one slice.
 | **S8** rewriting | RTP-11, RTP-12: modules `rewrite` and `counter`, and the close operations | S1, S4, S7 | `rewrite_continuity`, `rewrite_late`, `simulcast_switch`, `svc_masks`, `codec_counter_continuity`, `close_leaves_nothing` | L | Opus |
 | **S9** unit adapter in `media_bits` | a `vp8` module (RFC 7741 descriptor: picture ID, TL0PICIDX, TID, `Y`, `S`, `PID`, keyframe from `P`, in-place rewrite of picture ID and TL0PICIDX at the output width), and the `Unit` adapter for VP8, VP9, H.264 and AV1. The one owner of the VP8 parser and descriptor laws; WebRTC slice S2 consumes them at egress | nothing | `unit_adapter` | M | Opus |
 | **S10** network laws | the two `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff` | M | Sol |
-| **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost` | S | Sol |
+| **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (default mode), reports instructions (`--mode instructions`) and times the path on a shielded CPU (`--mode time`) | S | Sol |
 | **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
 
 Every slice that changes a `.hirsel` source under `core/programs/rtp` <!-- doc-ref: planned --> or

@@ -327,46 +327,53 @@ pub fn write_header(f: header.Fields, w: View[ExtWriter], mut out: Bytes) -> Res
     if size > available {
         return Error(Capacity(Capacity(requested: size, available: available)))
     }
-    list.push(mut out, if has_block {
+    // Room is checked, so size the header once and store into it.
+    let base = list.len(out)
+    list.fill(mut out, size, 0u8)
+    out[base] = if has_block {
         0x90u8
     } else {
         0x80u8
-    })
-    list.push(mut out, if f.marker {
+    }
+    out[base + 1] = if f.marker {
         f.pt | 128
     } else {
         f.pt
-    })
-    list.put_word_be(mut out, f.seq)
-    list.put_word_be(mut out, f.ts)
-    list.put_word_be(mut out, f.ssrc)
+    }
+    list.set_word_be(mut out, base + 2, f.seq)
+    list.set_word_be(mut out, base + 4, f.ts)
+    list.set_word_be(mut out, base + 8, f.ssrc)
     if has_block {
-        list.put_word_be(mut out, if one_byte {
+        list.set_word_be(mut out, base + 12, if one_byte {
             0xbedeu16
         } else {
             0x1000u16
         })
         let word_count: u16 = int.narrow(words)
-        list.put_word_be(mut out, word_count)
+        list.set_word_be(mut out, base + 14, word_count)
+        // The zero fill is the padding to the word boundary.
+        let mut at = base + 16
         let mut value_at = 0u64
         let mut i = 0u64
         while i < w.count {
             let e = w.entries[i]
             if one_byte {
-                list.push(mut out, (e.id << 4) | (e.len - 1))
+                out[at] = (e.id << 4) | (e.len - 1)
+                at += 1
             } else {
-                list.push(mut out, e.id)
-                list.push(mut out, e.len)
+                out[at] = e.id
+                out[at + 1] = e.len
+                at += 2
             }
             let len: u64 = int.widen(e.len)
             let end = value_at + len
             while value_at < end {
-                list.push(mut out, w.data[value_at])
+                out[at] = w.data[value_at]
+                at += 1
                 value_at += 1
             }
             i += 1
         }
-        list.fill(mut out, words * 4 - elements_len, 0u8)
     }
     Ok(size)
 }

@@ -60,6 +60,9 @@ pub opaque type Rewrite {
     frame_max: List[u64],
     frame_used: List[bool],
     frame_next: u64,
+    // The highest timestamp of any frame the current generation added.
+    gen_frames: bool,
+    gen_ts_max: i64,
     evicted: bool,
     evicted_upto: u64,
     // The outgoing stream.
@@ -109,7 +112,7 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
     list.fill(mut frame_forward, f, false)
     list.fill(mut frame_max, f, 0u64)
     list.fill(mut frame_used, f, false)
-    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, range_from: range_from, range_offset: range_offset, range_count: 0, range_head: 0, frame_gen: frame_gen, frame_ts: frame_ts, frame_id: frame_id, frame_forward: frame_forward, frame_max: frame_max, frame_used: frame_used, frame_next: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
+    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, range_from: range_from, range_offset: range_offset, range_count: 0, range_head: 0, frame_gen: frame_gen, frame_ts: frame_ts, frame_id: frame_id, frame_forward: frame_forward, frame_max: frame_max, frame_used: frame_used, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
 }
 
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
@@ -148,13 +151,31 @@ fn has(mask: u32, bit: u8) -> bool {
 
 // The ring slot holding the current generation's decision for a frame.
 fn find_frame(r: Rewrite, ts: i64, frame: u16) -> Option[u64] {
+    // A timestamp above every frame of this generation matches no entry.
+    if !r.gen_frames || ts > r.gen_ts_max {
+        return None
+    }
     let n = list.len(r.frame_used)
+    // Newest first, stepping back without a division per slot. Entries are
+    // written in order and generations only grow, so the first older
+    // generation (or unused slot) ends the current generation's entries.
+    let mut i = if r.frame_next == 0 {
+        n - 1
+    } else {
+        r.frame_next - 1
+    }
     let mut k = 0u64
     while k < n {
-        // Newest first.
-        let i = (r.frame_next + n - 1 - k) % n
-        if r.frame_used[i] && r.frame_gen[i] == r.generation && r.frame_ts[i] == ts && r.frame_id[i] == frame {
+        if !r.frame_used[i] || r.frame_gen[i] != r.generation {
+            return None
+        }
+        if r.frame_ts[i] == ts && r.frame_id[i] == frame {
             return Some(i)
+        }
+        i = if i == 0 {
+            n - 1
+        } else {
+            i - 1
         }
         k += 1
     }
@@ -176,7 +197,15 @@ fn add_frame(mut r: Rewrite, ts: i64, frame: u16, forward: bool, index: u64) {
     r.frame_id[i] = frame
     r.frame_forward[i] = forward
     r.frame_max[i] = index
-    r.frame_next = (i + 1) % list.len(r.frame_used)
+    if !r.gen_frames || ts > r.gen_ts_max {
+        r.gen_ts_max = ts
+    }
+    r.gen_frames = true
+    r.frame_next = if i + 1 == list.len(r.frame_used) {
+        0u64
+    } else {
+        i + 1
+    }
 }
 
 fn push_range(mut r: Rewrite, from: u64, offset: i64) {
@@ -270,6 +299,7 @@ fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64
     r.gen_start = index
     r.highest_in = index
     r.range_count = 0
+    r.gen_frames = false
     let i: i64 = int.narrow(index)
     let out: i64 = int.narrow(r.next_out)
     push_range(mut r, index, i - out)

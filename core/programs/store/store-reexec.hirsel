@@ -102,9 +102,6 @@ type BaseReplay {
 fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
     let d = log_directory(db)?
     let (_, id, take manifest) = read_only_manifest(d)?
-    if let Some(_) = manifest.claim {
-        return Error(Unsupported(1))
-    }
     let validated = validate_page_manifest(d, id, take manifest)?
     let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
     let mut graph = take resolved

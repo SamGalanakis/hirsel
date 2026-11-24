@@ -27,100 +27,9 @@ fn paged_pack_path(seq: u64) -> Result[String, Error] {
     })
 }
 
-// CLAIM: the writer epoch and the holder, a random identity kept by one local
-// directory. AUTHORITY: the bucket the store lives in.
-type BucketClaim: shareable + send {
-    epoch: u64,
-    holder: StoreId,
-    endpoint: String,
-    aws_region: String,
-    bucket: String,
-    prefix: String,
-    style: u8
-}
-
 const CLAIM_BYTES: u64 = 24
 
-const AUTHORITY_LIMIT: u64 = 65536
-
-// The CLAIM and AUTHORITY frames with their heads.
-const BUCKET_FRAMES_LIMIT: u64 = 32 + CLAIM_BYTES + AUTHORITY_LIMIT
-
-const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + BUCKET_FRAMES_LIMIT + UNKNOWN_ROOM
-
-fn push_authority_text(mut out: Bytes, field: String) -> Result[(), Error] {
-    let n = string.byte_len(field)
-    if n > 65535 {
-        return Error(Limit(Manifest))
-    }
-    capacity(le(mut out, n, 2))?
-    list.append(mut out, string.as_bytes(field))
-    Ok(())
-}
-
-fn authority_payload(claim: BucketClaim) -> Result[Bytes, Error] {
-    let mut out: Bytes = list.new()
-    capacity(le(mut out, int.widen(claim.style), 1))?
-    push_authority_text(mut out, claim.endpoint)?
-    push_authority_text(mut out, claim.aws_region)?
-    push_authority_text(mut out, claim.bucket)?
-    push_authority_text(mut out, claim.prefix)?
-    if list.len(out) > AUTHORITY_LIMIT {
-        return Error(Limit(Manifest))
-    }
-    Ok(take out)
-}
-
-fn authority_text(path: String, at: u64, raw: Bytes, mut cursor: u64) -> Result[String, Error] {
-    if list.len(raw) - cursor < 2 {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    let n = read_le(raw, cursor, 2)
-    cursor += 2
-    if list.len(raw) - cursor < n {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    let Ok(text) = string.from_utf8(clone(list.slice(raw, cursor, cursor + n))) else {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    cursor += n
-    Ok(take text)
-}
-
-fn decode_authority(path: String, at: u64, raw: Bytes, epoch: u64, holder: StoreId) -> Result[BucketClaim, Error] {
-    if list.len(raw) < 1 || raw[0u64] > 1 {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    let mut cursor = 1u64
-    let endpoint = authority_text(path, at, raw, mut cursor)?
-    let aws_region = authority_text(path, at, raw, mut cursor)?
-    let bucket_name = authority_text(path, at, raw, mut cursor)?
-    let key_prefix = authority_text(path, at, raw, mut cursor)?
-    if cursor != list.len(raw) {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    Ok(BucketClaim(epoch, holder, endpoint: take endpoint, aws_region: take aws_region, bucket: take bucket_name, prefix: take key_prefix, style: raw[0u64]))
-}
-
-fn append_bucket_frames(mut raw: Bytes, context: DiskContext, claim: BucketClaim) -> Result[(), Error] {
-    let authority = authority_payload(claim)?
-    let start = list.len(raw)
-    let tail = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        let mut payload: Bytes = list.with_capacity(CLAIM_BYTES)
-        capacity(le(mut payload, claim.epoch, 8))?
-        capacity(le(mut payload, claim.holder.hi, 8))?
-        capacity(le(mut payload, claim.holder.lo, 8))?
-        let frame = capacity(disk_seal(context, start, 0x0040, 1, payload))?
-        let second = capacity(disk_seal(context, start + list.len(frame), 0x0050, 1, authority))?
-        let mut tail: Bytes = list.with_capacity(list.len(frame) + list.len(second))
-        list.append(mut tail, frame)
-        list.append(mut tail, second)
-        Ok(take tail)
-    })?
-    capacity(list.try_reserve(mut raw, list.len(tail)))?
-    list.append(mut raw, tail)
-    Ok(())
-}
+const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
 
 fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -> Result[(), Error] {
     if kind == 0x0020 || kind == 0x0030 {
@@ -144,7 +53,6 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
         0x0023 => true,
         0x0031 => true,
         0x0040 => true,
-        0x0050 => true,
         0x0060 => true,
         0x0070 => true,
         _ => kind >= 0x0080 && kind <= 0x0084,
@@ -160,36 +68,14 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
 
 fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(StoreId, PageManifest), Error] {
     let header = disk_read_header(path, raw, 1, None, None)?
-    let bucketed = raw[29u64] == 1
     let mut found: Option[PageManifest] = None
-    let mut claimed: Option[(u64, StoreId)] = None
-    let mut authority: Option[BucketClaim] = None
     let mut fence: u32 = 0
     let mut room = 0u64
     let mut at = 72u64
     while at < list.len(raw) {
         let frame = disk_frame_bytes(path, header.context, raw, at)?
         let payload = list.slice(raw, frame.payload, frame.end)
-        if bucketed && frame.kind == 0x0040 {
-            if let Some(_) = claimed {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            if frame.flags != 1 || list.len(payload) != CLAIM_BYTES {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            claimed = Some((read_le(payload, 0, 8), StoreId(hi: read_le(payload, 8, 8), lo: read_le(payload, 16, 8))))
-        } else if bucketed && frame.kind == 0x0050 {
-            let Some((epoch, holder)) = claimed else {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            if let Some(_) = authority {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            if frame.flags != 1 {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            authority = Some(decode_authority(path, at, payload, epoch, holder)?)
-        } else if frame.kind == 0x0070 {
+        if frame.kind == 0x0070 {
             if fence != 0 || frame.flags != 1 || list.len(payload) != 4 {
                 return Error(disk_fault(path, at, Malformed))
             }
@@ -221,15 +107,6 @@ fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(StoreId, PageMan
     }
     let mut manifest = take record
     manifest.fence = fence
-    if bucketed {
-        let Some(take claim) = take authority else {
-            return Error(disk_fault(path, 72, Malformed))
-        }
-        if claim.epoch == 0 {
-            return Error(disk_fault(path, 72, Malformed))
-        }
-        manifest.claim = Some(take claim)
-    }
     Ok((header.context.store, take manifest))
 }
 
@@ -249,22 +126,14 @@ fn fill_page_manifest_file(mut raw: Bytes, id: StoreId, m: PageManifest) -> Resu
         return Error(Limit(Manifest))
     }
     let context = DiskContext(store: id, role: 1, seq: m.generation)
-    let authority: u8 = match m.claim {
-        Some(_) => 1,
-        None => 0
-    }
-    begin_page_manifest_file(mut raw, context, authority)?
+    begin_page_manifest_file(mut raw, context)?
     append_page_manifest(mut raw, m)?
-    seal_page_manifest_file(mut raw, context, m.fence)?
-    if let Some(claim) = m.claim {
-        append_bucket_frames(mut raw, context, claim)?
-    }
-    Ok(())
+    seal_page_manifest_file(mut raw, context, m.fence)
 }
 
-fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext, authority: u8) -> Result[(), Error] {
+fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext) -> Result[(), Error] {
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        capacity(disk_header_bytes(context, 0, authority))
+        capacity(disk_header_bytes(context, 0, 0))
     })?
     list.clear(mut raw)
     list.append(mut raw, header)

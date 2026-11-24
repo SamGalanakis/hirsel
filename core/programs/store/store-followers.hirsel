@@ -43,9 +43,6 @@ fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result
     disk_io(host.sync_dir(d))?
     let (take raw, id, take manifest) = read_only_manifest(d)?
     check_expected_store(expected, id)?
-    if let Some(_) = manifest.claim {
-        return Error(Unsupported(1))
-    }
     let replay = read_only_state(d, id, take manifest, true)?
     let resident = journal_account(replay)?
     over_ceiling(resident, ceiling)?

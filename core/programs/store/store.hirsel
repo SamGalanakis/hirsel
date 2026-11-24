@@ -4704,7 +4704,6 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0023 => Some(PACK_INDEX_LIMIT),
         0x0031 => Some(MANIFEST_LIMIT),
         0x0040 => Some(CLAIM_BYTES),
-        0x0050 => Some(AUTHORITY_LIMIT),
         0x0070 => Some(4),
         0x0080 => Some(128),
         0x0081 => Some(1048832),
@@ -4729,7 +4728,7 @@ fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[DiskFrameHe
     if kind == 0 {
         return Error(disk_fault(file, at, Kind(0)))
     }
-    if kind == 0x0020 || kind == 0x0030 {
+    if kind == 0x0020 || kind == 0x0030 || kind == 0x0050 {
         return Error(Unsupported(int.widen(kind)))
     }
     if flags & 65534 != 0 {
@@ -4750,7 +4749,7 @@ fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, 
     if kind == 0x0020 || kind == 0x0030 {
         return Error(Unsupported(int.widen(kind)))
     }
-    if ((kind == 0x0040 || kind == 0x0050 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0084 && ctx.role != 6) {
+    if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0084 && ctx.role != 6) {
         return Error(disk_fault(file, at, Malformed))
     }
     if let None = disk_kind_limit(kind) {
@@ -4826,7 +4825,7 @@ fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expect
     if format != DISK_FORMAT {
         return Error(Unsupported(format))
     }
-    if raw[29] > 1 || (raw[29] == 1 && role != 1) {
+    if raw[29] != 0 {
         return Error(Unsupported(int.widen(raw[29])))
     }
     let epoch = read_le(raw, 48, 8)
@@ -6259,15 +6258,6 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     let mut loaded = match take selected {
         Ok((id, take manifest)) => {
             check_expected_store(options.expect, id)?
-            // Each authority refuses the other's MANIFEST.
-            match options.authority {
-                Directory() => if let Some(_) = manifest.claim {
-                    return Error(Unsupported(1))
-                },
-                Bucket(_) => if let None = manifest.claim {
-                    return Error(Unsupported(0))
-                },
-            }
             let validated = select_page_manifest(d, id, take manifest)?
             disk_loaded(id, take validated)?
         },
@@ -6276,9 +6266,6 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
                 return Error(NotFound)
             }
             if !options.create {
-                return Error(NotFound)
-            }
-            if let Bucket(_) = options.authority {
                 return Error(NotFound)
             }
             let id = capacity(disk_identity(r))?
@@ -6379,7 +6366,6 @@ type DiskState {
     record_cut: u64,
     recorded_after: u64,
     pages: PageDisk,
-    bucket: Option[BucketWriter],
     object: Option[ObjectWriterState],
     acks: Receiver[Ack],
     journaled: u64,
@@ -6419,10 +6405,7 @@ pub fn retained_main_after(db: Db) -> u64 {
 fn healthy(db: Db) -> Result[(), Error] {
     match journal_poison(db) {
         Some(e) => Error(Poisoned(e)),
-        None => {
-            object_writer_healthy(db)?
-            bucket_failed(db)
-        }
+        None => object_writer_healthy(db),
     }
 }
 
@@ -6495,14 +6478,14 @@ fn journal_channels(group_count: u64) -> JournalChannels {
 }
 
 // S3 makes the disk opener public with its journal and final durability path.
-/// Opens a Directory store. A Bucket store opens with `open_bucket`.
+/// Opens a Directory store. An object store opens with `open_authority`.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     if let Bucket(_) = options.authority {
         return Error(Unsupported(1))
     }
     open_checks(options)?
     let session = disk_session(d, c, r, options)?
-    open_started(tasks, d, c, options, take session, None)
+    open_started(tasks, d, c, options, take session)
 }
 
 /// Recovers an existing Directory store in memory. The caller must exclude writers
@@ -6515,9 +6498,6 @@ pub fn open_read_only(d: Dir, options: Options) -> Result[ReadOnly, Error] waits
     open_checks(options)?
     let (take raw, id, take manifest) = read_only_manifest(d)?
     check_expected_store(options.expect, id)?
-    if let Some(_) = manifest.claim {
-        return Error(Unsupported(1))
-    }
     let reader = read_only_recover(d, id, take manifest, options.resident_limit)?
     check_read_only_manifest(d, raw)?
     Ok(take reader)
@@ -6582,7 +6562,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
     Ok(())
 }
 
-fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession, take remote_writer: Option[BucketWriter]) -> Result[Db, Error] waits {
+fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
     let DiskStartup(store: id, fence: fence, state: take state, live: live, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages) = take startup
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
@@ -6613,7 +6593,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, bucket: take remote_writer, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
     Ok(take db)
 }
 
@@ -6741,13 +6721,9 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
         _ => db.next_table
     }
     let zero = std.page.unlocated(0)
-    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new(), claim: None)
+    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new())
     let context = DiskContext(store: db.store, role: 1, seq: generation)
-    let claim = bucket_claim_of(db)
-    begin_page_manifest_file(mut raw, context, match claim {
-        Some(_) => 1,
-        None => 0
-    })?
+    begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?
     let heads = list.len(db.heads)
     let branch_count = match delta {
@@ -6771,9 +6747,6 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots), held.watermark)
     })?
     write_seal(mut raw, context, db.fence)?
-    if let Some(held_claim) = claim {
-        append_bucket_frames(mut raw, context, held_claim)?
-    }
     Ok(())
 }
 
@@ -6930,10 +6903,6 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     if let Some(wanted) = target {
         validate_new_page_manifest(d, id, manifest, wanted)?
     }
-    // A Bucket store publishes the generation remotely first; the local
-    // MANIFEST and the segment removals follow only a created one.
-    let first_pack = disk_state(db).pages.next_pack
-    bucket_publish(mut db, first_pack, pages.next_pack, generation, manifest)?
     if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }

@@ -80,7 +80,7 @@ fn history_entry_range(item: HistoryRef, epoch: u64) -> bool {
 fn history_frame(path: String, ctx: DiskContext, raw: Bytes, at: u64, kind: u16) -> Result[DiskFrame, Error] {
     let frame = disk_frame_bytes(path, ctx, raw, at)?
     if frame.kind != kind {
-        if frame.kind == 0x0050 || (frame.flags == 1 && disk_kind_limit(frame.kind) == None) {
+        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
             return Error(Unsupported(int.widen(frame.kind)))
         }
         return Error(disk_fault(path, at, Malformed))
@@ -241,6 +241,14 @@ fn history_append_header(mut raw_bytes: Bytes, context: DiskContext, epoch: u64)
     history_seal(mut raw_bytes, context, 0, 0x0001)
 }
 
+const AUTHORITY_LIMIT: u64 = 65536
+
+fn history_append_text(mut raw: Bytes, text: String) {
+    let size: u16 = int.narrow(string.byte_len(text))
+    list.put_word_le(mut raw, size)
+    list.append(mut raw, string.as_bytes(text))
+}
+
 fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
     let place = view config.place
     let endpoint = string.byte_len(place.endpoint)
@@ -256,12 +264,12 @@ fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
         } else {
             1u8
         })
-        push_authority_text(mut raw_bytes, place.endpoint)?
-        push_authority_text(mut raw_bytes, place.aws_region)?
-        push_authority_text(mut raw_bytes, place.bucket)?
-        push_authority_text(mut raw_bytes, place.prefix)?
+        history_append_text(mut raw_bytes, place.endpoint)
+        history_append_text(mut raw_bytes, place.aws_region)
+        history_append_text(mut raw_bytes, place.bucket)
+        history_append_text(mut raw_bytes, place.prefix)
         list.push(mut raw_bytes, 1u8)
-        push_authority_text(mut raw_bytes, config.level)?
+        history_append_text(mut raw_bytes, config.level)
         list.push(mut raw_bytes, 2u8)
         Ok(take raw_bytes)
     })

@@ -383,14 +383,13 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
 - **Online scrub (v2.42, §11.17).** `begin_scrub` leases the packs referenced by the
   current generation, and `scrub_step` rereads them from disk under a byte budget,
   verifying frame envelopes and reachable pointers without writing or repairing.
-- **Bucket authority (v2.43, §11.18).** `open_bucket` stores packs and `MANIFEST-<gen:020>`
-  generations in an S3-compatible bucket via `std.object`, fencing a second writer with
-  no-clobber conditional puts while keeping the journal local.
-- **Offline read-only open (v2.44, §11.19).** `open_read_only` and `open_bucket_read_only`
-  open a Format-3 Directory store or current Bucket mirror without writing, exposing
+- **Object authority (§12).** `open_authority` over an `object_authority` grant keeps the
+  journal and checkpoints in a qualified bucket. Conditional replacement of HEAD fences the
+  prior holder. A `follower` over the same authority reads the committed history without claiming.
+- **Offline read-only open.** `open_read_only` opens a Directory store without writing, exposing
   `read_only_table`, `read_only_get`, and `read_only_snapshot` (the captured `Snapshot`).
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
-  `Options` includes `journal_limit: u64` and `authority: Authority` (`Directory() | Bucket(std.object.Bucket)`).
+  `Options` includes `journal_limit: u64` and `authority: StorageKind` (`Directory() | Bucket(std.object.Bucket)`).
 - **Errors.** `Limit` includes `Ids`, `Manifest`, and `Triggers`. `Error` includes
   `Fenced(u64)` and `Remote(std.object.Error)`. Every capacity refusal carries
   `StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)`,

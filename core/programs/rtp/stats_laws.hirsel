@@ -1,0 +1,187 @@
+// The RTP-5 and RTP-6 laws of build slice S3, and the packing half of nack_pairs.
+
+const MS: u64 = 1000000
+
+fn nack_config(window: u32) -> loss.NackConfig {
+    loss.NackConfig(window: window, retry_ns: 100 * MS, tries: 3, max_age_ns: 2000 * MS)
+}
+
+fn arrive(mut l: loss.Losses, index: u64) {
+    if loss.on_packet(mut l, index, 0) != Tracked {
+        fail("loss window reset")
+    }
+}
+
+// The packing half of nack_pairs.
+fn nack_packing() {
+    // The four losses of the parse half pack back into its one pair.
+    let mut l = result.unwrap(loss.losses(nack_config(64), 196507, 0))
+    arrive(mut l, 196510)
+    arrive(mut l, 196511)
+    let mut i = 196513u64
+    while i <= 196523 {
+        arrive(mut l, i)
+        i += 1
+    }
+    arrive(mut l, 196525)
+    let mut pairs: List[(u16, u16)] = list.with_capacity(16)
+    if loss.due(mut l, 0, None, 16, mut pairs) != Done(Some(100 * MS)) || list.len(pairs) != 1 || pairs[0] != (65436u16, 0x8009u16) {
+        fail("NACK packing")
+    }
+    list.clear(mut pairs)
+    if loss.due(mut l, 99 * MS, None, 16, mut pairs) != Done(Some(100 * MS)) || list.len(pairs) != 0 {
+        fail("NACK asked again inside retry_ns")
+    }
+    // Window 4 from 0, then 2, 5 and 6: the window is [2, 5], so only 3 and 4
+    // are missing (1 has left it and 5 arrived): PID 3, bit 0 for 4.
+    let mut ring = result.unwrap(loss.losses(nack_config(4), 0, 0))
+    arrive(mut ring, 2)
+    arrive(mut ring, 5)
+    arrive(mut ring, 6)
+    if loss.due(mut ring, 0, None, 16, mut pairs) != Done(Some(100 * MS)) || list.len(pairs) != 1 || pairs[0] != (3u16, 1u16) {
+        fail("NACK window ring")
+    }
+    // 12 after 6 leaves 5 missing, more than the window holds.
+    if loss.on_packet(mut ring, 12, 0) != Reset {
+        fail("gap wider than the window")
+    }
+    list.clear(mut pairs)
+    if loss.due(mut ring, 200 * MS, None, 16, mut pairs) != Done(None) || list.len(pairs) != 0 {
+        fail("NACK after a reset")
+    }
+    // 18 isolated losses, 1 + 17k: each needs its own pair.
+    let mut wide = result.unwrap(loss.losses(nack_config(512), 0, 0))
+    i = 1
+    while i <= 291 {
+        if (i - 1) % 17 != 0 {
+            arrive(mut wide, i)
+        }
+        i += 1
+    }
+    let mut short: List[(u16, u16)] = list.with_capacity(4)
+    let over: u32 = int.narrow(list.capacity(short) + 1)
+    if loss.due(mut wide, 0, None, over, mut short) != More || list.len(short) != 0 {
+        fail("NACK into a short output")
+    }
+    list.clear(mut pairs)
+    if loss.due(mut wide, 0, None, 16, mut pairs) != More || list.len(pairs) != 16 {
+        fail("NACK pairs past max")
+    }
+    let mut k = 0u64
+    while k < 16 {
+        let pid: u16 = int.narrow(1 + 17 * k)
+        if pairs[k] != (pid, 0u16) {
+            fail("isolated NACK pair")
+        }
+        k += 1
+    }
+    list.clear(mut pairs)
+    if loss.due(mut wide, 0, None, 16, mut pairs) != Done(Some(100 * MS)) || list.len(pairs) != 2 || pairs[0] != (273u16, 0u16) || pairs[1] != (290u16, 0u16) {
+        fail("NACK pairs left over")
+    }
+    let Error(_) = loss.losses(nack_config(0), 0, 0) else {
+        fail("window 0 admitted")
+    }
+}
+
+/// bug: Take the wrong 32 bits of NTP time, subtract without the compact wrap, or answer a round trip with no SR or a negative one.
+/// oracle: RFC 3550 section 6.4.1's worked example: 0xB7108000 - 0xB7052000 - 0x00054000 = 0x62000 = 401408 / 65536 = 6.125 s.
+@test
+fn rtt_example() -> Result[(), ()] {
+    let b = rtcp.Block(ssrc: 1, fraction: 0, lost: 0, highest: 0, jitter: 0, lsr: 0xb7052000, dlsr: 0x54000)
+    if stats.rtt(b, 0x1234b71080005678) != Some(6125000000u64) {
+        fail("RFC 3550 round trip")
+    }
+    let wrap = rtcp.Block(ssrc: 1, fraction: 0, lost: 0, highest: 0, jitter: 0, lsr: 0xffff0000, dlsr: 0x8000)
+    if stats.rtt(wrap, 0xabcd00010000ffff) != Some(1500000000u64) {
+        fail("round trip across the compact wrap")
+    }
+    let none = rtcp.Block(ssrc: 1, fraction: 0, lost: 0, highest: 0, jitter: 0, lsr: 0, dlsr: 0)
+    if stats.rtt(none, 0x1234b71080005678) != None {
+        fail("round trip without an SR")
+    }
+    let negative = rtcp.Block(ssrc: 1, fraction: 0, lost: 0, highest: 0, jitter: 0, lsr: 0xb7108000, dlsr: 1)
+    if stats.rtt(negative, 0x1234b71080005678) != None {
+        fail("negative round trip")
+    }
+    Ok(())
+}
+
+/// bug: Miscount expected, lost or the interval fraction across the 16-bit wrap, duplicates and late packets; misstep RFC 3550 A.8's jitter; count a held packet or restart at the wrong index; or misreport LSR and DLSR.
+/// oracle: RFC 3550 A.3, A.8 and section 6.4.1, by hand. Arrival i * 33.4 ms at clock 90,000 is 3006 i ticks and the timestamp 3000 i, so transit is 6 i. Over i = 0, 1, 2, 4, 5, 6, 8, 9 the differences are 6, 6, 12, 6, 6, 12, 6 and J = J - ((J + 8) >> 4) + d goes 6, 12, 23, 28, 32, 42, 45: jitter 45 >> 4 = 2.
+@test
+fn reception_report() -> Result[(), ()] {
+    let mut r = stats.received(90000, 65530, 0, 0)
+    let mut i = 1u64
+    while i <= 9 {
+        if i != 3 && i != 7 {
+            let ts: i64 = int.narrow(3000 * i)
+            if stats.on_packet(mut r, 65530 + i, ts, i * 33400000) != Counted {
+                fail("first interval packet")
+            }
+        }
+        i += 1
+    }
+    let first = stats.report(mut r, 0x1234, 300 * MS)
+    if first != rtcp.Block(ssrc: 0x1234, fraction: 51, lost: 2, highest: 65539, jitter: 2, lsr: 0, dlsr: 0) {
+        fail("first report")
+    }
+    // An SR whose middle 32 NTP bits are the RFC example's LSR, 5.25 s
+    // (0x54000 / 65536) before the next report.
+    stats.on_sr(mut r, rtcp.SenderInfo(ssrc: 9, ntp: 0xdeadb7052000beef, rtp: 0, packets: 0, octets: 0), 300 * MS)
+    i = 10
+    while i <= 19 {
+        let ts: i64 = int.narrow(3000 * i)
+        if stats.on_packet(mut r, 65530 + i, ts, i * 33400000) != Counted {
+            fail("second interval packet")
+        }
+        if i == 12 {
+            if stats.on_packet(mut r, 65533, 9000, 417500000) != Counted {
+                fail("late packet")
+            }
+        }
+        i += 1
+    }
+    let second = stats.report(mut r, 0x1234, 5550 * MS)
+    if second.fraction != 0 || second.lost != 1 || second.highest != 0x1000d || second.lsr != 0xb7052000 || second.dlsr != 0x54000 {
+        fail("second report")
+    }
+    if stats.on_packet(mut r, 70549, 0, 6000 * MS) != Held || stats.on_packet(mut r, 70550, 3000, 6000 * MS) != Restarted {
+        fail("restart")
+    }
+    let third = stats.report(mut r, 0x1234, 6000 * MS)
+    if third.fraction != 0 || third.lost != 0 || third.highest != 70550 {
+        fail("report after restart")
+    }
+    Ok(())
+}
+
+/// bug: Send more than one keyframe request per interval, send a FIR for picture loss, renumber a FIR repeat, or keep the old interval after set_interval.
+/// oracle: RFC 5104 sections 4.3.1.1 and 4.3.1.2, by hand.
+@test
+fn keyframe_coalesce() -> Result[(), ()] {
+    let mut k = loss.keyframes(true, 200 * MS)
+    if loss.want(mut k, Switch, 0) != Some(Fir(0)) || loss.want(mut k, Switch, 10 * MS) != None || loss.want(mut k, Switch, 50 * MS) != None {
+        fail("burst inside the interval")
+    }
+    if loss.want(mut k, Switch, 210 * MS) != Some(Fir(0)) {
+        fail("FIR repeat")
+    }
+    loss.set_interval(mut k, 100 * MS)
+    if loss.want(mut k, Switch, 300 * MS) != None || loss.want(mut k, Switch, 310 * MS) != Some(Fir(0)) {
+        fail("repeat after set_interval")
+    }
+    loss.keyframe_seen(mut k)
+    if loss.want(mut k, Switch, 320 * MS) != Some(Fir(1)) {
+        fail("new FIR")
+    }
+    loss.keyframe_seen(mut k)
+    if loss.want(mut k, Loss, 500 * MS) != Some(Pli) || loss.want(mut k, Switch, 510 * MS) != None {
+        fail("picture loss")
+    }
+    let mut plain = loss.keyframes(false, 200 * MS)
+    if loss.want(mut plain, Switch, 0) != Some(Pli) {
+        fail("switch without ccm fir")
+    }
+    Ok(())
+}

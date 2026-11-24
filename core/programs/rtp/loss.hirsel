@@ -1,0 +1,223 @@
+pub type NackConfig {
+    window: u32,
+    retry_ns: u64,
+    tries: u8,
+    max_age_ns: u64
+}
+
+pub type Gap: key = Tracked | Reset
+
+pub type Due: key = Done(Option[u64]) | More
+
+pub type Why: key = Loss | Switch
+
+pub type Request: key = Pli | Fir(u8)
+
+// A ring of window slots over the indices [highest - window, highest - 1].
+// Slot index mod window holds that index's state; the highest itself is
+// never missing, so its slot holds highest - window.
+pub opaque type Losses {
+    config: NackConfig,
+    highest: u64,
+    missing: Bytes,
+    found_at: List[u64],
+    asked_at: List[u64],
+    asked: List[u8]
+}
+
+pub opaque type Keyframes {
+    fir: bool,
+    interval_ns: u64,
+    outstanding: bool,
+    fir_outstanding: bool,
+    sent_at: u64,
+    seq: u8,
+    next_seq: u8
+}
+
+pub fn losses(c: NackConfig, first: u64, at_ns: u64) -> Result[Losses, Capacity] {
+    let n: u64 = int.widen(c.window)
+    if n == 0 {
+        return Error(Capacity(requested: 0, available: 0))
+    }
+    let size = (n + 7) / 8
+    let mut missing: Bytes = list.new()
+    let mut found_at: List[u64] = list.new()
+    let mut asked_at: List[u64] = list.new()
+    let mut asked: List[u8] = list.new()
+    list.try_reserve(mut missing, size)?
+    list.try_reserve(mut found_at, n)?
+    list.try_reserve(mut asked_at, n)?
+    list.try_reserve(mut asked, n)?
+    list.fill(mut missing, size, 0u8)
+    list.fill(mut found_at, n, at_ns)
+    list.fill(mut asked_at, n, 0u64)
+    list.fill(mut asked, n, 0u8)
+    Ok(Losses(config: c, highest: first, missing: missing, found_at: found_at, asked_at: asked_at, asked: asked))
+}
+
+fn window(l: Losses) -> u64 {
+    int.widen(l.config.window)
+}
+
+fn is_missing(l: Losses, slot: u64) -> bool {
+    (l.missing[slot / 8] >> int.truncate(slot % 8)) & 1 != 0
+}
+
+fn clear(mut l: Losses, slot: u64) {
+    let bit = 1u8 << int.truncate(slot % 8)
+    l.missing[slot / 8] = l.missing[slot / 8] & (bit ^ 0xff)
+}
+
+fn mark(mut l: Losses, slot: u64, at_ns: u64) {
+    let bit = 1u8 << int.truncate(slot % 8)
+    l.missing[slot / 8] = l.missing[slot / 8] | bit
+    l.found_at[slot] = at_ns
+    l.asked_at[slot] = 0
+    l.asked[slot] = 0
+}
+
+pub fn on_packet(mut l: Losses, index: u64, at_ns: u64) -> Gap {
+    let w = window(l)
+    if index > l.highest {
+        if index - l.highest - 1 > w {
+            let size = list.len(l.missing)
+            list.fill_slice(mut l.missing, 0, size, 0u8)
+            l.highest = index
+            return Reset
+        }
+        // The old highest's slot now stands for the old highest, which arrived.
+        let old = l.highest % w
+        clear(mut l, old)
+        let mut j = l.highest + 1
+        while j < index {
+            mark(mut l, j % w, at_ns)
+            j += 1
+        }
+        l.highest = index
+        return Tracked
+    }
+    // The highest's own slot belongs to highest - window, so a duplicate of
+    // the highest touches nothing.
+    if index < l.highest && l.highest - index <= w {
+        clear(mut l, index % w)
+    }
+    Tracked
+}
+
+fn earlier(a: Option[u64], t: u64) -> Option[u64] {
+    if let Some(x) = a {
+        if x <= t {
+            return a
+        }
+    }
+    Some(t)
+}
+
+// The time an index asked tries times, last at asked_at, is next due, unless
+// it is dropped first.
+fn retry_at(l: Losses, slot: u64, tries: u8, asked_at: u64, retry: u64) -> Option[u64] {
+    let again = int.saturating_add(asked_at, retry)
+    if tries >= l.config.tries || again >= int.saturating_add(l.found_at[slot], l.config.max_age_ns) {
+        return None
+    }
+    Some(again)
+}
+
+pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs: List[(u16, u16)]) -> Due {
+    let room: u64 = int.widen(max)
+    if room > list.capacity(pairs) - list.len(pairs) {
+        return More
+    }
+    let mut retry = l.config.retry_ns
+    if let Some(r) = rtt_ns {
+        if r > retry {
+            retry = r
+        }
+    }
+    let w = window(l)
+    let mut index = if l.highest >= w {
+        l.highest - w
+    } else {
+        0
+    }
+    let mut written = 0u64
+    let mut pid = 0u64
+    let mut more = false
+    let mut next: Option[u64] = None
+    while index < l.highest {
+        let slot = index % w
+        if is_missing(l, slot) {
+            let tries = l.asked[slot]
+            let age = int.saturating_sub(now_ns, l.found_at[slot])
+            let waiting = tries > 0 && now_ns < int.saturating_add(l.asked_at[slot], retry)
+            if tries >= l.config.tries || age >= l.config.max_age_ns {
+                clear(mut l, slot)
+            } else if waiting {
+                if let Some(t) = retry_at(l, slot, tries, l.asked_at[slot], retry) {
+                    next = earlier(next, t)
+                }
+            } else {
+                let fits = written > 0 && index - pid <= 16
+                let mut took = fits
+                if fits {
+                    let at = list.len(pairs) - 1
+                    let (p, blp) = pairs[at]
+                    let bit: u16 = 1u16 << int.truncate(index - pid - 1)
+                    pairs[at] = (p, blp | bit)
+                } else if written < room {
+                    list.push(mut pairs, (int.truncate(index), 0u16))
+                    written += 1
+                    pid = index
+                    took = true
+                }
+                if took {
+                    l.asked_at[slot] = now_ns
+                    l.asked[slot] = tries + 1
+                    if let Some(t) = retry_at(l, slot, tries + 1, now_ns, retry) {
+                        next = earlier(next, t)
+                    }
+                } else {
+                    more = true
+                }
+            }
+        }
+        index += 1
+    }
+    if more {
+        More
+    } else {
+        Done(next)
+    }
+}
+
+pub fn keyframes(fir: bool, interval_ns: u64) -> Keyframes {
+    Keyframes(fir: fir, interval_ns: interval_ns, outstanding: false, fir_outstanding: false, sent_at: 0, seq: 0, next_seq: 0)
+}
+
+pub fn want(mut k: Keyframes, why: Why, now_ns: u64) -> Option[Request] {
+    if k.outstanding && int.saturating_sub(now_ns, k.sent_at) < k.interval_ns {
+        return None
+    }
+    k.outstanding = true
+    k.sent_at = now_ns
+    // Picture loss is always a PLI (RFC 5104 section 4.3.1.2).
+    if why == Loss || !k.fir {
+        return Some(Pli)
+    }
+    if !k.fir_outstanding {
+        k.seq = k.next_seq
+        k.next_seq = int.wrapping_add(k.next_seq, 1u8)
+        k.fir_outstanding = true
+    }
+    Some(Fir(k.seq))
+}
+
+pub fn set_interval(mut k: Keyframes, interval_ns: u64) {
+    k.interval_ns = interval_ns
+}
+
+pub fn keyframe_seen(mut k: Keyframes) {
+    k.outstanding = false
+    k.fir_outstanding = false
+}

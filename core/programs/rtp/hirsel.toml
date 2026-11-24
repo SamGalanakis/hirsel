@@ -11,9 +11,12 @@ charge = "charge-v1"
 "history.hirsel" = "history"
 "rtx.hirsel" = "rtx"
 "twcc.hirsel" = "twcc"
+"stats.hirsel" = "stats"
+"loss.hirsel" = "loss"
 
 [tests]
 limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"stats_laws.hirsel" = "laws"

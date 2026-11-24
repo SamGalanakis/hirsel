@@ -893,8 +893,8 @@ fn twcc_chunks() -> Result[(), ()] {
     Ok(())
 }
 
-/// bug: Misread a NACK FCI entry, or extend its PID or BLP bits against the wrong cycle.
-/// oracle: str0m src/rtp/rtcp/nack.rs:134-155 and RFC 4585 section 6.2.1. 196618 is cycle 3, sequence 10; 65436 - 10 > 32768, so PID 65436 is cycle 2: 196508, and BLP 0x8009 sets bits 0, 3 and 15: +1, +4 and +16.
+/// bug: Misread a NACK FCI entry, extend its PID or BLP bits against the wrong cycle, pack due losses into the wrong pairs, ask for an index that arrived or left the window, or lose retry state when the output is short.
+/// oracle: str0m src/rtp/rtcp/nack.rs:134-155 and RFC 4585 section 6.2.1. 196618 is cycle 3, sequence 10; 65436 - 10 > 32768, so PID 65436 is cycle 2: 196508, and BLP 0x8009 sets bits 0, 3 and 15: +1, +4 and +16. Packing is RTP-6's greedy rule, by hand.
 @test
 fn nack_pairs() -> Result[(), ()] {
     let pkt = nack()
@@ -923,6 +923,7 @@ fn nack_pairs() -> Result[(), ()] {
     if list.len(lost) != 4 || lost[0] != 196508 || lost[1] != 196509 || lost[2] != 196512 || lost[3] != 196524 {
         fail("NACK expansion")
     }
+    nack_packing()
     Ok(())
 }
 

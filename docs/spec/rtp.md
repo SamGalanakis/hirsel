@@ -463,8 +463,9 @@ per SSRC on the wire: a repair that arrives on an RTX SSRC is counted in that SS
 `Received`, never in the media stream's. Whether a media packet was delivered, as original
 or repair, is [RTP-6](#rtp-6-loss-tracking-nack-and-keyframe-requests)'s.
 
-- **Restart.** RFC 3550 A.1's rule, on authenticated indices: a packet more than 3,000
-  above the highest, or more than 100 below it, is `Held` and counted nowhere. When the next
+- **Restart.** RFC 3550 A.1's rule, on authenticated indices: a packet 3,000 or more
+  above the highest, or 100 or more below it (A.1's `MAX_DROPOUT` and `MAX_MISORDER`
+  bounds), is `Held` and counted nowhere. When the next
   packet's index is the held index plus 1, the statistics restart there, as if that held
   packet were the first, and `on_packet` answers `Restarted`. Any other packet clears the hold
   and is counted normally. A restart touches only statistics; SRTP's index is unchanged
@@ -553,7 +554,8 @@ both clear the index, and a second arrival of either is a duplicate that changes
   from the bitmap without another request. Only the indices it actually wrote are marked as
   asked; the rest stay due. It answers `More` when due indices remain that did not fit,
   and otherwise `Done` with the next time something is due. `pairs` must have room for `max`
-  more entries: `due` checks that before it changes anything and appends nothing otherwise.
+  more entries: `due` checks that before it changes anything, and otherwise appends nothing,
+  changes nothing and answers `More`.
 - Pairs are packed greedily: the lowest due index is a PID, and each due index from
   `PID + 1` to `PID + 16` sets bit `index − PID − 1` of its BLP.
 
@@ -1327,7 +1329,9 @@ written here and repeated in the law's comment.
   CNAME belongs to another SSRC (`NoCname`); the lone PLI without `Reduced` (`NotCompound`); a
   length word one past the datagram (`Length`); an SDES with `SC = 2` whose second chunk is
   cut (`Body(202)`); a BYE whose reason length runs past its body (`Body(203)`); a PLI with 4
-  bytes of FCI, a NACK with 6 bytes of FCI and a FIR with 12 bytes of FCI (`Body`); a valid SR
+  bytes of FCI, a NACK with an empty FCI and a FIR with 12 bytes of FCI (`Body(205)` for the NACK);
+  a NACK whose 6 bytes of FCI are padded to a word with a count of 2 (`Padding`, which `check`
+  answers before any body check, because a word-bodied count is a multiple of 4); a valid SR
   + SDES followed by a final RR whose padding count is 3 (`Padding`). `is_rtcp` holds for
   second bytes 192 and 223 and fails for 191 and 224. `write_rr` of 32 blocks writes an RR
   of 31 and an RR of 1, each parsing back. `write_cname` of 256 bytes is `Unrepresentable`

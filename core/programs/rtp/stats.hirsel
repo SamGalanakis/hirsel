@@ -1,0 +1,179 @@
+pub type Seen: key = Counted | Held | Restarted
+
+// RFC 3550 A.1's MAX_DROPOUT and MAX_MISORDER.
+const DROPOUT: u64 = 3000
+
+const MISORDER: u64 = 100
+
+const LOST_MIN: i64 = -8388608
+
+const LOST_MAX: i64 = 8388607
+
+const NS: u64 = 1000000000
+
+const JITTER_MAX: u64 = 0xffffffff
+
+pub opaque type Received {
+    clock: u32,
+    base: u64,
+    highest: u64,
+    count: u64,
+    expected_prior: u64,
+    received_prior: u64,
+    last_transit: i64,
+    // Sixteen times the interarrival jitter, as RFC 3550 A.8 keeps it.
+    scaled: u64,
+    // An out-of-range packet waiting for its successor: its index and transit.
+    held: Option[(u64, i64)],
+    // The middle 32 NTP bits of the last SR and its arrival time.
+    sr: Option[(u32, u64)]
+}
+
+pub opaque type Sent {
+    clock: u32,
+    packets: u64,
+    octets: u64
+}
+
+// floor(n * scale / 10^9) without overflow: n = q * 10^9 + r and
+// r * scale < 10^9 * 2^32 < 2^64.
+fn scaled_ns(n: u64, scale: u64) -> (u64, u64) {
+    (n / NS, (n % NS) * scale / NS)
+}
+
+// The arrival in timestamp units minus the timestamp. Only differences of
+// transits are used, and those are exact in wrapping 64-bit arithmetic
+// whenever the true difference fits in 63 bits.
+fn transit(clock: u32, ts: i64, at_ns: u64) -> i64 {
+    let wide: u64 = int.widen(clock)
+    let (q, part) = scaled_ns(at_ns, wide)
+    let arrival = int.wrapping_add(int.wrapping_mul(q, wide), part)
+    let signed: i64 = int.truncate(arrival)
+    int.wrapping_sub(signed, ts)
+}
+
+pub fn received(clock: u32, first: u64, first_ts: i64, at_ns: u64) -> Received {
+    Received(clock: clock, base: first, highest: first, count: 1, expected_prior: 0, received_prior: 0, last_transit: transit(clock, first_ts, at_ns), scaled: 0, held: None, sr: None)
+}
+
+fn jitter(mut r: Received, now: i64) {
+    let d = int.wrapping_sub(now, r.last_transit)
+    let magnitude: u64 = if d < 0 {
+        int.truncate(int.wrapping_neg(d))
+    } else {
+        int.truncate(d)
+    }
+    // J - ((J + 8) >> 4) never goes below 0. The sum saturates only past 2^64,
+    // which no stream reaches; report clamps J >> 4 to its 32-bit field.
+    let kept = r.scaled - ((r.scaled + 8) >> 4)
+    r.scaled = int.saturating_add(kept, magnitude)
+    r.last_transit = now
+}
+
+pub fn on_packet(mut r: Received, index: u64, ts: i64, at_ns: u64) -> Seen {
+    let now = transit(r.clock, ts, at_ns)
+    let far = if index > r.highest {
+        index - r.highest >= DROPOUT
+    } else {
+        r.highest - index >= MISORDER
+    }
+    if far {
+        if let Some((h, held_transit)) = r.held {
+            if index == h + 1 {
+                // Restart as if the held packet were the first.
+                r.base = h
+                r.highest = index
+                r.count = 2
+                r.expected_prior = 0
+                r.received_prior = 0
+                r.scaled = 0
+                r.last_transit = held_transit
+                r.held = None
+                jitter(mut r, now)
+                return Restarted
+            }
+        }
+        r.held = Some((index, now))
+        return Held
+    }
+    r.held = None
+    if index > r.highest {
+        r.highest = index
+    }
+    r.count += 1
+    jitter(mut r, now)
+    Counted
+}
+
+pub fn on_sr(mut r: Received, info: rtcp.SenderInfo, at_ns: u64) {
+    let middle: u32 = int.truncate(info.ntp >> 16)
+    r.sr = Some((middle, at_ns))
+}
+
+pub fn report(mut r: Received, ssrc: u32, now_ns: u64) -> rtcp.Block {
+    let expected = r.highest - r.base + 1
+    let total: i64 = int.narrow(expected)
+    let got: i64 = int.narrow(r.count)
+    let behind = total - got
+    let lost = if behind < LOST_MIN {
+        LOST_MIN
+    } else if behind > LOST_MAX {
+        LOST_MAX
+    } else {
+        behind
+    }
+    let expected_interval: i64 = int.narrow(expected - r.expected_prior)
+    let received_interval: i64 = int.narrow(r.count - r.received_prior)
+    let lost_interval = expected_interval - received_interval
+    // Expected only grows when a packet is counted, so a positive interval
+    // received at least one packet and the fraction is at most 255.
+    let fraction: u8 = if expected_interval > 0 && lost_interval > 0 {
+        int.narrow((lost_interval << 8) / expected_interval)
+    } else {
+        0
+    }
+    r.expected_prior = expected
+    r.received_prior = r.count
+    let shown = r.scaled >> 4
+    let jit: u32 = int.narrow(if shown > JITTER_MAX {
+        JITTER_MAX
+    } else {
+        shown
+    })
+    let (lsr, dlsr) = match r.sr {
+        Some((middle, at)) => {
+            let (q, part) = scaled_ns(int.saturating_sub(now_ns, at), 65536)
+            // The compact NTP delay is modular, as the rtt that reads it is.
+            let delay: u32 = int.truncate(int.wrapping_add(int.wrapping_mul(q, 65536u64), part))
+            (middle, delay)
+        }
+        None => (0u32, 0u32),
+    }
+    rtcp.Block(ssrc: ssrc, fraction: fraction, lost: int.narrow(lost), highest: int.truncate(r.highest), jitter: jit, lsr: lsr, dlsr: dlsr)
+}
+
+pub fn rtt(b: rtcp.Block, ntp_now: u64) -> Option[u64] {
+    if b.lsr == 0 {
+        return None
+    }
+    let middle: u32 = int.truncate(ntp_now >> 16)
+    let r = int.wrapping_sub(int.wrapping_sub(middle, b.lsr), b.dlsr)
+    if r >= 0x80000000 {
+        return None
+    }
+    let units: u64 = int.widen(r)
+    Some(units * NS / 65536)
+}
+
+pub fn sent(clock: u32) -> Sent {
+    Sent(clock: clock, packets: 0, octets: 0)
+}
+
+pub fn on_sent(mut s: Sent, payload: u64) {
+    s.packets += 1
+    s.octets += payload
+}
+
+pub fn sender_info(s: Sent, ssrc: u32, ntp_now: u64, rtp_now: u32) -> rtcp.SenderInfo {
+    rtcp.SenderInfo(ssrc: ssrc, ntp: ntp_now, rtp: rtp_now, packets: int.truncate(s.packets), octets: int.truncate(s.octets))
+}

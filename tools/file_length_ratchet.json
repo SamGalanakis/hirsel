@@ -144,9 +144,6 @@
   "core/twins/json/matched_float.rs": {
     "lines": 1263
   },
-  "crates/hirsel-contain/src/lib.rs": {
-    "lines": 1245
-  },
   "crates/hirsel-core-driver/src/call.rs": {
     "lines": 1415
   },

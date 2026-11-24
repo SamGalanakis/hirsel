@@ -487,7 +487,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::Url
             | Opt::Control
             | Opt::HostState
-            | Opt::CgroupRoot
             | Opt::OperatorListen
             | Opt::PlatformHost
             | Opt::MaxPlaces
@@ -502,11 +501,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::Tenant
             | Opt::GroupStore
             | Opt::DryRunExe
-            | Opt::NetRule
-            | Opt::Uncontained
             | Opt::Trusted
-            | Opt::Pids
-            | Opt::Cpu
             | Opt::RequestId
             | Opt::RequestStatus
             | Opt::MaxMemory

@@ -249,13 +249,13 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False, harness_only = False):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
     `data` are the files the test reads at run time.
     """
-    harness = name if harness_only else name + "-harness"
+    harness = name + "-harness"
     bin_exe_dir = "{}/{}".format(BIN_EXE_DIR, harness)
     exes = [_env_set("CARGO_BIN_EXE_" + bin, _from_package(manifest_dir, "{}/{}".format(bin_exe_dir, bin))) for bin in sorted(bin_exes)]
     _rust(
@@ -273,8 +273,6 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         exec_compatible_with = _compile_constraints(harness),
         visibility = ["PUBLIC"],
     )
-    if harness_only:
-        return
     if package_name == "hirsel-core-rt":
         # Cross harness is opt-in, not a host test/tool or a shipping archive.
         # Same sources/deps as the ordinary harness, with real ARM cfg/std/link.

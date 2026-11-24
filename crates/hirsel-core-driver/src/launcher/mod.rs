@@ -26,9 +26,8 @@ use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
 use ready::{CHANGE, Epoll, READ, WRITE, Watch};
 
 use session::{
-    Approvals, Attempt, Bindings, Child, ChildState, End, Event, Failure, Group, HostCommand,
-    HostReply, Input, InstallKind, Label, Launch, Limits, Mode, Phase, Refusal, Request, Role,
-    Status, Wire,
+    Approvals, Attempt, Child, ChildState, End, Event, Failure, Group, HostCommand, HostReply,
+    Input, InstallKind, Launch, Mode, Phase, Refusal, Request, Role, Status, Wire,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -86,12 +85,12 @@ const ADMISSIONS: usize = 4;
 /// The staging bound of the launcher's code store.
 const STAGING_BYTES: u64 = 512 << 20;
 
-/// Lock `state`, recover any containers, then serve the control session on `SOCKET`.
+/// Lock `state`, recover any child cgroups, then serve the control session on `SOCKET`.
 pub(crate) fn run(
     invocation: crate::cli::Invocation,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     use crate::cli::OptionId as Opt;
-    let (mut control, mut state, mut cgroup_root) = (None, None, None);
+    let (mut control, mut state) = (None, None);
     let (mut operator, mut platform_host, mut max_places, mut idle_ms) = (None, None, None, None);
     for (option, value) in invocation.options {
         let text = value.unwrap_or_default();
@@ -99,7 +98,6 @@ pub(crate) fn run(
         match option {
             Opt::Control => control = Some(value),
             Opt::HostState => state = Some(value),
-            Opt::CgroupRoot => cgroup_root = Some(value),
             Opt::OperatorListen => operator = Some(value),
             Opt::PlatformHost => platform_host = Some(value),
             Opt::MaxPlaces => max_places = Some(positive(&text, "--max-places")?),
@@ -110,7 +108,7 @@ pub(crate) fn run(
     let state = private_dir(state.ok_or("--state DIR is required")?)?;
     let control = control.ok_or("--control SOCKET is required")?;
     let mut admission = None;
-    let mut launcher = Launcher::new(&state, cgroup_root.as_deref(), || {
+    let mut launcher = Launcher::new(&state, || {
         let stores = Stores::open(&state, limits().recipe_bytes)?;
         admission = Some(Admission::open(
             &state,
@@ -289,9 +287,6 @@ struct Listening {
     watch: Watch,
     group: Group,
     socket: TcpListener,
-    label: Label,
-    bindings: Bindings,
-    limits: Limits,
     /// The host has been told this listener is readable, by `Arrived`, an inventory or an
     /// end's sample; the watch stays off until a serving child has run again.
     reported: bool,
@@ -300,7 +295,7 @@ struct Listening {
 
 struct Process {
     watch: Option<Watch>,
-    child: Option<Running>,
+    child: Option<RunningChild>,
     /// A serving child's private endpoint (descriptor 4).
     endpoint: Option<Conn>,
     /// A serving open awaiting the host's durable acceptance. Replay it after Hello.
@@ -316,63 +311,30 @@ struct Process {
     triggers: Option<(PathBuf, u64)>,
 }
 
-struct Ordinary {
+struct RunningChild {
     pid: libc::pid_t,
     pidfd: OwnedFd,
     group: Option<cgroup::Group>,
     status: Option<Status>,
 }
 
-enum Running {
-    Ordinary(Ordinary),
-    Contained(hirsel_contain::Contained),
-}
-
-impl Running {
-    fn pidfd(&self) -> RawFd {
-        match self {
-            Self::Ordinary(child) => child.pidfd.as_raw_fd(),
-            Self::Contained(child) => child.pidfd().as_raw_fd(),
-        }
-    }
-
+impl RunningChild {
     fn signal(&self, signal: i32) -> io::Result<()> {
-        match self {
-            Self::Contained(child) if signal == libc::SIGKILL => child.kill(),
-            Self::Contained(child) => child.signal(signal),
-            Self::Ordinary(child) => match (&child.group, signal, &child.status) {
-                (Some(group), libc::SIGKILL, _) => group.kill(),
-                (_, _, Some(_)) => Ok(()),
-                _ => send(child.pidfd.as_raw_fd(), signal),
-            },
+        match (&self.group, signal, &self.status) {
+            (Some(group), libc::SIGKILL, _) => group.kill(),
+            (_, _, Some(_)) => Ok(()),
+            _ => send(self.pidfd.as_raw_fd(), signal),
         }
     }
 
-    fn wait(self) -> io::Result<Status> {
-        match self {
-            Self::Ordinary(mut child) => {
-                child.reap_leader()?;
-                if let Some(group) = &child.group {
-                    group.wait_empty()?;
-                }
-                child.finish()
-            }
-            Self::Contained(child) => match child.wait()? {
-                hirsel_contain::End::Exited(status) => Ok(status_of(status)),
-                hirsel_contain::End::Setup { step, errno } => {
-                    eprintln!(
-                        "contained launch failed at {step}: {}",
-                        io::Error::from_raw_os_error(errno)
-                    );
-                    Ok(Status::Code(127))
-                }
-                hirsel_contain::End::Killed => Ok(Status::Signal(libc::SIGKILL)),
-            },
+    fn wait(mut self) -> io::Result<Status> {
+        self.reap_leader()?;
+        if let Some(group) = &self.group {
+            group.wait_empty()?;
         }
+        self.finish()
     }
-}
 
-impl Ordinary {
     fn reap_leader(&mut self) -> io::Result<()> {
         if self.status.is_none() {
             self.status = Some(status_of(wait_pid(self.pid)?));
@@ -395,21 +357,17 @@ impl Ordinary {
 impl Process {
     fn complete(&mut self, epoll: &Epoll) -> io::Result<Option<Status>> {
         self.watch.take();
-        if let Some(Running::Ordinary(child)) = &mut self.child {
-            child.reap_leader()?;
-            if let Some(group) = &child.group
-                && !group.empty()?
-            {
-                let mut watch = epoll.watch(group.event_fd());
-                watch.set(CHANGE)?;
-                self.watch = Some(watch);
-                return Ok(None);
-            }
+        let child = self.child.as_mut().expect("a live child");
+        child.reap_leader()?;
+        if let Some(group) = &child.group
+            && !group.empty()?
+        {
+            let mut watch = epoll.watch(group.event_fd());
+            watch.set(CHANGE)?;
+            self.watch = Some(watch);
+            return Ok(None);
         }
-        match self.child.take().expect("a live child") {
-            Running::Ordinary(child) => child.finish().map(Some),
-            child => child.wait().map(Some),
-        }
+        self.child.take().expect("a live child").finish().map(Some)
     }
 }
 
@@ -480,7 +438,6 @@ struct Admitting {
 
 pub(crate) struct Launcher<I> {
     images: I,
-    containment: Option<hirsel_contain::Host>,
     cgroup_root: Option<PathBuf>,
     epoll: Epoll,
     scratch: PathBuf,
@@ -581,82 +538,14 @@ fn read_report(file: &mut File) -> Option<Option<u64>> {
     }
 }
 
-/// Native images and the serving activation wrapper use the system loader and
-/// support libraries. Bind individual files so sibling host files stay hidden.
-fn runtime_files(image: &Path) -> Vec<PathBuf> {
-    let (multiarch, loader) = if cfg!(target_arch = "aarch64") {
-        ("aarch64-linux-gnu", "/lib/ld-linux-aarch64.so.1")
-    } else {
-        ("x86_64-linux-gnu", "/lib64/ld-linux-x86-64.so.2")
-    };
-    let mut files = vec![image.to_path_buf(), PathBuf::from(loader)];
-    for dir in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
-        for dir in [PathBuf::from(dir), Path::new(dir).join(multiarch)] {
-            files.extend(
-                [
-                    "libc.so.6",
-                    "libgcc_s.so.1",
-                    "libm.so.6",
-                    "libpthread.so.0",
-                    "libdl.so.2",
-                    "librt.so.1",
-                    "libutil.so.1",
-                ]
-                .into_iter()
-                .map(|name| dir.join(name))
-                .filter(|path| path.is_file()),
-            );
-        }
-    }
-    files
-}
-
-fn container_id(launch: &Launch) -> hirsel_contain::ChildId {
-    use hirsel_contain::{ChildId, Mode};
-    let (role, key) = match launch.mode.role() {
-        Role::Install(generation) => (Mode::Install, u128::from(generation)),
-        Role::Serving(generation) => (Mode::Serving, u128::from(generation)),
-        Role::Describe(a) => (Mode::Describe, u128::from_le_bytes(a.bytes())),
-        Role::Preview(a) => (Mode::Preview, u128::from_le_bytes(a.bytes())),
-        Role::Prepare(a) => (Mode::Prepare, u128::from_le_bytes(a.bytes())),
-    };
-    ChildId {
-        group: launch.group.name.clone(),
-        incarnation: launch.group.incarnation,
-        key,
-        role,
-    }
-}
-
 impl<I: Images> Launcher<I> {
     /// A launcher over `state`, which it locks before it opens its objects with `open`;
     /// `state/scratch` holds each group's private scratch and export directories.
-    pub(crate) fn new(
-        state: &Path,
-        cgroup_root: Option<&Path>,
-        open: impl FnOnce() -> io::Result<I>,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(state: &Path, open: impl FnOnce() -> io::Result<I>) -> io::Result<Self> {
         let lock = lock(state)?;
-        let containment = cgroup_root
-            .map(|root| {
-                let host = hirsel_contain::Host::open(root, state).map_err(|why| {
-                    io::Error::other(format!("cannot contain in {}: {why:?}", root.display()))
-                })?;
-                host.recover()?;
-                Ok::<_, io::Error>(host)
-            })
-            .transpose()?;
-        let cgroup_root = match cgroup_root {
-            Some(path) => Some(path.to_owned()),
-            None => {
-                let root = cgroup::delegated(state)?;
-                if let Some(root) = &root {
-                    cgroup::recover(root)?;
-                }
-                root
-            }
-        };
-        if cgroup_root.is_some() {
+        let cgroup_root = cgroup::delegated(state)?;
+        if let Some(root) = &cgroup_root {
+            cgroup::recover(root)?;
             cgroup::own_orphans()?;
         }
         let epoll = Epoll::new()?;
@@ -670,7 +559,6 @@ impl<I: Images> Launcher<I> {
         std::fs::create_dir_all(&scratch)?;
         Ok(Self {
             images,
-            containment,
             cgroup_root,
             epoll,
             scratch,
@@ -792,9 +680,7 @@ impl<I: Images> Launcher<I> {
     pub(crate) fn handle(&mut self, request: Request) {
         match request {
             Request::Hello => self.hello(),
-            Request::Bind(group, address, label, bindings, limits) => {
-                self.bind(group, &address, label, bindings, limits)
-            }
+            Request::Bind(group, address) => self.bind(group, &address),
             Request::Close(group) => {
                 if let Some(i) = self.listener(&group) {
                     self.listeners.swap_remove(i);
@@ -1089,37 +975,11 @@ impl<I: Images> Launcher<I> {
         }
     }
 
-    fn bind(
-        &mut self,
-        group: Group,
-        address: &str,
-        label: Label,
-        bindings: Bindings,
-        limits: Limits,
-    ) {
-        if label == Label::Contained {
-            if self.containment.is_none() {
-                return self.emit(Event::BindFailed(
-                    group,
-                    "contained: no delegated cgroup root".into(),
-                ));
-            }
-            if bindings.store.is_empty() || bindings.dirs.iter().any(String::is_empty) {
-                return self.emit(Event::BindFailed(
-                    group,
-                    "contained: empty directory binding".into(),
-                ));
-            }
-        }
+    fn bind(&mut self, group: Group, address: &str) {
         if let Some(held) = self.listeners.iter().find(|l| l.group.name == group.name) {
             let event = if held.group.incarnation != group.incarnation {
                 let held = held.group.incarnation;
                 Event::BindFailed(group, format!("the name is bound at incarnation {held}"))
-            } else if (held.label, &held.bindings, held.limits) != (label, &bindings, limits) {
-                Event::BindFailed(
-                    group,
-                    "the group already has different bindings, limits or label".into(),
-                )
             } else {
                 Event::Bound(group)
             };
@@ -1137,9 +997,6 @@ impl<I: Images> Launcher<I> {
                     watch: self.epoll.watch(socket.as_raw_fd()),
                     group: group.clone(),
                     socket,
-                    label,
-                    bindings,
-                    limits,
                     reported: false,
                     retiring: false,
                 });
@@ -1229,26 +1086,11 @@ impl<I: Images> Launcher<I> {
         let mut answer = None;
         let mut install_target = None;
         let mut input = None;
-        let mut export_path = None;
         let mut triggers = None;
         let scratch = self.scratch_of(&launch.group);
-        let host_pid = if listener.label == Label::Contained {
-            1
-        } else {
-            std::process::id()
-        };
+        let host_pid = std::process::id();
         match &launch.mode {
             Mode::Serving(_, serve) => {
-                if listener.label == Label::Contained {
-                    command = Command::new("/bin/sh");
-                    command
-                        .args([
-                            "-c",
-                            "LISTEN_PID=$$ LISTEN_FDS=1 exec \"$@\"",
-                            "hirsel-place",
-                        ])
-                        .arg(&image.path);
-                }
                 command.arg("--hirsel-wake");
                 if serve.idle != 0 {
                     command.arg(format!("--hirsel-idle={}", serve.idle));
@@ -1315,7 +1157,6 @@ impl<I: Images> Launcher<I> {
                     .arg(hex(&attempt.bytes()))
                     .arg(hex(&image.digest));
                 triggers = Some((path.join("TRIGGERS"), image.n_place));
-                export_path = Some(path);
             }
             Mode::Install(_, kind) => {
                 let selection = match kind {
@@ -1333,91 +1174,74 @@ impl<I: Images> Launcher<I> {
                 answer = Some((tempfile::tempfile()?, 16));
             }
         }
-        let child = if listener.label == Label::Contained {
-            if let Some(input) = input {
-                slots.push((input.into(), 0));
-            }
-            if let Some((out, _)) = &answer {
-                slots.push((out.try_clone()?.into(), 1));
-            }
-            Running::Contained(self.spawn_contained(
-                launch,
-                listener,
-                image,
-                &command,
-                slots,
-                export_path.as_deref(),
-            )?)
-        } else {
-            let null = File::options().read(true).write(true).open("/dev/null")?;
-            let stdin = input.as_ref().unwrap_or(&null);
-            let stdout = answer.as_ref().map_or(&null, |(out, _)| out);
-            for (source, target) in [(stdin, 0), (stdout, 1), (&null, 2)] {
-                slots.push((above_launch_slots(source.as_raw_fd())?, target));
-            }
-            let serving = matches!(launch.mode, Mode::Serving(..));
-            if !serving {
-                command
-                    .env_remove("HIRSEL_CONTROL_FD")
-                    .env_remove("HIRSEL_SCRATCH");
-            }
+        let null = File::options().read(true).write(true).open("/dev/null")?;
+        let stdin = input.as_ref().unwrap_or(&null);
+        let stdout = answer.as_ref().map_or(&null, |(out, _)| out);
+        for (source, target) in [(stdin, 0), (stdout, 1), (&null, 2)] {
+            slots.push((above_launch_slots(source.as_raw_fd())?, target));
+        }
+        let serving = matches!(launch.mode, Mode::Serving(..));
+        if !serving {
             command
-                .env_remove("LISTEN_FDS")
-                .env_remove("LISTEN_PID")
-                .env_remove("LISTEN_FDNAMES")
-                .env_remove("LISTEN_PIDFDID");
-            // Only a recorded serving start records: its destination was set above, and no
-            // other child inherits one from the launcher's own environment.
-            if launch.recording.is_none() {
-                command
-                    .env_remove("HIRSEL_RECORD")
-                    .env_remove("HIRSEL_RECORD_ID");
+                .env_remove("HIRSEL_CONTROL_FD")
+                .env_remove("HIRSEL_SCRATCH");
+        }
+        command
+            .env_remove("LISTEN_FDS")
+            .env_remove("LISTEN_PID")
+            .env_remove("LISTEN_FDNAMES")
+            .env_remove("LISTEN_PIDFDID");
+        // Only a recorded serving start records: its destination was set above, and no
+        // other child inherits one from the launcher's own environment.
+        if launch.recording.is_none() {
+            command
+                .env_remove("HIRSEL_RECORD")
+                .env_remove("HIRSEL_RECORD_ID");
+        }
+        if serving {
+            command.env("LISTEN_FDS", "1");
+        }
+        match &image.executable {
+            ImageFile::Verified(file) => {
+                let slot = spawn::IMAGE_FD;
+                slots.push((above_launch_slots(file.as_raw_fd())?, slot));
+                let parent = std::process::id();
+                let digest = hex(&image.digest);
+                command.env(LAUNCH_IMAGE_ENV, format!("{parent}:{slot}:{digest}"));
             }
-            if serving {
-                command.env("LISTEN_FDS", "1");
+            #[cfg(test)]
+            ImageFile::Script => {
+                command.env_remove(LAUNCH_IMAGE_ENV);
             }
-            match &image.executable {
-                ImageFile::Verified(file) => {
-                    let slot = spawn::IMAGE_FD;
-                    slots.push((above_launch_slots(file.as_raw_fd())?, slot));
-                    let parent = std::process::id();
-                    let digest = hex(&image.digest);
-                    command.env(LAUNCH_IMAGE_ENV, format!("{parent}:{slot}:{digest}"));
+        }
+        let group = self
+            .cgroup_root
+            .as_ref()
+            .map(|root| cgroup::Group::create(root, &launch.child()))
+            .transpose()?;
+        let started = (|| {
+            let directory = group.as_ref().map(cgroup::Group::directory).transpose()?;
+            spawn::start(&command, workdir, &slots, directory.as_ref(), serving)
+        })();
+        let (pid, pidfd) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                if let Some(group) = group {
+                    group.kill()?;
+                    group.wait_empty()?;
+                    group.reap_orphans()?;
+                    group.remove()?;
                 }
-                #[cfg(test)]
-                ImageFile::Script => {
-                    command.env_remove(LAUNCH_IMAGE_ENV);
-                }
+                return Err(error);
             }
-            let group = self
-                .cgroup_root
-                .as_ref()
-                .map(|root| cgroup::Group::create(root, &container_id(launch)))
-                .transpose()?;
-            let started = (|| {
-                let directory = group.as_ref().map(cgroup::Group::directory).transpose()?;
-                spawn::start(&command, workdir, &slots, directory.as_ref(), serving)
-            })();
-            let (pid, pidfd) = match started {
-                Ok(started) => started,
-                Err(error) => {
-                    if let Some(group) = group {
-                        group.kill()?;
-                        group.wait_empty()?;
-                        group.reap_orphans()?;
-                        group.remove()?;
-                    }
-                    return Err(error);
-                }
-            };
-            Running::Ordinary(Ordinary {
-                pid,
-                pidfd,
-                group,
-                status: None,
-            })
         };
-        let mut watch = self.epoll.watch(child.pidfd());
+        let child = RunningChild {
+            pid,
+            pidfd,
+            group,
+            status: None,
+        };
+        let mut watch = self.epoll.watch(child.pidfd.as_raw_fd());
         if let Err(error) = watch.set(READ) {
             if child.signal(libc::SIGKILL).is_ok() {
                 let _ = child.wait();
@@ -1433,56 +1257,6 @@ impl<I: Images> Launcher<I> {
             answer,
             install_target,
             triggers,
-        })
-    }
-
-    fn spawn_contained(
-        &self,
-        launch: &Launch,
-        listener: &Listening,
-        image: &Image,
-        command: &Command,
-        slots: Vec<(OwnedFd, RawFd)>,
-        export: Option<&Path>,
-    ) -> io::Result<hirsel_contain::Contained> {
-        use hirsel_contain::{Authority, LaunchError};
-        let host = self
-            .containment
-            .as_ref()
-            .expect("a contained bind requires a host");
-        let id = container_id(launch);
-        let bindings = hirsel_contain::Bindings {
-            store: PathBuf::from(&listener.bindings.store),
-            dirs: listener.bindings.dirs.iter().map(PathBuf::from).collect(),
-            net: listener.bindings.net.clone(),
-        };
-        let authority = Authority::of(id.role, &bindings, export)
-            .map_err(|why| io::Error::other(format!("contained authority: {why:?}")))?
-            .with_serving_scratch(&self.scratch_of(&launch.group));
-        let args: Vec<_> = command.get_args().map(OsString::from).collect();
-        let env: Vec<_> = command
-            .get_envs()
-            .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
-            .collect();
-        let limits = hirsel_contain::Limits {
-            memory: listener.limits.memory,
-            cpu: listener.limits.cpu,
-            pids: listener.limits.pids,
-        };
-        host.launch(hirsel_contain::Launch {
-            id: &id,
-            authority: &authority,
-            program: Path::new(command.get_program()),
-            args: &args,
-            env: &env,
-            workdir: &std::path::absolute(&launch.workdir)?,
-            read_only: &runtime_files(&image.path),
-            fds: slots.into_iter().map(|(fd, target)| (target, fd)).collect(),
-            limits,
-        })
-        .map_err(|error| match error {
-            LaunchError::Io(error) => error,
-            LaunchError::Refused(why) => io::Error::other(format!("contained launch: {why:?}")),
         })
     }
 

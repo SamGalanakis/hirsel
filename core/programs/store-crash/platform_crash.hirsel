@@ -29,9 +29,7 @@ fn must[T](take r: Result[T, platform.Refused], take what: String) -> T {
 fn group(name: String) -> platform.NewGroup {
     let mut image: Bytes = list.with_capacity(32u64)
     list.fill(mut image, 32u64, 7u8)
-    let bindings = platform.launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new())
-    let limits = platform.launcher.Limits(memory: None, cpu: None, pids: None)
-    platform.NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: take bindings, limits: limits, assembly: take image, activation: 1u64, args: list.new(), record: None)
+    platform.NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", store: string.new(), memory: None, assembly: take image, activation: 1u64, args: list.new(), record: None)
 }
 
 fn has(h: platform.Host, name: String) -> bool waits {

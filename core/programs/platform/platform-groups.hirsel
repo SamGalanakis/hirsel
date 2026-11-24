@@ -29,7 +29,7 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
                 }
             }
             let mut meta = meta_of(tx, call_env.2)?
-            let g = GroupRow(tenant: string.from(call_env.1.tenant), workdir: string.from(call_env.1.workdir), author: call_env.1.author, label: call_env.1.label, listen: string.from(call_env.1.listen), bindings: clone(call_env.1.bindings), limits: call_env.1.limits, assembly: clone(call_env.1.assembly), activation: call_env.1.activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1.args), record: clone(call_env.1.record))
+            let g = GroupRow(tenant: string.from(call_env.1.tenant), workdir: string.from(call_env.1.workdir), author: call_env.1.author, listen: string.from(call_env.1.listen), store: string.from(call_env.1.store), memory: call_env.1.memory, assembly: clone(call_env.1.assembly), activation: call_env.1.activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1.args), record: clone(call_env.1.record))
             meta.next_incarnation += 1u64
             st(store.put(mut tx, call_env.2.meta, 0u64, meta))?
             st(store.put(mut tx, call_env.2.groups, call_env.1.name, g))?

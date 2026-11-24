@@ -100,7 +100,6 @@ pub enum OptionId {
     CallStream,
     Control,
     HostState,
-    CgroupRoot,
     OperatorListen,
     PlatformHost,
     MaxPlaces,
@@ -114,11 +113,7 @@ pub enum OptionId {
     GroupName,
     Tenant,
     GroupStore,
-    NetRule,
-    Uncontained,
     Trusted,
-    Pids,
-    Cpu,
     RequestId,
     RequestStatus,
     Resident,
@@ -159,8 +154,8 @@ commands! {
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
-    "host", "host --state DIR [--cgroup-root DIR] [--max-places N] [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
-    "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
+    "host", "host --state DIR [--max-places N] [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
+    "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
@@ -360,13 +355,6 @@ static OPTIONS: &[OptionSpec] = &[
         "Private host state directory; the operator socket is STATE/operator.sock."
     ),
     option!(
-        CgroupRoot,
-        ["--cgroup-root"],
-        Some("DIR"),
-        ["host", "launcher"],
-        "Use a delegated cgroup v2 subtree for child lifecycle and contained groups."
-    ),
-    option!(
         OperatorListen,
         ["--operator-listen"],
         Some("SOCKET"),
@@ -434,7 +422,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--memory"],
         Some("BYTES"),
         ["register"],
-        "Memory limit for each of the group's children."
+        "Memory allowance for a group's release."
     ),
     option!(
         ReleaseManifest,
@@ -549,39 +537,11 @@ static OPTIONS: &[OptionSpec] = &[
         "The group's durable store directory."
     ),
     option!(
-        NetRule,
-        ["--net"],
-        Some("RULE"),
-        ["register"],
-        "Bind a Net grant rule to the group. Repeat for more rules."
-    ),
-    option!(
-        Uncontained,
-        ["--uncontained"],
-        None,
-        ["register"],
-        "Run the group's children without a namespace and cgroup sandbox."
-    ),
-    option!(
         Trusted,
         ["--trusted"],
         None,
         ["register"],
         "Let the group's recipes use grants that need operator trust."
-    ),
-    option!(
-        Pids,
-        ["--pids"],
-        Some("N"),
-        ["register"],
-        "Process limit for each of the group's children."
-    ),
-    option!(
-        Cpu,
-        ["--cpu"],
-        Some("QUOTA/PERIOD"),
-        ["register"],
-        "CPU bandwidth for each of the group's children, in microseconds."
     ),
     option!(
         RequestId,
@@ -900,7 +860,7 @@ static OPTIONS: &[OptionSpec] = &[
         Dir,
         ["--dir"],
         Some("PATH"),
-        ["build", "publish", "run", "replay", "test", "register"],
+        ["build", "publish", "run", "replay", "test"],
         "Grant a confined directory. Repeat for more directories."
     ),
     option!(

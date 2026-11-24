@@ -5,7 +5,7 @@
 // does for launched groups; this module only carries its requests out and reports each
 // child's phases and end back to it as launcher events.
 //
-// Every group here is Uncontained and first-party: its place is linked code, made by the
+// Every group here is first-party: its place is linked code, made by the
 // one factory the host was given. A child's end is reported only after operate has
 // returned, so after the child's store is closed: a group never has two heads.
 //
@@ -332,7 +332,7 @@ fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: Lis
             for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None)) }
             list.push(mut events, Inventory(take children, list.new(), list.new()))
         },
-        Bind(take g, _, _, _, _) => list.push(mut events, Bound(take g)),
+        Bind(take g, _) => list.push(mut events, Bound(take g)),
         Close(take g) => closed(mut a, take g),
         Start(take l) => start(mut a, take l, mut events),
         Stop(take c) => if let Some(i) = kid_index(a, c) { stop_kid(mut a.kids[i]) },
@@ -528,9 +528,8 @@ fn refused_of(r: platform.Refused) -> Refused {
 }
 
 fn group_spec(name: String) -> platform.NewGroup {
-    platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted, label: Uncontained,
-        listen: string.new(), bindings: launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new()),
-        limits: launcher.Limits(memory: None, cpu: None, pids: None), assembly: list.new(), activation: 0u64, args: list.new(), record: None)
+    platform.NewGroup(name: string.from(name), tenant: string.new(), workdir: string.from(name), author: Trusted,
+        listen: string.new(), store: string.new(), memory: None, assembly: list.new(), activation: 0u64, args: list.new(), record: None)
 }
 
 fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {

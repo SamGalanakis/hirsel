@@ -245,21 +245,6 @@ admitted size (MEM-4); a later type never reinterprets them, moves a published v
 turns `finish` into a copy, flattening it into a blob is an admitted copy, and no
 allocator chunk size becomes a logical capacity (MEM-28).
 
-**R27.** A contained child process will be a separate kind of launch profile, one that the
-host confines to the profile's files, network and descendants and that is refused where the
-host cannot enforce it. It would also tear down every descendant, through containment the run
-owns and a child cannot leave, such as a delegated cgroup or a PID namespace, and confirm that
-the containment is empty before reporting completion. That containment would also make each
-child's death certain when the host kills the run, which v1 gives only on a best-effort basis
-([EXEC-6](exec.md#exec-6-dropping-a-proc-kills-its-child)). *v1:* no profile is contained, and an `Exec` grant confers what its
-programs can do ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them));
-a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify. The
-platform launcher's `contained` label ([launch](launch.md#containment-r27)) is the same
-containment, applied to every process that runs an authority group's code: the install child of
-genesis and standalone install, the describe, preview, prepare and serving children, and
-every descendant they start, `Exec` tools included, each with its mode's authority. No group whose author is outside the operator's first-party authors runs
-before it is built; until then only `uncontained` first-party groups run. The launcher's containment is built (launch.md "Containment (R27)") and admits contained groups when `--cgroup-root` is configured, except for `Net` bindings, which a contained child cannot yet hold.
-
 **R28 (claims and verdicts).** A later claim form is written with contextual words in
 positions v1 refuses, and never changes whether a program that does not use it is accepted
 or what any program does. No verification verdict, from a test, a model checker, a solver

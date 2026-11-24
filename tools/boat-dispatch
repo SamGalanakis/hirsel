@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run locally built Hirsel artifacts on Boat."""
 import argparse
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -29,14 +29,6 @@ ACTIVE_LIMIT = 100
 SOURCE_PATHS = ("core/core", "core/std", "core/programs", "core/tools",
                 "bench/awfy/hirsel", "bench/awfy/*.py", "tools/capped")
 SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
-CONTAIN_PATHS = ("crates/hirsel-contain", "crates/hirsel-core-driver",
-                 "core/programs/platform/launcher.hirsel")
-CONTAIN_TARGET = "root//:contain"
-LAUNCHER_TEST_TARGET = "root//:hirsel-core-driver-unittest-harness"
-CONTAIN_COMMAND = (
-    "./launcher launcher::laws::contained_group --exact --ignored --nocapture"
-    " && ./contain 'contain::' --skip contain::contained_helper --test-threads=1"
-)
 
 
 class StartUnavailable(ValueError):
@@ -173,7 +165,6 @@ class Job:
     command: str
     seconds: int
     fetch: tuple
-    success_record: tuple[Path, str] | None = None
 
     def __post_init__(self):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", self.lane):
@@ -214,35 +205,6 @@ def manifest_jobs(path):
         jobs.append(Job(entry["lane"], Input(directory.resolve(), worktree), entry["command"],
                         seconds, tuple(fetch_spec(spec, base) for spec in fetch)))
     return jobs
-
-
-def contain_job(checkout, since, record, stack, dry_run):
-    def git(*args):
-        return subprocess.check_output(["git", *args], cwd=checkout, text=True).strip()
-
-    head = git("rev-parse", "HEAD")
-    if since is None and record is not None and record.exists():
-        since = record.read_text().strip()
-    if since is not None:
-        base = git("rev-parse", "--verify", "--end-of-options", f"{since}^{{commit}}")
-        if not git("log", "--full-history", "-1", "--format=%H", f"{base}..{head}", "--", *CONTAIN_PATHS):
-            return None
-
-    if dry_run:
-        bundle = checkout
-    else:
-        if git("status", "--porcelain"):
-            raise ValueError(f"build the containment shard from a clean checkout: {checkout}")
-        bundle = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="hirsel-contain-")))
-        output = subprocess.check_output(
-            [".buck2/bin/buck2", "build", "-j4", "--show-json-output",
-             CONTAIN_TARGET, LAUNCHER_TEST_TARGET],
-            cwd=checkout, text=True)
-        outputs = json.loads(output)
-        shutil.copy2(checkout / outputs[CONTAIN_TARGET], bundle / "contain")
-        shutil.copy2(checkout / outputs[LAUNCHER_TEST_TARGET], bundle / "launcher")
-    return Job("contain", Input(bundle, False), CONTAIN_COMMAND, 15, (),
-               (record, head) if record is not None else None)
 
 
 def batches(jobs, capacity):
@@ -412,12 +374,6 @@ def execute(invoke, vm, jobs, archives, log):
             local.mkdir(parents=True, exist_ok=True)
             fetched = invoke("scp", "-r", f"{vm}:{work}/{remote}", str(local)).returncode
             status = status or fetched
-        if not ran and job.success_record is not None:
-            record, revision = job.success_record
-            with tempfile.TemporaryDirectory(dir=record.parent) as work_dir:
-                staged = Path(work_dir) / "revision"
-                staged.write_text(f"{revision}\n")
-                staged.replace(record)
         previous = work
     return status
 
@@ -531,24 +487,16 @@ def main():
     parser.add_argument("--manifest", type=Path, help="JSON array of timed jobs")
     parser.add_argument("--job-class", choices=("law", "vopr"), default="law",
                         help="VOPR yields to law dispatches and uses spare starts only")
-    parser.add_argument("--contain-worktree", type=Path, help="checkout for the built-in containment shard")
-    parser.add_argument("--changed-since", help="include containment if a matching path changed since this revision")
-    parser.add_argument("--contain-record", type=Path, help="read and update the last passing containment revision")
     parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
     parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
     args = parser.parse_args()
-    if args.contain_worktree is None and (args.changed_since is not None or args.contain_record is not None):
-        parser.error("--changed-since and --contain-record require --contain-worktree")
-    if args.contain_worktree and args.job_class != "law":
-        parser.error("the containment shard is a law job")
-    if (args.manifest or args.contain_worktree) and (args.lane or args.worktree or args.fetch):
-        parser.error("--manifest and --contain-worktree supply their own lanes, inputs, commands and fetch paths")
-    if (args.manifest or args.contain_worktree) and args.batch_seconds >= args.ttl:
+    if args.manifest and (args.lane or args.worktree or args.fetch):
+        parser.error("--manifest supplies its own lanes, inputs, commands and fetch paths")
+    if args.manifest and args.batch_seconds >= args.ttl:
         parser.error("--ttl must leave room beyond --batch-seconds for setup and upload")
     try:
-        with ExitStack() as stack:
-            return run(args, parser, stack)
+        return run(args, parser)
     except StartUnavailable as error:
         print(f"boat-dispatch: {error}", file=sys.stderr)
         return os.EX_TEMPFAIL
@@ -558,22 +506,12 @@ def main():
         return 1
 
 
-def run(args, parser, stack):
-    jobs = []
-    if args.manifest or args.contain_worktree:
-        if args.manifest:
-            jobs = manifest_jobs(args.manifest)
-        if args.contain_worktree:
-            containment = contain_job(args.contain_worktree.resolve(), args.changed_since,
-                                      args.contain_record, stack, args.dry_run)
-            if containment is not None:
-                jobs.append(containment)
-        if not jobs:
-            print("boat-dispatch: no relevant containment changes")
-            return 0
+def run(args, parser):
+    if args.manifest:
+        jobs = manifest_jobs(args.manifest)
     else:
         if not all((args.lane, args.directory, args.command)):
-            parser.error("supply LANE DIRECTORY COMMAND, --manifest or --contain-worktree")
+            parser.error("supply LANE DIRECTORY COMMAND or --manifest")
         jobs = [Job(args.lane, Input(args.directory.resolve(), args.worktree), args.command, 0,
                     tuple(fetch_spec(value, Path.cwd()) for value in args.fetch))]
     groups = batches(jobs, args.batch_seconds)

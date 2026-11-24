@@ -388,7 +388,7 @@ def host_law(args, root, work, engine, name):
         probe.bind(('127.0.0.1', 0))
         address = f'127.0.0.1:{probe.getsockname()[1]}'
     register = [compiler, 'register', old_recipe, '--state', str(state), '--group', 'app',
-                '--listen', address, '--store', str(work / 'group-store'), '--uncontained', '--trusted',
+                '--listen', address, '--store', str(work / 'group-store'), '--trusted',
                 '--workdir', str(launch_store), '--code-store', str(publish_store)]
     deploy = [compiler, 'deploy', new_recipe, '--state', str(state), '--group', 'app',
               '--code-store', str(publish_store)]
@@ -706,8 +706,7 @@ def install_child_law(compiler, state, work, old, new):
                 with peer.makefile('rb') as stream:
                     send(0)
                     assert receive() == bytes(16), 'a fresh launcher has an empty inventory'
-                    send(1, group + blob(b'127.0.0.1:0') + pack('<I', 1)
-                         + blob(os.fsencode(live)) + bytes(20))
+                    send(1, group + blob(b'127.0.0.1:0'))
                     assert receive() == pack('<I', 5) + group
                     # Genesis on an empty store commits exactly activation 1.
                     genesis = child(0, 1)

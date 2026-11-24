@@ -168,27 +168,6 @@ pub(crate) enum InstallRefusal {
     WrongVersion(u64),
 }
 
-/// A group's containment label (launch.md "Containment (R27)").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Label {
-    Contained,
-    Uncontained,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Bindings {
-    pub(crate) store: String,
-    pub(crate) dirs: Vec<String>,
-    pub(crate) net: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Limits {
-    pub(crate) memory: Option<u64>,
-    pub(crate) cpu: Option<(u64, u64)>,
-    pub(crate) pids: Option<u64>,
-}
-
 /// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
 /// publication R already in the launcher's code store; or source, a `launcher.Tree`'s
 /// codec bytes, which the launcher publishes and admits as a publication.
@@ -238,7 +217,7 @@ pub(crate) enum Failure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Request {
     Hello,
-    Bind(Group, String, Label, Bindings, Limits),
+    Bind(Group, String),
     Close(Group),
     Start(Launch),
     Stop(Child),
@@ -768,55 +747,6 @@ impl Wire for Input {
     }
 }
 
-impl Wire for Label {
-    fn put(&self, w: &mut Writer) {
-        w.u32(match self {
-            Self::Contained => 0,
-            Self::Uncontained => 1,
-        });
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        match r.u32()? {
-            0 => Ok(Self::Contained),
-            1 => Ok(Self::Uncontained),
-            _ => Err(malformed("label tag")),
-        }
-    }
-}
-
-impl Wire for Bindings {
-    fn put(&self, w: &mut Writer) {
-        w.bytes(self.store.as_bytes());
-        w.strings(&self.dirs);
-        w.strings(&self.net);
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        Ok(Self {
-            store: r.string()?,
-            dirs: r.strings()?,
-            net: r.strings()?,
-        })
-    }
-}
-
-impl Wire for Limits {
-    fn put(&self, w: &mut Writer) {
-        w.option(&self.memory, |w, &memory| w.u64(memory));
-        w.option(&self.cpu, |w, &(quota, period)| {
-            w.u64(quota);
-            w.u64(period);
-        });
-        w.option(&self.pids, |w, &pids| w.u64(pids));
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        Ok(Self {
-            memory: r.option(Reader::u64)?,
-            cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
-            pids: r.option(Reader::u64)?,
-        })
-    }
-}
-
 /// A `List[Wanted]`: each key's kind as a tag, then its 32-byte hash as Bytes.
 pub(crate) fn put_wanted(w: &mut Writer, keys: &[ObjectKey]) {
     w.len(keys.len());
@@ -885,19 +815,10 @@ macro_rules! session_wire {
 
 session_wire!(Request, "request tag", w, r;
     0 => Hello => Self::Hello,
-    1 => Bind(g, address, label, bindings, limits) {
+    1 => Bind(g, address) {
         g.put(w);
         w.bytes(address.as_bytes());
-        label.put(w);
-        bindings.put(w);
-        limits.put(w);
-    } => Self::Bind(
-        Group::get(r)?,
-        r.string()?,
-        Label::get(r)?,
-        Bindings::get(r)?,
-        Limits::get(r)?,
-    ),
+    } => Self::Bind(Group::get(r)?, r.string()?),
     2 => Close(g) { g.put(w); } => Self::Close(Group::get(r)?),
     3 => Start(launch) { launch.put(w); } => Self::Start(Launch::get(r)?),
     4 => Stop(c) { c.put(w); } => Self::Stop(Child::get(r)?),

@@ -50,14 +50,8 @@ fn session_vectors() {
     let requests = [
         (Request::Hello, "00000000".to_owned()),
         (
-            Request::Bind(
-                group(),
-                "127.0.0.1:9".into(),
-                Label::Contained,
-                Bindings { store: "/store".into(), dirs: vec!["data".into()], net: vec!["rule".into()] },
-                Limits { memory: Some(4096), cpu: Some((1000, 10000)), pids: None },
-            ),
-            "01000000010000006703000000000000000b0000003132372e302e302e313a3900000000060000002f73746f7265010000000400000064617461010000000400000072756c6501000000001000000000000001000000e803000000000000102700000000000000000000".into(),
+            Request::Bind(group(), "127.0.0.1:9".into()),
+            "01000000010000006703000000000000000b0000003132372e302e302e313a39".into(),
         ),
         (
             Request::Close(group()),

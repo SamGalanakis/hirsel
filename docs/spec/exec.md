@@ -110,13 +110,6 @@ line shows no environment value. What Hirsel enforces as approval is the explici
 the launching command, the match between the loaded policy and the build's binding, and
 this emitted record. It cannot establish that anyone read the record.
 
-A contained child, confined to its profile's files, network and descendants by the host, is a
-separate later design ([reserved](reserved.md)). The host mechanisms available to an
-unprivileged process do not enforce the full [NET-6](net.md#net-6-network-rules) policy on a
-native child: Landlock filters TCP ports but no address prefix, and this host class
-restricts unprivileged user namespaces. A profile that claimed such a bound on a host that
-cannot enforce it would be unsound, so no profile claims one.
-
 ## Profiles and authority
 
 ### EXEC-2: Launch profiles and narrowing
@@ -478,11 +471,8 @@ the setting. EXEC-7 does not forbid either. Deeper descendants may keep running.
 that an outside service starts on a child's request (a user service manager, a scheduler, a
 remote shell) are not descendants at all.
 
-Tearing down the whole tree, or promising any child's death after the host kills the run,
-would need process containment that the run neither owns nor can escape, with a
-verified-empty check before it reports completion: a delegated cgroup, or a PID namespace.
-Neither is available to an unprivileged process on every host of the supported class, so
-that is part of the contained kind ([reserved](reserved.md)) and not of EXEC-6.
+The supervisor uses direct-child death and reaping. Programs that start other
+processes retain responsibility for their teardown.
 
 Laws:
 

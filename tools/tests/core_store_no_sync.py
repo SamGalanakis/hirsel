@@ -497,7 +497,6 @@ class StoreNoSync(unittest.TestCase):
                 scratch / "group-store",
                 "--workdir",
                 scratch,
-                "--uncontained",
                 "--trusted",
             ]
             with tempfile.TemporaryFile(mode="w+") as output, subprocess.Popen(

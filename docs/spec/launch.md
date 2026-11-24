@@ -56,7 +56,7 @@ require or extract a constant argument.
 - An embedded runtime receives the digest, target and `n_place` explicitly from
   its embedder before entry. It copies or pins the supplied value for the whole
   launch; later mutation of the embedder's input cannot change it.
-- For an uncontained platform launch, the launcher supplies the digest through
+- For a platform launch, the launcher supplies the digest through
   the embedded identity path. It checks the SHA-256 of the opened, read-only
   content-addressed image and executes that same file by descriptor. Replacing
   the store pathname cannot change the executed image or its digest.
@@ -207,7 +207,7 @@ and returns `IdentityUnknown` if it is unavailable.
 A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest>`<!-- doc-ref: external -->
 as its place arguments. The attempt and image digest use lowercase hex for 16 and
 32 bytes. The native launcher binds directory designations to that export
-directory. The child receives no network rules, listener or private endpoint. The place
+directory. The child receives no listener or private endpoint. The place
 passes the scratch directory to `runner.prepare_deploy`. It verifies the image
 key, stages the migration, validates both handle sets, and
 syncs `PREPARED` before exiting.
@@ -675,8 +675,8 @@ runs under the launcher like a group, as the operator's group. Its catalog is or
 tables of that store:
 
 - `groups`: per group name, its tenant, its working directory, its author class (trusted or
-  untrusted), its containment label (below), its current assembly record and activation
-  version, its retained activations' assembly records, and its listener address;
+  untrusted), its store directory and release memory allowance, its current assembly record
+  and activation version, its retained activations' assembly records, and its listener address;
 - `wake`: per group name, the one wake row of RUNNER-SPEC §14 (`Dirty(gen)` or
   `Clean(Option[next_due])`) and its generation counter;
 - `deploys`: each pending deploy attempt and its assembly record (the "pending record"
@@ -691,7 +691,7 @@ tables of that store:
 
 The host does routing, quotas, wake scheduling and deploy orchestration. It decides which
 group runs, when it starts and stops, which recipe a deploy installs, and which objects are
-still roots. It does not compile, assemble, confine or spawn. It asks the launcher for those
+still roots. It does not compile, assemble or spawn. It asks the launcher for those
 over the launcher's control socket.
 
 **Bounded workers.** "10,000 listeners" means 10,000 groups that are durably registered and
@@ -798,7 +798,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
-| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits, args, record), with `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
+| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record), with `memory` an `Option[u64]` in bytes and `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 | 8 Decide(D, grants, approve) | A person's decision on D, which must be in AwaitDecision on exactly this grant diff ("Deploy preview"); anything else is `Error(Denied)`. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
 
 | Host → operator | Payload and rule |
@@ -875,7 +875,7 @@ recording runtime cannot replay (a Foreign call) is refused before assembly.
 
 ### The operator CLI
 
-`hirsel host --state S [--cgroup-root DIR] [--max-places N] [--idle-ms M]` runs the launcher
+`hirsel host --state S [--max-places N] [--idle-ms M]` runs the launcher
 of "Starting the host" with `--control S/launcher.sock`, `--operator-listen S/operator.sock`
 and the installation's `libexec/hirsel/platform_main`, and does not return. The state
 directory must be the operator's and mode 0700.
@@ -888,8 +888,8 @@ one JSON object on stdout: the request, group, incarnation, phase and, when inst
 activation, assembly and report.
 
 - `hirsel register RECIPE --state S --group NAME --listen ADDR --store DIR --code-store DIR
-  [--tenant T] [--workdir DIR] [--uncontained] [--trusted] [--dir D]... [--net RULE]...
-  [--memory BYTES] [--pids N] [--cpu QUOTA/PERIOD] [--grant G]... [--record DIR
+  [--tenant T] [--workdir DIR] [--trusted]
+  [--memory BYTES] [--grant G]... [--record DIR
   [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
   code store.
 - `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...
@@ -991,10 +991,10 @@ content-addressed: the code store, the image store and the assembly records, eac
 the hash of its own content (above). Such a file is either complete or absent after a crash,
 so keeping it is caching, not state. Its operations are these:
 
-`hirsel launcher --control SOCKET --state DIR [--cgroup-root DIR]` serves the control
+`hirsel launcher --control SOCKET --state DIR` serves the control
 session of RUNNER-SPEC §14.5. It holds the launcher lock and the groups' listeners, starts
-children according to each group's label, and collects unused objects. `Bind` supplies
-the group's approved store, Dir and Net bindings and its cgroup limits. `Start` selects
+children, and collects unused objects. `Bind` names the group and its listener address.
+`Start` selects
 the child's mode, and a serving `Start` may name a recording (its 16-byte recording ID
 and destination), which the child receives as `HIRSEL_RECORD` and `HIRSEL_RECORD_ID`.
 The launcher waits on a single epoll set for its control session, cold listeners,
@@ -1049,8 +1049,8 @@ child endpoints, pidfds and cgroup population changes.
   attempt at any step. `Release(attempt)` or a new session cancels a running attempt.
 - **Launch.** It starts a group's children: install (genesis and standalone install),
   describe, preview, prepare and serving. Each child runs a retained image by digest, from
-  the image store, in the group's working directory, with the authority of its mode
-  ("Child modes" below), which never exceeds the group's approved grant bindings. Each
+  the image store, in the group's working directory, with descriptors for its mode
+  ("Child modes" below). Each
   launch is keyed by the child's identity, and the launcher holds at most one serving
   launch per group outside a cutover (RUNNER-SPEC §14.3). It reports each child's end to
   the host, with the Clean report of RUNNER-SPEC §14.4 when the child sends one.
@@ -1139,92 +1139,41 @@ are:
 - **Descriptors.** An `Exec` child receives only descriptors 0, 1 and 2 (EXEC-1, EXEC-3).
   The launcher must hold one listener per group and pass each to its serving child, which
   no `Exec` spawn can carry.
-- **Containment needs setup that `Exec` forbids.** EXEC-3 starts each child with
-  no-new-privileges and keeps it out of the run's private state (EXEC-7). The launcher must
-  create and own each child's container (R27), which the operator's start gives it.
 
-`Exec` is still built under this item as a grant that a group of a trusted author may hold
-(to run tools), contained by R27 like the rest of the group's processes. The launcher, which the operator starts, is
-the only process that starts a group's children, and it owns their containers. Its control socket is the host's alone: no child
-receives it, in any mode.
+A trusted group may hold an approved `Exec` grant to run tools. The launcher's control
+socket belongs to the host. No group child inherits it.
 
-**Ordinary child lifecycle.** The launcher starts an uncontained image directly in a
+**Child lifecycle.** The launcher starts the image directly in a
 new session, enters its working directory by descriptor, and passes only its mode's
 descriptors. Standard streams use files or `/dev/null`. The runtime consumes the
 verified image descriptor at entry. A serving child receives the socket activation
 metadata and descriptors 3 through 5.
 
-With `--cgroup-root`, ordinary children use the same delegated root and identity names
-as contained children. Otherwise the launcher uses its own subtree under the current
-delegated cgroup v2, keyed by the state directory. Each ordinary child is born in its
+Under a delegated cgroup v2, the launcher uses a subtree keyed by its state directory.
+Each child is born in its
 own cgroup with a pidfd. After the leader exits, the launcher requests `cgroup.kill`
 and reads `cgroup.events`. If the cgroup is still populated, epoll waits for a population
 change. The launcher reports `Ended` after observing `populated 0`, reaping any adopted
 descendants and removing the cgroup. An explicit kill targets the whole cgroup.
 
 On a host without a delegated subtree, the pidfd tracks and reaps the direct child.
-Its descendants can outlive it and can keep inherited descriptors open. Neither
-ordinary lifecycle uses a pidfile.
+Its descendants can outlive it and can keep inherited descriptors open. Neither path uses a pidfile.
 
-### Containment (R27)
+### Child modes
 
-Every child of a group carries one **containment label**, fixed in the group's catalog row:
+| Mode | Runs | Store | Inherited listener | Private descriptors |
+|---|---|---|---|---|
+| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store | none | its answer on stdout |
+| describe | `place` | none | none | its answer on stdout |
+| preview | `place` | none | none | its answer on stdout |
+| prepare | `place`, `migrate`, `handles` | the export directory | none | none |
+| serving | the place | the group's store | the group's listener (3) | its private endpoint (4) and wake report (5) |
 
-- **`contained`.** The launcher runs the child under R27's containment
-  ([reserved](reserved.md)). The child can reach only the group's working directory and
-  the files its `Dir` bindings name, only the network its `Net` bindings and its inherited
-  listener allow, and only its own descendants. Every descendant is in a container that the
-  child cannot leave, such as a delegated cgroup or a PID namespace. A stop or kill of the
-  child ends every process in it, and the launcher reports the child ended only after it
-  has seen that the container is empty. CPU and memory have OS limits from the group's
-  quota.
-- **`uncontained`.** The launcher runs the child as an ordinary process of its own OS user,
-  with OS CPU and memory limits from the group's quota and EXEC-6's best-effort death of
-  the direct child. Only a group whose author is the operator, or a first-party author the
-  operator names, may carry this label. Its program is compiled from source by the
-  platform, reaches no foreign code, and holds credentials only in connector groups.
-
-The label covers **every** process that runs the group's code: the install child of
-genesis and of a standalone install, and the describe, preview, prepare and serving
-children, with every descendant any of them starts, `Exec` tools included. Each of these
-runs code from the group's program (`place`, `migrate` and `handles` included), so a
-confined server with an unconfined preview would confine nothing. A tool descendant runs in
-its child's container, with no more than its child's authority, and the child is reported
-ended only when that container is empty.
-
-**Child modes.** A child's authority is the group's approved grant bindings intersected
-with its mode's row. A mode narrows the grants; it never adds one.
-
-| Mode | Runs | Store | `Dir` bindings | `Net` bindings | Inherited listener | Private descriptors |
-|---|---|---|---|---|---|---|
-| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | the group's | none | none | its answer on stdout |
-| describe | `place` | none | none | none | none | its answer |
-| preview | `place` | none | none | none | none | its answer |
-| prepare | `place`, `migrate`, `handles` | the export directory only ("Place activation") | none | none | none | none |
-| serving | the place | the group's store directory | the group's | the group's | the group's listener, descriptor 3 | its private endpoint (4) and its wake report (5) |
-
-The store column is the `Dir` binding that names the store (the `--dir` grant of RUNNER-SPEC
-§12.1 `Disk`); prepare's export directory replaces it. A private endpoint reaches only the
-launcher's handler for its serving child. Serving also gets the group's private staging
-directory for the export exchange. Prepare receives only the named export directory from
-that exchange and syncs `PREPARED` there before it exits.
-A launcher that cannot enforce `contained` on its host refuses at startup to admit any
-contained group, and it never runs such a group uncontained. A group whose author is not
-the operator or a named first-party author is `contained`, so no external or multi-customer
-tenant runs without R27. Changing a group's label is an operator action, recorded in
-the catalog, and it takes effect at the group's next start.
-
-The launcher starts contained children through `hirsel-contain`. The operator starts the
-launcher in a sibling cgroup and passes the empty delegated cgroup v2 subtree to
-`--cgroup-root`. The launcher refuses a contained `Bind` without a configured subtree.
-With a configured subtree, startup requires a successful trial container with the `cpu`,
-`memory` and `pids` controllers and unprivileged user, PID, mount, network and cgroup
-namespaces. Each child runs as its own container, named by its identity (RUNNER-SPEC §14.1), under
-an init that is PID 1 of its namespaces. Its root holds only its mode's directories, its image
-and the read-only paths the launcher names. Its network namespace is empty. Only its mode's
-descriptors reach it. The successor uses the same subtree and empties every container its
-predecessor left before it answers `Hello`. A serving start with a `Net` binding is refused
-until the container can enforce NET-6.
+The image's recipe declares its Hirsel grants. The launcher runs children under its
+OS user and uses cgroups for lifecycle management. The serving child's private endpoint
+reaches only the launcher's handler for that child. Serving also gets the group's private
+staging directory for the export exchange. Prepare receives the path of the named export
+directory and syncs `PREPARED` there before it exits.
 
 ### Preparing the pending trigger report
 
@@ -1273,21 +1222,10 @@ OLD's head has closed it, and an extra launch of the group is refused `Held`;
 `launcher_restart_stateless`, where a launcher killed at every step of a deploy and
 restarted gives the host's reconciliation the same result as the host's records alone,
 and a host killed at every step adopts the live children and starts no second serving
-child of any group; `child_mode_authority`, for its descriptor and control socket parts;
+child of any group; `child_mode_authority`, for descriptors and the control socket;
 `collect_reservation_handoff`; and L46 (RUNNER-SPEC §14.3), where a child's end samples
 its listener before the watch resumes. The delegated `cgroup_lifecycle` law checks
 that a successor recovers the predecessor's cgroup inventory and that an ordinary child's
-grandchild PID is gone by `Ended`. The Boat `contain` selector runs the launcher's
-`contained_group` law, which checks a child's cgroup and limits, the directories it can reach,
-and container removal before `Ended`. The selector also runs the laws in
-crates/hirsel-contain. These include `contained_all_children`, where an install, describe,
-preview, prepare and serving child
-of a contained group, and a tool descendant of the serving child, each fail to read a
-file outside its mode's row and to connect outside its `Net` bindings (all connections,
-for every mode but serving), and leave no process after it ends, and where a launcher
-killed while they run is replaced by one that reports them ended only after their
-containers are empty; `child_mode_authority`'s containment half, where a prepare child can
-write only its export directory; and `contained_refused_uncontainable`, where a launcher on
-a host without the mechanism admits no contained group. The platform host suite
+grandchild PID is gone by `Ended`. The platform host suite
 (`platform_laws.hirsel`) also covers `collect_reservation_handoff`'s host half,
 admit-after-collect, store-identity enforcement, and drift-retry pause recovery.

@@ -4,8 +4,7 @@
 //! both sides check. One connection carries one exchange.
 use crate::code_admission::ObjectKey;
 use crate::launcher::session::{
-    Attempt, Bindings, Grants, Group, Input, Label, Limits, Reader, Wire, Writer, get_wanted,
-    malformed, put_wanted,
+    Attempt, Grants, Group, Input, Reader, Wire, Writer, get_wanted, malformed, put_wanted,
 };
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -30,10 +29,9 @@ pub(crate) struct Registration {
     pub(crate) tenant: String,
     pub(crate) workdir: String,
     pub(crate) trusted: bool,
-    pub(crate) label: Label,
     pub(crate) listen: String,
-    pub(crate) bindings: Bindings,
-    pub(crate) limits: Limits,
+    pub(crate) store: String,
+    pub(crate) memory: Option<u64>,
     pub(crate) args: Vec<String>,
     pub(crate) record: Option<Record>,
 }
@@ -236,10 +234,9 @@ impl Wire for Registration {
         w.bytes(self.tenant.as_bytes());
         w.bytes(self.workdir.as_bytes());
         w.bool(self.trusted);
-        self.label.put(w);
         w.bytes(self.listen.as_bytes());
-        self.bindings.put(w);
-        self.limits.put(w);
+        w.bytes(self.store.as_bytes());
+        w.option(&self.memory, |w, &memory| w.u64(memory));
         w.strings(&self.args);
         w.option(&self.record, |w, record| {
             w.bytes(record.dir.as_bytes());
@@ -252,10 +249,9 @@ impl Wire for Registration {
             tenant: r.string()?,
             workdir: r.string()?,
             trusted: r.bool()?,
-            label: Label::get(r)?,
             listen: r.string()?,
-            bindings: Bindings::get(r)?,
-            limits: Limits::get(r)?,
+            store: r.string()?,
+            memory: r.option(Reader::u64)?,
             args: r.strings()?,
             record: r.option(|r| {
                 Ok(Record {
@@ -733,18 +729,9 @@ mod tests {
                         tenant: "t".into(),
                         workdir: "/w".into(),
                         trusted: false,
-                        label: Label::Uncontained,
                         listen: "127.0.0.1:9".into(),
-                        bindings: Bindings {
-                            store: "/store".into(),
-                            dirs: vec!["data".into()],
-                            net: Vec::new(),
-                        },
-                        limits: Limits {
-                            memory: Some(4096),
-                            cpu: None,
-                            pids: Some(8),
-                        },
+                        store: "/store".into(),
+                        memory: Some(4096),
                         args: vec!["--port".into()],
                         record: Some(Record {
                             dir: "/tapes".into(),
@@ -755,7 +742,7 @@ mod tests {
                     Vec::new(),
                     Vec::new(),
                 ),
-                "07000000100000002121212121212121212121212121212101000000670100000074020000002f7700010000000b0000003132372e302e302e313a39060000002f73746f7265010000000400000064617461000000000100000000100000000000000000000001000000080000000000000001000000060000002d2d706f727401000000060000002f74617065733c000000000000000100000001000000010000000000000000",
+                "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c000000000000000100000001000000010000000000000000",
             ),
         ];
         let answers = [

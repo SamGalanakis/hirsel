@@ -6,7 +6,7 @@
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::code_admission::{AdmissionError, ObjectKey, ObjectKind, send_release};
 use crate::code_store::CodeStore;
-use crate::launcher::session::{Attempt, Bindings, Grants, Group, Input, Label, Limits};
+use crate::launcher::session::{Attempt, Grants, Group, Input};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{self, Answer, Ask, Class, Pause, Phase, Record, Registration, Report};
 use hirsel_core_ids::ContentHash;
@@ -58,7 +58,7 @@ fn installed(name: &str) -> Result<PathBuf, Error> {
     Ok(installation.libexec(name))
 }
 
-/// `hirsel host --state S [--cgroup-root C] [--max-places N] [--idle-ms M]`: the launcher in
+/// `hirsel host --state S [--max-places N] [--idle-ms M]`: the launcher in
 /// the foreground with this installation's platform host (launch.md "Starting the host").
 pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, Error> {
     if invocation.positional.is_some() || !invocation.arguments.is_empty() {
@@ -71,7 +71,7 @@ pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, E
     for (option, value) in invocation.options {
         match option {
             Opt::HostState => state = value.map(PathBuf::from),
-            Opt::CgroupRoot | Opt::MaxPlaces | Opt::IdleMs => options.push((option, value)),
+            Opt::MaxPlaces | Opt::IdleMs => options.push((option, value)),
             _ => return Err("unexpected host option".into()),
         }
     }
@@ -175,11 +175,8 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
     let (mut state, mut store_dir, mut code, mut name, mut listen) = (None, None, None, None, None);
     let mut tenant = String::from("operator");
     let mut workdir = std::env::current_dir()?;
-    let mut label = Label::Contained;
     let mut trusted = false;
-    let mut dirs = Vec::new();
-    let mut net = Vec::new();
-    let mut limits = Limits::default();
+    let mut memory = None;
     let mut record = None;
     let mut retention_days = 30u64;
     let mut grants = crate::package_dir::Grants::default();
@@ -194,16 +191,8 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::GroupStore => store_dir = Some(std::path::absolute(text)?),
             Opt::CodeStore => code = Some(PathBuf::from(text)),
             Opt::Workdir => workdir = PathBuf::from(text).canonicalize()?,
-            Opt::Uncontained => label = Label::Uncontained,
             Opt::Trusted => trusted = true,
-            Opt::Dir => dirs.push(std::path::absolute(text)?.to_string_lossy().into_owned()),
-            Opt::NetRule => net.push(text),
-            Opt::HostMemory => limits.memory = Some(text.parse()?),
-            Opt::Pids => limits.pids = Some(text.parse()?),
-            Opt::Cpu => {
-                let (quota, period) = text.split_once('/').ok_or("--cpu takes QUOTA/PERIOD")?;
-                limits.cpu = Some((quota.parse()?, period.parse()?));
-            }
+            Opt::HostMemory => memory = Some(text.parse()?),
             Opt::Record => record = Some(PathBuf::from(text)),
             Opt::TapeRetention => {
                 retention_days = text
@@ -237,17 +226,12 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
         tenant,
         workdir: workdir.to_string_lossy().into_owned(),
         trusted,
-        label,
         listen: listen.ok_or("register requires --listen ADDR")?,
-        bindings: Bindings {
-            store: store_dir
-                .ok_or("register requires --store DIR")?
-                .to_string_lossy()
-                .into_owned(),
-            dirs,
-            net,
-        },
-        limits,
+        store: store_dir
+            .ok_or("register requires --store DIR")?
+            .to_string_lossy()
+            .into_owned(),
+        memory,
         args: invocation.arguments,
         record: record.map(|dir| Record {
             dir: dir.to_string_lossy().into_owned(),

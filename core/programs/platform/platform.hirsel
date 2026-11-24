@@ -21,10 +21,9 @@ pub type GroupRow: codec + send {
     tenant: String,
     workdir: String,
     author: Author,
-    label: launcher.Label,
     listen: String,
-    bindings: launcher.Bindings,
-    limits: launcher.Limits,
+    store: String,
+    memory: Option[u64],
     assembly: Bytes,
     activation: u64,
     retained: List[Bytes],
@@ -172,10 +171,9 @@ pub type NewGroup: send {
     tenant: String,
     workdir: String,
     author: Author,
-    label: launcher.Label,
     listen: String,
-    bindings: launcher.Bindings,
-    limits: launcher.Limits,
+    store: String,
+    memory: Option[u64],
     assembly: Bytes,
     activation: u64,
     args: List[String],
@@ -540,7 +538,7 @@ fn group_of(name: String, incarnation: u64) -> launcher.Group {
 
 // The one place a Bind is built.
 fn bind_request(name: String, g: GroupRow) -> launcher.Request {
-    Bind(group_of(name, g.incarnation), string.from(g.listen), g.label, clone(g.bindings), g.limits)
+    Bind(group_of(name, g.incarnation), string.from(g.listen))
 }
 
 fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64], witness: Option[u64]) -> launcher.Request {
@@ -2732,7 +2730,7 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
     let request: Bytes = clone(d.request)
     let mut why = string.new()
     // OLD and NEW run side by side through the cutover, so the group's memory bounds both.
-    if let Some(m) = g.limits.memory {
+    if let Some(m) = g.memory {
         if summary.root_limit > m || summary.old_root_limit > m - summary.root_limit {
             why = "Refused(Memory)"
         }
@@ -2881,7 +2879,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
         reattach(mut h, conn, d, r, now, mut out)
         return
     }
-    if spec.name == "" || spec.tenant == "" || spec.listen == "" || spec.bindings.store == "" {
+    if spec.name == "" || spec.tenant == "" || spec.listen == "" || spec.store == "" {
         refuse(mut h, conn, InvalidClass, "a registration names its group, tenant, listener and store")
         return
     }
@@ -2897,7 +2895,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             return
         }
     }
-    if store_owned(h, spec.bindings.store) {
+    if store_owned(h, spec.store) {
         refuse(mut h, conn, ConflictClass, "another group owns this store")
         return
     }
@@ -2945,7 +2943,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, listen: string.from(spec.listen), store: string.from(spec.store), memory: spec.memory, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
 }
 
 // Whether a catalog group already holds store directory `path`.
@@ -2957,7 +2955,7 @@ fn store_owned(h: Host, path: String) -> bool waits {
     let mut rows = take scanned
     loop {
         match store.next(read_handle, mut rows) {
-            Ok(Some((_, g))) => if g.bindings.store == path {
+            Ok(Some((_, g))) => if g.store == path {
                 return true
             },
             Ok(None) => return false,

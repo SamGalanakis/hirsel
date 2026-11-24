@@ -47,7 +47,7 @@ commit=$(git rev-parse --verify origin/main)
 taskset -c 8-11 git switch -q --detach "$commit"
 checkout=$PWD
 boat_status=0
-step="Boat screen and containment"
+step="Boat screen"
 record
 screen=()
 candidate="$run/screen-candidate"
@@ -67,11 +67,12 @@ if taskset -c 8-11 python3 bench/awfy/screen.py prepare "$candidate" \
 else
   boat_status=$?
 fi
-(
-  cd "$run"
-  taskset -c 8-11 "$checkout/tools/boat-dispatch" "${screen[@]}" \
-    --contain-worktree "$checkout" --contain-record "$base/last-contain"
-) >>"$run/run.log" 2>&1 || boat_status=$?
+if (( ${#screen[@]} )); then
+  (
+    cd "$run"
+    taskset -c 8-11 "$checkout/tools/boat-dispatch" "${screen[@]}"
+  ) >>"$run/run.log" 2>&1 || boat_status=$?
+fi
 # Warm peer Rust caches before board.py invokes cargo --offline.
 for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/Cargo.toml"; do
   if [[ -f "$manifest" ]]; then

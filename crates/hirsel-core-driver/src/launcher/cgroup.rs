@@ -5,8 +5,8 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
+use super::session::{Child, Role};
 use super::{hex, wait_pid};
-use hirsel_contain::ChildId;
 
 const MOUNT: &str = "/sys/fs/cgroup";
 
@@ -60,13 +60,7 @@ pub(super) fn own_orphans() -> io::Result<()> {
 pub(super) fn recover(root: &Path) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir()
-            && entry
-                .file_name()
-                .to_str()
-                .and_then(ChildId::parse)
-                .is_some()
-        {
+        if entry.file_type()?.is_dir() && entry.file_name().to_str().is_some_and(is_child_name) {
             let group = Group::open(entry.path())?;
             group.kill()?;
             group.wait_empty()?;
@@ -76,6 +70,47 @@ pub(super) fn recover(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn child_name(child: &Child) -> String {
+    let (role, key) = match child.role {
+        Role::Install(generation) => ("install", u128::from(generation)),
+        Role::Serving(generation) => ("serving", u128::from(generation)),
+        Role::Describe(attempt) => ("describe", u128::from_le_bytes(attempt.bytes())),
+        Role::Preview(attempt) => ("preview", u128::from_le_bytes(attempt.bytes())),
+        Role::Prepare(attempt) => ("prepare", u128::from_le_bytes(attempt.bytes())),
+    };
+    let group = hex(child.group.name.as_bytes());
+    format!("c-{group}-{}-{key}-{role}", child.group.incarnation)
+}
+
+fn is_child_name(name: &str) -> bool {
+    let mut parts = name.split('-');
+    let (Some("c"), Some(group), Some(incarnation), Some(key), Some(role), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    if !matches!(
+        role,
+        "install" | "serving" | "describe" | "preview" | "prepare"
+    ) {
+        return false;
+    }
+    let (Some(bytes), Ok(incarnation), Ok(key)) = (
+        crate::call::from_hex(group),
+        incarnation.parse::<u64>(),
+        key.parse::<u128>(),
+    ) else {
+        return false;
+    };
+    std::str::from_utf8(&bytes).is_ok()
+        && format!("c-{}-{incarnation}-{key}-{role}", hex(&bytes)) == name
+}
+
 pub(super) struct Group {
     path: PathBuf,
     events: File,
@@ -83,8 +118,8 @@ pub(super) struct Group {
 }
 
 impl Group {
-    pub(super) fn create(root: &Path, id: &ChildId) -> io::Result<Self> {
-        let path = root.join(id.name());
+    pub(super) fn create(root: &Path, child: &Child) -> io::Result<Self> {
+        let path = root.join(child_name(child));
         fs::create_dir(&path)?;
         Self::open(path.clone()).inspect_err(|_| {
             let _ = fs::remove_dir(path);

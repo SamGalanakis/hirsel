@@ -450,7 +450,12 @@ operations it names; nothing else about them may be inferred from an implementat
   take offsets, lengths and buffer addresses that are multiples of 4,096, else `Other(22)`
   with no effect; the host checks this on every provider. A crash while such a write is
   issued keeps any subset of its 512-byte sectors old or new, in the sim fs and the crash
-  bridge too. A read never returns bytes the host failed to read: an unreadable page is an
+  bridge too. Completion of a `Durable` or `Direct` write means its bytes are durable only when it succeeds;
+  a write that fails can leave bytes readable that a crash takes back. A process's exit does not wait for
+  its in-flight direct writes, so another process can run while they land: a program that hands such a
+  file to another process orders the handoff itself, as Store does with an exclusive `host.try_lock` on
+  the writing handle, which the kernel holds until the last request issued through it completes
+  (Store §3.3b, v2.98). A read never returns bytes the host failed to read: an unreadable page is an
   error for the read that reaches it, never zeros. `host.read` appends to `buf` at most its spare
   capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing

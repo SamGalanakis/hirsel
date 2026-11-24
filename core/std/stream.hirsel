@@ -99,6 +99,41 @@ pub fn fields(s: Spec) -> View[List[(Bytes, Bytes)]] in s {
     view s.fields
 }
 
+pub type SseHeaders {
+    event_stream: bool,
+    cache_control_default: bool,
+    accel_buffering_default: bool,
+}
+
+pub fn sse_headers(s: Spec) -> SseHeaders {
+    let mut sse = false
+    let mut cache_control = false
+    let mut accel_buffering = false
+    for (name, value) in s.fields {
+        if http1.equal_ascii(name, b"content-type") {
+            sse = sse || event_stream(value)
+        } else if http1.equal_ascii(name, b"cache-control") {
+            cache_control = true
+        } else if http1.equal_ascii(name, b"x-accel-buffering") {
+            accel_buffering = true
+        }
+    }
+    SseHeaders(event_stream: sse, cache_control_default: sse && !cache_control, accel_buffering_default: sse && !accel_buffering)
+}
+
+fn event_stream(value: Bytes) -> bool {
+    let media = b"text/event-stream"
+    let n = list.len(media)
+    if list.len(value) < n || !http1.equal_ascii(list.slice(value, 0, n), media) {
+        return false
+    }
+    let mut at = n
+    while at < list.len(value) && (value[at] == b' ' || value[at] == b'\t') {
+        at += 1
+    }
+    at == list.len(value) || value[at] == b';'
+}
+
 pub type Offer: send {
     block: Bytes,
     head_len: u64,

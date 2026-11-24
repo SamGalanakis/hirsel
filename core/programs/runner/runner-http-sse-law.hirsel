@@ -49,11 +49,33 @@ type SseLawServer: send {
     frame_limit: u64, stop: Receiver[u64],
 }
 
+fn sse_law_empty(mut _state: u64) -> Result[Option[Bytes], Capacity] {
+    Ok(None)
+}
+
+fn sse_law_empty_stream(take seed: std.stream.Seed) waits {
+    std.stream.produce(take seed, sse_law_empty)
+}
+
+fn sse_law_override(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, _state: HttpConnection[(), SseLawTables, ()]) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let stream_bounds = std.stream.Bounds(event_max: 128u64, producer_bytes: 16384u64, producer_steps: 256u64)
+    let mut spec = std.stream.spec(req, 200u16, stream_bounds, 0u64, sse_law_empty_stream)?
+    std.stream.header(mut spec, b"Content-Type", b"text/event-stream; charset=utf-8")?
+    if let Some(_) = std.http.field(req, b"last-event-id") {
+        std.stream.header(mut spec, b"cAcHe-CoNtRoL", b"private")?
+    } else {
+        std.stream.header(mut spec, b"x-aCcEl-BuFfErInG", b"yes")?
+    }
+    Ok(Stream(take spec))
+}
+
 fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] waits {
     let SseLawServer(listener: take listener, publisher: take pub_to, clock, random, tasks, frame_limit, stop: take stop) = take job
     let place: StaticFn[fn(mut Registry[(), SseLawTables]) -> Result[(), RegisterError]] = code.describe(sse_law_place)
     let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
-    let builder: std.router.Builder[HttpConnection[(), SseLawTables, ()]] = std.router.builder()
+    let mut builder: std.router.Builder[HttpConnection[(), SseLawTables, ()]] = std.router.builder()
+    result.unwrap(std.router.add(mut builder, "GET", "/head-override",
+        std.router.Route(handler: sse_law_override, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768u64), steps: None)))
     let (take routes, take plans) = result.unwrap(http_router(reg, None, take builder))
     let declarations = result.unwrap(store.describe_declarations(clock, code.describe(sse_law_schema)))
     let reads = http_read_access(pub_to, declarations, frame_limit)
@@ -111,6 +133,47 @@ fn sse_law_event(mut client: std.http_client.Connection) -> Bytes waits {
             if line != b":\n\n" { return take line }
             list.clear(mut line)
         }
+    }
+}
+
+fn sse_law_check_headers(head: std.http_client.ResponseHead, cache: Bytes, buffering: Bytes) {
+    let mut caches = 0u64
+    let mut buffers = 0u64
+    for i in 0u64 .. std.http_client.field_count(head) {
+        let (name, value) = option.unwrap(std.http_client.field_at(head, i))
+        if std.http1.equal_ascii(name, b"cache-control") {
+            caches += 1u64
+            if value != cache {
+                fail("L16 unexpected Cache-Control value")
+            }
+        }
+        if std.http1.equal_ascii(name, b"x-accel-buffering") {
+            buffers += 1u64
+            if value != buffering {
+                fail("L16 unexpected X-Accel-Buffering value")
+            }
+        }
+    }
+    if caches != 1u64 || buffers != 1u64 {
+        fail("L16 expected one Cache-Control and one X-Accel-Buffering")
+    }
+}
+
+fn sse_law_check_overrides(n: Net, c: Clock, addr: Addr) waits {
+    for cache_override in[true, false] {
+        let mut client = sse_law_dial(n, c, addr, "/head-override", cache_override)
+        result.unwrap(std.http_client.finish_request(mut client, 65536u64))
+        sse_law_check_headers(std.http_client.head(client), if cache_override {
+            b"private"
+        } else {
+            b"no-store"
+        }, if cache_override {
+            b"no"
+        } else {
+            b"yes"
+        })
+        let _ = sse_law_body(mut client)
+        std.http_client.close(take client)
     }
 }
 
@@ -181,9 +244,11 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else { fail("L16 publisher did not start") }
     let (address, take stop, take server) = sse_law_start(pub_in, n, c, r, tasks, 65536u64)
+    sse_law_check_overrides(n, c, address)
     let mut first = sse_law_dial(n, c, address, "/events", false)
     result.unwrap(std.http_client.finish_request(mut first, 65536u64))
     if std.http_client.status(std.http_client.head(first)) != 200u16 { fail("L16 expected SSE head") }
+    sse_law_check_headers(std.http_client.head(first), b"no-store", b"no")
     if sse_law_event(mut first) != sse_law_expected(first_version, true, None) {
         fail("L16 empty initial Batch must decode the zero-byte record")
     }

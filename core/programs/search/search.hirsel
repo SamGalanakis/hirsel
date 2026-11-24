@@ -328,12 +328,12 @@ pub fn rank(texts: List[String], text: String) -> List[Hit] {
     take hits
 }
 
-pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, k: u64, params: Bm25, allows: scoped fn(u64, M) -> bool) -> Result[List[Hit], store.Error] {
+pub fn query[M: codec](read_handle: store.Reader, snapshot: store.Snapshot, index: Index[M], text: String, k: u64, params: Bm25, allows: scoped fn(u64, M) -> bool) -> Result[List[Hit], store.Error] waits {
     let mut hits: List[Hit] = list.new()
     if k == 0 {
         return Ok(take hits)
     }
-    let stats = corpus_stats(store.get(snapshot, index.stats, 0u8)?)
+    let stats = corpus_stats(store.get(read_handle, snapshot, index.stats, 0u8)?)
     if stats.tokens == 0 {
         return Ok(take hits)
     }
@@ -349,18 +349,18 @@ pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, 
         if !std.set.insert(mut terms, clone(term)) {
             continue
         }
-        let df = match store.get(snapshot, frequencies, term)? {
+        let df = match store.get(read_handle, snapshot, frequencies, term)? {
             Some(df) => df,
             None => continue
         }
         let weight = inverse_frequency(stats.documents, df)
         let low = PostingKey(term: clone(term), id: 0)
         let high = PostingKey(term: take term, id: 18446744073709551615)
-        let mut rows = store.scan(snapshot, postings, Included(take low), Included(take high))?
-        while let Some((key, tf)) = store.next(mut rows)? {
+        let mut rows = store.scan(read_handle, snapshot, postings, Included(take low), Included(take high))?
+        while let Some((key, tf)) = store.next(read_handle, mut rows)? {
             let id = key.id
             if !map.contains(candidates, id) {
-                let doc = option.unwrap(store.get(snapshot, docs, id)?)
+                let doc = option.unwrap(store.get(read_handle, snapshot, docs, id)?)
                 let candidate = if allows(id, doc.metadata) {
                     let length: f64 = float.from_int(doc.length)
                     Eligible(1.0 - params.b + params.b * (length / mean), 0.0)

@@ -9,16 +9,16 @@ fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases:
         result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     }
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+    let filled = store.run(mut db, None, (store.copy_env(call), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
         let mut calls: List[harness.Call] = list.new()
-        list.push(mut calls, clone(call))
+        list.push(mut calls, clone(call_env.0))
         let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
-        store.put(mut tx, h.entries, 0u64, User("go"))?
-        store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 2u64, active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None))?
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64, 0u64), round: 0u64, rounds_left: 4u64, stalled: 0u64, spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
+        store.put(mut tx, call_env.1.entries, 0u64, User("go"))?
+        store.put(mut tx, call_env.1.entries, 1u64, Assistant(clone(answer)))?
+        store.put(mut tx, call_env.1.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 2u64, active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None))?
+        store.put(mut tx, call_env.1.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64, 0u64), round: 0u64, rounds_left: 4u64, stalled: 0u64, spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
         let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
-        store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(frame: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None, omit: list.new()), call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, stream: true, reserve: 0u64))
+        store.put(mut tx, call_env.1.effects, model_key, harness.Effect(cutoff: harness.Cutoff(frame: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None, omit: list.new()), call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, stream: true, reserve: 0u64))
     })
     match take filled {
         Ok(Committed(_)) => (),
@@ -44,8 +44,8 @@ fn inline_text(take s: String) -> harness.Payload {
 
 fn put_file(mut db: store.Db, take path: String, take text: String) -> () waits {
     let t = result.unwrap(store.with_schema(mut db, code.describe(release.tables)))
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.put(mut tx, t.files, clone(path), clone(text))?
+    let ran = store.run(mut db, None, (store.copy_env(path), store.copy_env(text), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        let _ = store.put(mut tx, call_env.2.files, clone(call_env.0), clone(call_env.1))?
         Ok(())
     })
     match take ran {
@@ -58,8 +58,8 @@ fn settling(mut db: store.Db, a: harness.Agent[Grants], take id: Bytes, take dec
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let t = result.unwrap(store.with_schema(mut db, code.describe(release.tables)))
     let w = result.unwrap(wired())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, harness.Refused] {
-        release.settle(mut tx, h, t, a, w, clone(id), clone(decided))
+    let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(decided), store.copy_env(id), store.copy_env(h), store.copy_env(t), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Filed, harness.Refused] {
+        release.settle(mut tx, call_env.3, call_env.4, call_env.0, call_env.5, clone(call_env.2), clone(call_env.1))
     })
     match take ran {
         Ok(Committed(store.Done(value: take f, ..))) => take f,
@@ -79,7 +79,7 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
     kick(mut db, a)
     kick(mut db, a)
     let t = result.unwrap(store.with_schema(mut db, code.describe(release.tables)))
-    let wrote = match result.unwrap(store.get(store.snapshot(db), t.files, "tools.hirsel")) {
+    let wrote = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t.files, "tools.hirsel")) {
         Some(text) => text == "fn fetch() {}",
         None => false
     }
@@ -98,11 +98,11 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
         _ => false
     }
     let t2 = result.unwrap(store.with_schema(mut db2, code.describe(release.tables)))
-    let filed = result.unwrap(release.pending(store.snapshot(db2), t2))
+    let filed = result.unwrap(release.pending(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2))
     let one = list.len(filed) == 1u64
     let (id, p): (Bytes, release.Proposal) = clone(filed[0])
     let summary = p.summary == "swap fetch" && p.build.package == "app" && list.len(p.build.grants) == 1u64 && p.build.grants[0u64] == "Clock" && list.len(p.build.dirs) == 1u64 && p.build.dirs[0u64] == "data"
-    let named = match result.unwrap(release.source(store.snapshot(db2), t2, clone(p.tree))) {
+    let named = match result.unwrap(release.source(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2, clone(p.tree))) {
         Some(files) => list.len(files) == 2u64 && files[0].path == "a.hirsel" && files[0].text == "A" && files[1].path == "b.hirsel" && files[1].text == "B",
         None => false,
     }
@@ -115,13 +115,13 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
         _ => false
     }
     let h = result.unwrap(store.with_schema(mut db2, code.describe(harness.handles)))
-    let shown = match result.unwrap(store.get(store.snapshot(db2), h.entries, 2u64)) {
+    let shown = match result.unwrap(store.get(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), h.entries, 2u64)) {
         Some(ToolResult(c, Returned(Inline(b)), _)) => c == "c1" && b == string.into_bytes("release 7"),
         _ => false,
     }
-    let none_left = list.len(result.unwrap(release.pending(store.snapshot(db2), t2))) == 0u64
+    let none_left = list.len(result.unwrap(release.pending(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2))) == 0u64
     put_file(mut db2, "a.hirsel", "A2")
-    let moved = match result.unwrap(release.source(store.snapshot(db2), t2, clone(p.tree))) {
+    let moved = match result.unwrap(release.source(result.unwrap(store.reader(db2, 0u64)), store.snapshot(db2), t2, clone(p.tree))) {
         None => true,
         Some(_) => false
     }
@@ -179,8 +179,8 @@ fn projected_agent(kind: u8) -> harness.Agent[Grants] {
 
 fn projecting(mut db: store.Db, a: harness.Agent[Grants]) -> harness.Projection waits {
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Projection, harness.Refused] {
-        harness.project(tx, h, a)
+    let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(h)), fn(mut tx, call_env) -> Result[harness.Projection, harness.Refused] {
+        harness.project(tx, call_env.1, call_env.0)
     })
     match take ran {
         Ok(Committed(store.Done(value: take p, ..))) => take p,
@@ -267,8 +267,8 @@ fn record_call(mut db: store.Db, bounds: store.Plan) -> u64 waits {
         fail("record_call: not admitted")
     }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
-    let served = store.serve(mut db, take complete, bounds, Some(take rec), scoped fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
-        result.unwrap(store.put(mut tx, t.files, "other", "x"))
+    let served = store.serve(mut db, take complete, bounds, Some(take rec), t, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        result.unwrap(store.put(mut tx, call_env.files, "other", "x"))
         Ok(list.new())
     })
     let Ok(Committed(receipt)) = take served else {
@@ -376,8 +376,8 @@ fn test_fork_cache_diff_depth(parent: Dir, clock: Clock, random: Random, tasks: 
         let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
         result.unwrap(store.run_migration(mut db, tasks, code.describe(release_migrate)))
         let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-        let adopted = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-            harness.adopt(mut tx, h, clone(prefix))
+        let adopted = store.run(mut db, None, (store.copy_env(prefix), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+            harness.adopt(mut tx, call_env.1, clone(call_env.0))
         })
         let Ok(Committed(_)) = adopted else {
             fail("fork depth: adoption failed")

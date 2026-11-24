@@ -18,13 +18,13 @@ fn bounded_law_value(k: u64) -> Bytes {
     take raw
 }
 
-fn bounded_law_pages(s: Snapshot, first: u64, until: u64, rows: u64, byte_limit: u64, ideal_rows: u64, pages: u64) -> bool {
+fn bounded_law_pages(s: Snapshot, first: u64, until: u64, rows: u64, byte_limit: u64, ideal_rows: u64, pages: u64) -> bool waits {
     let hi = bounded_law_key(until)
     let mut lo = bounded_law_key(first)
     let mut key = first
     for _ in 0u64 .. pages {
         let expected_rows = order.min(ideal_rows, until - key)
-        let page = result.unwrap(changes_page(None, s, lo, hi, Limits(rows: rows, byte_limit: byte_limit)))
+        let page = result.unwrap(changes_page(law_reader(s), None, s, lo, hi, Limits(rows: rows, byte_limit: byte_limit)))
         if list.len(page.changes) != expected_rows || list.len(page.trimmed) != 0 {
             return false
         }
@@ -60,9 +60,9 @@ fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("source", std.codec.key_u64(), std.codec.of_bytes())))
     let t = result.unwrap(table(mut db, "source", std.codec.key_u64(), std.codec.of_bytes()))
-    let committed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let committed = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         for k in 0u64 .. 12 {
-            put(mut tx, t, k, bounded_law_value(k))?
+            put(mut tx, call_env, k, bounded_law_value(k))?
         }
         Ok(())
     }))
@@ -79,10 +79,10 @@ fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     if !bounded_law_pages(base, 1, 11, 4, 1000, 4, 3) {
         return Error(())
     }
-    let changed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 2, bounded_law_value(2))?
-        let _ = delete(mut tx, t, 4)?
-        put(mut tx, t, 6, bounded_law_value(4))?
+    let changed = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 2, bounded_law_value(2))?
+        let _ = delete(mut tx, call_env, 4)?
+        put(mut tx, call_env, 6, bounded_law_value(4))?
         Ok(())
     }))
     if let Committed(_) = changed {} else {
@@ -91,7 +91,7 @@ fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     let newer = snapshot(db)
     let high = bounded_law_key(7)
     let limits = Limits(rows: 2, byte_limit: 100)
-    let first = result.unwrap(changes_page(Some(clone(base)), newer, bounded_law_key(2), high, limits))
+    let first = result.unwrap(changes_page(result.unwrap(reader(db, 0u64)), Some(clone(base)), newer, bounded_law_key(2), high, limits))
     if list.len(first.changes) != 1 || first.changes[0u64].tree_key != bounded_law_key(4) {
         return Error(())
     }
@@ -104,7 +104,7 @@ fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     if resume != bounded_law_key(6) {
         return Error(())
     }
-    let last = result.unwrap(changes_page(Some(base), newer, resume, high, limits))
+    let last = result.unwrap(changes_page(result.unwrap(reader(db, 0u64)), Some(base), newer, resume, high, limits))
     if list.len(last.changes) != 1 || last.changes[0u64].tree_key != bounded_law_key(6) {
         return Error(())
     }

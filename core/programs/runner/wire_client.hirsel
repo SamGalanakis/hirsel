@@ -168,13 +168,13 @@ pub fn close(take cn: Conn) -> bool waits {
 
 // A one-connection fixture listener. Each connection has an ephemeral loopback
 // port; all listeners in one fixture share the head and publisher.
-type Server[G: send, H: send, B: send]: send {
+type Server[G: send, H: shareable + inert + send, B: send]: send {
     listener: Listener, peer: Addr, tasks: Tasks, clock: Clock, random: Random, wire: Option[runner.Wire[G, B]],
     head: Sender[runner.HeadInput], post: Sender[runner.PubIn], config: runner.WireConfig,
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]
 }
 
-fn server[G: send, H: send, B: send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
+fn server[G: send, H: shareable + inert + send, B: send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
     let Server(listener: take listener, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: take head, post: take post, config: config, place: place) = take seed
     let mut l = take listener
     let socket = match std.net.accept_from(mut l, peer, deadline(c)) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
@@ -188,7 +188,7 @@ fn server[G: send, H: send, B: send](take seed: Server[G, H, B]) -> Result[(), s
     match task.join(take h) { Ok(take r) => take r, Error(_) => Error(Protocol(1008u16)) }
 }
 
-pub fn pair[G: send, H: send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
+pub fn pair[G: send, H: shareable + inert + send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
     take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn],
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
@@ -202,7 +202,7 @@ pub fn pair[G: send, H: send, B: send](tasks: Tasks, n: Net, c: Clock, random: R
 
 // Cover retention needs one whole initial Batch of 1,954 rows. Its fixture
 // selects the frame bound explicitly, using the same listener and owner.
-pub fn pair_config[G: send, H: send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
+pub fn pair_config[G: send, H: shareable + inert + send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
     take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn],
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64)

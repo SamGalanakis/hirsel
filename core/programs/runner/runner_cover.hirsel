@@ -92,9 +92,9 @@ fn drive(take d: D) -> () waits {
 }
 
 fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () waits {
-    let done = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        for k in from .. to {
-            store.put(mut tx, t, k, k)?
+    let done = store.run(mut db, None, (store.copy_env(from), store.copy_env(t), store.copy_env(to)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        for k in call_env.0 .. call_env.2 {
+            store.put(mut tx, call_env.1, k, k)?
         }
         Ok(())
     })

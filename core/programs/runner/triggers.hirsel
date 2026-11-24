@@ -30,7 +30,7 @@ type Row: codec + send {
     cancel: bool
 }
 
-pub opaque type Tables: send {
+pub opaque type Tables: shareable + send {
     rows: store.Table[Id, Row],
     due: store.Index[u64, Id, Row],
     outcomes: store.Table[Id, Terminal]
@@ -131,25 +131,25 @@ pub fn pending_table_if_present(source: store.Schema) -> Result[PendingTable, st
     }
 }
 
-pub fn scan_pending(s: store.Snapshot, t: PendingTable) -> Result[Option[PendingRows], store.Error] {
+pub fn scan_pending(read_handle: store.Reader, s: store.Snapshot, t: PendingTable) -> Result[Option[PendingRows], store.Error] waits {
     match t.table {
-        Some(table) => Ok(Some(PendingRows(rows: store.scan(s, table, Unbounded, Unbounded)?))),
+        Some(table) => Ok(Some(PendingRows(rows: store.scan(read_handle, s, table, Unbounded, Unbounded)?))),
         None => Ok(None),
     }
 }
 
-pub fn next_scanned(mut cursor: PendingRows) -> Result[Option[Pending], store.Error] {
-    while let Some((id, take row)) = store.next(mut cursor.rows)? {
+pub fn next_scanned(read_handle: store.Reader, mut cursor: PendingRows) -> Result[Option[Pending], store.Error] waits {
+    while let Some((id, take row)) = store.next(read_handle, mut cursor.rows)? {
         if id.branch == 0u32 { return Ok(Some(Pending(id: id, row: take row))) }
     }
     Ok(None)
 }
 
-pub fn tables_for_settlement(source: store.Schema, snapshot: store.Snapshot) -> Result[Option[Tables], store.Error] {
+pub fn tables_for_settlement(read_handle: store.Reader, source: store.Schema, snapshot: store.Snapshot) -> Result[Option[Tables], store.Error] waits {
     let pending = pending_table_if_present(source)?
-    let Some(take cursor) = scan_pending(snapshot, pending)? else { return Ok(None) }
+    let Some(take cursor) = scan_pending(read_handle, snapshot, pending)? else { return Ok(None) }
     let mut remaining = take cursor
-    if let None = next_scanned(mut remaining)? { return Ok(None) }
+    if let None = next_scanned(read_handle, mut remaining)? { return Ok(None) }
     Ok(Some(tables(source)?))
 }
 
@@ -228,9 +228,9 @@ pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A],
 
 // The place supplies its durable main snapshot. The index sorts by due time,
 // with the primary key as the tie breaker (store index order).
-pub fn next_pending(s: store.Snapshot, t: Tables, active: scoped[view] fn(Id) -> bool) -> Result[Option[Pending], store.Error] {
-    let mut rows = store.find(s, t.due, Unbounded, Unbounded)?
-    while let Some((id, take row)) = store.next(mut rows)? {
+pub fn next_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables, active: scoped[view] fn(Id) -> bool) -> Result[Option[Pending], store.Error] waits {
+    let mut rows = store.find(read_handle, s, t.due, Unbounded, Unbounded)?
+    while let Some((id, take row)) = store.next(read_handle, mut rows)? {
         // An inherited trigger in a fork is inert.
         if id.branch == 0u32 && !active(id) && (!parked(row.state) || row.cancel) {
             return Ok(Some(Pending(id: id, row: take row)))
@@ -296,15 +296,15 @@ pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
     Ok(row.cancel)
 }
 
-pub fn hold_mark(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Hold], store.Error] {
-    match store.get(s, t.rows, id)? {
+pub fn hold_mark(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Hold], store.Error] waits {
+    match store.get(read_handle, s, t.rows, id)? {
         Some(Row(state: Parked(take mark), ..)) => Ok(Some(take mark)),
         _ => Ok(None),
     }
 }
 
-pub fn boundary(s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] {
-    let row = stored(store.get(s, t.rows, a.id))?
+pub fn boundary(read_handle: store.Reader, s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] waits {
+    let row = stored(store.get(read_handle, s, t.rows, a.id))?
     let Some(value) = row else { return Error(StaleAttempt) }
     if !current_attempt(value, a) { return Error(StaleAttempt) }
     Ok(value.cancel)
@@ -380,8 +380,8 @@ pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Termin
     consume(mut tx, t, p.id, terminal)
 }
 
-pub fn outcome(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
-    store.get(s, t.outcomes, id)
+pub fn outcome(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] waits {
+    store.get(read_handle, s, t.outcomes, id)
 }
 
 pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
@@ -405,6 +405,6 @@ fn done[R](take result: Result[store.Outcome[R, Error], store.Error]) -> store.D
     }
 }
 
-fn first(db: store.Db, t: Tables) -> Option[Pending] {
-    result.unwrap(next_pending(store.snapshot(db), t, fn(id: Id) -> bool { false }))
+fn first(db: store.Db, t: Tables) -> Option[Pending] waits {
+    result.unwrap(next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t, fn(id: Id) -> bool { false }))
 }

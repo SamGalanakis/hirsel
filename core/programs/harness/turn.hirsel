@@ -949,11 +949,13 @@ fn hedge_attempt(mut tx: store.Tx, attempt: runner.triggers.Attempt, take ask: (
     Ok(true)
 }
 
-pub fn register[G: send, H: send](mut r: runner.Registry[G, H], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
-    runner.register_attempt(mut r, code.describe(begin), take f, n, steps)?
-    let more: own[send] fn(mut store.Tx, runner.triggers.Attempt, take (EffectKey, u64)) -> Result[bool, store.Error] = hedge_attempt
-    runner.register_attempt(mut r, code.describe(hedge_attempt), take more, n, steps)
+pub fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    runner.register_attempt(mut r, code.describe(begin), (), fn(mut tx: store.Tx, a: runner.triggers.Attempt, take key: EffectKey, unused: ()) -> Result[Permit, store.Error] {
+        begin(mut tx, a, take key)
+    }, n, steps)?
+    runner.register_attempt(mut r, code.describe(hedge_attempt), (), fn(mut tx: store.Tx, a: runner.triggers.Attempt, take asked: (EffectKey, u64), unused: ()) -> Result[bool, store.Error] {
+        hedge_attempt(mut tx, a, take asked)
+    }, n, steps)
 }
 
 // The entries every harness place registers: the app's advance, its granted
@@ -964,10 +966,7 @@ pub fn register_standard[G: send](mut r: runner.Registry[G, Handles], advance_en
     runner.transact(mut r, advance_entry, n, steps)?
     runner.granted(mut r, effect_entry, effect_n, steps)?
     register(mut r, n, steps)?
-    let run = fn(mut tx: store.Tx, a: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
-        let call = code.callable(settle_entry)
-        call(mut tx, a, take m)
-    }
-    let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error] = take run
-    runner.register_attempt(mut r, settle_entry, take f, n, steps)
+    runner.register_attempt(mut r, settle_entry, settle_entry, fn(mut tx: store.Tx, a: runner.triggers.Attempt, take asked: Settle, body: StaticFn[fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]]) -> Result[Filed, store.Error] {
+        code.callable(body)(mut tx, a, take asked)
+    }, n, steps)
 }

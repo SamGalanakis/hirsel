@@ -359,9 +359,9 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let inline = table(mut db, "inline", std.codec.key_u64(), codec)?
     let mut large_value: Bytes = list.with_capacity(1100)
     list.fill(mut large_value, 1100, 31u8)
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(large_value)), fn(mut tx, call_env) -> Result[(), Error] {
         for k in 1u64 .. 7 {
-            put(mut tx, rows, k, large_value)?
+            put(mut tx, call_env.0, k, call_env.1)?
         }
         Ok(())
     })?)?
@@ -371,13 +371,13 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let (spares, _) = fork(mut db, "spares", all)?
     let mut filler: Bytes = list.with_capacity(600)
     list.fill(mut filler, 600, 42u8)
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, rows, 2)?
-        let _ = delete(mut tx, rows, 3)?
-        let _ = delete(mut tx, rows, 5)?
-        let _ = delete(mut tx, rows, 6)?
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(inline), copy_env(filler)), fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env.0, 2)?
+        let _ = delete(mut tx, call_env.0, 3)?
+        let _ = delete(mut tx, call_env.0, 5)?
+        let _ = delete(mut tx, call_env.0, 6)?
         for k in 1u64 .. 4 {
-            put(mut tx, inline, k, filler)?
+            put(mut tx, call_env.1, k, call_env.2)?
         }
         Ok(())
     })?)?
@@ -400,12 +400,12 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     // The pins now hold P; main and spares have different leaves that
     // still reference the two blobs. Dropping keys 2 and 3 moves only the
     // first blob and rewrites every live parent.
-    law_location_commit(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 7, filler)
+    law_location_commit(run(mut db, None, (copy_env(rows), copy_env(filler)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 7, call_env.1)
     })?)?
-    law_location_commit(run_on(mut db, spares, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, rows, 2)?
-        let _ = delete(mut tx, rows, 3)?
+    law_location_commit(run_on(mut db, spares, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env, 2)?
+        let _ = delete(mut tx, call_env, 3)?
         Ok(())
     })?)?
     let _ = checkpoint(mut db)?
@@ -425,7 +425,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         fail("location law: old parent copy must remain in a listed pack")
     }
     let still_saved = option.unwrap(pinned(db, "a-old"))
-    if list.len(changes(saved, still_saved)?) != 0 {
+    if list.len(changes(result.unwrap(reader(db, 0u64)), saved, still_saved)?) != 0 {
         fail("location law: relocation changed pinned rows")
     }
     let _ = unpin(mut db, "z-old")?

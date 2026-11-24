@@ -22,7 +22,7 @@
 // - poison-segment (poison): the cross calls, each sent once the previous is answered, with
 //   the sync of the first call's effect frame failing.
 // The adapter gives one cut per run, so runner-order has one crash where the model has two.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
@@ -291,7 +291,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     o.create = false
     let mut again = result.unwrap(store.open(tasks, d, c, r, o))
     let h = result.unwrap(store.with_schema(mut again, code.describe(handles)))
-    let total = result.unwrap(store.get(store.snapshot(again), h.t, 0u64))
+    let total = result.unwrap(store.get(result.unwrap(store.reader(again, 0u64)), store.snapshot(again), h.t, 0u64))
     want(total == Some(2u64), "L31: two effects must be durable")
     let ticket = result.unwrap(store.checkpoint(mut again))
     result.unwrap(store.durable(mut again, ticket))
@@ -547,7 +547,7 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
     let mut db = result.unwrap(store.open(tasks, d, c, r, o))
     let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
     let v = store.version(store.snapshot(db))
-    let n = match result.unwrap(store.get(store.snapshot(db), h.t, 0u64)) {
+    let n = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.t, 0u64)) {
         Some(n) => n,
         None => 0u64,
     }
@@ -581,9 +581,9 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.releases", std.codec.key_u64(), release_codec)))
         let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
-        let written = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-            store.put(mut tx, table, 0u8, old_current)?
-            store.put(mut tx, table, 1u8, old_previous)
+        let written = result.unwrap(store.run(mut db, None, (store.copy_env(old_previous), store.copy_env(old_current), store.copy_env(table)), fn(mut tx, call_env) -> Result[(), store.Error] {
+            store.put(mut tx, call_env.2, 0u8, call_env.1)?
+            store.put(mut tx, call_env.2, 1u8, call_env.0)
         }))
         if let Committed(done) = written { result.unwrap(store.durable(mut db, done.ticket)) } else { fail("activation: failed to seed both rows") }
         result.unwrap(store.close(take db))
@@ -603,10 +603,10 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
             (!activated && !uncut && version == base && store.fence_level(db) == 0), "activation and fence disagree")
         if activated || !genesis {
             let table = result.unwrap(store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), codec))
-            let current = option.unwrap(result.unwrap(store.get(snap, table, 0u8)))
-            let previous = result.unwrap(store.get(snap, table, 1u8))
+            let current = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table, 0u8)))
+            let previous = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table, 1u8))
             let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
-            let history = result.unwrap(store.get(snap, releases, base + 1u64))
+            let history = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, releases, base + 1u64))
             if activated {
                 if genesis {
                     if let Some(_) = previous { fail("genesis: unexpected previous release") }
@@ -774,7 +774,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let data = result.unwrap(store.with_schema(mut db, code.describe(handles)))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
     let stream = runner.wire_client.stream(result.unwrap(runner.ingress.caller((), named)), 0u32)
-    want(match result.unwrap(store.get(store.snapshot(db), data.t, 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
+    want(match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), data.t, 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
     let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
     match result.unwrap(store.admit(mut db, stream, 0u64, digest)) {
         Admitted(_) => (),

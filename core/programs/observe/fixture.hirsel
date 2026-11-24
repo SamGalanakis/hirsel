@@ -81,12 +81,12 @@ pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
     let t = result.unwrap(store.table(mut db, "ran", std.codec.key_bytes(), ca))
     let h = Handles(ran: t)
     let a = Request(stream: list.new(), p: 0u64, arg: list.new())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        k_record(mut tx, h, observe.own(a))
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(a)), fn(mut tx, call_env) -> Result[u64, store.Error] {
+        k_record(mut tx, call_env.0, observe.own(call_env.1))
     })
     match ran { Ok(Committed(_)) => (), _ => return false }
     let held = store.snapshot(db)
-    match store.get(held, h.ran, observe.key(0u64, a.stream, a.p)) {
+    match store.get(result.unwrap(store.reader(db, 0u64)), held, h.ran, observe.key(0u64, a.stream, a.p)) {
         Ok(Some(saved)) => {
             let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: digest(entry(), encoded(saved)), version: store.version(held)))
             let co: std.codec.Codec[observe.Obs] = std.codec.of()

@@ -20,8 +20,8 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     if version(snapshot(db)) != 1 || !typed_put(mut db, rows, 7, 6) {
         return Error(Foreign)
     }
-    let mut found = find(snapshot(db), ix, Included(2), Included(2))?
-    if next(mut found)? != Some((7, 6)) || next(mut found)? != None {
+    let mut found = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Included(2), Included(2))?
+    if next(law_reader(found.capture), mut found)? != Some((7, 6)) || next(law_reader(found.capture), mut found)? != None {
         return Error(Foreign)
     }
     let before = version(snapshot(db))
@@ -63,10 +63,10 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let pre_rename = snapshot(db)
     let _ = seal(mut db, take renamed)?
     let after = snapshot(db)
-    if version(after) != version(pre_rename) + 1 || get(after, new_handle, 7)? != Some(6) || get(pre_rename, rows, 7)? != Some(6) {
+    if version(after) != version(pre_rename) + 1 || get(result.unwrap(reader(db, 0u64)), after, new_handle, 7)? != Some(6) || get(result.unwrap(reader(db, 0u64)), pre_rename, rows, 7)? != Some(6) {
         return Error(Foreign)
     }
-    match get(after, rows, 7) {
+    match get(result.unwrap(reader(db, 0u64)), after, rows, 7) {
         Error(Stale(_)) => Ok(()),
         _ => Error(Foreign),
     }

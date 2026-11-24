@@ -103,8 +103,7 @@ def main():
         if args.compiler is not None:
             for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                             'index_rows_write_refused', 'completion_unreachable',
-                            'view_tx_write_refused', 'view_cursor_advance_refused',
-                            'view_snapshot_escape_refused', 'view_cursor_send_refused'):
+                            'view_tx_write_refused'):
                 negative = inputs(args.root.resolve())
                 negative['packages'][-1]['sources'].append(dict(
                     file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
@@ -121,9 +120,6 @@ def main():
                     'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
                     'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],
                     'view_tx_write_refused': [('OWN-10', '`tx` is viewed')],
-                    'view_cursor_advance_refused': [('OWN-10', '`rows` is viewed')],
-                    'view_snapshot_escape_refused': [('OWN-20', 'a scoped result may read only its declared anchors')],
-                    'view_cursor_send_refused': [('CONC-2', '`store@1/store/ViewRows` is not send')],
                     'look_info_refused': [('OWN-5', '`tx` is not writable'),
                                           ('PROG-2', '`Tx` is opaque outside its module'),
                                           ('PROG-2', '`RequestDigest` is opaque outside its module'),

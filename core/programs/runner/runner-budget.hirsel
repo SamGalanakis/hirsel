@@ -31,7 +31,7 @@ fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, C
     add_place_bytes(head, grant)
 }
 
-pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
+pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
     let head = place_head_bytes(n_place, p.n_publisher, trigger_bytes(p.triggers))?
@@ -40,7 +40,7 @@ pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S,
     add_place_bytes(tasks, OPERATE_OWN_BYTES)
 }
 
-fn place_store[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64), StartError] waits {
+fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64), StartError] waits {
     let overhead = operate_bytes(p) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()

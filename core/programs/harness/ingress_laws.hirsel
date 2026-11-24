@@ -5,27 +5,27 @@
 fn lodging(mut db: store.Db, take item: harness.Item, take key: String) -> harness.Disposition waits {
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(wired())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        match item {
-            Input(when, text) => harness.submit(mut tx, h, crash_agent(), w, alice(), clone(when), harness.Submit(client_key: clone(key), text: clone(text))),
-            Command(c) => harness.command(mut tx, h, crash_agent(), w, alice(), clone(key), clone(c)),
+    let ran = store.run(mut db, None, (store.copy_env(item), store.copy_env(key), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        match call_env.0 {
+            Input(when, text) => harness.submit(mut tx, call_env.2, crash_agent(), call_env.3, alice(), clone(when), harness.Submit(client_key: clone(call_env.1), text: clone(text))),
+            Command(c) => harness.command(mut tx, call_env.2, crash_agent(), call_env.3, alice(), clone(call_env.1), clone(c)),
         }
     })
     match take ran { Ok(Committed(store.Done(value: take d, ..))) => take d, _ => fail("lodging: did not commit") }
 }
 
-fn disposition(db: store.Db, take key: String) -> Option[harness.Disposition] {
+fn disposition(db: store.Db, take key: String) -> Option[harness.Disposition] waits {
     let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let k = harness.InboxKey(caller: alice(), client_key: take key)
-    match result.unwrap(store.get(store.snapshot(db), h.inbox, k)) { Some(r) => Some(clone(r.disposition)), None => None }
+    match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.inbox, k)) { Some(r) => Some(clone(r.disposition)), None => None }
 }
 
-fn asked_at(db: store.Db, run: u64, round: u64) -> harness.Request {
+fn asked_at(db: store.Db, run: u64, round: u64) -> harness.Request waits {
     let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let snap = store.snapshot(db)
     let key = harness.EffectKey(run: run, round: round, kind: harness.MODEL, ordinal: 0u64)
-    let Some(e) = result.unwrap(store.get(snap, h.effects, key)) else { fail("asked_at: no model effect") }
-    result.unwrap(harness.request(snap, h, key, e))
+    let Some(e) = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.effects, key)) else { fail("asked_at: no model effect") }
+    result.unwrap(harness.request(result.unwrap(store.reader(db, 0u64)), snap, h, key, e))
 }
 
 fn says_user(r: harness.Request, text: String) -> bool {
@@ -46,7 +46,7 @@ pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Rando
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.open_session(mut tx, h, "scripted", All) })
+    let opened = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), harness.Refused] {harness.open_session(mut tx, call_env, "scripted", All) })
     match take opened { Ok(Committed(_)) => (), _ => fail("ingress: open did not commit") }
     let mut bad = 0u64
     // 1. An idle session places the first input at once.
@@ -58,8 +58,8 @@ pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Rando
     let later = lodging(mut db, Input(NextTurn, "later"), "l")
     if bad == 0u64 && !(match (steer, narrow, later) { (Queued(1u64), Queued(2u64), Queued(3u64)) => true, _ => false }) { bad = 2u64 }
     // 3. Run 0's next round: the Early input joins it; the command has not applied.
-    let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: 1u64, rounds_left: 8u64, stalled: 0u64,
+    let set = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: 1u64, rounds_left: 8u64, stalled: 0u64,
             spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
     })
     match take set { Ok(Committed(_)) => (), _ => fail("ingress: setup did not commit") }
@@ -70,7 +70,8 @@ pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Rando
     if bad == 0u64 && !(match (disposition(db, "n"), disposition(db, "l")) { (Some(Queued(2u64)), Some(Queued(3u64))) => true, _ => false }) { bad = 5u64 }
     // 4. Run 0 ends; the queued items stay queued until the boundary.
     let w = result.unwrap(wired())
-    let ended = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Finish, harness.Refused] { harness.cancel(mut tx, h, w, alice(), 0u64) })
+    let ended = store.run(mut db, None, (store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Finish, harness.Refused] {
+    harness.cancel(mut tx, call_env.0, call_env.1, alice(), 0u64) })
     match take ended { Ok(Committed(_)) => (), _ => fail("ingress: cancel did not commit") }
     // 5. The boundary (the Kick finish arms): the command applies, then the later input starts run 1.
     kick(mut db, crash_agent())

@@ -9,7 +9,7 @@
 //   its run, its aborted run's frame or its reply-only commit is the next; a refusal, a
 //   Duplicate, a Refused(HistoryUnavailable) and a Refused(RequestMismatch) commit nothing.
 //   A write returns its own commit's version.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 
@@ -1468,9 +1468,9 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
     let table = result.unwrap(store.with_schema(mut db, code.describe(handles)))
     let snap = store.snapshot(db)
-    want(result.unwrap(store.get(snap, table.t, 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
-    want(result.unwrap(store.get(snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
-    want(result.unwrap(store.get(snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 40u64)) == Some(40u64), "drain: admitted effect did not survive reopen")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
+    want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
     let key = k_write()
     let held = digest_bytes("held")
     let fresh_stream = digest_bytes("new")
@@ -1628,11 +1628,11 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let mut reopened = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
     let table = result.unwrap(store.table(mut reopened, "hirsel.runner.activation", std.codec.key_u8(), codec))
-    let stored = result.unwrap(store.get(store.snapshot(reopened), table, 0u8))
+    let stored = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), table, 0u8))
     let releases: store.Table[u64, runner.ReleaseRecord] = result.unwrap(store.table(mut reopened, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of()))
     let snap = store.snapshot(reopened)
     let version = store.version(snap)
-    let installed = result.unwrap(store.get(snap, releases, version))
+    let installed = result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), snap, releases, version))
     result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     if let Some(raw) = stored {
@@ -1682,8 +1682,8 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     // One application commit between the starts: genesis is version 1, this row is version 2.
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
     let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
-    let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.t, 7u64, 70u64)
+    let seeded = result.unwrap(store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.t, 7u64, 70u64)
     }))
     if let Committed(done) = seeded { result.unwrap(store.durable(mut db, done.ticket)) } else { fail("restart: seed row did not commit") }
     result.unwrap(store.close(take db))
@@ -1701,7 +1701,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let mut check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
     let read = result.unwrap(store.with_schema(mut check, code.describe(handles)))
     let snap = store.snapshot(check)
-    let survived = result.unwrap(store.get(snap, read.t, 7u64)) == Some(70u64)
+    let survived = result.unwrap(store.get(result.unwrap(store.reader(check, 0u64)), snap, read.t, 7u64)) == Some(70u64)
     let unwritten = store.version(snap) == 2u64
     result.unwrap(store.close(take check))
     let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
@@ -1716,7 +1716,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let resumed = serve_until_ready(tasks, take after)
     let mut last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
     let rows = result.unwrap(store.with_schema(mut last, code.describe(handles)))
-    let carried = result.unwrap(store.get(store.snapshot(last), rows.t, 7u64)) == Some(70u64)
+    let carried = result.unwrap(store.get(result.unwrap(store.reader(last, 0u64)), store.snapshot(last), rows.t, 7u64)) == Some(70u64)
     result.unwrap(store.close(take last))
     result.unwrap(std.dir.remove_all(parent, name))
     want(resumed == 3u64, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
@@ -2324,7 +2324,7 @@ fn test_atomic_migration(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 // L32 (RUNNER-SPEC v2.19.1, `duplicate_own_reply`). note_write refuses a Caller
 // with no membership row and otherwise counts that Caller's writes, so a re-run
 // or a re-check of a duplicate answers differently from the saved reply.
-type NoteHandles: send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
+type NoteHandles: shareable + send { notes: store.Table[u64, u64], members: store.Table[u64, u64] }
 type NoteRegistry = runner.Registry[(), NoteHandles]
 
 fn note_handles(schema: store.Schema) -> Result[NoteHandles, store.Error] {
@@ -2390,9 +2390,9 @@ pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits 
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(note_migrate)))
     let hd = result.unwrap(store.with_schema(mut db, code.describe(note_handles)))
-    let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, hd.members, 1u64, 1u64)?
-        store.put(mut tx, hd.members, 2u64, 1u64)
+    let seeded = result.unwrap(store.run(mut db, None, hd, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.members, 1u64, 1u64)?
+        store.put(mut tx, call_env.members, 2u64, 1u64)
     }))
     if let Committed(_) = seeded {} else { return false }
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(4u64)

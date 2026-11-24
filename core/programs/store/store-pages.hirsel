@@ -703,7 +703,9 @@ pub type ChangePage {
     next: Option[Bytes]
 }
 
-pub fn changes_page(a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] {
+pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] waits {
+    read_access(r, b)?
+    if let Some(before) = a { read_access(r, before)? }
     page_limits(l)?
     if let Some(base) = a {
         if !same(base.store, b.store) || base.open != b.open {

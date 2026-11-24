@@ -5,14 +5,14 @@ type HistoryOpenBase: send {
     pages: PageDisk
 }
 
-fn history_load_admitted(mut reader: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
-    let (take replay, take checkpoint_state) = history_paged_load(mut reader, head, ceiling)?
+fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
+    let (take replay, take checkpoint_state) = history_paged_load(mut read_source, head, ceiling)?
     let owners = disk_allocation(scoped fn() -> Result[Map[IncomingEdge, u64], Error] {
         Ok(located_owners(checkpoint_state.manifest))
     })?
     let LoadedPageStore(manifest: take manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
     let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None)
-    reader.admitted_base = Some(HistoryOpenBase(generation: manifest.generation, fence: manifest.fence, recorded_after: manifest.branches[0].version, pages: take pages))
+    read_source.admitted_base = Some(HistoryOpenBase(generation: manifest.generation, fence: manifest.fence, recorded_after: manifest.branches[0].version, pages: take pages))
     Ok(take replay)
 }
 
@@ -131,30 +131,30 @@ fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, dead
 
 // Recover and prepare_writer the state while the incumbent still holds the claim.
 // The returned register has already advanced its CLAIM entry.
-fn history_open_existing[T](mut reader: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_level: String, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
+fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_level: String, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
     let pair = first.head.pair
     let mut selected = take first
     let mut admitted: Option[(HistoryHead, JournalReplay)] = None
     let mut entropy = disk_allocation(fn() -> Result[Bytes, Error] { Ok(list.with_capacity(8)) })?
     let mut pause = 10u64
     loop {
-        if std.object.deadline_after_ms(reader.client, 0) >= reader.deadline {
+        if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        history_check_open(reader.client, selected, requested_level, options)?
+        history_check_open(read_source.client, selected, requested_level, options)?
         let trial = match replace(mut admitted, None) {
             Some((base, take replay)) if selected.head.checkpoint.seq <= base.entry.seq => {
                 if selected.head.floor < base.floor {
                     return Error(disk_fault("head", 72, Malformed))
                 }
-                history_rebase_suffix(mut reader, selected.head, base.entry, take replay, options.resident_limit)
+                history_rebase_suffix(mut read_source, selected.head, base.entry, take replay, options.resident_limit)
             },
-            _ => history_load_admitted(mut reader, selected.head, options.resident_limit),
+            _ => history_load_admitted(mut read_source, selected.head, options.resident_limit),
         }
         let replay = match take trial {
             Ok(take ready) => take ready,
             Error(HistoryMissing(take file, missing_seq)) => {
-                let verdict = history_witness(mut reader.client, selected.head, Some(pair), file, missing_seq, mut workspace.witness, reader.deadline)?
+                let verdict = history_witness(mut read_source.client, selected.head, Some(pair), file, missing_seq, mut workspace.witness, read_source.deadline)?
                 match take verdict {
                     HistoryEvicted(take newer) if options.claim_ms != 0 => {
                         selected = take newer
@@ -168,14 +168,14 @@ fn history_open_existing[T](mut reader: ObjectPackRead, c: Clock, r: Random, hol
         let admitted_state = prepare_writer(selected.head.store, replay)?
         let head = selected.head
         let authority = copied(list.slice(workspace.witness, 240, list.len(workspace.witness)))?
-        if std.object.deadline_after_ms(reader.client, 0) >= reader.deadline {
+        if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        let attempt = history_replace_claim(mut reader.client, head, holder, mut workspace, reader.deadline)?
+        let attempt = history_replace_claim(mut read_source.client, head, holder, mut workspace, read_source.deadline)?
         match take attempt {
             HistoryClaimed(take result) => {
                 let mut register = take result
-                history_advance_claim(mut reader.client, mut register, authority, mut workspace, reader.deadline)?
+                history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline)?
                 return Ok((take register, take replay, take admitted_state))
             },
             HistoryClaimMoved(backoff) => {
@@ -185,7 +185,7 @@ fn history_open_existing[T](mut reader: ObjectPackRead, c: Clock, r: Random, hol
                 selected = history_decode_head(workspace.witness)?
                 admitted = Some((head, take replay))
                 if backoff {
-                    history_claim_retry(c, r, mut entropy, pause, reader.deadline)
+                    history_claim_retry(c, r, mut entropy, pause, read_source.deadline)
                     pause = order.min(pause * 2, 1000)
                 }
             },
@@ -195,31 +195,31 @@ fn history_open_existing[T](mut reader: ObjectPackRead, c: Clock, r: Random, hol
     }
 }
 
-fn history_rebase_suffix(mut reader: ObjectPackRead, head: HistoryHead, from: HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
-    let suffix = history_suffix(mut reader.client, head, from, reader.deadline)?
+fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, from: HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
+    let suffix = history_suffix(mut read_source.client, head, from, read_source.deadline)?
     let mut replay = take initial
-    history_apply_suffix(mut reader.client, head, from.seq, suffix, mut replay, ceiling, reader.deadline)?
+    history_apply_suffix(mut read_source.client, head, from.seq, suffix, mut replay, ceiling, read_source.deadline)?
     Ok(take replay)
 }
 
 
-fn history_open_register(mut reader: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
-    let (take register, take replay, _) = history_open_with(mut reader, c, r, options, requested_level, mut workspace, op_ms, fn(id: StoreId, initial: JournalReplay) -> Result[(), Error] { Ok(()) })?
+fn history_open_register(mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
+    let (take register, take replay, _) = history_open_with(mut read_source, c, r, options, requested_level, mut workspace, op_ms, fn(id: StoreId, initial: JournalReplay) -> Result[(), Error] { Ok(()) })?
     Ok((take register, take replay))
 }
 
-fn history_open_with[T](mut reader: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
+fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
     let claim_ms = if options.claim_ms == 0 { op_ms } else { options.claim_ms }
-    reader.deadline = std.object.deadline_after_ms(reader.client, claim_ms)
-    let observed = history_fetch(mut reader.client, "head", mut workspace.witness, reader.deadline)
-    history_qualify(mut reader.client, reader.deadline)?
+    read_source.deadline = std.object.deadline_after_ms(read_source.client, claim_ms)
+    let observed = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)
+    history_qualify(mut read_source.client, read_source.deadline)?
     let holder = capacity(disk_identity(r))?
     match take observed {
         Ok(_) => {
             let selected = history_decode_head(workspace.witness)?
-            history_open_existing(mut reader, c, r, holder, take selected, options, requested_level, mut workspace, prepare_writer)
+            history_open_existing(mut read_source, c, r, holder, take selected, options, requested_level, mut workspace, prepare_writer)
         },
-        Error(Remote(NotFound)) => history_open_genesis(mut reader.client, r, holder, options, requested_level, mut workspace, reader.deadline, prepare_writer),
+        Error(Remote(NotFound)) => history_open_genesis(mut read_source.client, r, holder, options, requested_level, mut workspace, read_source.deadline, prepare_writer),
         Error(take failure) => Error(take failure),
     }
 }

@@ -2,7 +2,7 @@
 // core/tools/runner_tests.py on the charge-observation runtime's peak_retained_bytes.
 // argv: number of malformed calls before the valid call. Each malformed call appends
 // one byte to a 4,096-byte String, so the decoder reads the full String before refusal.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 

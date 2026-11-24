@@ -32,8 +32,8 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 7, 70)
+    let committed = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 7, 70)
     })?
     let Committed(done) = committed else {
         fail("the position law did not commit")
@@ -51,8 +51,8 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
             fail("a cut received a commit Position")
         }
         if seed != None && std.sim.world.pick(mut plan, 2) == 1 {
-            let after_cut = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-                put(mut tx, rows, i + 8, 80 + i)
+            let after_cut = run(mut db, None, (copy_env(rows), copy_env(i)), fn(mut tx, call_env) -> Result[(), Error] {
+                put(mut tx, call_env.0, call_env.1 + 8, 80 + call_env.1)
             })?
             let Committed(continued) = after_cut else {
                 fail("the position law did not commit after the cut")
@@ -81,7 +81,7 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
         fail("log followers did not keep distinct capture identities")
     }
     let source = follower_table(second, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if get(also, source, 7)? != Some(70) || get(found, source, 7)? != Some(70) {
+    if get(result.unwrap(follower_reader(second, 0u64)), also, source, 7)? != Some(70) || get(result.unwrap(follower_reader(first, 0u64)), found, source, 7)? != Some(70) {
         fail("the follower missed the committed row")
     }
     Ok(())

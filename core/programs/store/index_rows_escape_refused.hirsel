@@ -1,7 +1,7 @@
 // J1: an index cursor anchored to the body Tx cannot escape as its result.
 pub fn rejected(mut db: store.Db, ix: store.Index[u64, u64, u64]) -> bool waits {
-    let answer = store.run(mut db, None, fn(mut tx: store.Tx) -> Result[store.IndexRows[u64, u64], store.Error] {
-        store.lookup(tx, ix, Unbounded, Unbounded)
+    let answer = store.run(mut db, None, ix, fn(mut tx, call_env) -> Result[store.IndexRows[u64, u64], store.Error] {
+        store.lookup(tx, call_env, Unbounded, Unbounded)
     })
     false
 }

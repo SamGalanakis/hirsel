@@ -180,8 +180,8 @@ pub fn law_stored_size(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("sizes", std.codec.key_u64(), old_codec())))
     let old = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), old_codec()))
-    let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, old, 1, OldAccount(balance: 10))
+    let first = result.unwrap(run(mut db, None, old, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, OldAccount(balance: 10))
     }))
     if let Committed(_) = first {} else {
         return false
@@ -190,8 +190,8 @@ pub fn law_stored_size(c: Clock) -> bool waits {
     let current = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), new_codec()))
     let sh = view current
     let before = db.resident
-    let changed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, current, 1, NewAccount(balance: 10, bonus: 7))
+    let changed = result.unwrap(run(mut db, None, current, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, NewAccount(balance: 10, bonus: 7))
     }))
     if let Committed(_) = changed {} else {
         return false
@@ -199,14 +199,14 @@ pub fn law_stored_size(c: Clock) -> bool waits {
     if db.resident != before + 8 {
         return false
     }
-    let second = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, current, 1, NewAccount(balance: 11, bonus: 9))
+    let second = result.unwrap(run(mut db, None, current, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, NewAccount(balance: 11, bonus: 9))
     }))
     if let Committed(_) = second {} else {
         return false
     }
-    let a = option.unwrap(result.unwrap(get(held, sh, 1)))
-    let b = option.unwrap(result.unwrap(get(snapshot(db), sh, 1)))
+    let a = option.unwrap(result.unwrap(get(result.unwrap(reader(db, 0u64)), held, sh, 1)))
+    let b = option.unwrap(result.unwrap(get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, 1)))
     db.resident == before + 8 && a.balance == 10 && a.bonus == 7 && b.balance == 11 && b.bonus == 9
 }
 
@@ -854,8 +854,8 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     if !typed_put(mut db, t, 1, 100) {
         return false
     }
-    let on_b = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 1, 200)
+    let on_b = result.unwrap(run_on(mut db, b, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1, 200)
     }))
     match take on_b {
         Committed(_) => {},
@@ -867,8 +867,8 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
         Error(Diverged(_)) => {},
         _ => return false
     }
-    let late = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 5, 555)
+    let late = result.unwrap(run_on(mut db, b, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 5, 555)
     }))
     match take late {
         Committed(done) => result.unwrap(durable(mut db, done.ticket)),
@@ -877,7 +877,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let main_now = snapshot(reopened)
-    if version(main_now) != 2 || result.unwrap(get(main_now, sh, 1)) != Some(100u64) || result.unwrap(get(main_now, sh, 5)) != None {
+    if version(main_now) != 2 || result.unwrap(get(result.unwrap(reader(reopened, 0u64)), main_now, sh, 1)) != Some(100u64) || result.unwrap(get(result.unwrap(reader(reopened, 0u64)), main_now, sh, 5)) != None {
         return false
     }
     let again_b = match branch(reopened, "b") {
@@ -885,7 +885,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
         None => return false
     }
     let at_b = result.unwrap(snapshot_of(reopened, again_b))
-    if again_b.id != 1 || version(at_b) != 3 || result.unwrap(get(at_b, sh, 1)) != Some(200u64) || result.unwrap(get(at_b, sh, 5)) != Some(555u64) {
+    if again_b.id != 1 || version(at_b) != 3 || result.unwrap(get(result.unwrap(reader(reopened, 0u64)), at_b, sh, 1)) != Some(200u64) || result.unwrap(get(result.unwrap(reader(reopened, 0u64)), at_b, sh, 5)) != Some(555u64) {
         return false
     }
     let again_c = match branch(reopened, "c") {
@@ -917,8 +917,8 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
         return false
     }
     for step in 0u64 .. 20 {
-        let committed = result.unwrap(run(mut sdb, None, fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, st, 1, step + 2)
+        let committed = result.unwrap(run(mut sdb, None, (copy_env(st), copy_env(step)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, 1, call_env.1 + 2)
         }))
         match take committed {
             Committed(done) => result.unwrap(durable(mut sdb, done.ticket)),
@@ -938,7 +938,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
         Some(s) => s,
         None => return false
     }
-    let good = settled_open.resident == 448 && result.unwrap(get(snapshot(settled_open), st, 1)) == Some(21u64) && result.unwrap(get(held, st, 1)) == Some(1u64)
+    let good = settled_open.resident == 448 && result.unwrap(get(result.unwrap(reader(settled_open, 0u64)), snapshot(settled_open), st, 1)) == Some(21u64) && result.unwrap(get(result.unwrap(reader(settled_open, 0u64)), held, st, 1)) == Some(1u64)
     result.unwrap(close(take settled_open))
     if !good {
         return false

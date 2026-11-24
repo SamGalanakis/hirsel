@@ -454,18 +454,18 @@ fn retry_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
     Ok(())
 }
 
-fn retry_effect(db: store.Db, h: harness.Handles, key: harness.EffectKey) -> harness.Effect {
-    option.unwrap(result.unwrap(store.get(store.snapshot(db), h.effects, key)))
+fn retry_effect(db: store.Db, h: harness.Handles, key: harness.EffectKey) -> harness.Effect waits {
+    option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.effects, key)))
 }
 
-fn retry_pending(db: store.Db, h: harness.Handles, id: runner.triggers.Id) -> Option[runner.triggers.Pending] {
-    result.unwrap(runner.triggers.next_pending(store.snapshot(db), h.triggers, scoped fn(other) { other != id }))
+fn retry_pending(db: store.Db, h: harness.Handles, id: runner.triggers.Id) -> Option[runner.triggers.Pending] waits {
+    result.unwrap(runner.triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, scoped fn(other) { other != id }))
 }
 
 fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock], w: harness.Wiring, key: harness.EffectKey,
     p: runner.triggers.Pending, take fault: harness.ModelFault) -> u64 waits {
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, store.Error] {
-        let started = runner.triggers.start(mut tx, h.triggers, p, b"revision") ?=> |err| {
+    let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(fault), store.copy_env(h), store.copy_env(key), store.copy_env(p), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Filed, store.Error] {
+        let started = runner.triggers.start(mut tx, call_env.2.triggers, call_env.4, b"revision") ?=> |err| {
             match err {
                 NotDue => Missing("retry trigger is not due"),
                 StaleAttempt => Missing("stale retry trigger"),
@@ -473,12 +473,12 @@ fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock], w: 
             }
         }
         let Body(attempt) = started else { return Error(Missing("started trigger")) }
-        let Some(take saved) = store.fetch(tx, h.effects, key)? else { return Error(Missing("model effect")) }
+        let Some(take saved) = store.fetch(tx, call_env.2.effects, call_env.3)? else { return Error(Missing("model effect")) }
         let mut e = take saved
         e.phase = Dispatched(runner.triggers.number(attempt))
         e.dispatches += 1u64
-        store.put(mut tx, h.effects, key, e)?
-        harness.settle(mut tx, a, w, attempt, harness.Settle(key: key, receipt: Some(ModelFailed(clone(fault)))))
+        store.put(mut tx, call_env.2.effects, call_env.3, e)?
+        harness.settle(mut tx, call_env.0, call_env.5, attempt, harness.Settle(key: call_env.3, receipt: Some(ModelFailed(clone(call_env.1)))))
     })
     match take ran {
         Ok(Committed(store.Done(value: Recorded, info: info, ..))) => info.at,
@@ -515,10 +515,10 @@ fn law_typed_retry(tasks: Tasks, random: Random, seed: u64) -> bool waits {
     let mut a = harness.agent("retry", "m", code.describe(retry_model))
     a.charge = BoundedDuplicate(5u64)
     let caller = store.Caller(issuer: 1u8, subject: b"test")
-    let prepared = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        harness.open_session(mut tx, h, "m", All)?
-        let _ = harness.submit(mut tx, h, a, w, caller, NextTurn, harness.Submit(client_key: "key", text: "weather in San Francisco?"))?
-        harness.advance(mut tx, h, a, w, Kick)
+    let prepared = store.run(mut db, None, (store.copy_env(h), store.copy_env(w), store.copy_env(a), store.copy_env(caller)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, call_env.0, "m", All)?
+        let _ = harness.submit(mut tx, call_env.0, call_env.2, call_env.1, call_env.3, NextTurn, harness.Submit(client_key: "key", text: "weather in San Francisco?"))?
+        harness.advance(mut tx, call_env.0, call_env.2, call_env.1, Kick)
     })
     let Ok(Committed(_)) = prepared else { fail("retry setup did not commit") }
     let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
@@ -536,7 +536,7 @@ fn law_typed_retry(tasks: Tasks, random: Random, seed: u64) -> bool waits {
     let fallback_id = option.unwrap(fallback.trigger)
     let next = option.unwrap(retry_pending(db, h, fallback_id))
     if fallback.stream || fallback_id == second_id || runner.triggers.due_time(next) != drop_at { return false }
-    let req = result.unwrap(harness.request(store.snapshot(db), h, key, fallback))
+    let req = result.unwrap(harness.request(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h, key, fallback))
     let mut sink: Option[harness.preview.Source] = None
     let reply = reply_with("200 OK", "application/json", "{\"choices\":[{\"message\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}")
     let (completed, heard) = exchange_preview(tasks, seed, OpenAi, Some(take reply), provider.bounds(), take req, mut sink)
@@ -580,12 +580,12 @@ fn test_harness_fixes(tasks: Tasks, random: Random, seed_grant: Env) -> Result[(
     Ok(())
 }
 
-fn read_session(db: store.Db, h: harness.Handles) -> harness.Session {
-    option.unwrap(result.unwrap(store.get(store.snapshot(db), h.session, 0u64)))
+fn read_session(db: store.Db, h: harness.Handles) -> harness.Session waits {
+    option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.session, 0u64)))
 }
 
-fn pending_id(db: store.Db, h: harness.Handles, wanted: runner.triggers.Id) -> runner.triggers.Pending {
-    option.unwrap(result.unwrap(runner.triggers.next_pending(store.snapshot(db), h.triggers, scoped fn(id) { id != wanted })))
+fn pending_id(db: store.Db, h: harness.Handles, wanted: runner.triggers.Id) -> runner.triggers.Pending waits {
+    option.unwrap(result.unwrap(runner.triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, scoped fn(id) { id != wanted })))
 }
 
 fn warm_agent() -> harness.Agent[Clock] {
@@ -595,8 +595,8 @@ fn warm_agent() -> harness.Agent[Clock] {
 }
 
 fn warm_tick(mut db: store.Db, h: harness.Handles, w: harness.Wiring, wake: harness.Wake) waits {
-    let advanced = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        harness.advance(mut tx, h, warm_agent(), w, clone(wake))
+    let advanced = store.run(mut db, None, (store.copy_env(h), store.copy_env(w), store.copy_env(wake)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+        harness.advance(mut tx, call_env.0, warm_agent(), call_env.1, clone(call_env.2))
     })
     if let Ok(Committed(_)) = advanced {} else { fail("warm: advance refused") }
 }
@@ -604,17 +604,17 @@ fn warm_tick(mut db: store.Db, h: harness.Handles, w: harness.Wiring, wake: harn
 fn warm_answer(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: harness.EffectKey) -> u64 waits {
     let e = retry_effect(db, h, key)
     let p = pending_id(db, h, option.unwrap(e.trigger))
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, store.Error] {
-        let started = runner.triggers.start(mut tx, h.triggers, p, b"revision") ?=> |_| Missing("warm trigger")
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(key), store.copy_env(w), store.copy_env(e), store.copy_env(p)), fn(mut tx, call_env) -> Result[harness.Filed, store.Error] {
+        let started = runner.triggers.start(mut tx, call_env.0.triggers, call_env.4, b"revision") ?=> |_| Missing("warm trigger")
         let Body(attempt) = started else { return Error(Missing("warm attempt")) }
-        let mut dispatched: harness.Effect = clone(e)
+        let mut dispatched: harness.Effect = clone(call_env.3)
         dispatched.phase = Dispatched(runner.triggers.number(attempt))
         dispatched.dispatches = 1u64
-        store.put(mut tx, h.effects, key, dispatched)?
+        store.put(mut tx, call_env.0.effects, call_env.1, dispatched)?
         let answer = harness.Answer(text: "answered", calls: list.new(), stop: "stop",
             usage: harness.Usage(input: 0u64, output: 0u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64))
-        let filed = harness.settle(mut tx, warm_agent(), w, attempt, harness.Settle(key: key, receipt: Some(Model(take answer))))?
-        runner.triggers.finish(mut tx, h.triggers, attempt, Returned(b"")) ?=> |_| Missing("finish warm trigger")
+        let filed = harness.settle(mut tx, warm_agent(), call_env.2, attempt, harness.Settle(key: call_env.1, receipt: Some(Model(take answer))))?
+        runner.triggers.finish(mut tx, call_env.0.triggers, attempt, Returned(b"")) ?=> |_| Missing("finish warm trigger")
         Ok(filed)
     })
     match ran {
@@ -623,16 +623,16 @@ fn warm_answer(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: har
     }
 }
 
-fn warm_wait(db: store.Db, h: harness.Handles, due: u64) -> runner.triggers.Id {
+fn warm_wait(db: store.Db, h: harness.Handles, due: u64) -> runner.triggers.Id waits {
     let Some(Waiting(_, id, _)) = read_session(db, h).warm else { fail("warm: no timer") }
     if runner.triggers.due_time(pending_id(db, h, id)) != due { fail("warm: wrong due time") }
     id
 }
 
 fn warm_submit(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: String) waits {
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(key), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
         let caller = store.Caller(issuer: 1u8, subject: b"warm")
-        harness.submit(mut tx, h, warm_agent(), w, caller, NextTurn, harness.Submit(client_key: clone(key), text: "keep this prefix"))
+        harness.submit(mut tx, call_env.0, warm_agent(), call_env.2, caller, NextTurn, harness.Submit(client_key: clone(call_env.1), text: "keep this prefix"))
     })
     if let Ok(Committed(_)) = ran {} else { fail("warm: submit refused") }
 }
@@ -644,8 +644,8 @@ fn law_warm_bounds(tasks: Tasks, random: Random, seed: Option[u64]) -> Result[()
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
-    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        harness.open_session(mut tx, h, "m", All)
+    let opened = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, call_env, "m", All)
     })
     if let Ok(Committed(_)) = opened {} else { return Error(1u64) }
     warm_submit(mut db, h, w, "one")
@@ -676,7 +676,7 @@ fn law_warm_bounds(tasks: Tasks, random: Random, seed: Option[u64]) -> Result[()
         warm_tick(mut db, h, w, Warm(0u64))
         let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.WARM, ordinal: ordinal)
         let refresh = retry_effect(db, h, key)
-        let req = result.unwrap(harness.request(store.snapshot(db), h, key, refresh))
+        let req = result.unwrap(harness.request(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h, key, refresh))
         let wire = result.unwrap(provider.body(p, req))
         if req.stream || !req.warm || list.len(req.messages) != 1u64 || !has(wire, "\"max_tokens\":1") ||
             !has(wire, "\"stream\":false") || !has(wire, "keep this prefix") || has(wire, "answered") ||
@@ -708,10 +708,10 @@ fn law_warm_bounds(tasks: Tasks, random: Random, seed: Option[u64]) -> Result[()
 
     let third = harness.EffectKey(run: 2u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
     let _ = warm_answer(mut db, h, w, third)
-    let off = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+    let off = store.run(mut db, None, (store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
         let mut a = warm_agent()
         a.keep_warm = Some(harness.KeepWarm(cache: Off, lifetime_ms: 5000u64, margin_ms: 1000u64, requests: 2u64))
-        harness.advance(mut tx, h, a, w, Kick)
+        harness.advance(mut tx, call_env.0, a, call_env.1, Kick)
     })
     if let Ok(Committed(_)) = off {} else { return Error(11u64) }
     let cold = read_session(db, h)
@@ -850,10 +850,10 @@ fn seed_hedge(dir: Dir, clock: Clock, random: Random, tasks: Tasks, enabled: boo
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let setup = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        harness.open_session(mut tx, h, "m", All)?
-        let count = if enabled { 10u64 } else { 1u64 }
-        for i in 0u64 .. count { hedge_submit(mut tx, h, i, enabled)? }
+    let setup = store.run(mut db, None, (store.copy_env(enabled), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, call_env.1, "m", All)?
+        let count = if call_env.0 { 10u64 } else { 1u64 }
+        for i in 0u64 .. count { hedge_submit(mut tx, call_env.1, i, call_env.0)? }
         Ok(())
     })
     if let Ok(Committed(_)) = setup {} else { fail("hedge: could not seed") }
@@ -915,7 +915,7 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
             fail(take message)
         }
         if answer.text != text || e.dispatches != dispatches { return Error(23u64) }
-        let run = option.unwrap(result.unwrap(store.get(store.snapshot(db), h.runs, id)))
+        let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.runs, id)))
         if run.spend.reserved != 0u64 || run.spend.known != 2u64 || run.spend.unresolved != (dispatches - 1u64) * 2u64 {
             return Error(24u64)
         }

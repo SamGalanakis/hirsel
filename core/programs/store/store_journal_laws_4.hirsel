@@ -13,10 +13,10 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let mut db = open(tasks, d, c, r, options)?
     let initial_generation = db.checkpointed
     let initial_segment = db.file_seq
-    let start = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let start = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         let mut body: Bytes = list.with_capacity(4023)
         list.fill(mut body, 4023, 7u8)
-        put(mut tx, rows, 1, body)
+        put(mut tx, call_env, 1, body)
     })?
     let Committed(_) = start else {
         return Error(Foreign)
@@ -39,17 +39,17 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         return Error(Foreign)
     }
     let previous_head = version(snapshot(db))
-    let refused = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete(mut tx, rows, 1)
+    let refused = run(mut db, None, rows, fn(mut tx, call_env) -> Result[bool, Error] {
+        delete(mut tx, call_env, 1)
     })?
     match refused {
         Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
-    let overwritten = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+    let overwritten = run(mut db, None, rows, fn(mut tx, call_env) -> Result[bool, Error] {
         let replacement: Bytes = list.new()
-        put(mut tx, rows, 1, replacement)?
-        delete(mut tx, rows, 1)
+        put(mut tx, call_env, 1, replacement)?
+        delete(mut tx, call_env, 1)
     })?
     match overwritten {
         Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
@@ -80,8 +80,8 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if accounts(recovered).journal != 16781392 || disk_state(recovered).since_cut != 0 || version(snapshot(recovered)) != previous_head {
         return Error(Foreign)
     }
-    let refused_again = run(mut recovered, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete(mut tx, rows, 1)
+    let refused_again = run(mut recovered, None, rows, fn(mut tx, call_env) -> Result[bool, Error] {
+        delete(mut tx, call_env, 1)
     })?
     match refused_again {
         Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
@@ -91,8 +91,8 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if accounts(recovered).journal != 0 {
         return Error(Foreign)
     }
-    let retry = run(mut recovered, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        delete(mut tx, rows, 1)
+    let retry = run(mut recovered, None, rows, fn(mut tx, call_env) -> Result[bool, Error] {
+        delete(mut tx, call_env, 1)
     })?
     match retry {
         Committed(done) if done.value => (),
@@ -132,17 +132,17 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     let plan = Plan(n_e: 65536, s_e: 1048576, reply_max: 8)
-    let failed = result.unwrap(serve(mut db, take second, plan, Some(take record), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let failed = result.unwrap(serve(mut db, take second, plan, Some(take record), (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         fail("body intentionally stopped before its reply")
     }))
     let Failed(take pend, Raised(5)) = take failed else {
         return Error(())
     }
     let attempted = pend.attempted
-    let padding = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let padding = result.unwrap(run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         let mut body: Bytes = list.with_capacity(3823)
         list.fill(mut body, 3823, 7u8)
-        put(mut tx, rows, 1, body)
+        put(mut tx, call_env, 1, body)
     }))
     let Committed(_) = padding else {
         return Error(())
@@ -170,9 +170,9 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
     // Two section heads (47 including the frame header), one data put
     // (31 bytes) and the 66-byte reply op. Nothing reaches the journal.
-    let refused = serve(mut db, take first, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let refused = serve(mut db, take first, plan, None, rows, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
         let empty: Bytes = list.new()
-        if let Error(_) = put(mut tx, rows, 4, empty) {
+        if let Error(_) = put(mut tx, call_env, 4, empty) {
             return Error(key_word(0))
         }
         Ok(key_word(7))
@@ -237,7 +237,7 @@ pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     } else {
         None
     }
-    if result.unwrap(get(snapshot(reopened), sh, 7)) != expected {
+    if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 7)) != expected {
         return false
     }
     result.unwrap(close(take reopened))
@@ -292,8 +292,8 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
     let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let before = db.heads[0].head
     let live = db.resident
-    let ran = result.unwrap(run(mut db, Some(65536u64), scoped fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 1u64, 91u64)?
+    let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 1u64, 91u64)?
         loop {}
     }))
     match take ran {
@@ -305,7 +305,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
     if db.heads[0].head != before || db.resident != live {
         return false
     }
-    let stopped = result.unwrap(look(snapshot(db), Some(65536u64), scoped fn(tx: Tx) -> u64 {
+    let stopped = result.unwrap(look(result.unwrap(reader(db, 0u64)), snapshot(db), Some(65536u64), (), fn(tx, unused_env) -> u64 {
         loop {}
     }))
     match take stopped {
@@ -314,8 +314,8 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    let inspected = result.unwrap(look(snapshot(db), None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
-        fetch(tx, t, 1u64)
+    let inspected = result.unwrap(look(result.unwrap(reader(db, 0u64)), snapshot(db), None, t, fn(tx, call_env) -> Result[Option[u64], Error] {
+        fetch(tx, call_env, 1u64)
     }))
     match take inspected {
         Seen(v) => match v.value {

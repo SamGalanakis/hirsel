@@ -36,8 +36,8 @@ fn replay_place(mut r: ReplayRegistry) -> Result[(), RegisterError] {
 }
 
 fn replay_seed(mut db: store.Db, h: ReplayMembers, value: u64) -> () waits {
-    let seed = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h, string.as_bytes("alice"), value)
+    let seed = result.unwrap(store.run(mut db, None, (store.copy_env(h), store.copy_env(value)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.0, string.as_bytes("alice"), call_env.1)
     }))
     let Committed(receipt) = take seed else { fail("replay seed commit") }
     result.unwrap(store.durable(mut db, receipt.ticket))

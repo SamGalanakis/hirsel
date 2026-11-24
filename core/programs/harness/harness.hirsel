@@ -261,7 +261,7 @@ pub type Wait: codec + send = Open(Bytes, u64) | Decided(Bytes, bool) | Expired 
 // visible line of entry p.
 pub type View: codec + send = Status(String) | Line(String, String)
 
-pub type Handles: send {
+pub type Handles: shareable + send {
     session: store.Table[u64, Session],
     entries: store.Table[u64, Entry],
     inbox: store.Table[InboxKey, Received],
@@ -664,8 +664,8 @@ pub type Framed: codec + send {
 // Exports entries[0..upto) through a snapshot. A cut inside a tool round (an
 // Assistant whose calls do not all have results before `upto`) conflicts: the
 // fork's first request would carry calls with no results.
-pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] {
-    let Some(s) = kept(store.get(snap, h.session, 0u64))? else {
+pub fn export(read_handle: store.Reader, snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] waits {
+    let Some(s) = kept(store.get(read_handle, snap, h.session, 0u64))? else {
         return Error(Malformed("no session"))
     }
     if upto > s.next_pos {
@@ -674,7 +674,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     let mut log: List[Entry] = list.with_capacity(upto)
     let mut open: List[String] = list.new()
     for p in 0u64 .. upto {
-        let Some(take e) = kept(store.get(snap, h.entries, p))? else {
+        let Some(take e) = kept(store.get(read_handle, snap, h.entries, p))? else {
             return Error(Malformed("entry"))
         }
         match e {
@@ -704,8 +704,8 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     // itself a fork. A cut is the first row owned by the newer segment.
     let mut cuts: List[u64] = list.new()
     if upto > 0u64 {
-        let mut rows = kept(store.scan(snap, h.fork_cuts, Unbounded, Included(upto)))?
-        while let Some((cut, _)) = kept(store.next(mut rows))? {
+        let mut rows = kept(store.scan(read_handle, snap, h.fork_cuts, Unbounded, Included(upto)))?
+        while let Some((cut, _)) = kept(store.next(read_handle, mut rows))? {
             list.push(mut cuts, cut)
         }
     }
@@ -713,8 +713,8 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     let mut frames: List[Framed] = list.new()
     let mut frame = 0u64
     if upto > 0u64 {
-        let mut rows = kept(store.scan(snap, h.frames, Unbounded, Excluded(upto)))?
-        while let Some((base, f)) = kept(store.next(mut rows))? {
+        let mut rows = kept(store.scan(read_handle, snap, h.frames, Unbounded, Excluded(upto)))?
+        while let Some((base, f)) = kept(store.next(read_handle, mut rows))? {
             list.push(mut frames, Framed(base: base, frame: clone(f)))
             frame = base
         }

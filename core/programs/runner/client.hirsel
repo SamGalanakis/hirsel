@@ -89,7 +89,7 @@ pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, runner.Call
 }
 
 // The place's entry keys in registration order, as its Hello lists them.
-pub fn entry_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
+pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
     let mut r: runner.Registry[G, H] = runner.registry()
     let run = code.callable(place)
     if let Error(e) = run(mut r) {

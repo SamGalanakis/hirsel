@@ -110,7 +110,7 @@ fn apply(mut r: Rig, take input: Input) -> List[launcher.Request] waits {
 
 // Collects the host's operator answers; each connection an answer closed is closed, as the
 // transport does, and the host's detach requests join `out`.
-fn hang_ups(mut r: Rig, mut out: List[launcher.Request]) {
+fn hang_ups(mut r: Rig, mut out: List[launcher.Request]) waits {
     for s in outgoing(mut r.h) {
         list.push(mut r.got, clone(s))
         if s.close {
@@ -376,7 +376,7 @@ fn idle_stop(mut r: Rig, name: String, due: Option[u64]) waits {
     finish(mut r, c, Code(0i32), Some(due))
 }
 
-fn is_dirty(r: Rig, name: String, g: u64) -> bool {
+fn is_dirty(r: Rig, name: String, g: u64) -> bool waits {
     match wake_row(r.h, name) {
         Some(w) => match w.wake {
             Dirty(a) => a == g,
@@ -386,7 +386,7 @@ fn is_dirty(r: Rig, name: String, g: u64) -> bool {
     }
 }
 
-fn is_clean(r: Rig, name: String) -> bool {
+fn is_clean(r: Rig, name: String) -> bool waits {
     match wake_row(r.h, name) {
         Some(w) => match w.wake {
             Clean(_) => true,
@@ -408,7 +408,7 @@ fn two(a: u64, b: u64) -> List[u64] {
     out
 }
 
-fn gone_row(h: Host, name: String) -> bool {
+fn gone_row(h: Host, name: String) -> bool waits {
     match wake_row(h, name) {
         Some(_) => false,
         None => true
@@ -650,7 +650,7 @@ fn add_genesis(mut r: Rig, name: String) waits {
     pump(mut r, take reqs)
 }
 
-fn activation_of(r: Rig, name: String) -> u64 {
+fn activation_of(r: Rig, name: String) -> u64 waits {
     match group_row(r.h, name) {
         Ok(Some(g)) => g.activation,
         _ => fail("no group row")
@@ -691,7 +691,7 @@ fn last_activation(r: Rig) -> Option[u64] {
     found
 }
 
-fn failing_cause(r: Rig, name: String) -> Option[String] {
+fn failing_cause(r: Rig, name: String) -> Option[String] waits {
     for f in status(r.h).failing {
         if f.name == name {
             return Some(string.from(f.last))
@@ -928,14 +928,14 @@ fn asked_of(r: Rig, kind: u64) -> u64 {
     n
 }
 
-fn failed_with(r: Rig, why: String) -> bool {
+fn failed_with(r: Rig, why: String) -> bool waits {
     match deploy_outcome(r.h, "g") {
         Some(Failed(w)) => w == why,
         _ => false
     }
 }
 
-fn still_preparing(r: Rig) -> bool {
+fn still_preparing(r: Rig) -> bool waits {
     match deploy_outcome(r.h, "g") {
         Some(Preparing) => true,
         _ => false
@@ -975,7 +975,7 @@ fn collection_keeps(mut r: Rig, new: bool, old: bool) -> bool waits {
 
 // The deploy committed once: OLD got one cutover, the row is Dirty(2) with NEW's assembly
 // as the group's root and OLD's kept, the outcome is Installed and nothing is held.
-fn committed_once(r: Rig) -> bool {
+fn committed_once(r: Rig) -> bool waits {
     let installed = match deploy_outcome(r.h, "g") {
         Some(Installed) => true,
         _ => false
@@ -1075,8 +1075,8 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
 }
 
 // The deploy row's current attempt.
-fn deploy_attempt(r: Rig) -> launcher.Attempt {
-    match store.get(store.snapshot(r.h.db), r.h.t.deploys, "g") {
+fn deploy_attempt(r: Rig) -> launcher.Attempt waits {
+    match store.get(result.unwrap(store.reader(r.h.db, 0u64)), store.snapshot(r.h.db), r.h.t.deploys, "g") {
         Ok(Some(d)) => d.attempt,
         _ => fail("no deploy row")
     }
@@ -1338,14 +1338,14 @@ fn starts_are(r: Rig, want: List[Pair]) -> bool {
     true
 }
 
-fn rooted_at(r: Rig, assembly: Bytes, activation: u64) -> bool {
+fn rooted_at(r: Rig, assembly: Bytes, activation: u64) -> bool waits {
     match group_row(r.h, "g") {
         Ok(Some(g)) => g.assembly == assembly && g.activation == activation,
         _ => false
     }
 }
 
-fn installed_new(r: Rig, activation: u64) -> bool {
+fn installed_new(r: Rig, activation: u64) -> bool waits {
     let done = match deploy_outcome(r.h, "g") {
         Some(Installed) => true,
         _ => false
@@ -1392,20 +1392,20 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
         let lo = done
         let made = {
             let t = view r.h.t
-            store.run(mut r.h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-                for i in lo .. upto {
+            store.run(mut r.h.db, None, (store.copy_env(due), store.copy_env(upto), store.copy_env(lo), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+                for i in call_env.2 .. call_env.1 {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
                     let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
-                    st(store.put(mut tx, t.groups, name, g))?
-                    let at: Option[u64] = if i < due {
+                    st(store.put(mut tx, call_env.3.groups, name, g))?
+                    let at: Option[u64] = if i < call_env.0 {
                         Some(T0 + 10u64)
                     } else {
                         Some(T0 + 86400000u64)
                     }
-                    st(store.put(mut tx, t.wake, name, WakeRow(wake: Clean(at), gen: 1u64)))?
+                    st(store.put(mut tx, call_env.3.wake, name, WakeRow(wake: Clean(at), gen: 1u64)))?
                     if let Some(when) = at {
-                        st(store.put(mut tx, t.due, DueKey(at: when, name: string.from(name)), 0u8))?
+                        st(store.put(mut tx, call_env.3.due, DueKey(at: when, name: string.from(name)), 0u8))?
                     }
                 }
                 Ok(())
@@ -1491,14 +1491,14 @@ fn bytes_of(n: u64, b: u8) -> Bytes {
     out
 }
 
-fn finds(h: Host, id: Bytes, now: u64, want: Bytes) -> bool {
+fn finds(h: Host, id: Bytes, now: u64, want: Bytes) -> bool waits {
     match resolve_pin(h, id, now) {
         Ok(Found(got)) => got == want,
         _ => false,
     }
 }
 
-fn pin_gone(h: Host, id: Bytes, now: u64) -> bool {
+fn pin_gone(h: Host, id: Bytes, now: u64) -> bool waits {
     match resolve_pin(h, id, now) {
         Ok(Gone) => true,
         _ => false,
@@ -1906,7 +1906,7 @@ fn serving_at(r: Rig, name: String, activation: u64, assembly: Bytes) -> bool {
 
 // Whether group `name`'s first serving start carried its arguments and a recording whose
 // pin, committed before the start, names the start's assembly until its 60 s retention ends.
-fn recorded_start(r: Rig, name: String) -> bool {
+fn recorded_start(r: Rig, name: String) -> bool waits {
     for l in r.sent {
         if let ServingMode(gen, _) = l.mode {
             if l.group.name != name {

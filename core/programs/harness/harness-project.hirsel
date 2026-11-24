@@ -105,29 +105,13 @@ pub fn fork_cache_diff[G: send, N: send](db: store.Db, b: store.Branch, v: u64, 
 }
 
 fn projected_at[G: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G]) -> Result[Projection, ForkDiffError] waits {
-    let seen: Log[Result[Projection, Refused]] = log.new()
-    let halted: Log[bool] = log.new()
-    let ran = store.reexecute(db, b, v, bounds, scoped fn(_stop: store.Stop) -> Bytes {
-        log.append(halted, true)
-        list.new()
-    }, scoped fn(_call: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
-        log.append(seen, project(tx, h, a))
-        Ok(list.new())
-    })
-    let outcome = match take ran {
-        Ok(take done) => take done,
-        Error(take e) => return Error(Store(take e)),
-    }
-    if let Unknown(reason) = outcome {
-        return Error(Unrecorded(reason))
-    }
-    if list.len(log.finish(take halted)) > 0u64 {
-        return Error(Overran)
-    }
-    let mut got = log.finish(take seen)
-    match list.pop(mut got) {
-        Some(Ok(take p)) => Ok(take p),
-        Some(Error(take r)) => Error(Projection(take r)),
-        None => Error(Overran),
+    let attempt = store.project_recorded(db, b, v, bounds, (store.copy_env(h), store.copy_env(a)), fn(tx, env) -> Result[Projection, Refused] {
+        project(tx, env.0, env.1)
+    }) ?=> Store
+    match take attempt {
+        Projected(Ok(take answer)) => Ok(take answer),
+        Projected(Error(take refusal)) => Error(Projection(take refusal)),
+        ProjectionUnavailable(reason) => Error(Unrecorded(reason)),
+        ProjectionStopped => Error(Overran),
     }
 }

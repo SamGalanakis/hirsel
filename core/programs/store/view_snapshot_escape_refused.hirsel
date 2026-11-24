@@ -1,5 +1,0 @@
-// L38: a view anchored to a local snapshot cannot escape through another anchor.
-pub fn rejected(outer: store.Snapshot, take short: store.Snapshot, sh: store.Table[u64, u64])
-    -> Result[Option[View[Bytes]], store.Error] in outer {
-    store.get_bytes(short, sh, 1)
-}

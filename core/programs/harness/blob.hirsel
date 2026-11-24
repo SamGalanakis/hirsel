@@ -134,17 +134,17 @@ fn doubt[F](ctx: runner.TriggerContext, settle_entry: StaticFn[F], key: EffectKe
     }
 }
 
-fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G], port: G) -> Outcome waits {
+fn remote_effect[G: send](read_handle: store.Reader, snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G], port: G) -> Outcome waits {
     let Some(resolve) = a.mcp_peer else {
         return Gone
     }
     let Some(pos) = e.cutoff.tools_pos else {
         return Gone
     }
-    let Ok(pinned) = store.get(snap, h.entries, pos) else {
+    let Ok(pinned) = store.get(read_handle, snap, h.entries, pos) else {
         return InDoubt
     }
-    let Ok(found) = store.get(snap, h.mcp_catalog, c.name) else {
+    let Ok(found) = store.get(read_handle, snap, h.mcp_catalog, c.name) else {
         return InDoubt
     }
     let Some(row) = found else {
@@ -215,13 +215,13 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         Some(Shut) => return Ok(Skipped),
         None => return Ok(Lost),
     }
-    let Ok(snap) = runner.trigger_snapshot(ctx) else {
+    let Ok((take read_handle, snap)) = runner.trigger_snapshot(ctx) else {
         return Ok(Lost)
     }
     let Ok(h) = handles(store.snapshot_schema(snap)) else {
         return Ok(Lost)
     }
-    let Ok(Some(take e)) = store.get(snap, h.effects, key) else {
+    let Ok(Some(take e)) = store.get(read_handle, snap, h.effects, key) else {
         return Ok(Lost)
     }
     let receipt: Receipt = if recover {
@@ -230,10 +230,10 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         }
         take recovered
     } else if key.kind == MODEL || key.kind == WARM {
-        let Ok(take asked) = request(snap, h, key, e) else {
+        let Ok(take asked) = request(read_handle, snap, h, key, e) else {
             return Ok(Lost)
         }
-        let mut sink: Option[preview.Source] = if key.kind == WARM { None } else { effect_preview(target, snap, h, ctx, key) }
+        let mut sink: Option[preview.Source] = if key.kind == WARM { None } else { effect_preview(read_handle, target, snap, h, ctx, key) }
         let race = match e.repeat {
             Repeatable(max) if key.kind == MODEL && e.stream && dispatches < max => a.hedged_model,
             _ => None,
@@ -253,12 +253,12 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
             Error(take fault) => ModelFailed(take fault),
         }
     } else {
-        let progress = effect_preview(target, snap, h, ctx, key)
+        let progress = effect_preview(read_handle, target, snap, h, ctx, key)
         let Some(c) = view e.call else {
             return Ok(Lost)
         }
         let outcome: Receipt = if mcp_tools.reserved(c.name) {
-            Tool(remote_effect(snap, h, e, c, a, port))
+            Tool(remote_effect(read_handle, snap, h, e, c, a, port))
         } else {
             let Some(Outside(f, _, _)) = tool_named(a, c.name) else {
                 return Ok(Lost)
@@ -279,14 +279,14 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
     }
 }
 
-fn effect_preview(target: Option[preview.Target], snap: store.Snapshot, h: Handles, ctx: runner.TriggerContext, key: EffectKey) -> Option[preview.Source] {
+fn effect_preview(read_handle: store.Reader, target: Option[preview.Target], snap: store.Snapshot, h: Handles, ctx: runner.TriggerContext, key: EffectKey) -> Option[preview.Source] waits {
     let Some(t) = view target else {
         return None
     }
-    let Ok(Some(s)) = store.get(snap, h.session, 0u64) else {
+    let Ok(Some(s)) = store.get(read_handle, snap, h.session, 0u64) else {
         return None
     }
-    let Ok(Some(r)) = store.get(snap, h.runs, key.run) else {
+    let Ok(Some(r)) = store.get(read_handle, snap, h.runs, key.run) else {
         return None
     }
     let a = runner.trigger_attempt(ctx)

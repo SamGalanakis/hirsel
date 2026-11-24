@@ -293,9 +293,9 @@ fn transcript_of(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> List[B
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let snap = store.snapshot(db)
     let mut out: List[Bytes] = list.new()
-    if let Ok(Some(s)) = store.get(snap, h.session, 0u64) {
+    if let Ok(Some(s)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64) {
         for p in 0u64 .. s.next_pos {
-            if let Ok(Some(e)) = store.get(snap, h.entries, p) {
+            if let Ok(Some(e)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, p) {
                 list.push(mut out, bytes_of(e))
             }
         }

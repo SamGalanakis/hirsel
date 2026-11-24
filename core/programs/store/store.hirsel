@@ -48,7 +48,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Tiered(TieredRefusal)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
 
 type Roots = PageRoots
 
@@ -537,29 +537,22 @@ pub opaque type ReadOnly: shareable + send {
     snapshot: Snapshot
 }
 
-pub fn read_only_table[K, V](reader: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let s = view reader.snapshot
+pub fn read_only_table[K, V](read_source: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let s = view read_source.snapshot
     let handle = catalog_handle(s.store, s.roots.catalog, take name, take key, take value)?
     Ok(clone(handle))
 }
 
-pub fn read_only_get[K, V](reader: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] {
-    get(reader.snapshot, t, key)
+pub fn read_only_get[K, V](read_source: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] waits {
+    get(read_only_reader(read_source, 0)?, read_source.snapshot, t, key)
 }
 
-pub fn read_only_snapshot(reader: ReadOnly) -> Snapshot {
-    Snapshot(store: reader.snapshot.store, open: reader.snapshot.open, branch: reader.snapshot.branch, head: reader.snapshot.head, roots: share_roots(reader.snapshot.roots), watermark: reader.snapshot.watermark)
+pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
+    Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark)
 }
 
 pub opaque type ByteRows: send {
     cursor: PageRange
-}
-
-pub opaque scoped type ViewRows {
-    cursor: List[std.page.Cursor],
-    prefix: Bytes,
-    high: Bytes,
-    slot: Option[u64]
 }
 
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
@@ -1106,7 +1099,7 @@ fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_
     }
 }
 
-pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take rec: Option[CallRecord], env: E, body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
     serve_before(journal_poll(mut db))?
     serve_before(healthy(db))?
     registered_completion(db, complete)?
@@ -1115,7 +1108,9 @@ pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let metered = metered_draft(db, complete, attempted, plan, grant, rec, body)
+    let metered = metered_draft(db, complete, attempted, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        body(mut tx, env)
+    })
     let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
         Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
         Error(DraftStopped(stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), stop)),
@@ -1212,19 +1207,19 @@ pub fn info(mut tx: Tx) -> CallInfo {
     tx.info
 }
 
-pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+pub fn run[E: inert, R, A](mut db: Db, steps: Option[u64], env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
-    run_on(mut db, b, steps, body)
+    run_on(mut db, b, steps, env, body)
 }
 
-pub fn run_on[R, A](mut db: Db, b: Branch, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    run_on_with_reply(mut db, b, steps, None, body)
+pub fn run_on[E: inert, R, A](mut db: Db, b: Branch, steps: Option[u64], env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    run_on_with_reply(mut db, b, steps, None, scoped fn(mut tx: Tx) -> Result[R, A] { body(mut tx, env) })
 }
 
 // A runner abort may keep its reply. A runner refusal rolls back the whole Tx.
-pub fn run_with_reply[R, A](mut db: Db, steps: Option[u64], keep_reply: fn(A) -> bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+pub fn run_with_reply[E: inert, R, A](mut db: Db, steps: Option[u64], keep_reply: fn(A) -> bool, env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
-    run_on_with_reply(mut db, b, steps, Some(keep_reply), body)
+    run_on_with_reply(mut db, b, steps, Some(keep_reply), scoped fn(mut tx: Tx) -> Result[R, A] { body(mut tx, env) })
 }
 
 fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -2364,9 +2359,9 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         capacity(map.try_reserve(mut db.admits, 1))?
     }
     let b = main_branch(db)
-    let outcome = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let value = stream_bytes(p, d, false, list.new())?
-        stream_write(mut tx, copied(stream)?, take value, 0)
+    let outcome = run_on(mut db, b, None, (copy_env(d), copy_env(p), copy_env(stream)), fn(mut tx, call_env) -> Result[(), Error] {
+        let value = stream_bytes(call_env.1, call_env.0, false, list.new())?
+        stream_write(mut tx, copied(call_env.2)?, take value, 0)
     })?
     let admitted = match take outcome {
         Committed(done) => done.ticket,
@@ -2428,10 +2423,6 @@ fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[ByteRo
 
 fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     next_page_range(mut rows.cursor)
-}
-
-fn scan_raw(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
-    byte_cursor(s.roots.collections, Included(lower_bytes(id, lo, false)?), lower_bytes(id, hi, true)?)
 }
 
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
@@ -2908,12 +2899,16 @@ pub fn with_index[J, K, V](mut s: TableSpec[K, V], name: String, by: StaticFn[fn
     Ok(list.push(mut s.indexes, take declared))
 }
 
-pub opaque type Rows[K, V]: send {
+type PageRows[K, V]: send {
     cursor: ByteRows,
+    data: PageTree,
+    decoder: RowDecoder[K, V]
+}
+
+type RowDecoder[K, V]: send {
     table: u32,
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
-    data: PageTree,
     skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
 }
 
@@ -3119,15 +3114,15 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], key: By
     Ok(true)
 }
 
-pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
     open_range(tx, t, lo, hi, false)
 }
 
-pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
     open_range(tx, t, lo, hi, true)
 }
 
-fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[RangeRows[K, V], Error] in tx {
+fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
@@ -3140,133 +3135,14 @@ fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse:
     } else {
         byte_cursor(tree, Included(copied(low)?), high)?
     }
-    let rows = Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: take tree, skip: None)
-    Ok(RangeRows(rows: take rows, reads: tx.reads, low: take low, high: take high, reverse))
-}
-
-/// Borrow the stored schema tag and codec bytes from a snapshot.
-pub fn get_bytes[K, V](s: Snapshot, t: Table[K, V], k: K) -> Result[Option[View[Bytes]], Error] in s {
-    if !same(s.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let mut p = prefixed(t.id, 8, false)?
-    std.codec.encode_key(t.key, k, mut p)
-    Ok(get_page_row(s.roots.collections, p))
-}
-
-pub fn get[K, V](s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] {
-    match get_bytes(s, t, k)? {
-        Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
-        None => Ok(None)
-    }
-}
-
-/// Open a forward cursor over the stored values in a snapshot.
-pub fn scan_bytes[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[ViewRows, Error] in s {
-    if !same(s.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let id = prefix(t.id)?
-    let mut cursor: List[std.page.Cursor] = list.new()
-    if let Some(root) = std.page.collection_child(s.roots.collections.root, id) {
-        let boundary: Bytes = clone(list.slice(low, 4, list.len(low)))
-        list.push(mut cursor, std.page.cursor_open(root, Some(take boundary), true, false))
-    }
-    Ok(ViewRows(cursor: take cursor, prefix: take id, high: take high, slot: None))
-}
-
-/// Advance the cursor and return the next owned logical key.
-pub fn next_view(mut c: ViewRows) -> Result[Option[Bytes], Error] {
-    if list.len(c.cursor) != 0 {
-        if let Some((take key, slot)) = std.page.cursor_next_key(mut c.cursor[0u64], c.prefix) {
-            if key < c.high {
-                c.slot = Some(slot)
-                return Ok(Some(take key))
-            }
-        }
-        let _ = list.pop(mut c.cursor)
-    }
-    c.slot = None
-    Ok(None)
-}
-
-/// Borrow the current row's value. Traps if the cursor has no current row.
-pub fn value_view(c: ViewRows) -> View[Bytes] in c {
-    let Some(slot) = c.slot else {
-        fail("store: no current view row")
-    }
-    let Some(raw) = std.page.cursor_value(c.cursor[0u64], slot) else {
-        fail("store: invalid view row")
-    }
-    raw
-}
-
-pub fn scan[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
-    if !same(s.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let cursor = scan_raw(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
-    Ok(table_rows(s, t, take cursor))
-}
-
-pub fn scan_reverse[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
-    if !same(s.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let cursor = reverse_byte_cursor(s.roots.collections, low, high)?
-    Ok(table_rows(s, t, take cursor))
-}
-
-pub fn count[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] {
-    if !same(s.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    count_page_rows(s.roots.collections, t.id, low, high)
-}
-
-fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: ByteRows) -> Rows[K, V] {
-    Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: share_page_tree(s.roots.collections), skip: None)
+    let rows = PageRows(cursor: take cursor, data: take tree, decoder: table_decoder(t))
+    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse))
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
 // gives the Span a fully consumed range over the same bounds covers.
 pub fn key_span[K, V](t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
     Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
-}
-
-// AG3: iterate the data-tree rows in [lo, hi) without keeping a second copy of the span.
-pub fn open_span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[ByteRows, Error] {
-    byte_cursor(s.roots.collections, Included(copied(lo)?), hi)
-}
-
-pub fn next_span_change(mut rows: ByteRows) -> Result[Option[Change], Error] {
-    match next_bytes(mut rows)? {
-        Some((take k, take v)) => Ok(Some(Change(tree_key: take k, value: Some(take v)))),
-        None => Ok(None),
-    }
-}
-
-pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] {
-    let mut out: List[Change] = list.new()
-    if hi <= lo {
-        return Ok(take out)
-    }
-    let mut rows = open_span_changes(s, lo, hi)?
-    while let Some(take row) = next_span_change(mut rows)? {
-        list.push(mut out, take row)
-    }
-    Ok(take out)
 }
 
 // AG3: the value a publisher sends for a Change of t, in t's current codec without the u16
@@ -3304,7 +3180,7 @@ pub fn reads_key(r: Read, key: Bytes) -> bool {
     }
 }
 
-fn indexed_rows[J, K, V](data: PageTree, ix: Index[J, K, V], take cursor: ByteRows) -> Result[Rows[K, V], Error] {
+fn index_decoder[J, K, V](ix: Index[J, K, V]) -> RowDecoder[K, V] {
     let k = ix.key
     let start = 4u64
     let skip: own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.DecodeError] {
@@ -3312,7 +3188,11 @@ fn indexed_rows[J, K, V](data: PageTree, ix: Index[J, K, V], take cursor: ByteRo
         let _ = std.codec.take_key_with(raw, mut at, k)?
         Ok(())
     }
-    Ok(Rows(cursor: take cursor, table: ix.table, key: ix.primary, readers: arc.share(ix.readers), data: share_page_tree(data), skip: Some(take skip)))
+    RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), skip: Some(take skip))
+}
+
+fn indexed_rows[J, K, V](data: PageTree, ix: Index[J, K, V], take cursor: ByteRows) -> Result[PageRows[K, V], Error] {
+    Ok(PageRows(cursor: take cursor, data: share_page_tree(data), decoder: index_decoder(ix)))
 }
 
 fn prefix_after(raw: Bytes) -> Result[Bytes, Error] {
@@ -3372,15 +3252,6 @@ pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -
     Ok(IndexRows(rows: take rows, reads: tx.reads))
 }
 
-pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] {
-    if !same(s.store, ix.store) {
-        return Error(Foreign)
-    }
-    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
-    let cursor = byte_cursor(s.roots.collections, Included(index_bound(ix.id, ix.key, lo, false)?), index_bound(ix.id, ix.key, hi, true)?)?
-    indexed_rows(s.roots.collections, ix, take cursor)
-}
-
 fn page_limits(limits: Limits) -> Result[(), Error] {
     if limits.rows == 0 {
         return Error(Missing("rows"))
@@ -3391,7 +3262,8 @@ fn page_limits(limits: Limits) -> Result[(), Error] {
     Ok(())
 }
 
-pub fn scan_page[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] {
+pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] waits {
+    read_access(read_handle, s)?
     page_limits(l)?
     if !same(s.store, t.store) {
         return Error(Foreign)
@@ -3402,7 +3274,8 @@ pub fn scan_page[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], 
     read_page(s, t.id, take high, table_rows(s, t, take cursor), l)
 }
 
-pub fn find_page[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] {
+pub fn find_page[J, K, V](read_handle: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
+    read_access(read_handle, s)?
     page_limits(l)?
     if !same(s.store, ix.store) {
         return Error(Foreign)
@@ -3428,7 +3301,8 @@ fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: B
     Ok(true)
 }
 
-pub fn scan_next[K, V](s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
+pub fn scan_next[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
+    read_access(read_handle, s)?
     if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
@@ -3437,7 +3311,8 @@ pub fn scan_next[K, V](s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -
     Ok(Paged(read_page(s, t.id, take high, table_rows(s, t, take cursor), l)?))
 }
 
-pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
+pub fn find_next[J, K, V](read_handle: Reader, s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
+    read_access(read_handle, s)?
     if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
@@ -3446,7 +3321,7 @@ pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Li
     Ok(Paged(read_page(s, ix.id, take high, indexed_rows(s.roots.collections, ix, take cursor)?, l)?))
 }
 
-fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: Rows[K, V], limits: Limits) -> Result[Page[K, V], Error] {
+fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: PageRows[K, V], limits: Limits) -> Result[Page[K, V], Error] {
     let mut cursor = take rows
     let mut page: List[(K, V)] = list.new()
     let mut byte_count = 0u64
@@ -3465,7 +3340,7 @@ fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: Rows[K
         } else {
             Some(int.saturating_sub(limits.byte_limit, byte_count))
         }
-        let row = advance_rows(cursor, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
+        let row = advance_rows(cursor.decoder, cursor.data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
             Ok(())
         })?
         match take row {
@@ -3484,7 +3359,7 @@ fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: Rows[K
     Ok(Page(rows: take page, byte_count: byte_count, next: take resume))
 }
 
-fn advance_rows[K, V](r: Rows[K, V], row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+fn advance_rows[K, V](r: RowDecoder[K, V], data: PageTree, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
     let mut at: u64 = 4
     if let Some(skip) = r.skip {
         match (skip)(row_key, mut at) {
@@ -3496,7 +3371,7 @@ fn advance_rows[K, V](r: Rows[K, V], row_key: Bytes, raw: Bytes, remaining: Opti
     let k = decoded(std.codec.decode_key(r.key, key))?
     if let Some(_) = r.skip {
         let primary = logical_key(r.table, key)?
-        match get_page_row(r.data, primary) {
+        match get_page_row(data, primary) {
             Some(value) => finish_row(r, take k, primary, value, remaining, seen),
             None => Error(Stale(r.table))
         }
@@ -3505,7 +3380,7 @@ fn advance_rows[K, V](r: Rows[K, V], row_key: Bytes, raw: Bytes, remaining: Opti
     }
 }
 
-fn finish_row[K, V](r: Rows[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
     let size = list.len(row_key) + list.len(raw)
     if let Some(left) = remaining {
         if size > left {
@@ -3906,7 +3781,7 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16, schema: Bytes
             let resolved = match take resolution {
                 Error(Schema(i)) => return Error(Schema(i)),
                 Error(e) => return Error(Decode(e)),
-                Ok(take reader) => take reader
+                Ok(take read_source) => take read_source
             }
             let _ = list.set(mut older, int.widen(old.number), Some(take resolved))
         }
@@ -4384,8 +4259,8 @@ fn bucket(v: u64) -> Result[u64, Capacity] {
 }
 
 fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
-    let out = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, k, v)
+    let out = run(mut db, None, (copy_env(k), copy_env(t), copy_env(v)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
     })
     match take out {
         Ok(Committed(_)) => true,
@@ -4428,14 +4303,15 @@ pub type Seen[R] {
     reads: List[Read]
 }
 
-pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) -> Result[Looked[R], Error] {
+pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
+    read_access(r, s)?
     let reads: Log[Read] = log.new()
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
             let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
-            body(tx)
+            body(tx, env)
         }
         match steps {
             Some(n) => bound steps n {
@@ -4461,7 +4337,9 @@ pub type Change {
     value: Option[Arc[Bytes]]
 }
 
-pub fn changes(a: Snapshot, b: Snapshot) -> Result[List[Change], Error] {
+pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[List[Change], Error] waits {
+    read_access(r, a)?
+    read_access(r, b)?
     if !same(a.store, b.store) || a.open != b.open {
         return Error(Foreign)
     }
@@ -4509,8 +4387,10 @@ fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error]
     }
 }
 
-pub opaque scoped type RangeRows[K, V] {
-    rows: Rows[K, V],
+pub opaque scoped type TxRows[K, V] {
+    rows: PageRows[K, V],
+    owner: CallId,
+    depth: u64,
     reads: View[Log[Read]],
     low: Bytes,
     high: Bytes,
@@ -4519,7 +4399,10 @@ pub opaque scoped type RangeRows[K, V] {
 
 // Before decoding an attempted row, record it and the gap traversed to find it.
 // Exhaustion records the remainder once. An unused cursor observes no keys.
-pub fn next_range[K, V](mut r: RangeRows[K, V]) -> Result[Option[(K, V)], Error] {
+pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Error] {
+    if !same(tx.store, r.owner.store) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
+        return Error(Foreign)
+    }
     let found = next_bytes(mut r.rows.cursor)?
     match take found {
         Some((take key, take raw)) => {
@@ -4533,7 +4416,7 @@ pub fn next_range[K, V](mut r: RangeRows[K, V]) -> Result[Option[(K, V)], Error]
                 let low = replace(mut r.low, copied(end)?)
                 log.append(r.reads, Span(take low, take end))
             }
-            let row = advance_rows(r.rows, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
+            let row = advance_rows(r.rows.decoder, r.rows.data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
                 Ok(())
             })?
             match take row {
@@ -4553,44 +4436,15 @@ pub fn next_range[K, V](mut r: RangeRows[K, V]) -> Result[Option[(K, V)], Error]
 }
 
 pub scoped type IndexRows[K, V] {
-    rows: Rows[K, V],
+    rows: PageRows[K, V],
     reads: View[Log[Read]]
 }
 
-fn next_primary[K, V](mut rows: ByteRows, table_id: u32, key_format: std.codec.Key[K], decoders: Readers[V]) -> Result[Option[(K, V)], Error] {
-    if list.len(rows.cursor.active) == 0 {
-        if !next_page_collection(mut rows.cursor)? {
-            return Ok(None)
-        }
-        if rows.cursor.collection != table_id {
-            list.clear(mut rows.cursor.active)
-            return Ok(None)
-        }
-    }
-    let observed = std.page.cursor_read(mut rows.cursor.active[0u64], scoped fn(key: Bytes, raw: Bytes) -> Result[Option[(K, V)], Error] {
-        let decoded_key = decoded(std.codec.decode_key(key_format, key))?
-        Ok(Some((take decoded_key, row_value(decoders, table_id, raw)?)))
-    })
-    match take observed {
-        Some(take output) => take output,
-        None => Ok(None),
-    }
-}
-
-pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
-    if let None = r.skip {
-        return next_primary(mut r.cursor, r.table, r.key, r.readers)
-    }
-    next_row(mut r, fn(key: Bytes) -> Result[(), Error] {
-        Ok(())
-    })
-}
-
-fn next_row[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
+fn next_row[K, V](mut r: PageRows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
     let found = next_bytes(mut r.cursor)?
     match take found {
         Some((take key, take raw)) => {
-            let row = advance_rows(r, key, raw, None, seen)?
+            let row = advance_rows(r.decoder, r.data, key, raw, None, seen)?
             match take row {
                 Some((take value, _)) => Ok(Some(take value)),
                 None => Ok(None)
@@ -4604,7 +4458,7 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
     indexed_advance(mut r.rows, r.reads)
 }
 
-fn indexed_advance[K, V](mut rows: Rows[K, V], reads: View[Log[Read]]) -> Result[Option[(K, V)], Error] {
+fn indexed_advance[K, V](mut rows: PageRows[K, V], reads: View[Log[Read]]) -> Result[Option[(K, V)], Error] {
     next_row(mut rows, fn(key: Bytes) -> Result[(), Error] {
         log.append(reads, Point(copied(key)?))
         Ok(())
@@ -5314,9 +5168,9 @@ pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: Stat
     stage_migration(source.db, tasks, configure)
 }
 
-pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], at: K) -> Result[Option[V], Error] {
+pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], at: K) -> Result[Option[V], Error] waits {
     let selected = system_table(source.db, name, take key, take value)?
-    get(snapshot(source.db), selected, at)
+    get(staged_reader(source, 0)?, snapshot(source.db), selected, at)
 }
 
 pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {
@@ -6510,9 +6364,9 @@ pub fn open_read_only(d: Dir, options: Options) -> Result[ReadOnly, Error] waits
     open_checks(options)?
     let (take raw, id, take manifest) = read_only_manifest(d)?
     check_expected_store(options.expect, id)?
-    let reader = read_only_recover(d, id, take manifest, options.resident_limit)?
+    let read_source = read_only_recover(d, id, take manifest, options.resident_limit)?
     check_read_only_manifest(d, raw)?
-    Ok(take reader)
+    Ok(take read_source)
 }
 
 fn read_only_manifest(d: Dir) -> Result[(Bytes, StoreId, PageManifest), Error] waits {
@@ -7682,8 +7536,8 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
         let short = bound bytes byte_total - 1u64 {
-            serve(mut db, take complete, plan, None, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-                reserve_tx(mut tx, fault)
+            serve(mut db, take complete, plan, None, fault, fn(mut tx, should_fail) -> Result[Bytes, Bytes] {
+                reserve_tx(mut tx, should_fail)
             })
         }
         match take short {
@@ -7697,8 +7551,8 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             return false
         }
         let exact = bound bytes byte_total {
-            serve(mut db, take completion, plan, None, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
-                reserve_tx(mut tx, fault)
+            serve(mut db, take completion, plan, None, fault, fn(mut tx, should_fail) -> Result[Bytes, Bytes] {
+                reserve_tx(mut tx, should_fail)
             })
         }
         match take exact {
@@ -7722,7 +7576,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
     // The two log nodes (48 bytes) and a 944-byte reply fit in 1024. The
     // reply row's stored copy, 41 + 944 = 985 bytes rounded up to 992, does
     // not fit in the 32 left.
-    let kept_inside = match serve(mut db, take complete, small, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let kept_inside = match serve(mut db, take complete, small, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         let mut output: Bytes = list.with_capacity(944)
         list.fill(mut output, 944, 7u8)
         Ok(take output)
@@ -7788,7 +7642,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
         },
         _ => return false,
     }
-    match serve(mut db, take complete, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    match serve(mut db, take complete, plan, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         Ok(key_word(7))
     }) {
         Ok(Committed(receipt)) => receipt.reply == key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,

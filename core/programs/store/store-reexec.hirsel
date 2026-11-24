@@ -168,19 +168,19 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
     Ok(None)
 }
 
-type Rerun = RanTo(Bytes, DataRows) | Halted(Stop) | RoomRefused
+type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun(db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Rerun {
+fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: Log[Read] = log.new()
     let issued: Log[u64] = log.new()
-    let caught = isolate(fn() -> Result[Result[Finished[Bytes, Bytes], Capacity], OutOfTime] {
+    let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
-                let keep: Option[fn(Bytes) -> bool] = None
-                let staged = draft_body(db, registry, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+                let keep: Option[fn(R) -> bool] = None
+                let staged = draft_body(db, registry, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(take staged) {
@@ -218,9 +218,6 @@ fn rerun(db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan,
                 Error(take answer) => (take answer, new_data_rows()),
             }
         },
-    }
-    if list.len(output) > plan.reply_max {
-        return Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max)))
     }
     RanTo(take output, take writes)
 }
@@ -267,7 +264,9 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
     Ok(true)
 }
 
-type ReplaySource {
+pub opaque type ReplaySource {
+    store: StoreId,
+    open: u64,
     commit: JournalCommit,
     call: Recorded,
     base: Roots
@@ -289,7 +288,7 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
     let Some(base) = base_roots(db, b, call.base)? else {
         return Ok(Error(StateGone))
     }
-    Ok(Ok(ReplaySource(commit: take commit, call: take call, base: take base)))
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
 }
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
@@ -298,7 +297,11 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
     let reran = rerun(db, registry, source.base, ci, plan, call, body)
-    let (take output, take writes) = match (call.settle, take reran) {
+    let metered: Rerun[Bytes] = match take reran {
+        RanTo(output, _) if list.len(output) > plan.reply_max => Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max))),
+        take within => take within,
+    }
+    let (take output, take writes) = match (call.settle, take metered) {
         (0, RanTo(take output, take writes)) => (take output, take writes),
         (1, Halted(stop)) => (failed(stop), new_data_rows()),
         (_, RoomRefused) => return Ok(Unknown(AdmissionRefused)),
@@ -314,36 +317,64 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
     Ok(Same)
 }
 
-pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Stop) -> Bytes, env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let selected = replay_source(db, b, v)?
     match take selected {
-        Ok(take source) => replay_run(db, db.indexes, source, plan, failed, body),
+        Ok(take source) => replay_run(db, db.indexes, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) }),
         Error(reason) => Ok(Unknown(reason)),
     }
 }
 
-// Select the plan and open fresh handles on the same historical schema the
-// re-execution will read. Preparation runs outside the recorded entry's bounds.
-pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes,
-    prepare: scoped fn(Recorded, take Schema, scoped fn(take Schema, Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
-    let loaded = replay_source(db, b, v) ?=> |e| store_error(take e)
+// Prepare handles on the same historical catalog the attempt will read.
+pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[(ReplaySource, Schema), UnknownReason], Error] waits {
+    let loaded = replay_source(db, b, v)?
+    match take loaded {
+        Ok(take source) => {
+            let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog), bindings: Some(log.new()))
+            Ok(Ok((take source, take schema)))
+        },
+        Error(reason) => Ok(Error(reason)),
+    }
+}
+
+pub fn replay_record(source: ReplaySource) -> Recorded {
+    clone(source.call)
+}
+
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Schema, plan: Plan, failed: fn(Stop) -> Bytes, env: Env,
+    body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+    if !same(source.store, db.store) || source.open != open_number(db) || !same(selected.store, db.store) ||
+        std.page.stamp(std.page.image_of(selected.catalog.root)) != std.page.stamp(std.page.image_of(source.base.catalog.root)) {
+        return Error(Foreign)
+    }
+    let Schema(bindings: take bindings, ..) = take selected
+    let Some(take registration) = take bindings else { return Error(Foreign) }
+    let declared = log.finish(take registration)
+    let mut registry = empty_index_registry()
+    for take binding in take declared {
+        register_index(mut registry, take binding)
+    }
+    replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] { body(call, mut tx, env) })
+}
+
+
+// Run a read-only projection at the recorded base with the same entry bounds.
+pub type ReplayProjection[R] = Projected(R) | ProjectionUnavailable(UnknownReason) | ProjectionStopped
+
+pub fn project_recorded[E: inert, R](db: Db, b: Branch, v: u64, plan: Plan, env: E, body: fn(Tx, E) -> R) -> Result[ReplayProjection[R], Error] waits {
+    let loaded = replay_source(db, b, v)?
     let source = match take loaded {
-        Ok(take source) => take source,
-        Error(reason) => return Ok(Unknown(reason)),
+        Ok(take retained) => take retained,
+        Error(reason) => return Ok(ProjectionUnavailable(reason)),
     }
-    let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog), bindings: Some(log.new()))
-    let rerun_selected = scoped fn(take selected: Schema, plan: Plan, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
-        if !same(selected.store, db.store) || std.page.stamp(std.page.image_of(selected.catalog.root)) != std.page.stamp(std.page.image_of(source.base.catalog.root)) {
-            return Error(Foreign)
-        }
-        let Schema(bindings: take bindings, ..) = take selected
-        let Some(take registration) = take bindings else { return Error(Foreign) }
-        let declared = log.finish(take registration)
-        let mut registry = empty_index_registry()
-        for take binding in take declared {
-            register_index(mut registry, take binding)
-        }
-        replay_run(db, registry, source, plan, failed, body)
+    let call = view source.call
+    let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
+    let projected = rerun(db, db.indexes, source.base, ci, plan, call, scoped fn(call_record: Recorded, mut tx: Tx) -> Result[R, R] {
+        Ok(body(tx, env))
+    })
+    match take projected {
+        RanTo(take answer, _) => Ok(Projected(take answer)),
+        Halted(_) => Ok(ProjectionStopped),
+        RoomRefused => Ok(ProjectionUnavailable(AdmissionRefused)),
     }
-    prepare(source.call, take schema, rerun_selected)
 }

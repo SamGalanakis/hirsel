@@ -61,23 +61,23 @@ fn start_current(found: u64, selected: launcher.Selection) -> String {
 fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.PlaceReady, authoritative: bool) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, t.groups, name))? else {
+        store.run(mut h.db, None, (store.copy_env(authoritative), store.copy_env(incarnation), store.copy_env(name), store.copy_env(ready), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.4.groups, call_env.2))? else {
                 return Error(Unknown)
             }
-            if found.incarnation != incarnation {
+            if found.incarnation != call_env.1 {
                 return Error(Unknown)
             }
             let mut g = found
-            g.store_id = Some((ready.store_hi, ready.store_lo))
-            if authoritative && g.activation == 0u64 { g.activation = ready.version }
-            if authoritative && g.activation == ready.version {
+            g.store_id = Some((call_env.3.store_hi, call_env.3.store_lo))
+            if call_env.0 && g.activation == 0u64 { g.activation = call_env.3.version }
+            if call_env.0 && g.activation == call_env.3.version {
                 g.recovery = None
                 if g.activation != 0u64 && list.len(g.assembly) != 0u64 {
-                    index_release(mut tx, t, g, g.activation, g.assembly)?
+                    index_release(mut tx, call_env.4, g, g.activation, g.assembly)?
                 }
             }
-            st(store.put(mut tx, t.groups, name, g))
+            st(store.put(mut tx, call_env.4.groups, call_env.2, g))
         })
     }
     decided(mut h, take made)
@@ -98,9 +98,9 @@ fn read_place(raw: Bytes) -> Option[runner.PlaceRead] {
     }
 }
 
-fn opens_cutover(h: Host, name: String, ready: runner.PlaceReady) -> bool {
+fn opens_cutover(h: Host, name: String, ready: runner.PlaceReady) -> bool waits {
     let Some(read) = read_place(ready.read) else { return false }
-    match store.get(store.snapshot(h.db), h.t.deploys, name) {
+    match store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name) {
         Ok(Some(d)) => list.len(d.digest) == 32u64 && read.prepared == d.digest,
         _ => false,
     }
@@ -176,47 +176,47 @@ fn report_recovery(mut h: Host, name: String, gen: u64, version: u64, selected: 
     let Some(read) = read_place(raw) else { return }
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
-            let Some(w) = st(store.fetch(tx, t.wake, name))? else { return Ok(false) }
+        store.run(mut h.db, None, (store.copy_env(gen), store.copy_env(name), store.copy_env(opened), store.copy_env(selected), store.copy_env(version), store.copy_env(read), store.copy_env(t)), fn(mut tx, call_env) -> Result[bool, Refused] {
+            let Some(w) = st(store.fetch(tx, call_env.6.wake, call_env.1))? else { return Ok(false) }
             let Dirty(active) = w.wake else { return Ok(false) }
-            if gen != active { return Ok(false) }
-            let Some(found) = st(store.fetch(tx, t.groups, name))? else { return Ok(false) }
-            let Some(deploy) = st(store.fetch(tx, t.deploys, name))? else { return Ok(false) }
+            if call_env.0 != active { return Ok(false) }
+            let Some(found) = st(store.fetch(tx, call_env.6.groups, call_env.1))? else { return Ok(false) }
+            let Some(deploy) = st(store.fetch(tx, call_env.6.deploys, call_env.1))? else { return Ok(false) }
             let mut g = found
             let mut d = deploy
             if let Some(_) = g.retiring { return Ok(false) }
-            if g.store_id != Some((read.store_hi, read.store_lo)) { return Ok(false) }
-            let mark = Unmatched(d.attempt, version, Binding(identity: clone(read.binding), n_place: read.n_place))
+            if g.store_id != Some((call_env.5.store_hi, call_env.5.store_lo)) { return Ok(false) }
+            let mark = Unmatched(d.attempt, call_env.4, Binding(identity: clone(call_env.5.binding), n_place: call_env.5.n_place))
             match d.outcome {
                 Undecided(_) => {
                     // The directory capture held LOCK after recovery. Its witness, or the
                     // absence of one, is final even when the activation has since moved.
-                    let installed = read.prepared == d.digest && list.len(d.digest) == 32u64
-                    if installed { index_release(mut tx, t, g, d.activation, d.assembly)? }
-                    let picked = if opened {
-                        Some(selected.assembly == d.assembly)
+                    let installed = call_env.5.prepared == d.digest && list.len(d.digest) == 32u64
+                    if installed { index_release(mut tx, call_env.6, g, d.activation, d.assembly)? }
+                    let picked = if call_env.2 {
+                        Some(call_env.3.assembly == d.assembly)
                     } else {
-                        pick_release(g, d, read, installed, false)
+                        pick_release(g, d, call_env.5, installed, false)
                     }
                     if let Some(new) = picked {
-                        select_release(mut tx, t, mut g, d, version, new, installed)?
+                        select_release(mut tx, call_env.6, mut g, d, call_env.4, new, installed)?
                         g.recovery = None
                     } else {
                         retain_release(mut g, d.assembly)
                         g.recovery = Some(take mark)
                     }
-                    st(store.put(mut tx, t.groups, name, g))?
+                    st(store.put(mut tx, call_env.6.groups, call_env.1, g))?
                     if installed {
                         d.outcome = Installed
-                        put_deploy(mut tx, t, name, d, StoreClass)?
+                        put_deploy(mut tx, call_env.6, call_env.1, d, StoreClass)?
                     } else {
                         d.outcome = Failed("not installed after recovery")
-                        put_deploy(mut tx, t, name, d, NotInstalledClass)?
+                        put_deploy(mut tx, call_env.6, call_env.1, d, NotInstalledClass)?
                     }
-                    Ok(!opened && !is_none(picked))
+                    Ok(!call_env.2 && !is_none(picked))
                 },
                 _ => {
-                    if opened { return Ok(false) }
+                    if call_env.2 { return Ok(false) }
                     let installed = match d.outcome {
                         Installed => true,
                         Failed(_) => false,
@@ -225,28 +225,28 @@ fn report_recovery(mut h: Host, name: String, gen: u64, version: u64, selected: 
                     let recovery: Option[Recovery] = clone(g.recovery)
                     let Some(prior) = take recovery else { return Ok(false) }
                     if !same_attempt(recovery_attempt(prior), d.attempt) { return Ok(false) }
-                    if let Some(new) = pick_release(g, d, read, installed, true) {
+                    if let Some(new) = pick_release(g, d, call_env.5, installed, true) {
                         let assembly = if new { view d.assembly } else { view d.old_assembly }
-                        if g.activation == version && g.assembly == assembly {
+                        if g.activation == call_env.4 && g.assembly == assembly {
                             // A replay before the end's acknowledgement still finishes the
                             // adoption that this start already committed.
                             return Ok(match prior {
-                                Adopted(_, _, _) => selected.activation != version || selected.assembly != assembly,
+                                Adopted(_, _, _) => call_env.3.activation != call_env.4 || call_env.3.assembly != assembly,
                                 Unmatched(_, _, _) => false,
                             })
                         }
-                        select_release(mut tx, t, mut g, d, version, new, installed)?
-                        g.recovery = Some(Adopted(d.attempt, version, clone(g.assembly)))
-                        st(store.put(mut tx, t.groups, name, g))?
+                        select_release(mut tx, call_env.6, mut g, d, call_env.4, new, installed)?
+                        g.recovery = Some(Adopted(d.attempt, call_env.4, clone(g.assembly)))
+                        st(store.put(mut tx, call_env.6.groups, call_env.1, g))?
                         Ok(true)
                     } else {
                         if let Unmatched(_, at, binding) = prior {
-                            if at == version && binding.identity == read.binding && binding.n_place == read.n_place {
+                            if at == call_env.4 && binding.identity == call_env.5.binding && binding.n_place == call_env.5.n_place {
                                 return Ok(false)
                             }
                         }
                         g.recovery = Some(take mark)
-                        st(store.put(mut tx, t.groups, name, g))?
+                        st(store.put(mut tx, call_env.6.groups, call_env.1, g))?
                         Ok(false)
                     }
                 },
@@ -276,11 +276,11 @@ fn push_candidate(mut out: String, assembly: Bytes, binding: Option[Binding]) {
     }
 }
 
-fn failing_last(h: Host, name: String, outcome: String) -> String {
+fn failing_last(h: Host, name: String, outcome: String) -> String waits {
     let Ok(Some(g)) = group_row(h, name) else { return string.from(outcome) }
     let recovery: Option[Recovery] = clone(g.recovery)
     let Some(Unmatched(attempt, version, binding)) = take recovery else { return string.from(outcome) }
-    let Ok(Some(d)) = store.get(store.snapshot(h.db), h.t.deploys, name) else { return string.from(outcome) }
+    let Ok(Some(d)) = store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name) else { return string.from(outcome) }
     if !same_attempt(d.attempt, attempt) { return string.from(outcome) }
     let mut message = string.from("No recovery candidate matches the store at activation ")
     string.push_u64(mut message, version)

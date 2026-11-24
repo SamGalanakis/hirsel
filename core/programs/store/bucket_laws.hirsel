@@ -142,8 +142,8 @@ fn bucket_law_rows_table(mut db: Db) -> Result[Table[u64, Bytes], Error] waits {
 fn bucket_law_commit(mut db: Db, k: u64) -> Result[(), Error] waits {
     let rows = bucket_law_rows_table(mut db)?
     let value = bucket_law_value(k)
-    let done = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, k, value)
+    let done = run(mut db, None, (copy_env(k), copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
     })?
     let Committed(take receipt) = take done else {
         return Error(Foreign)
@@ -201,7 +201,7 @@ fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
     let s = snapshot(db)
     let mut got = 0u64
     loop {
-        match get(s, rows, got + 1)? {
+        match get(result.unwrap(reader(db, 0u64)), s, rows, got + 1)? {
             Some(value) => {
                 if value != bucket_law_value(got + 1) {
                     return Error(Foreign)
@@ -310,7 +310,7 @@ fn bucket_law_fence(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error] 
     bucket_law_round(mut b, 2)?
     bucket_law_round(mut b, 3)?
     let rows = bucket_law_rows_table(mut b)?
-    if get(snapshot(b), rows, 4)? != None {
+    if get(reader(b, 0u64)?, snapshot(b), rows, 4)? != None {
         fail("bucket fence: the stale writer's row became visible")
     }
     close(take b)?
@@ -342,12 +342,13 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     let options = bucket_law_options(false)
     let source = bucket_law_authority(s, tasks, "s3.test", 2)?
     let mut process = followers()
-    let mut reader = follower(mut process, tasks, take source, s.time, options)?
-    let Some(main) = follower_branch(reader, "main") else {
+    let mut mirror = follower(mut process, tasks, take source, s.time, options)?
+    let Some(main) = follower_branch(mirror, "main") else {
         fail("the follower did not recover main")
     }
-    let before = snapshot_follower(reader, main)?
-    if get(before, rows, 2)? != Some(bucket_law_value(2)) || follower_head(reader)?.claim.epoch != 1 {
+    let before = snapshot_follower(mirror, main)?
+    let read_handle = follower_reader(mirror, 0u64)?
+    if get(read_handle, before, rows, 2)? != Some(bucket_law_value(2)) || follower_head(mirror)?.claim.epoch != 1 {
         fail("the follower missed the durable group or claimed the register")
     }
     let successor_grant = bucket_law_authority(s, tasks, "s3.test", 3)?
@@ -355,11 +356,11 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     bucket_law_commit(mut successor, 3)?
     close(take successor)?
     let deadline = clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
-    let current = fresh(mut reader, deadline)?
-    if get(current, rows, 3)? != Some(bucket_law_value(3)) || follower_head(reader)?.claim.epoch != 2 {
+    let current = fresh(mut mirror, deadline)?
+    if get(read_handle, current, rows, 3)? != Some(bucket_law_value(3)) || follower_head(mirror)?.claim.epoch != 2 {
         fail("the refreshed follower missed the successor's durable group")
     }
-    if get(before, rows, 2)? != Some(bucket_law_value(2)) || get(before, rows, 3)? != None {
+    if get(read_handle, before, rows, 2)? != Some(bucket_law_value(2)) || get(read_handle, before, rows, 3)? != None {
         fail("refresh changed the previous capture")
     }
     Ok(())
@@ -578,8 +579,8 @@ fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let data = bucket_m2_pack_value()
-    let outcome = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 7, data)
+    let outcome = run(mut db, None, (copy_env(rows), copy_env(data)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 7, call_env.1)
     })?
     if let Committed(_) = outcome {} else {
         fail("the checkpoint fixture refused its row")
@@ -669,7 +670,7 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let root = view replay.state.tips[0]
     let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1)
     let rows = catalog_handle(id, root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
-    if version(snap) != 2 || get(snap, rows, 7)? != Some(bucket_m2_pack_value()) {
+    if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
     }
     Ok(())
@@ -829,7 +830,7 @@ fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks, seed
 
 fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
-    let reader = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let read_source = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let mut writer = history_reader(take initial_client, 0)
     let mut workspace = history_buffers(1024)?
     let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(writer.client), level: "bucket"))?
@@ -841,7 +842,7 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
     // Writer selection never constrains a read-only follower.
     settings.activation = Some(17)
     settings.binding = Some(list.new())
-    let mut followed = follower(mut source, tasks, object_authority(take reader, "reader", BUCKET_LAW_OP_MS), sim.time, settings)?
+    let mut followed = follower(mut source, tasks, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings)?
     let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
     let genesis = fresh(mut followed, deadline)?
     let genesis_head = follower_head(followed)?

@@ -106,7 +106,7 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(is_installed(status_of(mut recovered, publication)), "L54: restart lost the installed result")
     let _ = begin_with(mut recovered, publication, submitted)
     expect(admits(recovered) == 0u64 && committed_once(recovered), "L54: retry after install started another deploy")
-    let shown: operator.Preview = match store.get(store.snapshot(recovered.h.db), recovered.h.t.deploys, "g") {
+    let shown: operator.Preview = match store.get(result.unwrap(store.reader(recovered.h.db, 0u64)), store.snapshot(recovered.h.db), recovered.h.t.deploys, "g") {
         Ok(Some(row)) => clone(row.preview),
         _ => operator.no_preview(),
     }
@@ -175,7 +175,7 @@ fn source_admitted(mut r: Rig, take diff: launcher.Grants) waits {
     feed(mut r, take events)
 }
 
-fn old_serves(r: Rig) -> bool {
+fn old_serves(r: Rig) -> bool waits {
     match group_row(r.h, "g") {
         Ok(Some(g)) => g.assembly == image() && g.activation == 1u64 && is_dirty(r, "g", 1u64),
         _ => false,

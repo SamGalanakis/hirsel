@@ -68,13 +68,13 @@ type Started { task: Task[()], charge: u64 }
 type AccessReply = Sender[Result[Option[Lease], Refused]]
 pub type ColdCheck: send {
     caller: store.Caller,
-    check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error]],
+    check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error] waits],
 }
 
 // A read of a session's store, run in the host while no child of the session holds it.
 pub type ColdRead: send {
     arg: Bytes,
-    read: StaticFn[fn(store.ReadOnly, Bytes) -> Result[Bytes, String]]
+    read: StaticFn[fn(store.ReadOnly, Bytes) -> Result[Bytes, String] waits]
 }
 
 type ReadReply = Sender[Result[Bytes, Refused]]
@@ -83,10 +83,10 @@ type Downs = Sender[Result[u64, Refused]]
 
 type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
-type PlaceJob[G: send, H: send, S: send, B: send]: send {
+type PlaceJob[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64, need: u64,
 }
-type Operated[G: send, H: send, S: send, B: send]: send {
+type Operated[G: send, H: shareable + inert + send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
@@ -147,7 +147,7 @@ type Forward: send { from: Receiver[platform.Input], to: Sender[In] }
 
 // ---- factories ----
 
-pub fn factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
+pub fn factory[T: send, G: send, H: shareable + inert + send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
     let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
         let config = make(clone(request.supplied))
         start_made(take request, take config)
@@ -157,7 +157,7 @@ pub fn factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Suppli
 
 // A factory whose `make` also sees the host's seed. `make` is still a plain fn, so only
 // linked code runs as a group.
-pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
+pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send, B: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Factory[T] {
     let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
         let config = make(clone(request.supplied), seed)
         start_made(take request, take config)
@@ -165,7 +165,7 @@ pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take
     Factory(start: take made)
 }
 
-fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
+fn start_made[T: send, G: send, H: shareable + inert + send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
     let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made { Ok(take m) => take m, Error(_) => return Error(string.from("Full")) }
     config.backing = take backing
@@ -189,7 +189,7 @@ fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[
 
 // The child task: operate runs in a child of it so this task can read its phases. Its
 // last message is Down, sent after operate has returned and so after the store is closed.
-fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
+fn run_place[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
     let to = channel.sender(job.to)
     let name = string.from(job.name)
     let gen = job.gen
@@ -197,7 +197,7 @@ fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B])
     let _ = channel.send(to, Down(take name, gen, take ended))
 }
 
-fn operated[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn operated[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
@@ -215,7 +215,7 @@ fn operated[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) 
     }
 }
 
-fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: shareable + inert + send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }
@@ -384,7 +384,7 @@ fn serves(k: Kid) -> bool {
 
 // A route is answered once the host has accepted a child of its group as Ready, and is
 // refused when its group is gone.
-fn answer_routes[T: send](mut a: Actor[T]) {
+fn answer_routes[T: send](mut a: Actor[T]) waits {
     let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take name, take reply)) = list.pop(mut a.routes) {
         let answer: Option[Result[Option[Lease], Refused]] = match platform.serving_ready(a.h, name) {
@@ -542,17 +542,17 @@ fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused]
 }
 
 fn add_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.add_group_with(mut h, group_spec(name_of(id)), scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, cat.sessions, id, clone(key))?
-        store.put(mut tx, cat.keys, clone(key), id)?
-        store.put(mut tx, cat.meta, NEXT_ID, id + 1u64)
+    platform.add_group_with(mut h, group_spec(name_of(id)), (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        store.put(mut tx, env.0.sessions, env.1, clone(env.2))?
+        store.put(mut tx, env.0.keys, clone(env.2), env.1)?
+        store.put(mut tx, env.0.meta, NEXT_ID, env.1 + 1u64)
     })
 }
 
 fn remove_listed(mut h: platform.Host, cat: Catalog, id: u64, key: Bytes) -> Result[List[launcher.Request], platform.Refused] waits {
-    platform.remove_with(mut h, name_of(id), Delete, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.delete(mut tx, cat.keys, clone(key))?
-        let _ = store.delete(mut tx, cat.sessions, id)?
+    platform.remove_with(mut h, name_of(id), Delete, (store.copy_env(cat), id, store.copy_env(key)), fn(mut tx, env) -> Result[(), store.Error] {
+        let _ = store.delete(mut tx, env.0.keys, clone(env.2))?
+        let _ = store.delete(mut tx, env.0.sessions, env.1)?
         Ok(())
     })
 }
@@ -687,7 +687,7 @@ fn on_route[T: send](mut a: Actor[T], id: u64, take reply: AccessReply) waits {
     }
 }
 
-fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] {
+fn on_peek[T: send](a: Actor[T], id: u64) -> Result[Lease, Refused] waits {
     let name = listed(a, id)?
     let Some(gen) = platform.serving_ready(a.h, name) else {
         return match platform.wake_row(a.h, name) { Some(_) => Error(Busy), None => Error(Unknown) }
@@ -818,11 +818,11 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
         keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?,
         meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
     let snap = store.snapshot(db)
-    let next_id = match store.get(snap, catalog.meta, NEXT_ID)? { Some(n) => n, None => 0u64 }
+    let next_id = match store.get(result.unwrap(store.reader(db, 0u64)), snap, catalog.meta, NEXT_ID)? { Some(n) => n, None => 0u64 }
     let mut by_id: Map[u64, Bytes] = map.new()
     let mut by_key: Map[Bytes, u64] = map.new()
-    let mut rows = store.scan(snap, catalog.sessions, Unbounded, Unbounded)?
-    while let Some((id, key)) = store.next(mut rows)? {
+    let mut rows = store.scan(result.unwrap(store.reader(db, 0u64)), snap, catalog.sessions, Unbounded, Unbounded)?
+    while let Some((id, key)) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows)? {
         map.insert(mut by_key, clone(key), id)
         map.insert(mut by_id, id, clone(key))
     }

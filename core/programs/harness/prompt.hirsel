@@ -51,7 +51,7 @@ fn tool_search(mut tx: store.Tx, inv: Invoke) -> Result[Reply, Fault] {
     let mut texts: List[String] = list.new()
     {
         let mut rows = store.range(tx, h.mcp_catalog, Unbounded, Unbounded) ?=> |_| Unavailable
-        while let Some((take name, r)) = store.next_range(mut rows) ?=> |_| Unavailable {
+        while let Some((take name, r)) = store.next_in(tx, mut rows) ?=> |_| Unavailable {
             if narrowed(s, name) {
                 list.push(mut names, take name)
                 list.push(mut texts, string.from(mcp_tools.about(r)))
@@ -109,7 +109,7 @@ fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result
             return Error(Storage)
         }
         let mut rows = take cursor
-        while let Some((take name, r)) = kept(store.next_range(mut rows))? {
+        while let Some((take name, r)) = kept(store.next_in(tx, mut rows))? {
             if !mcp_tools.deferred(r) && narrowed(s, name) {
                 list.push(mut defs, remote_definition(take name, r))
             }
@@ -219,20 +219,20 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
 // the attempt's snapshot, so the advance transaction never carries the body.
 // System entries fold into `system` and `tools`; Notes are not sent. A frame's
 // seed is the first message, and the sealed omit ranges leave messages out.
-pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> Result[Request, store.Error] {
+pub fn request(read_handle: store.Reader, snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> Result[Request, store.Error] waits {
     let cutoff = view e.cutoff
     let mut messages: List[Entry] = list.new()
     let mut system: List[Change] = list.new()
     let mut tools: List[ToolDef] = list.new()
     if cutoff.frame > 0u64 {
-        let Some(f) = store.get(snap, h.frames, cutoff.frame)? else {
+        let Some(f) = store.get(read_handle, snap, h.frames, cutoff.frame)? else {
             return Error(Missing("frame"))
         }
         list.push(mut messages, Inform(clone(f.seed)))
     }
     let mut p = cutoff.frame
     while p <= cutoff.tail_pos {
-        match store.get(snap, h.entries, p)? {
+        match store.get(read_handle, snap, h.entries, p)? {
             Some(System(take patch)) => fold(mut system, mut tools, take patch),
             Some(Note(_, _)) => (),
             Some(take entry) => if !omitted(cutoff.omit, p) {

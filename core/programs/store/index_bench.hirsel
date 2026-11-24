@@ -42,10 +42,10 @@ fn bucket(a: Account) -> Result[u64, Capacity] {
 }
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
-    let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        let a = Account(id: k, owner: string.from("owner000"), balance: int.narrow(balance))
-        store.put(mut tx, t, k, a)?
-        Ok(balance)
+    let done = result.unwrap(store.run(mut db, None, (copy_env(balance), copy_env(k), copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {
+        let a = Account(id: call_env.1, owner: string.from("owner000"), balance: int.narrow(call_env.0))
+        store.put(mut tx, call_env.2, call_env.1, a)?
+        Ok(call_env.0)
     }))
     match take done {
         Committed(x) => x.value,
@@ -105,7 +105,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
     let snapshot = store.snapshot(db)
     let shape = view t
     for i in 0u64 .. 10000 {
-        let a = option.unwrap(result.unwrap(store.get(snapshot, shape, i)))
+        let a = option.unwrap(result.unwrap(store.get(result.unwrap(reader(db, 0u64)), snapshot, shape, i)))
         if a.id != i || a.balance != int.narrow(i + 100000) || a.owner != "owner000" {
             return Error(Exit(status: 8))
         }

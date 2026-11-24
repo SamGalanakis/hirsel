@@ -50,7 +50,7 @@ fn queue_empty(tx: store.Tx, h: Handles) -> Result[bool, Refused] {
         return Error(Storage)
     }
     let mut rows = take cursor
-    match kept(store.next_range(mut rows))? {
+    match kept(store.next_in(tx, mut rows))? {
         Some(_) => Ok(false),
         None => Ok(true),
     }
@@ -73,7 +73,7 @@ fn queue_window(tx: store.Tx, h: Handles, l: Limits) -> Result[List[(u64, Lodged
     }
     let mut rows = take cursor
     while list.len(out) < l.ingress {
-        let Some((seq, take row)) = kept(store.next_range(mut rows))? else {
+        let Some((seq, take row)) = kept(store.next_in(tx, mut rows))? else {
             break
         }
         list.push(mut out, (seq, take row))

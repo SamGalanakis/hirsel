@@ -150,9 +150,10 @@ fn control(mut tx: store.Tx, a: triggers.Attempt, take command: Command) -> Resu
     }
 }
 
-pub fn register[G: send, H: send](mut r: runner.Registry[G, H], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let invoke: own[send] fn(mut store.Tx, triggers.Attempt, take Command) -> Result[Reply, store.Error] = control
-    runner.register_attempt(mut r, code.describe(control), take invoke, encoded, steps)
+pub fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    runner.register_attempt(mut r, code.describe(control), (), fn(mut tx: store.Tx, a: triggers.Attempt, take command: Command, unused: ()) -> Result[Reply, store.Error] {
+        control(mut tx, a, take command)
+    }, encoded, steps)
 }
 
 fn must[A, E](take value: Result[A, E]) -> A {
@@ -291,12 +292,10 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     Ok(Replay(take data))
 }
 
-pub fn register_transaction[G: send, H: send, A: codec, R: codec, E: codec](mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    let made = fn(mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest) -> Result[Reply, store.Error] {
-        transaction_body(mut tx, a, take request, f)
-    }
-    let entry = take made
-    runner.register_attempt(mut r, f, take entry, encoded, steps)
+pub fn register_transaction[G: send, H: shareable + inert + send, A: codec, R: codec, E: codec](mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]], encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    runner.register_attempt(mut r, f, f, fn(mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest, body: StaticFn[fn(mut store.Tx, A) -> Result[R, E]]) -> Result[Reply, store.Error] {
+        transaction_body(mut tx, a, take request, body)
+    }, encoded, steps)
 }
 
 pub fn transaction[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]]) -> Result[R, StepError[E]] waits {
@@ -305,11 +304,11 @@ pub fn transaction[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take 
     reply_value(mut ctx, (take result)?)
 }
 
-pub fn recorded[R: codec, E: codec](db: store.Db, id: StepId) -> Result[Option[Result[R, E]], store.Error] {
+pub fn recorded[R: codec, E: codec](db: store.Db, id: StepId) -> Result[Option[Result[R, E]], store.Error] waits {
     let snapshot = store.snapshot(db)
     let t = tables(store.snapshot_schema(snapshot))?
     let index = encode(id)?
-    match store.get(snapshot, t.rows, index)? {
+    match store.get(result.unwrap(store.reader(db, 0u64)), snapshot, t.rows, index)? {
         Some(Finished(_, take raw)) => {
             let result: Result[R, E] = decode(raw)?
             Ok(Some(take result))

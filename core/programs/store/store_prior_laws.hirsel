@@ -139,7 +139,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let baseline = db.resident
     let start = db.file_end
     let seq = db.file_seq
-    let Committed(initial) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let Committed(initial) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(34))
     })? else { return Error(Missing("insert")) }
     // entry(12, 34) = 62 + 16 + 40 = 118.
@@ -147,7 +147,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(Missing("insert charge or length"))
     }
     let first = share_page_tree(db.heads[0].roots.collections)
-    let Committed(changed) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let Committed(changed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(16))?
         put_bytes(mut tx, 1, key_word(7), prior_fixture_value(10))
     })? else { return Error(Missing("overwrite")) }
@@ -155,7 +155,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     if db.resident != baseline + 94 || db.file_end != start + 101 + 77 {
         return Error(Missing("overwrite charge or length"))
     }
-    let Committed(removed) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let Committed(removed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         let _ = delete_bytes(mut tx, 1, key_word(7))?
         Ok(())
     })? else { return Error(Missing("delete")) }

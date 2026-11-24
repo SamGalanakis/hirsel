@@ -127,7 +127,7 @@ fn diff_recorded(db: store.Db) -> Result[harness.CacheDiff, String] waits {
     while version > 0u64 {
         if let Some(call) = store.recorded(db, branch, version) ?=> |_| "Could not read the fork's recorded calls." {
             if call.record.key == key {
-                let h = store.with_schema(mut db, code.describe(harness.handles)) ?=> |_| "Could not read the fork's harness schema."
+                let h = harness.handles(store.snapshot_schema(store.snapshot(db))) ?=> |_| "Could not read the fork's harness schema."
                 let limits = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
                 let live = notes.main.notes_agent()
                 let mut candidate = notes.main.notes_agent()

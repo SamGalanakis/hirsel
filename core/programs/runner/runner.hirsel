@@ -63,7 +63,7 @@ pub type Phase: send = Starting(Step) | Ready | Draining | Paused
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir) | Temp(Dir)
-pub type PlaceConfig[G: send, H: send, S: send, B: send]: send {
+pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: send {
     backing: Backing, sizes: store.Overrides, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
@@ -198,15 +198,15 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
     Ok(task.spawn(tasks, bytes 4096u64, take alarm, drain_timer))
 }
 
-pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+pub fn operate[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, None)
 }
 
-pub fn operate_report[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, Some(errors))
 }
 
-fn operate_with_report[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
     let sized_store = place_store(p, report)
@@ -541,7 +541,7 @@ fn operate_with_report[G: send, H: send, S: send, B: send](take p: PlaceConfig[G
 
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+fn operate_install[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles, ..) = take p
     let persistent = match backing { Disk(_) => true, _ => false }
     if let InstallAt(_) = selection {
@@ -591,17 +591,17 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
     match take result { Ok(_) => Ok(Unstarted), Error(take problem) => Error(take problem) }
 }
 
-pub fn prepare_place[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
     let (take options, _, _) = place_store(p, Some(errors))?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image)
 }
 
-fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
+fn operate_prepare[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
     prepare_placed(take p, take options, n_place, launch_bytes(attempt), launch_bytes(image))
 }
 
-fn prepare_placed[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
+fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, clock: clock, tasks: tasks, triggers: take config, ..) = take p
     let Disk(scratch) = backing else { return Error(Missing("scratch")) }
     let entries = match take config {
@@ -625,20 +625,20 @@ fn prepare_placed[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, 
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Caller, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried) | Fenced(u64, u64, own[send] fn(mut store.Tx, triggers.Attempt, Bytes) -> Result[Bytes, store.Error])
+type Slot[G: send, H: shareable + inert + send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], TransactAdapters[H]) | Query(u64, u64, own[send] fn(PublisherReads, store.Reader, store.Snapshot, H, Caller, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried waits) | Fenced(u64, u64, own[send] fn(mut store.Db, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits)
 
 // One granted call's launcher, made from its slot where the Registry is and called by the
 // task that holds the grant (§3 "One Registry").
 type GrantedLaunch[G: send]: send { go: own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport]) -> Result[Task[Outcome], Capacity] }
 
-pub opaque type Registry[G: send, H: send]: send {
+pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     slots: Map[Bytes, Slot[G, H]],
     exported: List[Exported],
     checks: Map[Bytes, own[send] fn(Bytes) -> Option[Refusal]],
     gone: Map[Bytes, ()]
 }
 
-pub fn registry[G: send, H: send]() -> Registry[G, H] {
+pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
     Registry(slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new())
 }
 
@@ -790,7 +790,7 @@ fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kin
 }
 
 // The one insertion: a key already present is refused and the registry is unchanged.
-fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Exported, take s: Slot[G, H]) -> Result[(), RegisterError] {
+fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Exported, take s: Slot[G, H]) -> Result[(), RegisterError] {
     if map.contains(r.slots, key) {
         return Error(AlreadyRegistered(take key))
     }
@@ -800,7 +800,7 @@ fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Expo
     Ok(())
 }
 
-pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn compute[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Compute, ca, cr) {
@@ -812,7 +812,7 @@ pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
     insert(mut r, take key, take d, Compute(made))
 }
 
-pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), code.revision(f), Granted, ca, cr) {
@@ -832,7 +832,7 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
 }
 
 // The export list in registration order: the codec of List[Described].
-pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
+pub fn describe[G: send, H: shareable + inert + send](r: Registry[G, H], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     let c: std.codec.Codec[Described] = std.codec.of()
     let count = list.len(r.exported)
     if count > 0xffffffffu64 { return Error(CountOverflow(count)) }
@@ -881,7 +881,7 @@ fn preview_old_entries(old: LaunchBytes) -> Result[List[Exported], RegisterError
     }
 }
 
-fn preview_answers[G: send, H: send](r: Registry[G, H], previous: LaunchBytes) -> Result[List[Entry], RegisterError] {
+fn preview_answers[G: send, H: shareable + inert + send](r: Registry[G, H], previous: LaunchBytes) -> Result[List[Entry], RegisterError] {
     let old = preview_old_entries(previous)?
     let mut answers: List[Entry] = list.with_capacity(list.len(old))
     for i in 0u64 .. list.len(old) {
@@ -914,7 +914,7 @@ fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError
     Ok(take out)
 }
 
-fn describe_registered[G: send, H: send](launch: LaunchEnv, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
+fn describe_registered[G: send, H: shareable + inert + send](launch: LaunchEnv, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
     let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
     let Registry(exported: take exported, ..) = take r
     let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported)
@@ -922,23 +922,23 @@ fn describe_registered[G: send, H: send](launch: LaunchEnv, take r: Registry[G, 
     Ok(encode_describe(description) ?=> |_| Bounds)
 }
 
-fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
+fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
     match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
-        Ok(take table) => store.get(store.snapshot(db), table, 0u8),
+        Ok(take table) => store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, 0u8),
         Error(Missing(_)) => Ok(None),
         Error(take problem) => Error(take problem),
     }
 }
 
-fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] {
+fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] waits {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    let mut rows = store.scan(store.snapshot(db), table, Unbounded, Unbounded)?
+    let mut rows = store.scan(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, Unbounded, Unbounded)?
     let mut latest: u64 = 0
     let mut previous = 0u64
     let mut live = 0u64
     let first_record = int.saturating_add(store.retained_main_after(db), 1u64)
-    while let Some((version, _)) = store.next(mut rows)? {
+    while let Some((version, _)) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows)? {
         previous = latest
         latest = version
         if version <= first_record { live = version }
@@ -948,7 +948,7 @@ fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] {
     Ok((latest, if live == 0u64 { recent } else { std.order.min(recent, live) }))
 }
 
-pub fn activation_version(db: store.Db) -> Result[u64, store.Error] {
+pub fn activation_version(db: store.Db) -> Result[u64, store.Error] waits {
     let (version, _) = activation_window(db)?
     Ok(version)
 }
@@ -972,7 +972,7 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
     Ok(match selected { Some(choice) => choice, None => Reopen })
 }
 
-fn describe_response[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
+fn describe_response[G: send, H: shareable + inert + send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
     let run = code.callable(place)
     // The isolate's cause cell belongs to the parent, outside n_place.
     let ran = isolate(scoped fn() -> Result[Result[Bytes, RegisterError], Capacity] {
@@ -1047,6 +1047,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Unqualified(_) => string.push(mut line, "the object store provider did not pass conditional write qualification"),
         HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
         Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
+        Missed => string.push(mut line, "a read is waiting for a store frame"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
         Tiered(reason) => string.push(mut line, match reason {
             Memory => "a memory store cannot use Tiered residency",
@@ -1119,7 +1120,7 @@ pub fn start_text(problem: StartError) -> String {
     take line
 }
 
-pub fn main[G: send, H: send](_a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
+pub fn main[G: send, H: shareable + inert + send](_a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
     let launch = launch_env()
     let serving = scoped fn() -> Result[(), Exit] waits {
         let full = Exit(status: 1u8)
@@ -1161,11 +1162,11 @@ pub fn main[G: send, H: send](_a: Args, process: Process, errors: Stderr, tasks:
 
 // The first branch precedes the caller's ordinary serve callback, including its
 // store open, listener and every capability use. No n_place runtime argument.
-pub fn launch_server[G: send, H: send](_a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+pub fn launch_server[G: send, H: shareable + inert + send](_a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
     launch_with(launch_env(), place, start_server)
 }
 
-fn launch_with[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
     if !launch.describe {
         return start_server()
     }
@@ -1190,7 +1191,7 @@ fn launch_with[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Regis
 
 // A compute call in the caller's task, under the entry's n. A key that names no compute
 // entry is NoEntry.
-pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome {
+pub fn call[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome {
     match map.get(r.slots, key) {
         Some(Compute(run)) => run(arg),
         _ => Refused(NoEntry),
@@ -1199,7 +1200,7 @@ pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outc
 
 // A granted call: a task under the entry's `bytes n` holding g. A key that names no
 // granted entry is NoEntry; a task the place cannot grant is Budget.
-pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, take caller: Caller, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
+pub fn start[G: send, H: shareable + inert + send](r: Registry[G, H], tasks: Tasks, take g: G, take caller: Caller, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
     match map.get(r.slots, key) {
         Some(Granted(bind)) => match (bind().go)(tasks, Direct(take g), take caller, take arg, None) {
             Ok(take t) => Ok(take t),
@@ -1222,7 +1223,7 @@ pub fn finish(take t: Task[Outcome]) -> Outcome waits {
 // Rule 10: the head, the publisher and the serving task each run the place's one `place`
 // function under `bytes n_place`, so their lists are the same list; the serving task's
 // Registry is built once and every session plans against it.
-fn placed[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
+fn placed[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
     let go = code.callable(place)
     let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes n_place {
         let mut r: Registry[G, H] = registry()
@@ -1235,101 +1236,6 @@ fn placed[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(),
         Ok(take x) => take x,
         Error(c) => Error(Full(c)),
     }
-}
-
-// A transact run, for the head: an effect to commit with its reply, a typed error whose
-// reply is kept alone, a fault after entry, or a refusal that records nothing.
-type Ran: send = Commit(Bytes) | Abort(Bytes) | Exhausted(Capacity) | Refuse(Refusal)
-
-// The session's check (rule 5): the argument decodes under n, and the value is dropped.
-// Running out of n is not a refusal; the head's run answers it with Failed(OutOfBytes).
-fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
-    let seen = bound bytes n {
-        match std.codec.decode(ca, arg) {
-            Error(e) => {
-                let why: Refusal = Malformed(bad(e))
-                Some(take why)
-            },
-            _ => None,
-        }
-    }
-    match take seen {
-        Ok(take o) => take o,
-        Error(c) => Some(Budget(room(c))),
-    }
-}
-
-// The store's entry bound covers decoding, execution and reply encoding.
-fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran {
-    let body = code.callable(f)
-    match std.codec.decode(ca, arg) {
-        Ok(take a) => {
-            let res = body(mut tx, h, author, take a)
-            let kept = match res { Ok(_) => true, Error(_) => false }
-            let mut out: Bytes = list.new()
-            match std.codec.put_result(res, cr, ce, mut out) {
-                Ok(()) => {
-                    let length = list.len(out)
-                    if length > MAX_RETURNED_BYTES {
-                        Exhausted(Capacity(requested: length, available: MAX_RETURNED_BYTES))
-                    } else if kept { Commit(take out) } else { Abort(take out) }
-                },
-                Error(_) => fail("runner: unrepresentable reply count"),
-            }
-        },
-        Error(e) => Refuse(Malformed(bad(e))),
-    }
-}
-
-pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
-    check_call_reserve(n, s)?
-    let ca: std.codec.Codec[A] = std.codec.of()
-    let cr: std.codec.Codec[R] = std.codec.of()
-    let ce: std.codec.Codec[E] = std.codec.of()
-    let carried: std.codec.Codec[Result[R, E]] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), code.revision(f), Transact, ca, carried) {
-        Ok(take kd) => take kd,
-        Error(_) => return Error(Bounds),
-    }
-    let revision: Option[Bytes] = if list.len(d.revision) == 0u64 {
-        None
-    } else {
-        let copied: Bytes = clone(d.revision)
-        Some(take copied)
-    }
-    register_check(mut r, key, ca, n, s)?
-    let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
-    let run = fn(mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, author, arg) }
-    insert(mut r, take key, take d, Transact(n, s, take revision, check, run))
-}
-
-pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
-    let identity = code.identity(definition)
-    Ok(entry_key(identity, std.codec.fingerprint(arg)?, std.codec.fingerprint(reply)?))
-}
-
-// An attempt entry has no wire slot or call record. Only the head can attach
-// the checked attempt, and the application must register the entry at open.
-pub fn register_attempt[G: send, H: send, F, A: codec, R: codec](mut registered: Registry[G, H], definition: StaticFn[F],
-    take run: own[send] fn(mut store.Tx, triggers.Attempt, take A) -> Result[R, store.Error], n: u64, steps: u64) -> Result[(), RegisterError] {
-    check_call_reserve(n, steps)?
-    let ca: std.codec.Codec[A] = std.codec.of()
-    let cr: std.codec.Codec[R] = std.codec.of()
-    let key = attempt_key(definition, ca, cr) ?=> |_| Bounds
-    if map.contains(registered.slots, key) { return Error(AlreadyRegistered(take key)) }
-    let made = fn(mut tx: store.Tx, attempt: triggers.Attempt, arg: Bytes) -> Result[Bytes, store.Error] {
-        let value = match std.codec.decode(ca, arg) {
-            Ok(take decoded) => take decoded,
-            Error(_) => return Error(Missing("attempt argument")),
-        }
-        let answer = run(mut tx, attempt, take value)?
-        let mut raw: Bytes = list.new()
-        std.codec.encode(cr, answer, mut raw) ?=> |_| Limit(Value)
-        Ok(take raw)
-    }
-    let adapter = take made
-    map.insert(mut registered.slots, take key, Fenced(n, steps, take adapter))
-    Ok(())
 }
 
 // ---- R2 (RUNNER-SPEC v2.11 §4): queries and their Covers.
@@ -1374,68 +1280,83 @@ fn query_body[H, A](body: QueryBody[H, A], tx: store.Tx, h: H, caller: Caller, t
     }
 }
 
-// The query adapter: decode A and call the body inside `look`, all inside `bound bytes n`. A
-// fault, or exhaustion after entry, ends the subscription with Failed. The run is isolated
-// inside `look`'s body, so `look` returns the reads it made before it stopped: that partial
-// read log is the ended entry (§3 "Ended entries"). `caller` is the subscribing session's.
-fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], schemas: store.RowSchemas, s: store.Snapshot, h: H, caller: Caller, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-    let looked = bound bytes n {
-        store.look(s, None, scoped fn(tx: store.Tx) -> Result[Cover, Queried] {
-          let ran = isolate(fn() -> Result[Result[Cover, Queried], OutOfTime] {
-           bound steps steps {
-            let c = match std.codec.decode(ca, arg) {
-                Ok(take a) => match query_body(body, tx, h, caller, take a) {
-                    Ok(take value) => take value,
-                    Error(c) => return Ok(Error(Stopped(Failed(OutOfBytes(room(c)))))),
-                },
-                Error(e) => return Ok(Error(Stopped(Refused(Malformed(bad(e)))))),
+type QueryAttempt[H, A] {
+    body: QueryBody[H, A],
+    codec: std.codec.Codec[A],
+    handles: H,
+    caller: Caller,
+    arguments: Bytes,
+    steps: u64
+}
+
+fn query_attempt[H: inert, A](tx: store.Tx, attempt: QueryAttempt[H, A]) -> Result[Cover, Outcome] {
+    let ran = isolate(fn() -> Result[Cover, Outcome] {
+        let input = std.codec.decode(attempt.codec, attempt.arguments) ?=> |e| Refused(Malformed(bad(e)))
+        let c = query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(room(f)))
+        Ok(take c)
+    })
+    match take ran {
+        Ok(Ok(take output)) => take output,
+        Ok(Error(cs)) => {
+            for cause in cs {
+                if let OutOfTime = cause.kind { return Error(Failed(OutOfTime(attempt.steps))) }
+            }
+            Error(Failed(Raised(raised(cs))))
+        },
+        Error(problem) => Error(Failed(OutOfBytes(room(problem)))),
+    }
+}
+
+fn query_projection[H: inert, A](access: PublisherReads, read_handle: store.Reader, s: store.Snapshot, attempt: QueryAttempt[H, A], schemas: store.RowSchemas, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried waits {
+    let looked = store.look(read_handle, s, None, attempt, query_attempt)
+    match take looked {
+        Ok(Seen(take answer)) => {
+            let store.Seen(value: take output, version: _, reads: take reads) = take answer
+            let c = match take output {
+                Ok(take received) => take received,
+                Error(take why) => return Faulted(take why, take reads),
             }
             if c.schemas.key != schemas.key || c.schemas.value != schemas.value {
                 fail("runner: query Cover schema does not match registration")
             }
             let projected = match old {
-                Some(previous) => rerun_rows(prior, previous, s, c, sub, rows),
-                None => cover_rows(s, c, sub, rows),
+                Some(previous) => rerun_rows(access, read_handle, prior, previous, s, c, sub, rows),
+                None => cover_rows(access, read_handle, s, c, sub, rows),
             }
             match take projected {
-                Ok(()) => Ok(take c),
-                Error(take e) => Error(projection_error(take e)),
-            }
-           }
-          })
-          match take ran {
-              Ok(Ok(Ok(take v))) => take v,
-              Ok(Ok(Error(e))) => Error(Stopped(Failed(OutOfTime(e.steps)))),
-              Ok(Error(cs)) => Error(Stopped(Failed(Raised(raised(cs))))),
-              Error(c) => Error(Stopped(Failed(OutOfBytes(room(c))))),
-          }
-        })
-    }
-    match take looked {
-        Ok(Ok(Seen(take x))) => {
-            let store.Seen(value: take v, version: _, reads: take reads) = take x
-            match take v {
-                Ok(take c) => Covered(Viewed(cover: take c, reads: take reads)),
-                Error(Stopped(take why)) => Faulted(take why, take reads),
-                Error(take other) => take other,
+                Ok(()) => Covered(Viewed(cover: take c, reads: take reads)),
+                Error(take problem) => projection_error(take problem),
             }
         },
-        Ok(Ok(Failed(cs))) => Stopped(Failed(Raised(raised(cs)))),
-        Ok(Ok(Refused(c))) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
-        Ok(Ok(Stopped(e))) => Stopped(Failed(OutOfTime(e.steps))),
-        Ok(Error(e)) => Lost(e),
-        Error(c) => Stopped(Refused(Budget(room(c)))),
+        Ok(Failed(cs)) => Stopped(Failed(Raised(raised(cs)))),
+        Ok(Refused(c)) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
+        Ok(Stopped(e)) => Stopped(Failed(OutOfTime(e.steps))),
+        Error(take problem) => Lost(take problem),
+    }
+}
+
+fn adapt_query[H: inert, A](body: QueryBody[H, A], ca: std.codec.Codec[A], schemas: store.RowSchemas, access: PublisherReads, read_handle: store.Reader, s: store.Snapshot, h: H, caller: Caller, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried waits {
+    let result = bound bytes n {
+        let attempt = QueryAttempt(body: body, codec: ca, handles: store.copy_env(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
+        bound steps steps {
+            query_projection(access, read_handle, s, attempt, schemas, prior, old, sub, rows)
+        }
+    }
+    match take result {
+        Ok(Ok(take output)) => take output,
+        Ok(Error(limit)) => Stopped(Failed(OutOfTime(limit.steps))),
+        Error(problem) => Stopped(Refused(Budget(room(problem)))),
     }
 }
 
 // Rule 2's two query kinds. `query` registers a caller-independent body, which has no Caller
 // parameter; `query_as` registers a caller-dependent one, which takes the Caller. The kind is
 // the body's type, so a body that reads the Caller cannot be registered with `query`.
-pub fn query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query[G: send, H: shareable + inert + send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
     register_query(mut r, Plain(f), ck, cv, n, s)
 }
 
-pub fn query_as[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query_as[G: send, H: shareable + inert + send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
     register_query(mut r, As(f), ck, cv, n, s)
 }
 
@@ -1455,7 +1376,7 @@ pub fn query_result_schema[K, V](ck: std.codec.Key[K], cv: std.codec.Codec[V]) -
     encode_query_schemas(query_codecs(ck, cv)?)
 }
 
-fn register_query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], body: QueryBody[H, A], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
+fn register_query[G: send, H: shareable + inert + send, A: codec, K, V](mut r: Registry[G, H], body: QueryBody[H, A], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let schemas = query_codecs(ck, cv) ?=> |_| Bounds
     let result = encode_query_schemas(schemas) ?=> |_| Bounds
@@ -1468,696 +1389,10 @@ fn register_query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], body:
         Error(_) => return Error(Bounds),
     }
     register_check(mut r, key, ca, n, s)?
-    let made = fn(at: store.Snapshot, h: H, caller: Caller, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-        adapt_query(body, ca, schemas, at, h, caller, arg, n, s, prior, old, sub, rows)
+    let made = fn(access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, h: H, caller: Caller, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried waits {
+        adapt_query(body, ca, schemas, access, read_handle, at, h, caller, arg, n, s, prior, old, sub, rows)
     }
     insert(mut r, take key, take d, Query(n, s, made))
-}
-
-// ---- The publisher's subscriptions (G2, G3). A subscription keeps its Cover and read set at
-// the base, never its rows (F4): rows are enumerated from the snapshots the publisher holds.
-// Fields drop in reverse order: return the room after freeing the Caller, argument and key.
-// `caller` is the subscribing session's, the one a caller-dependent query runs with at
-// subscribe, at every rerun and at repair (rule 2).
-pub opaque type SubscriptionInput: send { room: Option[SubscriptionLease], key: Bytes, arg: Bytes, caller: Caller }
-
-resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(lease) {
-    let _ = channel.try_send(lease.refund, lease.charge)
-}
-
-// A live sub has its Cover. An ended entry (§3 "Ended entries") has none: it no longer runs,
-// but its read set stays indexed, and its input stays charged to the session, until its first
-// read-set hit, its owner's removal or the session's end.
-// `due` (§3 "Repair"): a full owner inbox bounced content of this live sub. Its hits still
-// fence, its diffs stop, and on its owner's progress one full `complete` replaces it.
-type Sub { generation: u64, input: SubscriptionInput, cover: Option[Cover], routes: List[RouteKey], due: bool }
-
-type SubId { who: u64, sub: u32, serial: u64 }
-
-// The publisher holds one balanced interval tree for the data-tree keys of its open.
-// Points have an inclusive upper endpoint and Covers and Spans have an exclusive one.
-// Each node also holds the greatest upper endpoint in its subtree.
-type RouteEnd { at: Arc[Bytes], included: bool }
-type RouteKey { low: Arc[Bytes], serial: u64, slot: u64 }
-type Route {
-    key: RouteKey,
-    id: SubId,
-    end: RouteEnd,
-    max: RouteEnd,
-    height: u64,
-    left: Option[Box[Route]],
-    right: Option[Box[Route]]
-}
-
-type Subscriptions { by_session: Map[u64, Map[u32, Sub]], root: Option[Box[Route]], serial: u64 }
-
-fn subscriptions() -> Subscriptions {
-    Subscriptions(by_session: map.new(), root: None, serial: 0u64)
-}
-
-fn route_before(a: RouteKey, b: RouteKey) -> bool {
-    let low_a: View[Bytes] = a.low
-    let low_b: View[Bytes] = b.low
-    if low_a != low_b { return low_a < low_b }
-    if a.serial != b.serial { return a.serial < b.serial }
-    a.slot < b.slot
-}
-
-fn end_reaches(end: RouteEnd, key: Bytes) -> bool {
-    let high: View[Bytes] = end.at
-    key < high || (end.included && key == high)
-}
-
-fn raise_end(mut end: RouteEnd, candidate: RouteEnd) {
-    let high: View[Bytes] = candidate.at
-    if !end_reaches(end, high) {
-        end.at = arc.share(candidate.at)
-        end.included = candidate.included
-    }
-}
-
-fn route_height(root: Option[Box[Route]]) -> u64 {
-    match root { Some(node) => node.height, None => 0u64 }
-}
-
-fn measure_route(mut node: Box[Route]) {
-    let left = route_height(node.left)
-    let right = route_height(node.right)
-    node.height = 1u64 + if left > right { left } else { right }
-    let mut far = RouteEnd(at: arc.share(node.end.at), included: node.end.included)
-    if let Some(child) = node.left { raise_end(mut far, child.max) }
-    if let Some(child) = node.right { raise_end(mut far, child.max) }
-    node.max = take far
-}
-
-fn rotate_route_left(take node: Box[Route]) -> Box[Route] {
-    let mut parent = take node
-    let mut next = option.unwrap(replace(mut parent.right, None))
-    parent.right = replace(mut next.left, None)
-    measure_route(mut parent)
-    next.left = Some(take parent)
-    measure_route(mut next)
-    take next
-}
-
-fn rotate_route_right(take node: Box[Route]) -> Box[Route] {
-    let mut parent = take node
-    let mut next = option.unwrap(replace(mut parent.left, None))
-    parent.left = replace(mut next.right, None)
-    measure_route(mut parent)
-    next.right = Some(take parent)
-    measure_route(mut next)
-    take next
-}
-
-fn balance_route(take node: Box[Route]) -> Box[Route] {
-    let mut root = take node
-    let left = route_height(root.left)
-    let right = route_height(root.right)
-    if left > right + 1u64 {
-        let child = option.unwrap(replace(mut root.left, None))
-        root.left = Some(if route_height(child.right) > route_height(child.left) {
-            rotate_route_left(take child)
-        } else { take child })
-        return rotate_route_right(take root)
-    }
-    if right > left + 1u64 {
-        let child = option.unwrap(replace(mut root.right, None))
-        root.right = Some(if route_height(child.left) > route_height(child.right) {
-            rotate_route_right(take child)
-        } else { take child })
-        return rotate_route_left(take root)
-    }
-    measure_route(mut root)
-    take root
-}
-
-fn put_route(take top: Option[Box[Route]], take node: Box[Route]) -> Box[Route] {
-    let Some(take old) = take top else { return take node }
-    let mut root = take old
-    if route_before(node.key, root.key) {
-        let child = replace(mut root.left, None)
-        root.left = Some(put_route(take child, take node))
-    } else {
-        let child = replace(mut root.right, None)
-        root.right = Some(put_route(take child, take node))
-    }
-    balance_route(take root)
-}
-
-fn take_first_route(take root: Box[Route], mut rest: Option[Box[Route]]) -> Box[Route] {
-    let mut node = take root
-    if let Some(take left) = replace(mut node.left, None) {
-        let first = take_first_route(take left, mut node.left)
-        rest = Some(balance_route(take node))
-        take first
-    } else {
-        rest = replace(mut node.right, None)
-        take node
-    }
-}
-
-fn drop_route(take top: Option[Box[Route]], key: RouteKey) -> Option[Box[Route]] {
-    let mut root = option.unwrap(take top)
-    if route_before(key, root.key) {
-        let child = replace(mut root.left, None)
-        root.left = drop_route(take child, key)
-    } else if route_before(root.key, key) {
-        let child = replace(mut root.right, None)
-        root.right = drop_route(take child, key)
-    } else {
-        let right = replace(mut root.right, None)
-        let Some(take child) = take right else { return replace(mut root.left, None) }
-        let mut rest: Option[Box[Route]] = None
-        let mut next = take_first_route(take child, mut rest)
-        next.left = replace(mut root.left, None)
-        next.right = take rest
-        return Some(balance_route(take next))
-    }
-    Some(balance_route(take root))
-}
-
-// Allocate before changing the tree. An insertion or removal only moves boxes.
-fn stage_route(mut nodes: List[Box[Route]], id: SubId, slot: u64, take interval: store.Read) -> Result[(), Capacity] {
-    let (take low, take end) = match take interval {
-        Point(take point) => {
-            let endpoint = arc.new(take point)
-            (arc.share(endpoint), RouteEnd(at: take endpoint, included: true))
-        },
-        Span(take lo, take hi) => {
-            if hi <= lo { return Ok(()) }
-            let upper = arc.new(take hi)
-            (arc.new(take lo), RouteEnd(at: take upper, included: false))
-        },
-    }
-    let max = RouteEnd(at: arc.share(end.at), included: end.included)
-    let node = Route(key: RouteKey(low: take low, serial: id.serial, slot: slot), id: id,
-        end: take end, max: take max, height: 1u64, left: None, right: None)
-    Ok(list.push(mut nodes, box.new(take node)))
-}
-
-fn cover_view(c: Option[Cover]) -> Option[View[Cover]] in c {
-    match c {
-        Some(x) => Some(x),
-        None => None,
-    }
-}
-
-// Slot 0 is the Cover's route, which an ended entry does not have; reads take slots from 1.
-fn stage_routes(id: SubId, c: Option[View[Cover]], take reads: List[store.Read]) -> Result[(List[Box[Route]], List[RouteKey]), Capacity] {
-    let mut nodes: List[Box[Route]] = list.with_capacity(list.len(reads) + 1u64)
-    if let Some(span) = c { stage_route(mut nodes, id, 0u64, Span(clone(span.low), clone(span.high)))? }
-    let mut slot = 0u64
-    for take read in reads {
-        slot += 1u64
-        stage_route(mut nodes, id, slot, take read)?
-    }
-    let mut keys: List[RouteKey] = list.with_capacity(list.len(nodes))
-    for node in nodes {
-        let key = node.key
-        list.push(mut keys, RouteKey(low: arc.share(key.low), serial: key.serial, slot: key.slot))
-    }
-    Ok((take nodes, take keys))
-}
-
-fn install_routes(mut root: Option[Box[Route]], take nodes: List[Box[Route]]) {
-    for take node in nodes {
-        let previous = replace(mut root, None)
-        root = Some(put_route(take previous, take node))
-    }
-}
-
-fn unregister_routes(mut root: Option[Box[Route]], keys: List[RouteKey]) {
-    for key in keys {
-        let previous = replace(mut root, None)
-        root = drop_route(take previous, key)
-    }
-}
-
-fn route_key(root: Option[Box[Route]], key: Bytes, mut hits: Map[u64, (SubId, bool)]) -> Result[(), Capacity] {
-    let Some(node) = view root else { return Ok(()) }
-    if !end_reaches(node.max, key) { return Ok(()) }
-    route_key(node.left, key, mut hits)?
-    let low: View[Bytes] = node.key.low
-    if key < low { return Ok(()) }
-    if end_reaches(node.end, key) {
-        let read = node.key.slot != 0u64
-        if read || !map.contains(hits, node.id.serial) {
-            map.insert(mut hits, node.id.serial, (node.id, read))
-        }
-    }
-    route_key(node.right, key, mut hits)
-}
-
-fn sub_at(subs: Subscriptions, who: u64, sub: u32) -> Option[View[Sub]] in subs {
-    match map.get(subs.by_session, who) {
-        Some(group) => map.get(group, sub),
-        None => None,
-    }
-}
-
-fn put_sub(mut subs: Subscriptions, id: SubId, take value: Sub) -> Result[(), Capacity] {
-    if !map.contains(subs.by_session, id.who) {
-        map.insert(mut subs.by_session, id.who, map.new())
-    }
-    let mut incoming = Some(take value)
-    let inserted = option.unwrap(map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> Result[(), Capacity] {
-        let pending_sub = option.unwrap(replace(mut incoming, None))
-        Ok(map.insert(mut group, id.sub, take pending_sub))
-    }))
-    if let Error(_) = inserted {
-        if map.len(option.unwrap(map.get(subs.by_session, id.who))) == 0u64 {
-            let _ = map.remove(mut subs.by_session, id.who)
-        }
-    }
-    inserted
-}
-
-fn remove_sub(mut subs: Subscriptions, who: u64, sub: u32) -> Option[Sub] {
-    let Some((take removed, empty)) = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> (Option[Sub], bool) {
-        let removed = map.remove(mut group, sub)
-        (take removed, map.len(group) == 0u64)
-    }) else { return None }
-    if empty { let _ = map.remove(mut subs.by_session, who) }
-    if let Some(s) = view removed { unregister_routes(mut subs.root, s.routes) }
-    take removed
-}
-
-// The publisher ends a live sub (§3 "Ended entries"): its Cover's route leaves the index and
-// its read routes stay, as an ended entry. Nothing is allocated.
-fn end_entry(mut subs: Subscriptions, who: u64, sub: u32) {
-    let dropped = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> Option[RouteKey] {
-        match map.update(mut group, sub, scoped fn(mut entry: Sub) -> Option[RouteKey] {
-            entry.cover = None
-            entry.due = false
-            if list.len(entry.routes) > 0u64 && entry.routes[0].slot == 0u64 { Some(list.remove(mut entry.routes, 0u64)) } else { None }
-        }) {
-            Some(take key) => take key,
-            None => None,
-        }
-    })
-    if let Some(Some(take key)) = take dropped {
-        let previous = replace(mut subs.root, None)
-        subs.root = drop_route(take previous, key)
-    }
-}
-
-// A publisher-made Reset ends every live sub of the session; each stays as an ended entry.
-fn end_session(mut subs: Subscriptions, who: u64) {
-    let mut live: List[u32] = list.new()
-    if let Some(group) = map.get(subs.by_session, who) {
-        for (sub, entry) in group {
-            if let Some(_) = entry.cover { list.push(mut live, sub) }
-        }
-    }
-    for sub in live { end_entry(mut subs, who, sub) }
-}
-
-fn ended_entry(subs: Subscriptions, id: SubId) -> bool {
-    match sub_at(subs, id.who, id.sub) {
-        Some(entry) => match entry.cover { Some(_) => false, None => true },
-        None => false,
-    }
-}
-
-fn due_entry(subs: Subscriptions, id: SubId) -> bool {
-    match sub_at(subs, id.who, id.sub) {
-        Some(entry) => entry.due,
-        None => false,
-    }
-}
-
-// Marks a live sub for repair (§3 "Repair"); an ended entry or a removed sub is not marked.
-fn mark_due(mut subs: Subscriptions, who: u64, sub: u32) -> bool {
-    match map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> bool {
-        match map.update(mut group, sub, scoped fn(mut entry: Sub) -> bool {
-            match entry.cover {
-                Some(_) => { entry.due = true; true },
-                None => false,
-            }
-        }) {
-            Some(marked) => marked,
-            None => false,
-        }
-    }) {
-        Some(marked) => marked,
-        None => false,
-    }
-}
-
-fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
-    let mut due: List[u32] = list.new()
-    if let Some(group) = map.get(subs.by_session, who) {
-        for (sub, entry) in group {
-            if entry.due { list.push(mut due, sub) }
-        }
-    }
-    take due
-}
-
-// What one step owes one session: at `version`, the subs whose whole initial result it
-// carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
-type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], ended: List[(u32, u64, Outcome)], reset: bool }
-
-type Board[G: send, H: send] { r: Registry[G, H], h: H, base: store.Snapshot, newest: Option[store.Snapshot], subs: Subscriptions }
-
-fn sub_generation(generations: List[(u32, u64)], sub: u32) -> Option[u64] {
-    for (id, generation) in generations { if id == sub { return Some(generation) } }
-    None
-}
-
-fn stamp_rows(mut generations: List[(u32, u64)], sub: u32, generation: u64) {
-    if generation != 0u64 { list.push(mut generations, (sub, generation)) }
-}
-
-fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
-    let mut i = 0u64
-    while i < list.len(owes) {
-        if owes[i].session == who {
-            return i
-        }
-        i += 1u64
-    }
-    list.push(mut owes, Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false))
-    i
-}
-
-fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-    match map.get(r.slots, input.key) {
-        Some(Query(_, _, go)) => go(s, h, input.caller, input.arg, prior, old, sub, rows),
-        _ => Stopped(Refused(NoEntry)),
-    }
-}
-
-fn projection_error(take e: store.Error) -> Queried {
-    match take e {
-        Full(c) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
-        take other => Lost(take other),
-    }
-}
-
-// The log's backing list belongs to the publisher. The row bytes and codec
-// scratch created during projection are charged to the subscription's bound.
-fn row_log() -> Result[Log[Row], Capacity] {
-    let output: Log[Row] = log.new()
-    log.append(output, Row(sub: 0u32, key: list.new(), value: None))
-    Ok(take output)
-}
-
-fn read_rows(take output: Log[Row]) -> List[Row] {
-    let mut rows = log.finish(take output)
-    let _ = list.remove(mut rows, 0u64)
-    take rows
-}
-
-fn projection_row(out: Log[Row], sub: u32, take ch: store.Change, take value: Option[Bytes]) -> Result[(), store.Error] {
-    let store.Change(tree_key: take key, value: _) = take ch
-    log.append(out, Row(sub: sub, key: take key, value: take value))
-    Ok(())
-}
-
-// The rows inside a Cover at s, each with its published value (F10).
-fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] {
-    let mut rows = store.open_span_changes(s, c.low, c.high)?
-    while let Some(take ch) = store.next_span_change(mut rows)? {
-        let value = (c.value)(ch)?
-        projection_row(out, sub, take ch, take value)?
-    }
-    Ok(())
-}
-
-fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe {
-    let _ = remove_sub(mut b.subs, who, sub)
-    let version = store.version(b.base)
-    let mut o = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
-    let rows = match row_log() {
-        Ok(take x) => take x,
-        Error(c) => {
-            list.push(mut o.ended, (sub, generation, Refused(Budget(room(c)))))
-            return take o
-        },
-    }
-    match run_query(b.r, b.h, b.base, input, b.base, None, sub, rows) {
-        Covered(take v) => {
-            let Viewed(cover: take c, reads: take reads) = take v
-            match add_subscription(mut b.subs, who, sub, generation, take input, Some(take c), take reads) {
-                Ok(()) => {
-                    o.rows = read_rows(take rows)
-                    stamp_rows(mut o.generations, sub, generation)
-                    list.push(mut o.complete, sub)
-                },
-                // Its read set cannot be indexed, so no content of it may go: a Reset, whose
-                // other subs stay as ended entries (§3 "Ended entries").
-                Error(_) => { o.reset = true },
-            }
-        },
-        Stopped(take why) => list.push(mut o.ended, (sub, generation, take why)),
-        // A faulted or refused run: its partial read log is its ended entry.
-        Faulted(take why, take reads) => match add_subscription(mut b.subs, who, sub, generation, take input, None, take reads) {
-            Ok(()) => list.push(mut o.ended, (sub, generation, take why)),
-            Error(_) => { o.reset = true },
-        },
-        Lost(_) => {
-            o.reset = true
-        },
-    }
-    take o
-}
-
-fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput, take c: Option[Cover], take reads: List[store.Read]) -> Result[(), Capacity] {
-    subs.serial += 1u64
-    let id = SubId(who: who, sub: sub, serial: subs.serial)
-    let (take nodes, take keys) = stage_routes(id, cover_view(c), take reads)?
-    put_sub(mut subs, id, Sub(generation: generation, input: take input, cover: take c, routes: take keys, due: false))?
-    install_routes(mut subs.root, take nodes)
-    Ok(())
-}
-
-// The rerun's difference: the keys inside the old Cover at a against the keys inside the new
-// Cover at b, removals included, each new or changed key with its published value at b.
-fn rerun_rows(a: store.Snapshot, old: Cover, b: store.Snapshot, new: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] {
-    let mut before = store.open_span_changes(a, old.low, old.high)?
-    let mut after = store.open_span_changes(b, new.low, new.high)?
-    let mut previous = store.next_span_change(mut before)?
-    let mut next = store.next_span_change(mut after)?
-    loop {
-        let order = match (view previous, view next) {
-            (Some(x), Some(y)) => if x.tree_key < y.tree_key { 0u8 } else if x.tree_key == y.tree_key { 1u8 } else { 2u8 },
-            (Some(_), None) => 0u8,
-            (None, Some(_)) => 2u8,
-            (None, None) => return Ok(()),
-        }
-        if order == 0u8 {
-            let removed = option.unwrap(replace(mut previous, None))
-            projection_row(out, sub, take removed, None)?
-            previous = store.next_span_change(mut before)?
-            continue
-        }
-        let was = if order == 1u8 {
-            let row = option.unwrap(replace(mut previous, None))
-            let v = (old.value)(row)?
-            previous = store.next_span_change(mut before)?
-            take v
-        } else {
-            None
-        }
-        let row = option.unwrap(replace(mut next, None))
-        let now = (new.value)(row)?
-        if was != now {
-            projection_row(out, sub, take row, take now)?
-        }
-        next = store.next_span_change(mut after)?
-    }
-}
-
-// The changed keys inside a Cover, with their published values at b.
-fn covered_rows(d: List[store.Change], c: Cover, sub: u32, out: Log[Row]) -> Result[(), store.Error] {
-    for ch in d {
-        let v = (c.value)(ch)?
-        let copied: Bytes = clone(ch.tree_key)
-        let key = take copied
-        log.append(out, Row(sub: sub, key: take key, value: take v))
-    }
-    Ok(())
-}
-
-fn change_offset(d: List[store.Change], key: Bytes) -> u64 {
-    match list.binary_search_by(d, scoped fn(ch: store.Change) -> Order {
-        if ch.tree_key < key { Less } else { Greater }
-    }) {
-        Ok(i) => i,
-        Error(i) => i,
-    }
-}
-
-fn project_changes[G: send, H: send](r: Registry[G, H], key: Bytes, d: List[store.Change], c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] {
-    // changes walks the two data trees in key order, with at most one change per key.
-    let first = change_offset(d, c.low)
-    let past = change_offset(d, c.high)
-    match map.get(r.slots, key) {
-        Some(Query(allowance, steps, _)) => bounded_changes(allowance, steps, list.slice(d, first, past), c, sub, rows),
-        _ => Error(Stopped(Refused(NoEntry))),
-    }
-}
-
-fn bounded_changes(allowance: u64, steps: u64, d: List[store.Change], c: Cover, sub: u32, rows: Log[Row]) -> Result[(), Queried] {
-    let attempt = bound bytes allowance {
-        isolate(fn() -> Result[Result[(), store.Error], OutOfTime] {
-            bound steps steps { covered_rows(d, c, sub, rows) }
-        })
-    }
-    match take attempt {
-        Ok(Ok(Ok(Ok(Ok(()))))) => Ok(()),
-        Ok(Ok(Ok(Ok(Error(e))))) => Error(projection_error(take e)),
-        Ok(Ok(Ok(Error(e)))) => Error(Stopped(Failed(OutOfTime(e.steps)))),
-        Ok(Ok(Error(cs))) => Error(Stopped(Failed(Raised(raised(cs))))),
-        Ok(Error(f)) => Error(Stopped(Failed(OutOfBytes(room(f))))),
-        Error(f) => Error(Stopped(Refused(Budget(room(f))))),
-    }
-}
-
-// A session Reset ends all its subscriptions, whose read sets stay as ended entries, and
-// replaces its owed content.
-fn reset_session(mut subs: Subscriptions, mut owes: List[Owe], who: u64, version: u64) {
-    end_session(mut subs, who)
-    let k = owe(mut owes, who, version)
-    owes[k] = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: true)
-}
-
-fn reset_subscriptions(mut subs: Subscriptions, mut owes: List[Owe], version: u64) {
-    let groups = replace(mut subs.by_session, map.new())
-    subs.root = None
-    for (who, _) in groups { reset_session(mut subs, mut owes, who, version) }
-}
-
-fn affected_subscriptions(subs: Subscriptions, changes: List[store.Change]) -> Result[List[(SubId, bool)], Capacity] {
-    let mut hits: Map[u64, (SubId, bool)] = map.new()
-    for ch in changes { route_key(subs.root, ch.tree_key, mut hits)? }
-    let mut ordered: List[(SubId, bool)] = list.with_capacity(map.len(hits))
-    for (_, hit) in hits { list.push(mut ordered, hit) }
-    // Both projection and reruns observe the same subscription order as G3.
-    list.sort(mut ordered, scoped fn(a: (SubId, bool), b: (SubId, bool)) -> Order {
-        if a.0.serial < b.0.serial { Less } else if a.0.serial > b.0.serial { Greater } else { Equal }
-    })
-    Ok(take ordered)
-}
-
-// A re-run's Cover and read set replace the sub's, or, with no Cover, its partial read log
-// makes it an ended entry.
-fn replace_routes(mut subs: Subscriptions, id: SubId, take c: Option[Cover], take reads: List[store.Read]) -> Result[(), Capacity] {
-    let (take nodes, take keys) = stage_routes(id, cover_view(c), take reads)?
-    let mut incoming = Some((take c, take keys))
-    let old = option.unwrap(option.unwrap(map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) -> Option[List[RouteKey]] {
-        map.update(mut group, id.sub, scoped fn(mut entry: Sub) -> List[RouteKey] {
-            let (take cover_next, take routes_next) = option.unwrap(replace(mut incoming, None))
-            entry.cover = take cover_next
-            replace(mut entry.routes, take routes_next)
-        })
-    })))
-    unregister_routes(mut subs.root, old)
-    install_routes(mut subs.root, take nodes)
-    Ok(())
-}
-
-// The sub keeps the read set of its last run as its ended entry.
-fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u64, take why: Outcome) {
-    list.push(mut out.ended, (id.sub, generation, take why))
-    end_entry(mut subs, id.who, id.sub)
-}
-
-fn append_round_rows(mut out: Owe, id: SubId, generation: u64, take rows: Log[Row]) {
-    let before = list.len(out.rows)
-    for take row in read_rows(take rows) { list.push(mut out.rows, take row) }
-    if list.len(out.rows) != before { stamp_rows(mut out.generations, id.sub, generation) }
-}
-
-type SubUpdate = Rows(Log[Row]) | Refreshed(Viewed, Log[Row]) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs
-
-fn advance_sub[G: send, H: send](b: Board[G, H], newest: store.Snapshot, d: List[store.Change], id: SubId, read: bool) -> Option[(u64, SubUpdate)] {
-    let Some(entry) = sub_at(b.subs, id.who, id.sub) else { return None }
-    let generation = entry.generation
-    let rows = match row_log() {
-        Ok(take x) => take x,
-        Error(f) => return Some((generation, EndSub(Refused(Budget(room(f)))))),
-    }
-    let advanced = if read {
-        match run_query(b.r, b.h, newest, entry.input, b.base, cover_view(entry.cover), id.sub, rows) {
-            Covered(take v) => Refreshed(take v, take rows),
-            Stopped(take why) => EndSub(take why),
-            Faulted(take why, take reads) => EndRead(take why, take reads),
-            Lost(_) => ResetSubs,
-        }
-    } else {
-        let Some(c) = entry.cover else { return None }
-        match project_changes(b.r, entry.input.key, d, c, id.sub, rows) {
-            Ok(()) => Rows(take rows),
-            Error(Stopped(take why)) => EndSub(take why),
-            Error(_) => ResetSubs,
-        }
-    }
-    Some((generation, take advanced))
-}
-
-// G2: one round from the base to the newest snapshot released.
-// `fenced` gets every session with a read-set hit, found before any sub is advanced or ended;
-// a lost diff fences them all.
-fn round[G: send, H: send](mut b: Board[G, H], mut fenced: Fenced) -> List[Owe] {
-    let mut owes: List[Owe] = list.new()
-    let Some(take newest) = replace(mut b.newest, None) else { return take owes }
-    let version = store.version(newest)
-    let d = match store.changes(b.base, newest) {
-        Ok(take x) => take x,
-        Error(_) => {
-            fenced.all = true
-            reset_subscriptions(mut b.subs, mut owes, version)
-            b.base = take newest
-            return take owes
-        },
-    }
-    let hits = match affected_subscriptions(b.subs, d) {
-        Ok(take x) => take x,
-        Error(_) => {
-            fenced.all = true
-            reset_subscriptions(mut b.subs, mut owes, version)
-            b.base = take newest
-            return take owes
-        },
-    }
-    for (id, read) in hits {
-        if read && !list.contains(fenced.sessions, id.who) {
-            list.push(mut fenced.sessions, id.who)
-        }
-    }
-    for (id, read) in hits {
-        // An ended entry's hit is a read-set hit, fenced above: from this round's E every writer
-        // drops all of its content, so the entry leaves.
-        if ended_entry(b.subs, id) {
-            let _ = remove_sub(mut b.subs, id.who, id.sub)
-            continue
-        }
-        // A due sub's hit is fenced above and its diff is not computed: the repair's full
-        // image replaces whatever this round changed (§3 "Repair").
-        if due_entry(b.subs, id) { continue }
-        let Some((generation, take advanced)) = advance_sub(b, newest, d, id, read) else { continue }
-        let k = owe(mut owes, id.who, version)
-        match take advanced {
-            Rows(take rows) => append_round_rows(mut owes[k], id, generation, take rows),
-            Refreshed(Viewed(cover: take c, reads: take reads), take rows) => {
-                match replace_routes(mut b.subs, id, Some(take c), take reads) {
-                    Ok(()) => append_round_rows(mut owes[k], id, generation, take rows),
-                    Error(f) => end_round_sub(mut b.subs, mut owes[k], id, generation, Refused(Budget(room(f)))),
-                }
-            },
-            EndSub(take why) => end_round_sub(mut b.subs, mut owes[k], id, generation, take why),
-            EndRead(take why, take reads) => match replace_routes(mut b.subs, id, None, take reads) {
-                Ok(()) => list.push(mut owes[k].ended, (id.sub, generation, take why)),
-                Error(_) => reset_session(mut b.subs, mut owes, id.who, version),
-            },
-            ResetSubs => reset_session(mut b.subs, mut owes, id.who, version),
-        }
-    }
-    b.base = take newest
-    take owes
 }
 
 // The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
@@ -2358,7 +1593,7 @@ fn round_advance(mut rounds: RoundRegister, at: u64, live: u64) -> bool {
 // every content unit; otherwise the fence acts at `latest` once R has reached it, and at
 // `prior` before, and a unit passes if that fence is at most its version.
 pub fn release_passes(r: u64, f: Fence, version: u64) -> bool {
-    if r == ROUND_HALTED { return false }
+    if r == ROUND_HALTED || f.latest == ROUND_HALTED { return false }
     let effective = if f.latest <= r { f.latest } else { f.prior }
     effective <= version
 }
@@ -2383,7 +1618,7 @@ type Worker: send { p: u64, digest: store.RequestDigest, version: u64, outcome: 
 
 type Waiting: send { req: Request, parked: bool, held_by_pause: bool }
 
-type Head[G: send, H: send] {
+type Head[G: send, H: shareable + inert + send] {
     db: store.Db,
     r: Registry[G, H],
     replay_identity: Bytes,
@@ -2406,10 +1641,11 @@ type Head[G: send, H: send] {
     trigger_drive: Option[Box[TriggerDrive[G]]]
 }
 
-type Publish[G: send, H: send]: send {
+type Publish[G: send, H: shareable + inert + send]: send {
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     n_place: u64,
     h: H,
+    read_handle: store.Reader,
     base: store.Snapshot,
     from: Receiver[PubIn],
     rounds: RoundRegister,
@@ -2417,8 +1653,8 @@ type Publish[G: send, H: send]: send {
 }
 
 // The publisher task runs `place` itself and tells the head whether it could.
-fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
-    let Publish(place: place, n_place: n_place, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready) = take p
+fn publish[G: send, H: shareable + inert + send](take p: Publish[G, H]) -> () waits {
+    let Publish(place: place, n_place: n_place, h: take h, read_handle: take read_handle, base: take base, from: take from, rounds: take rounds, ready: take ready) = take p
     let r = match placed(place, n_place) {
         Ok(take x) => take x,
         Error(take e) => {
@@ -2429,15 +1665,15 @@ fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
     if let Error(_) = channel.send(ready, None) {
         return
     }
-    publisher(take r, take h, take base, take from, take rounds)
+    publisher(take r, take h, take read_handle, take base, take from, take rounds)
 }
 
 // The head selects the release under the store's LOCK before opening handles.
-pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head[G: send, H: shareable + inert + send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, take inbox, take mail, tasks, n_publisher)
 }
 
-pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
     let persistent = store.is_disk(owned)
     let prepared = head_prepare(mut owned, selection, persistent, place, migrate, handles, n_place, tasks)
@@ -2449,7 +1685,7 @@ pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selec
     Ok(())
 }
 
-fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, take h2: H,
+fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, take h2: H,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: Receiver[HeadInput],
     take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
     let mut owned = take db
@@ -2510,7 +1746,7 @@ fn forward_requests(take forward: Forward) -> () waits {
 
 // A journaled store's syncs wake the head through its inbox (Head.wakes). A store
 // without a journal is durable at commit, so its groups release at close.
-fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]]) {
+fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]]) {
     let mut helpers: List[Task[()]] = list.new()
     let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers) }
     let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
@@ -2536,7 +1772,7 @@ fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: Receiver[HeadInp
     (take woken, take helpers)
 }
 
-fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error], take drained_tables: Option[triggers.Tables]) -> Result[Option[u64], OpenError] waits {
+fn finish_head[G: send, H: shareable + inert + send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error], take drained_tables: Option[triggers.Tables]) -> Result[Option[u64], OpenError] waits {
     let Head(db: take kept, out: take last_word, cut: cut, trigger_drive: take drive, ..) = take head
     let tables = match take drive {
         Some(take scheduled) => Some(stop_triggers(take scheduled)),
@@ -2557,8 +1793,8 @@ fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()
     Ok(due)
 }
 
-fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64], store.Error] {
-    let next = triggers.next_pending(store.snapshot(db), tables, fn(id: triggers.Id) -> bool { false })?
+fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64], store.Error] waits {
+    let next = triggers.next_pending(store.reader(db, 0u64)?, store.snapshot(db), tables, fn(id: triggers.Id) -> bool { false })?
     Ok(match next { Some(pending) => Some(triggers.due_time(pending)), None => None })
 }
 
@@ -2566,17 +1802,17 @@ fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
     match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
 }
 
-fn open_handles[H: send](mut db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
+fn open_handles[H: shareable + inert + send](mut db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
     match store.with_schema(mut db, handles) {
         Ok(take h) => Ok(take h),
         Error(take problem) => Error(Store(take problem)),
     }
 }
 
-fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take h2: H, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
+fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take h2: H, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let (ready, readied): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: place, n_place: n_place, h: take h2, base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
+    let p = Publish(place: place, n_place: n_place, h: take h2, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
     let publishing = task.spawn(tasks, bytes n_publisher, take p, publish)
     match channel.receive(readied) {
         Ok(None) => (),
@@ -2832,7 +2068,7 @@ type HeadDrain {
     clock: Clock, tasks: Tasks, head_to: Sender[HeadInput], n_place: u64, cut: CutActivity, idle: Option[u64],
 }
 
-type ManagedHead[G: send, H: send, S: send]: send {
+type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
     backing: Backing, options: store.Options, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
@@ -2847,7 +2083,7 @@ fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress
     match channel.receive(inbox) { Ok(HeadContinue) => true, _ => false }
 }
 
-fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () waits {
+fn head_ended[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> () waits {
     let to = channel.sender(job.to)
     let ended = managed_head(take job)
     let _ = channel.send(to, HeadEnded(take ended))
@@ -2870,7 +2106,7 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
     Ok((take db, take temporary))
 }
 
-fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
+fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
     let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
         head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
@@ -2924,7 +2160,7 @@ fn head_closed(take db: store.Db) -> Result[Option[u64], StartError] waits {
     Ok(None)
 }
 
-fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persistent: bool,
+fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, H, Bytes, Bytes), OpenError] waits {
     if !store.is_disk(db) {
@@ -3033,7 +2269,7 @@ fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, handles_id: Bytes) -> 
 
 pub type PrepareError: send = Open(OpenError) | Deploy(store.DeployError) | Identity
 
-pub type PrepareConfig[G: send, H: send] {
+pub type PrepareConfig[G: send, H: shareable + inert + send] {
     scratch: Dir,
     options: store.Options,
     attempt: Bytes,
@@ -3111,7 +2347,7 @@ fn prepare_open_result[T](take outcome: Result[T, store.Error]) -> Result[T, Pre
 
 // The process receives its export directory as a scratch capability. It
 // creates no listener or live-store lock.
-pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), PrepareError] waits {
+pub fn prepare_deploy[G: send, H: shareable + inert + send](p: PrepareConfig[G, H]) -> Result[(), PrepareError] waits {
     let source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
     let digest = match launch_digest() {
         Ok(take hash) => take hash,
@@ -3121,7 +2357,7 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
     prepare_export(p, source)
 }
 
-fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Preparation) -> Result[(), PrepareError] waits {
+fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], source: store.Preparation) -> Result[(), PrepareError] waits {
     let registered = match placed(p.place, p.n_place) {
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),
@@ -3148,34 +2384,21 @@ fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Prepar
 
 fn trigger_scan_limit() -> PrepareError { Deploy(Scratch(Limit(Triggers))) }
 
-fn prepare_trigger_scan[G: send, H: send](source: store.Preparation, staged: store.StagedMigration, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] {
-    let scanned = isolate(scoped fn() -> Result[Bytes, PrepareError] {
-        let snapshot = store.staged_snapshot(source, staged)
-        let table = prepare_open_result(triggers.pending_table_if_present(store.snapshot_schema(snapshot)))?
-        let rows = match prepare_open_result(triggers.scan_pending(snapshot, table))? {
-            Some(take cursor) => collect_trigger_scan(take cursor, source, reg, choices, digest)?,
-            None => list.new(),
-        }
-        let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
-        let mut raw: Bytes = list.new()
-        std.codec.encode(codec, rows, mut raw) ?=> |_| trigger_scan_limit()
-        Ok(take raw)
-    })
-    match take scanned {
-        Ok(Ok(Error(Open(Store(Full(Allocation(_))))))) => Error(trigger_scan_limit()),
-        Ok(Ok(take report)) => take report,
-        Error(_) => Error(trigger_scan_limit()),
-        Ok(Error(causes)) => {
-            for cause in causes {
-                if let Capacity(_) = cause.kind { return Error(trigger_scan_limit()) }
-                break
-            }
-            fail("runner: trigger scan failed")
-        },
+fn prepare_trigger_scan[G: send, H: shareable + inert + send](source: store.Preparation, staged: store.StagedMigration, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] waits {
+    let read_handle = prepare_open_result(store.staged_reader(source, 0u64))?
+    let snapshot = store.staged_snapshot(source, staged)
+    let table = prepare_open_result(triggers.pending_table_if_present(store.snapshot_schema(snapshot)))?
+    let rows = match prepare_open_result(triggers.scan_pending(read_handle, snapshot, table))? {
+        Some(take cursor) => collect_trigger_scan(read_handle, take cursor, source, reg, choices, digest)?,
+        None => list.new(),
     }
+    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
+    let mut raw: Bytes = list.new()
+    std.codec.encode(codec, rows, mut raw) ?=> |_| trigger_scan_limit()
+    Ok(take raw)
 }
 
-fn collect_trigger_scan[G: send, H: send](take cursor: triggers.PendingRows, source: store.Preparation, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[List[TriggerScanRow], PrepareError] {
+fn collect_trigger_scan[G: send, H: shareable + inert + send](read_handle: store.Reader, take cursor: triggers.PendingRows, source: store.Preparation, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[List[TriggerScanRow], PrepareError] waits {
     let mut remaining = take cursor
     let raw = match store.export_system_get(source, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes(), 0u8) {
         Ok(take row) => take row,
@@ -3188,7 +2411,7 @@ fn collect_trigger_scan[G: send, H: send](take cursor: triggers.PendingRows, sou
         take prior_entries
     } else { list.new() }
     let mut grouped: Map[(TriggerScanClass, Kind, Bytes, Bytes), (u64, u64)] = map.new()
-    while let Some(take pending) = prepare_open_result(triggers.next_scanned(mut remaining))? {
+    while let Some(take pending) = prepare_open_result(triggers.next_scanned(read_handle, mut remaining))? {
         let class = prepare_open_result(trigger_scan_class(reg, choices, old, pending, digest))?
         let due = triggers.due_time(pending)
         let path: Bytes = clone(triggers.entry_path(pending))
@@ -3207,7 +2430,7 @@ fn collect_trigger_scan[G: send, H: send](take cursor: triggers.PendingRows, sou
     Ok(take rows)
 }
 
-fn trigger_scan_class[G: send, H: send](reg: Registry[G, H], choices: triggers.Entries, old: List[Exported], pending: triggers.Pending, digest: Bytes) -> Result[TriggerScanClass, store.Error] {
+fn trigger_scan_class[G: send, H: shareable + inert + send](reg: Registry[G, H], choices: triggers.Entries, old: List[Exported], pending: triggers.Pending, digest: Bytes) -> Result[TriggerScanClass, store.Error] {
     if triggers.cancelling(pending) { return Ok(Cancelling) }
     if triggers.held_on_start(pending, digest) { return Ok(Held) }
     let Some((_, index)) = trigger_key(reg, pending, choices)? else { return Ok(Gone) }
@@ -3242,7 +2465,7 @@ fn target_release(target: store.PreparedTarget, prepared: Inline[u8, 32]) -> Res
     Ok(ReleaseRecord(release: take release, digest: clone(description.digest), binding: take binding, n_place: description.n_place, prepared: take witness))
 }
 
-fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
+fn cutover_store[G: send, H: shareable + inert + send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
     let binding = match prepare_activation(reg, n_place) {
         Ok((_, ReleaseRecord(binding: take binding, ..))) => take binding,
         Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(Allocation(c)))) },
@@ -3272,7 +2495,7 @@ pub type CutoverOutcome = Installed(u64, Result[(), store.Error]) | Refused(stor
 // The request reaches this point only after the head settles its admitted
 // calls. Once installed, the callback retires publication and the sessions;
 // the caller cannot regain a writer for the old image.
-pub fn cutover[G: send, H: send](take db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64,
+pub fn cutover[G: send, H: shareable + inert + send](take db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64,
     retire: scoped fn(u64) -> () waits) -> CutoverOutcome waits {
     let mut owned = take db
     match cutover_store(mut owned, request, reg, n_place, scoped fn() -> bool { true }) {
@@ -3317,7 +2540,7 @@ fn settle_probe(inbox: Receiver[HeadInput]) -> Option[HeadInput] waits {
     None
 }
 
-fn close_head_admission[G: send, H: send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
+fn close_head_admission[G: send, H: shareable + inert + send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
     let waiting = replace(mut head.waiting, list.new())
     for take entry in take waiting {
         let Waiting(req: take req, ..) = take entry
@@ -3391,7 +2614,7 @@ fn end_write_pause(mut db: store.Db, mut pause: Option[WritePause], control: Hea
     }
 }
 
-fn pause_progress[G: send, H: send](mut head: Head[G, H], mut pause: Option[WritePause], control: HeadDrain, waiting: bool) -> Result[bool, store.Error] waits {
+fn pause_progress[G: send, H: shareable + inert + send](mut head: Head[G, H], mut pause: Option[WritePause], control: HeadDrain, waiting: bool) -> Result[bool, store.Error] waits {
     let deadline = match pause { Some(active) => active.deadline, None => return Ok(false) }
     if !store.cutover_settled(mut head.db)? {
         let now = host.mono_ns(control.clock)
@@ -3434,7 +2657,7 @@ fn pause_progress[G: send, H: send](mut head: Head[G, H], mut pause: Option[Writ
     }
 }
 
-fn head_is_idle[G: send, H: send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] {
+fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] waits {
     if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || store.export_leased(head.db) { return Ok(false) }
     if let Some(drive) = head.trigger_drive {
         if map.len(drive.active) != 0u64 { return Ok(false) }
@@ -3446,7 +2669,7 @@ fn head_is_idle[G: send, H: send](head: Head[G, H], idle: u64) -> Result[bool, s
     Ok(true)
 }
 
-fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: Receiver[HeadInput], take drain: Option[HeadDrain], mut tables: Option[triggers.Tables]) -> Result[bool, store.Error] waits {
+fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take inbox: Receiver[HeadInput], take drain: Option[HeadDrain], mut tables: Option[triggers.Tables]) -> Result[bool, store.Error] waits {
     let mut closed = false
     let mut settled = false
     let mut input: Option[HeadInput] = None
@@ -3624,7 +2847,7 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: Receiver[HeadI
     }
 }
 
-fn head_arrival[G: send, H: send](mut hd: Head[G, H], take message: Req, closed: bool, hold: bool) -> Result[(), store.Error] waits {
+fn head_arrival[G: send, H: shareable + inert + send](mut hd: Head[G, H], take message: Req, closed: bool, hold: bool) -> Result[(), store.Error] waits {
     let Req(e: take e) = take message
     match take e {
         Requested(take q) => {
@@ -3652,7 +2875,7 @@ fn head_arrival[G: send, H: send](mut hd: Head[G, H], take message: Req, closed:
 }
 
 // Read the owner's mark before keeping an old request or admitting replacement work.
-fn refresh_waiting[G: send, H: send](mut hd: Head[G, H], unpark: bool) {
+fn refresh_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], unpark: bool) {
     let mut i = 0u64
     while i < list.len(hd.waiting) {
         if !latest.read(hd.waiting[i].req.live).active {
@@ -3669,7 +2892,7 @@ fn refresh_waiting[G: send, H: send](mut hd: Head[G, H], unpark: bool) {
 // H1: a request for its stream's worker position joins the waiters if its digest equals the
 // worker's, and is otherwise answered Refused(RequestMismatch) as V3 without running (v2.11.3);
 // another position waits.
-fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed: bool) -> Result[(), store.Error] waits {
+fn route_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, closed: bool) -> Result[(), store.Error] waits {
     let running = match map.get(hd.busy, q.stream) {
         Some(w) => Some((w.p, w.digest == q.digest)),
         None => None,
@@ -3698,7 +2921,7 @@ fn route_admission[G: send, H: send](mut hd: Head[G, H], take q: Request, closed
 }
 
 // The first unparked waiting request whose stream has no worker starts.
-fn next_waiting[G: send, H: send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
+fn next_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
     let mut i = 0u64
     while i < list.len(hd.waiting) {
         if !hd.waiting[i].parked && !map.contains(hd.busy, hd.waiting[i].req.stream) {
@@ -3723,7 +2946,7 @@ fn next_waiting[G: send, H: send](mut hd: Head[G, H], drain: Option[HeadDrain]) 
 // ran these bytes (AH2), and at latest another digest is not this request (AH1): both are
 // answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
 // neither marks the stream.
-fn begin[G: send, H: send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
+fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
     let a = match store.admit(mut hd.db, q.stream, q.p, q.digest) {
         Ok(take x) => take x,
         Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
@@ -3791,18 +3014,14 @@ fn failed_stop(stop: store.Stop) -> Outcome {
 
 type Effect = Served(Result[store.Served, store.ServeError]) | Unregistered(store.Pending)
 
-fn run_effect[G: send, H: send](mut db: store.Db, identity: Bytes, locations: Registry[G, H],
+fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: Bytes, locations: Registry[G, H],
         handles: H, q: Request, take complete: store.Completion) -> Result[Effect, store.Error] waits {
     match map.get(locations.slots, q.key) {
         Some(Transact(n, s, revision, _, go)) => {
             let rec = record_request(q, revision, n, s, identity)?
             // The stored Outcome adds a four-byte tag and a four-byte length.
             let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-            Ok(Served(store.serve(mut db, take complete, plan, Some(take rec),
-                scoped fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
-                    let outcome = go(mut tx, handles, q.caller, q.arg)
-                    encode_entry_reply(mut tx, take outcome)
-                })))
+            Ok(Served((go.serve)(mut db, take complete, plan, take rec, handles, q.caller, q.arg)))
         },
         _ => {
             let attempted = store.next_call_info(db)
@@ -3811,7 +3030,7 @@ fn run_effect[G: send, H: send](mut db: store.Db, identity: Bytes, locations: Re
     }
 }
 
-fn execute[G: send, H: send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
+fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
     let tried = run_effect(mut hd.db, hd.replay_identity, hd.r, hd.h, q, take complete)
     let ran = match take tried {
         Ok(Served(take result)) => take result,
@@ -3830,7 +3049,7 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Request, take complete:
     }
 }
 
-fn answered[G: send, H: send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
+fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let version = store.version(store.snapshot(hd.db))
     match std.codec.decode(co, receipt.reply) {
@@ -3839,7 +3058,7 @@ fn answered[G: send, H: send](mut hd: Head[G, H], take q: Request, take receipt:
     }
 }
 
-fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take pending_run: store.Pending, take outcome: Outcome) -> Result[(), store.Error] waits {
+fn reply_only[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take pending_run: store.Pending, take outcome: Outcome) -> Result[(), store.Error] waits {
     let wire_bytes = encode_runner_reply(outcome)?
     let settled = store.conclude(mut hd.db, take pending_run, take wire_bytes, Resident)
     match take settled {
@@ -3855,7 +3074,7 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Request, take pendin
     }
 }
 
-fn duplicate_reply[G: send, H: send](mut hd: Head[G, H], take q: Request, stored: store.Stored) -> Result[(), store.Error] waits {
+fn duplicate_reply[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, stored: store.Stored) -> Result[(), store.Error] waits {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let outcome = match std.codec.decode(co, stored.reply) {
         Ok(take value) => take value,
@@ -3865,7 +3084,7 @@ fn duplicate_reply[G: send, H: send](mut hd: Head[G, H], take q: Request, stored
     commitless(mut hd, take q, take outcome)
 }
 
-fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
+fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
     let mut waiters: List[Recipient] = list.new()
@@ -3879,7 +3098,7 @@ fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome
 
 // V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
 // Release on the one FIFO to the publisher, held ones included.
-fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
+fn commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[Answer] = list.new()
@@ -3895,17 +3114,17 @@ fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Out
 
 type Held = Sealed(store.Ticket, u64, store.Snapshot, List[Bytes]) | Loose(Release)
 
-fn publish_release[G: send, H: send](mut hd: Head[G, H], take release: Release) waits {
+fn publish_release[G: send, H: shareable + inert + send](mut hd: Head[G, H], take release: Release) waits {
     if let Error(_) = channel.send(hd.out, PubIn(e: Released(take release))) { hd.cut = true }
 }
 
-fn unreleased[G: send, H: send](hd: Head[G, H]) -> bool {
+fn unreleased[G: send, H: shareable + inert + send](hd: Head[G, H]) -> bool {
     !none(hd.last) || list.len(hd.held) != 0u64
 }
 
 // H3: the open group closes behind the held ones with the version and snapshot it
 // committed; later commits never reach its Release.
-fn close_group[G: send, H: send](mut hd: Head[G, H]) {
+fn close_group[G: send, H: shareable + inert + send](mut hd: Head[G, H]) {
     if let Some(t) = replace(mut hd.last, None) {
         let at = store.snapshot(hd.db)
         let d = store.version(at)
@@ -3917,7 +3136,7 @@ fn close_group[G: send, H: send](mut hd: Head[G, H]) {
 // V4: held entries leave in order, each group only once its own sync covers its last
 // commit, with every worker's answer in commit order and the waiters that joined it.
 // With `wait` each sync is awaited; otherwise the first unsynced group stops the scan.
-fn release_held[G: send, H: send](mut hd: Head[G, H], wait: bool) -> Result[(), store.Error] waits {
+fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: bool) -> Result[(), store.Error] waits {
     while list.len(hd.held) != 0u64 {
         let ticket = match hd.held[0] { Sealed(t, ..) => Some(t), Loose(_) => None }
         if let Some(t) = ticket {
@@ -3948,7 +3167,7 @@ fn release_held[G: send, H: send](mut hd: Head[G, H], wait: bool) -> Result[(), 
 }
 
 // H3, V4: every commit so far is durable and released, in commit order.
-fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
+fn gate[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
     close_group(mut hd)
     release_held(mut hd, true)
 }
@@ -3963,7 +3182,7 @@ type TriggerAction: send =
     Invoke(triggers.Attempt, Bytes, Bytes, Sender[Result[Outcome, TriggerCallError]])
     | Boundary(triggers.Attempt, Sender[Result[(), TriggerCallError]])
     | MarkHold(triggers.Attempt, u64, Bytes, Bytes, Sender[Result[(), TriggerCallError]])
-    | Snap(triggers.Attempt, Sender[Result[store.Snapshot, TriggerCallError]])
+    | Snap(triggers.Attempt, Sender[Result[(store.Reader, store.Snapshot), TriggerCallError]])
 
 pub opaque type TriggerInput: send { action: TriggerAction }
 
@@ -3991,8 +3210,8 @@ pub fn trigger_boundary(ctx: TriggerContext) -> Result[(), TriggerCallError] wai
 // A granted run reads the store through a read-only snapshot taken by the
 // head after the release gate and the attempt fence. A fenced-out attempt
 // gets StaleAttempt and never sees a snapshot.
-pub fn trigger_snapshot(ctx: TriggerContext) -> Result[store.Snapshot, TriggerCallError] waits {
-    trigger_request(ctx, (), fn(a: triggers.Attempt, take p: (), take to: Sender[Result[store.Snapshot, TriggerCallError]]) -> TriggerAction {
+pub fn trigger_snapshot(ctx: TriggerContext) -> Result[(store.Reader, store.Snapshot), TriggerCallError] waits {
+    trigger_request(ctx, (), fn(a: triggers.Attempt, take p: (), take to: Sender[Result[(store.Reader, store.Snapshot), TriggerCallError]]) -> TriggerAction {
         Snap(a, take to)
     })
 }
@@ -4061,14 +3280,14 @@ fn make_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: T
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
+fn open_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
     if let Some(take configured) = take config {
         if !triggers.is_empty(configured.entries) {
             return Ok(Some(make_trigger_drive(mut db, clock, tasks, take to, trigger_stamp(exported, n_place)?, take configured)?))
         }
     }
     let snapshot = store.snapshot(db)
-    let Some(_) = triggers.tables_for_settlement(store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
+    let Some(_) = triggers.tables_for_settlement(store.reader(db, 0u64)?, store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
     let tables = store.with_schema(mut db, code.describe(triggers.tables))?
     let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(exported, n_place)?, clock: clock, tasks: tasks, to: take to,
         entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
@@ -4093,7 +3312,7 @@ fn arm_wall_timer(take prior: Option[ArmedTimer], tasks: Tasks, c: Clock, to: Se
     ArmedTimer(at: at, task_handle: take waiting)
 }
 
-fn clear_trigger_timer[G: send, H: send](mut hd: Head[G, H], at: u64) -> () waits {
+fn clear_trigger_timer[G: send, H: shareable + inert + send](mut hd: Head[G, H], at: u64) -> () waits {
     let Some(take drive) = replace(mut hd.trigger_drive, None) else { return () }
     let mut owned = take drive
     let clear = match owned.timer { Some(armed) => armed.at == at, None => false }
@@ -4126,7 +3345,7 @@ fn trigger_matches(p: triggers.Pending, entry: Described) -> bool {
     matches_kind && triggers.matches(p, entry.identity, entry.args)
 }
 
-fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[(Bytes, u64)], store.Error] {
+fn trigger_key[G: send, H: shareable + inert + send](r: Registry[G, H], p: triggers.Pending, choices: triggers.Entries) -> Result[Option[(Bytes, u64)], store.Error] {
     if !triggers.is_allowed(p, choices) { return Ok(None) }
     for index in 0u64 .. list.len(r.exported) {
         let entry = view r.exported[index]
@@ -4155,7 +3374,7 @@ fn trigger_commit[R](take ran: Result[store.Outcome[R, triggers.Error], store.Er
     }
 }
 
-fn publish_trigger[G: send, H: send](mut hd: Head[G, H], ticket: store.Ticket) -> Result[(), store.Error] waits {
+fn publish_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], ticket: store.Ticket) -> Result[(), store.Error] waits {
     hd.last = Some(ticket)
     gate(mut hd)
 }
@@ -4173,7 +3392,7 @@ fn trigger_terminal(take outcome: Outcome) -> triggers.Terminal {
     }
 }
 
-fn run_trigger_transaction[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, take key: Option[Bytes]) -> Result[bool, store.Error] waits {
+fn run_trigger_transaction[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, take key: Option[Bytes]) -> Result[bool, store.Error] waits {
     let completed = invoke_trigger_transaction(mut hd.db, hd.r, hd.h, drive, p, key)?
     let final = match take completed {
         TriggerApplied(ticket) => { publish_trigger(mut hd, ticket)?; return Ok(true) },
@@ -4182,8 +3401,8 @@ fn run_trigger_transaction[G: send, H: send](mut hd: Head[G, H], mut drive: Box[
     }
     // The draft that returned an error or fault left no writes. Only this
     // settlement commits, and it consumes the row with the outcome.
-    let collected = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        triggers.finish_transact(mut tx, drive.tables, p, final)
+    let collected = store.run(mut hd.db, None, (store.copy_env(drive.tables), store.copy_env(p), store.copy_env(final)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+        triggers.finish_transact(mut tx, call_env.0, call_env.1, call_env.2)
     })
     let committed = trigger_commit(take collected)?
     publish_trigger(mut hd, committed.ticket)?
@@ -4192,26 +3411,10 @@ fn run_trigger_transaction[G: send, H: send](mut hd: Head[G, H], mut drive: Box[
 
 type TriggerDraft = TriggerApplied(store.Ticket) | TriggerSettled(triggers.Terminal) | TriggerNotDue
 
-fn invoke_trigger_transaction[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, drive: Box[TriggerDrive[G]], p: triggers.Pending, key: Option[Bytes]) -> Result[TriggerDraft, store.Error] waits {
+fn invoke_trigger_transaction[G: send, H: shareable + inert + send](mut db: store.Db, r: Registry[G, H], h: H, drive: Box[TriggerDrive[G]], p: triggers.Pending, key: Option[Bytes]) -> Result[TriggerDraft, store.Error] waits {
     let slot = match key { Some(wanted) => map.get(r.slots, wanted), None => None }
-    let terminal: triggers.Terminal = if let Some(Transact(n, steps, _, _, go)) = slot {
-        let ran = store.run(mut db, Some(steps), scoped fn(mut tx: store.Tx) -> Result[(), TriggerBodyError] {
-            // The wall can move backwards between the scheduler's sample
-            // and this transaction. The body sees this CallInfo, so use it.
-            if store.info(mut tx).at < triggers.due_time(p) { return Error(NotDue) }
-            let body = bound bytes n { go(mut tx, h, drive.author, triggers.argument(p)) }
-            let terminal: triggers.Terminal = match take body {
-                Ok(Commit(take payload)) => Returned(take payload),
-                Ok(Abort(take payload)) => return Error(Terminal(Returned(take payload))),
-                Ok(Exhausted(cap)) => return Error(Terminal(OutOfBytes(cap.requested, cap.available))),
-                Ok(Refuse(_)) => return Error(Terminal(Gone)),
-                Error(cap) => return Error(Terminal(OutOfBytes(cap.requested, cap.available))),
-            }
-            match triggers.finish_transact(mut tx, drive.tables, p, terminal) {
-                Ok(()) => Ok(()),
-                Error(take problem) => Error(Store(take problem)),
-            }
-        })
+    let terminal: triggers.Terminal = if let Some(Transact(_, _, _, _, go)) = slot {
+        let ran = (go.trigger)(mut db, h, drive.author, drive.tables, p)
         match take ran {
             Ok(Committed(committed)) => return Ok(TriggerApplied(committed.ticket)),
             Ok(Aborted(store.Undone(value: Terminal(take terminal), ..))) => take terminal,
@@ -4260,7 +3463,7 @@ fn watch_granted[G: send, A, R](take watched: WatchedJob[G, A, R]) -> Outcome wa
     Abandoned
 }
 
-fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
+fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
     let Some(Granted(bind)) = map.get(r.slots, key) else { return Error(NoEntry) }
     let go = bind().go
     let grant_to = match drive.grants {
@@ -4287,9 +3490,9 @@ fn launch_trigger[G: send, H: send](r: Registry[G, H], mut drive: Box[TriggerDri
     }
 }
 
-fn finish_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, outcome: triggers.Terminal) -> Result[(), store.Error] waits {
-    let settled = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        triggers.finish(mut tx, drive.tables, a, outcome)
+fn finish_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, outcome: triggers.Terminal) -> Result[(), store.Error] waits {
+    let settled = store.run(mut hd.db, None, (store.copy_env(a), store.copy_env(drive.tables), store.copy_env(outcome)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+        triggers.finish(mut tx, call_env.1, call_env.0, call_env.2)
     })
     match take settled {
         Ok(Aborted(store.Undone(value: StaleAttempt, ..))) => Ok(()),
@@ -4300,9 +3503,9 @@ fn finish_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[
     }
 }
 
-fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]]) -> Result[bool, store.Error] waits {
+fn advance_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]]) -> Result[bool, store.Error] waits {
     let snapshot = store.snapshot(hd.db)
-    let next = triggers.next_pending(snapshot, drive.tables, scoped fn(id: triggers.Id) -> bool { map.contains(drive.active, id) })?
+    let next = triggers.next_pending(store.reader(hd.db, 0u64)?, snapshot, drive.tables, scoped fn(id: triggers.Id) -> bool { map.contains(drive.active, id) })?
     let Some(take p) = take next else { return Ok(false) }
     let due = triggers.due_time(p)
     if store.next_call_info(hd.db).at < due {
@@ -4312,8 +3515,8 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
     if unreleased(hd) { gate(mut hd)? }
     if hd.cut { return Ok(false) }
     if triggers.cancelling(p) {
-        let settled = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-            triggers.finish_cancel(mut tx, drive.tables, p)
+        let settled = store.run(mut hd.db, None, (store.copy_env(drive.tables), store.copy_env(p)), fn(mut tx, call_env) -> Result[(), triggers.Error] {
+            triggers.finish_cancel(mut tx, call_env.0, call_env.1)
         })
         let committed = trigger_commit(take settled)?
         publish_trigger(mut hd, committed.ticket)?
@@ -4326,8 +3529,9 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
     if !triggers.is_granted(p) {
         return run_trigger_transaction(mut hd, mut drive, p, take key)
     }
-    let ran = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Started, triggers.Error] {
-        triggers.start(mut tx, drive.tables, p, drive.revision)
+    let revision: Bytes = clone(drive.revision)
+    let ran = store.run(mut hd.db, None, (store.copy_env(drive.tables), store.copy_env(p), take revision), fn(mut tx, call_env) -> Result[triggers.Started, triggers.Error] {
+        triggers.start(mut tx, call_env.0, call_env.1, call_env.2)
     })
     let committed = match take ran {
         Ok(Aborted(store.Undone(value: NotDue, ..))) => {
@@ -4351,7 +3555,7 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
     Ok(true)
 }
 
-fn advance_triggers[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+fn advance_triggers[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
     let Some(take selected) = replace(mut hd.trigger_drive, None) else { return Ok(false) }
     let mut drive = take selected
     let advanced = advance_trigger(mut hd, mut drive)
@@ -4359,7 +3563,7 @@ fn advance_triggers[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.
     take advanced
 }
 
-fn trigger_done[G: send, H: send](mut hd: Head[G, H], a: triggers.Attempt, take outcome: Option[Outcome], closed: bool) -> Result[(), store.Error] waits {
+fn trigger_done[G: send, H: shareable + inert + send](mut hd: Head[G, H], a: triggers.Attempt, take outcome: Option[Outcome], closed: bool) -> Result[(), store.Error] waits {
     let Some(take selected) = replace(mut hd.trigger_drive, None) else { return Ok(()) }
     let mut drive = take selected
     let watched = map.remove(mut drive.active, triggers.run_id(a))
@@ -4373,7 +3577,7 @@ fn trigger_done[G: send, H: send](mut hd: Head[G, H], a: triggers.Attempt, take 
     take completed
 }
 
-fn trigger_message[G: send, H: send](mut hd: Head[G, H], take pending: Box[TriggerInput], closed: bool) -> Result[(), store.Error] waits {
+fn trigger_message[G: send, H: shareable + inert + send](mut hd: Head[G, H], take pending: Box[TriggerInput], closed: bool) -> Result[(), store.Error] waits {
     let TriggerInput(action: take action) = box.unbox(take pending)
     let Some(take drive) = replace(mut hd.trigger_drive, None) else { return Ok(()) }
     let result = answer_trigger(mut hd, drive, take action, closed)
@@ -4390,7 +3594,7 @@ fn checked_boundary(take seen: Result[bool, triggers.Error]) -> Result[(), Trigg
     }
 }
 
-fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], take action: TriggerAction, closed: bool) -> Result[(), store.Error] waits {
+fn answer_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], take action: TriggerAction, closed: bool) -> Result[(), store.Error] waits {
     if unreleased(hd) { gate(mut hd)? }
     let stopped = closed || hd.cut
     match take action {
@@ -4401,7 +3605,7 @@ fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[
         },
         Boundary(a, take answer) => {
             let reply: Result[(), TriggerCallError] = if stopped { Error(Closed) } else {
-                checked_boundary(triggers.boundary(store.snapshot(hd.db), drive.tables, a))
+                checked_boundary(triggers.boundary(store.reader(hd.db, 0u64)?, store.snapshot(hd.db), drive.tables, a))
             }
             let _ = channel.send(answer, take reply)
         },
@@ -4412,10 +3616,11 @@ fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[
             let _ = channel.send(answer, take reply)
         },
         Snap(a, take answer) => {
-            let reply: Result[store.Snapshot, TriggerCallError] = if stopped { Error(Closed) } else {
+            let reply: Result[(store.Reader, store.Snapshot), TriggerCallError] = if stopped { Error(Closed) } else {
                 let seen = store.snapshot(hd.db)
-                match checked_boundary(triggers.boundary(seen, drive.tables, a)) {
-                    Ok(()) => Ok(seen),
+                let read_handle = store.reader(hd.db, store.VALUE_LIMIT + 1048576u64)?
+                match checked_boundary(triggers.boundary(read_handle, seen, drive.tables, a)) {
+                    Ok(()) => Ok((take read_handle, seen)),
                     Error(take problem) => Error(take problem),
                 }
             }
@@ -4425,9 +3630,9 @@ fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[
     Ok(())
 }
 
-fn mark_trigger_hold[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, position: u64, expected: Bytes, actual: Bytes) -> Result[Result[(), TriggerCallError], store.Error] waits {
-    let written = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), TriggerCallError] {
-        match triggers.hold(mut tx, drive.tables, a, position, expected, actual) {
+fn mark_trigger_hold[G: send, H: shareable + inert + send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], a: triggers.Attempt, position: u64, expected: Bytes, actual: Bytes) -> Result[Result[(), TriggerCallError], store.Error] waits {
+    let written = store.run(mut hd.db, None, (store.copy_env(a), store.copy_env(actual), store.copy_env(drive.tables), store.copy_env(expected), store.copy_env(position)), fn(mut tx, call_env) -> Result[(), TriggerCallError] {
+        match triggers.hold(mut tx, call_env.2, call_env.0, call_env.4, call_env.3, call_env.1) {
             Ok(()) => Ok(()),
             Error(Store(take problem)) => Error(Store(take problem)),
             Error(CancelRequested) => Error(Cancelled),
@@ -4443,7 +3648,7 @@ fn mark_trigger_hold[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDri
     }
 }
 
-fn trigger_effect[G: send, H: send](mut hd: Head[G, H], trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[Result[Outcome, TriggerCallError], store.Error] waits {
+fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[Result[Outcome, TriggerCallError], store.Error] waits {
     let invoked = apply_attempt(mut hd.db, hd.r, hd.h, trigger_tables, author, a, key, arg)
     match take invoked {
         Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
@@ -4473,36 +3678,15 @@ pub fn journal_attempt_gate(take db: store.Db, take registered: Registry[(), ()]
     (take kept, at, take response)
 }
 
-pub fn apply_attempt[G: send, H: send](mut db: store.Db, registered: Registry[G, H], h: H, trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
-    let slot = map.get(registered.slots, key)
-    let steps = match slot { Some(Transact(_, limit, _, _, _)) => Some(limit), Some(Fenced(_, limit, _)) => Some(limit), _ => None }
-    store.run(mut db, steps, scoped fn(mut tx: store.Tx) -> Result[Outcome, FencedRefusal] {
-        match triggers.fence(tx, trigger_tables, a) {
-            Ok(false) => (),
-            Ok(true) => return Error(Refusal(Cancelled)),
-            Error(StaleAttempt) => return Error(Refusal(StaleAttempt)),
-            Error(Store(take problem)) => return Error(Refusal(Store(take problem))),
-            Error(_) => return Error(Refusal(StaleAttempt)),
-        }
-        if let Some(Fenced(n, _, go)) = slot {
-            let ran = bound bytes n { go(mut tx, a, arg) }
-            return match take ran {
-                Ok(Ok(take payload)) => Ok(Returned(take payload)),
-                Ok(Error(take problem)) => Error(Refusal(Store(take problem))),
-                Error(cap) => Error(Refusal(Capacity(cap))),
-            }
-        }
-        if let Some(Transact(n, _, _, _, go)) = slot {
-            let ran = bound bytes n { go(mut tx, h, author, arg) }
-            match take ran {
-                Ok(Commit(take payload)) => Ok(Returned(take payload)),
-                Ok(Abort(take payload)) => Error(BodyOutcome(Returned(take payload))),
-                Ok(Refuse(take refusal)) => Error(BodyOutcome(Refused(take refusal))),
-                Ok(Exhausted(cap)) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
-                Error(cap) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
-            }
-        } else { Error(BodyOutcome(Refused(NoEntry))) }
-    })
+pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, registered: Registry[G, H], h: H, trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
+    match map.get(registered.slots, key) {
+        Some(Transact(_, _, _, _, go)) => (go.attempt)(mut db, h, author, trigger_tables, a, arg),
+        Some(Fenced(_, _, go)) => go(mut db, trigger_tables, a, arg),
+        _ => store.run(mut db, None, (store.copy_env(trigger_tables), store.copy_env(a)), fn(mut tx, env) -> Result[Outcome, FencedRefusal] {
+            check_attempt(tx, env.0, env.1)?
+            Error(BodyOutcome(Refused(NoEntry)))
+        }),
+    }
 }
 
 // ---- The publisher, on its one inbox. A Release with a snapshot runs one G2 round to it
@@ -4520,7 +3704,7 @@ pub fn apply_attempt[G: send, H: send](mut db: store.Db, registered: Registry[G,
 // Ended keeps the version it was computed at when it is folded into later content.
 // v2.22: `handed` counts the `complete`s the owner's inbox took, and `taken` is the owner's
 // count of those it no longer holds unsent; a due session is repaired only when they agree.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -4533,9 +3717,9 @@ fn offer(to: Sender[WireEvent], take e: Notice) -> Offered {
     }
 }
 
-fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister) -> () waits {
+fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take h: H, take read_handle: store.Reader, take base: store.Snapshot, take from: Receiver[PubIn], take register: RoundRegister) -> () waits {
     let mut at = store.version(base)
-    let mut b = Board(r: take r, h: take h, base: take base, newest: None, subs: subscriptions())
+    let mut b = Board(r: take r, h: take h, read_handle: take read_handle, reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
     let mut joined: List[Joiner] = list.new()
     let mut waiting: List[Replies] = list.new()
     let mut minted = 0u64
@@ -4604,7 +3788,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64))
+                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                         // v2.22: the Subscribe that made the owner join, at this base (G3).
                         if let Some(take f) = take first {
@@ -4640,26 +3824,55 @@ type Fenced { sessions: List[u64], all: bool }
 // its reservation. A publisher that cannot is stopped, which publishes R = u64::MAX as it is
 // cleaned (RoundRegister), and the head ends the place when its next Release is refused.
 fn fence_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds: RoundRegister) {
+    fence_before_round(mut joined, take fenced, b, mut rounds, fn() {})
+}
+
+fn fence_before_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds: RoundRegister, before_release: scoped fn()) {
     let Fenced(sessions: take sessions, all: all) = take fenced
     let mut i = 0u64
     while i < list.len(joined) {
         if all || list.contains(sessions, joined[i].who) {
-            if let Some(take held) = replace(mut joined[i].fence, None) {
-                let mut fences = take held
-                let published = fence_advance(mut fences, b)
-                joined[i].fence = Some(take fences)
-                if !published { fail("release check: no fence Arc for the round") }
-            }
+            publish_session_fence(mut joined[i], b)
         }
         i += 1u64
     }
+    before_release()
     if !round_advance(mut rounds, b, list.len(joined)) { fail("release check: no round Arc for the round") }
 }
 
-fn publish_wire_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) {
+fn publish_session_fence(mut j: Joiner, version: u64) {
+    if let Some(take held) = replace(mut j.fence, None) {
+        let mut fences = take held
+        let published = fence_advance(mut fences, version)
+        j.fence = Some(take fences)
+        if !published { fail("release check: no fence Arc for the round") }
+    }
+}
+
+fn retire_read_failure(mut j: Joiner) {
+    publish_session_fence(mut j, ROUND_HALTED)
+}
+
+fn reset_waiting(joined: List[Joiner], owner: u64) -> bool {
+    for j in joined {
+        if j.read_failed {
+            if let Some(identity) = j.identity {
+                if latest.read(identity).number == owner { return true }
+            }
+        }
+    }
+    false
+}
+
+fn publish_wire_subscription[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) waits {
     if let Some(i) = joiner(joined, who) {
         unend(mut joined[i].ended, sub)
-        list.push(mut owes, at_base_generation(mut b, who, sub, generation, take input))
+        let next = at_base_generation(mut b, who, sub, generation, take input)
+        if next.read_failed {
+            retire_read_failure(mut joined[i])
+            end_session(mut b.subs, who)
+        }
+        list.push(mut owes, take next)
     }
 }
 
@@ -4716,7 +3929,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             continue
         }
         let owner = match joined[i].identity { Some(id) => latest.read(id).number, None => 0u64 }
-        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
+        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false, read_failed: false)
         while content_index < list.len(contents) && contents[content_index].session < who {
             content_index += 1u64
         }
@@ -4736,6 +3949,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             let _ = replace(mut next.rows, list.new())
             let _ = replace(mut next.ended, list.new())
             next.reset = true
+            next.read_failed = next.read_failed || joined[i].read_failed
             end_session(mut subs, who)
             joined[i].due = false
         } else if list.len(old) > 0u64 {
@@ -4747,6 +3961,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             }
         }
         joined[i].reset = false
+        joined[i].read_failed = false
         let (take recipient, take rows) = match reply_bucket(waiting, owner) {
             Some(k) => {
                 let Replies(recipient: take r, rows: take rows) = list.remove(mut waiting, k)
@@ -4782,6 +3997,10 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
     let retry = replace(mut waiting, take bounced)
     for take bucket in retry {
         let Replies(recipient: take recipient, rows: take rows) = take bucket
+        if reset_waiting(joined, recipient.owner) {
+            list.push(mut waiting, Replies(recipient: take recipient, rows: take rows))
+            continue
+        }
         if let Bounced(Notice(e: Updated(Update(version: _, content: _, outcomes: take back)))) = offer(recipient.to, update(at, None, take rows)) {
             list.push(mut waiting, Replies(recipient: take recipient, rows: take back))
         }
@@ -4791,11 +4010,12 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: computed, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: who, version: computed, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
     if reset || j.reset {
         j.reset = true
+        j.read_failed = j.read_failed || failed
         j.ended = list.new()
         j.ended_at = ROUND_HALTED
         return
@@ -4818,7 +4038,7 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
 // channel) reruns each due sub at the base, with its generation and input, into its owe as a
 // complete. Removing the sub drops its old read set: any commit since that read set's run
 // that hit it has fenced the session, and if none did the rerun reads the same keys.
-fn repair[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe]) {
+fn repair[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe]) waits {
     let at = store.version(b.base)
     let mut i = 0u64
     while i < list.len(joined) {
@@ -4832,15 +4052,72 @@ fn repair[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut ow
             joined[i].progressed = false
             let who = joined[i].who
             for sub in due_subs(b.subs, who) {
-                let Some(take old) = remove_sub(mut b.subs, who, sub) else { continue }
-                let Sub(generation: generation, input: take input, cover: _, routes: _, due: _) = take old
-                let fresh = at_base_generation(mut b, who, sub, generation, take input)
+                let fresh = repair_entry(mut b, who, sub, at)
                 let k = owe(mut owes, who, at)
+                if fresh.read_failed {
+                    retire_read_failure(mut joined[i])
+                    reset_session(mut b.subs, mut owes, who, at)
+                    owes[k].read_failed = true
+                    break
+                }
                 merge_owe(mut owes[k], take fresh)
             }
         }
         i += 1u64
     }
+}
+
+fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, at: u64) -> Owe waits {
+    let mut owes: List[Owe] = list.new()
+    let _ = owe(mut owes, who, at)
+    let rows = match row_log() {
+        Ok(take output) => take output,
+        Error(problem) => {
+            if let Some(entry) = sub_at(b.subs, who, sub) {
+                list.push(mut owes[0u64].ended, (sub, entry.generation, Refused(Budget(room(problem)))))
+            }
+            end_entry(mut b.subs, who, sub)
+            return list.remove(mut owes, 0u64)
+        },
+    }
+    let (id, generation, take fresh) = {
+        let Some(entry) = sub_at(b.subs, who, sub) else { return list.remove(mut owes, 0u64) }
+        let id = SubId(who: who, sub: sub, serial: entry.routes[0u64].serial)
+        let read = run_query(b.r, b.h, b.reads, b.read_handle, b.base, entry.input, b.base, None, sub, rows)
+        (id, entry.generation, take read)
+    }
+    match take fresh {
+        Covered(Viewed(cover: take c, reads: take reads)) => {
+            match replace_routes(mut b.subs, id, Some(take c), take reads) {
+                Ok(()) => {
+                    clear_due(mut b.subs, id)
+                    owes[0u64].rows = read_rows(take rows)
+                    stamp_rows(mut owes[0u64].generations, sub, generation)
+                    list.push(mut owes[0u64].complete, sub)
+                },
+                Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(room(problem)))),
+            }
+        },
+        Stopped(take why) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
+        Faulted(take why, take reads) => match replace_routes(mut b.subs, id, None, take reads) {
+            Ok(()) => {
+                clear_due(mut b.subs, id)
+                list.push(mut owes[0u64].ended, (sub, generation, take why))
+            },
+            Error(_) => { owes[0u64].reset = true },
+        },
+        Lost(problem) => {
+            owes[0u64].reset = true
+            owes[0u64].read_failed = read_failed(problem)
+        },
+    }
+    list.remove(mut owes, 0u64)
+}
+
+fn clear_due(mut subs: Subscriptions, id: SubId) {
+    let _ = map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, id.sub, scoped fn(mut entry: Sub) { entry.due = false })
+    })
 }
 
 // v2.22 (§3 "Repair"): the owner holds no `complete` it took and has not sent. A session with
@@ -4850,9 +4127,10 @@ fn caught_up(j: Joiner) -> bool {
 }
 
 fn merge_owe(mut into: Owe, take from: Owe) {
-    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take from
+    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take from
     if v < into.version { into.version = v }
     if reset { into.reset = true }
+    into.read_failed = into.read_failed || failed
     for g in generations { list.push(mut into.generations, g) }
     for sub in complete { list.push(mut into.complete, sub) }
     for take r in rows { list.push(mut into.rows, take r) }
@@ -5008,7 +4286,7 @@ fn slot_key(stream: Bytes, p: u64) -> Bytes {
 // keeps them, and the owner drops their rows and Endeds until a Batch completes the sub's
 // resubscription, an Ended ends it, or a Reset ends them all.
 fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32], take outcomes: List[KeyedDone]) -> () waits {
-    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
     if reset {
         list.clear(mut dropped)
         let _ = channel.send(to, KeyedReset(v, take outcomes))
@@ -5075,8 +4353,8 @@ fn word(v: u8) -> Bytes {
 }
 
 fn set(mut db: store.Db, t: store.Table[u64, u64], k: u64, v: u64) -> () waits {
-    let done = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, t, k, v)
+    let done = store.run(mut db, None, (store.copy_env(k), store.copy_env(t), store.copy_env(v)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.1, call_env.0, call_env.2)
     })
     match take done {
         Ok(Committed(_)) => (),
@@ -5133,7 +4411,7 @@ fn apply(mut c: Client, take o: Owe) -> bool {
         drop_cache(mut c, o.session, sub)
         list.push(mut c.caches, Cached(who: o.session, sub: sub, rows: map.new()))
     }
-    let Owe(session: who, version: _, generations: _, complete: _, rows: take rows, ended: take ended, reset: _) = take o
+    let Owe(session: who, version: _, generations: _, complete: _, rows: take rows, ended: take ended, ..) = take o
     for take row in rows {
         let Row(sub: sub, key: take key, value: take value) = take row
         let k = match cached(c, who, sub) {
@@ -5192,7 +4470,7 @@ fn holds(c: Client, keys: List[Bytes], who: u64, sub: u32, row0: Option[u8], row
     map.len(rows) == n
 }
 
-fn step[G: send, H: send](mut b: Board[G, H], db: store.Db) -> List[Owe] {
+fn step[G: send, H: shareable + inert + send](mut b: Board[G, H], db: store.Db) -> List[Owe] waits {
     b.newest = Some(store.snapshot(db))
     let mut fenced = Fenced(sessions: list.new(), all: false)
     round(mut b, mut fenced)
@@ -6356,20 +5634,20 @@ fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
     match lifecycle { Some(control) => closing_at(control.window, clock), _ => false }
 }
 
-type ServePlace[G: send, H: send, B: send]: send {
+type ServePlace[G: send, H: shareable + inert + send, B: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, random: Random, wire: Option[Wire[G, B]],
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[HeadInput],
     inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]],
 }
 
-fn run_serve_place[G: send, H: send, B: send](take seed: ServePlace[G, H, B]) -> () waits {
+fn run_serve_place[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> () waits {
     let events = channel.sender(seed.events)
     let serving = supervise_serve(take seed)
     let _ = channel.send(events, ServeEnded(take serving))
 }
 
-fn supervise_serve[G: send, H: send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
+fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
     let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
         max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write) = take seed
@@ -6548,7 +5826,7 @@ fn limited_reply(take b: Bytes) -> Outcome {
     } else { Returned(take b) }
 }
 
-fn register_check[G: send, H: send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
+fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
     let check = fn(arg: Bytes) -> Option[Refusal] {
         let seen = bound bytes n {
             let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
@@ -6578,7 +5856,7 @@ fn register_check[G: send, H: send, A](mut r: Registry[G, H], key: Bytes, ca: st
 
 // The composition root supplies previous/current activation keys. A current key
 // always wins; retaining a gone key never substitutes a newly registered entry.
-pub fn retain_gone[G: send, H: send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
+pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
     map.insert(mut r.gone, take key, ())
     Ok(())
 }
@@ -6594,7 +5872,7 @@ pub fn admitted(take caller: Caller, take entries: List[Bytes], arrived: u64, no
 pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_ms: u32 }
 pub opaque type Send: send { key: Bytes, stream: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
 
-pub fn prepare[G: send, H: send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
+pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
     let known = map.contains(r.slots, want.key)
     if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }
     let mut allowed = false
@@ -6801,7 +6079,7 @@ pub fn entry_key(identity: View[Bytes], args_fp: u64, result_fp: u64) -> Bytes {
 
 fn wire_key(w: Want) -> Bytes { entry_key(view w.identity, w.args_fp, w.result_fp) }
 
-fn answer_want[G: send, H: send](r: Registry[G, H], key: Bytes, slot: u32) -> Entry {
+fn answer_want[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes, slot: u32) -> Entry {
     if map.contains(r.slots, key) { Ready(slot) } else { Gone }
 }
 
@@ -7193,7 +6471,7 @@ fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, 
 pub type CallRun: send = Computed(Outcome) | Launched | Durable | Uncallable
 pub type ServicePlan: send = NoAction | PlanRefusal(u32, u64, Refusal) | PlannedCall(Send, Admitted, u32, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
 
-fn wire_plan_call[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
+fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, slot: slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
     let index: u64 = int.widen(slot)
     if index >= list.len(s.entries) { return Ok(PlanRefusal(stream, p, NoEntry)) }
@@ -7427,7 +6705,7 @@ fn wire_subscribed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
     if !registered { list.push(mut s.pub_subs, sub) }
 }
 
-fn wire_plan_subscribe[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], sub: u32, slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
+fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], sub: u32, slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
     if s.phase != 3u8 { return Error(1008u16) }
     if let Some(_) = resume { return Ok(ResumeReset) }
     let index: u64 = int.widen(slot)
@@ -7540,12 +6818,12 @@ fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
     let mut generations: List[(u32, u64)] = list.new()
     let mut computed = 0u64
     if current {
-        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset) = option.unwrap(take content)
+        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset, read_failed: failed) = option.unwrap(take content)
         computed = content_version
         s.completes += list.len(complete)
         if reset {
-            if s.reset_seen { return Error(1008u16) }
-            s.reset_seen = true
+            if !failed && s.reset_seen { return Error(1008u16) }
+            if !failed { s.reset_seen = true }
             return wire_reset_rows(mut s, mut output, version, take done, take marks)
         }
         generations = take stamps
@@ -7673,7 +6951,7 @@ fn wire_finish_owed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWo
     }
 }
 
-fn wire_service_allocate[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
+fn wire_service_allocate[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
     match take allocation {
         AcceptHello(take identity_result) => { wire_accept_hello(mut s, r, take identity_result)?; Ok(NoAction) },
         PlanCall => {
@@ -7696,12 +6974,12 @@ fn wire_service_allocate[G: send, H: send, B: send](mut s: WireSession[G, B], r:
 }
 
 // Adds a Hello entry with what the shared Registry knows of it: 1 registered, 2 gone, 0 neither.
-fn wire_know[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take key: Bytes) {
+fn wire_know[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take key: Bytes) {
     list.push(mut s.known, if map.contains(r.slots, key) { 1u8 } else if map.contains(r.gone, key) { 2u8 } else { 0u8 })
     list.push(mut s.entries, take key)
 }
 
-fn wire_accept_hello[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take identity_result: Option[Caller]) -> Result[(), u16] {
+fn wire_accept_hello[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take identity_result: Option[Caller]) -> Result[(), u16] {
     let caller = match take identity_result { Some(take value) => take value, None => return Error(1008u16) }
     if list.len(caller.subject) > SUBJECT_MAX { return Error(1008u16) }
     s.caller = Some(take caller)
@@ -7876,11 +7154,11 @@ pub fn wire_target_service[G: send, B: send](random: Random, take session_wire: 
 
 // The place's one Registry, built once under `bytes n_place` and owned by the allocation
 // pool's step for every session the pool serves (§3 "One Registry").
-pub fn wire_place_allocator[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16], RegisterError] {
+pub fn wire_place_allocator[G: send, H: shareable + inert + send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16], RegisterError] {
     Ok(wire_allocator(placed(place, n_place)?, n_place))
 }
 
-fn wire_allocator[G: send, H: send, B: send](take r: Registry[G, H], n_place: u64) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
+fn wire_allocator[G: send, H: shareable + inert + send, B: send](take r: Registry[G, H], n_place: u64) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
     fn(mut s: WireSession[G, B], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
         if let AcceptHello(_) = view allocation { s.n_place = n_place }
         wire_service_allocate(mut s, r, take allocation)

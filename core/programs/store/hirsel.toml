@@ -50,6 +50,7 @@ std = { major = 1 }
 "store-tiered-refusals.hirsel" = "store"
 "store-index-registry.hirsel" = "store"
 "store-declare.hirsel" = "store"
+"store-read.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]

@@ -24,14 +24,14 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     result.unwrap(allow(mut allowed, target))
     let r1 = result.unwrap(copy_bytes(string.as_bytes("r1")))
     let r2 = result.unwrap(copy_bytes(string.as_bytes("r2")))
-    let queued_run = store.run(mut before, None, scoped fn(mut tx: store.Tx) -> Result[Id, Error] {
-        write(mut tx, original, allowed, target, 42u64, AfterCommit)
+    let queued_run = store.run(mut before, None, (store.copy_env(original), store.copy_env(target), store.copy_env(allowed)), fn(mut tx, call_env) -> Result[Id, Error] {
+        write(mut tx, call_env.0, call_env.2, call_env.1, 42u64, AfterCommit)
     })
     let queued = done(take queued_run)
     result.unwrap(store.durable(mut before, queued.ticket))
     let scheduled = option.unwrap(first(before, original))
-    let started_run = store.run(mut before, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
-        start(mut tx, original, scheduled, r1)
+    let started_run = store.run(mut before, None, (store.copy_env(original), store.copy_env(r1), store.copy_env(scheduled)), fn(mut tx, call_env) -> Result[Started, Error] {
+        start(mut tx, call_env.0, call_env.2, call_env.1)
     })
     let started = done(take started_run)
     result.unwrap(store.durable(mut before, started.ticket))
@@ -42,34 +42,34 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let mut db = result.unwrap(store.open(tasks, dir, c, r, law_options()))
     let t = result.unwrap(store.with_schema(mut db, code.describe(tables)))
     let p = option.unwrap(first(db, t))
-    let decision_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
-        start(mut tx, t, p, r2)
+    let decision_run = store.run(mut db, None, (store.copy_env(r2), store.copy_env(t), store.copy_env(p)), fn(mut tx, call_env) -> Result[Started, Error] {
+        start(mut tx, call_env.1, call_env.2, call_env.0)
     })
     let decision = done(take decision_run)
     result.unwrap(store.durable(mut db, decision.ticket))
     if let Held = decision.value { } else { return false }
     if let Some(_) = first(db, t) { return false }
-    let refused = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
-        let _ = fence(tx, t, a1)?
+    let refused = store.run(mut db, None, (store.copy_env(a1), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = fence(tx, call_env.1, call_env.0)?
         Ok(())
     })
     match refused { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
 
-    let released_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
-        release(mut tx, t, queued.value, Some(copy_bytes(r2)?))
+    let released_run = store.run(mut db, None, (store.copy_env(r2), store.copy_env(queued), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
+        release(mut tx, call_env.2, call_env.1.value, Some(copy_bytes(call_env.0)?))
     })
     let released = done(take released_run)
     result.unwrap(store.durable(mut db, released.ticket))
     let ready = option.unwrap(first(db, t))
-    let restarted_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
-        start(mut tx, t, ready, r2)
+    let restarted_run = store.run(mut db, None, (store.copy_env(r2), store.copy_env(t), store.copy_env(ready)), fn(mut tx, call_env) -> Result[Started, Error] {
+        start(mut tx, call_env.1, call_env.2, call_env.0)
     })
     let restarted = done(take restarted_run)
     result.unwrap(store.durable(mut db, restarted.ticket))
     let Body(a2) = restarted.value else { return false }
     let same = run_id(a2) == queued.value
-    let old = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Error] {
-        finish(mut tx, t, a1, Returned(list.new()))
+    let old = store.run(mut db, None, (store.copy_env(a1), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
+        finish(mut tx, call_env.1, call_env.0, Returned(list.new()))
     })
     match old { Ok(Aborted(store.Undone(value: StaleAttempt, ticket: None))) => (), _ => return false }
     result.unwrap(store.close(take db))

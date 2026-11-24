@@ -25,30 +25,30 @@ fn framing_with_view() -> harness.Agent[Grants] {
 // Run 0 at `round`, ready to prepare.
 fn at_round(mut db: store.Db, round: u64) -> () waits {
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: round, rounds_left: 8u64, stalled: 0u64,
+    let set = store.run(mut db, None, (store.copy_env(round), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.1.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: call_env.0, rounds_left: 8u64, stalled: 0u64,
             spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
     })
     match take set { Ok(Committed(_)) => (), _ => fail("frames: setup did not commit") }
 }
 
-fn frame_rows(db: store.Db) -> List[(u64, harness.Frame)] {
+fn frame_rows(db: store.Db) -> List[(u64, harness.Frame)] waits {
     let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let mut out: List[(u64, harness.Frame)] = list.new()
-    let mut rows = result.unwrap(store.scan(store.snapshot(db), h.frames, Unbounded, Unbounded))
-    while let Some((base, f)) = result.unwrap(store.next(mut rows)) {
+    let mut rows = result.unwrap(store.scan(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.frames, Unbounded, Unbounded))
+    while let Some((base, f)) = result.unwrap(store.next(result.unwrap(store.reader(db, 0u64)), mut rows)) {
         list.push(mut out, (base, clone(f)))
     }
     take out
 }
 
-fn entry_at(db: store.Db, p: u64) -> Option[harness.Entry] {
+fn entry_at(db: store.Db, p: u64) -> Option[harness.Entry] waits {
     let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
-    result.unwrap(store.get(store.snapshot(db), h.entries, p))
+    result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.entries, p))
 }
 
 // The four hand-placed entries: 0 "first", 1 the baseline, 2 "a", 3 "u2".
-fn log_unchanged(db: store.Db) -> bool {
+fn log_unchanged(db: store.Db) -> bool waits {
     is_user_text(entry_at(db, 0u64), "first") && offers_bump(entry_at(db, 1u64))
         && match entry_at(db, 2u64) { Some(Assistant(a)) => a.text == "a" && list.len(a.calls) == 0u64, _ => false }
         && is_user_text(entry_at(db, 3u64), "u2")
@@ -76,25 +76,25 @@ pub fn law_frames_open_once(parent: Dir, clock: Clock, random: Random, tasks: Ta
     let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(wired())
     // Run 0 prepares round 0 under the plain agent: entries 0 and 1.
-    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        harness.open_session(mut tx, h, "scripted", All)?
-        harness.submit(mut tx, h, crash_agent(), w, alice(), NextTurn, harness.Submit(client_key: "k", text: "first"))
+    let opened = store.run(mut db, None, (store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, call_env.0, "scripted", All)?
+        harness.submit(mut tx, call_env.0, crash_agent(), call_env.1, alice(), NextTurn, harness.Submit(client_key: "k", text: "first"))
     })
     match take opened { Ok(Committed(_)) => (), _ => fail("frames: submit did not commit") }
-    let grown = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.entries, 2u64, Assistant(harness.Answer(text: "a", calls: list.new(), stop: "end", usage: usage())))?
-        store.put(mut tx, h.entries, 3u64, User("u2"))?
-        let Some(take found) = store.fetch(tx, h.session, 0u64)? else { return Error(Missing("session")) }
+    let grown = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.entries, 2u64, Assistant(harness.Answer(text: "a", calls: list.new(), stop: "end", usage: usage())))?
+        store.put(mut tx, call_env.entries, 3u64, User("u2"))?
+        let Some(take found) = store.fetch(tx, call_env.session, 0u64)? else { return Error(Missing("session")) }
         let mut s = take found
         s.next_pos = 4u64
-        store.put(mut tx, h.session, 0u64, s)
+        store.put(mut tx, call_env.session, 0u64, s)
     })
     match take grown { Ok(Committed(_)) => (), _ => fail("frames: log did not commit") }
     let mut bad = 0u64
     // 1. The crash: round 1's prepare opens the frame, and its transaction never commits.
     at_round(mut db, 1u64)
-    let crashed = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        harness.advance(mut tx, h, framing(), w, Kick)?
+    let crashed = store.run(mut db, None, (store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+        harness.advance(mut tx, call_env.0, framing(), call_env.1, Kick)?
         Error(Storage)
     })
     match take crashed { Ok(Aborted(_)) => (), _ => fail("frames: the crash committed") }

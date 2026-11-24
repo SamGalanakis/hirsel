@@ -24,8 +24,8 @@ type CounterSource {
 }
 
 fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits {
-    let written = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, table, 1u64, value)
+    let written = result.unwrap(store.run(mut db, None, (store.copy_env(table), store.copy_env(value)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.0, 1u64, call_env.1)
     }))
     match take written {
         Committed(take done) => result.unwrap(store.durable(mut db, done.ticket)),
@@ -34,8 +34,8 @@ fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits
 }
 
 fn get_counter(db: store.Db, shape: store.Table[u64, u64]) -> u64 {
-    let read = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
-        option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
+    let read = result.unwrap(store.look(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), None, shape, fn(tx, call_env) -> u64 {
+        option.unwrap(result.unwrap(store.fetch(tx, call_env, 1u64)))
     }))
     match take read {
         Seen(take row) => row.value,
@@ -117,8 +117,8 @@ fn place_writer(take job: PlaceJob) waits {
         let mut next = Some(take first)
         while let Some(take request) = replace(mut next, None) {
             let value = request.1
-            let written = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[(), store.Error] {
-                store.put(mut tx, table, 1u64, value)
+            let written = result.unwrap(store.run(mut db, None, (store.copy_env(table), store.copy_env(value)), fn(mut tx, call_env) -> Result[(), store.Error] {
+                store.put(mut tx, call_env.0, 1u64, call_env.1)
             }))
             match take written {
                 Committed(take done) => {

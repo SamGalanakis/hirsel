@@ -14,27 +14,27 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
     if mode == "seed" {
         let made = {
             let t = view h.t
-            store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-                let Some(found) = st(store.fetch(tx, t.groups, name))? else { return Error(Unknown) }
-                let Some(w) = st(store.fetch(tx, t.wake, name))? else { return Error(Unknown) }
-                if let Clean(_) = w.wake { let _ = mark_dirty(mut tx, t, name)? }
+            store.run(mut h.db, None, (store.copy_env(fixture), store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+                let Some(found) = st(store.fetch(tx, call_env.2.groups, call_env.1))? else { return Error(Unknown) }
+                let Some(w) = st(store.fetch(tx, call_env.2.wake, call_env.1))? else { return Error(Unknown) }
+                if let Clean(_) = w.wake { let _ = mark_dirty(mut tx, call_env.2, call_env.1)? }
                 let mut g = found
                 expect(!is_none(g.store_id), "T1: registration did not accept a store ID")
-                g.assembly = clone(fixture.old)
+                g.assembly = clone(call_env.0.old)
                 g.retained = list.new()
-                let attempt = fresh_attempt(mut tx, t)?
-                let hosted_binding = Binding(identity: clone(fixture.hosted), n_place: 1048576u64)
-                let d = DeployRow(request: list.new(), attempt: attempt, assembly: clone(fixture.new), image: list.new(),
+                let attempt = fresh_attempt(mut tx, call_env.2)?
+                let hosted_binding = Binding(identity: clone(call_env.0.hosted), n_place: 1048576u64)
+                let d = DeployRow(request: list.new(), attempt: attempt, assembly: clone(call_env.0.new), image: list.new(),
                     old_assembly: clone(g.assembly), old_binding: Some(clone(hosted_binding)), binding: Some(take hosted_binding),
                     new_retained: false, digest: bytes_of(32u64, 9u8), release: list.new(), activation: 10u64,
                     old: w.gen, candidate: w.gen + 1u64, outcome: Failed("not installed after recovery"), describe: list.new(),
                     retry_of: None, fetch_ns: None, assemble_ns: None, preview: operator.Preview(grants: launcher.no_grants(), entries: list.new(), triggers: list.new()))
                 g.activation = 3u64
                 retain_release(mut g, d.assembly)
-                g.recovery = Some(Unmatched(attempt, 11u64, Binding(identity: clone(fixture.bare), n_place: 524288u64)))
-                index_release(mut tx, t, g, 3u64, g.assembly)?
-                st(store.put(mut tx, t.groups, name, g))?
-                st(store.put(mut tx, t.deploys, name, d))
+                g.recovery = Some(Unmatched(attempt, 11u64, Binding(identity: clone(call_env.0.bare), n_place: 524288u64)))
+                index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
+                st(store.put(mut tx, call_env.2.groups, call_env.1, g))?
+                st(store.put(mut tx, call_env.2.deploys, call_env.1, d))
             })
         }
         must(decided(mut h, take made), "T1: seed marked group")
@@ -43,12 +43,12 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
         expect(mode == "inspect", "T1: unknown catalog fixture command")
         let g = option.unwrap(must(group_row(h, name), "T1: read group"))
         expect(g.activation == 12u64 && is_none(g.recovery), "T1: the relaunch did not clear the mark at 12")
-        let d = option.unwrap(result.unwrap(store.get(store.snapshot(h.db), h.t.deploys, name)))
+        let d = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name)))
         expect(g.assembly == d.old_assembly && !roots_release(g, d.assembly), "T1: failed deploy did not keep OLD alone")
         expect(failed_outcome(d.outcome), "T1: adoption changed the deploy outcome")
-        let selected = result.unwrap(store.get(store.snapshot(h.db), h.t.activations, (g.incarnation, 12u64)))
+        let selected = result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.activations, (g.incarnation, 12u64)))
         expect(selected == Some(clone(g.assembly)), "T1: activation 12 was not indexed to OLD")
-        let pending = result.unwrap(store.get(store.snapshot(h.db), h.t.activations, (g.incarnation, 10u64)))
+        let pending = result.unwrap(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.activations, (g.incarnation, 10u64)))
         expect(is_none(pending), "T1: adoption changed the attempt's activation")
     }
     result.unwrap(store.close(close(take h)))
@@ -97,21 +97,23 @@ fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identi
     let mut r = take setup
     let made = {
         let t = view r.h.t
-        store.run(mut r.h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let g0 = option.unwrap(st(store.fetch(tx, t.groups, "g"))?)
-            let d0 = option.unwrap(st(store.fetch(tx, t.deploys, "g"))?)
+        let before: Bytes = clone(old_identity)
+        let after: Bytes = clone(new_identity)
+        store.run(mut r.h.db, None, (retain_r, take before, store.copy_env(t), expected, take after), fn(mut tx, call_env) -> Result[(), Refused] {
+            let g0 = option.unwrap(st(store.fetch(tx, call_env.2.groups, "g"))?)
+            let d0 = option.unwrap(st(store.fetch(tx, call_env.2.deploys, "g"))?)
             let mut g = g0
             let mut d = d0
             g.activation = 3u64
-            g.store_id = Some(expected)
-            if retain_r { retain_release(mut g, bytes_of(32u64, 6u8)) }
+            g.store_id = Some(call_env.3)
+            if call_env.0 { retain_release(mut g, bytes_of(32u64, 6u8)) }
             d.activation = 10u64
             d.outcome = Undecided(ProbeNew)
-            d.old_binding = Some(Binding(identity: clone(old_identity), n_place: 1048576u64))
-            d.binding = Some(Binding(identity: clone(new_identity), n_place: 1048576u64))
-            index_release(mut tx, t, g, 3u64, g.assembly)?
-            st(store.put(mut tx, t.groups, "g", g))?
-            st(store.put(mut tx, t.deploys, "g", d))
+            d.old_binding = Some(Binding(identity: clone(call_env.1), n_place: 1048576u64))
+            d.binding = Some(Binding(identity: clone(call_env.4), n_place: 1048576u64))
+            index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
+            st(store.put(mut tx, call_env.2.groups, "g", g))?
+            st(store.put(mut tx, call_env.2.deploys, "g", d))
         })
     }
     must(decided(mut r.h, take made), "traces: seed the deploy")

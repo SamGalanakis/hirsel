@@ -1,0 +1,95 @@
+const OLD_SCHEMA: String = "{\"type\":\"object\"}"
+const NEW_SCHEMA: String = "{\"type\":\"object\",\"required\":[\"text\"]}"
+
+fn update_catalog(mut db: store.Db, input: String) -> () waits {
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let mut page = string.from("{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo text\",\"inputSchema\":")
+    string.push(mut page, input)
+    string.push(mut page, "}]}")
+    let mut pages: List[String] = list.new()
+    list.push(mut pages, take page)
+    let remote = result.unwrap(mcp_tools.listing("fixture", pages))
+    let changed = store.run(mut db, None, (store.copy_env(h), store.copy_env(remote)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        mcp_tools.replace(mut tx, call_env.0.mcp_catalog, call_env.1)
+    })
+    match take changed { Ok(Committed(_)) => (), _ => fail("catalog update did not commit") }
+}
+
+fn ready_catalog_call(mut db: store.Db, round: u64, name: String) -> () waits {
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let ran = store.run(mut db, None, (store.copy_env(name), store.copy_env(round), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        let key = harness.EffectKey(run: 0u64, round: call_env.1, kind: harness.MODEL, ordinal: 0u64)
+        let Some(take row) = store.fetch(tx, call_env.2.effects, key)? else { return Error(Missing("model effect")) }
+        let mut model_effect = take row
+        let mut calls: List[harness.Call] = list.new()
+        list.push(mut calls, harness.Call(id: "echo-call", name: clone(call_env.0), args: Inline(string.into_bytes("{\"text\":\"hello\"}"))))
+        let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
+        model_effect.phase = Settled(Model(take answer))
+        store.put(mut tx, call_env.2.effects, key, model_effect)?
+        let Some(take old) = store.fetch(tx, call_env.2.runs, 0u64)? else { return Error(Missing("run")) }
+        let mut run = take old
+        run.phase = AnswerReady(call_env.1, 0u64)
+        store.put(mut tx, call_env.2.runs, 0u64, run)
+    })
+    match take ran { Ok(Committed(_)) => (), _ => fail("catalog model answer did not commit") }
+    kick(mut db, catalog_agent())
+}
+
+fn held_key(db: store.Db, round: u64) -> Bytes waits {
+    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+    let key = harness.WaitKey(run: 0u64, slot: 0u64, kind: harness.APPROVAL, generation: round)
+    match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.waits, key)) {
+        Some(Open(take approval, _)) => take approval,
+        _ => fail("expected an MCP approval"),
+    }
+}
+
+// A held call under the old schema must conflict after the row changes.
+// The next request uses a tools-only patch and offers the same prompt as a
+// fresh session with the changed row.
+@test
+fn test_mcp_catalog_approval_and_patch(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let mut old_dir_name = string.with_capacity(32u64)
+    let old_dir = result.unwrap(host.mkdtemp(parent, mut old_dir_name))
+    let mut new_dir_name = string.with_capacity(32u64)
+    let new_dir = result.unwrap(host.mkdtemp(parent, mut new_dir_name))
+    let mut db = fresh(old_dir, clock, random, tasks)
+    let mut clean = fresh(new_dir, clock, random, tasks)
+    let a = catalog_agent()
+    update_catalog(mut db, OLD_SCHEMA)
+    let first = prepared(mut db, a, 0u64, shows3(Show("instructions"), Hidden, Hidden), false)
+    let name = mcp_tools.offered_name("fixture", "echo")
+    if list.len(first.tools) != 3u64 || first.tools[2u64].name != name || first.tools[2u64].input != OLD_SCHEMA { return Error(1u64) }
+    ready_catalog_call(mut db, 0u64, name)
+    let old_approval = held_key(db, 0u64)
+    update_catalog(mut db, NEW_SCHEMA)
+    match deciding(mut db, a, alice(), decision(clone(old_approval), true)) {
+        Error(Conflict) => (),
+        _ => return Error(2u64),
+    }
+    let patched = prepared(mut db, a, 1u64, shows3(Show("instructions"), Hidden, Hidden), false)
+    update_catalog(mut clean, NEW_SCHEMA)
+    let fresh_prompt = prepared(mut clean, a, 0u64, shows3(Show("instructions"), Hidden, Hidden), false)
+    if !one_patch(patched, false, 0u64, true) || !one_patch(fresh_prompt, true, 1u64, true) { return Error(3u64) }
+    if patched.system != texts3("instructions", "", "", 1u64) || patched.system != fresh_prompt.system { return Error(4u64) }
+    if list.len(patched.tools) != 3u64 || list.len(fresh_prompt.tools) != 3u64 { return Error(5u64) }
+    for i in 0u64..3u64 {
+        let changed = patched.tools[i]
+        let current = fresh_prompt.tools[i]
+        if changed.name != current.name || changed.about != current.about || changed.input != current.input
+            || changed.rev != current.rev || changed.catalog != current.catalog { return Error(6u64) }
+    }
+    if patched.tools[2u64].name != name || patched.tools[2u64].input != NEW_SCHEMA
+        || patched.tools[2u64].catalog == first.tools[2u64].catalog { return Error(7u64) }
+    ready_catalog_call(mut db, 1u64, name)
+    let new_approval = held_key(db, 1u64)
+    let stale = harness.Decision(run: 0u64, round: 1u64, ordinal: 0u64, key: take old_approval, allow: true)
+    let valid = harness.Decision(run: 0u64, round: 1u64, ordinal: 0u64, key: take new_approval, allow: true)
+    match deciding(mut db, a, alice(), take stale) { Error(Conflict) => (), _ => return Error(8u64) }
+    match deciding(mut db, a, alice(), take valid) { Ok(Approved) => (), _ => return Error(9u64) }
+    result.unwrap(store.close(take db))
+    result.unwrap(store.close(take clean))
+    result.unwrap(std.dir.remove_all(parent, old_dir_name))
+    result.unwrap(std.dir.remove_all(parent, new_dir_name))
+    Ok(())
+}

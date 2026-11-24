@@ -12,16 +12,16 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
     let made = {
         let t = view h.t
         let shown = view diff
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, t.requests, d))? else {
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(shown)), fn(mut tx, call_env) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.1.requests, call_env.0))? else {
                 return Ok(())
             }
             let mut row = found
             if let Some(_) = row.done {
                 return Ok(())
             }
-            row.held = Some(clone(shown))
-            st(store.put(mut tx, t.requests, d, row))?
+            row.held = Some(clone(call_env.2))
+            st(store.put(mut tx, call_env.1.requests, call_env.0, row))?
             Ok(())
         })
     }
@@ -80,22 +80,22 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
     let made = {
         let t = view h.t
         let approved = view diff
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[launcher.Attempt, Refused] {
-            let Some(found) = st(store.fetch(tx, t.requests, d))? else {
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.2.requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
-            if let Some(x) = st(store.fetch(tx, t.active, found.group.name))? {
-                if x != d {
+            if let Some(x) = st(store.fetch(tx, call_env.2.active, found.group.name))? {
+                if x != call_env.0 {
                     return Error(Busy(0u64))
                 }
             }
             let mut row = found
-            let a = fresh_attempt(mut tx, t)?
+            let a = fresh_attempt(mut tx, call_env.2)?
             row.attempt = a
-            row.deadline_ms = now.wall_ms + ADMISSION_MS
+            row.deadline_ms = call_env.1.wall_ms + ADMISSION_MS
             row.held = None
-            row.approved = clone(approved)
-            st(store.put(mut tx, t.requests, d, row))?
+            row.approved = clone(call_env.3)
+            st(store.put(mut tx, call_env.2.requests, call_env.0, row))?
             Ok(a)
         })
     }
@@ -153,7 +153,7 @@ fn trigger_rows(b: Bytes) -> Option[List[runner.TriggerScanRow]] {
 }
 
 // Read the contract from the original Begin, including after a grant decision or reconnect.
-fn deploy_required_entries(h: Host, d: Bytes) -> Result[List[launcher.RequiredEntry], Refused] {
+fn deploy_required_entries(h: Host, d: Bytes) -> Result[List[launcher.RequiredEntry], Refused] waits {
     let Some(row) = request_row(h, d)? else {
         return Error(Missing("deploy request"))
     }

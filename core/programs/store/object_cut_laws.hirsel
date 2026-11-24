@@ -121,8 +121,8 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let _ = create_table(mut draft, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut draft, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let value = bucket_m2_pack_value()
-    let wrote = run(mut draft, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, rows, 7, value)
+    let wrote = run(mut draft, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 7, call_env.1)
     })?
     if let Committed(_) = wrote {} else { fail("fixture did not write a blob") }
     let participants = cut_participants(draft, NoHolderChange)?
@@ -147,7 +147,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let recovered = history_paged_capture(mut source, held.head, 1048576)?
     let tip = view recovered.state.tips[0]
     let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?)
-    if get(snap, rows, 7)? != Some(value) {
+    if get(law_reader(snap), snap, rows, 7)? != Some(value) {
         fail("pack objects created by the cut lost the imported row")
     }
     close(take draft)
@@ -174,8 +174,8 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 10 {
-        let committed = run(mut writer, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            put(mut tx, rows, k, k)
+        let committed = run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, call_env.1, call_env.1)
         })?
         if let Committed(_) = committed {} else { fail("the fixture write was refused") }
     }
@@ -193,7 +193,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let observed = follower_head(installed)?
     let captured = snapshot_follower(installed, Branch(store: observed.store, id: 0))?
     let releases = follower_table(installed, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())?
-    if observed.activation != 12 || observed.binding != binding || version(captured) != 12 || get(captured, releases, 12)? != Some(73u64) {
+    if observed.activation != 12 || observed.binding != binding || version(captured) != 12 || get(result.unwrap(follower_reader(installed, 0u64)), captured, releases, 12)? != Some(73u64) {
         fail("activation, binding and the release row were not published by one checkpoint")
     }
     let bad_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?

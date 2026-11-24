@@ -34,7 +34,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = view t
     for k in 0u64 .. 96 {
-        let found = get(snapshot(db), sh, k)?
+        let found = get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)?
         let old_value: Option[u64] = if scenario == "genesis" {
             if k + 1 < db.heads[0].head {
                 Some(k + 1)
@@ -85,7 +85,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) {
             good = false
         }
-        match get(snapshot(db), big, 1)? {
+        match get(result.unwrap(reader(db, 0u64)), snapshot(db), big, 1)? {
             Some(value) => {
                 if db.heads[0].head != 99 || string.byte_len(value) != 1048566 {
                     good = false
@@ -105,7 +105,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         // k + 1001, and by_v lists all 96 in key order. Nothing between.
         let mut moved = true
         for k in 0u64 .. 96 {
-            if get(snapshot(db), sh, k)? != Some(k + 1001) {
+            if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)? != Some(k + 1001) {
                 moved = false
             }
         }
@@ -114,10 +114,10 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         if moved && listed == 1 && db.heads[0].head == 98 {
             let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
             let ix = index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
-            let mut rows = find(snapshot(db), ix, Unbounded, Unbounded)?
+            let mut rows = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded)?
             let mut expect = 0u64
             whole = true
-            while let Some((k, v)) = next(mut rows)? {
+            while let Some((k, v)) = next(law_reader(rows.capture), mut rows)? {
                 if k != expect || v != k + 1001 {
                     whole = false
                 }
@@ -137,7 +137,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.
         let has_pin = match pinned(db, "p") {
             Some(s) => {
-                if version(s) != 97 || get(s, sh, 0)? != Some(1u64) {
+                if version(s) != 97 || get(law_reader(s), s, sh, 0)? != Some(1u64) {
                     good = false
                 };
                 true
@@ -152,7 +152,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
                 } else {
                     Some(1)
                 }
-                if get(at_b, sh, 0)? != k0 || get(at_b, sh, 95)? != Some(96u64) {
+                if get(result.unwrap(reader(db, 0u64)), at_b, sh, 0)? != k0 || get(result.unwrap(reader(db, 0u64)), at_b, sh, 95)? != Some(96u64) {
                     good = false
                 }
                 version(at_b)
@@ -296,8 +296,8 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let (scratch_writes, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let stale = crash_import(mut db, scratch_writes, c, tasks, attempt, 66u8, 16781392u64)?
     let t = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let acknowledged = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, t, 0u64, 77u64)
+    let acknowledged = deploy_result(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 0u64, 77u64)
     }))?
     if let Committed(done) = acknowledged {
         deploy_result(durable(mut db, done.ticket))?
@@ -323,7 +323,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let reopened = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
     let migrated = deploy_result(system_table(reopened, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let _ = deploy_result(system_table(reopened, "kept", std.codec.key_u64(), std.codec.of_u64()))?
-    if deploy_result(get(snapshot(reopened), migrated, 0u64))? != Some(1077u64) {
+    if deploy_result(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), migrated, 0u64))? != Some(1077u64) {
         fail("fresh export lost the acknowledged row")
     }
     deploy_result(close(take reopened))
@@ -352,7 +352,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     let installed = v == 98
     let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
     let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
-    let found = option.unwrap(get(snap, activated, 0u8)?)
+    let found = option.unwrap(get(result.unwrap(reader(db, 0u64)), snap, activated, 0u8)?)
     if found != install_fixture_bytes(32u64, if installed {
         66u8
     } else {
@@ -360,7 +360,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }) || db.fence != 1 {
         return Ok(false)
     }
-    let new_release = get(snap, release, 98u64)?
+    let new_release = get(result.unwrap(reader(db, 0u64)), snap, release, 98u64)?
     if installed {
         if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 {
             return Ok(false)
@@ -370,7 +370,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }
     let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96u64 {
-        if get(snap, t, k)? != Some(k + if installed {
+        if get(result.unwrap(reader(db, 0u64)), snap, t, k)? != Some(k + if installed {
             1001u64
         } else {
             1u64
@@ -392,7 +392,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         close(take db)?
         let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
         for k in 0u64 .. 96u64 {
-            if get(snapshot(reopened), t, k)? != Some(k + 1001u64) {
+            if get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), t, k)? != Some(k + 1001u64) {
                 return Ok(false)
             }
         }
@@ -524,9 +524,9 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
         }
         fail("read-only open accepted a published torn MANIFEST or lost its fault")
     }
-    let reader = opened?
-    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if version(reader.snapshot) != 161 {
+    let read_source = opened?
+    let rows = read_only_table(read_source, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if version(read_source.snapshot) != 161 {
         fail("read-only open recovered the wrong journal prefix")
     }
     for k in 0u64 .. 96 {
@@ -535,7 +535,7 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
         } else {
             k + 1
         }
-        if read_only_get(reader, rows, k)? != Some(expected) {
+        if read_only_get(read_source, rows, k)? != Some(expected) {
             fail("read-only open recovered the wrong row")
         }
     }

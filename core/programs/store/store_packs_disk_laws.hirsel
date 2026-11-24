@@ -231,11 +231,11 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
     let t = table(mut db, "values", std.codec.key_u64(), codec)?
     let old_blob_pack = disk_state(db).pages.next_pack
-    let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+    let initial = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         for k in 1u64 .. 4 {
             let mut value: Bytes = list.with_capacity(1024)
             list.fill(mut value, 1024, int.truncate(k))
-            put(mut tx, t, k, value)?
+            put(mut tx, call_env, k, value)?
         }
         Ok(())
     })?
@@ -250,9 +250,9 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     if list.len(original) != 72 + 3 * (16 + payload) {
         return Error(Foreign)
     }
-    let edited = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let _ = delete(mut tx, t, 2)?
-        let _ = delete(mut tx, t, 3)?
+    let edited = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = delete(mut tx, call_env, 2)?
+        let _ = delete(mut tx, call_env, 3)?
         Ok(())
     })?
     if let Committed(_) = edited {} else {
@@ -314,10 +314,10 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     }
     let held = snapshot(reopened)
     let sh = view t
-    let Some(value) = get(held, sh, 1)? else {
+    let Some(value) = get(result.unwrap(reader(reopened, 0u64)), held, sh, 1)? else {
         return Error(Foreign)
     }
-    if list.len(value) != 1024 || value[0u64] != 1 || get(held, sh, 2)? != None || get(held, sh, 3)? != None {
+    if list.len(value) != 1024 || value[0u64] != 1 || get(result.unwrap(reader(reopened, 0u64)), held, sh, 2)? != None || get(result.unwrap(reader(reopened, 0u64)), held, sh, 3)? != None {
         return Error(Foreign)
     }
     close(take reopened)
@@ -347,9 +347,9 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     list.fill(mut inline_value, cutoff - 6, 13u8)
     let mut blob_value: Bytes = list.with_capacity(cutoff - 5)
     list.fill(mut blob_value, cutoff - 5, 23u8)
-    let finished = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        put(mut tx, shape_table, 1, inline_value)?
-        put(mut tx, shape_table, 2, blob_value)
+    let finished = run(mut db, None, (copy_env(shape_table), copy_env(inline_value), copy_env(blob_value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.0, 1, call_env.1)?
+        put(mut tx, call_env.0, 2, call_env.2)
     })?
     if let Committed(_) = finished {} else {
         return Error(Foreign)
@@ -399,7 +399,7 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     let again = open(tasks, d, c, r, options)?
     let held = snapshot(again)
     let sh = view shape_table
-    let values_match = get(held, sh, 1)? == Some(clone(inline_value)) && get(held, sh, 2)? == Some(clone(blob_value))
+    let values_match = get(result.unwrap(reader(again, 0u64)), held, sh, 1)? == Some(clone(inline_value)) && get(result.unwrap(reader(again, 0u64)), held, sh, 2)? == Some(clone(blob_value))
     close(take again)?
     if values_match {
         Ok(())

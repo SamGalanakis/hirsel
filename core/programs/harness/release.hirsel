@@ -34,7 +34,7 @@ pub type Proposal: codec + send {
     state: State
 }
 
-pub type Tables: send {
+pub type Tables: shareable + send {
     files: store.Table[String, String],
     proposals: store.Table[Bytes, Proposal]
 }
@@ -165,7 +165,7 @@ fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
     let mut rows = take cursor
     let mut out: Bytes = list.new()
     loop {
-        match store.next_range(mut rows) {
+        match store.next_in(tx, mut rows) {
             Ok(Some((path, _))) => {
                 list.extend(mut out, string.as_bytes(path))
                 list.push(mut out, b'\n')
@@ -184,7 +184,7 @@ fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
     let mut hash = std.sha256.start()
     let mut n = 0u64
     let mut size = 4u64
-    while let Some((path, text)) = store.next_range(mut rows)? {
+    while let Some((path, text)) = store.next_in(tx, mut rows)? {
         size += 8u64 + string.byte_len(path) + string.byte_len(text)
         if size > platform.launcher.TREE_BYTES {
             return Error(Limit(Value))
@@ -243,10 +243,10 @@ fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Repl
 }
 
 // The host's read: every filed proposal, by its ID.
-pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] {
-    let mut rows = store.scan(snap, t.proposals, Unbounded, Unbounded)?
+pub fn pending(read_handle: store.Reader, snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] waits {
+    let mut rows = store.scan(read_handle, snap, t.proposals, Unbounded, Unbounded)?
     let mut out: List[(Bytes, Proposal)] = list.new()
-    while let Some((take id, take p)) = store.next(mut rows)? {
+    while let Some((take id, take p)) = store.next(read_handle, mut rows)? {
         if let Filed = p.state {
             list.push(mut out, (take id, take p))
         }
@@ -256,11 +256,11 @@ pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)
 
 // The source a proposal names, in path order, or None when the tree has changed since it
 // was filed: the host never publishes source the proposal did not name.
-pub fn source(snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] {
-    let mut rows = store.scan(snap, t.files, Unbounded, Unbounded)?
+pub fn source(read_handle: store.Reader, snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] waits {
+    let mut rows = store.scan(read_handle, snap, t.files, Unbounded, Unbounded)?
     let mut hash = std.sha256.start()
     let mut files: List[File] = list.new()
-    while let Some((take path, take text)) = store.next(mut rows)? {
+    while let Some((take path, take text)) = store.next(read_handle, mut rows)? {
         hash_file(mut hash, path, text)
         list.push(mut files, File(path: take path, text: take text))
     }
@@ -312,7 +312,7 @@ pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.C
 pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] {
     let shape = view t.proposals
     let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
-    while let Some((id, proposal)) = store.next_range(mut rows) ?=> |_| read_failed() {
+    while let Some((id, proposal)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
         if let Filed = proposal.state {
             return runner.cover(shape, Included(clone(id)), Included(clone(id)))
         }
@@ -328,7 +328,7 @@ pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[ru
         None => Unbounded,
     }
     let mut rows = store.range(tx, shape, low, Unbounded) ?=> |_| read_failed()
-    if let Some((path, _)) = store.next_range(mut rows) ?=> |_| read_failed() {
+    if let Some((path, _)) = store.next_in(tx, mut rows) ?=> |_| read_failed() {
         return runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
     }
     runner.cover(shape, Included(""), Excluded(""))

@@ -331,7 +331,7 @@ fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tas
 }
 
 // The laws' place: one u64 table, "data", and the reads and writes the laws call.
-type Hd: send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
 

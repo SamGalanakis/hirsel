@@ -1,0 +1,197 @@
+type ReadAccess {
+    store: StoreId,
+    opened: u64,
+    check: fn(StoreId, u64, Snapshot) -> Result[(), Error] waits
+}
+
+pub opaque resource type Reader: send {
+    access: ReadAccess
+} drop(owned_reader) {}
+
+fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), Error] {
+    if !same(id, captured.store) || opened != captured.open {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn make_reader(id: StoreId, opened: u64) -> Result[Reader, Error] {
+    let access = ReadAccess(store: id, opened: opened, check: hot_read_access)
+    match Reader(access: access) {
+        Ok(take opened_reader) => Ok(take opened_reader),
+        Error((problem, _)) => Error(Full(Allocation(problem))),
+    }
+}
+
+pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] {
+    make_reader(db.store, open_number(db))
+}
+
+pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] {
+    make_reader(f.capture.store, f.open)
+}
+
+pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] {
+    make_reader(source.snapshot.store, source.snapshot.open)
+}
+
+pub fn staged_reader(source: Preparation, pin_bytes: u64) -> Result[Reader, Error] {
+    reader(source.db, pin_bytes)
+}
+
+fn read_access(r: Reader, s: Snapshot) -> Result[(), Error] waits {
+    (r.access.check)(r.access.store, r.access.opened, s)
+}
+
+pub fn copy_env[E: inert](env: E) -> E {
+    clone(env)
+}
+
+pub opaque type SpanRows: send {
+    capture: Snapshot,
+    low: Bytes,
+    high: Bytes,
+    last: Option[Bytes],
+    done: bool
+}
+
+pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[SpanRows, Error] waits {
+    read_access(r, s)?
+    let captured: Snapshot = clone(s)
+    Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, last: None, done: hi <= lo))
+}
+
+pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change], Error] waits {
+    read_access(r, rows.capture)?
+    if rows.done { return Ok(None) }
+    let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
+    match next_bytes(mut cursor)? {
+        Some((take key, take value)) => {
+            rows.last = Some(copied(key)?)
+            Ok(Some(Change(tree_key: take key, value: Some(take value))))
+        },
+        None => {
+            rows.done = true
+            Ok(None)
+        },
+    }
+}
+
+pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits {
+    read_access(r, s)?
+    let mut out: List[Change] = list.new()
+    if hi <= lo { return Ok(take out) }
+    let mut cursor = byte_cursor(s.roots.collections, Included(copied(lo)?), hi)?
+    while let Some((take key, take value)) = next_bytes(mut cursor)? {
+        list.push(mut out, Change(tree_key: take key, value: Some(take value)))
+    }
+    Ok(take out)
+}
+
+pub opaque type Rows[K, V]: send {
+    capture: Snapshot,
+    source: u32,
+    catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
+    low: Bytes,
+    high: Bytes,
+    last: Option[Bytes],
+    reverse: bool,
+    done: bool,
+    decoder: RowDecoder[K, V]
+}
+
+fn table_decoder[K, V](t: Table[K, V]) -> RowDecoder[K, V] {
+    RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), skip: None)
+}
+
+fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: ByteRows) -> PageRows[K, V] {
+    PageRows(cursor: take cursor, data: share_page_tree(s.roots.collections), decoder: table_decoder(t))
+}
+
+pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] waits {
+    read_access(r, s)?
+    if !same(s.store, t.store) { return Error(Foreign) }
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
+    let mut key = prefixed(t.id, 8, false)?
+    std.codec.encode_key(t.key, k, mut key)
+    match get_page_row(s.roots.collections, key) {
+        Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn count[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits {
+    read_access(r, s)?
+    if !same(s.store, t.store) { return Error(Foreign) }
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    count_page_rows(s.roots.collections, t.id, low, high)
+}
+
+fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
+    read_access(r, s)?
+    if !same(s.store, t.store) { return Error(Foreign) }
+    let captured: Snapshot = clone(s)
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    Ok(Rows(capture: take captured, source: t.id, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), low: take low, high: take high, last: None, reverse: reverse, done: false, decoder: table_decoder(t)))
+}
+
+pub fn scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] waits {
+    open_scan(r, s, t, lo, hi, false)
+}
+
+pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] waits {
+    open_scan(r, s, t, lo, hi, true)
+}
+
+pub fn find[J, K, V](r: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
+    read_access(r, s)?
+    if !same(s.store, ix.store) { return Error(Foreign) }
+    let captured: Snapshot = clone(s)
+    let low = index_bound(ix.id, ix.key, lo, false)?
+    let high = index_bound(ix.id, ix.key, hi, true)?
+    Ok(Rows(capture: take captured, source: ix.id, catalog_key: arc.share(ix.catalog_key), catalog_page: arc.share(ix.catalog_page), low: take low, high: take high, last: None, reverse: false, done: false, decoder: index_decoder(ix)))
+}
+
+fn resume_data(data: PageTree, low: Bytes, high: Bytes, last: Option[Bytes], reverse: bool) -> Result[ByteRows, Error] {
+    if reverse {
+        return match last {
+            Some(previous) => reverse_byte_cursor(data, low, previous),
+            None => reverse_byte_cursor(data, low, high),
+        }
+    }
+    let start = match last {
+        Some(previous) => Excluded(copied(previous)?),
+        None => Included(copied(low)?),
+    }
+    byte_cursor(data, take start, high)
+}
+
+pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Error] waits {
+    read_access(r, rows.capture)?
+    if rows.done { return Ok(None) }
+    readable(rows.capture.roots, rows.catalog_key, rows.catalog_page, rows.source)?
+    let selected = {
+        let data = view rows.capture.roots.collections
+        let mut cursor = resume_data(data, rows.low, rows.high, rows.last, rows.reverse)?
+        let Some((take key, raw)) = next_bytes(mut cursor)? else {
+            rows.done = true
+            return Ok(None)
+        }
+        let result = advance_rows(rows.decoder, data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })?
+        (take key, take result)
+    }
+    let (take key, take result) = take selected
+    rows.last = Some(take key)
+    match take result {
+        Some((take row, _)) => Ok(Some(take row)),
+        None => Ok(None),
+    }
+}
+
+fn scan_raw(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
+    byte_cursor(s.roots.collections, Included(lower_bytes(id, lo, false)?), lower_bytes(id, hi, true)?)
+}

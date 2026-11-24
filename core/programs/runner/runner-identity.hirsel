@@ -35,15 +35,15 @@ pub type PlaceRead: codec + send {
     prepared: Bytes,
 }
 
-fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] {
+fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] waits {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    store.get(store.snapshot(db), table, version)
+    store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, version)
 }
 
 // Call under the open store's lock. A failed capture leaves the refusal useful
 // as a start outcome, but supplies no evidence for a recovery decision.
-fn capture_release(db: store.Db, version: u64, witness: u64) -> Result[Bytes, store.Error] {
+fn capture_release(db: store.Db, version: u64, witness: u64) -> Result[Bytes, store.Error] waits {
     let Some(current) = release_record(db, version)? else { return Error(Missing("activation release")) }
     let prepared: Bytes = if witness == 0u64 {
         list.new()
@@ -64,13 +64,14 @@ fn encode_place_read(read: PlaceRead) -> Result[Bytes, store.Error] {
     Ok(take raw)
 }
 
-pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes), store.Error] {
+pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes), store.Error] waits {
     let current = store.follower_head(f)?
     let Some(main_branch) = store.follower_branch(f, "main") else { return Error(Missing("main")) }
     let captured = store.snapshot_follower(f, main_branch)?
+    let read_handle = store.follower_reader(f, 0u64)?
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let releases = store.follower_table(f, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    let Some(release) = store.get(captured, releases, current.activation)? else {
+    let Some(release) = store.get(read_handle, captured, releases, current.activation)? else {
         return Error(Missing("activation release"))
     }
     if release.binding != current.binding {
@@ -81,7 +82,7 @@ pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes),
     } else if witness == current.activation {
         clone(release.prepared)
     } else {
-        match store.get(captured, releases, witness)? {
+        match store.get(read_handle, captured, releases, witness)? {
             Some(record) => clone(record.prepared),
             None => list.new(),
         }
@@ -90,7 +91,7 @@ pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes),
     Ok((current.activation, encode_place_read(read)?))
 }
 
-fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -> OpenError {
+fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -> OpenError waits {
     let read = match capture_release(db, version, launch_env().witness) {
         Ok(take raw) => take raw,
         Error(_) => list.new(),
@@ -98,7 +99,7 @@ fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -
     NotCurrent(Active(version, take description, take read))
 }
 
-fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
+fn prepare_activation[G: send, H: shareable + inert + send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
     let release = release_digest(r.exported) ?=> |_| Bounds
     let launch = launch_env()
     let image = launch_bytes(launch.digest)

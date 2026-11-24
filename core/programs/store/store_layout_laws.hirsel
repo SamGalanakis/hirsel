@@ -24,7 +24,9 @@ fn fetch_threshold[V](tx: Tx, sh: Table[u64, V], k: u64) -> u64 {
 fn overrun_probe(mut db: Db, t: Table[u64, u64], rows: u64, outer: u64, inner: u64) -> (bool, bool) waits {
     let entered: Log[u64] = log.new()
     let returned: Log[u64] = log.new()
-    let out = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+    let line = main_branch(db)
+    let keep: Option[fn(Error) -> bool] = None
+    let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         for k in 1u64 .. rows {
             put(mut tx, t, k, k)?
         }
@@ -102,7 +104,9 @@ pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
         return false
     }
     let wrote: Log[u64] = log.new()
-    let out = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+    let line = main_branch(db)
+    let keep: Option[fn(Error) -> bool] = None
+    let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[bool, Error] {
         put(mut tx, t, 1, 10)?
         let read_cost = fetch_threshold(tx, sh, 2)
         for _ in 0u64 .. 8 {
@@ -125,7 +129,7 @@ pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
     }))
     let s = snapshot(db)
     match take out {
-        Committed(done) => done.value && list.len(log.finish(take wrote)) == 8 && result.unwrap(get(s, sh, 1)) == Some(10) && result.unwrap(get(s, sh, 2)) == None && result.unwrap(get(s, sh, 3)) == Some(30),
+        Committed(done) => done.value && list.len(log.finish(take wrote)) == 8 && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 1)) == Some(10) && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 2)) == None && result.unwrap(get(result.unwrap(reader(db, 0u64)), s, sh, 3)) == Some(30),
         _ => false,
     }
 }
@@ -149,10 +153,10 @@ type LayoutAnswers {
     account: u64
 }
 
-fn collect_layout_rows[K, V](take source: Rows[K, V]) -> List[(K, V)] {
+fn collect_layout_rows[K, V](take source: Rows[K, V]) -> List[(K, V)] waits {
     let mut rows = take source
     let mut all: List[(K, V)] = list.new()
-    while let Some(take row) = result.unwrap(next(mut rows)) {
+    while let Some(take row) = result.unwrap(next(law_reader(rows.capture), mut rows)) {
         list.push(mut all, take row)
     }
     take all
@@ -171,14 +175,14 @@ fn layout_answers(mut db: Db) -> LayoutAnswers waits {
     let mut points: List[Option[u64]] = list.new()
     let mut k = 1u64
     while k <= 2000 {
-        list.push(mut points, result.unwrap(get(at, sh, k)))
+        list.push(mut points, result.unwrap(get(result.unwrap(reader(db, 0u64)), at, sh, k)))
         k += 17
     }
-    let rows = collect_layout_rows(result.unwrap(scan(at, sh, Unbounded, Unbounded)))
-    let large = collect_layout_rows(result.unwrap(scan(at, big, Unbounded, Unbounded)))
-    let indexed = collect_layout_rows(result.unwrap(find(at, ix, Included(1), Included(2))))
+    let rows = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, sh, Unbounded, Unbounded)))
+    let large = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, big, Unbounded, Unbounded)))
+    let indexed = collect_layout_rows(result.unwrap(find(result.unwrap(reader(db, 0u64)), at, ix, Included(1), Included(2))))
     let empty = Snapshot(store: at.store, open: at.open, branch: at.branch, head: 0, roots: empty_roots(), watermark: 1)
-    let delta = result.unwrap(changes(empty, at))
+    let delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, at))
     let account = accounts(db)
     if !account.exact {
         fail("layout account")
@@ -219,29 +223,29 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
             let first = snapshot(db)
             let _ = result.unwrap(pin(mut db, "held", first))
         }
-        let wrote = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            match step {
+        let wrote = result.unwrap(run(mut db, None, (copy_env(t), copy_env(big), copy_env(large), copy_env(newer), copy_env(step)), fn(mut tx, call_env) -> Result[(), Error] {
+            match call_env.4 {
                 0u8 => {
                     let mut k = 2000u64
                     while k > 0 {
-                        put(mut tx, t, k, k)?
+                        put(mut tx, call_env.0, k, k)?
                         k -= 1
                     }
                 },
                 1u8 => {
-                    put(mut tx, big, 1, large)?
-                    put(mut tx, big, 2, "small")?
+                    put(mut tx, call_env.1, 1, call_env.2)?
+                    put(mut tx, call_env.1, 2, "small")?
                 },
                 2u8 => {
                     let mut k = 7u64
                     while k <= 2000 {
-                        let _ = delete(mut tx, t, k)?
+                        let _ = delete(mut tx, call_env.0, k)?
                         k += 7
                     }
                 },
-                3u8 => put(mut tx, t, newer, newer)?,
-                4u8 => put(mut tx, t, newer - 4000, newer)?,
-                _ => put(mut tx, big, 2, "a longer small value")?,
+                3u8 => put(mut tx, call_env.0, call_env.3, call_env.3)?,
+                4u8 => put(mut tx, call_env.0, call_env.3 - 4000, call_env.3)?,
+                _ => put(mut tx, call_env.1, 2, "a longer small value")?,
             }
             Ok(())
         }))

@@ -1,4 +1,4 @@
-fn wire_call_ready[G: send, H: send, B: send](mut s: WireSession[G, B], r: Registry[G, H], mut work: WireWork, take pending: WirePending) -> Result[(), u16] {
+fn wire_call_ready[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], mut work: WireWork, take pending: WirePending) -> Result[(), u16] {
     let plan = wire_plan_call(mut s, r, take pending)?
     wire_apply_plan(mut s, mut work, take plan)
 }
@@ -185,7 +185,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+    list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), ended_at: ROUND_HALTED, reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -193,7 +193,7 @@ pub fn law_join_cleanup() -> bool {
     list.len(joined) == 0u64 && match channel.try_receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
 }
 
-type W3cHandles: send { data: store.Table[u64, u32] }
+type W3cHandles: shareable + send { data: store.Table[u64, u32] }
 
 fn w3c_put(mut tx: store.Tx, h: W3cHandles, author: Caller, take value: u32) -> Result[u64, u32] {
     if let Error(_) = store.put(mut tx, h.data, 0u64, value) { return Error(1u32) }
@@ -374,7 +374,7 @@ pub fn law_request_mismatch_wire(tasks: Tasks, clock: Clock, random: Random) -> 
     let mut ok = w3c_answer(first, 4u64, 0u32, 0u64, w3c_ok(4u64))
     let changed = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(8u32))
     ok = w3c_answer(changed, 4u64, 0u32, 0u64, Refused(RequestMismatch)) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
 }
@@ -388,7 +388,7 @@ pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> b
     }
     let old = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(9u32))
     ok = w3c_answer(old, 6u64, 0u32, 0u64, Refused(HistoryUnavailable)) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
 }
@@ -399,7 +399,7 @@ pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bo
     let mut ok = w3c_answer(large, 4u64, 1u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64))))
     let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8169u32))
     ok = w3c_answer(big, 4u64, 2u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64)))) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == None && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == None && ok
     w3c_close(take rig)
     ok
 }
@@ -438,7 +438,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
     let pub_job = Publish(place: code.describe(subs_place), n_place: 1048576u64,
-        h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+        h: result.unwrap(subs_handles(mut db)), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
@@ -533,7 +533,7 @@ pub fn law_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random)
     let no_outcome = match channel.try_receive(from) { Error(Closed) => true, _ => false }
     let after = store.snapshot(rig.head.db)
     let published = store.version(after) == before + 1u64 &&
-        result.unwrap(store.get(after, rig.head.h.data, 0u64)) == Some(7u32)
+        result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), after, rig.head.h.data, 0u64)) == Some(7u32)
     let W3cRig(head: take owned, ..) = take rig
     let Head(db: take db, ..) = take owned
     let _ = store.close(take db)
@@ -625,7 +625,7 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
         list.push(mut generations, (1u32, 1u64))
         let mut complete: List[u32] = list.new()
         list.push(mut complete, 1u32)
-        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), ended: list.new(), reset: false)
+        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), ended: list.new(), reset: false, read_failed: false)
         if let Error(_) = wire_update(mut owner, mut work, Update(version: version, content: Some(take owed), outcomes: list.new())) { delivered = false }
     }
     // The client's image: every `complete` naming sub 1 replaces it from empty.
@@ -720,7 +720,7 @@ fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> 
     if law_removal_waits_for_writer(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
-fn repair_offer(mut b: Board[(), Qh], mut joined: List[Joiner]) -> u64 {
+fn repair_offer(mut b: Board[(), Qh], mut joined: List[Joiner]) -> u64 waits {
     let mut owes: List[Owe] = list.new()
     repair(mut b, mut joined, mut owes)
     let mut offered = 0u64
@@ -754,7 +754,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     set(mut db, t, 1u64, 0u64)
     let h = result.unwrap(subs_handles(mut db))
     let board_reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut b = Board(r: take board_reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take board_reg, h: take h, read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
 
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
@@ -777,7 +777,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     owner.taken = Some(take root)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64))
+    list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64))
 
     // The first repair: due, and the owner drained.
     let _ = mark_due(mut b.subs, 7u64, 1u32)

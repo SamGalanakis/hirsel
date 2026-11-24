@@ -603,11 +603,11 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
     }
     let mut client_key = string.from("ask-")
     string.push_u64(mut client_key, n)
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        if n == 0u64 {
-            harness.open_session(mut tx, h, "scripted", All)?
+    let ran = store.run(mut db, None, (store.copy_env(line), store.copy_env(n), store.copy_env(h), store.copy_env(w), store.copy_env(client_key)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        if call_env.1 == 0u64 {
+            harness.open_session(mut tx, call_env.2, "scripted", All)?
         }
-        harness.submit(mut tx, h, helper_agent(), w, you(), NextTurn, harness.Submit(client_key: clone(client_key), text: clone(line)))
+        harness.submit(mut tx, call_env.2, helper_agent(), call_env.3, you(), NextTurn, harness.Submit(client_key: clone(call_env.4), text: clone(call_env.0)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("helper: submit did not commit")
@@ -623,11 +623,11 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
         return Error("helper: reopen")
     }
     let snap = store.snapshot(db2)
-    let Ok(Some(session)) = store.get(snap, h.session, 0u64) else {
+    let Ok(Some(session)) = store.get(result.unwrap(store.reader(db2, 0u64)), snap, h.session, 0u64) else {
         return Error("helper: no session")
     }
     let last = session.next_pos - 1u64
-    let answer: Result[String, String] = match store.get(snap, h.entries, last) {
+    let answer: Result[String, String] = match store.get(result.unwrap(store.reader(db2, 0u64)), snap, h.entries, last) {
         Ok(Some(Assistant(a))) => Ok(clone(a.text)),
         _ => Error("helper: the run did not end in an answer"),
     }
@@ -783,9 +783,9 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
     let Ok(w) = wired() else {
         return Error("wiring")
     }
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        harness.open_session(mut tx, h, "scripted", All)?
-        harness.set_reader(mut tx, h, you(), true)?
+    let ran = store.run(mut db, None, (store.copy_env(prompt), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, call_env.1, "scripted", All)?
+        harness.set_reader(mut tx, call_env.1, you(), true)?
         let Ok(t) = tables(store.tx_schema(tx)) else {
             return Error(Storage)
         }
@@ -795,7 +795,7 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
         let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else {
             return Error(Storage)
         }
-        harness.submit(mut tx, h, notes_agent(), w, you(), NextTurn, harness.Submit(client_key: "k1", text: string.from(prompt)))
+        harness.submit(mut tx, call_env.1, notes_agent(), call_env.2, you(), NextTurn, harness.Submit(client_key: "k1", text: string.from(call_env.0)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("submit did not commit")
@@ -819,11 +819,11 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         return Error("schema")
     }
     let snap = store.snapshot(db)
-    let Ok(waits) = harness.pending_approvals(snap, h, you()) else { return Error("read approvals") }
+    let Ok(waits) = harness.pending_approvals(result.unwrap(store.reader(db, 0u64)), snap, h, you()) else { return Error("read approvals") }
     if list.len(waits) != 1u64 { return Error("expected one open approval") }
     let wait = waits[0u64]
     let ek = harness.EffectKey(run: wait.run, round: wait.round, kind: harness.TOOL, ordinal: wait.ordinal)
-    let Ok(Some(held)) = store.get(snap, h.effects, ek) else {
+    let Ok(Some(held)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.effects, ek) else {
         return Error("the held call is missing")
     }
     if let Some(c) = held.call {
@@ -836,8 +836,8 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         return Error("wiring")
     }
     let d = harness.Decision(run: wait.run, round: wait.round, ordinal: wait.ordinal, key: clone(wait.key), allow: true)
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Ruling, harness.Refused] {
-        harness.decide(mut tx, h, notes_agent(), w, you(), clone(d))
+    let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(w), store.copy_env(d)), fn(mut tx, call_env) -> Result[harness.Ruling, harness.Refused] {
+        harness.decide(mut tx, call_env.0, notes_agent(), call_env.1, you(), clone(call_env.2))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("the decision did not commit")
@@ -863,34 +863,34 @@ fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> 
         return Error("tables")
     }
     let snap = store.snapshot(db)
-    let Ok(Some(session)) = store.get(snap, h.session, 0u64) else {
+    let Ok(Some(session)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64) else {
         return Error("no session")
     }
     emit(out, "transcript:", "")
     for pos in 0u64 .. session.next_pos {
-        if let Ok(Some(e)) = store.get(snap, h.entries, pos) {
+        if let Ok(Some(e)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, pos) {
             show_entry(out, e)
         }
     }
     emit(out, "notes:", "")
-    let mut rows = match store.scan(snap, t.notes, Unbounded, Unbounded) {
+    let mut rows = match store.scan(result.unwrap(store.reader(db, 0u64)), snap, t.notes, Unbounded, Unbounded) {
         Ok(take v) => take v,
         Error(_) => return Error("scan")
     }
-    while let Ok(Some((id, text))) = store.next(mut rows) {
+    while let Ok(Some((id, text))) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows) {
         let mut s = string.from("  ")
         string.push_u64(mut s, id)
         string.push(mut s, ". ")
         emit(out, take s, text)
     }
-    let counted = match store.get(snap, t.stats, RESULTS) {
+    let counted = match store.get(result.unwrap(store.reader(db, 0u64)), snap, t.stats, RESULTS) {
         Ok(Some(n)) => n,
         _ => 0u64
     }
     let mut tallied = string.from("tool results counted by the reaction: ")
     string.push_u64(mut tallied, counted)
     emit(out, take tallied, "")
-    let Ok(Some(run)) = store.get(snap, h.runs, 0u64) else {
+    let Ok(Some(run)) = store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64) else {
         return Error("no run")
     }
     let mut s = string.from("spend: ")

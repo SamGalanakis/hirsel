@@ -98,7 +98,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     Ok(())
 }
 
-fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] {
+fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] waits {
     let tree = db.heads[0u64].roots.collections
     let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else { return Error(Missing("collection")) }
     let image = std.page.image_of(root)
@@ -106,10 +106,10 @@ fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: 
         return Error(Missing("merged root leaf"))
     }
     let s = snapshot(db)
-    let reader = view rows
-    if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
+    let read_source = view rows
+    if get(result.unwrap(reader(db, 0u64)), s, read_source, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
     for key in 1u64 .. 5 {
-        if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
+        if get(result.unwrap(reader(db, 0u64)), s, read_source, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
     }
     Ok(())
 }
@@ -130,8 +130,8 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
     // including its one-byte key suffix. A typed value adds six bytes.
     // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
-    let filled = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        for key in 0u64 .. 5 { put(mut tx, rows, key, wide)? }
+    let filled = run(mut db, None, (copy_env(rows), copy_env(wide)), fn(mut tx, call_env) -> Result[(), Error] {
+        for key in 0u64 .. 5 { put(mut tx, call_env.0, key, call_env.1)? }
         Ok(())
     })?
     if let Committed(_) = take filled {} else { return Error(Missing("initial commit")) }
@@ -153,7 +153,8 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     // The overwrite leaves the left leaf at 31 + 2*8 + 920 + 7 = 974,
     // below 1024. AP3 joins it with the right leaf and collapses the root:
     // 31 + 5*8 + 4*920 + 7 = 3758 bytes, within 4096.
-    let shrunk = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 0, short) })?
+    let shrunk = run(mut db, None, (copy_env(rows), copy_env(short)), fn(mut tx, call_env) -> Result[(), Error] {
+    put(mut tx, call_env.0, 0, call_env.1) })?
     let Committed(done) = take shrunk else { return Error(Missing("overwrite commit")) }
     durable(mut db, done.ticket)?
     if db.file_seq != seq { return Error(Missing("uncovered journal")) }

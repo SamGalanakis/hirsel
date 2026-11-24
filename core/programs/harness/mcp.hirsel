@@ -151,7 +151,7 @@ pub fn replace(mut tx: store.Tx, table: store.Table[String, Remote], next: Listi
     let mut removed: List[String] = list.new()
     {
         let mut old = store.range(tx, table, Unbounded, Unbounded)?
-        while let Some((take key, remote)) = store.next_range(mut old)? {
+        while let Some((take key, remote)) = store.next_in(tx, mut old)? {
             if remote.server == next.server && !map.contains(next.rows, key) {
                 list.push(mut removed, take key)
             }

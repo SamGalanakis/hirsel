@@ -50,12 +50,12 @@ fn mapped[A](take r: Result[A, platform.local.Refused]) -> Result[A, Refused] {
 fn seeder(take seeding: Seeding, take reader: Option[store.Caller]) -> platform.local.Seed {
     fn(mut db: store.Db) -> Result[(), String] waits {
         let Ok(h) = store.with_schema(mut db, code.describe(harness.handles)) else { return Error(string.from("harness schema")) }
-        let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-            match seeding {
-                Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),
-                Adopt(prefix) => harness.adopt(mut tx, h, clone(prefix)),
+        let ran = store.run(mut db, None, (store.copy_env(reader), store.copy_env(seeding), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
+            match call_env.1 {
+                Fresh(model, narrow) => harness.open_session(mut tx, call_env.2, clone(model), clone(narrow)),
+                Adopt(prefix) => harness.adopt(mut tx, call_env.2, clone(prefix)),
             }?
-            if let Some(caller) = reader { harness.set_reader(mut tx, h, caller, true)? }
+            if let Some(caller) = call_env.0 { harness.set_reader(mut tx, call_env.2, caller, true)? }
             Ok(())
         })
         match take ran {
@@ -102,7 +102,8 @@ fn create_with(d: Door, take key: Bytes, take seeding: Seeding, take reader: Opt
 }
 
 // Exports a cold session's prefix up to the cut `arg` encodes.
-fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] {
+fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] waits {
+    let read_handle = store.read_only_reader(reader, store.VALUE_LIMIT) ?=> |_| string.from("fork read")
     let c_cut: std.codec.Codec[u64] = std.codec.of()
     let Ok(upto) = std.codec.decode(c_cut, arg) else {
         return Error(string.from("fork cut"))
@@ -111,7 +112,7 @@ fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] {
     let Ok(h) = harness.handles(store.snapshot_schema(snap)) else {
         return Error(string.from("harness schema"))
     }
-    let Ok(prefix) = harness.export(snap, h, upto) else {
+    let Ok(prefix) = harness.export(read_handle, snap, h, upto) else {
         return Error(string.from("fork cut"))
     }
     let c_prefix: std.codec.Codec[harness.Prefix] = std.codec.of()

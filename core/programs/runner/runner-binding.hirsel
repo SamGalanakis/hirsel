@@ -4,9 +4,9 @@ type BindingJob[G: send]: send {
 
 fn binding_job[G: send, B: send](supplied: Option[Wire[G, B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
     if let Some(w) = supplied {
-        if let Some(bind) = w.bind {
+        if let Some(bind_app) = w.bind {
             let raw = match take credential { Some(take bytes_in) => take bytes_in, None => list.new() }
-            let job = BindingJob(seed: (w.duplicate)(w.seed), bind: bind, credential: take raw, steps: w.bind_steps)
+            let job = BindingJob(seed: (w.duplicate)(w.seed), bind: bind_app, credential: take raw, steps: w.bind_steps)
             return Some((take job, w.bind_bytes))
         }
     }
@@ -27,8 +27,8 @@ fn anonymous_caller(random: Random) -> Option[Caller] {
 }
 
 fn run_binding[G: send](take job: BindingJob[G]) -> Option[Caller] waits {
-    let BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps) = take job
-    let invoke = code.callable(bind)
+    let BindingJob(seed: take seed, bind: bind_app, credential: take credential, steps: steps) = take job
+    let invoke = code.callable(bind_app)
     let result = bound steps steps { invoke(seed, credential) }
     match take result {
         Ok(Ok(take caller)) if caller.issuer != 1u8 => Some(take caller),
@@ -38,8 +38,8 @@ fn run_binding[G: send](take job: BindingJob[G]) -> Option[Caller] waits {
 
 // Apply the same credential binding rules for a front that seeds a private
 // session before a place is listening.
-pub fn bind_credential[G: send](tasks: Tasks, take seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Option[Caller] waits {
-    bound_caller(tasks, BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps), bytes_budget)
+pub fn bind_credential[G: send](tasks: Tasks, take seed: G, bind_app: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Option[Caller] waits {
+    bound_caller(tasks, BindingJob(seed: take seed, bind: bind_app, credential: take credential, steps: steps), bytes_budget)
 }
 
 fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Option[Caller] waits {
@@ -238,6 +238,11 @@ pub fn bind_http[G: send, B: send](supplied: Option[Wire[G, B]], take credential
     }
 }
 
+type CheckedArgument: send {
+    validate: own[send] fn(Bytes, u64) -> Option[Refusal],
+    description: own[send] fn() -> Result[std.codec.Schema, std.codec.EncodeError],
+}
+
 fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
     let check = fn(arg: Bytes, maximum: u64) -> Option[Refusal] {
         let seen = bound bytes order.min(n, maximum) {
@@ -259,7 +264,8 @@ fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H]
             Error(c) => Some(Budget(room(c))),
         }
     }
-    let go = check
+    let description = fn() -> Result[std.codec.Schema, std.codec.EncodeError] { std.codec.describe(ca) }
+    let go = CheckedArgument(validate: take check, description: take description)
     let copied_result: Bytes = clone(key)
     let copied: Bytes = take copied_result
     map.insert(mut r.checks, take copied, take go)
@@ -285,24 +291,27 @@ pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_
 pub opaque type Send: send { caller: Caller, key: Bytes, stream: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
 
 pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
-    let known = map.contains(r.slots, want.key)
-    if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }
+    let CallWant(key: take key, stream: stream_id, p: p, arg: take arg, deadline_ms: relative) = take want
+    prepare_call(r, a, take key, stream_id, p, take arg, int.widen(relative))
+}
+
+fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: u32, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
+    let known = map.contains(r.slots, key)
+    if !known && !map.contains(r.gone, key) { return Error(NoEntry) }
     let mut allowed = false
-    for key in a.entries { if key == want.key { allowed = true } }
+    for entry in a.entries { if entry == key { allowed = true } }
     if !allowed { return Error(NotAllowed) }
-    let size = list.len(want.arg)
+    let size = list.len(arg)
     if size > a.arg_max { return Error(Budget(Room(requested: size, available: a.arg_max))) }
     if size > a.budget { return Error(Budget(Room(requested: size, available: a.budget))) }
-    let relative: u64 = int.widen(want.deadline_ms)
     let end = std.clock.deadline_after_ms(a.arrived, relative)
-    if want.deadline_ms == 0u32 || end <= a.now { return Error(Deadline) }
-    if let Some(check) = map.get(r.checks, want.key) {
-        if let Some(take why) = check(want.arg, a.arg_max) { return Error(take why) }
+    if relative == 0u64 || end <= a.now { return Error(Deadline) }
+    if let Some(check) = map.get(r.checks, key) {
+        if let Some(take why) = (check.validate)(arg, a.arg_max) { return Error(take why) }
     }
-    let digest = store.request_digest(want.key, want.arg)
-    let stream = match stream_key(a.caller, want.stream) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
-    let CallWant(key: take key, stream: _, p: p, arg: take arg, deadline_ms: _) = take want
-    Ok(Send(caller: clone(a.caller), key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
+    let digest = store.request_digest(key, arg)
+    let stream_key_bytes = match stream_key(a.caller, stream_id) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
+    Ok(Send(caller: clone(a.caller), key: take key, stream: take stream_key_bytes, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
 }
 
 fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {

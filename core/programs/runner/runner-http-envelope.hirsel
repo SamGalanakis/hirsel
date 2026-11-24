@@ -1,0 +1,153 @@
+type HttpGroup: send {
+    version: u64,
+    complete: bool,
+    payload: Arc[Bytes],
+    output: Arc[std.json.JsonPlan],
+    slots: Arc[List[HttpSlotPlan]],
+    tables: Arc[Map[u32, String]],
+}
+
+type HttpGroupHeader {
+    version: Inline[u8, 64],
+    first: u64,
+}
+
+fn http_group_header(version: u64) -> HttpGroupHeader {
+    let mut digits: Inline[u8, 64] = [0; 64]
+    let first = int.radix_digits(version, 10u32, mut digits)
+    HttpGroupHeader(version: digits, first: first)
+}
+
+type HttpGroupRow {
+    slot: u64,
+    table: u32,
+    key: std.http1.Span,
+    value: Option[std.http1.Span],
+}
+
+fn http_envelope_row(payload: Bytes, mut at: u64) -> Result[HttpGroupRow, store.Error] {
+    let slot_index: u64 = int.widen(std.codec.take_u16(payload, mut at) ?=> |_| Limit(Value))
+    let key_span = http_counted_span(payload, mut at)?
+    if key_span.end - key_span.start < 4u64 { return Error(Limit(Key)) }
+    let mut table = 0u32
+    for byte in list.slice(payload, key_span.start, key_span.start + 4u64) {
+        let code_byte: u32 = int.widen(byte)
+        table = (table << 8u32) | code_byte
+    }
+    let key = std.http1.Span(start: key_span.start + 4u64, end: key_span.end)
+    let tag = std.codec.take_tag(payload, mut at, 2u32) ?=> |_| Limit(Value)
+    let value = if tag == 1u32 { Some(http_counted_span(payload, mut at)?) } else { None }
+    Ok(HttpGroupRow(slot: slot_index, table: table, key: key, value: take value))
+}
+
+const HTTP_GROUP_START: String = "{\"version\":\""
+const HTTP_GROUP_COMPLETE: String = "\",\"complete\":[0],\"groups\":[{\"sub\":0"
+const HTTP_GROUP_DELTA: String = "\",\"complete\":[],\"groups\":[{\"sub\":0"
+const HTTP_GROUP_VALUE: String = ",\"value\":"
+const HTTP_GROUP_ROWS: String = ",\"rows\":["
+const HTTP_GROUP_END: String = "]}],\"outcomes\":[]}"
+const HTTP_ROW_START: String = "{\"slot\":"
+const HTTP_ROW_TABLE: String = ",\"table\":"
+const HTTP_ROW_KEY: String = ",\"key\":"
+const HTTP_ROW_PRESENT: String = ",\"present\":true,\"value\":"
+const HTTP_ROW_REMOVED: String = ",\"present\":false}"
+
+fn http_group_size(g: HttpGroup) -> Result[u64, std.json.TypedWriteError] {
+    let mut at = 0u64
+    let header = http_group_header(g.version)
+    let first = http_counted_span(g.payload, mut at) ?=> |_| Binary(Invalid(0u64))
+    let rows: u64 = int.widen(std.codec.take_u32(g.payload, mut at) ?=> Binary)
+    let mut length = string.byte_len(HTTP_GROUP_START) + 64u64 - header.first +
+        (if g.complete { string.byte_len(HTTP_GROUP_COMPLETE) } else { string.byte_len(HTTP_GROUP_DELTA) }) +
+        string.byte_len(HTTP_GROUP_ROWS) + string.byte_len(HTTP_GROUP_END)
+    if g.complete || first.start != first.end {
+        let n = std.json.wire_length(g.output, g.output.root, list.slice(g.payload, first.start, first.end))?
+        http_size_add(mut length, string.byte_len(HTTP_GROUP_VALUE))?
+        http_size_add(mut length, n)?
+    }
+    for i in 0u64 .. rows {
+        let row = http_envelope_row(g.payload, mut at) ?=> |_| Binary(Invalid(0u64))
+        let slot_plan = view g.slots[row.slot]
+        let table_name = option.unwrap(map.get(g.tables, row.table))
+        let key = std.json.wire_length(slot_plan.key, slot_plan.key.root, list.slice(g.payload, row.key.start, row.key.end))?
+        let prefix = string.byte_len(HTTP_ROW_START) + string.byte_len(slot_plan.name) +
+            string.byte_len(HTTP_ROW_TABLE) + string.byte_len(table_name) + string.byte_len(HTTP_ROW_KEY)
+        http_size_add(mut length, prefix)?
+        http_size_add(mut length, key)?
+        if i != 0u64 { http_size_add(mut length, 1u64)? }
+        if let Some(value) = row.value {
+            let json_size = std.json.wire_length(slot_plan.value, slot_plan.value.root, list.slice(g.payload, value.start, value.end))?
+            http_size_add(mut length, string.byte_len(HTTP_ROW_PRESENT) + 1u64)?
+            http_size_add(mut length, json_size)?
+        } else {
+            http_size_add(mut length, string.byte_len(HTTP_ROW_REMOVED))?
+        }
+    }
+    Ok(length)
+}
+
+fn http_size_add(mut first: u64, add: u64) -> Result[(), std.json.TypedWriteError] {
+    let Some(total) = int.checked_add(first, add) else { return Error(LengthOverflow) }
+    first = total
+    Ok(())
+}
+
+fn http_group_write(g: HttpGroup, mut out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+    let mut at = 0u64
+    let header = http_group_header(g.version)
+    let value = result.unwrap(http_counted_span(g.payload, mut at))
+    let rows: u64 = int.widen(result.unwrap(std.codec.take_u32(g.payload, mut at)))
+    if !flush(string.as_bytes(HTTP_GROUP_START)) { return false }
+    list.clear(mut out)
+    for index in header.first .. 64u64 {
+        if list.len(out) == list.capacity(out) {
+            if !flush(out) { return false }
+            list.clear(mut out)
+        }
+        list.push(mut out, header.version[index])
+    }
+    if !flush(out) || !flush(string.as_bytes(if g.complete { HTTP_GROUP_COMPLETE } else { HTTP_GROUP_DELTA })) { return false }
+    if g.complete || value.start != value.end {
+        if !flush(string.as_bytes(HTTP_GROUP_VALUE)) || !http_value_write(g.output, g.payload, value, mut out, flush) { return false }
+    }
+    if !flush(string.as_bytes(HTTP_GROUP_ROWS)) { return false }
+    for i in 0u64 .. rows {
+        let row = result.unwrap(http_envelope_row(g.payload, mut at))
+        let slot_plan = view g.slots[row.slot]
+        let table_name = option.unwrap(map.get(g.tables, row.table))
+        if i != 0u64 && !flush(b",") { return false }
+        if !flush(string.as_bytes(HTTP_ROW_START)) || !flush(string.as_bytes(slot_plan.name)) ||
+            !flush(string.as_bytes(HTTP_ROW_TABLE)) || !flush(string.as_bytes(table_name)) || !flush(string.as_bytes(HTTP_ROW_KEY)) ||
+            !http_value_write(slot_plan.key, g.payload, row.key, mut out, flush) { return false }
+        if let Some(value_span) = row.value {
+            if !flush(string.as_bytes(HTTP_ROW_PRESENT)) || !http_value_write(slot_plan.value, g.payload, value_span, mut out, flush) || !flush(b"}") {
+                return false
+            }
+        } else if !flush(string.as_bytes(HTTP_ROW_REMOVED)) { return false }
+    }
+    flush(string.as_bytes(HTTP_GROUP_END))
+}
+
+fn http_value_write(plan: std.json.JsonPlan, payload: Bytes, span: std.http1.Span, mut out: Bytes,
+    flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+    match std.json.write_wire(plan, plan.root, list.slice(payload, span.start, span.end), mut out, flush) {
+        Ok(sent) => sent,
+        Error(_) => false,
+    }
+}
+
+fn http_batch_reply(operation: HttpOperation, tables: Arc[Map[u32, String]], version: u64, take data: Arc[Bytes]) -> Result[std.http.Response, std.http.HandlerError] {
+    let group = HttpGroup(version: version, complete: true, payload: take data, output: arc.share(operation.output),
+        slots: arc.share(operation.projections), tables: arc.share(tables))
+    let size = match http_group_size(group) {
+        Ok(n) => n,
+        Error(DepthLimit) => return http_reply(500u16, "{\"fault\":\"depth\"}", false, false, false),
+        Error(_) => return Error(StatusInvalid),
+    }
+    let write: std.http.BodyWriter = fn(mut out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+        http_group_write(group, mut out, flush)
+    }
+    let mut reply = std.http.response_measured(200u16, size, take write)?
+    std.http.content_type(mut reply, ApplicationJson)?
+    Ok(take reply)
+}

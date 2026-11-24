@@ -7,6 +7,10 @@ type Error = Box<dyn std::error::Error>;
 pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
+mod http;
+
+pub use http::HttpBinding;
+
 pub(crate) struct Reader<'a> {
     pub(crate) bytes: &'a [u8],
     pub(crate) at: usize,
@@ -20,6 +24,9 @@ impl<'a> Reader<'a> {
     }
     pub(crate) fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
+    }
+    fn half(&mut self) -> Result<u16, Error> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
     }
     pub(crate) fn count(&mut self) -> Result<usize, Error> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?) as usize)
@@ -251,6 +258,7 @@ pub struct ExportedSlot {
     pub name: String,
     pub kind: u32,
     pub key: Vec<u8>,
+    pub key_json: Vec<u8>,
     pub value: Vec<u8>,
 }
 
@@ -317,6 +325,7 @@ pub struct Describe {
     pub revision: Vec<u8>,
     pub exported: Vec<Exported>,
     pub tables: Vec<DeclaredCollection>,
+    pub bindings: Vec<HttpBinding>,
 }
 impl Describe {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
@@ -354,6 +363,7 @@ impl Describe {
                     name: r.name()?,
                     kind: r.count()? as u32,
                     key: r.bytes()?,
+                    key_json: r.bytes()?,
                     value: r.bytes()?,
                 });
             }
@@ -372,6 +382,10 @@ impl Describe {
                 kind: r.byte()?,
             });
         }
+        let mut bindings = Vec::new();
+        for _ in 0..r.count()? {
+            bindings.push(HttpBinding::read(r)?);
+        }
         Ok(Self {
             digest,
             target,
@@ -379,6 +393,7 @@ impl Describe {
             revision,
             exported,
             tables,
+            bindings,
         })
     }
 }
@@ -393,6 +408,7 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
         ),
         1 => format!("AlreadyRegistered({:?})", r.bytes()?),
         2 => "Bounds".to_owned(),
+        3 => http::bind_error(&mut r)?,
         _ => return Err("Malformed: describe error tag".into()),
     };
     r.done()?;
@@ -535,7 +551,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         subscriptions.join("; "),
         decoded.join("; ")
     );
-    Ok(BTreeMap::from([
+    let mut files = BTreeMap::from([
         ("package.json".into(), "{\"type\":\"module\"}\n".into()),
         ("codec.js".into(), js),
         ("codec.d.ts".into(), dts),
@@ -557,7 +573,9 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             "persistence.ts".into(),
             include_str!("../../../sdk/client/persistence.ts").into(),
         ),
-    ]))
+    ]);
+    http::generate(describe, &mut files)?;
+    Ok(files)
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {
     let files = generate(describe)?;
@@ -677,6 +695,7 @@ mod tests {
             revision: vec![],
             exported: vec![entry("a", "toggle"), entry("b", "toggle")],
             tables: vec![],
+            bindings: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("absent");
@@ -735,12 +754,14 @@ mod tests {
                 name: "data".into(),
                 kind: 0,
                 key: vec![4, 0, 0, 0, 0, 6],
+                key_json: scalar(6),
                 value: scalar(13),
             },
             ExportedSlot {
                 name: "other".into(),
                 kind: 1,
                 key: vec![],
+                key_json: scalar(0),
                 value: scalar(5),
             },
         ];
@@ -754,6 +775,7 @@ mod tests {
             revision: vec![],
             exported: vec![entry("m", "toggle"), query, computed],
             tables: vec![],
+            bindings: vec![],
         };
         let files = generate(&d).unwrap();
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
@@ -776,10 +798,10 @@ mod tests {
     }
     #[test]
     fn sdk_describe_and_nominal_schemas() {
-        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: [], tables: []}.
+        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: [], tables: [], bindings: []}.
         let bytes = [
             0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0,
+            0, 0, 0, 0, 0,
         ];
         let describe = Describe::read(&bytes).unwrap();
         assert_eq!(describe.target, "t");
@@ -848,6 +870,7 @@ mod tests {
         blob(&mut bytes, &e.revision);
         bytes.extend_from_slice(&0u32.to_le_bytes());
         blob(&mut bytes, &[]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         let description = Describe::read(&bytes).unwrap();
         assert_eq!(description.revision, [42; 32]);

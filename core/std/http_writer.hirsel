@@ -1,0 +1,55 @@
+// Writes fixed HTTP bodies with one deadline and a committed-prefix cursor.
+pub fn write_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[(), NetError] waits {
+    let boundary = list.len(prefix)
+    let end = boundary + list.len(body)
+    let mut committed: u64 = 0
+    while committed < end {
+        let until = http.clamp_deadline(signal, deadline)
+        if host.mono_ns(c) >= until {
+            return Error(TimedOut)
+        }
+        let sent = if committed < boundary {
+            host.send_pair(mut w, list.slice(prefix, committed, boundary), body, At(c, until))
+        } else {
+            host.send_pair(mut w, list.slice(body, committed - boundary, list.len(body)), string.as_bytes(""), At(c, until))
+        }
+        match sent {
+            Ok(0) => return Error(Reset),
+            Ok(n) => {
+                committed += n
+            },
+            Error(e) => return Error(e),
+        }
+    }
+    Ok(())
+}
+
+pub fn write_json(mut writer: WriteHalf, mut out: Bytes, plan: json.JsonPlan, root: u64, binary: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> bool waits {
+    if let Error(_) = write_until(mut writer, out, b"", c, deadline, signal) {
+        return false
+    }
+    let flush = scoped fn(chunk: Bytes) -> bool waits {
+        match write_until(mut writer, b"", chunk, c, deadline, signal) {
+            Ok(()) => true,
+            Error(_) => false,
+        }
+    }
+    match json.write_wire(plan, root, binary, mut out, flush) {
+        Ok(all) => all,
+        Error(_) => false,
+    }
+}
+
+pub fn write_measured(mut writer: WriteHalf, mut out: Bytes, write: http.BodyWriter, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> bool waits {
+    if let Error(_) = write_until(mut writer, out, b"", c, deadline, signal) {
+        return false
+    }
+    list.clear(mut out)
+    let flush = scoped fn(chunk: Bytes) -> bool waits {
+        match write_until(mut writer, b"", chunk, c, deadline, signal) {
+            Ok(()) => true,
+            Error(_) => false,
+        }
+    }
+    write(mut out, flush)
+}

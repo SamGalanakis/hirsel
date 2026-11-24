@@ -43,7 +43,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         } else {
             open_place_schema(mut db, schema) ?=> Store
         }
-        let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
+        let release = http_release_digest(local_registry.exported, local_registry.bindings) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take release, take identity))
     }
     if persistent && launch_env().revision.size == 0u64 { return Error(IdentityUnknown) }

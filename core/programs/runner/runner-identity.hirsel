@@ -1,5 +1,7 @@
 type ReleaseExport: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
-type ReleaseIdentity: codec + send { revision: Bytes, n_place: u64, exported: List[ReleaseExport] }
+type ReleaseIdentity: codec + send {
+    revision: Bytes, n_place: u64, exported: List[ReleaseExport], bindings: List[HttpDescribe], slots: List[List[SlotSchema]],
+}
 
 fn release_exports(exported: List[Exported]) -> List[ReleaseExport] {
     let mut entries: List[ReleaseExport] = list.with_capacity(list.len(exported))
@@ -12,7 +14,9 @@ fn release_exports(exported: List[Exported]) -> List[ReleaseExport] {
 
 pub fn identity_digest(description: Describe) -> Result[Bytes, RegisterError] {
     if list.len(description.revision) != 32u64 { return Error(Bounds) }
-    let identity = ReleaseIdentity(revision: clone(description.revision), n_place: description.n_place, exported: release_exports(description.exported))
+    let mut slot_schemas: List[List[SlotSchema]] = list.with_capacity(list.len(description.exported))
+    for export in description.exported { list.push(mut slot_schemas, clone(export.slots)) }
+    let identity = ReleaseIdentity(revision: clone(description.revision), n_place: description.n_place, exported: release_exports(description.exported), bindings: clone(description.bindings), slots: take slot_schemas)
     let codec: std.codec.Codec[ReleaseIdentity] = std.codec.of()
     let mut payload: Bytes = list.new()
     std.codec.encode(codec, identity, mut payload) ?=> |_| Bounds
@@ -170,21 +174,21 @@ fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -
 }
 
 fn prepare_activation[G: send, H: shareable + inert + send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
-    let release = release_digest(r.exported) ?=> |_| Bounds
+    let release = http_release_digest(r.exported, r.bindings) ?=> |_| Bounds
     let launch = launch_env()
     let image = launch_bytes(launch.digest)
     let target = owned_launch_target(launch.target)
-    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported), tables: list.new())
+    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported), tables: list.new(), bindings: clone(r.bindings))
     let binding: Bytes = if launch.revision.size == 0u64 { list.new() } else { identity_digest(description)? }
     let payload = encode_describe(description) ?=> |_| Bounds
     let Describe(digest: take digest, ..) = take description
     Ok((take payload, ReleaseRecord(release: take release, digest: take digest, binding: take binding, n_place: n_place, prepared: list.new())))
 }
 
-fn trigger_stamp(exported: List[Exported], n_place: u64) -> Result[Bytes, store.Error] {
+fn trigger_stamp(exported: List[Exported], bindings: List[HttpDescribe], n_place: u64) -> Result[Bytes, store.Error] {
     let entry = launch_env().revision
     if entry.size == 0u64 { return Ok(list.new()) }
     let revision = launch_bytes(entry)
-    let identity = Describe(digest: list.new(), target: string.new(), n_place: n_place, revision: take revision, exported: clone(exported), tables: list.new())
+    let identity = Describe(digest: list.new(), target: string.new(), n_place: n_place, revision: take revision, exported: clone(exported), tables: list.new(), bindings: clone(bindings))
     Ok(identity_digest(identity) ?=> |_| Limit(Value))
 }

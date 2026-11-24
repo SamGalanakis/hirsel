@@ -30,7 +30,28 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, std.codec.Encod
     Ok(take out)
 }
 
-pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, revision: Bytes, exported: List[Exported], tables: List[store.DeclaredCollection] }
+pub type Describe: codec + send {
+    digest: Bytes, target: String, n_place: u64, revision: Bytes, exported: List[Exported],
+    tables: List[store.DeclaredCollection], bindings: List[HttpDescribe],
+}
+
+fn http_release_digest(exported: List[Exported], bindings: List[HttpDescribe]) -> Result[Bytes, std.codec.EncodeError] {
+    let entries = release_digest(exported)?
+    if list.len(bindings) == 0u64 { return Ok(take entries) }
+    let codec: std.codec.Codec[List[HttpDescribe]] = std.codec.of_list()
+    let mut payload: Bytes = list.new()
+    std.codec.encode(codec, bindings, mut payload)?
+    let mut hash = std.sha256.start()
+    let domain = string.as_bytes("hirsel.release.http.v1")
+    std.sha256.add_byte(mut hash, int.truncate(list.len(domain)))
+    std.sha256.add(mut hash, domain, 0u64, list.len(domain))
+    std.sha256.add(mut hash, entries, 0u64, list.len(entries))
+    std.sha256.add(mut hash, payload, 0u64, list.len(payload))
+    let digest = std.sha256.finish(hash)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for byte in digest { list.push(mut out, byte) }
+    Ok(take out)
+}
 
 pub type Preview: codec + send { describe: Describe, release: Bytes, answers: List[Entry] }
 
@@ -63,7 +84,7 @@ fn preview_answers[G: send, H: shareable + inert + send](r: Registry[G, H], prev
 }
 
 fn encode_preview(take description: Describe, take answers: List[Entry]) -> Result[Bytes, RegisterError] {
-    let release = release_digest(description.exported) ?=> |_| Bounds
+    let release = http_release_digest(description.exported, description.bindings) ?=> |_| Bounds
     let preview = Preview(describe: take description, release: take release, answers: take answers)
     let codec: std.codec.Codec[Preview] = std.codec.of()
     let mut out: Bytes = list.new()
@@ -73,7 +94,7 @@ fn encode_preview(take description: Describe, take answers: List[Entry]) -> Resu
     }
 }
 
-pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | Bounds
+pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | Bounds | BadHttpBinding(BindError)
 
 fn launch_emit(data: Bytes) -> bool { false }
 
@@ -86,8 +107,8 @@ fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError
 
 fn describe_registered[G: send, H: shareable + inert + send](launch: LaunchEnv, take r: Registry[G, H], take tables: List[store.DeclaredCollection]) -> Result[Bytes, RegisterError] {
     let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
-    let Registry(exported: take exported, ..) = take r
-    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported, tables: take tables)
+    let Registry(exported: take exported, bindings: take bindings, ..) = take r
+    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported, tables: take tables, bindings: take bindings)
     if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
     Ok(encode_describe(description) ?=> |_| Bounds)
 }

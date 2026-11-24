@@ -55,7 +55,7 @@ fn entry_of(identity: u8, revision: u8) -> runner.Exported {
 
 // A Describe of image `digest` exporting `entries`.
 fn describing(digest: Bytes, take entries: List[runner.Exported]) -> runner.Describe {
-    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: take entries, tables: list.new())
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: take entries, tables: list.new(), bindings: list.new())
 }
 
 // L54 `deploy_preview` (launch.md "Deploy preview"): the deploy's report shows what NEW

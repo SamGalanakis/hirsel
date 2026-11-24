@@ -1,4 +1,4 @@
-import {CorruptState, RECOVERY_VERSION, validCaller, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
+import {CorruptState, RECOVERY_VERSION, validCaller, validHttpRequest, type Installation, type Want, type Pending, type StreamRecord} from './client.js';
 
 export function encodeState(state: Installation): string {
   return JSON.stringify(state, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
@@ -42,7 +42,8 @@ function want(w: Want): boolean {
 function pending(p: Pending, state: Installation, stream: number, next: bigint): boolean {
   return p.generation === state.generation && p.stream === stream && p.p === next && want(p.want)
     && p.args instanceof Uint8Array && u32(p.slot) && Number.isSafeInteger(p.attempts) && p.attempts >= 0
-    && typeof p.possiblyAdmitted === 'boolean' && state.streams[stream].caller !== null;
+    && typeof p.possiblyAdmitted === 'boolean' && state.streams[stream].caller !== null
+    && (p.http === undefined || validHttpRequest(p.http));
 }
 function validRecord(r: StreamRecord, state: Installation, stream: number): boolean {
   if (!r || (r.caller !== null && !validCaller(r.caller)) || !u64(r.next) || typeof r.retired !== 'boolean' || (r.pending && !pending(r.pending, state, stream, r.next))) return false;

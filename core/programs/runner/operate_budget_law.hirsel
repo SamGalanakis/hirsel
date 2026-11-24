@@ -93,7 +93,7 @@ fn seed_budget_bucket(take config: PlaceConfig[(), (), (), ()]) -> Result[store.
     let mut db = take opened
     let mut revision: Bytes = list.with_capacity(32u64)
     list.fill(mut revision, 32u64, 1u8)
-    let description = Describe(digest: list.new(), target: "", n_place: 262144u64, revision: take revision, exported: list.new(), tables: list.new())
+    let description = Describe(digest: list.new(), target: "", n_place: 262144u64, revision: take revision, exported: list.new(), tables: list.new(), bindings: list.new())
     let raw = result.unwrap(encode_describe(description))
     let binding = result.unwrap(identity_digest(description))
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()

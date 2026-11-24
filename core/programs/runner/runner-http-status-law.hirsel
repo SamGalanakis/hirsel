@@ -1,0 +1,85 @@
+type HttpStatusScript: shareable + send {
+    binding: HttpBinding,
+    reply: Arc[std.json.JsonPlan],
+}
+
+fn http_script_answer(position: u64) -> Outcome {
+    match position {
+        0u64 => Refused(NoEntry),
+        1u64 => Refused(Malformed(Bad(kind: 3u32, at: 19u64))),
+        2u64 => Refused(NotAllowed),
+        3u64 => Refused(Overloaded),
+        4u64 => Refused(Deadline),
+        5u64 => Refused(Budget(Room(requested: 11u64, available: 3u64))),
+        6u64 => Refused(RequestMismatch),
+        7u64 => Refused(HistoryUnavailable),
+        8u64 => Abandoned,
+        9u64 => Failed(Raised(7u32)),
+        10u64 => Failed(OutOfBytes(Room(requested: 8u64, available: 6u64))),
+        11u64 => Failed(OutOfTime(52u64)),
+        12u64 => Failed(Gone),
+        13u64 => InDoubt,
+        14u64 => Returned(b"\x00\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00"),
+        _ => Returned(b"\x01\x00\x00\x00\x10\x00\x00\x00request_mismatch"),
+    }
+}
+
+fn http_status_script(req: std.http.Request, _scratch: Region, mut _body: std.http.Responder, state: HttpStatusScript) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let (_, position) = option.unwrap(http_request_identity(req))
+    let bytes_out = relay_encode(http_script_answer(position))
+    let response = http_render_stream(req, state.binding, state.reply, RelayOutcome(payload: take bytes_out, replayed: position == 14u64))?
+    Ok(Reply(take response))
+}
+
+type HttpStatusListener: send { listener: Listener, clock: Clock, tasks: Tasks }
+
+fn http_status_serve(take seed: HttpStatusListener) waits {
+    let HttpStatusListener(listener: take listener, clock, tasks) = take seed
+    let registered = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
+    let binding: HttpBinding = clone(registered.bindings[0u64].binding)
+    let reply_plan = result.unwrap(bind_shape(registered.exported[0u64].described.result))
+    let mut builder: std.router.Builder[HttpStatusScript] = std.router.builder()
+    result.unwrap(std.router.add_tagged(mut builder, "POST", "/status", 1u64, std.router.raw(http_status_script)))
+    let mut listeners: List[Listener] = list.with_capacity(1u64)
+    list.push(mut listeners, take listener)
+    let state = HttpStatusScript(binding: take binding, reply: arc.new(take reply_plan))
+    result.unwrap(std.http.serve(take listeners, clock, tasks, http_law_config(), result.unwrap(std.router.build(take builder)), take state))
+}
+
+@test
+fn test_l14(c: Clock, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let mut app_reply = result.unwrap(std.http.response(422u16, list.new(), false))
+    if let Error(HeaderReserved) = std.http.header(mut app_reply, b"iDempotent-Outcome", b"committed") {} else {
+        fail("L14 application supplied a reserved response header")
+    }
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server = task.spawn(tasks, bytes 4194304u64, HttpStatusListener(listener: take listener, clock: c, tasks: tasks), http_status_serve)
+    let mut position = 0u64
+    for (status, body, retry, committed) in [
+        (404u16, b"", false, false),
+        (400u16, b"{\"refused\":\"malformed\",\"kind\":3}", false, false),
+        (403u16, b"", false, false),
+        (503u16, b"", true, false),
+        (504u16, b"", false, false),
+        (503u16, b"", true, false),
+        (422u16, b"{\"refused\":\"request_mismatch\"}", false, false),
+        (410u16, b"", false, false),
+        (409u16, b"", true, false),
+        (500u16, b"{\"fault\":\"raised\",\"kind\":7}", false, true),
+        (500u16, b"{\"fault\":\"out_of_bytes\",\"requested\":8,\"available\":6}", false, true),
+        (500u16, b"{\"fault\":\"out_of_time\",\"steps\":52}", false, true),
+        (500u16, b"{\"fault\":\"gone\"}", false, true),
+        (502u16, b"{\"outcome\":\"in_doubt\"}", false, false),
+        (200u16, b"\"9\"", false, true),
+        (422u16, b"{\"refused\":\"request_mismatch\"}", false, true),
+    ] {
+        let got = http_law_post(n, c, addr, "/status", b"", 0u32, position, b"", 1000u32)
+        if got.status != status || got.body != body || got.retry != retry || got.committed != committed ||
+            got.replayed != (position == 14u64) {
+            fail("L14 status, response JSON or header differs from B-7")
+        }
+        position += 1u64
+    }
+    let _ = std.task.cancel_join(take server)
+    Ok(())
+}

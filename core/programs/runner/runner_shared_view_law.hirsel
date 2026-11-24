@@ -9,7 +9,7 @@ fn shared_law_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
 }
 
 fn shared_input(key: Bytes, limit: u64, issuer: u8, refund: Sender[u64]) -> SubscriptionInput {
-    let lease = result.unwrap(SubscriptionLease(refund: channel.sender(refund), charge: 64u64, ledger: limit, frame_limit: 262144u64))
+    let lease = result.unwrap(SubscriptionLease(refund: channel.sender(refund), charge: 64u64, ledger: limit, frame_limit: 262144u64, http: false))
     SubscriptionInput(room: Some(take lease), key: clone(key), arg: no_arg(), caller: store.Caller(issuer: issuer, subject: list.new()))
 }
 

@@ -20,7 +20,9 @@ pub opaque type Pattern: shareable + send {
 pub type Entry[S: send]: shareable + send {
     method: String,
     pattern: Pattern,
-    route: Route[S]
+    route: Route[S],
+    tag: u64,
+    finished: Option[fn(S)],
 }
 
 pub opaque type Builder[S: send]: send {
@@ -121,6 +123,22 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
 }
 
 pub fn add[S: send](mut b: Builder[S], method: String, pattern: String, take route: Route[S]) -> Result[(), AddError] {
+    add_tagged(mut b, method, pattern, 0u64, take route)
+}
+
+/// Adds a route with an application tag read from the matched Request.
+pub fn add_tagged[S: send](mut b: Builder[S], method: String, pattern: String, tag: u64, take route: Route[S]) -> Result[(), AddError] {
+    add_with_finish(mut b, method, pattern, tag, take route, None)
+}
+
+/// Clears tags on routes supplied by an application before mounting generated routes.
+pub fn clear_tags[S: send](mut b: Builder[S]) {
+    for i in 0u64 .. list.len(b.entries) {
+        b.entries[i].tag = 0u64
+    }
+}
+
+pub fn add_with_finish[S: send](mut b: Builder[S], method: String, pattern: String, tag: u64, take route: Route[S], finished: Option[fn(S)]) -> Result[(), AddError] {
     let raw_bytes = string.as_bytes(method)
     if list.len(raw_bytes) == 0 {
         return Error(InvalidMethod)
@@ -130,7 +148,7 @@ pub fn add[S: send](mut b: Builder[S], method: String, pattern: String, take rou
             return Error(InvalidMethod)
         }
     }
-    let entry = Entry(method: string.from(method), pattern: parse(pattern)?, route: take route)
+    let entry = Entry(method: string.from(method), pattern: parse(pattern)?, route: take route, tag: tag, finished: finished)
     list.push(mut b.entries, take entry)
     Ok(())
 }
@@ -213,6 +231,13 @@ fn relationship(a: Pattern, b: Pattern) -> Relationship {
     } else {
         RightSpecific
     }
+}
+
+/// Checks two URI patterns with the same overlap rule as build.
+pub fn conflict(a: String, b: String) -> Result[bool, AddError] {
+    let first = parse(a)?
+    let second = parse(b)?
+    Ok(relationship(first, second) == Conflict)
 }
 
 pub fn build[S: send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
@@ -363,4 +388,20 @@ pub fn request_segments(raw_path: Bytes) -> Result[List[String], TargetError] {
         start = end + 1
     }
     Ok(take decoded_segments)
+}
+
+/// The named scalar captures in a route pattern. A tail has a list value.
+pub fn captures(pattern: String) -> Result[(List[String], bool), AddError] {
+    let parsed = parse(pattern)?
+    let mut names: List[String] = list.new()
+    for piece in parsed.pieces {
+        if let Capture(name) = piece {
+            list.push(mut names, string.from(name))
+        }
+    }
+    let tail = match parsed.tail {
+        Some(_) => true,
+        None => false
+    }
+    Ok((take names, tail))
 }

@@ -865,7 +865,7 @@ pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
 
     // PubIn fills again before the owner sees its Admit.
     result.unwrap(channel.try_send(to_pub, PubIn(e: Drained)))
-    let round_at = arc.new(RoundAt(at: 0u64))
+    let round_at = arc.new(std.http.ReleaseRound(at: 0u64))
     let rounds = latest.new(take round_at)
     let mut admit_sent = false
     if let Some(take to) = take told {

@@ -1,0 +1,477 @@
+pub type SchemaWriteError = UnknownAnnotation(String) | DuplicateAnnotation(String)
+
+type SchemaWriter {
+    text: String,
+    path: String,
+    shared: Bytes,
+    descriptions: Map[String, String]
+}
+
+/// Appends one JSON Schema draft 2020-12 document for the format's wire shape.
+/// An annotation error leaves out intact.
+pub fn write(plan: json.JsonPlan, annotations: List[(String, String)], mut out: Bytes) -> Result[(), SchemaWriteError] {
+    let mut descriptions: Map[String, String] = map.new()
+    for (path, description) in annotations {
+        if let Some(_) = map.get(descriptions, path) {
+            return Error(DuplicateAnnotation(string.from(path)))
+        }
+        map.insert(mut descriptions, string.from(path), string.from(description))
+    }
+    let root = plan.facts[plan.root].form
+    let mut w = SchemaWriter(text: string.from("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\","), path: string.new(), shared: schema_references(plan, root), descriptions: take descriptions)
+    schema_shape(plan, root, mut w)
+    schema_description(mut w, ",")
+    let mut first = true
+    for id in 0u64 .. list.len(w.shared) {
+        if w.shared[id] == 2 && id != root {
+            string.push(mut w.text, if first {
+                ",\"$defs\":{"
+            } else {
+                ","
+            })
+            first = false
+            let name = schema_index(id)
+            schema_key(mut w.text, name)
+            string.push(mut w.path, "/$defs/")
+            string.push(mut w.path, name)
+            string.push(mut w.text, "{")
+            schema_shape(plan, id, mut w)
+            schema_description(mut w, ",")
+            string.push(mut w.text, "}")
+            string.truncate(mut w.path, 0)
+        }
+    }
+    if !first {
+        string.push(mut w.text, "}")
+    }
+    string.push(mut w.text, "}")
+    for (path, _) in annotations {
+        if let Some(_) = map.get(w.descriptions, path) {
+            return Error(UnknownAnnotation(string.from(path)))
+        }
+    }
+    list.append(mut out, string.as_bytes(w.text))
+    Ok(())
+}
+
+// A repeated composite gets a reference. This also cuts every reachable cycle
+// and avoids expanding shared shapes afresh along each path through the graph.
+fn schema_references(plan: json.JsonPlan, root: u64) -> Bytes {
+    let mut shared: Bytes = list.new()
+    list.fill(mut shared, list.len(plan.shapes), 0)
+    schema_count(plan, root, mut shared)
+    for shape in plan.shapes {
+        match shape {
+            Array(item) => schema_count(plan, item, mut shared),
+            Optional(item) => schema_count(plan, item, mut shared),
+            Pairs(key, value) => {
+                schema_count(plan, key, mut shared)
+                schema_count(plan, value, mut shared)
+            },
+            Outcome(ok, err) => {
+                schema_count(plan, ok, mut shared)
+                schema_count(plan, err, mut shared)
+            },
+            Record(fields) => for field in fields {
+                schema_count(plan, field.shape, mut shared)
+            },
+            Sum(variants) => for variant in variants {
+                for field in variant.fields {
+                    schema_count(plan, field, mut shared)
+                }
+            },
+            _ => {},
+        }
+    }
+    take shared
+}
+
+fn schema_count(plan: json.JsonPlan, id: u64, mut shared: Bytes) {
+    let form = plan.facts[id].form
+    if let Atom(_) = plan.shapes[form] {
+        return
+    }
+    if shared[form] < 2 {
+        shared[form] += 1
+    }
+}
+
+fn schema_key(mut text: String, name: String) {
+    push_quoted(mut text, name)
+    string.push(mut text, ":")
+}
+
+fn schema_index(i: u64) -> String {
+    let mut name = string.new()
+    string.push_u64(mut name, i)
+    take name
+}
+
+fn schema_description(mut w: SchemaWriter, separator: String) {
+    if let Some(take description) = map.remove(mut w.descriptions, w.path) {
+        string.push(mut w.text, separator)
+        string.push(mut w.text, "\"description\":")
+        push_quoted(mut w.text, description)
+    }
+}
+
+fn schema_impossible(mut w: SchemaWriter) {
+    let path = string.byte_len(w.path)
+    string.push(mut w.path, "/not")
+    string.push(mut w.text, "\"not\":{")
+    schema_description(mut w, "")
+    string.push(mut w.text, "}")
+    string.truncate(mut w.path, path)
+}
+
+fn schema_child(plan: json.JsonPlan, id: u64, name: String, mut w: SchemaWriter) {
+    let path = string.byte_len(w.path)
+    pointer_token(mut w.path, name)
+    let form = plan.facts[id].form
+    string.push(mut w.text, "{")
+    if w.shared[form] == 2 {
+        string.push(mut w.text, "\"$ref\":\"#")
+        if form != plan.facts[plan.root].form {
+            string.push(mut w.text, "/$defs/")
+            string.push_u64(mut w.text, form)
+        }
+        string.push(mut w.text, "\"")
+    } else {
+        schema_shape(plan, form, mut w)
+    }
+    schema_description(mut w, ",")
+    string.push(mut w.text, "}")
+    string.truncate(mut w.path, path)
+}
+
+fn schema_shape(plan: json.JsonPlan, id: u64, mut w: SchemaWriter) {
+    match plan.shapes[id] {
+        Atom(op) => schema_atom(plan.profile, op, mut w),
+        Array(item) => if let Atom(3) = plan.shapes[item] {
+            string.push(mut w.text, "\"type\":\"string\",\"contentEncoding\":\"base64\",\"pattern\":\"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?(?![\\\\s\\\\S])\"")
+        } else {
+            string.push(mut w.text, "\"type\":\"array\",\"items\":")
+            schema_child(plan, item, "items", mut w)
+        },
+        Pairs(key, value) => if json.string_map(plan, key) {
+            string.push(mut w.text, "\"type\":\"object\",\"additionalProperties\":")
+            schema_child(plan, value, "additionalProperties", mut w)
+        } else {
+            string.push(mut w.text, "\"type\":\"array\",\"items\":{")
+            let path = string.byte_len(w.path)
+            string.push(mut w.path, "/items")
+            let mut fields: List[u64] = list.with_capacity(2)
+            list.push(mut fields, key)
+            list.push(mut fields, value)
+            schema_tuple(plan, fields, mut w)
+            schema_description(mut w, ",")
+            string.truncate(mut w.path, path)
+            string.push(mut w.text, "}")
+        },
+        Optional(item) => {
+            string.push(mut w.text, "\"anyOf\":[{\"type\":\"null\"")
+            let path = string.byte_len(w.path)
+            string.push(mut w.path, "/anyOf/0")
+            schema_description(mut w, ",")
+            string.truncate(mut w.path, path)
+            string.push(mut w.path, "/anyOf")
+            string.push(mut w.text, "},")
+            schema_child(plan, item, "1", mut w)
+            string.push(mut w.text, "]")
+            string.truncate(mut w.path, path)
+        },
+        Outcome(ok, err) => {
+            string.push(mut w.text, "\"oneOf\":[")
+            let mut fields: List[u64] = list.with_capacity(1)
+            list.push(mut fields, ok)
+            schema_variant(plan, "ok", fields, 0, mut w)
+            string.push(mut w.text, ",")
+            fields[0] = err
+            schema_variant(plan, "error", fields, 1, mut w)
+            string.push(mut w.text, "]")
+        },
+        Record(fields) => schema_record(plan, id, fields, mut w),
+        Sum(variants) => {
+            let mut i: u64 = 0
+            for variant in variants {
+                if variant.live {
+                    string.push(mut w.text, if i == 0 {
+                        "\"oneOf\":["
+                    } else {
+                        ","
+                    })
+                    schema_variant(plan, variant.name, variant.fields, i, mut w)
+                    i += 1
+                }
+            }
+            if i == 0 {
+                schema_impossible(mut w)
+            } else {
+                string.push(mut w.text, "]")
+            }
+        },
+        Via(_) => fail("prepared JSON form has no via layer"),
+    }
+}
+
+fn schema_record(plan: json.JsonPlan, id: u64, fields: List[json.Field], mut w: SchemaWriter) {
+    string.push(mut w.text, "\"type\":\"object\",\"additionalProperties\":false,\"properties\":{")
+    let path = string.byte_len(w.path)
+    string.push(mut w.path, "/properties")
+    for i in 0u64 .. list.len(fields) {
+        let field = fields[i]
+        if i != 0 {
+            string.push(mut w.text, ",")
+        }
+        schema_key(mut w.text, field.name)
+        schema_child(plan, field.shape, field.name, mut w)
+    }
+    string.truncate(mut w.path, path)
+    string.push(mut w.text, "},\"required\":[")
+    let mut first = true
+    for field in fields {
+        if let Optional(_) = plan.shapes[plan.facts[field.shape].form] {
+            continue
+        }
+        if let Some(_) = codec.schema_default(plan.description, id, field.name) {
+            continue
+        }
+        if !first {
+            string.push(mut w.text, ",")
+        }
+        first = false
+        push_quoted(mut w.text, field.name)
+    }
+    string.push(mut w.text, "]")
+}
+
+fn schema_variant(plan: json.JsonPlan, name: String, fields: List[u64], branch_index: u64, mut w: SchemaWriter) {
+    let path = string.byte_len(w.path)
+    string.push(mut w.path, "/oneOf/")
+    string.push_u64(mut w.path, branch_index)
+    let width = list.len(fields)
+    if width == 0 {
+        string.push(mut w.text, "{\"const\":")
+        push_quoted(mut w.text, name)
+    } else {
+        string.push(mut w.text, "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[")
+        push_quoted(mut w.text, name)
+        string.push(mut w.text, "],\"properties\":{")
+        schema_key(mut w.text, name)
+        let branch = string.byte_len(w.path)
+        string.push(mut w.path, "/properties")
+        if width == 1 {
+            schema_child(plan, fields[0], name, mut w)
+        } else {
+            pointer_token(mut w.path, name)
+            string.push(mut w.text, "{")
+            schema_tuple(plan, fields, mut w)
+            schema_description(mut w, ",")
+            string.push(mut w.text, "}")
+        }
+        string.truncate(mut w.path, branch)
+        string.push(mut w.text, "}")
+    }
+    schema_description(mut w, ",")
+    string.push(mut w.text, "}")
+    string.truncate(mut w.path, path)
+}
+
+fn schema_tuple(plan: json.JsonPlan, fields: List[u64], mut w: SchemaWriter) {
+    string.push(mut w.text, "\"type\":\"array\",\"minItems\":")
+    string.push_u64(mut w.text, list.len(fields))
+    string.push(mut w.text, ",\"maxItems\":")
+    string.push_u64(mut w.text, list.len(fields))
+    string.push(mut w.text, ",\"prefixItems\":[")
+    let path = string.byte_len(w.path)
+    string.push(mut w.path, "/prefixItems")
+    for i in 0u64 .. list.len(fields) {
+        if i != 0 {
+            string.push(mut w.text, ",")
+        }
+        schema_child(plan, fields[i], schema_index(i), mut w)
+    }
+    string.truncate(mut w.path, path)
+    string.push(mut w.text, "]")
+}
+
+fn schema_atom(profile: json.Profile, op: u8, mut w: SchemaWriter) {
+    if op == 20 {
+        schema_impossible(mut w)
+        return
+    }
+    if profile == Strict && (op == 6 || op == 10) {
+        string.push(mut w.text, "\"type\":\"string\",\"pattern\":")
+        let mut pattern = string.from("^(?:0|")
+        if op == 6 {
+            schema_decimal_patterns("18446744073709551615", mut pattern)
+        } else {
+            schema_decimal_patterns("9223372036854775807", mut pattern)
+            string.push(mut pattern, "|-(?:")
+            schema_decimal_patterns("9223372036854775808", mut pattern)
+            string.push(mut pattern, ")")
+        }
+        string.push(mut pattern, ")(?![\\s\\S])")
+        push_quoted(mut w.text, pattern)
+        return
+    }
+    let keywords = match op {
+        0 => "\"type\":\"null\"",
+        1 => "\"type\":\"boolean\"",
+        2 => "\"type\":\"string\",\"minLength\":1,\"maxLength\":1",
+        3 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":255",
+        4 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":65535",
+        5 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295",
+        6 => "\"type\":\"integer\",\"minimum\":0,\"maximum\":18446744073709551615",
+        7 => "\"type\":\"integer\",\"minimum\":-128,\"maximum\":127",
+        8 => "\"type\":\"integer\",\"minimum\":-32768,\"maximum\":32767",
+        9 => "\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647",
+        10 => "\"type\":\"integer\",\"minimum\":-9223372036854775808,\"maximum\":9223372036854775807",
+        11 => schema_float(profile),
+        12 => schema_float(profile),
+        13 => "\"type\":\"string\"",
+        _ => fail("prepared JSON atom has a codec opcode"),
+    }
+    string.push(mut w.text, keywords)
+}
+
+fn schema_float(profile: json.Profile) -> String {
+    if profile == Strict {
+        "\"type\":[\"number\",\"string\"],\"pattern\":\"^(?:NaN|-?Infinity)(?![\\\\s\\\\S])\""
+    } else {
+        "\"type\":\"number\""
+    }
+}
+
+// Alternation for positive decimals at most limit. A same-width alternative
+// first diverges at one digit and can then have any digits after it.
+fn schema_decimal_patterns(limit: String, mut pattern: String) {
+    let bound_digits = string.as_bytes(limit)
+    let digits: String = "0123456789"
+    let n = list.len(bound_digits)
+    string.push(mut pattern, "[1-9][0-9]{0,")
+    string.push_u64(mut pattern, n - 2)
+    string.push(mut pattern, "}|")
+    for i in 0u64 .. n {
+        let low: u64 = if i == 0 {
+            1
+        } else {
+            0
+        }
+        let digit: u64 = int.widen(bound_digits[i] - b'0')
+        if digit > low {
+            string.push(mut pattern, string.slice(limit, 0, i))
+            string.push(mut pattern, "[")
+            string.push(mut pattern, string.slice(digits, low, low + 1))
+            string.push(mut pattern, "-")
+            string.push(mut pattern, string.slice(digits, digit - 1, digit))
+            string.push(mut pattern, "][0-9]{")
+            string.push_u64(mut pattern, n - i - 1)
+            string.push(mut pattern, "}|")
+        }
+    }
+    string.push(mut pattern, limit)
+}
+
+fn push_quoted(mut output: String, value: String) {
+    json.write(mut output, false, fn(w: json.Writer) {
+        json.write_string_value(w, value)
+    })
+}
+
+pub fn pointer_token(mut path: String, name: String) {
+    string.push(mut path, "/")
+    let mut start: u64 = 0
+    let b = string.as_bytes(name)
+    for i in 0u64 .. list.len(b) {
+        if b[i] == b'~' || b[i] == b'/' {
+            string.push(mut path, string.slice(name, start, i))
+            string.push(mut path, if b[i] == b'~' {
+                "~0"
+            } else {
+                "~1"
+            })
+            start = i + 1
+        }
+    }
+    string.push(mut path, string.slice(name, start, list.len(b)))
+}
+
+pub type LengthBound: shareable + send {
+    a: u64,
+    b: u64
+}
+
+/// A checked bound for every canonical JSON output of the plan.
+/// Charges fixed text along zero-byte edges to the nearest consuming node.
+pub fn length_bound(plan: json.JsonPlan) -> Option[LengthBound] {
+    let mut zero: List[Option[u64]] = list.with_capacity(list.len(plan.shapes))
+    for _ in plan.shapes {
+        list.push(mut zero, None)
+    }
+    let b = zero_text(plan, plan.root, mut zero)?
+    let mut header = 0u64
+    let mut entry = 0u64
+    for id in 0u64 .. list.len(plan.shapes) {
+        match plan.shapes[id] {
+            Array(item) => {
+                header = order.max(header, 2u64)
+                entry = order.max(entry, int.checked_add(1u64, zero_text(plan, item, mut zero)?)?)
+            },
+            Pairs(key, value) => {
+                header = order.max(header, 2u64)
+                let fields = int.checked_add(zero_text(plan, key, mut zero)?, zero_text(plan, value, mut zero)?)?
+                entry = order.max(entry, int.checked_add(4u64, fields)?)
+            },
+            Optional(item) => {
+                header = order.max(header, order.max(4u64, zero_text(plan, item, mut zero)?))
+            },
+            Outcome(ok, err) => {
+                let child = order.max(zero_text(plan, ok, mut zero)?, zero_text(plan, err, mut zero)?)
+                header = order.max(header, int.checked_add(10u64, child)?)
+            },
+            Sum(variants) => for variant in variants {
+                if !variant.live {
+                    continue
+                }
+                let width = list.len(variant.fields)
+                let name_text = int.checked_mul(string.byte_len(variant.name), 6u64)?
+                let punctuation = int.checked_add(width, 7u64)?
+                let mut cost = int.checked_add(name_text, punctuation)?
+                for field in variant.fields {
+                    cost = int.checked_add(cost, zero_text(plan, field, mut zero)?)?
+                }
+                header = order.max(header, cost)
+            },
+            _ => (),
+        }
+    }
+    // Primitive text needs at most 12 output bytes per codec byte, including
+    // quoted String/base64 framing. Each repeating item has a distinct first
+    // codec byte and each container header has its own tag or count bytes.
+    let a = int.checked_add(int.checked_add(12u64, header)?, entry)?
+    Some(LengthBound(a: a, b: b))
+}
+
+fn zero_text(plan: json.JsonPlan, id: u64, mut memo: List[Option[u64]]) -> Option[u64] {
+    if let Some(amount) = memo[id] {
+        return Some(amount)
+    }
+    let amount = match plan.shapes[id] {
+        Atom(0) => 4u64,
+        Via(child) => zero_text(plan, child, mut memo)?,
+        Record(fields) => {
+            let mut sum = 2u64
+            for field in fields {
+                let name_text = int.checked_mul(string.byte_len(field.name), 6u64)?
+                let field_text = int.checked_add(4u64, name_text)?
+                let child = zero_text(plan, field.shape, mut memo)?
+                sum = int.checked_add(sum, int.checked_add(field_text, child)?)?
+            }
+            sum
+        },
+        _ => 0u64,
+    }
+    memo[id] = Some(amount)
+    Some(amount)
+}

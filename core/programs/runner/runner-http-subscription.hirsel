@@ -1,0 +1,156 @@
+type HttpSlotPlan: shareable + send {
+    name: String,
+    key: Arc[std.json.JsonPlan],
+    value: Arc[std.json.JsonPlan],
+}
+
+pub opaque resource type HttpReadAccess: send {
+    publisher: Sender[PubIn],
+    tables: Arc[Map[u32, String]],
+    frame_limit: u64,
+} drop(access) {
+    let _ = channel.try_send(access.publisher, PubIn(e: Drained))
+}
+
+pub fn http_read_access(to: Sender[PubIn], declarations: List[store.DeclaredCollection], frame_limit: u64) -> HttpReadAccess {
+    let mut tables: Map[u32, String] = map.new()
+    for collection in declarations {
+        let mut name = string.new()
+        openapi_text(mut name, collection.name)
+        map.insert(mut tables, collection.id, take name)
+    }
+    result.unwrap(HttpReadAccess(publisher: channel.sender(to), tables: arc.new(take tables), frame_limit: frame_limit))
+}
+
+pub fn http_read_endpoint(original: HttpReadAccess) -> HttpReadAccess {
+    result.unwrap(HttpReadAccess(publisher: channel.sender(original.publisher), tables: arc.share(original.tables), frame_limit: original.frame_limit))
+}
+
+resource type HttpRetirement: send { mark: Option[Sender[()]], publisher: Sender[PubIn] } drop(retirement) {
+    if let Some(_) = retirement.mark {
+        retirement.mark = None
+        let _ = channel.try_send(retirement.publisher, PubIn(e: Drained))
+    }
+}
+
+type HttpOwner: send {
+    from: Receiver[WireEvent],
+    to: Sender[WireEvent],
+    admit: Receiver[Admit],
+    fence: Latest[Fence],
+    round: Option[Latest[RoundAt]],
+    progress: Sender[()],
+    closing: Sender[()],
+    publisher: Sender[PubIn],
+    retirement: HttpRetirement,
+}
+
+fn http_subscribe(access: HttpReadAccess, take sent: Send, budget: u64) -> Result[HttpOwner, Refusal] {
+    let Send(caller: take caller, key: take key, arg: take arg, ..) = take sent
+    let mut quota = subscription_room(budget, 1u64, budget, access.frame_limit) ?=> |c| Budget(room(c))
+    let input = subscription_hold_for(mut quota, take caller, take key, take arg, true) ?=> |c| Budget(room(c))
+    let (to, from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(3u64)
+    let (telling, admit): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    let (mark, marked): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
+    let retirement = HttpRetirement(mark: Some(take mark), publisher: channel.sender(access.publisher)) ?=> |(c, _)| Budget(room(c))
+    let join = Join(to: channel.sender(to), told: take telling, mark: Some(take marked), closed: Some(take closed),
+        identity: None, fence: Some(latest.handle(fence)), progress: Some(take progress), taken: None,
+        first: Some(JoinSubscribe(sub: 0u32, generation: 1u64, input: take input)))
+    channel.try_send(access.publisher, PubIn(e: Joined(take join))) ?=> |_| Overloaded
+    Ok(HttpOwner(from: take from, to: take to, admit: take admit, fence: take fence, round: None,
+        progress: take token, closing: take closing, publisher: channel.sender(access.publisher), retirement: take retirement))
+}
+
+type HttpFrame: send = HttpBatch(u64, bool, Arc[Bytes]) | HttpEnded(u64, Outcome) | HttpReset(u64)
+
+fn http_next_frame(mut owner: HttpOwner) -> Result[HttpFrame, Refusal] waits {
+    loop {
+        let WireEvent(e: take notice) = channel.receive(owner.from) ?=> |_| Overloaded
+        match take notice {
+            JoinReady => match channel.try_receive(owner.admit) {
+                Ok(Admit(who: id, round: take register)) if id != 0u64 => { owner.round = Some(take register) },
+                Ok(_) => return Error(Overloaded),
+                Error(_) => return Error(Overloaded),
+            },
+            FromRunner(Notice(e: Expired(_))) => return Error(Deadline),
+            FromRunner(Notice(e: Updated(Update(version: version, content: Some(take update_body), ..)))) => {
+                let Owe(reset: reset, complete: complete, groups: take groups, ended: take ended, ..) = take update_body
+                if reset { return Ok(HttpReset(version)) }
+                for take terminal in take ended {
+                    let TerminalUpdate(outcome: take outcome, version: at, ..) = take terminal
+                    return Ok(HttpEnded(at, take outcome))
+                }
+                for take group in take groups {
+                    let OwedGroup(payload: take data, ..) = take group
+                    return Ok(HttpBatch(version, list.len(complete) > 0u64, take data))
+                }
+            },
+            _ => (),
+        }
+    }
+}
+
+fn http_initial_frame(mut owner: HttpOwner, clock: Clock, tasks: Tasks, deadline: u64) -> Result[HttpFrame, Refusal] waits {
+    let expired = wire_event(FromRunner(Notice(e: Expired(Tick(stream: list.new(), p: 0u64, generation: 0u64)))))
+    let alarm = std.clock.alarm(tasks, clock, deadline, owner.to, take expired)
+    let frame = http_next_frame(mut owner)
+    let _ = std.task.cancel_join(take alarm)
+    if host.mono_ns(clock) >= deadline { return Error(Deadline) }
+    take frame
+}
+
+fn http_one_shot(req: std.http.Request, resp: std.http.Responder, access: HttpReadAccess,
+    operation: HttpOperation, take sent: Send, budget: u64, clock: Clock, tasks: Tasks) -> Result[std.http.Response, std.http.HandlerError] waits {
+    let Some(take permit) = std.http.read_slot(resp, tasks) else { return http_refusal(Overloaded) }
+    let mut owner = match http_subscribe(access, take sent, budget) {
+        Ok(take running) => take running,
+        Error(take problem) => {
+            std.http.read_done(take permit)
+            return http_refusal(take problem)
+        },
+    }
+    let answer = http_initial_frame(mut owner, clock, tasks, std.http.handler_deadline(req))
+    let mut reply = http_read_reply(owner, operation, access.tables, take answer)?
+    let mark = replace(mut owner.retirement.mark, None)
+    std.http.hold_read(mut reply, take permit, take mark)
+    Ok(take reply)
+}
+
+fn http_read_reply(owner: HttpOwner, operation: HttpOperation, tables: Arc[Map[u32, String]], take answer: Result[HttpFrame, Refusal]) -> Result[std.http.Response, std.http.HandlerError] {
+    match take answer {
+        Ok(HttpBatch(version, true, take data)) => {
+            let mut reply = http_batch_reply(operation, tables, version, take data)?
+            let Some(register) = view owner.round else { return http_refusal(Overloaded) }
+            std.http.guard_response(mut reply, register, owner.fence, version)
+            Ok(take reply)
+        },
+        Ok(HttpEnded(version, take outcome)) => {
+            let mut reply = http_ended_reply(take outcome)?
+            let Some(register) = view owner.round else { return http_refusal(Overloaded) }
+            std.http.guard_response(mut reply, register, owner.fence, version)
+            Ok(take reply)
+        },
+        Ok(_) => http_reply(503u16, "{\"refused\":\"reset\"}", false, true, false),
+        Error(Deadline) => http_reply(503u16, "", false, true, false),
+        Error(take why) => http_refusal(take why),
+    }
+}
+
+fn http_ended_reply(take outcome: Outcome) -> Result[std.http.Response, std.http.HandlerError] {
+    match take outcome {
+        Refused(Budget(problem)) => {
+            let mut text = string.from("{\"refused\":\"budget\",\"requested\":\"")
+            string.push_u64(mut text, problem.requested)
+            string.push(mut text, "\",\"available\":\"")
+            string.push_u64(mut text, problem.available)
+            string.push(mut text, "\"}")
+            http_reply(503u16, take text, false, false, false)
+        },
+        Refused(take why) => http_refusal(take why),
+        Failed(detail) => http_fault(detail, false),
+        _ => fail("subscription ended with a call outcome"),
+    }
+}

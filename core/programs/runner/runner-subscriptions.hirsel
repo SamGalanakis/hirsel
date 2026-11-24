@@ -5,8 +5,40 @@
 // subscribe, at every rerun and at repair (rule 2).
 pub opaque type SubscriptionInput: send { room: Option[SubscriptionLease], key: Bytes, arg: Bytes, caller: Caller }
 
-resource type SubscriptionLease: send { refund: Sender[u64], charge: u64, ledger: u64, frame_limit: u64 } drop(lease) {
+resource type SubscriptionLease: send { refund: Sender[u64], charge: u64, ledger: u64, frame_limit: u64, http: bool } drop(lease) {
     let _ = channel.try_send(lease.refund, lease.charge)
+}
+
+type SubscriptionRoom: send {
+    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64, ledger: u64, frame_limit: u64,
+}
+
+fn subscription_room(limit: u64, max_subs: u64, ledger: u64, frame_limit: u64) -> Result[SubscriptionRoom, Capacity] {
+    let possible = int.saturating_sub(limit, 64u64) / 8u64
+    let wanted = int.saturating_add(max_subs, 1u64)
+    let slot_capacity = if wanted < possible { wanted } else { possible }
+    if slot_capacity == 0u64 { return Error(Capacity(requested: 72u64, available: limit)) }
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(slot_capacity)
+    Ok(SubscriptionRoom(to: take to, from: take from, slots: slot_capacity, limit: limit - (64u64 + slot_capacity * 8u64), held: 0u64, used: 0u64, ledger: ledger, frame_limit: frame_limit))
+}
+
+fn subscription_hold(mut quota: SubscriptionRoom, take caller: Caller, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
+    subscription_hold_for(mut quota, take caller, take key, take arg, false)
+}
+
+fn subscription_hold_for(mut quota: SubscriptionRoom, take caller: Caller, take key: Bytes, take arg: Bytes, http: bool) -> Result[SubscriptionInput, Capacity] {
+    while let Ok(charge) = channel.try_receive(quota.from) {
+        quota.held -= charge
+        quota.used -= 1u64
+    }
+    // Include the lease record. One refund fits for every issued lease.
+    let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + wire_round(list.capacity(caller.subject)) + 64u64
+    let available = quota.limit - quota.held
+    if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
+    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge, ledger: quota.ledger, frame_limit: quota.frame_limit, http: http) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
+    quota.held += charge
+    quota.used += 1u64
+    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg, caller: take caller))
 }
 
 // A live sub has its Cover. An ended entry (§3 "Ended entries") has none: it no longer runs,

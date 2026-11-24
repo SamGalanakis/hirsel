@@ -1,0 +1,184 @@
+fn openapi_text(mut doc: String, value: String) {
+    std.json.write(mut doc, false, scoped fn(writer: std.json.Writer) {
+        std.json.write_string_value(writer, value)
+    })
+}
+
+fn openapi_schema(mut doc: String, plan: std.json.JsonPlan, root: u64, index: u64, role: String) {
+    let mut schema_plan: std.json.JsonPlan = clone(plan)
+    schema_plan.root = root
+    openapi_write_schema(mut doc, schema_plan, index, role)
+}
+
+fn openapi_write_schema(mut doc: String, plan: std.json.JsonPlan, index: u64, role: String) {
+    let mut schema: Bytes = list.new()
+    result.unwrap(std.json_schema.write(plan, list.new(), mut schema))
+    let document = result.unwrap(string.from_utf8(take schema))
+    string.push(mut doc, "{\"$id\":\"urn:hirsel:http:")
+    string.push_u64(mut doc, index)
+    string.push(mut doc, ":")
+    string.push(mut doc, role)
+    string.push(mut doc, "\",")
+    string.push(mut doc, string.slice(document, 1u64, string.byte_len(document)))
+}
+
+fn openapi_binding(mut doc: String, op: HttpOperation, index: u64) {
+    let binding = view op.binding
+    let input = view op.input
+    string.push(mut doc, "{\"operationId\":")
+    let mut operation_id = string.from(binding.op)
+    if binding.mode == Stream && !op.alias { string.push(mut operation_id, ".route") }
+    openapi_text(mut doc, operation_id)
+    string.push(mut doc, ",\"parameters\":[{\"name\":\"Authorization\",\"in\":\"header\",\"schema\":{\"type\":\"string\"}}")
+    if binding.mode == Stream {
+        string.push(mut doc, ",{\"name\":\"Idempotency-Key\",\"in\":\"header\",\"required\":true,\"schema\":{\"type\":\"string\"}},{\"name\":\"Hirsel-Expected-Caller\",\"in\":\"header\",\"schema\":{\"type\":\"string\",\"contentEncoding\":\"base64\"}}")
+    }
+    let mut body_fields: List[std.json.Field] = list.new()
+    let root = input.facts[input.root].form
+    if let Record(fields) = input.shapes[root] {
+        for index_field in 0u64 .. list.len(fields) {
+            let field = view fields[index_field]
+            let source = http_argument_source(result.unwrap(find_http_source(binding.fields, field.name)), op.alias)
+            if source == Body {
+                list.push(mut body_fields, clone(field))
+                continue
+            }
+            string.push(mut doc, ",{\"name\":")
+            openapi_text(mut doc, field.name)
+            string.push(mut doc, if source == Path { ",\"in\":\"path\",\"required\":true,\"schema\":" } else { ",\"in\":\"query\",\"schema\":" })
+            let mut role = string.from("param-")
+            string.push_u64(mut role, index_field)
+            openapi_schema(mut doc, input, field.shape, index, role)
+            string.push(mut doc, "}")
+        }
+    }
+    string.push(mut doc, "]")
+    if list.len(body_fields) != 0u64 {
+        let mut body_plan: std.json.JsonPlan = clone(input)
+        body_plan.shapes[root] = Record(take body_fields)
+        string.push(mut doc, ",\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":")
+        openapi_write_schema(mut doc, body_plan, index, "request")
+        string.push(mut doc, "}}}")
+    }
+    string.push(mut doc, ",\"responses\":{")
+    let output = view op.output
+    let (ok, error_case) = if binding.mode == Stream {
+        let Outcome(success, failure) = output.shapes[output.facts[output.root].form] else {
+            fail("transact result has a Result shape")
+        }
+        (success, failure)
+    } else { (output.root, output.root) }
+    openapi_reply(mut doc, op, index, binding.ok_status, ok, "ok")
+    if binding.mode == Stream {
+        string.push(mut doc, ",")
+        openapi_reply(mut doc, op, index, binding.error_status, error_case, "error")
+    }
+    for (status, description) in [
+        (400u16, "Bad request"), (401u16, "Rejected credential"), (403u16, "Not allowed or Caller changed"),
+        (404u16, "Unknown route"), (408u16, "Body deadline"), (409u16, "Abandoned, retry the same key"),
+        (410u16, "History unavailable"), (413u16, "Body too large"), (415u16, "Unsupported media type"),
+        (422u16, "Request mismatch"), (500u16, "Fault"), (502u16, "In doubt"), (503u16, "Capacity"),
+        (504u16, "Send deadline"),
+    ] {
+        if binding.mode == Stream && status == binding.error_status { continue }
+        string.push(mut doc, ",\"")
+        string.push_u64(mut doc, int.widen(status))
+        string.push(mut doc, "\":{\"description\":")
+        openapi_text(mut doc, description)
+        if status == 409u16 || status == 503u16 {
+            string.push(mut doc, ",\"headers\":{\"Retry-After\":{\"schema\":{\"type\":\"integer\",\"const\":1}}}")
+        }
+        string.push(mut doc, "}")
+    }
+    string.push(mut doc, "}}")
+}
+
+fn openapi_reply(mut doc: String, op: HttpOperation, index: u64, status: u16, root: u64, role: String) {
+    string.push(mut doc, "\"")
+    string.push_u64(mut doc, int.widen(status))
+    string.push(mut doc, "\":{\"description\":")
+    openapi_text(mut doc, if role == "ok" { "Result" } else { "Application error or protocol refusal" })
+    if op.binding.mode == Stream {
+        string.push(mut doc, ",\"headers\":{\"Idempotent-Outcome\":{\"schema\":{\"type\":\"string\",\"const\":\"committed\"}},\"Idempotent-Replayed\":{\"schema\":{\"type\":\"string\",\"const\":\"true\"}}}")
+    }
+    string.push(mut doc, ",\"content\":{")
+    if op.binding.mode == Subscribe {
+        string.push(mut doc, "\"text/event-stream\":{\"schema\":{\"type\":\"string\"}}}}")
+    } else {
+        string.push(mut doc, "\"application/json\":{\"schema\":")
+        if op.kind == Query {
+            openapi_query_schema(mut doc, op, index)
+        } else { openapi_schema(mut doc, op.output, root, index, role) }
+        string.push(mut doc, "}}}")
+    }
+}
+
+fn openapi_query_schema(mut doc: String, op: HttpOperation, index: u64) {
+    string.push(mut doc, "{\"type\":\"object\",\"required\":[\"version\",\"complete\",\"groups\",\"outcomes\"],\"properties\":{\"version\":{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\"},\"complete\":{\"const\":[0]},\"outcomes\":{\"const\":[]},\"groups\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":1,\"items\":{\"type\":\"object\",\"required\":[\"sub\",\"value\",\"rows\"],\"properties\":{\"sub\":{\"const\":0},\"value\":")
+    openapi_schema(mut doc, op.output, op.output.root, index, "group")
+    string.push(mut doc, ",\"rows\":{\"type\":\"array\"")
+    if list.len(op.projections) == 0u64 {
+        string.push(mut doc, ",\"maxItems\":0")
+    } else {
+        string.push(mut doc, ",\"items\":{\"oneOf\":[")
+        let mut first = true
+        for slot_index in 0u64 .. list.len(op.projections) {
+            for present in [false, true] {
+                if !first { string.push(mut doc, ",") }
+                first = false
+                openapi_row(mut doc, op.projections[slot_index], index, slot_index, present)
+            }
+        }
+        string.push(mut doc, "]}")
+    }
+    string.push(mut doc, "}}}}}}")
+}
+
+fn openapi_row(mut doc: String, slot_plan: HttpSlotPlan, index: u64, slot_index: u64, present: bool) {
+    string.push(mut doc, "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"slot\",\"table\",\"key\",\"present\"")
+    if present { string.push(mut doc, ",\"value\"") }
+    string.push(mut doc, "],\"properties\":{\"slot\":{\"const\":")
+    string.push(mut doc, slot_plan.name)
+    string.push(mut doc, "},\"table\":{\"type\":\"string\"},\"key\":")
+    let mut role = string.from(if present { "present-key-" } else { "removed-key-" })
+    string.push_u64(mut role, slot_index)
+    openapi_schema(mut doc, slot_plan.key, slot_plan.key.root, index, role)
+    if present {
+        string.push(mut doc, ",\"present\":{\"const\":true},\"value\":")
+        let mut value_role = string.from("row-value-")
+        string.push_u64(mut value_role, slot_index)
+        openapi_schema(mut doc, slot_plan.value, slot_plan.value.root, index, value_role)
+    } else { string.push(mut doc, ",\"present\":{\"const\":false}") }
+    string.push(mut doc, "}}")
+}
+
+fn http_openapi(ops: List[HttpOperation]) -> Bytes {
+    let mut paths: Map[String, List[u64]] = map.new()
+    for index in 0u64 .. list.len(ops) {
+        let op = view ops[index]
+        let path = if op.alias { operation_path(op.binding.op) } else { string.from(op.binding.path) }
+        let mut indices = match map.remove(mut paths, path) { Some(take prior) => take prior, None => list.new() }
+        list.push(mut indices, index)
+        map.insert(mut paths, take path, take indices)
+    }
+    let mut doc = string.from("{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"Hirsel\",\"version\":\"1\"},\"paths\":{")
+    let mut first_path = true
+    for (path, indices) in paths {
+        if !first_path { string.push(mut doc, ",") }
+        first_path = false
+        openapi_text(mut doc, path)
+        string.push(mut doc, ":{")
+        let mut first = true
+        for index in indices {
+            let op = view ops[index]
+            if !first { string.push(mut doc, ",") }
+            first = false
+            openapi_text(mut doc, if op.alias { "post" } else { string.to_lower(http_method(op.binding.method)) })
+            string.push(mut doc, ":")
+            openapi_binding(mut doc, op, index)
+        }
+        string.push(mut doc, "}")
+    }
+    string.push(mut doc, "}}")
+    std.http.copy_bytes(string.as_bytes(doc))
+}

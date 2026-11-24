@@ -10,12 +10,27 @@ fn http_law_from(take n: u8) -> Result[HttpLawPositive, ()] {
     if n == 0u8 { Error(()) } else { Ok(HttpLawPositive(value: n)) }
 }
 
-type HttpLawArg: codec = Unit | Scalars(HttpLawScalars) | Collections(Bytes, List[u16], Map[String, ()]) |
-    Optional(Option[String]) | ResultValue(Result[u8, String]) | Validated(HttpLawPositive)
+type HttpLawArg: codec { request: HttpLawValue }
+
+type HttpLawValue: codec = Unit | Scalars(HttpLawScalars) | Collections(Bytes, List[u16], Map[String, ()]) |
+    Optional(Option[String]) | ResultValue(Result[u8, String]) | Validated(HttpLawPositive) | Normalized(Map[HttpLawFolded, ()]) | RejectSame
+
+type HttpLawFolded: codec + key via String (to: http_law_fold_spelling, from: http_law_fold_key) { spelling: String }
+
+fn http_law_fold_spelling(key: HttpLawFolded) -> View[String] in key { view key.spelling }
+
+fn http_law_fold_key(take spelling: String) -> Result[HttpLawFolded, ()] {
+    Ok(HttpLawFolded(spelling: string.to_lower(spelling)))
+}
+
+type HttpLawError: codec { refused: String }
 
 type HttpLawHandles: shareable + send { counter: store.Table[u64, u64] }
 
-fn http_law_increment(mut tx: store.Tx, tables: HttpLawHandles, _author: Caller, take _input: HttpLawArg) -> Result[u64, u32] {
+fn http_law_increment(mut tx: store.Tx, tables: HttpLawHandles, _author: Caller, take request: HttpLawArg) -> Result[u64, HttpLawError] {
+    if let RejectSame = request.request {
+        return Error(HttpLawError(refused: "request_mismatch"))
+    }
     let prior = match result.unwrap(store.fetch(tx, tables.counter, 0u64)) { Some(n) => n, None => 0u64 }
     result.unwrap(store.put(mut tx, tables.counter, 0u64, prior + 1u64))
     Ok(prior + 1u64)
@@ -32,7 +47,14 @@ fn http_law_schema(mut declared: store.Declare) -> Result[HttpLawHandles, store.
 
 fn http_law_place(mut reg: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
     transact(mut reg, code.describe(http_law_increment), 65536u64, DEFAULT_STEPS)?
-    query(mut reg, code.describe(http_law_query), slots(), 65536u64, DEFAULT_STEPS)
+    query(mut reg, code.describe(http_law_query), slots(), 65536u64, DEFAULT_STEPS)?
+    let mut fields: List[FieldSource] = list.with_capacity(1u64)
+    list.push(mut fields, FieldSource(field: "request", source: Body))
+    let entry = http_law_key(reg.exported[0u64])
+    bind(mut reg, HttpBinding(op: "increment", method: Post, path: "/generated", entry: take entry, fields: take fields,
+        mode: Stream, ok_status: 200u16, error_status: 422u16, body_max: HTTP_LAW_ARG_MAX, arg_max: 65536u64,
+        deadline_ms: 1000u64, steps: DEFAULT_STEPS))
+
 }
 
 fn http_law_bind() -> Option[Wire[(), ()]] { Some(ingress.binding()) }
@@ -168,12 +190,23 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
     http_law_reply(status, take body, replayed)
 }
 
-type HttpLawServer: send { relay: Relay, listener: Listener, clock: Clock, random: Random, tasks: Tasks }
+type HttpLawServer: send { generated: bool, relay: Relay, listener: Listener, clock: Clock, random: Random, tasks: Tasks }
 
 fn http_law_serve(take job: HttpLawServer) waits {
-    let HttpLawServer(relay: take endpoint, listener: take listener, clock, random, tasks) = take job
+    let HttpLawServer(generated: generated, relay: take endpoint, listener: take listener, clock, random, tasks) = take job
     let mut listeners: List[Listener] = list.with_capacity(1u64)
     list.push(mut listeners, take listener)
+    if generated {
+        let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
+        let builder: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
+        let (take router, take prepared_routes) = result.unwrap(http_router(reg, None, take builder))
+        let connection: scoped[view] fn() -> HttpConnection[(), HttpLawHandles, ()] = fn() -> HttpConnection[(), HttpLawHandles, ()] {
+            let registry_copy = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
+            http_connection(take registry_copy, arc.share(prepared_routes), http_law_bind(), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+        }
+        result.unwrap(std.http.serve_with_factory(take listeners, clock, tasks, http_law_config(), take router, 2097152u64, connection, None))
+        return
+    }
     let mut routes: std.router.Builder[HttpLawRoute] = std.router.builder()
     result.unwrap(std.router.add(mut routes, "POST", "/run", std.router.raw(http_law_raw)))
     result.unwrap(std.router.add(mut routes, "POST", "/denied", std.router.raw(http_law_raw)))
@@ -190,15 +223,26 @@ fn http_law_write(mut writer: WriteHalf, input: Bytes, until: Until) waits {
     }
 }
 
-type HttpLawReply { status: u16, outcome: Option[Outcome], replayed: bool }
+type HttpLawReply { status: u16, outcome: Option[Outcome], replayed: bool, committed: bool, retry: bool, body: Bytes }
 
 fn http_law_post(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64,
     data: Bytes, deadline_ms: u32) -> HttpLawReply waits {
+    http_law_post_with_caller(n, clock, addr, path, credential, stream, p, data, deadline_ms, None)
+}
+
+fn http_law_post_with_caller(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64,
+    data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
+    http_law_request("POST", n, clock, addr, path, credential, stream, p, data, deadline_ms, expected)
+}
+
+fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64,
+    data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
     let until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64))
     let (take read_half, take write_half) = net.split(result.unwrap(host.connect(n, addr, until)))
     let mut input = take read_half
     let mut output = take write_half
-    let mut head = string.from("POST ")
+    let mut head = string.from(method)
+    string.push(mut head, " ")
     string.push(mut head, path)
     string.push(mut head, " HTTP/1.1\r\nHost: a\r\nConnection: close\r\nIdempotency-Key: \"")
     string.push_u64(mut head, int.widen(stream))
@@ -211,32 +255,45 @@ fn http_law_post(n: Net, clock: Clock, addr: Addr, path: String, credential: Byt
     string.push(mut head, "\r\nAuthorization: ")
     let mut request = std.http.copy_bytes(string.as_bytes(head))
     list.append(mut request, credential)
-    list.append(mut request, b"\r\n\r\n")
+    if let Some(encoded_caller) = expected {
+        list.append(mut request, b"\r\nHirsel-Expected-Caller: ")
+        list.append(mut request, string.as_bytes(encoded_caller))
+    }
+    list.append(mut request, b"\r\nContent-Type: application/json\r\n\r\n")
     list.append(mut request, data)
     http_law_write(mut output, request, until)
     let mut received: Bytes = list.with_capacity(8192u64)
     loop {
-        let available = 8192u64 - list.len(received)
+        if list.len(received) == list.capacity(received) { list.reserve(mut received, 8192u64) }
+        let available = list.capacity(received) - list.len(received)
         let size = result.unwrap(host.recv_bounded(mut input, mut received, available, until))
         if size == 0u64 { break }
     }
     let mut parsed = std.http1.head()
     if std.http1.response(received, mut parsed) != Complete { fail("HTTP law response head was incomplete") }
     let mut replayed = false
+    let mut committed = false
+    let mut retry = false
     for field in parsed.fields {
         let name = list.slice(received, field.name.start, field.name.end)
         if std.http1.equal_ascii(name, b"Idempotent-Replayed") {
             replayed = list.slice(received, field.value.start, field.value.end) == b"true"
         }
+        if std.http1.equal_ascii(name, b"Idempotent-Outcome") {
+            committed = list.slice(received, field.value.start, field.value.end) == b"committed"
+        }
+        if std.http1.equal_ascii(name, b"Retry-After") {
+            retry = list.slice(received, field.value.start, field.value.end) == b"1"
+        }
     }
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     let payload = list.slice(received, parsed.end, list.len(received))
     let decoded = match std.codec.decode(codec, payload) { Ok(take value) => Some(take value), _ => None }
-    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed)
+    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed, committed: committed, retry: retry, body: std.http.copy_bytes(payload))
 }
 
 type HttpLawDrive: send {
-    head: Sender[HeadInput], publisher_out: Sender[PubIn], net: Net, clock: Clock, random: Random, tasks: Tasks, parity: bool
+    head: Sender[HeadInput], publisher_out: Sender[PubIn], net: Net, clock: Clock, random: Random, tasks: Tasks, parity: bool, generated: bool
 }
 
 fn http_law_drive(take d: HttpLawDrive) waits {
@@ -244,11 +301,13 @@ fn http_law_drive(take d: HttpLawDrive) waits {
     let (take relay, take relay_task) = result.unwrap(start_relay(reg, d.head, d.publisher_out, d.clock, d.tasks,
         RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: HTTP_LAW_ARG_MAX)))
     let (take listener, addr) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
-    let job = HttpLawServer(relay: take relay, listener: take listener, clock: d.clock, random: d.random, tasks: d.tasks)
+    let job = HttpLawServer(generated: d.generated, relay: take relay, listener: take listener, clock: d.clock, random: d.random, tasks: d.tasks)
     let server = task.spawn(d.tasks, bytes 4194304u64, take job, http_law_serve)
     let keys = http_law_keys(reg)
     let (take socket, take wire_task) = result.unwrap(http_law_socket(d, keys, http_law_credential()))
-    if d.parity {
+    if d.generated {
+        http_law_lexical(d, addr, socket)
+    } else if d.parity {
         http_law_parity(d, addr, socket)
     } else {
         http_law_refusals(d, addr, socket, keys)
@@ -291,7 +350,7 @@ fn http_law_key(row: Exported) -> Bytes {
 
 fn http_law_count(value: Outcome) -> u64 {
     if let Returned(raw) = value {
-        let codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
+        let codec: std.codec.Codec[Result[u64, HttpLawError]] = std.codec.of()
         return result.unwrap(result.unwrap(std.codec.decode(codec, raw)))
     }
     fail("HTTP law did not return the counter")
@@ -336,6 +395,55 @@ fn http_law_parity(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits 
     }
 }
 
+fn http_law_lexical(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits {
+    let credential = http_law_credential()
+    let mut position = 0u64
+    // These are L10's hand-derived codec bytes. The single record field
+    // changes the HTTP shape without adding any bytes to the codec value.
+    for (text, binary) in [
+        (b"{\"request\":\"Unit\"}", b"\x00\x00\x00\x00"),
+        (b"{\"request\":{\"Scalars\":{\"text\":\"h\\u00e9\",\"double\":\"NaN\",\"single\":-0,\"h\":\"-4\",\"g\":-3,\"f\":-2,\"e\":-1,\"d\":\"9007199254740993\",\"c\":305419896,\"b\":4660,\"a\":255,\"scalar\":\"\\u03bb\",\"flag\":true,\"unit\":null}}}",
+            b"\x01\x00\x00\x00\x01\xbb\x03\x00\x00\xff\x34\x12\x78\x56\x34\x12\x01\x00\x00\x00\x00\x00\x20\x00\xff\xfe\xff\xfd\xff\xff\xff\xfc\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x80\x00\x00\x00\x00\x00\x00\xf8\x7f\x03\x00\x00\x00h\xc3\xa9"),
+        (b"{\"request\":{\"Collections\":[\"AP8=\",[1,256],[[\"9\",null],[\"-0\",null],[\"2\",null]]]}}",
+            b"\x02\x00\x00\x00\x02\x00\x00\x00\x00\xff\x02\x00\x00\x00\x01\x00\x00\x01\x03\x00\x00\x00\x01\x00\x00\x009\x02\x00\x00\x00-0\x01\x00\x00\x002"),
+        (b"{\"request\":{\"Optional\":null}}", b"\x03\x00\x00\x00\x00\x00\x00\x00"),
+        (b"{\"request\":{\"Optional\":\"\"}}", b"\x03\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"),
+        (b"{\"request\":{\"ResultValue\":{\"ok\":7}}}", b"\x04\x00\x00\x00\x00\x00\x00\x00\x07"),
+        (b"{\"request\":{\"ResultValue\":{\"error\":\"x\"}}}", b"\x04\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00x"),
+        (b"{\"request\":{\"Validated\":9}}", b"\x05\x00\x00\x00\x09"),
+    ] {
+        let expect = position + 1u64
+        let route = if position % 2u64 == 0u64 { "/generated" } else { "/.hirsel/op/increment" }
+        let response = http_law_post(d.net, d.clock, addr, route, credential, 7u32, position, text, 1000u32)
+        let mut expected_body = string.from("\"")
+        string.push_u64(mut expected_body, expect)
+        string.push(mut expected_body, "\"")
+        if response.status != 200u16 || !response.committed || response.replayed ||
+            response.body != string.as_bytes(expected_body) ||
+            http_law_count(http_law_wire(socket, 7u32, position, 0u32, 1000u32, binary)) != expect {
+            fail("L10j JSON and WebSocket bytes disagree")
+        }
+        position += 1u64
+    }
+    let body = b"{\"request\":\"RejectSame\"}"
+    let committed_error = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, 8u32, 0u64, body, 1000u32)
+    let refusal = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, 8u32, 0u64,
+        b"{\"request\":\"Unit\"}", 1000u32)
+    if committed_error.status != 422u16 || !committed_error.committed || refusal.status != 422u16 || refusal.committed ||
+        committed_error.body != b"{\"refused\":\"request_mismatch\"}" || refusal.body != committed_error.body {
+        fail("L10j the committed 422 and protocol 422 lacked distinct authoritative markers")
+    }
+
+    let duplicate = b"{\"request\":{\"Normalized\":[[\"A\",null],[\"a\",null]]}}"
+    let response = http_law_post(d.net, d.clock, addr, "/generated", credential, 7u32, position, duplicate, 1000u32)
+    if response.status != 400u16 || response.committed || response.body != b"{\"refused\":\"malformed\",\"kind\":3}" {
+        fail("L10j the live codec accepted keys equal after via decoding")
+    }
+    if http_law_count(http_law_wire(socket, 7u32, position, 0u32, 1000u32, b"\x00\x00\x00\x00")) != position + 1u64 {
+        fail("L10j a duplicate key consumed a position")
+    }
+}
+
 fn http_law_refusals(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn, keys: List[Bytes]) waits {
     let credential = http_law_credential()
     if let Error(Protocol(1008u16)) = http_law_socket(d, keys, std.http.copy_bytes(b"bad")) {} else {
@@ -371,12 +479,12 @@ fn http_law_refusals(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn, keys
     }
 }
 
-fn http_law_run(c: Clock, r: Random, tasks: Tasks, n: Net, parity: bool) -> Result[(), ()] waits {
+fn http_law_run(c: Clock, r: Random, tasks: Tasks, n: Net, parity: bool, generated: bool) -> Result[(), ()] waits {
     let info = result.unwrap(store.sized(Memory, 33554432u64))
     let db = store.memory(c, r, info)
     let (head, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
     let mail = result.unwrap(mailbox(16u64))
-    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, parity: parity)
+    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, parity: parity, generated: generated)
     let work = task.spawn(tasks, bytes 16777216u64, take drive, http_law_drive)
     result.unwrap(place_head(take db, code.describe(http_law_place), HTTP_LAW_PLACE_BYTES, None,
         code.describe(http_law_schema), take inbox, take mail, tasks, 1048576u64))
@@ -414,10 +522,15 @@ fn http_law_cause(causes: Causes) -> String {
 
 @test
 fn test_l10(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    http_law_run(c, r, tasks, n, true)
+    http_law_run(c, r, tasks, n, true, false)
 }
 
 @test
 fn test_l11(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    http_law_run(c, r, tasks, n, false)
+    http_law_run(c, r, tasks, n, false, false)
+}
+
+@test
+fn test_l10j(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    http_law_run(c, r, tasks, n, true, true)
 }

@@ -430,7 +430,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let Registry(exported: take exported, ..) = take old_reg
     let release = result.unwrap(release_digest(exported))
     let old_description = Describe(digest: clone(old_digest), target: "", n_place: n_place,
-        revision: launch_bytes(launch_env().revision), exported: take exported, tables: list.new())
+        revision: launch_bytes(launch_env().revision), exported: take exported, tables: list.new(), bindings: list.new())
     let old_binding = result.unwrap(identity_digest(old_description))
     let old_desc = result.unwrap(encode_describe(old_description))
     let mut declaration = result.unwrap(store.declare(db, Migrate))
@@ -528,7 +528,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let mut head = take running
     head.r = result.unwrap(placed(new_place, new_n_place))
     let mut drive = option.unwrap(replace(mut head.trigger_drive, None))
-    let new_binding = result.unwrap(trigger_stamp(head.r.exported, new_n_place))
+    let new_binding = result.unwrap(trigger_stamp(head.r.exported, head.r.bindings, new_n_place))
     drive.revision = clone(new_binding)
     head.trigger_drive = Some(take drive)
     for i in 0u64 .. 8u64 {

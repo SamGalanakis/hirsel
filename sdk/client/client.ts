@@ -44,9 +44,11 @@ export interface Transport {
     onChange: (sub: Subscription<V, Slots>) => void, onEnd: ((reason: SubscriptionEnd) => void) | undefined,
     decode: SubscriptionCodec<V, Slots>): Subscription<V, Slots>;
 }
+export interface HttpRequest { path: string; body?: string }
+export interface HttpReply { status: number; body: string; committed: boolean; replayed: boolean }
 export interface Pending {
   generation: bigint; stream: number; p: bigint; want: Want; args: Uint8Array;
-  slot: number; attempts: number; possiblyAdmitted: boolean;
+  slot: number; attempts: number; possiblyAdmitted: boolean; http?: HttpRequest;
 }
 export interface StreamRecord {
   caller: Caller | null; next: bigint; pending?: Pending; terminal?: {p: bigint; outcome: Outcome<Uint8Array>}; retired: boolean;
@@ -78,6 +80,8 @@ export interface Clock {
 export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
 export interface Options {
   url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity; credential?: Uint8Array;
+  http?: { url: string; fetch?: typeof fetch };
+  onHttpRecovered?: (reply: HttpReply) => void;
   socket?: (url: string, protocol: string) => Socket; clock?: Clock; deadlineMs?: number;
   onState?: (state: State) => void;
   onDiagnostic?: (diagnostic: string) => void;
@@ -123,7 +127,7 @@ const rawSubscription: SubscriptionCodec<Uint8Array, Record<number, SlotRow>> = 
 };
 
 interface QueuedCall {
-  want: Want; args: Uint8Array; slot: number; prediction?: unknown;
+  want: Want; args: Uint8Array; slot: number; prediction?: unknown; http?: HttpRequest;
   resolve: (outcome: Outcome<Uint8Array>) => void; reject: (error: unknown) => void;
 }
 
@@ -162,7 +166,7 @@ export class Client implements Transport {
     this.credential = options.credential?.slice(); this.record = structuredClone(state.streams[stream]);
     this.wants = options.wants.map(copyWant);
     const pending = this.record.pending;
-    if (pending && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
+    if (pending && !pending.http && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
     this.clock = options.clock ?? clock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     // A connection may become terminal before an app chooses to await whenReady().
@@ -445,16 +449,33 @@ export class Client implements Transport {
     await this.sendPending(); await this.subscribeAll(); this.readyResolve();
   }
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, prediction?: unknown): Promise<Outcome<R>> {
+    return this.queueCall(want, args, prediction)
+      .then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
+  }
+  callHttp(want: Want, request: HttpRequest): Promise<Outcome<HttpReply>> {
+    if (!this.options.http || !validHttpRequest(request)) return Promise.reject(new ClientError('InvalidHttpRequest'));
+    return this.queueCall(want, new Uint8Array(), undefined, {...request})
+      .then(outcome => outcome.tag === 'Returned'
+        ? {tag: 'Returned', value: JSON.parse(new TextDecoder().decode(outcome.value)) as HttpReply} : outcome);
+  }
+  private queueCall(want: Want, args: Uint8Array, prediction?: unknown, http?: HttpRequest): Promise<Outcome<Uint8Array>> {
     const copied = copyWant(want), arg = args.slice();
-    return new Promise<Outcome<Uint8Array>>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       void this.enqueue(async () => {
         if (this.state !== 'Ready') throw new ClientError(this.state);
-        const slot = this.wants.findIndex(w => sameWant(w, copied));
+        const slot = http ? 0 : this.wants.findIndex(w => sameWant(w, copied));
         if (slot < 0) throw new ClientError('UnknownWant');
-        this.calls.add({want: copied, args: arg, slot, prediction, resolve, reject});
+        if (http && this.record.pending?.http && sameWant(this.record.pending.want, copied)
+          && this.record.pending.http.path === http.path && this.record.pending.http.body === http.body) {
+          if (this.activeCall) throw new ClientError('AlreadySending');
+          this.activeCall = {resolve, reject};
+          await this.sendPending();
+          return;
+        }
+        this.calls.add({want: copied, args: arg, slot, prediction, http, resolve, reject});
         await this.startNextCall();
       }).catch(reject);
-    }).then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
+    });
   }
   private async startNextCall(): Promise<void> {
     if (this.state !== 'Ready' || this.record.pending) return;
@@ -465,7 +486,7 @@ export class Client implements Transport {
       await this.installation(async state => {
         const record = state.streams[this.stream];
         const pending: Pending = {generation: this.generation, stream: this.stream, p: record.next,
-          want: call.want, args: call.args, slot: call.slot, attempts: 0, possiblyAdmitted: false};
+          want: call.want, args: call.args, slot: call.slot, attempts: 0, possiblyAdmitted: false, ...(call.http && {http: call.http})};
         record.pending = pending;
         await this.options.storage.write(state);
         this.record = structuredClone(record); this.activeCall = {resolve: call.resolve, reject: call.reject};
@@ -483,23 +504,90 @@ export class Client implements Transport {
   }
   private async sendPending(): Promise<void> {
     if (this.state !== 'Ready' || !this.record.pending || this.sent) return;
-    await this.installation(async state => {
+    const http = await this.installation(async state => {
       const record = state.streams[this.stream], pending = record.pending!;
       // Persist possible admission before send. A crash here is conservative:
       // a later definitive refusal cannot authorize replacing these bytes.
       pending.attempts++; pending.possiblyAdmitted = pending.attempts > 1 || pending.possiblyAdmitted;
-      pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
+      if (!pending.http) pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
       await this.options.storage.write(state);
       this.record = structuredClone(record);
       this.sent = true;
+      if (pending.http) return {request: pending.http, p: pending.p, caller: record.caller!};
       try { this.socket!.send(this.options.frame.encode({tag: 'Call', values: [this.stream, pending.p, pending.slot, this.options.deadlineMs ?? 30000, pending.args]})); }
       catch { this.transient(); }
     });
+    if (http) {
+      const epoch = this.epoch;
+      void this.sendHttp(http.request, http.p, http.caller).then(
+        reply => this.enqueue(async () => {
+          if (epoch === this.epoch && this.state === 'Ready') await this.httpOutcome(http.p, reply);
+        }),
+        () => this.enqueue(async () => {
+          if (epoch === this.epoch && this.state === 'Ready') this.retryPending();
+        }),
+      ).catch(() => {});
+    }
+  }
+  private async sendHttp(request: HttpRequest, p: bigint, caller: Caller): Promise<HttpReply> {
+    const options = this.options.http;
+    if (!options) throw new ClientError('HttpUnavailable');
+    const headers = new Headers();
+    if (this.credential) headers.set('Authorization', Array.from(this.credential, b => String.fromCharCode(b)).join(''));
+    if (request.body !== undefined) headers.set('Content-Type', 'application/json');
+    headers.set('Idempotency-Key', `"${this.stream}.${p}"`);
+    headers.set('Hirsel-Expected-Caller', btoa(String.fromCharCode(caller.issuer, caller.subject.length, ...caller.subject)));
+    const send = options.fetch ?? globalThis.fetch;
+    const result = await send(new URL(request.path, options.url), {
+      method: 'POST', headers, body: request.body, redirect: 'error',
+    });
+    return {status: result.status, body: await result.text(),
+      committed: result.headers.get('Idempotent-Outcome') === 'committed',
+      replayed: result.headers.get('Idempotent-Replayed') === 'true'};
+  }
+  private async httpOutcome(p: bigint, reply: HttpReply): Promise<void> {
+    const pending = this.record.pending;
+    if (pending?.p !== p || !pending.http) return;
+    if (!reply.committed && reply.status === 403 && reply.body === '{"refused":"fenced"}') {
+      await this.fence('LocallyUnknown'); return;
+    }
+    const recovered = !this.activeCall;
+    const outcome = {tag: 'Returned' as const, value: new TextEncoder().encode(JSON.stringify(reply))};
+    if (reply.committed) {
+      await this.installation(async state => {
+        const record = state.streams[this.stream];
+        record.terminal = {p, outcome};
+        delete record.pending;
+        if (p === 0xffffffffffffffffn) record.retired = true; else record.next = p + 1n;
+        await this.options.storage.write(state);
+        this.record = structuredClone(record);
+        if (recovered) {
+          this.sent = false;
+          this.options.onHttpRecovered?.(reply);
+        } else this.finish(outcome);
+        if (record.retired) await this.stop('Retired');
+      });
+      await this.startNextCall();
+    } else {
+      if (recovered) {
+        this.sent = false;
+        this.options.onHttpRecovered?.(reply);
+      } else this.finish(outcome);
+      if (reply.status === 409 || reply.status === 503 || reply.status === 504) this.retryPending();
+    }
+  }
+  private retryPending(): void {
+    this.sent = false;
+    if (this.timer !== undefined) this.clock.clear(this.timer);
+    this.timer = this.clock.set(() => {
+      this.timer = undefined; void this.enqueue(async () => this.sendPending());
+    }, this.clock.random() * this.backoff);
+    this.backoff = Math.min(10000, this.backoff * 2);
   }
   private async outcomes(rows: Done[]): Promise<void> {
     for (const row of rows) {
       const pending = this.record.pending;
-      if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;
+      if (!pending || pending.http || row.stream !== this.stream || row.p !== pending.p) continue;
       this.dropPrediction(pending.p);
       const outcome = row.outcome;
       if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }
@@ -524,12 +612,7 @@ export class Client implements Transport {
           await this.options.storage.write(state); this.record = structuredClone(record); this.finish(outcome);
         });
       } else if (outcome.tag === 'Abandoned' || (outcome.tag === 'Refused' && ['Overloaded', 'Deadline', 'Budget'].includes(outcome.value.tag))) {
-        this.sent = false;
-        if (this.timer !== undefined) this.clock.clear(this.timer);
-        this.timer = this.clock.set(() => {
-          this.timer = undefined; void this.enqueue(async () => this.sendPending());
-        }, this.clock.random() * this.backoff);
-        this.backoff = Math.min(10000, this.backoff * 2);
+        this.retryPending();
       } else await this.incompatible(1008);
     }
   }
@@ -634,6 +717,12 @@ export class Client implements Transport {
   async close(): Promise<void> {
     await this.enqueue(async () => { await this.stop('Closed', 'LocallyUnknown'); await this.streamLease.release(); });
   }
+}
+
+export function validHttpRequest(request: HttpRequest): boolean {
+  return !!request && typeof request.path === 'string'
+    && /^\/\.hirsel\/op\/[a-z0-9][a-z0-9_.-]{0,63}(\?[^#\s]*)?$/.test(request.path)
+    && (request.body === undefined || typeof request.body === 'string');
 }
 
 export class CorruptState extends Error {}

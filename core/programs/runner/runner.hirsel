@@ -29,7 +29,7 @@ pub type Group: codec + send { sub: u32, value: Bytes, rows: List[Row] }
 
 pub type Frame: codec + send = Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes) | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32) | Welcome(Caller, u32, u64, Bytes, String, u64) | Placed(Entry) | Batch(u64, List[u32], List[Group], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done])
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | InvalidBinding(BindError)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
@@ -643,13 +643,14 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     slots: Map[Bytes, Slot[G, H]],
     bound_slots: Map[Bytes, List[BoundSlot]],
     exported: List[Exported],
-    checks: Map[Bytes, own[send] fn(Bytes, u64) -> Option[Refusal]],
+    checks: Map[Bytes, CheckedArgument],
+    bindings: List[HttpDescribe],
     gone: Map[Bytes, ()],
     trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
 
 pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
-    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new(), trigger_tables: None)
+    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), bindings: list.new(), gone: map.new(), trigger_tables: None)
 }
 
 fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
@@ -1071,6 +1072,7 @@ fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: S
             let error: DescribeError = match take e {
                 Full(c) => PlaceCapacity(room(c)),
                 AlreadyRegistered(take key) => AlreadyRegistered(take key),
+                InvalidBinding(take problem) => BadHttpBinding(take problem),
                 Bounds => Bounds,
             }
             let codec: std.codec.Codec[DescribeError] = std.codec.of()
@@ -1097,7 +1099,7 @@ pub fn call[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes,
 // granted entry is NoEntry; a task the place cannot grant is Budget.
 pub fn start[G: send, H: shareable + inert + send](r: Registry[G, H], tasks: Tasks, take g: G, take caller: Caller, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
     match map.get(r.slots, key) {
-        Some(Granted(bind)) => match (bind().go)(tasks, Direct(take g), take caller, take arg, None) {
+        Some(Granted(launch)) => match (launch().go)(tasks, Direct(take g), take caller, take arg, None) {
             Ok(take t) => Ok(take t),
             Error(c) => Error(Budget(room(c))),
         },
@@ -1220,11 +1222,11 @@ type Admit: send { who: u64, round: Latest[RoundAt] }
 
 // v2.19 (§3 "The release check"): `latest` is the newest commit that hit a read set of the
 // session, and `prior` the value `latest` had before it.
-pub type Fence: shareable + send { prior: u64, latest: u64 }
+pub type Fence = std.http.ReleaseFence
 
 // The round register's value R: the newest version whose fences are all published.
 // u64::MAX is the deploy halt's, and drops every content unit.
-type RoundAt: shareable + send { at: u64 }
+type RoundAt = std.http.ReleaseRound
 
 const ROUND_HALTED: u64 = 18446744073709551615u64
 
@@ -1254,10 +1256,10 @@ fn round_disarm(take rounds: RoundRegister) {
 
 pub fn mailbox(n: u64) -> Result[Mailbox, Capacity] {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(n)
-    let first = arc.new(RoundAt(at: 0u64))
+    let first = arc.new(std.http.ReleaseRound(at: 0u64))
     let register = latest.new(arc.share(first))
-    let halted = arc.new(RoundAt(at: ROUND_HALTED))
-    let next = arc.new(RoundAt(at: 0u64))
+    let halted = arc.new(std.http.ReleaseRound(at: ROUND_HALTED))
+    let next = arc.new(std.http.ReleaseRound(at: 0u64))
     let mut spares: List[Arc[RoundAt]] = list.new()
     list.push(mut spares, take next)
     let rounds = RoundRegister(round: take register, halted: take halted, current: take first, spares: take spares) ?=> |(c, _)| c
@@ -1272,9 +1274,9 @@ type FenceSet: send { root: Latest[Fence], current: Arc[Fence], a: Arc[Fence], b
 // `Joined`'s reservation: the session's two fence spares and one more round spare. A refusal
 // admits nothing and the join is answered with id 0.
 fn fence_reserve(mut rounds: RoundRegister, take root: Latest[Fence]) -> Result[FenceSet, Capacity] {
-    let a = arc.new(Fence(prior: 0u64, latest: 0u64))
-    let b = arc.new(Fence(prior: 0u64, latest: 0u64))
-    let spare = arc.new(RoundAt(at: 0u64))
+    let a = arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64))
+    let b = arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64))
+    let spare = arc.new(std.http.ReleaseRound(at: 0u64))
     list.push(mut rounds.spares, take spare)
     let current = latest.read(root)
     Ok(FenceSet(root: take root, current: take current, a: take a, b: take b))
@@ -1296,7 +1298,7 @@ fn fence_advance(mut fences: FenceSet, b: u64) -> bool {
             let kept = arc.share(fences.current)
             replace(mut fences.b, take kept)
         } else {
-            arc.new(Fence(prior: prior, latest: b))
+            arc.new(std.http.ReleaseFence(prior: prior, latest: b))
         }
     }
     let _ = replace(mut fences.current, take fresh)
@@ -1325,7 +1327,7 @@ fn round_advance(mut rounds: RoundRegister, at: u64, live: u64) -> bool {
     let index = match chosen {
         Some(x) => x,
         None => {
-            let made = arc.new(RoundAt(at: at))
+            let made = arc.new(std.http.ReleaseRound(at: at))
             list.push(mut rounds.spares, take made)
             list.len(rounds.spares) - 1u64
         },
@@ -1341,20 +1343,11 @@ fn round_advance(mut rounds: RoundRegister, at: u64, live: u64) -> bool {
 // every content unit; otherwise the fence acts at `latest` once R has reached it, and at
 // `prior` before, and a unit passes if that fence is at most its version.
 pub fn release_passes(r: u64, f: Fence, version: u64) -> bool {
-    if r == ROUND_HALTED || f.latest == ROUND_HALTED { return false }
-    let effective = if f.latest <= r { f.latest } else { f.prior }
-    effective <= version
+    std.http.release_passes(r, f, version)
 }
 
-// The writer's check: R first, then the fence, each copied and its share released before
-// the decision.
 fn release_load(register: Latest[RoundAt], fence: Latest[Fence], version: u64) -> bool {
-    let r = latest.read(register).at
-    let f = {
-        let held = latest.read(fence)
-        Fence(prior: held.prior, latest: held.latest)
-    }
-    release_passes(r, f, version)
+    std.http.read_fence(register, fence, version)
 }
 
 pub fn post(m: Mailbox) -> Sender[PubIn] {
@@ -1949,7 +1942,7 @@ fn target_release(target: store.PreparedTarget, prepared: Inline[u8, 32]) -> Res
         Error(_) => return Error(ImportMalformed),
     }
     let binding = identity_digest(description) ?=> |_| ImportMalformed
-    let release = release_digest(description.exported) ?=> |_| ImportMalformed
+    let release = http_release_digest(description.exported, description.bindings) ?=> |_| ImportMalformed
     if release != target.release { return Error(ImportMalformed) }
     let mut witness: Bytes = list.with_capacity(32u64)
     for byte in prepared { list.push(mut witness, byte) }
@@ -2750,14 +2743,14 @@ fn open_trigger_drive[G: send, H: shareable + inert + send, S: send](db: store.D
     if let Some(take configured) = take config {
         if !triggers.is_empty(configured.entries) {
             let Some(take opened_tables) = take tables else { return Error(Missing("trigger table selector")) }
-            return Ok(Some(make_trigger_drive(take opened_tables, h, clock, tasks, take to, trigger_stamp(reg.exported, n_place)?, take configured)?))
+            return Ok(Some(make_trigger_drive(take opened_tables, h, clock, tasks, take to, trigger_stamp(reg.exported, reg.bindings, n_place)?, take configured)?))
         }
     }
     let Some(take opened_tables) = take tables else { return Ok(None) }
     let read_handle = store.reader(db, 0u64)?
     let mut remaining = triggers.scan_pending(read_handle, snapshot, opened_tables)?
     if let None = triggers.next_scanned(read_handle, mut remaining)? { return Ok(None) }
-    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.exported, n_place)?, clock: clock, tasks: tasks, to: take to,
+    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.exported, reg.bindings, n_place)?, clock: clock, tasks: tasks, to: take to,
         entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
     Ok(Some(box.new(take drive)))
 }
@@ -2933,8 +2926,8 @@ fn watch_granted[G: send, A, R](take watched: WatchedJob[G, A, R]) -> Outcome wa
 }
 
 fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
-    let Some(Granted(bind)) = map.get(r.slots, key) else { return Error(NoEntry) }
-    let go = bind().go
+    let Some(Granted(launch)) = map.get(r.slots, key) else { return Error(NoEntry) }
+    let go = launch().go
     let grant_to = match drive.grants {
         Some(grants) => channel.sender(grants.to),
         None => return Error(NoEntry),
@@ -3342,8 +3335,14 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
         match offer(joined[i].to, update(at, take content, take rows)) {
             Took => { joined[i].handed += handing },
             Shut => {
-                forget(mut subs, mut joined, who)
-                continue
+                // A one-shot writer may still hold the mark while it writes
+                // the initial frame. Its release fence remains live until
+                // the writer drops the mark.
+                let marked = match joined[i].mark { Some(_) => true, None => false }
+                if !marked {
+                    forget(mut subs, mut joined, who)
+                    continue
+                }
             },
             Bounced(Notice(e: Updated(Update(version: _, content: take back, outcomes: take outcomes)))) => {
                 if let Some(take r) = take recipient {
@@ -5215,34 +5214,6 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     }
 }
 
-type SubscriptionRoom: send {
-    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64, ledger: u64, frame_limit: u64,
-}
-
-fn subscription_room(limit: u64, max_subs: u64, ledger: u64, frame_limit: u64) -> Result[SubscriptionRoom, Capacity] {
-    let possible = int.saturating_sub(limit, 64u64) / 8u64
-    let wanted = int.saturating_add(max_subs, 1u64)
-    let slot_capacity = if wanted < possible { wanted } else { possible }
-    if slot_capacity == 0u64 { return Error(Capacity(requested: 72u64, available: limit)) }
-    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(slot_capacity)
-    Ok(SubscriptionRoom(to: take to, from: take from, slots: slot_capacity, limit: limit - (64u64 + slot_capacity * 8u64), held: 0u64, used: 0u64, ledger: ledger, frame_limit: frame_limit))
-}
-
-fn subscription_hold(mut quota: SubscriptionRoom, take caller: Caller, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
-    while let Ok(charge) = channel.try_receive(quota.from) {
-        quota.held -= charge
-        quota.used -= 1u64
-    }
-    // Include the lease record. One refund fits for every issued lease.
-    let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + wire_round(list.capacity(caller.subject)) + 64u64
-    let available = quota.limit - quota.held
-    if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
-    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge, ledger: quota.ledger, frame_limit: quota.frame_limit) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
-    quota.held += charge
-    quota.used += 1u64
-    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg, caller: take caller))
-}
-
 // A place's wire configuration (§3 "Binding"): the binding's plain seed `B` and, when wire
 // calls may reach `Granted` entries, the plain grant `G` each such call copies. The copiers
 // carry the plain bounds into sessions that also support registries with movable trigger
@@ -5258,14 +5229,14 @@ type WireGrant[G: send]: send { value: G, duplicate: fn(G) -> G }
 
 fn copy_plain[G: plain](g: G) -> G { g }
 
-pub fn wire[G: plain + send](grant: G, bind: Option[StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits]], bind_bytes: u64, bind_steps: u64) -> Wire[G, G] {
+pub fn wire[G: plain + send](grant: G, bind_app: Option[StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits]], bind_bytes: u64, bind_steps: u64) -> Wire[G, G] {
     let duplicate: fn(G) -> G = copy_plain
-    Wire(grant: Some(WireGrant(value: grant, duplicate: duplicate)), seed: grant, duplicate: duplicate, bind: bind, bind_bytes: bind_bytes, bind_steps: bind_steps)
+    Wire(grant: Some(WireGrant(value: grant, duplicate: duplicate)), seed: grant, duplicate: duplicate, bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
-pub fn wire_bind[G: send, B: plain + send](seed: B, bind: StaticFn[fn(B, Bytes) -> Result[Caller, ()] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G, B] {
+pub fn wire_bind[G: send, B: plain + send](seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[Caller, ()] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G, B] {
     let duplicate: fn(B) -> B = copy_plain
-    Wire(grant: None, seed: seed, duplicate: duplicate, bind: Some(bind), bind_bytes: bind_bytes, bind_steps: bind_steps)
+    Wire(grant: None, seed: seed, duplicate: duplicate, bind: Some(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
 fn copy_wire[G: send, B: send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B]] {
@@ -5667,7 +5638,7 @@ fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSess
             let backing: Bytes = list.with_capacity(DONE_MAX)
             let run = match map.get(r.slots, sent.key) {
                 Some(Compute(_)) => Computed(call(r, sent.key, sent.arg)),
-                Some(Granted(bind)) => { s.launch = Some(bind()); Launched },
+                Some(Granted(launch)) => { s.launch = Some(launch()); Launched },
                 Some(Transact(_, _, _, _, _)) => Durable,
                 None => Durable,
                 _ => Uncallable,
@@ -5890,7 +5861,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
     let mut registered = false
     for id in s.pub_subs { if id == sub { registered = true } }
     if !registered && list.len(s.pub_subs) >= s.config.max_subs { return Ok(SubscriptionRefusal(sub, Refused(NotAllowed))) }
-    let refused = match map.get(r.checks, key) { Some(check) => check(arg, 18446744073709551615u64), _ => { let no_refusal: Option[Refusal] = None; no_refusal } }
+    let refused = match map.get(r.checks, key) { Some(check) => (check.validate)(arg, 18446744073709551615u64), _ => { let no_refusal: Option[Refusal] = None; no_refusal } }
     if let Some(take why) = take refused { return Ok(SubscriptionRefusal(sub, Refused(take why))) }
     if let None = s.subscription_room {
         let limit = int.saturating_sub(WIRE_SESSION_CEILING, wire_variable_peak(s.config) + s.config.n_granted)
@@ -5920,7 +5891,7 @@ fn wire_apply_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: Wi
     if let Some(_) = s.joined { wire_subscribed(mut s, mut work, sub, take input); return Ok(()) }
     let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
     // v2.19: the session's fence root, at {0, 0}; the publisher gets a handle in the Join.
-    let fence = latest.new(arc.new(Fence(prior: 0u64, latest: 0u64)))
+    let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     if let None = work.head {

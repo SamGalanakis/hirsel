@@ -31,7 +31,7 @@ type FailedReadOwner {
 
 fn failed_read_owner(mut joined: List[Joiner], mut rounds: RoundRegister, who: u64) -> FailedReadOwner {
     let (to, from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
-    let root = latest.new(arc.new(Fence(prior: 0u64, latest: 0u64)))
+    let root = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
     let identity = latest.new(arc.new(OwnerNumber(number: who)))
     let fences = result.unwrap(fence_reserve(mut rounds, latest.handle(root)))
     list.push(mut joined, Joiner(who: who, to: channel.sender(to), closed: None, ended: list.new(),

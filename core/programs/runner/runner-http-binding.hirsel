@@ -1,0 +1,231 @@
+pub type Method: codec + key + send = Get | Post | Put | Patch | Delete
+pub type Mode: codec + key + send = Read | Subscribe | Stream
+pub type Source: codec + key + send = Path | Query | Body
+
+pub type FieldSource: codec + shareable + send { field: String, source: Source }
+
+pub type HttpBinding: codec + shareable + send {
+    op: String,
+    method: Method,
+    path: String,
+    entry: Bytes,
+    fields: List[FieldSource],
+    mode: Mode,
+    ok_status: u16,
+    error_status: u16,
+    body_max: u64,
+    arg_max: u64,
+    deadline_ms: u64,
+    steps: u64,
+}
+
+pub type BindCheck: codec + send =
+    NoEntry | Mode | Op | DuplicateOp | Fields | Path | Shape(u8, u8) |
+    Status | StreamStatus(String) | Route | MetadataBytes
+
+pub type BindError: codec + send { op: String, check: BindCheck }
+
+pub type HttpDefault: codec + shareable + send {
+    definition: u64,
+    field: String,
+    payload: Bytes,
+}
+
+pub type HttpDescribe: codec + shareable + send {
+    binding: HttpBinding,
+    defaults: List[HttpDefault],
+}
+
+fn http_method(method: Method) -> String {
+    match method {
+        Get => "GET",
+        Post => "POST",
+        Put => "PUT",
+        Patch => "PATCH",
+        Delete => "DELETE",
+    }
+}
+
+fn valid_op(name: String) -> bool {
+    let raw = string.as_bytes(name)
+    let n = list.len(raw)
+    if n == 0u64 || n > 64u64 { return false }
+    for i in 0u64 .. n {
+        let x = raw[i]
+        if !(x >= b'a' && x <= b'z' || int.is_ascii_digit(x) ||
+            i != 0u64 && (x == b'_' || x == b'-' || x == b'.')) { return false }
+    }
+    true
+}
+
+fn binding_mode(kind: Kind, mode: Mode, method: Method) -> bool {
+    match kind {
+        Compute => mode == Read && (method == Get || method == Post),
+        Query => (mode == Read || mode == Subscribe) && method == Get,
+        Transact => mode == Stream && method != Get,
+        Granted => false,
+    }
+}
+
+fn validate_http_address(registered: List[HttpDescribe], found: HttpBinding, kind: Kind) -> Result[(), BindCheck] {
+    if !valid_op(found.op) { return Error(Op) }
+    if !binding_mode(kind, found.mode, found.method) { return Error(Mode) }
+    if kind == Query && found.ok_status != 200u16 ||
+        (found.ok_status != 200u16 && found.ok_status != 201u16) ||
+        found.error_status < 400u16 || found.error_status > 499u16 {
+        return Error(Status)
+    }
+    if found.method == Get && (std.router.conflict(found.path, "/.hirsel/openapi.json") ?=> |_| Path) {
+        return Error(Route)
+    }
+    if found.mode == Stream && found.method == Post &&
+        (std.router.conflict(found.path, operation_path(found.op)) ?=> |_| Path) {
+        return Error(Route)
+    }
+    for entry in registered {
+        let prior = view entry.binding
+        if prior.op == found.op { return Error(DuplicateOp) }
+        if prior.mode == Stream && found.mode == Stream && prior.entry == found.entry &&
+            (prior.ok_status != found.ok_status || prior.error_status != found.error_status) {
+            return Error(StreamStatus(string.from(prior.op)))
+        }
+        if prior.method == found.method && (std.router.conflict(prior.path, found.path) ?=> |_| Path) {
+            return Error(Route)
+        }
+        if prior.mode == Stream && found.method == Post &&
+            (std.router.conflict(operation_path(prior.op), found.path) ?=> |_| Path) {
+            return Error(Route)
+        }
+        if found.mode == Stream && prior.method == Post &&
+            (std.router.conflict(prior.path, operation_path(found.op)) ?=> |_| Path) {
+            return Error(Route)
+        }
+    }
+    Ok(())
+}
+
+fn operation_path(op: String) -> String {
+    let mut alias = string.from("/.hirsel/op/")
+    string.push(mut alias, op)
+    take alias
+}
+
+pub fn bind[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding) -> Result[(), RegisterError] {
+    let details = check_http_binding(reg, binding) ?=> |take check| InvalidBinding(BindError(op: string.from(binding.op), check: take check))
+    list.push(mut reg.bindings, HttpDescribe(binding: take binding, defaults: take details))
+    Ok(())
+}
+
+fn check_http_binding[G: send, H: shareable + inert + send](reg: Registry[G, H], binding: HttpBinding) -> Result[List[HttpDefault], BindCheck] {
+    let Some(validator) = map.get(reg.checks, binding.entry) else { return Error(NoEntry) }
+    let entry_index = find_binding_entry(reg.exported, binding.entry) ?=> |_| NoEntry
+    let entry = view reg.exported[entry_index]
+    validate_http_address(reg.bindings, binding, entry.described.kind)?
+    let description = (validator.description)() ?=> |_| Shape(0u8, 0u8)
+    let mut defaults: List[HttpDefault] = list.new()
+    for saved in std.codec.schema_defaults(description) {
+        list.push(mut defaults, HttpDefault(definition: saved.def, field: string.from(saved.field), payload: std.http.copy_bytes(saved.value)))
+    }
+    let input = std.json.prepare_schema(take description, Strict) ?=> |take e| binding_shape(take e)
+    if let None = std.json_schema.length_bound(input) { return Error(Shape(0u8, 6u8)) }
+    check_argument_fields(input, binding)?
+    check_binding_result(entry)?
+    Ok(take defaults)
+}
+
+fn find_binding_entry(exports: List[Exported], key: Bytes) -> Result[u64, ()] {
+    for index in 0u64 .. list.len(exports) {
+        let entry = view exports[index]
+        if key == entry_key(view entry.described.identity, entry.args_fp, entry.result_fp) { return Ok(index) }
+    }
+    Error(())
+}
+
+fn binding_shape(take e: std.json.TypedError) -> BindCheck {
+    match take e {
+        Schema(op, Tuple) => Shape(op, 1u8),
+        Schema(op, NullableOption) => Shape(op, 2u8),
+        Schema(op, EmptyListElement) => Shape(op, 3u8),
+        Schema(op, EmptyMapEntry) => Shape(op, 4u8),
+        Schema(op, NonConsumingCycle) => Shape(op, 5u8),
+        _ => Shape(0u8, 0u8),
+    }
+}
+
+fn bind_shape(encoding: Bytes) -> Result[std.json.JsonPlan, BindCheck] {
+    let restored = std.codec.restore_schema(encoding, list.new()) ?=> |_| Shape(0u8, 0u8)
+    Ok(std.json.prepare_schema(take restored, Strict) ?=> binding_shape)
+}
+
+fn check_binding_result(entry: Exported) -> Result[(), BindCheck] {
+    let plan = if entry.described.kind == Query { bind_shape(entry.value)? } else { bind_shape(entry.described.result)? }
+    if let None = std.json_schema.length_bound(plan) { return Error(Shape(0u8, 6u8)) }
+    if entry.described.kind == Query {
+        for projection in entry.slots {
+            let key = bind_shape(projection.key_json)?
+            let rows = bind_shape(projection.value)?
+            if let None = std.json_schema.length_bound(key) { return Error(Shape(0u8, 6u8)) }
+            if let None = std.json_schema.length_bound(rows) { return Error(Shape(0u8, 6u8)) }
+        }
+    }
+    Ok(())
+}
+
+fn check_argument_fields(plan: std.json.JsonPlan, binding: HttpBinding) -> Result[(), BindCheck] {
+    let (take names, is_tail) = std.router.captures(binding.path) ?=> |_| Path
+    if is_tail { return Error(Path) }
+    let root = plan.facts[plan.root].form
+    match plan.shapes[root] {
+        Atom(0u8) if list.len(binding.fields) == 0u64 && list.len(names) == 0u64 => Ok(()),
+        Record(fields) => {
+            if list.len(fields) != list.len(binding.fields) { return Error(Fields) }
+            let mut captures = 0u64
+            for member in fields {
+                let source = find_http_source(binding.fields, member.name)?
+                match source {
+                    Path => {
+                        let mut found = false
+                        for name in names { if name == member.name { found = true } }
+                        if !found || !path_scalar(plan, member.shape) { return Error(Path) }
+                        captures += 1u64
+                    },
+                    Query => if !query_shape(plan, member.shape) { return Error(Fields) },
+                    Body => if binding.method == Get { return Error(Fields) },
+                }
+            }
+            if captures != list.len(names) { return Error(Path) }
+            Ok(())
+        },
+        _ => Error(Fields),
+    }
+}
+
+fn find_http_source(sources: List[FieldSource], name: String) -> Result[Source, BindCheck] {
+    let mut found: Option[Source] = None
+    for source in sources {
+        if source.field == name {
+            if let Some(_) = found { return Error(Fields) }
+            found = Some(source.source)
+        }
+    }
+    match found { Some(source) => Ok(source), None => Error(Fields) }
+}
+
+fn path_scalar(plan: std.json.JsonPlan, shape: u64) -> bool {
+    match plan.shapes[plan.facts[shape].form] {
+        Atom(op) => op >= 1u8 && op <= 10u8 || op == 13u8,
+        _ => false,
+    }
+}
+
+fn query_shape(plan: std.json.JsonPlan, shape: u64) -> bool {
+    if path_scalar(plan, shape) { return true }
+    match plan.shapes[plan.facts[shape].form] {
+        Optional(inner) => path_scalar(plan, inner),
+        Array(inner) => match plan.shapes[plan.facts[inner].form] {
+            Atom(3u8) => false,
+            _ => path_scalar(plan, inner),
+        },
+        _ => false,
+    }
+}

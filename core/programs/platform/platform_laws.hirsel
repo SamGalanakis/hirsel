@@ -824,7 +824,7 @@ fn release_at(version: u64) -> Bytes {
 }
 
 fn describe_of(digest: Bytes) -> runner.Describe {
-    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: list.new(), tables: list.new())
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: list.new(), tables: list.new(), bindings: list.new())
 }
 
 // OLD's describe child's answer.

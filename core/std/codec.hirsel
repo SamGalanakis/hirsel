@@ -906,16 +906,16 @@ fn decode_error_schema(mut s: Schema, _c: Codec[DecodeError]) -> Result[(), Enco
 // depth-first walk from the root first meets them, so a type has one schema; defaults
 // are the reader's, never in the bytes.
 /// A schema being built: what a codec's schema function writes into.
-pub opaque type Schema {
+pub opaque type Schema: shareable + send {
     cur: Bytes,
     saved: List[Bytes],
     open: List[u64],
     keys: List[Bytes],
     defs: List[Bytes],
-    defaults: List[Default]
+    defaults: List[SchemaDefault]
 }
 
-type Default: shareable + send {
+pub type SchemaDefault: shareable + send {
     def: u64,
     field: String,
     value: Bytes
@@ -1130,7 +1130,7 @@ pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Resul
     let mut value: Bytes = list.new()
     (c.encoder)(v, mut value)?
     let copied = string.from(path)
-    list.push(mut s.defaults, Default(def, field: take copied, value: take value))
+    list.push(mut s.defaults, SchemaDefault(def, field: take copied, value: take value))
     Ok(())
 }
 
@@ -1236,6 +1236,37 @@ pub fn schema_default(s: Schema, def: u64, field_name: String) -> Option[View[By
     None
 }
 
+/// A completed description's encoded reader defaults, separate from its canonical schema.
+pub fn schema_defaults(s: Schema) -> View[List[SchemaDefault]] in s {
+    view s.defaults
+}
+
+/// Restores a description from canonical schema bytes and its separately encoded defaults.
+pub fn restore_schema(raw: Bytes, take defaults: List[SchemaDefault]) -> Result[Schema, DecodeError] {
+    let mut offsets: List[u64] = list.new()
+    let root = scan(raw, 0u64, list.len(raw), mut offsets) ?=> Schema
+    let mut defs: List[Bytes] = list.with_capacity(list.len(offsets))
+    for i in 0u64 .. list.len(offsets) {
+        let start = offsets[i]
+        let end = if i + 1u64 < list.len(offsets) {
+            offsets[i + 1u64]
+        } else {
+            root
+        }
+        let mut row: Bytes = list.with_capacity(end - start)
+        list.append(mut row, list.slice(raw, start, end))
+        list.push(mut defs, take row)
+    }
+    for item in defaults {
+        if item.def >= list.len(defs) {
+            return Error(Schema(0u64))
+        }
+    }
+    let mut expression: Bytes = list.with_capacity(list.len(raw) - root)
+    list.append(mut expression, list.slice(raw, root, list.len(raw)))
+    Ok(Schema(cur: take expression, saved: list.new(), open: list.new(), keys: list.new(), defs: take defs, defaults: take defaults))
+}
+
 /// The stable fingerprint of c's schema: CRC-64-AVRO (Rabin) of its bytes, so equal
 /// schemas, tombstones and variant order included, have equal fingerprints.
 pub fn fingerprint[T](c: Codec[T]) -> Result[u64, EncodeError] {
@@ -1243,275 +1274,9 @@ pub fn fingerprint[T](c: Codec[T]) -> Result[u64, EncodeError] {
     Ok(fingerprint_of(b))
 }
 
-// Apache Avro 1.12.0, SchemaNormalization.FP64. Start each entry with its
-// byte index and apply eight reflected rounds with polynomial 0xc15d213aa4d7a795.
-const FINGERPRINT_TABLE: Inline[u64, 256] =[
-    0x0000000000000000,
-    0x2cf1cba6b75351fa,
-    0x59e3974d6ea6a3f4,
-    0x75125cebd9f5f20e,
-    0xb3c72e9add4d47e8,
-    0x9f36e53c6a1e1612,
-    0xea24b9d7b3ebe41c,
-    0xc6d5727104b8b5e6,
-    0xe5341f40f335c0fb,
-    0xc9c5d4e644669101,
-    0xbcd7880d9d93630f,
-    0x902643ab2ac032f5,
-    0x56f331da2e788713,
-    0x7a02fa7c992bd6e9,
-    0x0f10a69740de24e7,
-    0x23e16d31f78d751d,
-    0x48d27cf4afc4cedd,
-    0x6423b75218979f27,
-    0x1131ebb9c1626d29,
-    0x3dc0201f76313cd3,
-    0xfb15526e72898935,
-    0xd7e499c8c5dad8cf,
-    0xa2f6c5231c2f2ac1,
-    0x8e070e85ab7c7b3b,
-    0xade663b45cf10e26,
-    0x8117a812eba25fdc,
-    0xf405f4f93257add2,
-    0xd8f43f5f8504fc28,
-    0x1e214d2e81bc49ce,
-    0x32d0868836ef1834,
-    0x47c2da63ef1aea3a,
-    0x6b3311c55849bbc0,
-    0x91a4f9e95f899dba,
-    0xbd55324fe8dacc40,
-    0xc8476ea4312f3e4e,
-    0xe4b6a502867c6fb4,
-    0x2263d77382c4da52,
-    0x0e921cd535978ba8,
-    0x7b80403eec6279a6,
-    0x57718b985b31285c,
-    0x7490e6a9acbc5d41,
-    0x58612d0f1bef0cbb,
-    0x2d7371e4c21afeb5,
-    0x0182ba427549af4f,
-    0xc757c83371f11aa9,
-    0xeba60395c6a24b53,
-    0x9eb45f7e1f57b95d,
-    0xb24594d8a804e8a7,
-    0xd976851df04d5367,
-    0xf5874ebb471e029d,
-    0x809512509eebf093,
-    0xac64d9f629b8a169,
-    0x6ab1ab872d00148f,
-    0x464060219a534575,
-    0x33523cca43a6b77b,
-    0x1fa3f76cf4f5e681,
-    0x3c429a5d0378939c,
-    0x10b351fbb42bc266,
-    0x65a10d106dde3068,
-    0x4950c6b6da8d6192,
-    0x8f85b4c7de35d474,
-    0xa3747f616966858e,
-    0xd666238ab0937780,
-    0xfa97e82c07c0267a,
-    0xa1f3b1a7f6bc745f,
-    0x8d027a0141ef25a5,
-    0xf81026ea981ad7ab,
-    0xd4e1ed4c2f498651,
-    0x12349f3d2bf133b7,
-    0x3ec5549b9ca2624d,
-    0x4bd7087045579043,
-    0x6726c3d6f204c1b9,
-    0x44c7aee70589b4a4,
-    0x68366541b2dae55e,
-    0x1d2439aa6b2f1750,
-    0x31d5f20cdc7c46aa,
-    0xf700807dd8c4f34c,
-    0xdbf14bdb6f97a2b6,
-    0xaee31730b66250b8,
-    0x8212dc9601310142,
-    0xe921cd535978ba82,
-    0xc5d006f5ee2beb78,
-    0xb0c25a1e37de1976,
-    0x9c3391b8808d488c,
-    0x5ae6e3c98435fd6a,
-    0x7617286f3366ac90,
-    0x03057484ea935e9e,
-    0x2ff4bf225dc00f64,
-    0x0c15d213aa4d7a79,
-    0x20e419b51d1e2b83,
-    0x55f6455ec4ebd98d,
-    0x79078ef873b88877,
-    0xbfd2fc8977003d91,
-    0x9323372fc0536c6b,
-    0xe6316bc419a69e65,
-    0xcac0a062aef5cf9f,
-    0x3057484ea935e9e5,
-    0x1ca683e81e66b81f,
-    0x69b4df03c7934a11,
-    0x454514a570c01beb,
-    0x839066d47478ae0d,
-    0xaf61ad72c32bfff7,
-    0xda73f1991ade0df9,
-    0xf6823a3fad8d5c03,
-    0xd563570e5a00291e,
-    0xf9929ca8ed5378e4,
-    0x8c80c04334a68aea,
-    0xa0710be583f5db10,
-    0x66a47994874d6ef6,
-    0x4a55b232301e3f0c,
-    0x3f47eed9e9ebcd02,
-    0x13b6257f5eb89cf8,
-    0x788534ba06f12738,
-    0x5474ff1cb1a276c2,
-    0x2166a3f7685784cc,
-    0x0d976851df04d536,
-    0xcb421a20dbbc60d0,
-    0xe7b3d1866cef312a,
-    0x92a18d6db51ac324,
-    0xbe5046cb024992de,
-    0x9db12bfaf5c4e7c3,
-    0xb140e05c4297b639,
-    0xc452bcb79b624437,
-    0xe8a377112c3115cd,
-    0x2e7605602889a02b,
-    0x0287cec69fdaf1d1,
-    0x7795922d462f03df,
-    0x5b64598bf17c5225,
-    0xc15d213aa4d7a795,
-    0xedacea9c1384f66f,
-    0x98beb677ca710461,
-    0xb44f7dd17d22559b,
-    0x729a0fa0799ae07d,
-    0x5e6bc406cec9b187,
-    0x2b7998ed173c4389,
-    0x0788534ba06f1273,
-    0x24693e7a57e2676e,
-    0x0898f5dce0b13694,
-    0x7d8aa9373944c49a,
-    0x517b62918e179560,
-    0x97ae10e08aaf2086,
-    0xbb5fdb463dfc717c,
-    0xce4d87ade4098372,
-    0xe2bc4c0b535ad288,
-    0x898f5dce0b136948,
-    0xa57e9668bc4038b2,
-    0xd06cca8365b5cabc,
-    0xfc9d0125d2e69b46,
-    0x3a487354d65e2ea0,
-    0x16b9b8f2610d7f5a,
-    0x63abe419b8f88d54,
-    0x4f5a2fbf0fabdcae,
-    0x6cbb428ef826a9b3,
-    0x404a89284f75f849,
-    0x3558d5c396800a47,
-    0x19a91e6521d35bbd,
-    0xdf7c6c14256bee5b,
-    0xf38da7b29238bfa1,
-    0x869ffb594bcd4daf,
-    0xaa6e30fffc9e1c55,
-    0x50f9d8d3fb5e3a2f,
-    0x7c0813754c0d6bd5,
-    0x091a4f9e95f899db,
-    0x25eb843822abc821,
-    0xe33ef64926137dc7,
-    0xcfcf3def91402c3d,
-    0xbadd610448b5de33,
-    0x962caaa2ffe68fc9,
-    0xb5cdc793086bfad4,
-    0x993c0c35bf38ab2e,
-    0xec2e50de66cd5920,
-    0xc0df9b78d19e08da,
-    0x060ae909d526bd3c,
-    0x2afb22af6275ecc6,
-    0x5fe97e44bb801ec8,
-    0x7318b5e20cd34f32,
-    0x182ba427549af4f2,
-    0x34da6f81e3c9a508,
-    0x41c8336a3a3c5706,
-    0x6d39f8cc8d6f06fc,
-    0xabec8abd89d7b31a,
-    0x871d411b3e84e2e0,
-    0xf20f1df0e77110ee,
-    0xdefed65650224114,
-    0xfd1fbb67a7af3409,
-    0xd1ee70c110fc65f3,
-    0xa4fc2c2ac90997fd,
-    0x880de78c7e5ac607,
-    0x4ed895fd7ae273e1,
-    0x62295e5bcdb1221b,
-    0x173b02b01444d015,
-    0x3bcac916a31781ef,
-    0x60ae909d526bd3ca,
-    0x4c5f5b3be5388230,
-    0x394d07d03ccd703e,
-    0x15bccc768b9e21c4,
-    0xd369be078f269422,
-    0xff9875a13875c5d8,
-    0x8a8a294ae18037d6,
-    0xa67be2ec56d3662c,
-    0x859a8fdda15e1331,
-    0xa96b447b160d42cb,
-    0xdc791890cff8b0c5,
-    0xf088d33678abe13f,
-    0x365da1477c1354d9,
-    0x1aac6ae1cb400523,
-    0x6fbe360a12b5f72d,
-    0x434ffdaca5e6a6d7,
-    0x287cec69fdaf1d17,
-    0x048d27cf4afc4ced,
-    0x719f7b249309bee3,
-    0x5d6eb082245aef19,
-    0x9bbbc2f320e25aff,
-    0xb74a095597b10b05,
-    0xc25855be4e44f90b,
-    0xeea99e18f917a8f1,
-    0xcd48f3290e9addec,
-    0xe1b9388fb9c98c16,
-    0x94ab6464603c7e18,
-    0xb85aafc2d76f2fe2,
-    0x7e8fddb3d3d79a04,
-    0x527e16156484cbfe,
-    0x276c4afebd7139f0,
-    0x0b9d81580a22680a,
-    0xf10a69740de24e70,
-    0xddfba2d2bab11f8a,
-    0xa8e9fe396344ed84,
-    0x8418359fd417bc7e,
-    0x42cd47eed0af0998,
-    0x6e3c8c4867fc5862,
-    0x1b2ed0a3be09aa6c,
-    0x37df1b05095afb96,
-    0x143e7634fed78e8b,
-    0x38cfbd924984df71,
-    0x4ddde17990712d7f,
-    0x612c2adf27227c85,
-    0xa7f958ae239ac963,
-    0x8b08930894c99899,
-    0xfe1acfe34d3c6a97,
-    0xd2eb0445fa6f3b6d,
-    0xb9d81580a22680ad,
-    0x9529de261575d157,
-    0xe03b82cdcc802359,
-    0xccca496b7bd372a3,
-    0x0a1f3b1a7f6bc745,
-    0x26eef0bcc83896bf,
-    0x53fcac5711cd64b1,
-    0x7f0d67f1a69e354b,
-    0x5cec0ac051134056,
-    0x701dc166e64011ac,
-    0x050f9d8d3fb5e3a2,
-    0x29fe562b88e6b258,
-    0xef2b245a8c5e07be,
-    0xc3daeffc3b0d5644,
-    0xb6c8b317e2f8a44a,
-    0x9a3978b155abf5b0,
-]
-
-/// CRC-64-AVRO of schema bytes. One lookup per byte in a 256-entry table. No admission.
+/// CRC-64-AVRO of the canonical schema bytes.
 pub fn fingerprint_of(b: Bytes) -> u64 {
-    let mut fp: u64 = 0xc15d213aa4d7a795
-    for x in b {
-        let byte: u64 = int.widen(x)
-        fp = (fp >> 8) ^ FINGERPRINT_TABLE[(fp ^ byte) & 255]
-    }
-    fp
+    crc64avro.fingerprint(b)
 }
 
 // Resolution. `resolve` checks the writer's schema, then compiles a plan from the pair of
@@ -1530,7 +1295,7 @@ pub opaque type Reader[T]: shareable + send {
     c: Codec[T],
     same: bool,
     ops: List[u64],
-    defaults: List[Default]
+    defaults: List[SchemaDefault]
 }
 
 type Plan {
@@ -1541,7 +1306,7 @@ type Plan {
     ops: List[u64],
     memo: Map[(u64, u64), u64],
     tasks: List[(u64, u64, u64)],
-    defaults: List[Default],
+    defaults: List[SchemaDefault],
     has_never: bool
 }
 
@@ -2306,7 +2071,7 @@ fn tag_word(mut o: Out, x: u32) {
 
 // Checks the writer's bytes by the plan and writes the reader's layout into o; the
 // offset where the value ends. marks: (offset in o.raw, offset in b) of each via value.
-fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, DecodeError] {
+fn transcode(ops: List[u64], defaults: List[SchemaDefault], b: Bytes, start: u64, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, DecodeError] {
     let mut stack: List[Frame] = list.new()
     let mut at = start
     let mut next: u64 = 0
@@ -2446,7 +2211,7 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
 
 // The record's runs in the reader's order after `before`, each reader field the writer's
 // run or a default's new chunk; a removed field's run is left out.
-fn relink(ops: List[u64], node: u64, before: u64, runs: List[u64], defaults: List[Default], mut o: Out) {
+fn relink(ops: List[u64], node: u64, before: u64, runs: List[u64], defaults: List[SchemaDefault], mut o: Out) {
     let wn = ops[node + 2]
     let rn = ops[node + 3 + 2 * wn]
     o.last = before

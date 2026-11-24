@@ -134,6 +134,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
         }
         sweep(mut b.subs, mut joined)
         repair(mut b, mut joined, mut owes)
+        http_project_owes(mut b, mut owes)
         settle(mut b.subs, mut joined, mut waiting, take owes, at)
         tell_relay(mut relay)
     }

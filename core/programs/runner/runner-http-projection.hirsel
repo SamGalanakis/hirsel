@@ -1,0 +1,112 @@
+// This form is private to the HTTP sink. The key still starts with the
+// collection id, followed by K's value codec bytes for B-4.
+fn http_group_keys(group: Bytes, bindings: List[BoundSlot], maximum: u64) -> Result[Arc[Bytes], Outcome] {
+    let encoded_keys: Result[Result[Arc[Bytes], Outcome], Capacity] = bound bytes maximum {
+        let rebuilt = isolate(scoped fn() -> Result[Arc[Bytes], store.Error] {
+            http_recode_group(group, bindings)
+        })
+        match take rebuilt {
+            Ok(Ok(take result)) => match take result {
+                Ok(take packed) => Ok(take packed),
+                Error(_) => Error(Failed(Raised(5u32))),
+            },
+            Ok(Error(causes)) => {
+                for cause in causes {
+                    if let Capacity(c) = cause.kind { return Error(Refused(Budget(room(c)))) }
+                    break
+                }
+                Error(projection_cause(causes))
+            },
+            Error(c) => Error(Refused(Budget(room(c)))),
+        }
+    }
+    match take encoded_keys {
+        Ok(take result) => take result,
+        Error(c) => Error(Refused(Budget(room(c)))),
+    }
+}
+
+fn http_recode_group(group: Bytes, bindings: List[BoundSlot]) -> Result[Arc[Bytes], store.Error] {
+    let mut at = 0u64
+    let _ = http_counted_span(group, mut at)?
+    let rows = std.codec.take_u32(group, mut at) ?=> |_| Limit(Value)
+    let mut output: Bytes = list.with_capacity(list.len(group))
+    list.append(mut output, list.slice(group, 0u64, at))
+    let count: u64 = int.widen(rows)
+    for _ in 0u64 .. count {
+        let slot_index = std.codec.take_u16(group, mut at) ?=> |_| Limit(Value)
+        let key = http_counted_span(group, mut at)?
+        let key_end = at
+        let tag = std.codec.take_tag(group, mut at, 2u32) ?=> |_| Limit(Value)
+        if tag == 1u32 { let _ = http_counted_span(group, mut at)? }
+        if key.end - key.start < 4u64 { return Error(Limit(Key)) }
+        let slot_number: u64 = int.widen(slot_index)
+        let Some(binding) = list.get(bindings, slot_number) else { return Error(Limit(Key)) }
+        std.codec.put_u16(slot_index, mut output)
+        let length_at = list.len(output)
+        std.codec.put_u32(0u32, mut output)
+        let body_at = list.len(output)
+        list.append(mut output, list.slice(group, key.start, key.start + 4u64))
+        (binding.http_key)(list.slice(group, key.start + 4u64, key.end), mut output)?
+        let length = list.len(output) - body_at
+        if length > 4294967295u64 { return Error(Limit(Key)) }
+        for byte in 0u64 .. 4u64 {
+            output[length_at + byte] = int.truncate(length >> (byte * 8u64))
+        }
+        list.append(mut output, list.slice(group, key_end, at))
+    }
+    if at != list.len(group) { return Error(Limit(Value)) }
+    Ok(arc.new(take output))
+}
+
+fn http_counted_span(input: Bytes, mut at: u64) -> Result[std.http1.Span, store.Error] {
+    let n: u64 = int.widen(std.codec.take_u32(input, mut at) ?=> |_| Limit(Value))
+    std.codec.need(input, at, n) ?=> |_| Limit(Value)
+    let span = std.http1.Span(start: at, end: at + n)
+    at += n
+    Ok(span)
+}
+
+fn http_project_owes[G: send, H: shareable + inert + send](mut b: Board[G, H], mut owes: List[Owe]) {
+    for index in 0u64 .. list.len(owes) {
+        let who = owes[index].session
+        for g in 0u64 .. list.len(owes[index].groups) {
+            let sub = owes[index].groups[g].sub
+            let before = list.len(owes[index].groups[g].payload)
+            let envelope = 24u64 + 4u64 * list.len(owes[index].complete)
+            let occupied = int.saturating_add(envelope, owes[index].group_bytes - before)
+            let available = int.saturating_sub(owes[index].frame_limit, occupied)
+            let keys = http_group_for(b, who, sub, owes[index].groups[g].payload, available)
+            match take keys {
+                None => (),
+                Some(Ok(take payload)) => {
+                    owes[index].group_bytes = owes[index].group_bytes - before + list.len(payload)
+                    owes[index].groups[g].payload = take payload
+                    list.clear(mut owes[index].rows)
+                },
+                Some(Error(take problem)) => {
+                    let generation = match sub_generation(owes[index].generations, sub) { Some(n) => n, None => 0u64 }
+                    list.clear(mut owes[index].complete)
+                    list.clear(mut owes[index].groups)
+                    list.clear(mut owes[index].rows)
+                    owes[index].group_bytes = 0u64
+                    append_terminal(mut owes[index], sub, generation, take problem)
+                    end_entry(mut b.subs, who, sub)
+                    break
+                },
+            }
+        }
+    }
+}
+
+fn http_group_for[G: send, H: shareable + inert + send](b: Board[G, H], who: u64, sub: u32, packed: Bytes, available: u64) -> Option[Result[Arc[Bytes], Outcome]] {
+    let Some(entry) = sub_at(b.subs, who, sub) else { return None }
+    let Some(lease) = entry.input.room else { return None }
+    if !lease.http { return None }
+    let bindings = option.unwrap(map.get(b.r.bound_slots, entry.input.key))
+    let result = http_group_keys(packed, bindings, subscription_frame_limit(entry.input))
+    match take result {
+        Ok(payload) if list.len(payload) > available => Some(Error(Refused(Budget(Room(requested: list.len(payload), available: available))))),
+        take other => Some(take other),
+    }
+}

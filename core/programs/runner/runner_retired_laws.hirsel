@@ -502,11 +502,11 @@ fn test_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> Result[(),
 // clears perm, a read hit, so the fence becomes {0, b} and R = b, and the writer's check
 // then refuses a unit at c and accepts one at b.
 pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let table = !release_passes(ROUND_HALTED, Fence(prior: 0u64, latest: 0u64), 5u64)
-        && !release_passes(7u64, Fence(prior: 3u64, latest: 7u64), 5u64)
-        && release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 4u64)
-        && !release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 2u64)
-        && release_passes(9u64, Fence(prior: 3u64, latest: 9u64), 9u64)
+    let table = !release_passes(ROUND_HALTED, std.http.ReleaseFence(prior: 0u64, latest: 0u64), 5u64)
+        && !release_passes(7u64, std.http.ReleaseFence(prior: 3u64, latest: 7u64), 5u64)
+        && release_passes(5u64, std.http.ReleaseFence(prior: 3u64, latest: 9u64), 4u64)
+        && !release_passes(5u64, std.http.ReleaseFence(prior: 3u64, latest: 9u64), 2u64)
+        && release_passes(9u64, std.http.ReleaseFence(prior: 3u64, latest: 9u64), 9u64)
     table && stale_trace(c, r, tasks) && trap_trace(c, r, tasks) && ended_trace(c, r)
 }
 
@@ -647,7 +647,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let refused = match channel.send(to, PubIn(e: Drained)) { Error(_) => true, Ok(_) => false }
     let at = latest.read(register).at
     let _ = (s_from, take s_to)
-    before && s != 0u64 && trapped && refused && at == ROUND_HALTED && !release_passes(at, Fence(prior: 0u64, latest: 0u64), v0)
+    before && s != 0u64 && trapped && refused && at == ROUND_HALTED && !release_passes(at, std.http.ReleaseFence(prior: 0u64, latest: 0u64), v0)
 }
 
 fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -673,7 +673,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
         Ok(None) => (),
         _ => return false,
     }
-    let first = arc.new(Fence(prior: 0u64, latest: 0u64))
+    let first = arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64))
     let root = latest.new(take first)
     let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
     let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)

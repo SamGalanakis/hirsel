@@ -12,7 +12,8 @@
 use hirsel_core_ids::{ContentHash, encoding};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::hash::Hasher;
+use std::io::{self, IoSlice, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -370,15 +371,28 @@ impl Store {
             self.locked(|path| fs::create_dir(path), |path, ()| File::open(path))?;
         Ok(Scratch { path, _lock: lock })
     }
-    /// Write `bytes` to a temporary and rename it to `path`. Nothing is
+    /// Write the byte slices to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
-    fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fn publish<const N: usize>(&self, path: &Path, parts: [&[u8]; N]) -> io::Result<()> {
         self.publish_to(|file| {
-            file.write_all(bytes)?;
+            if let [bytes] = parts.as_slice() {
+                file.write_all(bytes)?;
+            } else {
+                let mut buffers = parts.map(IoSlice::new);
+                let mut remaining = buffers.as_mut_slice();
+                while !remaining.is_empty() {
+                    match file.write_vectored(remaining) {
+                        Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                        Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
             Ok((path, ()))
         })?;
         if let Some(release) = &self.release {
-            release.wrote(bytes.len());
+            release.wrote(parts.iter().map(|part| part.len()).sum());
         }
         Ok(())
     }
@@ -448,7 +462,7 @@ impl Store {
             address: name,
             check: checksum(bytes),
         };
-        self.publish(&self.path(bare.address), bytes)?;
+        self.publish(&self.path(bare.address), [bytes])?;
         wrote("bare");
         Ok(bare)
     }
@@ -465,57 +479,45 @@ impl Store {
     /// The envelope of one payload and its address: the digest of the header,
     /// payload and length bytes, computed once while framing.
     pub(crate) fn frame(payload: &[u8]) -> (ContentHash, Vec<u8>) {
-        Self::framed(HEADER + payload.len() + TRAILER, |bytes| {
-            bytes.extend_from_slice(payload);
-            Ok(())
-        })
-        .expect("a copied payload cannot fail")
-    }
-    /// The envelope of the payload `fill` appends, written in place after
-    /// the header: a payload encoded here is never copied before its digest.
-    fn framed(
-        capacity: usize,
-        fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
-    ) -> io::Result<(ContentHash, Vec<u8>)> {
-        Self::envelope(capacity, fill, |bytes| {
-            ContentHash(Sha256::digest(bytes).into())
-        })
+        let mut bytes = Vec::with_capacity(HEADER + payload.len() + TRAILER);
+        bytes.extend_from_slice(&Self::header());
+        bytes.extend_from_slice(payload);
+        hirsel_core_front::cost_scope!("non-check", "archive write and digest");
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let hash = ContentHash(Sha256::digest(&bytes).into());
+        let check = checksum(&bytes);
+        bytes.extend_from_slice(&check.to_le_bytes());
+        bytes.extend_from_slice(&hash.0);
+        (hash, bytes)
     }
     /// Publish `payload` framed under `key`, an address its caller derives
     /// from the payload's inputs, never from its bytes: the frame's checksum
     /// guards the bytes on every read and no digest of them is computed. A
     /// key's payload is a function of its inputs, so a rewrite replaces the
-    /// file by a rename and a reader sees one whole frame or none.
+    /// file by a rename and a reader sees one whole frame or none. The
+    /// frame is written around the borrowed payload without copying it.
     pub(crate) fn put_keyed(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
-        let (_, bytes) = Self::envelope(
-            HEADER + payload.len() + TRAILER,
-            |bytes| {
-                bytes.extend_from_slice(payload);
-                Ok(())
-            },
-            |_| key,
-        )?;
-        self.write_framed(key, &bytes)
+        let header = Self::header();
+        let mut trailer = [0; TRAILER];
+        trailer[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        {
+            hirsel_core_front::cost_scope!("non-check", "archive write and digest");
+            let mut check = XxHash3_64::new();
+            check.write(&header);
+            check.write(payload);
+            check.write(&trailer[..8]);
+            trailer[8..16].copy_from_slice(&check.finish().to_le_bytes());
+        }
+        trailer[16..].copy_from_slice(&key.0);
+        self.publish(&self.path(key), [&header, payload, &trailer])?;
+        wrote("record");
+        Ok(())
     }
-    /// The envelope of the payload `fill` appends, under the address
-    /// `address` gives for the header, payload and length bytes.
-    fn envelope(
-        capacity: usize,
-        fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
-        address: impl FnOnce(&[u8]) -> ContentHash,
-    ) -> io::Result<(ContentHash, Vec<u8>)> {
-        let mut bytes = Vec::with_capacity(capacity);
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_le_bytes());
-        fill(&mut bytes)?;
-        hirsel_core_front::cost_scope!("non-check", "archive write and digest");
-        let payload = (bytes.len() - HEADER) as u64;
-        bytes.extend_from_slice(&payload.to_le_bytes());
-        let hash = address(&bytes);
-        let check = checksum(&bytes);
-        bytes.extend_from_slice(&check.to_le_bytes());
-        bytes.extend_from_slice(&hash.0);
-        Ok((hash, bytes))
+    fn header() -> [u8; HEADER] {
+        let mut header = [0; HEADER];
+        header[..8].copy_from_slice(MAGIC);
+        header[8..].copy_from_slice(&VERSION.to_le_bytes());
+        header
     }
     /// The hash of exactly a module's serialization (`IR`).
     pub(crate) fn ir_hash(ir: &[u8]) -> ContentHash {
@@ -670,7 +672,7 @@ impl Store {
     }
     /// Publish one framed record under its address.
     pub(crate) fn write_framed(&self, hash: ContentHash, bytes: &[u8]) -> io::Result<()> {
-        self.publish(&self.path(hash), bytes)?;
+        self.publish(&self.path(hash), [bytes])?;
         wrote("record");
         Ok(())
     }
@@ -758,7 +760,7 @@ impl Store {
         bytes.extend_from_slice(name.as_bytes());
         let check = checksum(&bytes);
         bytes.extend_from_slice(&check.to_le_bytes());
-        self.publish(&self.root.join(name), &bytes)?;
+        self.publish(&self.root.join(name), [&bytes])?;
         wrote("selection");
         Ok(())
     }

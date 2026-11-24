@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const IMAGE_NOTE: &str = ".note.hirsel.image-digest";
@@ -153,7 +154,7 @@ fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
 }
 
 pub(crate) struct NativeImage {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Arc<Vec<u8>>,
     pub(crate) debug: Vec<u8>,
 }
 
@@ -169,7 +170,10 @@ impl NativeImage {
         let Some(debug) = store.get(Self::debug_key(key))? else {
             return Ok(None);
         };
-        Ok(Some(Self { bytes, debug }))
+        Ok(Some(Self {
+            bytes: Arc::new(bytes),
+            debug,
+        }))
     }
 
     pub(crate) fn publish(&self, store: &crate::Store, key: ContentHash) -> io::Result<()> {

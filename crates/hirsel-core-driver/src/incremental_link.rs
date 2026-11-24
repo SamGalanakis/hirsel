@@ -33,7 +33,8 @@ struct Previous {
     /// Every argument of the link that is not one of its objects.
     frame: ContentHash,
     objects: Vec<Remembered>,
-    image: Vec<u8>,
+    /// Publication may still hold the previous bytes when a new edit arrives.
+    image: Arc<Vec<u8>>,
     /// The image's symbols, made by the first patch over it.
     symbols: Option<Symbols>,
 }
@@ -47,7 +48,7 @@ pub(crate) struct Incremental(Option<Previous>);
 pub(crate) static RESIDENT: crate::resident::WorkingMemo<(), Arc<Mutex<Incremental>>> =
     crate::resident::WorkingMemo::new();
 
-pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Vec<u8>>> {
+pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Arc<Vec<u8>>>> {
     RESIDENT
         .previous_or_default()
         .lock()
@@ -55,7 +56,11 @@ pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Opti
         .patch(frame, objects)
 }
 
-pub(crate) fn remember(frame: ContentHash, objects: &[Slot<'_>], image: &[u8]) -> io::Result<()> {
+pub(crate) fn remember(
+    frame: ContentHash,
+    objects: &[Slot<'_>],
+    image: &Arc<Vec<u8>>,
+) -> io::Result<()> {
     RESIDENT
         .previous_or_default()
         .lock()
@@ -70,7 +75,7 @@ impl Incremental {
         &mut self,
         frame: ContentHash,
         objects: &[Slot<'_>],
-    ) -> io::Result<Option<Vec<u8>>> {
+    ) -> io::Result<Option<Arc<Vec<u8>>>> {
         let Some(previous) = self.0.as_mut() else {
             return Ok(None);
         };
@@ -106,12 +111,13 @@ impl Incremental {
                 return Ok(None);
             }
         }
-        for edit in edits {
-            match edit {
-                Edit::Bytes(at, bytes) => {
-                    previous.image[at..at + bytes.len()].copy_from_slice(&bytes)
+        if !edits.is_empty() {
+            let image = Arc::make_mut(&mut previous.image);
+            for edit in edits {
+                match edit {
+                    Edit::Bytes(at, bytes) => image[at..at + bytes.len()].copy_from_slice(&bytes),
+                    Edit::Rename(old, new) => symbols.rename(image, &old, new),
                 }
-                Edit::Rename(old, new) => symbols.rename(&mut previous.image, &old, new),
             }
         }
         for (n, new) in changed {
@@ -121,7 +127,7 @@ impl Incremental {
             };
             previous.objects[n] = Remembered { key, bytes: new };
         }
-        Ok(Some(previous.image.clone()))
+        Ok(Some(Arc::clone(&previous.image)))
     }
 
     /// Remember the executable lld made of `objects` under `frame`.
@@ -129,7 +135,7 @@ impl Incremental {
         &mut self,
         frame: ContentHash,
         objects: &[Slot<'_>],
-        image: &[u8],
+        image: &Arc<Vec<u8>>,
     ) -> io::Result<()> {
         self.0 = None;
         let Some(elf) = Elf::parse(image) else {
@@ -160,7 +166,7 @@ impl Incremental {
         self.0 = Some(Previous {
             frame,
             objects,
-            image: image.to_vec(),
+            image: Arc::clone(image),
             symbols: None,
         });
         Ok(())

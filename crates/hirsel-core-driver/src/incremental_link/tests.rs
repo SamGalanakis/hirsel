@@ -107,14 +107,14 @@ fn a_patched_link_is_the_lld_link_of_the_edited_objects() {
         match linker.patch(frame, &objects).unwrap() {
             Some(image) => {
                 assert!(patches, "{name}: patched an edit lld must link");
-                assert!(image == want, "{name}: the patched image is not lld's");
+                assert!(*image == want, "{name}: the patched image is not lld's");
             }
             None => {
                 assert!(
                     !patches,
                     "{name}: an edit the patch places fell back to lld"
                 );
-                linker.remember(frame, &objects, &want).unwrap();
+                linker.remember(frame, &objects, &Arc::new(want)).unwrap();
             }
         }
     };
@@ -163,7 +163,7 @@ fn an_edited_static_patches_beside_another_members_static_of_its_index() {
             Slot::Keyed((ContentHash::of_bytes(&left), 0), &members[0]),
             Slot::Keyed((ContentHash::of_bytes(right), 0), &members[1]),
         ];
-        let want = lld(dir, &[&start, &left, right]);
+        let want = Arc::new(lld(dir, &[&start, &left, right]));
         let patched = linker.patch(frame, &objects).unwrap();
         if patched.is_none() {
             linker.remember(frame, &objects, &want).unwrap();

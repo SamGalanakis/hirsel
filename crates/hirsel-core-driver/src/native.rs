@@ -1752,7 +1752,7 @@ fn link_objects(
                     options.debug_lines,
                     emit_relocations,
                 )?;
-                let image = std::fs::read(&output)?;
+                let image = Arc::new(std::fs::read(&output)?);
                 if let Some((frame, objects)) = incremental {
                     crate::incremental_link::remember(frame, &objects, &image)?;
                 }

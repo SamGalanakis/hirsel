@@ -199,7 +199,10 @@ fn native_symbol_tiers_follow_the_elf_identity() {
             &bytes,
         )
         .unwrap();
-        let binary = NativeImage { bytes, debug };
+        let binary = NativeImage {
+            bytes: bytes.into(),
+            debug,
+        };
         binary.deliver(&image).unwrap();
         let SymbolSource::DetachedDwarf(rows) =
             resolve_symbols(&image, &binary.bytes, None).unwrap()

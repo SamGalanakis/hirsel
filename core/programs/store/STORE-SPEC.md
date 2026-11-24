@@ -1,4 +1,26 @@
-# STORE-SPEC v2.90: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.91: the M4 store library (lane store-spec-1001)
+
+v2.91 (tiered-cut-spec-2192): text only, **not yet built**. It specifies the Tiered cut publisher (§13.6a) and shared lineage boundaries (§13.6).
+- **Boundaries are derived from the holders of the published generation, never stored.** The holders are pins, anchor rows and the parent sides of fork rows.
+  - A boundary (w, 1) exists while at least one holder gives w. There is no count and no discriminator.
+  - The cut whose generation removes the last holder at w applies the drop rule. Removing one of two pins of one Snapshot changes nothing.
+- **`lineage` holds two kinds of row:**
+  - fork rows, `0x01 ‖ child`, giving parent, watermark and `adopted`, with ghosts kept while dependents remain;
+  - cells, `0x02 ‖ branch ‖ k ‖ side ‖ m ‖ pack`, where `m` is a watermark interval that replaces v2.89's ordinal `birth`.
+- §13.6 gains the filing, drop, `adopt`, relocation and probe-completion rules.
+- §13.6a amends AP16 for classes 3 and 4:
+  - the record map stays Memory-only;
+  - a mandatory Tiered emission walk;
+  - the layout order 4, 3, 1, 0, 2;
+  - the PACK_INDEX key made precise as a stored key or separator, because a range lower bound read as v2.89's "low key" could let the probe retire a pinned frame;
+  - the order of the lineage and queue edits;
+  - the split account and M3 fields in the MANIFEST;
+  - a journal cover rule, with its crash argument, so a cut never publishes past acknowledged but unfolded Tiered writes (tiered-write-2188's repro).
+- The replaced-list row is 24 bytes with its branch, and the dropped-list row is 48.
+- New cases: L68 (e) and L69 (a)–(c), hand-derived.
+- A forked store written before v2.91 has no fork rows and opens `Corrupt(Malformed)`, so test stores are re-created from genesis.
+
+Reversible: the spec only.
 
 v2.90 (journal-tail-2187): **built.** A zero step is due only when the journal task's last 64 groups were each under B = 65,536 bytes (§3.3a Bulk). A group of B or more already amortizes its file extension, and refilling behind it writes every frame byte twice. At 4 KiB × 64-frame bursts on four stores that doubled the device's sync-write bytes, and each store's 1 MiB idle step (2.2 ms alone, 3.8 ms beside three others) outlasted the 0–2 ms gap before its next burst, which queued behind it. The rule only removes steps: every §3.3a invariant, the Disk bound and the commit law hold as written. Bursts of eight or fewer frames and every 97-byte row write groups under 32 KiB and keep the window. See CHANGES-v2.90. Reversible: one counter in the journal task.
 
@@ -3588,12 +3610,12 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
    Items 0–2 are the **mandatory candidate**. The writer keeps it as the **retry base**: the candidate maps are persistent, so keeping that version is one share.
 
    3. selection and the relocation closure (below), which are optional;
-   4. **the data layout:** every class-1 and class-0 frame's pack seq and offset, from the installed `next_pack` upward (pack-contiguous emission, below), and each data pack's `frames`, `live` and `bytes`. That gives the data retirements;
+   4. **the data layout:** every class-1 and class-0 frame's pack seq and offset (on a store with a Tiered collection, classes 4 and 3 first, §13.6a), from the installed `next_pack` upward (pack-contiguous emission, below), and each data pack's `frames`, `live` and `bytes`. That gives the data retirements;
    5. the list edits and the retirement list (below), from that final data layout, with the candidate records and incoming entries of the new and discarded list pages and the two list roots' `List` entries (U8);
    6. the list pages' stamps, drawn from the counter by checked u64 arithmetic (AP6, S1), followed by the capture of `next_stamp`;
    7. **the class-2 layout:** every list frame's pack seq and offset, continuing the seqs after the data packs;
    8. Reserve one output buffer, charged to the writer under MEM-19, for the maximum of the complete planned pack sizes across classes 1, 0 and 2 and the prospective MANIFEST file size. Each pack size includes its HEADER and frame heads. The MANIFEST size is 72 + 16 + 152 + T, plus 20 if FENCE is present, using the record-byte total T with H applied. Refuse a request above max(`pack_bytes`, 16,777,476) or a failed reservation before rotating or writing any pack for this attempt. The mandatory-only retry computes its own maximum. The buffer holds one file at a time and emission requires no growth.
-3. **Rotate and write.** On the first attempt to reach this step, allocate the rotation's buffers (the segment and END names, the HEADER, and the END payload and frame), then create segment n+1 and its END by the barrier table and send `Rotate`, as in §3.5 steps 1–2. A rotation-buffer refusal creates and sends nothing. A retry reuses the successor if it was already created. Encode the frames children first in the order the layouts fix: class 1, then class 0, then class 2. Write each pack into the output buffer as `p-<seq>.tmp` (with `Write`, which truncates a leftover), then sync it and rename it onto `p-<seq>`.
+3. **Rotate and write.** On the first attempt to reach this step, allocate the rotation's buffers (the segment and END names, the HEADER, and the END payload and frame), then create segment n+1 and its END by the barrier table and send `Rotate`, as in §3.5 steps 1–2. A rotation-buffer refusal creates and sends nothing. A retry reuses the successor if it was already created. Encode the frames children first in the order the layouts fix: class 1, then class 0, then class 2. On a store with a Tiered collection, classes 4 and 3 come first (§13.6a). Write each pack into the output buffer as `p-<seq>.tmp` (with `Write`, which truncates a leftover), then sync it and rename it onto `p-<seq>`.
    - Emission is children first. So when a parent is encoded, each child's checksum is already known. A page's PagePtr takes its frame payload's xxh3-64. A BlobRef takes `len`, the value's length, and the xxh3-64 of the value bytes alone, never of the BLOB payload, which begins with the 8-byte stamp (AP8, U3).
    - As each frame is encoded, its candidate record takes its location, checksum and length. This is a fallible insert into the candidate map.
 4. **Publish.**
@@ -3605,7 +3627,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
      - `next_branch`: the live counter (below);
      - `next_table`: H's value, or the installed one when H has none;
      - `prev_first`: from the removal plan;
-     - `account`: X.
+     - `account`: X. In format 5, it is `account_memory` and `account_tiered`, followed by the M3 fields (§13.1, §13.6a).
 
      Write `MANIFEST.tmp`, sync it, rename it onto `MANIFEST`, and `sync_dir`.
    - **The rename is the commit point**, and the last point at which the cut can be refused.
@@ -4780,7 +4802,12 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 | shared | u16 | bytes of the previous row's key shared by this row's key; 0 on each frame's first row |
 | suffix | u16 + bytes | the rest of the key |
 
-- The key is a PAGE's low key, or a BLOB's owning row key, with the collection prefix (AP5).
+- The key, with the collection prefix (AP5), is one that every tree reaching the frame routes to it (v2.91, §13.6a T5):
+  - a leaf's first stored row key, or the empty key for an empty root leaf;
+  - a branch page's entry-1 logical separator (AP3), or the empty key for a unary root;
+  - a BLOB's owning row key.
+
+  This makes v2.89's "low key" precise: a range's lower bound is not a valid key here.
 - Keys are front-coded within one PACK_INDEX frame only, so each frame decodes alone.
 - Each frame's payload starts with `rows u32` and `prev u64`, the offset of the previous PACK_INDEX frame of the pack (0 for the first).
 - **Counted inside `pack_bytes`.** A pack closes before a frame whose payload plus the PACK_INDEX bytes its row adds would take the pack past `pack_bytes`, unless the pack holds no frame yet. The writer adds each row's worst-case encoded size (29 + full key length) to the running total as it admits the frame. For every PACK_INDEX frame the rows will need, it also adds that frame's head (§2.1) and its 12-byte `rows`/`prev` prefix.
@@ -4790,7 +4817,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 
 | Field | Size | Meaning |
 |---|---|---|
-| lineage | PagePtr 36 | root of the lineage tree (§13.6): boundaries and deadlist cells; a class-2 list tree |
+| lineage | PagePtr 36 | root of the lineage tree (§13.6): fork rows and deadlist cells (boundaries are derived, v2.91); a class-2 list tree |
 | deferred_frees | PagePtr 36 | root of the deferred-free queue (§13.6); a class-2 list tree |
 | deferred_next | u64 | the next queue sequence number |
 | archive_on | u64 | 0 = archival off; else the cut position from which it is on (§13.9) |
@@ -4804,6 +4831,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 
 **FORK and pin watermarks (Fable F7).** FORK's payload (0x0013) gains `watermark u64` after `name`. A pin's journal frame and its MANIFEST pin record gain `watermark u64` after their existing fields, which makes the pin record 130 + n bytes. A watermark is exact:
 - FORK records the writer's stamp counter (`next_stamp`) at the fork's commit;
+- a cut-path fork, which has no FORK frame, takes the capture watermark of the Snapshot it forks into its fork row (§13.6, v2.91);
 - a pin records the counter at the capture of the Snapshot it pins;
 - neither is ever estimated or reconstructed.
 
@@ -5178,24 +5206,111 @@ The walk and the copies run on the paused writer (AP16), never on the caller's p
 - AP14's per-pack `live` guides which packs a cut compacts. For a Tiered pack it is maintained by the deadlists below, and it may be off in either direction until that pack is next probed.
 - **A Tiered pack is never retired because `live` is 0.** It is retired only when a top-down probe of every frame in its PACK_INDEX finds no positive match in any root (Fable F6, astra #12).
 
-**Boundaries.** Each branch b has an ordered set of boundaries, each with an exact watermark:
-- each pin of b, with the pin's watermark;
-- each fork taken from b: a **parent-side** boundary on b, with FORK's watermark;
-- for a forked branch, its **child-side** boundary, with the same watermark.
+**Holders, origins and boundaries (v2.91, tiered-cut-spec-2192).** A boundary is derived from the published generation. `lineage` stores none.
+- **Holders.** A holder keeps a frozen tree, and that tree reaches no frame of stamp ≥ the holder's watermark w. The holders are:
+  - each pin, at its watermark (§13.1), on chain(the pin's branch);
+  - each anchor row of the `archive` tree (§14.10), at its watermark, on chain(its branch);
+  - each non-adopted fork row (below) with child c and parent p, at the row's watermark, on chain(p). This is the fork's **parent side**: a fork is an implicit pin on its parent (Fable F6, astra #10).
+- **Origins.** A branch c whose fork row is not adopted has one **origin**, at that row's watermark w₀. The frames c inherited are frames of stamp < w₀.
+- **Chains.** chain(b) is b, except for a branch whose fork row is adopted, whose chain is main. `adopt` made its history main's.
+- **The boundary set.** For each chain b, B(b) is the set {(w, 1) : at least one holder on b has watermark w}, plus (w₀, 0) when b has an origin. It is ordered by (watermark, side), so an origin sorts before a holder at the same watermark.
+  - W(b) is the set of holder watermarks in B(b).
+  - M(b) is {0} together with every watermark in B(b).
+  - m_b(s) is the largest element of M(b) that is ≤ s.
+- **Every holder watermark on a chain with an origin is ≥ w₀.** A Snapshot of c is captured at or after c's fork, so its capture counter is ≥ w₀. An anchor's watermark is its cut's `next_stamp`, and a fork taken from c is taken from such a Snapshot.
+- **Shared boundaries.** Several holders can give one watermark:
+  - two pins of one Snapshot (§1.9);
+  - a pin, and the anchors written by the cut that publishes it;
+  - the anchors of several Logs at one cut;
+  - two forks of one Snapshot, or a fork and a pin of it.
 
-- each archive anchor of a Tiered Log on b, with its cut's watermark (§14.10, v2.61).
+  A boundary has no count and no discriminator. **(w, 1) is in B(b) exactly while at least one holder in the published generation gives it.**
+- **The last-holder rule.** A cut changes cells for b only when B_new(b), the boundary set of the generation it publishes, lacks a watermark that B_old(b), the installed generation's set, had.
+  - Removing one of several holders at w leaves (w, 1) in B, and changes no cell and no `live`.
+  - The cut that removes the last holder at w applies the drop rule below.
+  - No rule depends on two holders at w having the same tree. Every rule uses only the fact that no holder at w reaches a frame of stamp ≥ w.
+- **Why derived, and not a count or a row per holder.** The pins, the anchors and the fork rows are already in the generation. A stored multiplicity, or one boundary row per holder, would be a second copy of those facts, kept in step by our own writer. Deriving B leaves nothing to fall out of step, and a crash cannot split holders from boundaries because both ride one MANIFEST (§13.6a, "Crash argument").
 
-A fork is therefore an implicit pin on its parent (Fable F6, astra #10), and an anchor is one too. Boundaries live in the `lineage` tree, keyed `(branch u32, watermark u64, side u8)`.
+**The `lineage` tree (v2.91).** It is a class-2 list tree with two kinds of row, told apart by the key's first byte. Keys are big-endian. Values follow §2's little-endian rule.
 
-**Deadlist cells (Fable F33).** A cell is keyed `(branch u32, boundary watermark u64, side u8, birth u32, pack u64)` and holds bytes u64. `birth` is the index of the interval between b's consecutive boundaries that contains the frame's stamp.
+| Row | Key | Value |
+|---|---|---|
+| fork row | `0x01 ‖ child u32 BE` (5 bytes) | `parent u32, watermark u64, adopted u8` (13 bytes); `adopted` is 0 or 1 |
+| cell | `0x02 ‖ branch u32 BE ‖ k u64 BE ‖ side u8 ‖ m u64 BE ‖ pack u64 BE` (30 bytes) | `bytes u64`, never 0 |
 
-**At a cut**, for each Cold edge that a commit since the last cut replaced, with the old PagePtr's (pack, len, stamp) recorded at commit time in the cut's replaced list (Fable F25):
-- if its stamp ≥ the newest boundary watermark of the branch, nothing else can reference it, so `live[pack] −= len`;
-- otherwise the cell (b, newest boundary, side, birth(stamp), pack) gains `len`.
+At AP21 step 0, each of these is `Corrupt(Malformed)`: any other first byte, a key or value of another length, `adopted` > 1, `side` > 1, or a cell whose bytes are 0.
 
-**Dropping a boundary** (unpin, deleting a forked child, or `adopt`) merges each of its cells into b's next older boundary. A merged cell whose birth interval lies wholly after that older boundary's watermark is dead: it moves to `live[pack] −= bytes`. A child-side cell merges into its parent's cells only when the parent side of the same fork is dropped. Until then it stays counted, and the probe settles it.
+**Fork rows.**
+- **Every branch other than main has exactly one fork row while its head lives.** This holds on every disk store, Memory-only stores included. A Memory → Tiered promotion keeps the stamps already drawn, so the first Tiered cut needs the origins of forks made before it.
+- **The row's watermark:**
+  - for a journaled (live-head) fork, FORK's `watermark` (§13.1);
+  - for a cut-path fork, the capture watermark of the Snapshot it forks (§13.1).
+- **The cut that first publishes the branch writes the row.** That is either a cut-path fork's own cut or the first cut after a journaled FORK. A crash before that cut loses nothing, because replay restores the watermark from the FORK frame.
+- **`delete_branch(c)`** removes c's head. It keeps c's fork row as a **ghost** (`adopted` 0) while the row has a dependent.
+- **`adopt(c)`** sets `adopted` to 1 when the row has a dependent, and removes the row otherwise.
+  - An adopted row gives no origin and no parent side.
+  - An adopted row makes chain(c) main.
+- **Dependents.** These are the dependents of c's row:
+  - c's live head;
+  - a pin or anchor row whose branch is c;
+  - a fork row whose parent is c;
+  - a `deferred_frees` row whose branch is c.
 
-**Relocation moves cells.** When compaction moves a live frame of stamp s and length n from pack p to pack q, then for each branch b whose head does not match the frame but whose boundary k does (k is the newest such boundary), the cell (b, k, side, birth(s), p) moves n bytes to (.., q). A cell that would go negative is clamped to 0, and p is queued for the repair probe.
+  A cut removes each row that has no dependent, and repeats until none is left to remove, children before parents. Dependents are counted after the cut's transfer of the dropped list and before its drains (§13.6a T8). So a row whose last queue row this cut drains goes at the next cut.
+- **Ids, never names.** Rows name branch ids, and a branch id is never reused (`next_branch`, AA1). So a ghost never collides with a later branch.
+- **A pin with no row.** A Snapshot of a deleted branch can be pinned after its row is gone. Such a pin is a holder on chain(its branch) with no origin. Frames it re-references may already have left `live`, which is the historical drift in "What drifts" below.
+
+**Deadlist cells (Fable F33; v2.91 encoding).** A cell holds payload bytes of killed frames of pack `pack`, in `live`'s unit (AP14), that a holder may still reach. There are two kinds:
+- **A holder cell** (side 1) is (b, k, 1, m, pack), with k ∈ W(b) and m ∈ M(b), m < k. It holds frames killed on chain b, filed while k was b's newest holder watermark, with stamps s such that m_b(s) = m.
+- **An origin cell** (side 0) is (c, w₀, 0, 0, pack). It holds inherited frames (stamp < w₀) that c killed. Its bytes never leave `live` directly:
+  - while the origin exists, the parent's head or its parent-side cells account for each such frame;
+  - at `adopt` they become main's kills (below).
+
+v2.89's `birth u32`, an ordinal of the interval between consecutive boundaries, is withdrawn. An ordinal changes meaning whenever an older boundary is inserted or removed. `m` names its interval by watermark, so a cell keeps its meaning while B changes.
+
+**Filing a kill.** A kill is a frame of stamp s and payload length n in pack p, killed on chain b. It is filed at the cut that consumes it, against B_new(b):
+1. If b has an origin w₀ and s < w₀, the origin cell (b, w₀, 0, 0, p) gains n.
+2. Otherwise, if no w in W_new(b) is > s, the frame is dead: `live[p]` −= n, saturating at 0.
+3. Otherwise, the holder cell (b, max W_new(b), 1, m_b(s), p) gains n.
+
+These are the kills a cut files:
+- the replaced list's rows (§13.8);
+- each frame a drain reads or a blob row it consumes (§13.6 "Deferred frees", §14.10);
+- `adopt`'s origin transfer (below).
+
+A frame killed on several chains leaves `live` on one chain at most: the chain it was born on. Every other chain inherited it, so it files the frame into an origin cell. `adopt` hands c's origin cells to main only because §1.9's precondition means main made no commit after the fork, so main never killed those frames.
+
+**Dropping.** For each chain b whose B_new(b) lacks a watermark that B_old(b) had, the cut rewrites b's cells in one pass. The order of the rows in that pass does not matter:
+- **A holder cell (b, k, 1, m, p) with k ∉ W_new(b).** Let j be the largest watermark in W_new(b) below k.
+  - If there is no such j, or m ≥ j, the cell is dead: `live[p]` −= its bytes, and the row is removed. No remaining holder reaches a frame of stamp ≥ j, and a frame of stamp ≥ m ≥ j is no older.
+  - Otherwise its bytes move to (b, j, 1, m′, p), merging with any cell already there, where m′ = m_new(m).
+- **A cell whose m ∉ M_new(b).** It is re-keyed to m′ = m_new(m), the largest element of M_new(b) ≤ m, merging the same way.
+- **An origin that leaves B** because its row is removed: its origin cells are deleted, with no change to `live`. Each frame they hold is still accounted for by the parent:
+  - if the parent's head still reaches it, it is in `live`;
+  - if the parent killed it, it is in a parent-side cell, which the same cut's drop of the parent side settles.
+- **`adopt(c)`** makes these changes at its cut:
+  - each holder cell (c, k, 1, m, p) is re-keyed to (main, k, 1, m_main(m), p);
+  - each origin cell (c, w₀, 0, 0, p) of n bytes is filed as a kill on main with m = 0: dead when W_new(main) is empty, else into (main, max W_new(main), 1, 0, p). The bytes are main's adopt kills: §1.9's precondition makes main's old head c's first tree, and the frames it reaches that c's head does not are the inherited frames c killed;
+  - c's parent side leaves W(main), which the rule above settles.
+
+  The head swap itself adds no replaced-list row.
+
+**Relocation moves cells.** Compaction moves a matched frame of stamp s and length n from pack p to pack q. That covers the selected frames and every ancestor that its rewritten paths re-emit (§13.6a T6). For each chain b whose head does not match the frame and some holder of which does:
+- if b has an origin w₀ and s < w₀, the origin cell (b, w₀, 0, 0, p) moves n bytes to (b, w₀, 0, 0, q);
+- otherwise (b, k, 1, m_b(s), p) moves n bytes to (b, k, 1, m_b(s), q), where k is the newest holder watermark on b whose root matched.
+
+A cell holding less than n moves what it holds, and q is queued for the repair probe. Separately, `live[p]` −= n for a moved ancestor whose pack is not being retired at this cut. A fresh pack's `live` is its laid-out payload (AP14).
+
+**Probe completion and retirement.** The cut that finishes a pack's probe, or retires the pack, deletes every cell naming that pack. The probe's exact `live` replaces the estimate those cells carried. Keeping them could subtract later a frame the reset never counted. The resulting over-count is repaired by the next probe within `repair_cuts`.
+
+**What drifts, and why it is safe.** Everything above is accounting. Retirement is decided by the probe alone (above), so an error moves `live`, never what a root reads. The known drifts are:
+- **Under-count:** a historical pin or cut-path fork (§13.5) that lands behind kills already filed dead. It references frames whose bytes already left `live`. The pack may be chosen early, and the probe then matches and keeps them.
+- **Over-count:**
+  - a holder created after a kill but before its filing cut keeps a frame it never reached in a cell until it goes;
+  - a frame AP10 edited in place;
+  - an adopted chain's m-keys, which interleave two lineages' watermarks.
+
+  Each delays a compaction by at most `repair_cuts` cuts.
 
 **The probe (astra #12, Fable F30; v2.59, astra 1990 #1).** To decide a frame of pack p with index row (collection, key, stamp, offset), the probe descends, by collection and key, every **participating root**:
 - every branch head;
@@ -5232,10 +5347,130 @@ A **positive match** is a `CollectionRoot` root PagePtr, a `Slot` PagePtr or a `
 | directory rename before its sync, or an Undecided head write | exactly one complete generation recovers by the authority's own rule (§2.6, §12.3); deletion waits |
 | after publication, before RAM install or during Remove | reopen selects the new roots, queue, cells and `live` together. Remove and reclaim resume idempotently, and names under a lease or a retained checkpoint wait |
 
+### 13.6a The Tiered cut publisher (v2.91, tiered-cut-spec-2192; not yet built)
+
+AP16's paused cut is the only publisher, on every store. On a store with a Tiered collection, it runs AP16's steps and plan items with the changes below. A cut that cannot do all of them publishes nothing, so no cut skips them. Where AP16 and this section differ, this section governs classes 3 and 4 and the M3 MANIFEST fields.
+
+**The journal cover rule.** A cut's MANIFEST moves `first_live` past journal frames. So the generation it publishes must hold every Tiered write those frames carry. A Tiered write is held in one of two ways:
+- **acknowledged live:** in the dirty Hot pages of the holder roots (T2 emits them);
+- **recovered by replay:** in a replay overlay, which the fold applies (§13.7).
+
+A cut that seals the collection map while a Tiered `CollectionRoot` still names a tree without those writes publishes a generation that has lost acknowledged writes. That cut is forbidden. Every cut over an overlay is the fold cut until one publishes (§13.7), on the `checkpoint`, threshold, schema, pin, fork and install paths alike. L68 (e) is this case.
+
+**Plan additions T1–T9.** They are numbered apart from AP16's items 0–8, and each one says where it runs among them. **The mandatory candidate** (AP16 items 0–2) runs in this order: item 0 (H); then the fold of every overlay (§13.7) and every materialization or promotion closure (§13.5) the cut needs; then T2; then item 1 with T1; then item 2's settle X over the folded roots.
+T1. **The record map covers classes 0, 1 and 2 only.**
+   - A Tiered frame has no record, no incoming list and no membership pair (§13.1).
+   - A collection-map leaf's record omits the out-edge of each Tiered `CollectionRoot`. The reference count (AP16 item 1) therefore never reaches a class-3 or class-4 frame.
+   - A Tiered pack's lifetime is the probe's alone (§13.6).
+T2. **The Tiered emission walk.** It is mandatory and runs inside the mandatory candidate, after the fold and before AP16 item 1.
+   - **Where it starts.** It starts from each Tiered `CollectionRoot` of every holder root of the generation with H applied: every branch head, every pin, and H's added pin or cut-path fork. It also covers every tree the fold, a materialization or a promotion closure produced at this cut. Compaction (AP16 item 3, optional) adds its rewritten paths and copied frames to N₃ and N₄ when it runs, and the mandatory-only retry drops them with the rest of item 3.
+   - **What it visits.** It descends Hot slots only and stops at each Cold slot, which already has a location. It visits each Hot page and each Hot blob once, keyed by stamp, so a Hot subtree that two holders share by `Arc` is emitted once and both slots take one location.
+   - **What it costs.** It reads no Cold frame and takes no cut pin. Its state goes on the paused writer's own limit (C2).
+   - **Stamps.** A rewritten path keeps its stamps (R6). A page that the fold or a materialization creates takes a fresh stamp (AP6).
+   - **What it hands on.** The set N₃ of Hot pages in post-order and the set N₄ of Hot blobs, for T4.
+T3. Selection and the relocation closure are unchanged for classes 0–2. For Tiered packs they are §13.6's compaction.
+T4. **At AP16 item 4, the data layout runs class 4, class 3, class 1, class 0, with class 2 after them at AP16 item 7.**
+   - N₄'s blobs, then N₃'s pages, are laid out from the installed `next_pack` upward. Each class's packs are contiguous, Tiered packs are closed and indexed by §13.1's PACK_INDEX rules, and class-3 frames are in post-order.
+   - The order is children first across classes. A Tiered leaf names class-4 BLOBs. A class-0 collection-map leaf names class-3 roots. A Memory leaf names class-1 BLOBs. Class-2 lists name packs and PagePtrs of every class.
+   - Each Tiered pack's row takes `class`, `frames`, `bytes`, `index` and `live` = its laid-out payload.
+T5. **PACK_INDEX keys (amends §13.1).** A row's key is a key that every tree reaching the frame routes to the frame:
+   - a leaf: its first stored row key. An empty leaf, which occurs only as a root, takes the empty key;
+   - a branch page: entry 1's logical separator (AP3). Entry 0's separator is always empty, and the range the parent gives the page can start below every key the page routes;
+   - a unary branch page, which occurs only as a root: the empty key;
+   - a BLOB: its owning row's key.
+
+   The probe matches a root-only frame at the `CollectionRoot`. A range lower bound (v2.89's "low key") is unsafe. An older pin's tree can route that bound to a neighbouring page, so the probe finds no match in that root. The pinned frame's pack is then retired, and its data lost.
+T6. **The relocation closure (at AP16 item 3).** A Tiered `CollectionRoot` whose root PagePtr changes location dirties its collection-map leaf and that leaf's ancestors. They join the closure as AP16's dirty Memory pages, so the map always names the new copy.
+T7. **B_new comes from the holder delta (§13.6), at AP16 item 0.** For each chain, B_new is derived from the candidate generation with H applied:
+   - added and removed pins;
+   - a cut-path fork's new fork row;
+   - this cut's anchor rows (§14.10) and those trimmed by `drop_archive`;
+   - fork rows ghosted, adopted or removed by `delete_branch`, `adopt` and dependent counting.
+T8. **The `lineage` and `deferred_frees` edits, at AP16 item 5.** They come in this order. Each step reads only what the steps before it wrote:
+   1. `adopt`'s re-keying and origin transfer (§13.6 "Dropping");
+   2. **filing the replaced list:** each row (branch, pack, len, stamp) is filed as a kill on chain(branch) against B_new;
+   3. **transferring the dropped list** into `deferred_frees` at `deferred_next`, with each Hot share walked (§14.10). Fork-row dependents are counted here;
+   4. **draining** up to `free_budget`, filing each frame;
+   5. **drops** for each watermark that left B, the deletion of departed origins' cells, and the fork-row changes;
+   6. **relocation moves** (§13.6);
+   7. **probe completions and retirements**, with their cell deletions and their exact `live`.
+
+   Steps 1, 2, 3 and 5 are mandatory. The mandatory-only retry (AP16) runs them and skips steps 4, 6 and 7. The queue keeps what it did not drain, and the probes resume. Filing uses B_new, so every cell that steps 2–4 write already has a key valid in B_new, and step 5 touches only older cells.
+T9. **The output buffer, at AP16 item 8,** takes the maximum across classes 4, 3, 1, 0 and 2.
+
+**Steps, amended.**
+- **Step 3 (write)** encodes in the layout's order: class 4, then 3, then 1, then 0, then 2. Each frame's location and checksum go into the parent slot that names it: a Tiered branch page's `Slot`, a leaf's `BlobSlot`, or the collection-map entry's root PagePtr. That happens before the parent is encoded.
+- **Step 4 (publish)** writes the format-5 MANIFEST (§13.1):
+  - `account_memory` and `account_tiered` are X split by class, from AP15's n-way walk over the participating roots of AP15. Anchors and lists are excluded;
+  - the `lineage` and `deferred_frees` roots, and `deferred_next`;
+  - `archive_on`, `archive`, `archive_drop` and `sweep`.
+
+  Every holder's Tiered `CollectionRoot` takes its candidate location.
+- **Step 5 (install).** Each holder's published Tiered images replace its Hot ones: the same trees, with every emitted slot sealed to its location. They are built fallibly in step 3, before the rename, so the swap allocates nothing. Also at install:
+  - `dirty_bytes`' Tiered figure drops by the emitted pages;
+  - the replaced and dropped lists clear, since their rows are now cells, `live` changes and queue rows of the published generation;
+  - every overlay is released (§13.7).
+
+**Crash argument.**
+- **One generation.**
+  - Holders, fork rows, cells, `live`, the queue, `deferred_next`, the Tiered roots and `first_live` all ride one MANIFEST, so boundaries derived from holders cannot disagree with them.
+  - Before the rename the old generation and the journal recover. After it, the new generation alone does (§13.6's crash table).
+  - A crash between two cuts loses nothing derived. B is recomputed from the recovered holders.
+  - A journaled FORK's watermark is in its frame, so replay rebuilds the fork row the next cut writes.
+- **Lists.** The replaced and dropped lists are lost with the crashed writer's RAM. The fold cut rebuilds them with live's ownership (§13.7) and files them against the same B_new rule, so the deadlist comes out as if the suffix had been applied live.
+- **The tiered-write-2188 sequence.**
+  1. A put overwrites row 3 from 30 to 31 and is acknowledged. Its COMMIT is in journal frame f, and its pages are Hot.
+  2. Reopen. Replay puts 31 into the overlay over the Cold tree that holds 30.
+  3. `checkpoint`. That cut is the fold cut. It applies the overlay, emits the fresh class-3 path through T2, names the new root in the map leaf, and moves `first_live` past f in the same MANIFEST.
+  4. A crash before the rename reopens to the old MANIFEST plus f, and so to the same overlay. A crash after it reopens to a Cold tree that holds 31.
+
+  With no reopen between the put and `checkpoint`, T2 emits the Hot path instead, with the same two outcomes. There is no generation in which `first_live` is past f and the root still holds 30.
+
+**Prior art (v2.91).** Reference: OpenZFS at acfefd53560409e542e00c84a9c0be05a493278f, cloned to /tmp/ref-openzfs.
+
+| Hirsel | Mapping | OpenZFS |
+|---|---|---|
+| Several holders per watermark, with the count derived from the holder set | **ADOPTED.** A user hold is a tag in a ZAP. The in-core `ds_userrefs` is re-derived by `zap_count` at load (`module/zfs/dsl_dataset.c:675-679`) and incremented beside the `zap_add` of the tag (`module/zfs/dsl_userhold.c:155-168`). There is no on-disk count to fall out of step | user holds |
+| `unpin` of a held boundary | **ADAPTED.** ZFS refuses to destroy a held snapshot with EBUSY (`module/zfs/dsl_destroy.c:78`). Hirsel never refuses `unpin`; the boundary stays while another holder gives it | destroy check |
+| Fork rows with ghosts and dependents | **NOT TAKEN:** a stored `ds_num_children` (incremented at `module/zfs/dsl_dataset.c:1255`) and the refusal to delete a branch point (`module/zfs/dsl_destroy.c:84`). Hirsel derives dependents and keeps a ghost row instead, so `delete_branch` always succeeds | clone origin |
+| Cells keyed by watermark interval m | **ADAPTED.** A deadlist entry is keyed by an exclusive mintxg, and an insert finds its entry by birth with `avl_nearest(.., AVL_BEFORE)` (`module/zfs/dsl_deadlist.c:484-490`). Hirsel keys by watermark, not by an ordinal | deadlist keys |
+| Inserting a boundary behind the head | **REPLACED.** ZFS adds a key only above every existing one (`dsl_deadlist_add_key`, `module/zfs/dsl_deadlist.c:519-545`) and allows one snapshot per txg (EAGAIN, `module/zfs/dsl_dataset.c:1549`). Hirsel inserts behind the head (historical pins, cut-path forks) and allows several holders per watermark, so its rules never assume a new boundary is the newest | key insertion |
+| The drop rule | **ADAPTED.** `dsl_deadlist_remove_key` merges a removed key into the previous one (`module/zfs/dsl_deadlist.c:547-575`). Hirsel moves a dropped cell to the next older holder, or frees it when no older holder reaches its interval | key removal |
+
+**Attack surface (v2.91).** The brief asked for an astra attack. The host rules allow no delegated review, so these cases are self-attacked. Each is answered by the rules above.
+
+| # | Attack | Answer |
+|---|---|---|
+| A1 | Two pins of one Snapshot at w; `unpin` one | (w, 1) stays in B while the other pin gives it. No cell or `live` changes (L69 (a)) |
+| A2 | A pin and an anchor at one watermark; `drop_archive` trims the anchor | the pin still gives w; only the last holder's removal drops it |
+| A3 | Two forks of one Snapshot; delete one | the other's parent side still gives w; the deleted child's row stays a ghost while it has dependents |
+| A4 | Crash between writing an unpin's packs and the rename | the old MANIFEST still holds the pin, so B_old is recovered; nothing stored can disagree |
+| A5 | `delete_branch(c)` while a pin of c lives | the ghost keeps the origin and the parent side. `unpin` then removes the row, deletes the origin cells without touching `live`, and drops the parent side (L69 (b)) |
+| A6 | The ghost's last dependent is a queue row drained by this cut | dependents are counted before drains; the row goes at the next cut, whose drop then settles its cells |
+| A7 | `adopt(c)` with live pins of c | c's cells re-key onto main; chain(c) becomes main, so those pins are main's holders (L69 (c) for the no-pin case) |
+| A8 | Delete a middle branch of a fork chain | its row is a ghost while a child's row names it as parent; chains stay acyclic (§13.7 step 0) |
+| A9 | Fork on a Memory-only store, then promote to Tiered | fork rows are written on every disk store, so the first Tiered cut has the origin |
+| A10 | A branch id reused for a ghost | impossible: `next_branch` never reissues an id (AA1) |
+| A11 | A pin or cut-path fork of an old Snapshot lands behind kills already filed dead | under-count, accounting only; the probe matches the frames before any retirement (§13.6 "What drifts") |
+| A12 | A frame killed on main and on its fork | the fork files it into an origin cell, which never subtracts, so `live` falls once (L69 (b), `origin_double`) |
+| A13 | PACK_INDEX keyed by a page's low key, while an older pin routes that key elsewhere | the key is a stored key or divider that every tree reaching the frame routes to it (T5) |
+| A14 | A Hot subtree shared by the head and a new pin before the cut | emitted once by stamp; both slots take one location |
+| A15 | A checkpoint cut after reopen that seals the map with the pre-overlay Tiered root | forbidden by the journal cover rule; the fold is in every cut over an overlay (L68 (e), `cut_skips_overlay`) |
+| A16 | The same with no reopen, so the Hot pages are not emitted | T2 is mandatory, and a cut that cannot run it publishes nothing (L68 (e), `cut_skips_tiered`) |
+| A17 | The mandatory-only retry skips relocation after the cells were planned | relocation moves are step 6 of T8, which the retry skips with the relocation; B_new and steps 1, 2, 3 and 5 are the same |
+| A18 | A cell subtraction takes `live` below 0 | it saturates at 0. The pack is chosen by ratio and probed, and is never retired on `live` |
+| A19 | A pack's probe finishes while cells still name it | they are deleted, and the exact `live` stands; the over-count is repaired within `repair_cuts` |
+| A20 | A cut-path fork's watermark is below kills filed after its Snapshot's capture | B is ordered by watermark, not insertion; the new parent side files later kills correctly, and earlier ones are A11's drift |
+
 ### 13.7 Lazy open (AP21-T)
 
 **What open validates (Fable F14, astra #6).** On a store with a Tiered collection, AP21 runs steps 0–11 with these changes:
-- **Step 0, metadata, in full.** It validates every list tree, including `lineage`, `deferred_frees` and the `archive` index (its range rows are disjoint and ascending, and each segment name is well formed; v2.59; each anchor row's `start` is a range row's `start` or `archive_on`, and its id names a kind-4 Tiered Log in that branch's catalog at the anchor's `catalog`; v2.61), every class-2 pack, the pack inventory, and (objects@1) the locator's exact coverage L ∪ C (§12.2, §13.1), exactly as AP21 does. A damaged list, retirement entry, boundary, cell or queue entry is `Corrupt` at open.
+- **Step 0, metadata, in full.** It validates every list tree, including `lineage`, `deferred_frees` and the `archive` index (its range rows are disjoint and ascending, and each segment name is well formed; v2.59; each anchor row's `start` is a range row's `start` or `archive_on`, and its id names a kind-4 Tiered Log in that branch's catalog at the anchor's `catalog`; v2.61), every class-2 pack, the pack inventory, and (objects@1) the locator's exact coverage L ∪ C (§12.2, §13.1), exactly as AP21 does. A damaged list, retirement entry, fork row, cell or queue entry is `Corrupt` at open. **`lineage` (v2.91):**
+  - every branch other than main has exactly one non-adopted fork row;
+  - parent chains are acyclic;
+  - every cell's (k, side, m) is valid against B derived from the generation, with bytes > 0.
+
+  Any failure is `Corrupt(Malformed)`.
 - **Tiered pages are not decoded.** It decodes no class 3 or class 4 frame, and builds no incoming list or location record for one.
 - **Steps 4 (Validate) and 6 (Rebuild)** run in full for Memory collections only.
 - **Step 5 (Cleanup)** deletes only names that are absent from the inventory just validated, and runs only after step 3's O1, which on objects@1 means after the claim. Open never deletes a pack that a validated list names.
@@ -5297,7 +5532,8 @@ A failure is `Corrupt` for that read. It is never a value, and nothing is delete
 - **The dirty bound (Fable F19).**
   - Dirty Tiered page bytes since the last cut reaching `dirty_bytes / 2` start a cut (Options `dirty_bytes`, default 67,108,864).
   - A commit whose apply would take them past `dirty_bytes` is `Refused(Resident(Capacity { requested, available }))`, which `serve` maps to NoRoom. A cut's install then frees them as Cold edges.
-  - The replaced list (§13.6) is charged with the dirty bytes, 20 bytes per row, and a Log trim's dropped list 40 bytes per row (§14.10, v2.61).
+  - The replaced list (§13.6) is charged with the dirty bytes (v2.91), 24 bytes per row: `branch u32, pack u64, len u32, stamp u64`. `len` is the payload length: `PagePtr.len` for a page, and 8 + `BlobRef.len` for a blob.
+  - A Log trim's dropped list is charged 48 bytes per row (§14.10, v2.91): 41 for a page row, 47 for a blob row (a 42-byte BlobRef plus branch and kind), and at most 48 for a Hot share. A Hot share's dirty pages are already in `dirty_bytes`.
 - **Between cuts (v2.63; v2.64).** `account_tiered` changes only by each commit's charge (§13.1 "COMMIT data ops carry their prior row"). A cut's settle is the only step that recomputes it, and it sets both class accounts with their modes. **A commit's settle recomputes `account_memory` alone** (AP15 "Settle"). It is triggered by the Memory admission, the only resident admission, and it walks no Tiered tree. That is why replay's `account_tiered` equals the crashed writer's, while open recomputes `account_memory` (§13.7 step 8). A replay overlay's entries (§13.7) are in the resident account and count toward `dirty_bytes` until the fold cut publishes.
 - `Accounts` gains `tiered: u64, dirty: u64, cached: u64, pinned: u64, leased: u64, rerun_steps: u64`. Its `logical` remains the sum.
 - **New `Options` fields**, with defaults: `cache_bytes` 268,435,456; `writer_pin_bytes` 67,108,864; `dirty_bytes` 67,108,864; `prefetch` 8; `prefetch_max` 256; `get_streams` 8; `rebase_levels` 2; `lease_ms` 300,000; `lease_generations` 8; `probe_budget` 65,536; `free_budget` 4,096; `compact_ratio` 0.5; `repair_cuts` 64; `pager_task_bytes` 16,777,216. A store with no Tiered collection reserves no cache and starts no pager. (v2.60) `sized` derives `cache_bytes`, `writer_pin_bytes`, `dirty_bytes` and `pager_task_bytes` from one equation inside `resident_limit` (§1.1 "The Tiered plan"); the values above are its figures at q = 64 MiB.
@@ -5351,7 +5587,7 @@ So a disabling cut still seals the part it covered. An off-then-on sequence appe
 **Dropping the archive (v2.59, astra 1990 #2).** `drop_archive(db, below)` raises `archive_drop` to `below` at its cut. It is monotone: a lower `below` changes nothing. `below` may be any value, including one above the head. The watermark only releases archive ownership. It never authorizes erasing anything that reclaim would otherwise keep:
 - **The drop boundary** of a pass is D = min(`archive_drop`, the pass's captured floor f). The sweep erases only below f, so the current CHECKPOINT, every retained checkpoint, the chain above the floor and every leased name stay live whatever `below` is.
 - **The kept boundary (v2.61, astra 1998 #12).** D′ is the `start` of the range row that holds D, or D when no row holds it. A partial drop never cuts a range: the range's anchors are the base its surviving entries replay from (§14.10).
-- **Index trimming.** The cut after a pass trims the index up to D′. A row with `end` ≤ D′ is removed with its anchor rows, its anchors' `lineage` boundaries are dropped, and its segment is erased after that cut is Advanced. The row that holds D is kept whole, with its segment and anchors. Rows at or above D′ are unchanged.
+- **Index trimming.** The cut after a pass trims the index up to D′. A row with `end` ≤ D′ is removed with its anchor rows, which stop being holders (§13.6's last-holder rule decides which boundaries go), and its segment is erased after that cut is Advanced. The row that holds D is kept whole, with its segment and anchors. Rows at or above D′ are unchanged.
 - **Operators.** Operators erase archive data only through `drop_archive`. Out-of-band deletion of `e-` or `a-` names is not supported.
 
 **Stragglers.** A segment row below D′ names entries that may be gone, and a reader of the archive treats them as erased.
@@ -5402,8 +5638,8 @@ Harness: `tiered_laws.hirsel` over `std.sim.s3` and the §3.9 file-system model.
 | **L65 hits verify their edge** | Two edges name one (pack, offset) with different checksums or stamps. The wrong edge is `Corrupt` whether the frame was cached first by the right edge, pinned, on NVMe or delivered to a waiter | skipping the check on a cache hit |
 | **L66 lifetime and re-base** | An expired holder or follower Snapshot gets `Reclaimed(floor)` through Cold slots, cached or not. A live one with an erased pack gets `Corrupt(Absent)`. Across a re-base, old Snapshots answer from their own pages or `Reclaimed`, and `changes` across domains is `Foreign` | re-reading an expired Snapshot at the new root |
 | **L67 NVMe is never trusted** | Each flipped byte or truncated NVMe entry is refetched and the right value returned. With the bucket copy also bad, the read is `Corrupt` | serving an NVMe entry without the five checks |
-| **L68 lazy open deletes nothing live, and replays exact accounts** | Damaged lists, cells, queue entries, locator rows or archive index rows (overlapping, `start ≥ end`, or a segment position other than `end`) are `Corrupt` at open with every name kept. Cleanup removes exactly the walker's orphans. **The K pair (v2.63), hand-derived.** A Tiered table T with u64 keys (k = 12 with the table id) and 6-byte stored values, so each row is entry(12, 6) = 62 + 16 + 8 = 86. Store P holds keys {1, 2} and store Q holds {1, 3}, each value 6 bytes: both have rows 2, bytes 172 and the same `account_tiered` M, and only one Tiered leaf. Each takes a cut (so T is Cold and the account settled exact), then commits put(2, V) with a 6-byte V and crashes before the next cut. P's op carries prior 7 and Q's prior 0. After reopen, with the harness counting zero class-3 and class-4 frame reads during open: P has rows 2, bytes 172 and `account_tiered` M; Q has rows 3, bytes 258 and M + 86. They differ by exactly one row and 86 bytes, and each equals the account the crashed writer held after its commit (read from the writer before the crash). `count(T)` is 2 and 3, and `get(2)` is V in both. After the fold cut publishes, the walker's settle gives the same figures, and the walker reaches no frame the fold replaced. Delete variant: delete(2) after the cut gives P rows 1 and M − 86 (prior 7), and Q unchanged at rows 2 and M (prior 0). Also: a crash during the fold cut reopens to the same overlay and figures; a Tiered Log appended and trimmed in the suffix reopens with the model's descriptor and zero Cold reads. "The crashed writer's account" here means `account_tiered`; `account_memory` is recomputed at open (§13.7 step 8). **v2.64 cases, hand-derived.** (a) *Many overwrite.* A Tiered table's Many index with 20-byte index keys and 6-byte covering payloads: each entry is entry(20, 6) = 62 + 24 + 8 = 94. After a cut, a put rewrites one entry's payload with another 6-byte payload and crashes. The op carries prior 7 = 1 + 6, and reopen gives the same rows and bytes, with `account_tiered` M unchanged (`many_prior_one`: prior 1 replays an overwrite of a 0-byte value, entry(20, 6) − entry(20, 0) = 94 − 86, so bytes and the account drift by +8, or a mismatch is `Corrupt`). (b) *Retained root.* A Tiered store with a Memory table T (rows of 86 bytes, as above) beside an untouched Tiered collection. A pin holds T = {1, 2:A}, the head holds {1, 2:B}, \|A\| = \|B\| = 6, and the settled `account_memory` is X = C0 + 258 (row 1, 2:A and 2:B), with `resident_limit` at exactly C0 + 258. put(2, A) on the head: the conservative charge gives C0 + 344, above the limit, so the commit settles and admits the proposed union {1, 2:A} at C0 + 172. The writer crashes before a cut. Reopen walks the Memory class to C0 + 172 and is not `Full`, and a further put of an 86-byte row is admitted (`replay_charges_memory`: the added charge gives C0 + 344 and reopen is `Full(Resident)`). (c) *Fold settles.* The same shape in a Tiered table: pin {1, 2:A}, head {1, 2:B}, settled `account_tiered` M. A suffix put of A on the head carries prior 7; replay and the crashed writer both hold M + 86 (conservative mode), and the fold publishes M − 86 with `exact` true (`fold_keeps_replayed`: the store stays at M + 86 after the fold and its first exact settle disagrees). (d) *Fork ownership.* main puts K under Cold leaf L at ordinal 1, FORK `beta` at ordinal 2, `beta` puts K2 under L at ordinal 3, crash. After the fold, L is on main's replaced list once and on no list of `beta`'s, as in the same run without the crash (`fold_per_branch_owner`: L recorded twice, and a later drop of `beta` frees a frame main still reaches). The expected figures are the hand-derived ones above and the pre-crash writer's account | cleanup before step 0's validation; replay that infers insert or overwrite from the descriptor alone (`prior_free_replay`: P and Q replay alike, one of them a row off); replay that fetches the Cold leaf to decide (`recovery_cold_read`: open reads a class-3 frame); a fold that releases no replaced edge (`fold_no_replaced`: the walker reaches a stale frame) |
-| **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable. Cases (v2.59): a parent written at stamp 40 whose child page was edited in place to stamp 41 is still found by the probe and loads; a frame named only by a fork made while a probe ran keeps its pack; a pin of a historical Snapshot whose pack left the inventory after its generation promotes by copy, and one whose lease expired is `Reclaimed(floor)` with nothing admitted. v2.64: a Snapshot taken after reopen and before the fold cut, on a Tiered table whose Cold root holds A at K and whose overlay holds B at K, pinned after the fold cut published, reads B at K through the pin, after reopen and with the Snapshot dropped, and the pin's root is not the head's root; a Snapshot at the head's version promotes the same way; a pin requested before the fold cut publishes in the cut after it | retiring a pack on `live == 0` without the probe; pruning a probe descent by stamp; a verdict taken from a cut other than the publishing one; pinning a historical Snapshot by reference after its pack retired; publishing the bare Cold root for an overlaid Snapshot (`pin_drops_overlay`: the pin reads A) |
+| **L68 lazy open deletes nothing live, and replays exact accounts** | Damaged lists, cells, queue entries, locator rows or archive index rows (overlapping, `start ≥ end`, or a segment position other than `end`) are `Corrupt` at open with every name kept. Cleanup removes exactly the walker's orphans. **The K pair (v2.63), hand-derived.** A Tiered table T with u64 keys (k = 12 with the table id) and 6-byte stored values, so each row is entry(12, 6) = 62 + 16 + 8 = 86. Store P holds keys {1, 2} and store Q holds {1, 3}, each value 6 bytes: both have rows 2, bytes 172 and the same `account_tiered` M, and only one Tiered leaf. Each takes a cut (so T is Cold and the account settled exact), then commits put(2, V) with a 6-byte V and crashes before the next cut. P's op carries prior 7 and Q's prior 0. After reopen, with the harness counting zero class-3 and class-4 frame reads during open: P has rows 2, bytes 172 and `account_tiered` M; Q has rows 3, bytes 258 and M + 86. They differ by exactly one row and 86 bytes, and each equals the account the crashed writer held after its commit (read from the writer before the crash). `count(T)` is 2 and 3, and `get(2)` is V in both. After the fold cut publishes, the walker's settle gives the same figures, and the walker reaches no frame the fold replaced. Delete variant: delete(2) after the cut gives P rows 1 and M − 86 (prior 7), and Q unchanged at rows 2 and M (prior 0). Also: a crash during the fold cut reopens to the same overlay and figures; a Tiered Log appended and trimmed in the suffix reopens with the model's descriptor and zero Cold reads. "The crashed writer's account" here means `account_tiered`; `account_memory` is recomputed at open (§13.7 step 8). **v2.64 cases, hand-derived.** (a) *Many overwrite.* A Tiered table's Many index with 20-byte index keys and 6-byte covering payloads: each entry is entry(20, 6) = 62 + 24 + 8 = 94. After a cut, a put rewrites one entry's payload with another 6-byte payload and crashes. The op carries prior 7 = 1 + 6, and reopen gives the same rows and bytes, with `account_tiered` M unchanged (`many_prior_one`: prior 1 replays an overwrite of a 0-byte value, entry(20, 6) − entry(20, 0) = 94 − 86, so bytes and the account drift by +8, or a mismatch is `Corrupt`). (b) *Retained root.* A Tiered store with a Memory table T (rows of 86 bytes, as above) beside an untouched Tiered collection. A pin holds T = {1, 2:A}, the head holds {1, 2:B}, \|A\| = \|B\| = 6, and the settled `account_memory` is X = C0 + 258 (row 1, 2:A and 2:B), with `resident_limit` at exactly C0 + 258. put(2, A) on the head: the conservative charge gives C0 + 344, above the limit, so the commit settles and admits the proposed union {1, 2:A} at C0 + 172. The writer crashes before a cut. Reopen walks the Memory class to C0 + 172 and is not `Full`, and a further put of an 86-byte row is admitted (`replay_charges_memory`: the added charge gives C0 + 344 and reopen is `Full(Resident)`). (c) *Fold settles.* The same shape in a Tiered table: pin {1, 2:A}, head {1, 2:B}, settled `account_tiered` M. A suffix put of A on the head carries prior 7; replay and the crashed writer both hold M + 86 (conservative mode), and the fold publishes M − 86 with `exact` true (`fold_keeps_replayed`: the store stays at M + 86 after the fold and its first exact settle disagrees). (d) *Fork ownership.* main puts K under Cold leaf L at ordinal 1, FORK `beta` at ordinal 2, `beta` puts K2 under L at ordinal 3, crash. After the fold, L is on main's replaced list once and on no list of `beta`'s, as in the same run without the crash (`fold_per_branch_owner`: L recorded twice, and a later drop of `beta` frees a frame main still reaches). The expected figures are the hand-derived ones above and the pre-crash writer's account. **v2.91 case, hand-derived (tiered-write-2188's repro).** (e) *A cut carries acknowledged Tiered writes.* A Tiered table holds row 3 = 30 in a Cold tree. A bounded put sets row 3 = 31, and its `durable` ticket resolves. In variant (e1) the store reopens and row 3 reads 31 from the overlay, then `checkpoint` succeeds and the store reopens again. In variant (e2) `checkpoint` runs with no reopen first, and then the store reopens. In both, row 3 reads 31 after the last reopen, and the walker reaches a class-3 leaf holding 31 from main's published root. A crash injected before the checkpoint's rename also reads 31, from the overlay | cleanup before step 0's validation; replay that infers insert or overwrite from the descriptor alone (`prior_free_replay`: P and Q replay alike, one of them a row off); replay that fetches the Cold leaf to decide (`recovery_cold_read`: open reads a class-3 frame); a fold that releases no replaced edge (`fold_no_replaced`: the walker reaches a stale frame); a cut that seals the map with the pre-overlay Tiered root (`cut_skips_overlay`: (e1) reads 30); a cut that emits no Hot Tiered page (`cut_skips_tiered`: (e2) reads 30) |
+| **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable. Cases (v2.59): a parent written at stamp 40 whose child page was edited in place to stamp 41 is still found by the probe and loads; a frame named only by a fork made while a probe ran keeps its pack; a pin of a historical Snapshot whose pack left the inventory after its generation promotes by copy, and one whose lease expired is `Reclaimed(floor)` with nothing admitted. v2.64: a Snapshot taken after reopen and before the fold cut, on a Tiered table whose Cold root holds A at K and whose overlay holds B at K, pinned after the fold cut published, reads B at K through the pin, after reopen and with the Snapshot dropped, and the pin's root is not the head's root; a Snapshot at the head's version promotes the same way; a pin requested before the fold cut publishes in the cut after it. **v2.91 cases, hand-derived** (pack 7 holds 12,000 live payload bytes, among them frame F with stamp 30 and n = 4,000; the expected figures are `live[7]` and the `lineage` rows): (a) *two pins of one Snapshot.* Pins A and B of one main Snapshot, both at w = 50. The head then kills F, and the next cut files the cell (0, 50, 1, 0, 7) = 4,000 with `live[7]` = 12,000. `unpin A`, with a crash at each row of §13.6's table: the cell and `live[7]` are unchanged, and B reads F after a compaction of pack 7. `unpin B`: the cell is removed and `live[7]` = 8,000. (b) *A fork ghost.* Fork `beta` from main's head at w₀ = 60, and pin Q of `beta` at 70. Pack 7's other 8,000 bytes are frames only main's head reaches. Main kills F, filing (0, 60, 1, 0, 7) = 4,000 against the parent side. `beta` kills F, filing the origin cell (beta, 60, 0, 0, 7) = 4,000. `delete_branch(beta)` keeps `beta`'s fork row as a ghost, with `live[7]` = 12,000. `unpin Q` after `beta`'s queue rows drain removes the row and deletes the origin cell, and the parent side's drop leaves `live[7]` = 8,000. (c) *Adopt.* Fork `beta` at w₀ = 60 with no pin, and `beta` kills F into its origin cell. `adopt(beta)` files that cell on main, where W(main) is empty, so `live[7]` = 8,000, and `beta`'s fork row is removed | retiring a pack on `live == 0` without the probe; pruning a probe descent by stamp; a verdict taken from a cut other than the publishing one; pinning a historical Snapshot by reference after its pack retired; publishing the bare Cold root for an overlaid Snapshot (`pin_drops_overlay`: the pin reads A); dropping a shared boundary with its first holder (`boundary_by_key`: (a) gives 8,000 after `unpin A`); subtracting origin cells when an origin goes (`origin_double`: (b) gives 4,000); deleting origin cells at `adopt` like a plain removal (`adopt_drops_origin`: (c) gives 12,000) |
 | **L70 partitions and refusals** | Readers that saturate their pool never delay a writer commit. Dirty bytes never pass `dirty_bytes`. `migrate`, `export` and `install` on a Tiered store are `Tiered(..)` with every byte unchanged. With the cache, Reader pins and overlap at `shared_bytes`, a held call still pins all of `writer_pin_bytes` (v2.59) | one shared pin pool; a cache insert or Reader reservation counted against the writer partition |
 | **L71 archival** | With archival on, every chain entry in an index range survives reclaim and every other entry below the floor is erased within one sweep cycle. With it never on, the store's names after reclaim equal L58's. Cases (v2.59): (a) `archive(true)` then `archive(false)` before the next cut: the window up to the disabling cut is sealed and kept; (b) on, off, on with no reclaim pass between: two disjoint rows, both kept; (c) a restart right after `archive` returns: the reopened MANIFEST has the new `archive_on`; (d) `retain` = 1 with debris at several intervals and a fenced holder's `e-150` PUT behind the cursor: all erased within one cycle; (e) `drop_archive` with `below` above the head, with a follower open and a recovery from C400: the current CHECKPOINT, every retained checkpoint and the chain above the floor stay, the follower and recovery succeed, and the index is trimmed to D = min(`archive_drop`, f) | rule 1 erasing kept entries; reading archive membership from a CHECKPOINT chain; an unsealed window at a disabling cut; a sweep with no durable cursor; a drop boundary not capped by the floor |
 | **L71b Log archival (v2.61, astra 1998 #12)** | With archival enabled while Log X already holds rows, and Log Y appended and trimmed inside one window: for every position q the archive keeps, `archive_log_bounds` and `archive_log_get` at q equal the model's Log at q, built from the anchored leaves at the range's start and the kept ops after it. Also: a partial drop inside a range keeps that range whole (D′); a fork live inside a window reads its own branch's anchors; a compaction relocating an anchored frame keeps it readable; positions below D′ give `Expired` | ops alone (`ops_only_archive`: X's rows before enable are lost); snapshots at cuts alone (`cut_only_archive`: Y's trimmed rows are lost); a partial drop that cuts a range (`cut_range_drop`) |
@@ -5713,7 +5949,7 @@ Its size is at most 2t plus the overlap's differences. Its cost (v2.61, astra 19
   A plan miss is a body miss and reruns the attempt (§13.3). The touched-page counter counts these pages only, so a trim's `Refused(Cache)` depends on the height and not on the rows dropped.
 - **Detached subtrees and removed blobs (v2.61, astra 1998 #7).** A trim's apply separates what it **replaces** from what it **detaches**:
   - A page on the boundary path or a join spine that the trim rewrites is *replaced*. Its old Cold edge goes to the replaced list (§13.6) as for any edit, and its surviving children are never released through it.
-  - A whole subtree the cut drops, entries 0 … c_i − 1 of a P_i, or the whole old root when s′ ≥ n, is *detached*. A Cold one goes into the commit's **dropped list** as its full AP20 PagePtr (36 bytes) and the branch, 40 bytes per row. A Hot one goes in as a tagged share of its root page, held until a cut transfers its Cold edges.
+  - A whole subtree the cut drops, entries 0 … c_i − 1 of a P_i, or the whole old root when s′ ≥ n, is *detached*. A Cold one goes into the commit's **dropped list** as its full AP20 PagePtr (36 bytes), the branch and the kind, charged 48 bytes per row (§13.8, v2.91). A Hot one goes in as a tagged share of its root page, held until a cut transfers its Cold edges.
   - Each BlobRef entry the cut removes from the boundary leaf is a *removed blob*. Its BlobRef goes into the dropped list as a blob row, identified and sized by AP8's rules.
   - Before the commit publishes, the dropped list is charged with the dirty bytes (§13.8) at its rows' storage. A Hot share's dirty pages are already counted there.
   - **At the next cut**, in the generation it publishes, each Cold detached root and each removed Cold blob is enqueued in `deferred_frees` with its branch. Each Hot share is walked: its Cold descendants and their blobs are enqueued and its pages dropped. That walk visits dirty pages only, which `dirty_bytes` already bounds, reads no Cold frame and runs on the paused writer, with its state on the writer's own limit (v2.74, §13.11). The transfer, the queue's progress, and the deadlist and `live` changes ship together in that generation.
@@ -5724,9 +5960,9 @@ Its size is at most 2t plus the overlap's differences. Its cost (v2.61, astra 19
   2. **The sequence index.** The segment that seals the window [c′, c) (§13.9 step 2) gains, after its entry rows, frames of **sequence rows**, one per chain entry, branch and archived Log that the entry changed: `position u64, branch u32, id u32, version u64, append_lo u64, append_hi u64, trim u64`. `append_lo` and `append_hi` are the half-open range of seqs the entry appended, and `trim` is its trim bound, or u64::MAX for none. A live-head fork or `adopt` inside the window adds a row naming the source branch and version whose roots the branch takes, with `id` = 0. The holder writes them from the commits it made or replayed, as it writes the entry rows. They locate, for any seq and version, the anchor or the kept GROUP entry that holds the row, including a row appended and trimmed between two cuts.
   3. **The kept GROUP entries**, which §13.9 already keeps, hold the appends and trims between anchors.
 
-  **Retention.** Each anchor row is a participating root of the probe (§13.6) and a boundary of its branch in `lineage` with its watermark. So compaction rewrites an anchored frame's path in the anchor row at the cut that relocates it, a pack that an anchor names is never retired, and deadlist accounting treats the anchor like a pin. Anchors are not participating roots of AP15: archived history is not admitted against `resident_limit`, and the objects it keeps are the store's opt-in cost. No pack is copied for the archive.
+  **Retention.** Each anchor row is a participating root of the probe (§13.6) and a holder on its branch's chain at its watermark (§13.6, v2.91). So compaction rewrites an anchored frame's path in the anchor row at the cut that relocates it, a pack that an anchor names is never retired, and deadlist accounting treats the anchor like a pin. Anchors are not participating roots of AP15: archived history is not admitted against `resident_limit`, and the objects it keeps are the store's opt-in cost. No pack is copied for the archive.
 
-  **Dropping.** `drop_archive` trims anchors with the range rows. The cut that trims the index up to D also removes every anchor row with `start` < D′ and drops its `lineage` boundary, where D′ is the `start` of the range row that holds D, or D when no row holds it. A range row that holds D is kept whole, with its `start` unchanged, and the sweep keeps its entries from that `start`, not from D. So every surviving range keeps its anchor and every entry after it, and a partial drop always leaves a base for its suffix (§13.9 "Dropping the archive"). After that cut, frames that only the removed anchors named are released by the probe as any unreferenced frame is.
+  **Dropping.** `drop_archive` trims anchors with the range rows. The cut that trims the index up to D also removes every anchor row with `start` < D′, which stops being a holder (§13.6), where D′ is the `start` of the range row that holds D, or D when no row holds it. A range row that holds D is kept whole, with its `start` unchanged, and the sweep keeps its entries from that `start`, not from D. So every surviving range keeps its anchor and every entry after it, and a partial drop always leaves a base for its suffix (§13.9 "Dropping the archive"). After that cut, frames that only the removed anchors named are released by the probe as any unreferenced frame is.
 
   **Reading.**
   ```hirsel

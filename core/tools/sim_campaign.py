@@ -250,10 +250,11 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         binary = output / output_name(definition)
         if rows[definition].get('source') != 'executed' or not binary.is_file():
             raise ValueError(f'{law} produced no executable; see {report}')
-        if not rows[definition]['passed']:
-            print(f'{law}: preparation seed 0 failed; see {report}', flush=True)
+        row = rows[definition]
+        seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
+                     'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
         count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
-        laws.append({'law': law, 'executable': str(binary), 'seeds': count})
+        laws.append({'law': law, 'executable': str(binary), 'seeds': count, 'seed_zero': seed_zero})
     shutil.rmtree(scratch / 'objects')
     return laws
 

@@ -8,6 +8,7 @@ exits 75. Call dispatch directly when its verdict determines the caller's status
 import argparse
 from bisect import bisect_right
 from contextlib import closing
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,14 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+
+
+@dataclass(frozen=True)
+class Law:
+    name: str
+    binary: Path
+    seeds: int
+    seed_zero: dict | None
 
 
 def allocate(db, campaign, shards, count):
@@ -49,16 +58,37 @@ def allocate_ranges(db, campaign, laws):
     return ranges
 
 
+def run_seed(executable, seed):
+    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+        ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
+                             env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
+    return {"seed": seed, "status": ran.returncode, "stdout": ran.stdout.decode(errors="replace"),
+            "stderr": ran.stderr.decode(errors="replace")}
+
+
 def run_shard(executable, start, stop):
     for seed in range(start, stop):
-        with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
-            ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
-                                 env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
-        print(json.dumps({"seed": seed, "status": ran.returncode,
-                          "stdout": ran.stdout.decode(errors="replace"),
-                          "stderr": ran.stderr.decode(errors="replace"),
-                          "replay": shlex.join([sys.argv[0], "run", str(executable),
-                                                str(seed), str(seed + 1)])}), flush=True)
+        row = run_seed(executable, seed)
+        row["replay"] = shlex.join([sys.argv[0], "run", str(executable), str(seed), str(seed + 1)])
+        print(json.dumps(row), flush=True)
+
+
+def seed_zero_failed(db, campaign, law, results):
+    verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
+    if verdict["status"] == 0:
+        return False
+    row = {**verdict, "law": law.name, "seed": 0, "kind": "deterministic_red"}
+    line = json.dumps(row)
+    with db:
+        db.execute("""CREATE TABLE IF NOT EXISTS deterministic_reds (
+            campaign TEXT, law TEXT, status INTEGER, stdout TEXT, stderr TEXT,
+            PRIMARY KEY (campaign, law)
+        )""")
+        db.execute("INSERT INTO deterministic_reds VALUES (?, ?, ?, ?, ?)",
+                   (campaign, law.name, row["status"], row["stdout"], row["stderr"]))
+    print(line, file=results, flush=True)
+    print(f"{law.name}: deterministic red at seed 0", file=sys.stderr)
+    return True
 
 
 def record(db, campaign, ranges, output, results, executable, laws=None):
@@ -77,7 +107,8 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             print(line, end="", file=sys.stderr)
             continue
         if laws is not None:
-            row["law"], executable, _ = laws[bisect_right(stops, seed)]
+            law = laws[bisect_right(stops, seed)]
+            row["law"], executable = law.name, law.binary
         row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
                                     str(seed), str(seed + 1)])
         print(json.dumps(row), file=results, flush=True)
@@ -108,6 +139,16 @@ def dispatch_campaign(args, executable=None, laws=None):
     with (closing(sqlite3.connect(args.ledger)) as db,
           tempfile.TemporaryDirectory(prefix="sim-campaign-", dir=Path.cwd()) as directory,
           args.results.open("x") as results):
+        deterministic_red = False
+        if laws is None:
+            if seed_zero_failed(db, args.campaign, Law(executable.name, executable, 0, None), results):
+                return 1
+        else:
+            passing = [law for law in laws if not seed_zero_failed(db, args.campaign, law, results)]
+            deterministic_red = len(passing) != len(laws)
+            laws = passing
+            if not laws:
+                return 1
         root = Path(directory)
         bundle = root / "bundle"
         bundle.mkdir()
@@ -120,11 +161,11 @@ def dispatch_campaign(args, executable=None, laws=None):
                      "command": f"./sim-campaign run ./law {start} {stop}"}
                     for shard, (start, stop) in enumerate(ranges)]
         else:
-            ranges = allocate_ranges(db, args.campaign, [(law, count) for law, _, count in laws])
+            ranges = allocate_ranges(db, args.campaign, [(law.name, law.seeds) for law in laws])
             remote = []
-            for index, ((_, binary, _), (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
+            for index, (law, (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
                 name = f"law-{index}"
-                shutil.copy2(binary, bundle / name)
+                shutil.copy2(law.binary, bundle / name)
                 remote.append((name, start, stop))
             (bundle / "ranges.json").write_text(json.dumps(remote))
             jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
@@ -143,7 +184,7 @@ def dispatch_campaign(args, executable=None, laws=None):
     if not complete:
         print("sim-campaign: dispatch did not deliver every reserved result", file=sys.stderr)
         return 2
-    return int(failed > 0)
+    return int(deterministic_red or failed > 0)
 
 
 def positive(value):
@@ -163,7 +204,11 @@ def read_laws(path):
         law, binary, count = entry["law"], entry["executable"], entry["seeds"]
         if not isinstance(law, str) or not law or law in names or type(count) is not int or count < 1:
             raise ValueError(f"invalid campaign law: {entry!r}")
-        laws.append((law, local_executable(path.parent / binary), count))
+        seed_zero = entry.get("seed_zero")
+        if "seed_zero" in entry and (not isinstance(seed_zero, dict) or type(seed_zero.get("status")) is not int
+                                     or not all(isinstance(seed_zero.get(stream), str) for stream in ("stdout", "stderr"))):
+            raise ValueError(f"invalid seed 0 verdict for {law}")
+        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero))
         names.add(law)
     return laws
 

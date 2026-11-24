@@ -1,0 +1,365 @@
+// test-vectors
+type Exchange: send {
+    method: String,
+    path: String,
+    body: Bytes,
+    content_type: bool,
+    credentials: bool,
+    may_close: bool,
+    response: Bytes
+}
+
+type Peer: send {
+    listener: Listener,
+    clock: Clock,
+    deadline: u64,
+    exchanges: List[Exchange]
+}
+
+fn fixture_url(port: u16, path: String) -> String {
+    let mut at = string.from("http://127.0.0.1:")
+    string.push_u64(mut at, int.widen(port))
+    string.push(mut at, path)
+    take at
+}
+
+fn send_all(mut out: WriteHalf, data: Bytes, until: Until) -> Result[(), NetError] waits {
+    let mut at: u64 = 0
+    while at < list.len(data) {
+        let n = host.send_pair(mut out, list.slice(data, at, list.len(data)), b"", until)?
+        if n == 0 {
+            return Error(Reset)
+        }
+        at += n
+    }
+    Ok(())
+}
+
+fn expect_field(raw: Bytes, h: http1.Head, expected: Bytes) -> bool {
+    for i in 0u64 .. h.count {
+        let name = h.fields[i].name
+        if http1.equal_ascii(list.slice(raw, name.start, name.end), expected) {
+            return true
+        }
+    }
+    false
+}
+
+fn request_matches(mut input: ReadHalf, row: Exchange, until: Until) -> bool waits {
+    let mut wire: Bytes = list.with_capacity(2048)
+    let mut h = http1.head()
+    loop {
+        match http1.request(wire, mut h) {
+            Complete => break,
+            Partial => (),
+            _ => return false,
+        }
+        let room = 2048 - list.len(wire)
+        if room == 0 || result.unwrap(host.recv_bounded(mut input, mut wire, room, until)) == 0 {
+            return false
+        }
+    }
+    let mut length: u64 = 0
+    for i in 0u64 .. h.count {
+        let field = h.fields[i]
+        if http1.equal_ascii(list.slice(wire, field.name.start, field.name.end), b"content-length") {
+            length = result.unwrap(int.parse_decimal_span(wire, field.value.start, field.value.end, 2048))
+        }
+    }
+    if length != list.len(row.body) || list.slice(wire, h.method.start, h.method.end) != string.as_bytes(row.method) || list.slice(wire, h.target.start, h.target.end) != string.as_bytes(row.path) {
+        return false
+    }
+    if expect_field(wire, h, b"content-type") != row.content_type || expect_field(wire, h, b"authorization") != row.credentials || expect_field(wire, h, b"proxy-authorization") != row.credentials || expect_field(wire, h, b"cookie") != row.credentials {
+        return false
+    }
+    while list.len(wire) < h.end + length {
+        let left = h.end + length - list.len(wire)
+        if result.unwrap(host.recv_bounded(mut input, mut wire, left, until)) == 0 {
+            return false
+        }
+    }
+    list.slice(wire, h.end, list.len(wire)) == row.body
+}
+
+fn serve(take job: Peer) -> bool waits {
+    let Peer(listener: take site, clock, deadline, exchanges: take exchanges) = take job
+    let until = At(clock, deadline)
+    let mut accepting = take site
+    let (sock, _) = result.unwrap(host.accept(mut accepting, until))
+    let (rx, tx) = net.split(take sock)
+    let mut input = take rx
+    let mut output = take tx
+    for row in exchanges {
+        if !request_matches(mut input, row, until) {
+            return false
+        }
+        match send_all(mut output, row.response, until) {
+            Ok(()) => (),
+            Error(Reset) => return row.may_close,
+            Error(_) => return false,
+        }
+    }
+    true
+}
+
+fn bind_fixture(n: Net) -> (Listener, Addr) waits {
+    result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 4))
+}
+
+fn reply(status: u16, fields: String, body: Bytes) -> Bytes {
+    let mut h = string.from("HTTP/1.1 ")
+    string.push_u64(mut h, int.widen(status))
+    string.push(mut h, "\r\n")
+    string.push(mut h, fields)
+    string.push(mut h, "Content-Length: ")
+    string.push_u64(mut h, list.len(body))
+    string.push(mut h, "\r\n\r\n")
+    let mut wire = string.into_bytes(take h)
+    list.append(mut wire, body)
+    take wire
+}
+
+fn wire_exchange(method: String, path: String, body: Bytes, content_type: bool, credentials: bool, take wire: Bytes) -> Exchange {
+    Exchange(method: string.from(method), path: string.from(path), body: clone(body), content_type, credentials, may_close: false, response: take wire)
+}
+
+fn fetch_case(n: Net, c: Clock, tasks: Tasks, status: u16, verb: String, next_verb: String, keeps_body: bool) -> bool waits {
+    let (site, address) = bind_fixture(n)
+    let end = host.mono_ns(c) + 2000000000
+    let mut script: List[Exchange] = list.new()
+    let notice = if verb == "HEAD" {
+        b""
+    } else {
+        b"moved"
+    }
+    list.push(mut script, wire_exchange(verb, "/first?x=y", b"input", true, false, reply(status, "Location: /second?ok#ignored\r\n", notice)))
+    if keeps_body {
+        list.push(mut script, wire_exchange(next_verb, "/second?ok", b"input", true, false, reply(200, "", b"")))
+    } else {
+        list.push(mut script, wire_exchange(next_verb, "/second?ok", b"", false, false, reply(200, "", b"")))
+    }
+    let server = task.spawn(tasks, bytes 65536, Peer(listener: take site, clock: c, deadline: end, exchanges: take script), serve)
+    let mut cl = http_client.client(n, c, System, http_client.limits(0))
+    let mut fields: List[http_client.Header] = list.new()
+    list.push(mut fields, http_client.Header(name: "Content-Type", value: Public(b"text/plain")))
+    let mut segments: List[http_client.Segment] = list.new()
+    list.push(mut segments, Plain(b"input"))
+    let req = http_client.Fetch(method: string.from(verb), url: fixture_url(address.port, "/first?x=y#not-sent"), headers: take fields, body: take segments)
+    let mut r = result.unwrap(http_client.fetch(mut cl, req, end))
+    let mut scratch: Bytes = list.with_capacity(1)
+    let valid = http_client.status(http_client.fetch_head(r)) == 200 && http_client.fetch_url(r) == fixture_url(address.port, "/second?ok#ignored") && result.unwrap(http_client.fetch_read(mut r, mut scratch)) == 0
+    http_client.fetch_done(mut cl, take r)
+    result.unwrap(task.join(take server)) && valid
+}
+
+// FE1. The server compares the wire method, body and content header against
+// literal RFC 9110 rows and sees the redirect reuse the same connection.
+// expect: run fetch_redirect_table(network) = true
+fn fetch_redirect_table(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    fetch_case(n, c, tasks, 301, "POST", "GET", false) && fetch_case(n, c, tasks, 301, "PUT", "PUT", true) && fetch_case(n, c, tasks, 302, "POST", "GET", false) && fetch_case(n, c, tasks, 302, "DELETE", "DELETE", true) && fetch_case(n, c, tasks, 303, "POST", "GET", false) && fetch_case(n, c, tasks, 303, "HEAD", "HEAD", false) && fetch_case(n, c, tasks, 307, "POST", "POST", true) && fetch_case(n, c, tasks, 308, "PATCH", "PATCH", true)
+}
+
+fn coding_fields(name: String) -> String {
+    let mut fields = string.from("Content-Encoding: ")
+    string.push(mut fields, name)
+    string.push(mut fields, "\r\n")
+    take fields
+}
+
+fn encoded_case(n: Net, c: Clock, tasks: Tasks, name: String, data: Bytes, expected_case: u8) -> bool waits {
+    let (site, address) = bind_fixture(n)
+    let end = host.mono_ns(c) + 2000000000
+    let mut exchange = wire_exchange("GET", "/data", b"", false, false, reply(200, coding_fields(name), data))
+    // A refused encoding can close while the peer is still writing its tail.
+    exchange.may_close = expected_case != 0 && expected_case != 5
+    let mut plan: List[Exchange] = list.new()
+    list.push(mut plan, take exchange)
+    let peer = task.spawn(tasks, bytes 65536, Peer(listener: take site, clock: c, deadline: end, exchanges: take plan), serve)
+    let mut cfg = http_client.limits(if expected_case >= 5 {
+        0
+    } else {
+        32768
+    })
+    if expected_case == 4 {
+        cfg.max_window = 1023
+    }
+    let mut cl = http_client.client(n, c, System, cfg)
+    let request = http_client.Fetch(method: "GET", url: fixture_url(address.port, "/data"), headers: list.new(), body: list.new())
+    let fetched = http_client.fetch(mut cl, request, end)
+    if expected_case == 6 {
+        let refused = match fetched {
+            Error(Http(TooLarge)) => true,
+            _ => false,
+        }
+        return result.unwrap(task.join(take peer)) && refused
+    }
+    let mut response = result.unwrap(take fetched)
+    if http_client.fetch_coding(response) == None {
+        return false
+    }
+    let mut payload: Bytes = list.with_capacity(4096)
+    let mut total: u64 = 0
+    let mut observed: u8 = 0
+    loop {
+        list.clear(mut payload)
+        match http_client.fetch_read(mut response, mut payload) {
+            Ok(0) => break,
+            Ok(nread) => {
+                if nread != list.len(payload) {
+                    return false
+                }
+                for byte in payload {
+                    if byte != 0 {
+                        return false
+                    }
+                }
+                total += nread
+            },
+            Error(Http(TooLarge)) => {
+                observed = 1;
+                break
+            },
+            Error(Coding(Flate(TrailingData(offset)))) => {
+                observed = if offset + 1 == list.len(data) {
+                    2
+                } else {
+                    255
+                };
+                break
+            },
+            Error(Coding(Flate(Header))) => {
+                observed = 3;
+                break
+            },
+            Error(Coding(Zstd(WindowTooLarge(1024)))) => {
+                observed = 4;
+                break
+            },
+            Error(_) => {
+                observed = 255;
+                break
+            },
+        }
+    }
+    http_client.fetch_done(mut cl, take response)
+    let served = result.unwrap(task.join(take peer))
+    let right_size = if expected_case == 3 || expected_case == 4 || expected_case == 5 {
+        total == 0
+    } else if expected_case == 1 && name == "zstd" {
+        total <= 32768
+    } else {
+        total == 32768
+    }
+    served && observed == (if expected_case == 5 {
+        0
+    } else {
+        expected_case
+    }) && right_size
+}
+
+fn skippable_frame(size: u64) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(size)
+    list.put_word_le(mut wire, 0x184d2a50u32)
+    let payload: u32 = int.narrow(size - 8)
+    list.put_word_le(mut wire, payload)
+    list.fill(mut wire, size - 8, 0)
+    take wire
+}
+
+// FE3 and FE4. gzip -dc, Python zlib and zstd -dc check the pinned corpus.
+// expect: run fetch_bounded_codings(network) = true
+fn fetch_bounded_codings(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let vectors = coding_vectors()
+    for row in vectors {
+        let (name, data, expected_case) = view row
+        if !encoded_case(n, c, tasks, name, data, expected_case) {
+            return false
+        }
+    }
+    encoded_case(n, c, tasks, "zstd", skippable_frame(131072), 5) && encoded_case(n, c, tasks, "zstd", skippable_frame(131073), 6)
+}
+
+fn route_to(url: String) -> String {
+    let mut fields = string.from("Location: ")
+    string.push(mut fields, url)
+    string.push(mut fields, "\r\n")
+    take fields
+}
+
+// FE2. A port change strips credentials even though the host is identical.
+// The first peer also checks same-origin forwarding before the port change.
+// expect: run fetch_cross_origin_fields(network) = true
+fn fetch_cross_origin_fields(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (site_a, a) = bind_fixture(n)
+    let (site_b, b) = bind_fixture(n)
+    let end = host.mono_ns(c) + 2000000000
+    let same = wire_exchange("GET", "/first", b"", false, true, reply(302, "Location: /same\r\n", b""))
+    let cross = wire_exchange("GET", "/same", b"", false, true, reply(307, route_to(fixture_url(b.port, "/cross")), b""))
+    let back = wire_exchange("GET", "/cross", b"", false, false, reply(308, route_to(fixture_url(a.port, "/last")), b""))
+    let last = wire_exchange("GET", "/last", b"", false, false, reply(200, "", b""))
+    let mut first: List[Exchange] = list.new()
+    list.push(mut first, take same)
+    list.push(mut first, take cross)
+    list.push(mut first, take last)
+    let mut second: List[Exchange] = list.new()
+    list.push(mut second, take back)
+    let first_peer = task.spawn(tasks, bytes 65536, Peer(listener: take site_a, clock: c, deadline: end, exchanges: take first), serve)
+    let second_peer = task.spawn(tasks, bytes 65536, Peer(listener: take site_b, clock: c, deadline: end, exchanges: take second), serve)
+    let mut cl = http_client.client(n, c, System, http_client.limits(0))
+    let mut headers: List[http_client.Header] = list.new()
+    list.push(mut headers, http_client.Header(name: "aUtHoRiZaTiOn", value: Public(b"private")))
+    list.push(mut headers, http_client.Header(name: "proxy-authorization", value: Public(b"private")))
+    list.push(mut headers, http_client.Header(name: "COOKie", value: Public(b"private")))
+    let req = http_client.Fetch(method: "GET", url: fixture_url(a.port, "/first"), headers: take headers, body: list.new())
+    let mut r = result.unwrap(http_client.fetch(mut cl, req, end))
+    let mut out: Bytes = list.with_capacity(8)
+    let valid = result.unwrap(http_client.fetch_read(mut r, mut out)) == 0 && http_client.status(http_client.fetch_head(r)) == 200
+    http_client.fetch_done(mut cl, take r)
+    result.unwrap(task.join(take first_peer)) && result.unwrap(task.join(take second_peer)) && valid
+}
+
+fn redirect_close_peer(take job: Peer) -> bool waits {
+    let Peer(listener: take site, clock, deadline, exchanges: take exchanges) = take job
+    let until = At(clock, deadline)
+    let mut accepting = take site
+    let (first, _) = result.unwrap(host.accept(mut accepting, until))
+    let (a, b) = net.split(take first)
+    let mut before = take a
+    let mut redirect = take b
+    if !request_matches(mut before, exchanges[0], until) {
+        return false
+    }
+    result.unwrap(send_all(mut redirect, exchanges[0].response, until))
+    // Keep the old write half open until the next connection is accepted.
+    // Waiting for any body byte beyond the drain budget would deadlock.
+    let (second, _) = result.unwrap(host.accept(mut accepting, until))
+    let _ = take redirect
+    let (r, w) = net.split(take second)
+    let mut next_input = take r
+    let mut next_output = take w
+    if !request_matches(mut next_input, exchanges[1], until) {
+        return false
+    }
+    if let Ok(()) = send_all(mut next_output, exchanges[1].response, until) {
+        return true
+    }
+    false
+}
+
+// HTTP-18. An EOF-delimited redirect may stall exactly at the drain bound.
+// expect: run fetch_redirect_drain_boundary(network) = true
+fn fetch_redirect_drain_boundary(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (site, address) = bind_fixture(n)
+    let end = host.mono_ns(c) + 2000000000
+    let mut notice: Bytes = list.with_capacity(2112)
+    list.append(mut notice, b"HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n")
+    list.fill(mut notice, 2048, b'x')
+    let mut script: List[Exchange] = list.new()
+    list.push(mut script, wire_exchange("GET", "/start", b"", false, false, take notice))
+    list.push(mut script, wire_exchange("GET", "/next", b"", false, false, reply(200, "", b"")))
+    let peer = task.spawn(tasks, bytes 65536, Peer(listener: take site, clock: c, deadline: end, exchanges: take script), redirect_close_peer)
+    let mut cl = http_client.client(n, c, System, http_client.limits(0))
+    let req = http_client.Fetch(method: "GET", url: fixture_url(address.port, "/start"), headers: list.new(), body: list.new())
+    let r = result.unwrap(http_client.fetch(mut cl, req, end))
+    http_client.status(http_client.fetch_head(r)) == 200 && result.unwrap(task.join(take peer))
+}

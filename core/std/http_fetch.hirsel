@@ -1,0 +1,668 @@
+type Origin: send {
+    tls: bool,
+    host: String,
+    port: u16
+}
+
+type HopUrl: send {
+    text: String,
+    parsed: uri.Uri,
+    origin: Origin,
+    authority: String,
+    target: String
+}
+
+type Idle: send {
+    origin: Origin,
+    conn: http_client.Connection,
+    since: u64
+}
+
+pub opaque type Client: send {
+    net: Net,
+    clock: Clock,
+    trust: Trust,
+    limits: http_client.Limits,
+    owner: Unique,
+    idle: List[Option[Idle]]
+}
+
+type Decoder: send = Flate(flate.Decoder) | Zstd(zstd.Decoder)
+
+type Body: send {
+    decoder: Decoder,
+    input: Bytes,
+    cursor: u64,
+    consumed: u64,
+    remaining: u64,
+    clock: Clock,
+    deadline: u64,
+    boundary: bool,
+    wire_end: bool
+}
+
+pub opaque type Response: send {
+    owner: Unique,
+    url: HopUrl,
+    conn: Option[http_client.Connection],
+    closed_head: Option[http_client.ResponseHead],
+    coding: Option[http_client.ContentCoding],
+    body: Option[Body],
+    ended: bool,
+    fault: Option[http_client.FetchError]
+}
+
+pub fn client(n: Net, c: Clock, take trust: Trust, limits: http_client.Limits) -> Client {
+    Client(net: n, clock: c, trust: take trust, limits, owner: unique.new(), idle: list.new())
+}
+
+fn http_error(take e: http_client.Error) -> http_client.FetchError {
+    Http(e)
+}
+
+fn url_error(take e: uri.Error) -> http_client.FetchError {
+    Url(e)
+}
+
+fn same_origin(a: Origin, b: Origin) -> bool {
+    a.tls == b.tls && a.port == b.port && a.host == b.host
+}
+
+fn part(s: String, span: http1.Span) -> View[String] in s {
+    string.slice(s, span.start, span.end)
+}
+
+fn parse_url(take text: String) -> Result[HopUrl, http_client.FetchError] {
+    let parsed = result.map_err(uri.parse(text), url_error)?
+    let Some(scheme) = parsed.scheme else {
+        return Error(Url(Relative))
+    }
+    let is_tls = http1.equal_ascii(string.as_bytes(part(text, scheme)), b"https")
+    if !is_tls && !http1.equal_ascii(string.as_bytes(part(text, scheme)), b"http") {
+        return Error(Scheme)
+    }
+    if let Some(_) = parsed.userinfo {
+        return Error(UserInfo)
+    }
+    let Some(raw_host) = parsed.host else {
+        return Error(Url(Invalid(scheme.end + 1)))
+    }
+    let (name, ipv6) = match raw_host {
+        Name(span) => (span, false),
+        Ip6(span) => (span, true),
+    }
+    if name.start == name.end {
+        return Error(Url(Invalid(name.start)))
+    }
+    let port = match uri.port_number(text, parsed) {
+        Some(n) => n,
+        None => if is_tls {
+            443u16
+        } else {
+            80u16
+        },
+    }
+    let host = string.to_lower(part(text, name))
+    let authority_start = if ipv6 {
+        name.start - 1
+    } else {
+        name.start
+    }
+    let authority_end = parsed.path.start
+    let authority = string.from(string.slice(text, authority_start, authority_end))
+    let mut target = string.with_capacity(string.byte_len(text) - authority_end + 1)
+    if parsed.path.start == parsed.path.end {
+        string.push(mut target, "/")
+    } else {
+        string.push(mut target, part(text, parsed.path))
+    }
+    if let Some(query) = parsed.query {
+        string.push(mut target, "?")
+        string.push(mut target, part(text, query))
+    }
+    Ok(HopUrl(text: take text, parsed, origin: Origin(tls: is_tls, host: take host, port), authority: take authority, target: take target))
+}
+
+fn addresses(cl: Client, name: String, deadline: u64) -> Result[List[Ip], http_client.FetchError] waits {
+    let mut peers: List[Ip] = list.with_capacity(16)
+    loop {
+        let count = match host.resolve(cl.net, name, mut peers, At(cl.clock, deadline)) {
+            Ok(n) => n,
+            Error(TimedOut) => return Error(Http(Deadline)),
+            Error(Aborted) => return Error(Http(Cancelled)),
+            Error(e) => return Error(Resolve(e)),
+        }
+        if count == 0 {
+            return Error(NoAddress)
+        }
+        if count < list.capacity(peers) {
+            return Ok(take peers)
+        }
+        list.clear(mut peers)
+        list.reserve(mut peers, int.saturating_mul(count, 2))
+    }
+}
+
+fn dial(cl: Client, u: HopUrl, ip: Ip, deadline: u64) -> Result[http_client.Connection, http_client.Error] waits {
+    let address = Addr(ip, port: u.origin.port)
+    if u.origin.tls {
+        http_client.open_tls(cl.net, address, u.authority, u.origin.host, cl.trust, cl.clock, deadline)
+    } else {
+        http_client.open(cl.net, address, u.authority, cl.clock, deadline)
+    }
+}
+
+fn open(cl: Client, u: HopUrl, deadline: u64) -> Result[http_client.Connection, http_client.FetchError] waits {
+    if host.mono_ns(cl.clock) >= deadline {
+        return Error(Http(Deadline))
+    }
+    if let Ok(ip) = net.parse_ip(string.as_bytes(u.origin.host)) {
+        return result.map_err(dial(cl, u, ip, deadline), http_error)
+    }
+    let peers = addresses(cl, u.origin.host, deadline)?
+    let mut failure: http_client.FetchError = NoAddress
+    for ip in peers {
+        match dial(cl, u, ip, deadline) {
+            Ok(take conn) => return Ok(take conn),
+            Error(Deadline) => return Error(Http(Deadline)),
+            Error(Cancelled) => return Error(Http(Cancelled)),
+            Error(e) => {
+                failure = Http(e)
+            },
+        }
+    }
+    Error(failure)
+}
+
+fn idle_age(entry: Option[Idle], origin: Origin, now: u64) -> Option[u64] {
+    if let Some(item) = entry {
+        if same_origin(origin, item.origin) {
+            return Some(now - item.since)
+        }
+    }
+    None
+}
+
+fn checkout(mut cl: Client, origin: Origin) -> Option[http_client.Connection] {
+    let mut at = list.len(cl.idle)
+    if at == 0 {
+        return None
+    }
+    let now = host.mono_ns(cl.clock)
+    let mut selected: Option[http_client.Connection] = None
+    let mut removed = false
+    while at != 0 {
+        at -= 1
+        let expires = idle_age(cl.idle[at], origin, now)
+        if let Some(age) = expires {
+            if age >= cl.limits.idle_ns {
+                let _ = replace(mut cl.idle[at], None)
+                removed = true
+            } else if let None() = selected {
+                let Some(take idle) = replace(mut cl.idle[at], None) else {
+                    continue
+                }
+                let Idle(origin: take old_origin, conn: take conn, since: _) = take idle
+                let _ = take old_origin
+                selected = Some(take conn)
+                removed = true
+            }
+        }
+    }
+    if removed {
+        list.retain(mut cl.idle, fn(item: Option[Idle]) -> bool {
+            match item {
+                Some(_) => true,
+                None => false,
+            }
+        })
+    }
+    take selected
+}
+
+fn park(mut cl: Client, take conn: http_client.Connection, origin: Origin) {
+    if !http_client.reusable(conn) || list.len(cl.idle) >= int.widen(cl.limits.idle_max) {
+        return
+    }
+    let mut count: u64 = 0
+    for entry in cl.idle {
+        if let Some(item) = entry {
+            if same_origin(origin, item.origin) {
+                count += 1
+            }
+        }
+    }
+    if count < int.widen(cl.limits.idle_per_origin) {
+        let idle = Idle(origin: clone(origin), conn: take conn, since: host.mono_ns(cl.clock))
+        list.push(mut cl.idle, Some(take idle))
+    }
+}
+
+fn retryable(e: http_client.Error, conn: http_client.Connection, method: String) -> bool {
+    if http_client.response_started(conn) {
+        return false
+    }
+    let transport_error = match e {
+        Write(_) => true,
+        Receive(_) => true,
+        MalformedHead => true,
+        _ => false,
+    }
+    transport_error && (!http_client.request_started(conn) || method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "TRACE")
+}
+
+fn exchange(mut conn: http_client.Connection, u: HopUrl, method: String, headers: List[http_client.Header], segments: List[http_client.Segment], deadline: u64) -> Result[(), http_client.Error] waits {
+    http_client.start_fetch(mut conn, u.authority, method, u.target, headers, segments, deadline)?
+    // The final head determines whether the caller's bound applies to wire
+    // bytes, decoded bytes, or a discarded redirect body.
+    http_client.finish_request(mut conn, 0xffffffffffffffff)
+}
+
+fn hop(mut cl: Client, u: HopUrl, method: String, headers: List[http_client.Header], segments: List[http_client.Segment], deadline: u64) -> Result[http_client.Connection, http_client.FetchError] waits {
+    if let Some(take saved) = checkout(mut cl, u.origin) {
+        let mut conn = take saved
+        match exchange(mut conn, u, method, headers, segments, deadline) {
+            Ok(()) => return Ok(take conn),
+            Error(e) => if !retryable(e, conn, method) {
+                return Error(Http(e))
+            },
+        }
+    }
+    let mut conn = open(cl, u, deadline)?
+    result.map_err(exchange(mut conn, u, method, headers, segments, deadline), http_error)?
+    Ok(take conn)
+}
+
+fn is_header(name: String, expected: Bytes) -> bool {
+    http1.equal_ascii(string.as_bytes(name), expected)
+}
+
+fn body_header(name: String) -> bool {
+    is_header(name, b"content-encoding") || is_header(name, b"content-language") || is_header(name, b"content-location") || is_header(name, b"content-type") || is_header(name, b"digest") || is_header(name, b"last-modified")
+}
+
+fn credential(h: http_client.Header) -> bool {
+    if let Protected(_, _) = h.value {
+        return true
+    }
+    is_header(h.name, b"authorization") || is_header(h.name, b"proxy-authorization") || is_header(h.name, b"cookie")
+}
+
+fn automatic(cl: Client, method: String, headers: List[http_client.Header], strip: bool) -> bool {
+    if !cl.limits.decode || method == "HEAD" {
+        return false
+    }
+    for field in headers {
+        if (!strip || !credential(field)) && (is_header(field.name, b"accept-encoding") || is_header(field.name, b"range")) {
+            return false
+        }
+    }
+    true
+}
+
+fn hop_headers(source: List[http_client.Header], strip: bool, dropped: bool, offer: bool) -> List[http_client.Header] {
+    let mut out: List[http_client.Header] = list.new()
+    for field in source {
+        if (strip && credential(field)) || (dropped && body_header(field.name)) {
+            continue
+        }
+        let name = string.from(field.name)
+        let value: http_client.HeaderValue = match field.value {
+            Public(data) => Public(clone(data)),
+            Protected(prefix, token) => Protected(clone(prefix), secret.share(token)),
+        }
+        list.push(mut out, http_client.Header(name: take name, value: take value))
+    }
+    if offer {
+        list.push(mut out, http_client.Header(name: "Accept-Encoding", value: Public(string.into_bytes("gzip, deflate, zstd"))))
+    }
+    take out
+}
+
+fn redirect_status(status: u16) -> bool {
+    status == 301 || status == 302 || status == 303 || status == 307 || status == 308
+}
+
+fn redirect(u: HopUrl, h: http_client.ResponseHead) -> Result[Option[HopUrl], http_client.FetchError] {
+    let mut location: Option[String] = None
+    for i in 0u64 .. http_client.field_count(h) {
+        if let Some((name, value)) = http_client.field_at(h, i) {
+            if !http1.equal_ascii(name, b"location") {
+                continue
+            }
+            if let Some(_) = location {
+                return Error(Location)
+            }
+            location = match string.from_utf8(clone(value)) {
+                Ok(take s) => Some(take s),
+                Error(_) => return Error(Location),
+            }
+        }
+    }
+    let Some(take value) = take location else {
+        return Ok(None)
+    }
+    let Ok(reference) = uri.parse(value) else {
+        return Error(Location)
+    }
+    let mut next = string.with_capacity(0)
+    if let Error(_) = uri.resolve(u.text, u.parsed, value, reference, mut next) {
+        return Error(Location)
+    }
+    match parse_url(take next) {
+        Ok(take target) => Ok(Some(take target)),
+        Error(_) => Error(Location),
+    }
+}
+
+const REDIRECT_DRAIN: u64 = 2048
+
+fn drain(mut conn: http_client.Connection) -> Result[(), http_client.FetchError] waits {
+    let Ok(frame) = http_client.limit_response(mut conn, REDIRECT_DRAIN) else {
+        return Ok(())
+    }
+    let mut scratch: Bytes = list.with_capacity(REDIRECT_DRAIN)
+    let mut drained: u64 = 0
+    loop {
+        list.clear(mut scratch)
+        match http_client.read(mut conn, mut scratch) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                drained += n
+                // Delimited bodies can finish by consuming only framing.
+                // A body delimited by close would have to probe another byte.
+                if frame == CloseDelimited && drained == REDIRECT_DRAIN {
+                    return Ok(())
+                }
+            },
+            Error(Deadline) => return Error(Http(Deadline)),
+            Error(Cancelled) => return Error(Http(Cancelled)),
+            Error(_) => return Ok(()),
+        }
+    }
+}
+
+fn coding_of(h: http_client.ResponseHead, offer: bool) -> Result[Option[http_client.ContentCoding], http_client.FetchError] {
+    let code = http_client.status(h)
+    if !offer || code == 204 || code == 304 {
+        return Ok(None)
+    }
+    let mut seen = false
+    let mut applied: Option[http_client.ContentCoding] = None
+    for i in 0u64 .. http_client.field_count(h) {
+        if let Some((name, value)) = http_client.field_at(h, i) {
+            if !http1.equal_ascii(name, b"content-encoding") {
+                continue
+            }
+            if seen {
+                return Error(Coding(Unsupported))
+            }
+            seen = true
+            applied = if http1.equal_ascii(value, b"gzip") || http1.equal_ascii(value, b"x-gzip") {
+                Some(Gzip)
+            } else if http1.equal_ascii(value, b"deflate") {
+                Some(Deflate)
+            } else if http1.equal_ascii(value, b"zstd") {
+                Some(Zstd)
+            } else if http1.equal_ascii(value, b"identity") {
+                None
+            } else {
+                return Error(Coding(Unsupported))
+            }
+        }
+    }
+    Ok(applied)
+}
+
+fn encoded_limit(max: u64) -> u64 {
+    let blocks = max / 65535 + (if max % 65535 == 0 {
+        0u64
+    } else {
+        1u64
+    })
+    int.saturating_add(max, 5 * blocks + 131072)
+}
+
+fn response(cl: Client, take conn: http_client.Connection, take url: HopUrl, offer: bool, deadline: u64) -> Result[Response, http_client.FetchError] {
+    let mut connection = take conn
+    let coding = coding_of(http_client.head(connection), offer)?
+    let mut body: Option[Body] = None
+    let max = cl.limits.body_max
+    if let Some(kind) = coding {
+        let _ = result.map_err(http_client.limit_response(mut connection, encoded_limit(max)), http_error)?
+        let decoder: Decoder = match kind {
+            Gzip => Flate(flate.decoder(Gzip)),
+            Deflate => Flate(flate.decoder(Zlib)),
+            Zstd => Zstd(zstd.decoder_bounded(cl.limits.max_window, max)),
+        }
+        body = Some(Body(decoder: take decoder, input: list.with_capacity(8192), cursor: 0, consumed: 0, remaining: max, clock: cl.clock, deadline, boundary: false, wire_end: false))
+    } else {
+        let _ = result.map_err(http_client.limit_response(mut connection, max), http_error)?
+    }
+    Ok(Response(owner: cl.owner, url: take url, conn: Some(take connection), closed_head: None, coding, body: take body, ended: false, fault: None))
+}
+
+pub fn fetch(mut cl: Client, req: http_client.Fetch, deadline_ns: u64) -> Result[Response, http_client.FetchError] waits {
+    let mut current = parse_url(string.from(req.url))?
+    let mut followed: u8 = 0
+    let mut get = false
+    let mut dropped = false
+    let mut strip = false
+    let empty: List[http_client.Segment] = list.new()
+    let get_method = "GET"
+    loop {
+        let method = if get {
+            view get_method
+        } else {
+            view req.method
+        }
+        let offer = automatic(cl, method, req.headers, strip)
+        let headers = hop_headers(req.headers, strip, dropped, offer)
+        let segments = if dropped {
+            view empty
+        } else {
+            view req.body
+        }
+        let mut conn = hop(mut cl, current, method, headers, segments, deadline_ns)?
+        let code = http_client.status(http_client.head(conn))
+        if let Follow(max) = cl.limits.redirects {
+            if redirect_status(code) {
+                let next_hop = redirect(current, http_client.head(conn))?
+                if let Some(take next) = take next_hop {
+                    if followed == max {
+                        return Error(TooManyRedirects)
+                    }
+                    if code == 303 || (code == 301 || code == 302) && method == "POST" {
+                        dropped = true
+                        get = method != "HEAD"
+                    }
+                    if !same_origin(current.origin, next.origin) {
+                        strip = true
+                        if !dropped {
+                            for segment in segments {
+                                if let Sealed(_, _) = segment {
+                                    return Error(CrossOriginSecret)
+                                }
+                            }
+                        }
+                    }
+                    drain(mut conn)?
+                    park(mut cl, take conn, current.origin)
+                    followed += 1
+                    current = take next
+                    continue
+                }
+            }
+        }
+        return response(cl, take conn, take current, offer, deadline_ns)
+    }
+}
+
+pub fn head(r: Response) -> View[http_client.ResponseHead] in r {
+    if let Some(conn) = view r.conn {
+        return http_client.head(conn)
+    }
+    let Some(h) = view r.closed_head else {
+        fail("response has no head")
+    }
+    view h
+}
+
+pub fn response_url(r: Response) -> View[String] in r {
+    view r.url.text
+}
+
+pub fn response_coding(r: Response) -> Option[http_client.ContentCoding] {
+    r.coding
+}
+
+fn refill(mut b: Body, mut conn: http_client.Connection) -> Result[(), http_client.FetchError] waits {
+    list.drop_prefix(mut b.input, b.cursor)
+    b.cursor = 0
+    b.wire_end = result.map_err(http_client.read(mut conn, mut b.input), http_error)? == 0
+    Ok(())
+}
+
+fn flate_error(take e: flate.FlateError) -> http_client.FetchError {
+    match e {
+        TooLarge => Http(TooLarge),
+        _ => Coding(Flate(e)),
+    }
+}
+
+fn too_large(e: http_client.FetchError) -> bool {
+    if let Http(TooLarge) = e {
+        return true
+    }
+    false
+}
+
+fn zstd_error(take e: zstd.ZstdError) -> http_client.FetchError {
+    match e {
+        TooLarge => Http(TooLarge),
+        _ => Coding(Zstd(e)),
+    }
+}
+
+fn next_frame(mut b: Body, kind: http_client.ContentCoding, mut conn: http_client.Connection) -> Result[bool, http_client.FetchError] waits {
+    if b.cursor == list.len(b.input) && !b.wire_end {
+        refill(mut b, mut conn)?
+    }
+    if b.cursor == list.len(b.input) {
+        return Ok(false)
+    }
+    if kind == Deflate {
+        return Error(Coding(Flate(TrailingData(b.consumed))))
+    }
+    if kind == Gzip {
+        if b.input[b.cursor] != 31 {
+            return Error(Coding(Flate(TrailingData(b.consumed))))
+        }
+        if list.len(b.input) - b.cursor == 1 && !b.wire_end {
+            refill(mut b, mut conn)?
+        }
+        if list.len(b.input) - b.cursor > 1 && b.input[b.cursor + 1] != 139 {
+            return Error(Coding(Flate(TrailingData(b.consumed))))
+        }
+        if let Flate(mut d) = b.decoder {
+            flate.next_member(mut d)
+        }
+    }
+    b.boundary = false
+    Ok(true)
+}
+
+fn step(mut b: Body, mut into: Bytes) -> Result[flate.Step, http_client.FetchError] {
+    match b.decoder {
+        Flate(mut d) => result.map_err(flate.decode_step_bounded(mut d, b.input, b.cursor, list.len(b.input), mut into, b.remaining), flate_error),
+        Zstd(mut d) => result.map_err(zstd.decode_step(mut d, b.input, b.cursor, list.len(b.input), mut into), zstd_error),
+    }
+}
+
+fn read_coded(mut b: Body, kind: http_client.ContentCoding, mut conn: http_client.Connection, mut into: Bytes) -> Result[u64, http_client.FetchError] waits {
+    loop {
+        if host.mono_ns(b.clock) >= b.deadline {
+            return Error(Http(Deadline))
+        }
+        if b.boundary {
+            if !next_frame(mut b, kind, mut conn)? {
+                return Ok(0)
+            }
+        }
+        let progress = step(mut b, mut into)?
+        b.cursor += progress.consumed
+        b.consumed += progress.consumed
+        b.remaining -= progress.produced
+        b.boundary = progress.ended
+        if progress.produced != 0 {
+            if host.mono_ns(b.clock) >= b.deadline {
+                return Error(Http(Deadline))
+            }
+            return Ok(progress.produced)
+        }
+        if progress.ended {
+            continue
+        }
+        if b.wire_end {
+            return if kind == Zstd {
+                Error(Coding(Zstd(Truncated)))
+            } else {
+                Error(Coding(Flate(Truncated)))
+            }
+        }
+        refill(mut b, mut conn)?
+    }
+}
+
+pub fn read(mut r: Response, mut into: Bytes) -> Result[u64, http_client.FetchError] waits {
+    let before = list.len(into)
+    if before == list.capacity(into) {
+        return Error(Http(NoSpace))
+    }
+    if let Some(error) = r.fault {
+        return Error(error)
+    }
+    if r.ended {
+        return Ok(0)
+    }
+    let Some(take live) = replace(mut r.conn, None) else {
+        return Error(Http(State))
+    }
+    let mut conn = take live
+    let polled = if let Some(kind) = r.coding {
+        if let Some(mut b) = r.body {
+            read_coded(mut b, kind, mut conn, mut into)
+        } else {
+            Error(Http(State))
+        }
+    } else {
+        result.map_err(http_client.read(mut conn, mut into), http_error)
+    }
+    match polled {
+        Ok(n) => {
+            r.ended = n == 0
+            r.conn = Some(take conn)
+            Ok(n)
+        },
+        Error(e) => {
+            r.closed_head = Some(http_client.close_response(take conn))
+            r.body = None
+            r.fault = Some(e)
+            let produced = list.len(into) - before
+            if produced != 0 && too_large(e) {
+                return Ok(produced)
+            }
+            list.truncate(mut into, before)
+            Error(e)
+        },
+    }
+}
+
+pub fn done(mut cl: Client, take r: Response) {
+    let mut owned = take r
+    if owned.owner == cl.owner && owned.ended {
+        if let Some(take conn) = replace(mut owned.conn, None) {
+            park(mut cl, take conn, owned.url.origin)
+        }
+    }
+}

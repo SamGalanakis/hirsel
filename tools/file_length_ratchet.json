@@ -110,7 +110,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/tests/http_connection.hirsel": {
-    "lines": 1728
+    "lines": 1848,
+    "raise_revision": 2,
+    "reason": "std2-fetch-2129 places the pool admission and client identity laws with the HTTP connection laws"
   },
   "core/std/tests/json.hirsel": {
     "lines": 1240

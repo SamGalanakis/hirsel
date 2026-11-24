@@ -110,8 +110,7 @@ For an event-stream response, feed the decoded body bytes to the
 
 ## Fetch
 
-*Specified 2026-11-24 (std Group 2), not yet implemented. The normative rules are
-[HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).*
+The normative rules are [HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).
 
 `fetch` sends one request to an `http` or `https` URL. It resolves the name, reuses an idle
 connection or opens one, follows redirects, decodes a gzip, deflate or zstd body, and
@@ -131,7 +130,7 @@ pub type Limits: send {
 }
 pub fn limits(body_max: u64) -> Limits
 pub opaque type Client: send
-pub fn client(n: Net, c: Clock, trust: Trust, limits: Limits) -> Client
+pub fn client(n: Net, c: Clock, take trust: Trust, cfg: Limits) -> Client
 pub type Fetch: send { method: String, url: String, headers: List[Header], body: List[Segment] }
 pub type ContentCoding: key + send = Gzip | Deflate | Zstd
 pub type CodingError: send = Unsupported | Flate(flate.FlateError) | Zstd(zstd.ZstdError)
@@ -192,19 +191,28 @@ closes its connection.
 - **Failures.** Each `FetchError` names one cause. `Http(e)` is the connection's own error
   on any hop, including `TooLarge` for either body bound and `Deadline`. `NoAddress` means
   the name resolved to no address. `Location` is a redirect whose `Location` field is
-  missing, repeated, not a URI reference, or resolves to a URL `fetch` refuses.
+  repeated, is not a URI reference, or resolves to a URL `fetch` refuses.
   `TooManyRedirects` and `CrossOriginSecret` are HTTP-18's. `Coding(e)` is a body that
   cannot be decoded. A refused allocation raises `Capacity`. Cancellation and the
   deadline end the fetch as on a connection, and the response's connection is closed.
-- **Charging.** `client` admits nothing. A fetch admits, under the limit current at the
-  call: the hop URL and header list it rebuilds per hop, the connection's fixed 16 KiB
-  (8192 wire and 8192 head bytes) when it opens one, and, when a coding is removed, the
-  decoder (flate's 32 KiB window and tables, or zstd's window of at most `max_window` and
-  its 128 KiB block buffer, RFC 8878 §3.1.1.2.4) and an 8192-byte encoded-input buffer. A
-  pooled connection keeps the payer it was admitted under. The pool holds at most
-  `idle_max` connections. Steps: a hop takes O(header bytes + URL bytes) of its own, plus
-  one step per host call. Decoding takes O(encoded input + decoded output), flate's and
-  zstd's rule. The body bounds of HTTP-18 bound both.
+- **Charging.** `client` takes ownership of its trust value and admits nothing. A
+  new connection admits three 8192-byte buffers for wire data, the response head and
+  request encoding, plus its authority string. Each hop admits its URL and rebuilt
+  headers. A decoded response admits an 8192-byte encoded-input buffer and decoder
+  storage. Flate uses a 32 KiB window and fixed tables. Zstd uses at most `max_window`
+  of history, fixed tables and buffers for blocks of at most 128 KiB (RFC 8878
+  §3.1.1.2.4). Idle list storage and retained origin keys are admitted under the limit
+  current when they are allocated.
+
+  For example, an inner `bound bytes` scope can fetch and return a connection to an
+  outer client. Its surviving allocations stay charged when the scope exits, with
+  their records leading to the parent under MEM-20. A sibling bound can use the
+  connection. The charges are refunded when the storage is freed.
+
+  A hop takes O(header bytes + URL bytes) steps of its own, plus host calls. The
+  pool compares the origins of at most `idle_max` entries per selection or return.
+  Selection compacts removed entries in one linear pass. Decoding is O(encoded input
+  + decoded output).
 - **Replay.** `fetch` passes no replay point of its own. Each resolve, connect, send,
   receive and Clock read passes its own, and decoding is recomputed. Pool choices depend
   only on those values, so a replay reuses the same connections.
@@ -242,11 +250,6 @@ closes its connection.
   pool. A server whose many tasks fetch either gives each task a client or runs a client
   task behind a channel. A shared pool would need a core primitive, and that decision
   belongs to the concurrency spec.
-- **Payer of a pooled connection.** A connection keeps the payer it was admitted under
-  (MEM-20). A fetch inside a `bound bytes` scope that returns its connection to a client
-  owned outside the scope leaves storage charged to a scope that has ended. The rule may
-  need to close, rather than pool, a connection whose payer is not the client's. Check
-  this against MEM-19 and MEM-20 before implementing.
 - **Encoded-bytes allowance.** The fixed 131,072-byte framing allowance (HTTP-18) refuses a
   gzip response with larger optional header fields, or with many tiny members. No server
   in common use sends one. Raising the allowance is reversible.

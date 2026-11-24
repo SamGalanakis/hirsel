@@ -1726,3 +1726,123 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+type FetchPoolPeer: send {
+    listener: Listener,
+    clock: Clock,
+    count: u64,
+    stop: Receiver[()]
+}
+
+fn fetch_pool_peer(take input: FetchPoolPeer) -> bool waits {
+    let FetchPoolPeer(listener: take listener, clock, count, stop: take stop) = take input
+    let mut site = take listener
+    let (socket, _) = result.unwrap(host.accept(mut site, Never))
+    let (rx, tx) = net.split(take socket)
+    let mut incoming = take rx
+    let mut outgoing = take tx
+    let until = At(clock, after_ms(host.mono_ns(clock), 2000))
+    let expected = b"GET /pool HTTP/1.1\r\n"
+    let mut request: Bytes = list.with_capacity(1024)
+    for i in 0u64 .. count {
+        let mut h = http1.head()
+        loop {
+            if http1.request(request, mut h) == Complete {
+                break
+            }
+            let spare = 1024 - list.len(request)
+            if result.unwrap(host.recv_bounded(mut incoming, mut request, spare, until)) == 0 {
+                return false
+            }
+        }
+        if h.end != list.len(request) || list.slice(request, 0, list.len(expected)) != expected {
+            return false
+        }
+        list.clear(mut request)
+        if !client_send(mut outgoing, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", until) {
+            return false
+        }
+    }
+    let signal = take stop
+    let _ = channel.receive(signal)
+    result.unwrap(host.recv_bounded(mut incoming, mut request, 1024, until)) == 0
+}
+
+fn fetch_pool_fixture(n: Net, c: Clock, tasks: Tasks, count: u64) -> (Task[bool], Sender[()], Addr, http_client.Fetch) waits {
+    let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 2))
+    let (signal, receive): (Sender[()], Receiver[()]) = channel.new(1)
+    let server = task.spawn(tasks, bytes 65536, FetchPoolPeer(listener: take listener, clock: c, count, stop: take receive), fetch_pool_peer)
+    let mut url = string.from("http://127.0.0.1:")
+    string.push_u64(mut url, int.widen(address.port))
+    string.push(mut url, "/pool")
+    let request = http_client.Fetch(method: "GET", url: take url, headers: list.new(), body: list.new())
+    (take server, take signal, address, take request)
+}
+
+fn fetch_room() -> u64 {
+    let probe = bound bytes 0xffffffffffffffffu64 {
+        ()
+    }
+    match probe {
+        Error(c) => c.available,
+        Ok(()) => fail("capacity probe admitted"),
+    }
+}
+
+fn empty_fetch(mut cl: http_client.Client, req: http_client.Fetch, end: u64) -> http_client.Response waits {
+    let mut reply = result.unwrap(http_client.fetch(mut cl, req, end))
+    let mut sink: Bytes = list.with_capacity(8)
+    if result.unwrap(http_client.fetch_read(mut reply, mut sink)) != 0 {
+        fail("expected an empty body")
+    }
+    take reply
+}
+
+// HTTP-18 / MEM-20. The peer accepts once, then reads one request per bound.
+// expect: run http_fetch_pool_sibling_bounds(network) = true
+fn http_fetch_pool_sibling_bounds(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (peer, signal, _, request) = fetch_pool_fixture(n, c, tasks, 2)
+    let before = fetch_room()
+    let mut cl = http_client.client(n, c, System, http_client.limits(0))
+    let end = after_ms(host.mono_ns(c), 2000)
+    result.unwrap(bound bytes 131072 {
+        let first = empty_fetch(mut cl, request, end)
+        http_client.fetch_done(mut cl, take first)
+    })
+    let warm = fetch_room()
+    result.unwrap(bound bytes 16384 {
+        let second = empty_fetch(mut cl, request, end)
+        http_client.fetch_done(mut cl, take second)
+    })
+    let twice = fetch_room()
+    let _ = take cl
+    let after = fetch_room()
+    let stop = take signal
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take peer)) && before - warm >= 24576 && twice == warm && after == before
+}
+
+// HTTP-18. A response cannot import a connected socket into a narrower client.
+// expect: run http_fetch_pool_rejects_other_client(network) = true
+fn http_fetch_pool_rejects_other_client(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (peer, signal, address, request) = fetch_pool_fixture(n, c, tasks, 1)
+    let port: u16 = if address.port == 1 {
+        2
+    } else {
+        1
+    }
+    let restricted = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: address.ip, bits: 32, ports: (port, port))))
+    let mut a = http_client.client(n, c, System, http_client.limits(0))
+    let mut b = http_client.client(restricted, c, System, http_client.limits(0))
+    let end = after_ms(host.mono_ns(c), 2000)
+    let first = empty_fetch(mut a, request, end)
+    http_client.fetch_done(mut b, take first)
+    let denied = match http_client.fetch(mut b, request, end) {
+        Error(Http(Connect(Denied))) => true,
+        _ => false,
+    }
+    let _ = take b
+    let stop = take signal
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take peer)) && denied
+}

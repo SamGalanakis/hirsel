@@ -196,7 +196,7 @@ pub type Until = Never | At(Clock, u64)
 
 pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32) | EphemeralOutsideNetGrant
 
-pub type Trust = System | Roots(Bytes)
+pub type Trust: send = System | Roots(Bytes)
 
 pub type Handshake {
     protocol: Option[u64],

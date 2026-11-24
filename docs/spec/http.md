@@ -635,7 +635,7 @@ protected segment is sent from the caller's bytes and has no such bound.
 
 ### HTTP-18: Client fetch, redirects, decoding and reuse
 
-*Specified 2026-11-24 (std Group 2), not yet implemented.* `std.http_client.fetch`
+`std.http_client.fetch`
 ([api](../../core/std/api/http_client.md#fetch)) runs one request through these rules. Each
 **hop** is one request and its final response head on one connection. The **origin** of a
 URL is its scheme, its host with ASCII letters lowercased, and its port, or 80 for `http`
@@ -720,13 +720,19 @@ admitted when the response is returned and refunded when it is done or dropped. 
 undecoded body keeps HTTP-16's path exactly.
 
 **Reuse.** An idle connection is keyed by origin. `fetch_done` returns a connection to the
-pool only when its body reached its end, `reusable` holds, and the pool has fewer than
-`idle_per_origin` connections for that origin and fewer than `idle_max` in all. Otherwise
-it closes the connection. `fetch` takes the most recently returned connection for the
-origin, and closes, without using them, those idle for `idle_ns` or longer on the client's
-Clock. No task runs in the background, so an expired connection holds its socket until
-the next fetch for its origin or until the client is dropped, which closes every idle
-connection.
+pool only when its body reached its end, `reusable` holds, the response belongs to that
+client, and the pool has fewer than `idle_per_origin` connections for that origin and
+fewer than `idle_max` in all. Otherwise it closes the connection. Each client has a
+private identity that follows it when moved. A different client may hold different
+Net or Trust authority. `fetch` takes the most recently returned eligible connection
+for the origin and closes connections for that origin idle for `idle_ns` or longer on
+the client's Clock. Expired sockets stay open until a fetch for their origin or until
+the client is dropped, which closes every idle connection.
+
+Moving a connection to or from the pool admits nothing for its existing blocks. Each
+block keeps its admission record. When a bound ends, its surviving charges follow
+MEM-20 to the parent. New allocations, including pool storage, are admitted under the
+limit current at the allocating operation.
 
 **Retry.** A hop on a connection from the pool that fails with `Write(_)` or `Receive(_)`
 before the connection received any byte of a response is sent once more on a new

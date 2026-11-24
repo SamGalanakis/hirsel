@@ -14,13 +14,13 @@ pub type Step {
     ended: bool
 }
 
-type Phase = Start | GzipHeader(u64, u8) | ExtraLength(u8) | ExtraHigh(u8, u64) | Extra(u8, u64) | Text(u8, u8) | HeaderCheck | Block | StoredHeader | Stored(u64) | DynamicHeader | CodeLengths(u64, u64, u64, u64) | Lengths(u64, u64, u64) | Fixed | Dynamic | Trailer | GzipSize | End
+type Phase: send = Start | GzipHeader(u64, u8) | ExtraLength(u8) | ExtraHigh(u8, u64) | Extra(u8, u64) | Text(u8, u8) | HeaderCheck | Block | StoredHeader | Stored(u64) | DynamicHeader | CodeLengths(u64, u64, u64, u64) | Lengths(u64, u64, u64) | Fixed | Dynamic | Trailer | GzipSize | End
 
 type Stop = Continue | Input | Output | Done
 
 // A unit reads tentatively at `used`. On input exhaustion the loaded
 // bytes remain in the reservoir and the next call retries the unit.
-type Bits {
+type Bits: send {
     data: u64,
     count: u64,
     used: u64,
@@ -28,7 +28,7 @@ type Bits {
     offset: u64
 }
 
-pub opaque type Decoder {
+pub opaque type Decoder: send {
     format: Format,
     phase: Phase,
     fault: Option[FlateError],
@@ -570,20 +570,47 @@ fn run(mut d: Decoder, input: Bytes, limit: u64, mut out: Bytes) -> Result[Stop,
 /// Append decoded bytes into the spare capacity of out. Reports the end of
 /// one stream, leaving any following bytes unconsumed. Alloc: none.
 pub fn decode_step(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes) -> Result[Step, FlateError] {
+    decode_step_bounded(mut d, input, lo, hi, mut out, 0xffffffffffffffff)
+}
+
+/// Append at most max bytes. TooLarge means the stream needs another output
+/// byte at that bound, even if the caller's physical capacity is also full.
+pub fn decode_step_bounded(mut d: Decoder, input: Bytes, lo: u64, hi: u64, mut out: Bytes, max: u64) -> Result[Step, FlateError] {
     if let Some(error) = d.fault {
         return Error(error)
     }
     let slice = list.slice(input, lo, hi)
     let start = list.len(out)
-    let limit = list.capacity(out)
+    let spare = list.capacity(out) - start
+    let limit = start + order.min(spare, max)
     let stop = run(mut d, slice, limit, mut out)?
     let consumed = d.bits.at
     d.bits.offset += consumed
     d.bits.at = 0
+    if let Output() = stop {
+        if max <= spare {
+            return Error(TooLarge())
+        }
+    }
     Ok(Step(consumed: consumed, produced: list.len(out) - start, ended: match stop {
         Done() => true,
         _ => false
     }))
+}
+
+/// Start another member after decode_step reaches a stream boundary.
+pub fn next_member(mut d: Decoder) {
+    if let End() = d.phase {
+        d.phase = Start()
+        d.bits = Bits(data: 0, count: 0, used: 0, at: 0, offset: 0)
+        d.size = 0
+        d.max_distance = WINDOW
+        d.last = false
+        d.header_crc = 0
+        d.crc = 0
+        d.adler_a = 1
+        d.adler_b = 0
+    }
 }
 
 /// Decode one stream with a checked output bound. A following byte is

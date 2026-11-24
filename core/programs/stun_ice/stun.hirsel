@@ -38,6 +38,7 @@ pub type Message {
     transaction: Transaction,
     username: Option[Range],
     mapped: Option[Addr],
+    xor_mapped: bool,
     priority: Option[u32],
     role: Option[IceRole],
     nominate: bool,
@@ -118,10 +119,9 @@ fn parse(packet: Bytes) -> Result[Parsed, Error] {
         },
     }
     let tx = Transaction(high: list.word_be(packet, 8), low: list.word_be(packet, 12))
-    let mut msg = Message(class: class, transaction: tx, username: None, mapped: None, priority: None, role: None, nominate: false, code: None, fingerprint: false, integrity: NoIntegrity)
+    let mut msg = Message(class: class, transaction: tx, username: None, mapped: None, xor_mapped: false, priority: None, role: None, nominate: false, code: None, fingerprint: false, integrity: NoIntegrity)
     let mut sha1_at = 0u64
     let mut sha256_at = 0u64
-    let mut xor_mapped = false
     let mut at = HEADER
     while at < end {
         let attr: u16 = list.word_be(packet, at)
@@ -163,11 +163,11 @@ fn parse(packet: Bytes) -> Result[Parsed, Error] {
                     }
                 },
                 _ if attr == 0x0001 || attr == 0x0020 => {
-                    if !xor_mapped {
+                    if !msg.xor_mapped {
                         let addr = mapped_address(packet, data, len, tx, attr == 0x0020)?
                         if attr == 0x0020 {
                             msg.mapped = Some(addr)
-                            xor_mapped = true
+                            msg.xor_mapped = true
                         } else if let None = msg.mapped {
                             msg.mapped = Some(addr)
                         }

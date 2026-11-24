@@ -9,7 +9,7 @@ pub type Path {
     peer: Addr
 }
 
-pub type IceError = Wire(Error) | BadCredentials | BadCheck | UnknownBase | BadCandidate | DuplicateCandidate | Resources(Capacity)
+pub type IceError = Wire(Error) | BadCredentials | BadCheck | UnknownBase | BadCandidate | DuplicateCandidate | PairLimit | RepeatedTransaction | ClockOutOfOrder | Resources(Capacity)
 
 pub opaque type Credentials {
     ufrag: Bytes,

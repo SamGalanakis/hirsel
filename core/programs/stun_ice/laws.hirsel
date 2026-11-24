@@ -161,3 +161,220 @@ fn lite_nat_rebinding() -> Result[(), stun_ice.IceError] {
     }
     Ok(())
 }
+
+// RFC 8445 sections 6–8 and RFC 7675 section 5 give the state and timing oracle.
+// Python struct, hmac and zlib produced each request and response independently.
+fn conflicting_check() -> Bytes {
+    b"\x00\x01\x00\x44\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x46\x00\x06\x00\x09\x6c\x69\x74\x65\x3a\x66\x75\x6c\x6c\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x29\x00\x08\x00\x00\x00\x00\x00\x00\x00\x37\x00\x08\x00\x14\x0a\x2a\x6e\x11\xac\x0a\x73\x25\xf3\xa8\x90\xee\xef\xe6\xad\x16\xd9\x17\x84\x46\x80\x28\x00\x04\x13\xb2\xcc\x07"
+}
+
+fn conflict_reply() -> Bytes {
+    b"\x01\x11\x00\x28\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x46\x00\x09\x00\x04\x00\x00\x04\x57\x00\x08\x00\x14\x2f\x32\x74\x4f\x16\x87\x9d\xed\x1b\xe8\x46\x38\x8a\xc0\xae\xab\x7b\xa1\xaa\x6d\x80\x28\x00\x04\xfd\xc9\xed\x40"
+}
+
+fn first_check() -> Bytes {
+    b"\x00\x01\x00\x44\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x65\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x29\x00\x08\x00\x00\x00\x00\x00\x00\x00\x0a\x00\x08\x00\x14\x4b\x01\x10\x0b\x8a\x97\x2e\x11\x01\x17\x8a\x74\x1c\x7f\xea\x52\xed\x18\x7f\x01\x80\x28\x00\x04\x6d\xd0\x4c\xe9"
+}
+
+fn first_conflict() -> Bytes {
+    b"\x01\x11\x00\x28\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x65\x00\x09\x00\x04\x00\x00\x04\x57\x00\x08\x00\x14\xe4\x29\xea\x66\xc3\x6f\x90\xe3\xf3\x2a\x6c\xc2\x3e\x1c\x4a\x63\x85\xc6\xc3\x21\x80\x28\x00\x04\xcb\x36\x75\xad"
+}
+
+fn retried_check() -> Bytes {
+    b"\x00\x01\x00\x44\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x66\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x2a\x00\x08\x00\x00\x00\x00\x00\x00\x00\x63\x00\x08\x00\x14\xb2\x23\x80\x33\x54\x48\x13\xf2\xc0\xe5\x42\x82\xe3\xfd\x3c\xa2\x96\xa1\xdf\x87\x80\x28\x00\x04\x61\x5b\x9c\xd4"
+}
+
+fn first_failure() -> Bytes {
+    b"\x01\x11\x00\x28\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x66\x00\x09\x00\x04\x00\x00\x05\x00\x00\x08\x00\x14\x14\xae\x24\xd8\x41\xf4\x87\x86\x63\x49\x0b\xd9\xad\xba\xb0\xe7\xaa\x85\xd7\x6d\x80\x28\x00\x04\xe8\x21\x16\x06"
+}
+
+fn backup_check() -> Bytes {
+    b"\x00\x01\x00\x44\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x67\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x2a\x00\x08\x00\x00\x00\x00\x00\x00\x00\x63\x00\x08\x00\x14\x84\x69\x93\xf4\x9b\xa7\xe6\xfe\x0d\x47\xab\x23\xc1\x4f\xcf\x20\x14\xf3\xf6\x11\x80\x28\x00\x04\xfc\x5b\x66\xd1"
+}
+
+fn backup_success() -> Bytes {
+    b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x67\x00\x20\x00\x08\x00\x01\x81\x3a\xe1\x12\xa6\x4b\x00\x08\x00\x14\x2b\x87\x5a\xeb\x6c\x35\xc7\xf9\x9f\x1b\x6e\x57\x07\x28\x9c\x1a\xed\x22\x2b\xe1\x80\x28\x00\x04\x48\x20\xcc\xbd"
+}
+
+fn backup_nomination() -> Bytes {
+    b"\x00\x01\x00\x48\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x68\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x2a\x00\x08\x00\x00\x00\x00\x00\x00\x00\x63\x00\x25\x00\x00\x00\x08\x00\x14\x3b\x3b\x6a\x1e\xf6\xb7\xcc\xbf\x8d\x8f\x8e\xa5\x00\xa0\x17\x10\x77\x21\x92\x2c\x80\x28\x00\x04\x20\x55\xb4\xe7"
+}
+
+fn nomination_success() -> Bytes {
+    b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x68\x00\x20\x00\x08\x00\x01\x81\x3a\xe1\x12\xa6\x4b\x00\x08\x00\x14\x4c\x7f\xa3\x83\x17\x28\xff\xf1\xe4\xa9\x04\x42\x65\x22\xa5\xf3\xad\x36\xbf\x37\x80\x28\x00\x04\xc8\x26\xa5\xdf"
+}
+
+fn consent_probe() -> Bytes {
+    b"\x00\x01\x00\x30\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x69\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x08\x00\x14\x73\x57\x0d\xef\x6a\x85\xdf\x24\x05\x26\x81\x34\xd6\x67\xf6\xf4\xc4\x3a\x77\x34\x80\x28\x00\x04\x06\xa9\xd6\x79"
+}
+
+fn consent_success() -> Bytes {
+    b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x69\x00\x20\x00\x08\x00\x01\x81\x3a\xe1\x12\xa6\x4b\x00\x08\x00\x14\x39\x8b\xfa\xd2\x10\xa6\x3e\xac\x84\xfa\x2d\xa3\x9d\xfa\x96\xaf\xab\x5f\x55\x3f\x80\x28\x00\x04\x1d\x58\xb3\x41"
+}
+
+fn consent_second() -> Bytes {
+    b"\x00\x01\x00\x30\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x6a\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x08\x00\x14\x8c\xd1\xd6\x96\x46\x8e\xa2\x13\x0c\x45\x8e\x3c\x49\xbd\x5b\x4a\x20\x5a\x1c\xa0\x80\x28\x00\x04\x3c\xec\x89\xe6"
+}
+
+fn consent_revoked() -> Bytes {
+    b"\x01\x11\x00\x28\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x6a\x00\x09\x00\x04\x00\x00\x04\x03\x00\x08\x00\x14\x02\xf8\xed\xc4\x89\xb9\x69\x29\xa5\x06\xd6\xf5\x9b\xf7\x88\x6a\xf0\x47\x49\x95\x80\x28\x00\x04\x1a\x08\x78\xff"
+}
+
+fn early_reply() -> Bytes {
+    b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0b\x00\x20\x00\x08\x00\x01\x95\x06\xe7\x21\xc0\x4e\x00\x08\x00\x14\x31\xb3\x33\x66\x30\xd1\xd9\x97\xce\x0d\xd6\xa4\x55\x97\x0a\xc0\x2c\x6f\x6e\xa4\x80\x28\x00\x04\x70\x07\x19\xbf"
+}
+
+fn triggered_check() -> Bytes {
+    b"\x00\x01\x00\x44\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc9\x00\x06\x00\x09\x66\x75\x6c\x6c\x3a\x6c\x69\x74\x65\x00\x00\x00\x00\x24\x00\x04\x6e\x00\x01\xff\x80\x29\x00\x08\x00\x00\x00\x00\x00\x00\x00\x0a\x00\x08\x00\x14\x4b\x30\xc7\x3b\x38\xe3\xca\x50\x94\xe2\x3e\x03\xb6\xa0\xfe\x6e\x96\x43\xdb\xaa\x80\x28\x00\x04\x2a\x43\x3c\x27"
+}
+
+fn triggered_success() -> Bytes {
+    b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc9\x00\x20\x00\x08\x00\x01\x81\x3a\xe1\x12\xa6\x4b\x00\x08\x00\x14\x5f\xd6\xd5\x80\x89\x74\x42\x61\xde\xcf\x7e\x57\x38\x23\x77\xb2\x57\xb6\xc3\x7a\x80\x28\x00\x04\xd8\xe4\x23\xa3"
+}
+
+const BASE: Addr = Addr(ip: V4(0xc0000201), port: 40000)
+
+const PEER_A: Addr = Addr(ip: V4(0xc633640c), port: 46000)
+
+const PEER_B: Addr = Addr(ip: V4(0xc633640c), port: 46100)
+
+fn entropy(id: u64) -> stun_ice.Entropy {
+    stun_ice.Entropy(transaction: stun_ice.Transaction(high: 0, low: id), jitter: 0)
+}
+
+fn new_full() -> Result[stun_ice.Agent, stun_ice.IceError] {
+    let local = stun_ice.credentials(b"lite", b"LocalPassword1234567890")?
+    let mut locals: List[stun_ice.LocalCandidate] = list.new()
+    let host = stun_ice.Candidate(component: 1, address: BASE, foundation: 1, priority: 0x7e0001ff)
+    list.push(mut locals, stun_ice.LocalCandidate(candidate: host, base: BASE))
+    stun_ice.full(take local, take locals, Controlled, 10, 10)
+}
+
+fn configure_peer(mut agent: stun_ice.Agent) -> Result[(), stun_ice.IceError] {
+    let remote = stun_ice.credentials(b"full", b"RemotePassword123456789")?
+    stun_ice.full_remote_credentials(mut agent, take remote, 0, 0)
+}
+
+fn wire(out: Bytes, n: u64, expected: Bytes) {
+    if list.compare_bytes(list.slice(out, 0, n), expected) != Equal {
+        fail("ICE datagram differs from the independent fixture")
+    }
+}
+
+fn expect_send(action: stun_ice.Poll, out: Bytes, port: u16, expected: Bytes) {
+    let Send(path, n) = action else {
+        fail("expected one paced STUN transmission")
+    }
+    if path.base.port != 40000 || path.peer.port != port || path.component != 1 {
+        fail("sent the check over the wrong candidate pair")
+    }
+    wire(out, n, expected)
+}
+
+fn expect_reply(action: stun_ice.Receive, out: Bytes, expected: Bytes) {
+    let Reply(n) = action else {
+        fail("expected a STUN reply")
+    }
+    wire(out, n, expected)
+}
+
+fn selected(agent: stun_ice.Agent, now: u64) -> bool {
+    if let Some(route) = stun_ice.full_selected(agent, 1, now) {
+        if let V4(0xc0000209) = route.mapped.ip {} else {
+            fail("lost the peer-reflexive local address")
+        }
+        if route.path.peer.port != 46100 || route.mapped.port != 41000 {
+            fail("wrong pair selected")
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// bug: accept conflicting roles or nominate before a successful check; keep sending after consent expires.
+/// oracle: RFC 8445 sections 6–8 and RFC 7675 section 5, with independent Binding datagrams.
+@test
+fn full_connectivity() -> Result[(), stun_ice.IceError] {
+    let mut agent = new_full()?
+    configure_peer(mut agent)?
+    stun_ice.full_add_remote(mut agent, stun_ice.Candidate(component: 1, address: PEER_A, foundation: 2, priority: 0x6e0001ff))?
+    stun_ice.full_add_remote(mut agent, stun_ice.Candidate(component: 1, address: PEER_B, foundation: 2, priority: 0x6e0000ff))?
+    let mut scratch: Bytes = list.with_capacity(160)
+    list.fill(mut scratch, 160, 0)
+    let mut output: Bytes = list.with_capacity(128)
+    list.fill(mut output, 128, 0)
+    let reply = stun_ice.full_receive(mut agent, BASE, PEER_A, conflicting_check(), 0, entropy(98), mut output, mut scratch)?
+    expect_reply(reply, output, conflict_reply())
+    if stun_ice.full_role(agent) != Controlled {
+        fail("lower controlled tiebreaker did not retain its role")
+    }
+    let first = stun_ice.full_poll(mut agent, 0, entropy(101), mut output, mut scratch)?
+    expect_send(first, output, 46000, first_check())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_A, first_conflict(), 1, entropy(99), mut output, mut scratch)?
+    if stun_ice.full_role(agent) != Controlling {
+        fail("authenticated 487 did not switch the check-sender to controlling")
+    }
+    let wait = stun_ice.full_poll(mut agent, 49000000, entropy(100), mut output, mut scratch)?
+    if let WakeAt(50000000) = wait {} else {
+        fail("triggered retry ignored Ta")
+    }
+    let new_role = stun_ice.full_poll(mut agent, 50000000, entropy(102), mut output, mut scratch)?
+    expect_send(new_role, output, 46000, retried_check())
+    let retry = stun_ice.full_poll(mut agent, 550000000, entropy(999), mut output, mut scratch)?
+    expect_send(retry, output, 46000, retried_check())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_A, first_failure(), 551000000, entropy(99), mut output, mut scratch)?
+    let backup = stun_ice.full_poll(mut agent, 600000000, entropy(103), mut output, mut scratch)?
+    expect_send(backup, output, 46100, backup_check())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_B, backup_success(), 601000000, entropy(99), mut output, mut scratch)?
+    if selected(agent, 601000000) {
+        fail("ordinary check selected an unnominated pair")
+    }
+    let nomination = stun_ice.full_poll(mut agent, 650000000, entropy(104), mut output, mut scratch)?
+    expect_send(nomination, output, 46100, backup_nomination())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_B, nomination_success(), 651000000, entropy(99), mut output, mut scratch)?
+    if !selected(agent, 651000000) || selected(agent, 30651000000) {
+        fail("nominated route did not have a 30-second consent window")
+    }
+    let first_probe = stun_ice.full_poll(mut agent, 4651000000, entropy(105), mut output, mut scratch)?
+    expect_send(first_probe, output, 46100, consent_probe())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_A, consent_success(), 4652000000, entropy(99), mut output, mut scratch)?
+    if selected(agent, 30651000000) {
+        fail("wrong source address extended consent")
+    }
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_B, consent_success(), 4653000000, entropy(99), mut output, mut scratch)?
+    if !selected(agent, 30651000000) || selected(agent, 34653000000) {
+        fail("consent renewal did not use the authenticated response time")
+    }
+    let second_probe = stun_ice.full_poll(mut agent, 8651000000, entropy(106), mut output, mut scratch)?
+    expect_send(second_probe, output, 46100, consent_second())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_B, consent_revoked(), 8652000000, entropy(99), mut output, mut scratch)?
+    if selected(agent, 8652000000) {
+        fail("authenticated 403 did not revoke consent")
+    }
+    controlled_nomination(mut output, mut scratch)
+}
+
+fn controlled_nomination(mut output: Bytes, mut scratch: Bytes) -> Result[(), stun_ice.IceError] {
+    let mut agent = new_full()?
+    let nomination = lite_nominate()
+    let attempt = bound bytes 0 {
+        stun_ice.full_receive(mut agent, BASE, PEER_B, nomination, 0, entropy(99), mut output, mut scratch)
+    }
+    let reply = match attempt {
+        Ok(verdict) => verdict?,
+        Error(_) => fail("pre-answer Binding reply allocated"),
+    }
+    expect_reply(reply, output, early_reply())
+    configure_peer(mut agent)?
+    if selected(agent, 0) {
+        fail("controlled agent nominated before the reciprocal check")
+    }
+    let triggered = stun_ice.full_poll(mut agent, 0, entropy(201), mut output, mut scratch)?
+    expect_send(triggered, output, 46100, triggered_check())
+    let _ = stun_ice.full_receive(mut agent, BASE, PEER_B, triggered_success(), 1, entropy(99), mut output, mut scratch)?
+    if !selected(agent, 1) {
+        fail("reciprocal check did not complete the pre-answer nomination")
+    }
+    Ok(())
+}

@@ -1,9 +1,10 @@
 //! Protocol state holds keys by direction and packet space.
 use crate::{
-    ImportUse,
-    packet_epoch::{DirectionKeys, Epoch, ImportError, IssueError, tls13_labels},
+    ImportKind, ImportUse,
+    packet_epoch::{DirectionKeys, Epoch, ImportError, IssueError, tls13_labels, traffic_profile},
     packet_nonce::NonceFormat,
     secret_aead::AeadAlg,
+    srtp_cipher::{SrtpKeys, SrtpProfile},
     tls_kdf::{
         Side, Tls13Direction, Tls13Handshake, Tls13PacketKeys, Tls13Traffic, TlsHash,
         dtls12::Dtls12Keys,
@@ -12,6 +13,35 @@ use crate::{
 
 const HANDSHAKE: usize = 1;
 const APPLICATION: usize = 2;
+
+#[derive(Clone, Copy)]
+pub enum ImportProfile {
+    Traffic(NonceFormat, AeadAlg),
+    Srtp(SrtpProfile),
+}
+
+impl ImportProfile {
+    pub fn from_case(kind: ImportKind, profile: u64, suite: u64) -> Option<Self> {
+        match kind {
+            ImportKind::Traffic => traffic_profile(profile, suite)
+                .map(|(format, algorithm)| Self::Traffic(format, algorithm)),
+            ImportKind::Srtp => SrtpProfile::from_case(profile).map(Self::Srtp),
+        }
+    }
+
+    pub fn import<C>(
+        self,
+        authority: ImportUse,
+        bytes: Option<&[u8]>,
+    ) -> Result<Schedule<C>, ImportError> {
+        match self {
+            Self::Traffic(format, algorithm) => {
+                Schedule::import_traffic(format, algorithm, authority, bytes)
+            }
+            Self::Srtp(profile) => Schedule::import_srtp(profile, authority, bytes),
+        }
+    }
+}
 
 pub struct Schedule<C> {
     spaces: [Option<Box<Epoch<C>>>; 5],
@@ -29,7 +59,9 @@ enum Kind {
     },
     Dtls12 {
         algorithm: AeadAlg,
+        local: Side,
         keys: Option<Dtls12Keys>,
+        srtp_issued: bool,
     },
     TrafficImport {
         local: bool,
@@ -92,11 +124,100 @@ impl<C> Schedule<C> {
                 packet_keys(local.peer()),
             ),
         );
-        schedule.kind = Kind::Dtls12 { algorithm, keys };
+        schedule.kind = Kind::Dtls12 {
+            algorithm,
+            local,
+            keys,
+            srtp_issued: false,
+        };
         schedule
     }
 
-    pub fn import_traffic(
+    pub fn check_srtp(&self) -> Result<(), IssueError> {
+        match self.kind {
+            Kind::Dtls12 {
+                srtp_issued: false, ..
+            } => Ok(()),
+            Kind::Dtls12 {
+                srtp_issued: true, ..
+            } => Err(IssueError::Issued),
+            _ => Err(IssueError::Invalid),
+        }
+    }
+
+    pub fn srtp(&mut self, profile: SrtpProfile) -> Self {
+        let Kind::Dtls12 {
+            local,
+            keys,
+            srtp_issued,
+            ..
+        } = &mut self.kind
+        else {
+            unreachable!("the caller validated the parent schedule");
+        };
+        let directions = keys
+            .as_mut()
+            .map(|keys| keys.take_srtp(profile, *local).unwrap().map(Some))
+            .unwrap_or([None, None]);
+        *srtp_issued = true;
+        Self::srtp_spaces(profile, directions, [true, true])
+    }
+
+    fn import_srtp(
+        profile: SrtpProfile,
+        authority: ImportUse,
+        bytes: Option<&[u8]>,
+    ) -> Result<Self, ImportError> {
+        let sending = match authority {
+            ImportUse::SrtpSend => true,
+            ImportUse::SrtpReceive => false,
+            _ => return Err(ImportError::Denied),
+        };
+        let keys = bytes
+            .map(|bytes| SrtpKeys::import(profile, authority, bytes))
+            .transpose()?;
+        let directions = if sending { [keys, None] } else { [None, keys] };
+        Ok(Self::srtp_spaces(profile, directions, [sending, !sending]))
+    }
+
+    fn srtp_spaces(
+        profile: SrtpProfile,
+        directions: [Option<SrtpKeys>; 2],
+        permitted: [bool; 2],
+    ) -> Self {
+        let per_space = |keys: Option<SrtpKeys>, allowed: bool| match keys {
+            Some(keys) => keys.into_spaces().map(|keys| {
+                if let Some((_, payload, iv)) = keys.aead_material() {
+                    DirectionKeys::Live(Tls13PacketKeys::new(payload, iv))
+                } else {
+                    DirectionKeys::Cm(keys)
+                }
+            }),
+            None => std::array::from_fn(|_| {
+                if allowed {
+                    DirectionKeys::Opaque
+                } else {
+                    DirectionKeys::Missing
+                }
+            }),
+        };
+        let [tx, rx] = directions;
+        let [rtp_tx, rtcp_tx] = per_space(tx, permitted[0]);
+        let [rtp_rx, rtcp_rx] = per_space(rx, permitted[1]);
+        let mut schedule = Self::single(
+            3,
+            Epoch::srtp(NonceFormat::SrtpRtp, profile, rtp_tx, rtp_rx),
+        );
+        schedule.spaces[4] = Some(Box::new(Epoch::srtp(
+            NonceFormat::SrtpRtcp,
+            profile,
+            rtcp_tx,
+            rtcp_rx,
+        )));
+        schedule
+    }
+
+    fn import_traffic(
         format: NonceFormat,
         algorithm: AeadAlg,
         authority: ImportUse,

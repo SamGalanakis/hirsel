@@ -153,3 +153,41 @@ fn check_gcm_lengths(body: usize, aad: usize) -> Result<(), Unspecified> {
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests;
+impl hirsel_core_net::packet_protection::Aead for PacketCipher {
+    fn expand(algorithm: AeadAlg, key: &[u8]) -> Result<Self, Unspecified> {
+        Self::new(algorithm, key)
+    }
+
+    fn seal(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        body: &mut [u8],
+    ) -> Result<[u8; TAG_LEN], Unspecified> {
+        self.seal(nonce, aad, body)
+    }
+
+    fn seal_into(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        plain: &[u8],
+        sealed: &mut [MaybeUninit<u8>],
+    ) -> Result<(), Unspecified> {
+        self.seal_into(nonce, aad, plain, sealed)
+    }
+
+    fn open(&self, nonce: [u8; 12], aad: &[u8], sealed: &mut [u8]) -> Result<(), Unspecified> {
+        self.open(nonce, aad, sealed).map(|_| ())
+    }
+
+    fn open_into(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        sealed: &[u8],
+        plain: &mut [MaybeUninit<u8>],
+    ) -> Result<(), Unspecified> {
+        self.open_into(nonce, aad, sealed, plain)
+    }
+}

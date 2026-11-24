@@ -133,6 +133,8 @@ pub enum HostOp {
     ScheduleFinished = hirsel_core_ids::host_op::SCHEDULE_FINISHED as isize,
     ScheduleVerifyFinished = hirsel_core_ids::host_op::SCHEDULE_VERIFY_FINISHED as isize,
     ScheduleDtls12 = hirsel_core_ids::host_op::SCHEDULE_DTLS12 as isize,
+    ScheduleImportSrtp = hirsel_core_ids::host_op::SCHEDULE_IMPORT_SRTP as isize,
+    ScheduleSrtp = hirsel_core_ids::host_op::SCHEDULE_SRTP as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
@@ -253,6 +255,8 @@ impl HostOp {
         HostOp::ScheduleFinished,
         HostOp::ScheduleVerifyFinished,
         HostOp::ScheduleDtls12,
+        HostOp::ScheduleImportSrtp,
+        HostOp::ScheduleSrtp,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
         HostOp::ScheduleHeaderMask,
@@ -525,6 +529,7 @@ impl HostOp {
             HostOp::ScheduleApplication => (vec![V(u64_), V(p)], outcome),
             HostOp::ScheduleKeyUpdate => (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome),
             HostOp::ScheduleRetire => (vec![V(u64_); 2], outcome),
+            HostOp::ScheduleImportSrtp | HostOp::ScheduleSrtp => (vec![V(u64_); 2], outcome),
             HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
                 (vec![V(u64_), V(u64_), V(p), V(p)], outcome)
             }
@@ -724,6 +729,8 @@ impl HostOp {
             HostOp::ScheduleFinished => "schedule_finished",
             HostOp::ScheduleVerifyFinished => "schedule_verify_finished",
             HostOp::ScheduleDtls12 => "schedule_dtls12",
+            HostOp::ScheduleImportSrtp => "schedule_import_srtp",
+            HostOp::ScheduleSrtp => "schedule_srtp",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
@@ -785,6 +792,8 @@ impl HostOp {
                 | HostOp::ScheduleFinished
                 | HostOp::ScheduleVerifyFinished
                 | HostOp::ScheduleDtls12
+                | HostOp::ScheduleImportSrtp
+                | HostOp::ScheduleSrtp
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask

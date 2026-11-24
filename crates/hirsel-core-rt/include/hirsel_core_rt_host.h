@@ -375,6 +375,8 @@ HirselCoreHostOutcome hirsel_core_schedule_quic_initial(HirselCoreContext *, uin
 HirselCoreHostOutcome hirsel_core_schedule_import_traffic(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_tls13(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_dtls12(HirselCoreContext *, uint64_t, uint64_t, uint16_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_import_srtp(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_srtp(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_application(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_key_update(HirselCoreContext *, uint64_t, bool, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_retire(HirselCoreContext *, uint64_t, uint64_t, uint64_t);

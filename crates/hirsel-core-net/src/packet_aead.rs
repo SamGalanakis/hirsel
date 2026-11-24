@@ -1,5 +1,5 @@
 //! Shared packet validation and runtime result encoding for AEAD formats.
-use crate::{packet_cipher::TAG_LEN, packet_nonce::CounterError, secret_aead::AeadAlg};
+use crate::{packet_nonce::CounterError, packet_protection::Algorithm, secret_aead::AeadAlg};
 
 #[derive(Clone, Copy)]
 pub enum PacketError {
@@ -48,23 +48,29 @@ impl PacketLengths {
         }
     }
 
-    pub fn check(&self, algorithm: AeadAlg) -> Result<(), PacketError> {
-        let max_aad = match algorithm {
-            AeadAlg::Aes128Gcm | AeadAlg::Aes256Gcm => (1 << 61) - 1,
-            AeadAlg::ChaCha20Poly1305 => u64::MAX,
+    pub fn check(&self, algorithm: Algorithm) -> Result<(), PacketError> {
+        let (max_body, max_aad) = match algorithm {
+            Algorithm::Aead(algorithm) => {
+                let max_aad = match algorithm {
+                    AeadAlg::Aes128Gcm | AeadAlg::Aes256Gcm => (1 << 61) - 1,
+                    AeadAlg::ChaCha20Poly1305 => u64::MAX,
+                };
+                (algorithm.max_input(), max_aad)
+            }
+            Algorithm::Cm => (1 << 20, u64::MAX),
         };
         let aad = self
             .header
             .checked_add(self.extra)
             .ok_or(PacketError::TooLong)?;
-        if self.body as u64 > algorithm.max_input() || aad as u64 > max_aad {
+        if self.body as u64 > max_body || aad as u64 > max_aad {
             return Err(PacketError::TooLong);
         }
         Ok(())
     }
 
-    pub fn scratch(&self) -> usize {
-        if self.header == 0 || self.extra == 0 {
+    pub fn scratch(&self, algorithm: Algorithm) -> usize {
+        if self.header == 0 || self.extra == 0 || matches!(algorithm, Algorithm::Cm) {
             0
         } else {
             self.header + self.extra
@@ -86,8 +92,8 @@ fn fits(requested: u64, available: usize) -> Result<(), PacketError> {
     Ok(())
 }
 
-pub fn sealed_len(plain: usize, available: usize) -> Result<usize, PacketError> {
-    let requested = plain.checked_add(TAG_LEN).ok_or(PacketError::Capacity {
+pub fn sealed_len(plain: usize, tag_len: usize, available: usize) -> Result<usize, PacketError> {
+    let requested = plain.checked_add(tag_len).ok_or(PacketError::Capacity {
         requested: u64::MAX,
         available: available as u64,
     })?;

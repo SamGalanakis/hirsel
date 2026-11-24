@@ -1,6 +1,11 @@
 //! RFC 3711/7714 session material, derived once for each protocol space.
 use super::{BLOCK, SrtpCipher, SrtpKdf};
-use crate::{ImportUse, packet_epoch::ImportError, secret_aead::AeadAlg};
+use crate::{
+    ImportUse,
+    packet_epoch::ImportError,
+    packet_nonce::{NonceFormat, cm_nonce},
+    secret_aead::AeadAlg,
+};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy)]
@@ -11,6 +16,15 @@ pub enum SrtpProfile {
 }
 
 impl SrtpProfile {
+    pub fn from_case(case: u64) -> Option<Self> {
+        Some(match case {
+            0 => Self::Aes128CmHmacSha1_80,
+            1 => Self::AeadAes128Gcm,
+            2 => Self::AeadAes256Gcm,
+            _ => return None,
+        })
+    }
+
     pub(crate) fn master_widths(self) -> (usize, usize) {
         match self {
             Self::Aes128CmHmacSha1_80 => (16, 14),
@@ -19,7 +33,7 @@ impl SrtpProfile {
         }
     }
 
-    fn algorithm(self) -> Option<AeadAlg> {
+    pub(crate) fn algorithm(self) -> Option<AeadAlg> {
         match self {
             Self::Aes128CmHmacSha1_80 => None,
             Self::AeadAes128Gcm => Some(AeadAlg::Aes128Gcm),
@@ -94,6 +108,10 @@ impl SrtpKeys {
         Self { send, spaces }
     }
 
+    pub(crate) fn into_spaces(self) -> [SrtpSessionKey; 2] {
+        self.spaces
+    }
+
     pub fn keys(&self, space: SrtpSpace, sending: bool) -> Option<&SrtpSessionKey> {
         (sending == self.send).then(|| &self.spaces[space as usize])
     }
@@ -105,25 +123,18 @@ impl SrtpSessionKey {
         Some(SrtpCipher::new(self.payload[..16].try_into().unwrap(), auth).unwrap())
     }
 
+    pub(crate) fn salt(&self) -> &[u8; 14] {
+        &self.salt
+    }
+
     pub fn cm_nonce(&self, ssrc: u32, index: u64) -> Option<[u8; BLOCK]> {
         self.auth.as_ref()?;
-        let start = match self.space {
-            SrtpSpace::Rtp if index < (1 << 48) => 8,
-            SrtpSpace::Rtcp if index < (1 << 31) => 10,
+        let format = match self.space {
+            SrtpSpace::Rtp if index < (1 << 48) => NonceFormat::SrtpRtp,
+            SrtpSpace::Rtcp if index < (1 << 31) => NonceFormat::SrtpRtcp,
             _ => return None,
         };
-        let mut nonce = [0; BLOCK];
-        nonce[..14].copy_from_slice(&*self.salt);
-        for (byte, word) in nonce[4..8].iter_mut().zip(ssrc.to_be_bytes()) {
-            *byte ^= word;
-        }
-        for (byte, word) in nonce[start..14]
-            .iter_mut()
-            .zip(&index.to_be_bytes()[start - 6..])
-        {
-            *byte ^= word;
-        }
-        Some(nonce)
+        Some(cm_nonce(format, self.salt(), ssrc, index))
     }
 
     pub fn aead_material(&self) -> Option<(AeadAlg, &[u8], [u8; 12])> {

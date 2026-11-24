@@ -2,6 +2,8 @@ pub type Suite13 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 
 pub type Suite12 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 
+pub type SrtpProfile = Aes128CmHmacSha1_80 | AeadAes128Gcm | AeadAes256Gcm
+
 pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13) | QuicMultipath(Suite13)
 
 pub opaque resource type Schedule
@@ -17,6 +19,10 @@ pub fn tls13(p: Profile13, side: Side, take k: secret.KeyShare, peer: Bytes, hel
 pub fn dtls12(suite: Suite12, side: Side, epoch: u16, take k: secret.KeyShare, peer: Bytes, client_random: Bytes, server_random: Bytes, session_hash: Option[Bytes]) -> Result[Schedule, (ScheduleError, Option[secret.KeyShare])]
 
 pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+
+pub fn import_srtp(p: SrtpProfile, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+
+pub fn srtp(mut s: Schedule, p: SrtpProfile) -> Result[Schedule, ScheduleError]
 
 pub fn application(mut s: Schedule, finished_hash: Bytes) -> Result[(), ScheduleError]
 

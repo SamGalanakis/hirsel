@@ -62,6 +62,8 @@ impl HostOp {
             Self::ScheduleFinished => "hirsel_core_schedule_finished",
             Self::ScheduleVerifyFinished => "hirsel_core_schedule_verify_finished",
             Self::ScheduleDtls12 => "hirsel_core_schedule_dtls12",
+            Self::ScheduleImportSrtp => "hirsel_core_schedule_import_srtp",
+            Self::ScheduleSrtp => "hirsel_core_schedule_srtp",
             Self::ScheduleSealer => "hirsel_core_schedule_sealer",
             Self::ScheduleOpener => "hirsel_core_schedule_opener",
             Self::ScheduleHeaderMask => "hirsel_core_schedule_header_mask",

@@ -3,20 +3,23 @@ use super::*;
 use hirsel_core_net::{
     agreement_registry::RegistryVerdict,
     packet_aead::{self, PacketError, PacketLengths},
-    packet_cipher::{HeaderMask, PacketCipher, TAG_LEN},
+    packet_cipher::{HeaderMask, PacketCipher},
     packet_epoch::{self, Epoch, IssueError},
     packet_nonce::{ReceiverNonce, SenderCounter},
-    packet_schedule,
-    secret_aead::AeadAlg,
+    packet_protection::{self, Algorithm},
+    packet_schedule::{self, ImportProfile},
+    srtp_cipher::SrtpProfile,
     tls_kdf::{Side, Tls13Handshake, TlsHash, dtls12::Dtls12Keys},
 };
 use std::mem::MaybeUninit;
 
+type Cipher = packet_protection::Cipher<PacketCipher>;
+
 pub(super) enum Payload {
     Share(key_share::Share),
     Schedule(packet_schedule::Schedule<Limit>),
-    Sealer(SenderCounter, AeadAlg, PacketCipher),
-    Opener(ReceiverNonce, AeadAlg, PacketCipher),
+    Sealer(SenderCounter, Algorithm, Cipher),
+    Opener(ReceiverNonce, Algorithm, Cipher),
     Mask(HeaderMask),
 }
 
@@ -110,7 +113,10 @@ impl Machine<'_> {
                 let state = packet_schedule::Schedule::single(0, epoch);
                 Ok(self.media_hold(payer, Payload::Schedule(state)))
             }
-            HostOp::ScheduleImportTraffic => Ok(self.import_traffic(payer, a)),
+            HostOp::ScheduleImportTraffic | HostOp::ScheduleImportSrtp => {
+                Ok(self.import_schedule(payer, op, a))
+            }
+            HostOp::ScheduleSrtp => Ok(self.srtp_child(payer, a)),
             HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
             HostOp::ScheduleDtls12 => Ok(self.dtls12(payer, a)),
             HostOp::ScheduleApplication | HostOp::ScheduleKeyUpdate | HostOp::ScheduleRetire => {
@@ -142,7 +148,7 @@ impl Machine<'_> {
                             Payload::Sealer(
                                 issued.counter,
                                 issued.algorithm,
-                                PacketCipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
+                                Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
                             )
                         }),
                     HostOp::ScheduleOpener => epoch
@@ -151,7 +157,7 @@ impl Machine<'_> {
                             Payload::Opener(
                                 issued.nonce,
                                 issued.algorithm,
-                                PacketCipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
+                                Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
                             )
                         }),
                     _ => epoch
@@ -342,15 +348,19 @@ impl Machine<'_> {
         vec![size as u64, 0, 0, 0]
     }
 
-    fn import_traffic(&mut self, payer: Limit, args: &[u64]) -> Vec<u64> {
-        use hirsel_core_net::{ImportKind, ImportRefusal, packet_epoch::traffic_profile};
-        let key = args[2];
+    fn import_schedule(&mut self, payer: Limit, op: HostOp, args: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::{ImportKind, ImportRefusal};
+        let (kind, profile, suite, key) = if op == HostOp::ScheduleImportTraffic {
+            (ImportKind::Traffic, args[0], args[1], args[2])
+        } else {
+            (ImportKind::Srtp, args[0], 0, args[1])
+        };
         let secret = self.secret(key).expect("a live Secret designation");
         if secret
             .policy
             .uses
             .import()
-            .is_none_or(|use_| use_.kind() != ImportKind::Traffic)
+            .is_none_or(|use_| use_.kind() != kind)
         {
             return vec![0, 1, 1, 0];
         }
@@ -360,8 +370,9 @@ impl Machine<'_> {
             .expect("import authority carries a spent mark");
         let bytes = secret.bytes.clone();
         let request = packet_epoch::SCHEDULE_CHARGE;
-        let issued = mark.issue(ImportKind::Traffic, || {
-            let parsed = traffic_profile(args[0], args[1]).ok_or(IssueError::Invalid)?;
+        let issued = mark.issue(kind, || {
+            let parsed =
+                ImportProfile::from_case(kind, profile, suite).ok_or(IssueError::Invalid)?;
             self.admit(&payer, request)
                 .map_err(|available| IssueError::Capacity {
                     requested: request,
@@ -369,7 +380,7 @@ impl Machine<'_> {
                 })?;
             Ok(parsed)
         });
-        let (authority, (format, algorithm)) = match issued {
+        let (authority, profile) = match issued {
             Ok(issued) => issued,
             Err(error) => {
                 let mut row = match error {
@@ -381,8 +392,7 @@ impl Machine<'_> {
                 return row;
             }
         };
-        let schedule =
-            packet_schedule::Schedule::import_traffic(format, algorithm, authority, Some(&bytes));
+        let schedule = profile.import(authority, Some(&bytes));
         drop(bytes);
         self.secret_drop(key);
         match schedule {
@@ -391,6 +401,31 @@ impl Machine<'_> {
                 self.refund(payer, request);
                 issue_error(IssueError::Invalid)
             }
+        }
+    }
+
+    fn srtp_child(&mut self, payer: Limit, args: &[u64]) -> Vec<u64> {
+        let Some(profile) = SrtpProfile::from_case(args[1]) else {
+            return issue_error(IssueError::Invalid);
+        };
+        let slot = args[0] as usize;
+        let mut held = self.world.media[slot].take().unwrap();
+        let Payload::Schedule(parent) = &mut held.payload else {
+            unreachable!("checked schedule");
+        };
+        let requested = packet_epoch::SCHEDULE_CHARGE;
+        let child = parent.check_srtp().and_then(|()| {
+            self.admit(&payer, requested)
+                .map_err(|available| IssueError::Capacity {
+                    requested,
+                    available,
+                })?;
+            Ok(parent.srtp(profile))
+        });
+        self.world.media[slot] = Some(held);
+        match child {
+            Ok(child) => self.media_hold(payer, Payload::Schedule(child)),
+            Err(error) => issue_error(error),
         }
     }
 
@@ -431,10 +466,10 @@ impl Machine<'_> {
         let into = matches!(op, HostOp::PacketSealInto | HostOp::PacketOpenInto);
         let (nonce, algorithm, cipher) = match payload {
             Payload::Sealer(counter, algorithm, cipher) => {
-                (counter.check(a[1]), *algorithm, &*cipher)
+                (counter.packet_nonce(a[1]), *algorithm, &*cipher)
             }
             Payload::Opener(base, algorithm, cipher) => {
-                (base.nonce(a[1], a[2]), *algorithm, &*cipher)
+                (base.packet_nonce(a[1], a[2]), *algorithm, &*cipher)
             }
             _ => unreachable!(),
         };
@@ -442,11 +477,12 @@ impl Machine<'_> {
             Ok(nonce) => nonce,
             Err(error) => return Ok(Err(error.into())),
         };
+        let tag_len = algorithm.tag_len();
         let body = (len - at) as usize;
         let plain = if seals {
             body
         } else {
-            body.saturating_sub(TAG_LEN)
+            body.saturating_sub(tag_len)
         };
         let lengths = PacketLengths::new(plain, header.len(), extra.len());
         if let Err(error) = lengths.check(algorithm) {
@@ -454,8 +490,8 @@ impl Machine<'_> {
         }
         let spare = (capacity - written) as usize;
         let appended = match op {
-            HostOp::PacketSeal => lengths.spare(TAG_LEN, spare).map(|()| TAG_LEN),
-            HostOp::PacketSealInto => packet_aead::sealed_len(plain, spare),
+            HostOp::PacketSeal => lengths.spare(tag_len, spare).map(|()| tag_len),
+            HostOp::PacketSealInto => packet_aead::sealed_len(plain, tag_len, spare),
             HostOp::PacketOpenInto => lengths.spare(plain, spare).map(|()| plain),
             _ => Ok(0),
         };
@@ -463,7 +499,7 @@ impl Machine<'_> {
             Ok(n) => n,
             Err(error) => return Ok(Err(error)),
         };
-        let scratch = lengths.scratch() as u64;
+        let scratch = lengths.scratch(algorithm) as u64;
         if scratch != 0
             && let Err(available) = self.admit(payer, scratch)
         {
@@ -473,24 +509,34 @@ impl Machine<'_> {
             }));
         }
         let header = &self.carrier_bytes(aad_source)[aad_at as usize..aad_end as usize];
-        let aad = [header, self.carrier_bytes(extra_source)].concat();
+        let extra = self.carrier_bytes(extra_source);
+        let joined;
+        let aad = match algorithm {
+            Algorithm::Cm => (header, extra),
+            Algorithm::Aead(_) if header.is_empty() => (extra, [].as_slice()),
+            Algorithm::Aead(_) if extra.is_empty() => (header, [].as_slice()),
+            Algorithm::Aead(_) => {
+                joined = [header, extra].concat();
+                (joined.as_slice(), [].as_slice())
+            }
+        };
         let mut bytes = self.carrier_bytes(src)[at as usize..].to_vec();
         let outcome = if seals {
             let tag = cipher
-                .seal(nonce, &aad, &mut bytes)
+                .seal(nonce, aad, &mut bytes)
                 .expect("validated packet sizes");
             if let Payload::Sealer(counter, ..) = payload {
                 counter.commit(a[1]);
             }
-            bytes.extend(tag);
+            bytes.extend_from_slice(&tag[..tag_len]);
             self.put(if into { output + written } else { input + at }, &bytes);
             self.store(dst + 8, 8, written + appended as u64);
             Ok(appended)
-        } else if body < TAG_LEN {
+        } else if body < tag_len {
             Err(PacketError::Tampered)
         } else if into {
             let mut out = vec![MaybeUninit::uninit(); plain];
-            match cipher.open_into(nonce, &aad, &bytes, &mut out) {
+            match cipher.open_into(nonce, aad, &bytes, &mut out) {
                 Ok(()) => {
                     // SAFETY: a successful open initializes the whole destination.
                     let out = unsafe { std::slice::from_raw_parts(out.as_ptr().cast(), plain) };
@@ -503,14 +549,13 @@ impl Machine<'_> {
                 Err(_) => Err(PacketError::Tampered),
             }
         } else {
-            let (body, tag) = bytes.split_at_mut(plain);
-            let opened = cipher.open(nonce, &aad, body, (&*tag).try_into().unwrap());
-            if !body.is_empty() {
-                self.put(input + at, body);
+            let opened = cipher.open(nonce, aad, &mut bytes);
+            if plain != 0 {
+                self.put(input + at, &bytes[..plain]);
             }
             match opened {
-                Ok(()) => {
-                    self.store(dst + 8, 8, len - TAG_LEN as u64);
+                Ok(_) => {
+                    self.store(dst + 8, 8, len - tag_len as u64);
                     Ok(plain)
                 }
                 Err(_) => Err(PacketError::Tampered),

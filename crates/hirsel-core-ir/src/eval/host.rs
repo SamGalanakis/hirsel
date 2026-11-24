@@ -128,6 +128,8 @@ impl Machine<'_> {
             | HostOp::ScheduleFinished
             | HostOp::ScheduleVerifyFinished
             | HostOp::ScheduleDtls12
+            | HostOp::ScheduleImportSrtp
+            | HostOp::ScheduleSrtp
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

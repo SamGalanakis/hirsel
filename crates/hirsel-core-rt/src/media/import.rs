@@ -7,8 +7,9 @@ use crate::{
 };
 use hirsel_core_net::{
     ImportKind, ImportRefusal,
-    packet_epoch::{IssueError, SCHEDULE_CHARGE, traffic_profile},
-    packet_schedule,
+    packet_epoch::{IssueError, SCHEDULE_CHARGE},
+    packet_schedule::ImportProfile,
+    srtp_cipher::SrtpProfile,
 };
 
 /// # Safety
@@ -22,11 +23,36 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
     key: u64,
     site: u64,
 ) -> Outcome {
+    // SAFETY: forwarded from the checked Secret move.
+    unsafe { import(context, ImportKind::Traffic, profile, suite, key, site) }
+}
+
+/// # Safety
+/// The running context takes custody of a checked Secret designation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_import_srtp(
+    context: *mut Context,
+    profile: u64,
+    key: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: forwarded from the checked Secret move.
+    unsafe { import(context, ImportKind::Srtp, profile, 0, key, site) }
+}
+
+unsafe fn import(
+    context: *mut Context,
+    kind: ImportKind,
+    profile: u64,
+    suite: u64,
+    key: u64,
+    site: u64,
+) -> Outcome {
     // SAFETY: the source owns one live holder and passes it exclusively.
     unsafe { crate::process::deny_describe_capability(context) };
     let import = unsafe { secret::resolve(context, key) };
-    let prepared = import.begin_import(ImportKind::Traffic, || {
-        let (format, algorithm) = traffic_profile(profile, suite).ok_or(IssueError::Invalid)?;
+    let prepared = import.begin_import(kind, || {
+        let shape = ImportProfile::from_case(kind, profile, suite).ok_or(IssueError::Invalid)?;
         // SAFETY: the context is running during pre-admission.
         let charge = admit(unsafe { &*context }, SCHEDULE_CHARGE).map_err(|available| {
             IssueError::Capacity {
@@ -34,9 +60,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
                 available,
             }
         })?;
-        Ok((format, algorithm, charge))
+        Ok((shape, charge))
     });
-    let (authority, (format, algorithm, charge)) = match prepared {
+    let (authority, (shape, charge)) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             let mut outcome = match error {
@@ -58,9 +84,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
         let Some(bytes) = import.bytes.as_ref() else {
             unreachable!("a replay must supply the opaque delivery")
         };
-        state =
-            packet_schedule::Schedule::import_traffic(format, algorithm, authority, Some(bytes))
-                .ok();
+        state = shape.import(authority, Some(bytes)).ok();
         if state.is_some() {
             Outcome::default()
         } else {
@@ -75,10 +99,14 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
             {
                 use super::capture::{self, Delivery};
                 use crate::provider::Buffer;
+                let operation = match kind {
+                    ImportKind::Traffic => 2,
+                    ImportKind::Srtp => 16,
+                };
                 let (kind, id) = import.origin.wire();
                 let policy = import.policy.text();
                 let args = capture::arguments(
-                    2,
+                    operation,
                     0,
                     &[
                         &[kind],
@@ -97,7 +125,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
                 let answer = unsafe {
                     capture::issue(
                         context,
-                        2,
+                        operation,
                         args,
                         Delivery::Child {
                             admits_invalid: true,
@@ -129,14 +157,53 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
             0
         }
     };
-    let state = state.unwrap_or_else(|| {
-        packet_schedule::Schedule::import_traffic(format, algorithm, authority, None).unwrap()
-    });
+    let state = state.unwrap_or_else(|| shape.import(authority, None).unwrap());
     // SAFETY: this call still owns the admitted charge, tied to its running context.
     let charge = track(unsafe { &*context }, charge);
     owned(Schedule {
         state,
         origin,
         _charge: charge,
+    })
+}
+
+/// # Safety
+/// The running context holds an exclusive loan of a live schedule.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_srtp(
+    context: *mut Context,
+    parent: u64,
+    profile: u64,
+    site: u64,
+) -> Outcome {
+    let Some(selected) = SrtpProfile::from_case(profile) else {
+        return refusal(IssueError::Invalid);
+    };
+    // SAFETY: the checked caller lends its schedule exclusively.
+    let parent = unsafe { super::loan_mut::<Schedule>(parent) };
+    if let Err(error) = parent.state.check_srtp() {
+        return refusal(error);
+    }
+    let charge = match admit(unsafe { &*context }, SCHEDULE_CHARGE) {
+        Ok(charge) => charge,
+        Err(available) => {
+            return refusal(IssueError::Capacity {
+                requested: SCHEDULE_CHARGE,
+                available,
+            });
+        }
+    };
+    // SAFETY: the running context pins the parent and profile through delivery.
+    let origin = match unsafe {
+        super::issue_child(context, parent.origin, 1, &[profile.to_le_bytes()], site)
+    } {
+        Ok(origin) => origin,
+        Err(outcome) => return outcome,
+    };
+    let state = parent.state.srtp(selected);
+    owned(Schedule {
+        state,
+        origin,
+        _charge: track(unsafe { &*context }, charge),
     })
 }

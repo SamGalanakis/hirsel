@@ -11,7 +11,10 @@ impl Cx<'_, '_, '_> {
     ) -> Option<ValueId> {
         if matches!(
             op,
-            HostOp::ScheduleTls13 | HostOp::ScheduleDtls12 | HostOp::ScheduleImportTraffic
+            HostOp::ScheduleTls13
+                | HostOp::ScheduleDtls12
+                | HostOp::ScheduleImportTraffic
+                | HostOp::ScheduleImportSrtp
         ) {
             return self.runtime_media_constructor(op, f, values, result, n);
         }
@@ -26,6 +29,7 @@ impl Cx<'_, '_, '_> {
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask
             | HostOp::ScheduleRetire
+            | HostOp::ScheduleSrtp
             | HostOp::ScheduleFinished
             | HostOp::ScheduleVerifyFinished => Some(1),
             _ => None,
@@ -149,7 +153,7 @@ impl Cx<'_, '_, '_> {
         let word = Ty::Scalar(Scalar::U64);
         let profile = self.case_as_word(at, n);
         let mut args = vec![Arg::Value(profile)];
-        if op != HostOp::ScheduleDtls12 {
+        if matches!(op, HostOp::ScheduleTls13 | HostOp::ScheduleImportTraffic) {
             let suite_join = self.new_block(&[word]);
             for case in 0..4 {
                 let otherwise = if case < 3 {
@@ -172,7 +176,10 @@ impl Cx<'_, '_, '_> {
             self.start(suite_join);
             args.push(Arg::Value(self.block_params(suite_join)[0]));
         }
-        let owned_index = if op == HostOp::ScheduleImportTraffic {
+        let owned_index = if matches!(
+            op,
+            HostOp::ScheduleImportTraffic | HostOp::ScheduleImportSrtp
+        ) {
             1
         } else {
             let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, values[1], n)?;

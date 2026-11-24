@@ -64,10 +64,50 @@ impl NonceFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Nonce {
+    Aead([u8; 12]),
+    Cm([u8; 16]),
+}
+
+pub(super) enum Base {
+    Aead(Zeroizing<[u8; 12]>),
+    Cm(Zeroizing<[u8; 14]>),
+}
+
+impl Base {
+    fn nonce(&self, format: NonceFormat, domain: u64, seq: u64) -> Nonce {
+        match self {
+            Self::Aead(base) => Nonce::Aead(format.nonce(base, domain, seq)),
+            Self::Cm(salt) => Nonce::Cm(cm_nonce(format, salt, domain as u32, seq)),
+        }
+    }
+}
+
+pub(super) fn cm_nonce(format: NonceFormat, salt: &[u8; 14], ssrc: u32, seq: u64) -> [u8; 16] {
+    let start = match format {
+        NonceFormat::SrtpRtp => 8,
+        NonceFormat::SrtpRtcp => 10,
+        _ => unreachable!("CM is confined to RTP and RTCP"),
+    };
+    let mut nonce = [0; 16];
+    nonce[..14].copy_from_slice(salt);
+    for (byte, word) in nonce[4..8].iter_mut().zip(ssrc.to_be_bytes()) {
+        *byte ^= word;
+    }
+    for (byte, word) in nonce[start..14]
+        .iter_mut()
+        .zip(&seq.to_be_bytes()[start - 6..])
+    {
+        *byte ^= word;
+    }
+    nonce
+}
+
 /// A sender's key lives independently of its owner's issuance ledger.
 pub struct SenderCounter {
     format: NonceFormat,
-    base: Zeroizing<[u8; 12]>,
+    base: Base,
     domain: u64,
     floor: u64,
     last: Option<u64>,
@@ -75,9 +115,18 @@ pub struct SenderCounter {
 
 impl SenderCounter {
     pub fn new(format: NonceFormat, base: [u8; 12], domain: u64, floor: u64) -> Option<Self> {
-        format.valid_domain(domain).then(|| Self {
+        Self::with_base(format, Base::Aead(Zeroizing::new(base)), domain, floor)
+    }
+
+    pub(super) fn with_base(
+        format: NonceFormat,
+        base: Base,
+        domain: u64,
+        floor: u64,
+    ) -> Option<Self> {
+        format.valid_domain(domain).then_some(Self {
             format,
-            base: Zeroizing::new(base),
+            base,
             domain,
             floor,
             last: None,
@@ -88,6 +137,13 @@ impl SenderCounter {
     /// after it validates lengths and reserves the caller's destination and
     /// any AAD scratch, at the same point where the operation issues.
     pub fn check(&self, seq: u64) -> Result<[u8; 12], CounterError> {
+        self.packet_nonce(seq).map(|nonce| match nonce {
+            Nonce::Aead(bytes) => bytes,
+            Nonce::Cm(_) => unreachable!("use packet_nonce for CM"),
+        })
+    }
+
+    pub fn packet_nonce(&self, seq: u64) -> Result<Nonce, CounterError> {
         if seq > self.format.sequence_max(true) {
             return Err(CounterError::Range);
         }
@@ -98,7 +154,7 @@ impl SenderCounter {
             NonceFormat::Dtls12 { epoch } => (u64::from(epoch) << 48) | seq,
             _ => seq,
         };
-        Ok(self.format.nonce(&self.base, self.domain, wire_seq))
+        Ok(self.base.nonce(self.format, self.domain, wire_seq))
     }
 
     pub fn commit(&mut self, seq: u64) {
@@ -109,21 +165,29 @@ impl SenderCounter {
 /// Openers authenticate a caller-supplied sequence without retaining it.
 pub struct ReceiverNonce {
     format: NonceFormat,
-    base: Zeroizing<[u8; 12]>,
+    base: Base,
 }
 
 impl ReceiverNonce {
     pub fn new(format: NonceFormat, base: [u8; 12]) -> Self {
-        Self {
-            format,
-            base: Zeroizing::new(base),
-        }
+        Self::with_base(format, Base::Aead(Zeroizing::new(base)))
+    }
+
+    pub(super) fn with_base(format: NonceFormat, base: Base) -> Self {
+        Self { format, base }
     }
 
     pub fn nonce(&self, domain: u64, seq: u64) -> Result<[u8; 12], CounterError> {
+        self.packet_nonce(domain, seq).map(|nonce| match nonce {
+            Nonce::Aead(bytes) => bytes,
+            Nonce::Cm(_) => unreachable!("use packet_nonce for CM"),
+        })
+    }
+
+    pub fn packet_nonce(&self, domain: u64, seq: u64) -> Result<Nonce, CounterError> {
         if !self.format.valid_domain(domain) || seq > self.format.sequence_max(false) {
             return Err(CounterError::Range);
         }
-        Ok(self.format.nonce(&self.base, domain, seq))
+        Ok(self.base.nonce(self.format, domain, seq))
     }
 }

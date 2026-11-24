@@ -549,6 +549,8 @@ tags!(HostOp {
     162 => ScheduleFinished,
     163 => ScheduleVerifyFinished,
     164 => ScheduleDtls12,
+    165 => ScheduleImportSrtp,
+    166 => ScheduleSrtp,
 });
 
 tags!(RaiseCause {

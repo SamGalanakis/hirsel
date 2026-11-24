@@ -5,7 +5,7 @@ use crate::{
 };
 use hirsel_core_net::{
     packet_aead::{self, PacketError, PacketLengths},
-    packet_cipher::TAG_LEN,
+    packet_protection::{Aad, Algorithm},
 };
 use std::{mem::MaybeUninit, slice};
 
@@ -60,15 +60,16 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             return fault(&mut *context, site);
         };
         let sealer = media::loan_mut::<super::schedule::Sealer>(sealer);
+        let tag_len = sealer.algorithm.tag_len();
         let extra = crate::tls::bytes(&*extra);
-        let nonce = match sealer.counter.check(seq).map_err(PacketError::from) {
+        let nonce = match sealer.counter.packet_nonce(seq).map_err(PacketError::from) {
             Ok(nonce) => nonce,
             Err(error) => return result(Err(error)),
         };
         let lengths = PacketLengths::new(buf.len - aad.end, aad.len(), extra.len());
         if let Err(error) = lengths
             .check(sealer.algorithm)
-            .and_then(|()| lengths.spare(TAG_LEN, buf.capacity - buf.len))
+            .and_then(|()| lengths.spare(tag_len, buf.capacity - buf.len))
         {
             return result(Err(error));
         }
@@ -79,7 +80,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             let header = &bytes[aad.clone()];
             let body = &bytes[aad.end..];
             let body_len = body.len();
-            let append = body_len + TAG_LEN;
+            let append = body_len + tag_len;
             let args = capture::arguments(
                 6,
                 (buf.capacity - buf.len) as u64,
@@ -98,13 +99,13 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
                 len: 0,
                 capacity: append,
             };
-            let answer = with_aad(&*context, header, extra, |aad| {
+            let answer = with_aad(&*context, sealer.algorithm, header, extra, |aad| {
                 capture::issue(
                     context,
                     6,
                     args,
                     Delivery::Packet {
-                        value: TAG_LEN as u64,
+                        value: tag_len as u64,
                         bytes: append,
                         tampered: None,
                     },
@@ -118,8 +119,8 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
                             .seal(nonce, aad, body)
                             .expect("validated packet sizes");
                         out.len = body_len;
-                        crate::secret::key_share::append(out, &tag);
-                        result(Ok(TAG_LEN))
+                        crate::secret::key_share::append(out, &tag[..tag_len]);
+                        result(Ok(tag_len))
                     },
                     site,
                 )
@@ -127,7 +128,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             let answer = answer.unwrap_or_else(|error| result(Err(error)));
             if answer.status == 0 && answer.error == crate::provider::IoError::OK {
                 sealer.counter.commit(seq);
-                buf.len += TAG_LEN;
+                buf.len += tag_len;
             }
             return answer;
         }
@@ -137,7 +138,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             slice::from_raw_parts_mut(buf.data, buf.len)
         };
         let (header, body) = initialized.split_at_mut(aad.end);
-        let sealed = with_aad(&*context, &header[aad], extra, |aad| {
+        let sealed = with_aad(&*context, sealer.algorithm, &header[aad], extra, |aad| {
             sealer.counter.commit(seq);
             sealer
                 .cipher
@@ -148,9 +149,9 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
         });
         match sealed {
             Ok(tag) => {
-                spare(buf, TAG_LEN).write_copy_of_slice(&tag);
-                buf.len += TAG_LEN;
-                result(Ok(TAG_LEN))
+                spare(buf, tag_len).write_copy_of_slice(&tag[..tag_len]);
+                buf.len += tag_len;
+                result(Ok(tag_len))
             }
             Err(error) => result(Err(error)),
         }
@@ -183,7 +184,8 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
             return fault(&mut *context, site);
         };
         let sealer = media::loan_mut::<super::schedule::Sealer>(sealer);
-        let nonce = match sealer.counter.check(seq).map_err(PacketError::from) {
+        let tag_len = sealer.algorithm.tag_len();
+        let nonce = match sealer.counter.packet_nonce(seq).map_err(PacketError::from) {
             Ok(nonce) => nonce,
             Err(error) => return result(Err(error)),
         };
@@ -191,7 +193,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
         let lengths = PacketLengths::new(plain.len(), aad.len(), extra.len());
         let append = match lengths
             .check(sealer.algorithm)
-            .and_then(|()| packet_aead::sealed_len(plain.len(), available))
+            .and_then(|()| packet_aead::sealed_len(plain.len(), tag_len, available))
         {
             Ok(append) => append,
             Err(error) => return result(Err(error)),
@@ -222,7 +224,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
                 len: 0,
                 capacity: append,
             };
-            let answer = with_aad(&*context, header, extra, |aad| {
+            let answer = with_aad(&*context, sealer.algorithm, header, extra, |aad| {
                 capture::issue(
                     context,
                     7,
@@ -255,7 +257,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
             return answer;
         }
         let tail = spare(dst, append);
-        let sealed = with_aad(&*context, header, extra, |aad| {
+        let sealed = with_aad(&*context, sealer.algorithm, header, extra, |aad| {
             sealer.counter.commit(seq);
             sealer
                 .cipher
@@ -293,13 +295,18 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
             return fault(&mut *context, site);
         };
         let opener = media::loan::<super::schedule::Opener>(opener);
+        let tag_len = opener.algorithm.tag_len();
         let extra = crate::tls::bytes(&*extra);
-        let nonce = match opener.nonce.nonce(domain, seq).map_err(PacketError::from) {
+        let nonce = match opener
+            .nonce
+            .packet_nonce(domain, seq)
+            .map_err(PacketError::from)
+        {
             Ok(nonce) => nonce,
             Err(error) => return result(Err(error)),
         };
         let lengths = PacketLengths::new(
-            (buf.len - aad.end).saturating_sub(TAG_LEN),
+            (buf.len - aad.end).saturating_sub(tag_len),
             aad.len(),
             extra.len(),
         );
@@ -313,8 +320,8 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
             let header = &bytes[aad.clone()];
             let sealed = &bytes[aad.end..];
             let sealed_len = sealed.len();
-            let plain = sealed_len.saturating_sub(TAG_LEN);
-            let reason = if sealed_len < TAG_LEN { 1 } else { 2 };
+            let plain = sealed_len.saturating_sub(tag_len);
+            let reason = if sealed_len < tag_len { 1 } else { 2 };
             let args = capture::arguments(
                 8,
                 0,
@@ -334,7 +341,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
                 len: 0,
                 capacity: plain,
             };
-            let answer = with_aad(&*context, header, extra, |aad| {
+            let answer = with_aad(&*context, opener.algorithm, header, extra, |aad| {
                 capture::issue(
                     context,
                     8,
@@ -369,7 +376,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
             let answer = answer.unwrap_or_else(|error| result(Err(error)));
             if answer.status == 0 {
                 if answer.error == crate::provider::IoError::OK {
-                    buf.len -= TAG_LEN;
+                    buf.len -= tag_len;
                 } else if answer.error == tampered(2).error && plain != 0 {
                     slice::from_raw_parts_mut(target.data, plain).fill(0);
                 }
@@ -382,18 +389,17 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
             slice::from_raw_parts_mut(buf.data, buf.len)
         };
         let (header, body) = initialized.split_at_mut(aad.end);
-        let opened = with_aad(&*context, &header[aad], extra, |aad| {
+        let opened = with_aad(&*context, opener.algorithm, &header[aad], extra, |aad| {
             opener
                 .cipher
                 .as_ref()
                 .expect("live packet key")
                 .open(nonce, aad, body)
-                .map(|plain| plain.len())
                 .map_err(|_| PacketError::Tampered)
         })
         .and_then(std::convert::identity);
         if opened.is_ok() {
-            buf.len -= TAG_LEN;
+            buf.len -= tag_len;
         }
         result(opened)
     }
@@ -421,14 +427,19 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
             return fault(&mut *context, site);
         };
         let opener = media::loan::<super::schedule::Opener>(opener);
+        let tag_len = opener.algorithm.tag_len();
         let extra = crate::tls::bytes(&*extra);
         let dst = &mut *dst;
-        let nonce = match opener.nonce.nonce(domain, seq).map_err(PacketError::from) {
+        let nonce = match opener
+            .nonce
+            .packet_nonce(domain, seq)
+            .map_err(PacketError::from)
+        {
             Ok(nonce) => nonce,
             Err(error) => return result(Err(error)),
         };
         let sealed = &src[aad.end..];
-        let bytes = sealed.len().saturating_sub(TAG_LEN);
+        let bytes = sealed.len().saturating_sub(tag_len);
         let lengths = PacketLengths::new(bytes, aad.len(), extra.len());
         if let Err(error) = lengths
             .check(opener.algorithm)
@@ -440,7 +451,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
         if opener.origin != 0 {
             use super::capture::{self, Delivery};
             let header = &src[aad.clone()];
-            let reason = if sealed.len() < TAG_LEN { 1 } else { 2 };
+            let reason = if sealed.len() < tag_len { 1 } else { 2 };
             let args = capture::arguments(
                 9,
                 (dst.capacity - dst.len) as u64,
@@ -460,7 +471,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
                 len: 0,
                 capacity: bytes,
             };
-            let answer = with_aad(&*context, header, extra, |aad| {
+            let answer = with_aad(&*context, opener.algorithm, header, extra, |aad| {
                 capture::issue(
                     context,
                     9,
@@ -499,7 +510,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
             return answer;
         }
         let tail = spare(dst, bytes);
-        let opened = with_aad(&*context, &src[aad], extra, |aad| {
+        let opened = with_aad(&*context, opener.algorithm, &src[aad], extra, |aad| {
             opener
                 .cipher
                 .as_ref()
@@ -525,15 +536,19 @@ fn tampered(reason: u32) -> Outcome {
 
 fn with_aad<T>(
     context: &Context,
+    algorithm: Algorithm,
     header: &[u8],
     extra: &[u8],
-    use_aad: impl FnOnce(&[u8]) -> T,
+    use_aad: impl FnOnce(Aad<'_>) -> T,
 ) -> Result<T, PacketError> {
+    if matches!(algorithm, Algorithm::Cm) {
+        return Ok(use_aad((header, extra)));
+    }
     if header.is_empty() {
-        return Ok(use_aad(extra));
+        return Ok(use_aad((extra, &[])));
     }
     if extra.is_empty() {
-        return Ok(use_aad(header));
+        return Ok(use_aad((header, &[])));
     }
     let bytes = header.len() + extra.len();
     let _charge = super::schedule::admit(context, bytes as u64).map_err(|available| {
@@ -545,7 +560,7 @@ fn with_aad<T>(
     let mut joined = Vec::with_capacity(bytes);
     joined.extend_from_slice(header);
     joined.extend_from_slice(extra);
-    Ok(use_aad(&joined))
+    Ok(use_aad((&joined, &[])))
 }
 
 /// # Safety

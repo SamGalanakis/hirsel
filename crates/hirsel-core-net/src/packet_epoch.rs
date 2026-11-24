@@ -2,11 +2,14 @@
 use crate::{
     ImportUse,
     packet_cipher::HeaderMask,
-    packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
+    packet_nonce::{Base, NonceFormat, ReceiverNonce, SenderCounter},
+    packet_protection::{Algorithm, Key},
     secret_aead::AeadAlg,
+    srtp_cipher::{SrtpProfile, SrtpSessionKey},
     tls_kdf::{Side, Tls13Labels, Tls13PacketKeys, Tls13Traffic},
 };
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 pub const SCHEDULE_CHARGE: u64 = 512;
 pub const CIPHER_CHARGE: u64 = 1024;
@@ -17,19 +20,47 @@ pub enum DirectionKeys {
     Missing,
     Opaque,
     Live(Tls13PacketKeys),
+    Cm(SrtpSessionKey),
 }
 
 impl DirectionKeys {
-    fn key(&self) -> Result<Option<&Tls13PacketKeys>, IssueError> {
+    fn validate(&self) -> Result<(), IssueError> {
         match self {
             Self::Missing => Err(IssueError::Invalid),
-            Self::Opaque => Ok(None),
-            Self::Live(keys) => Ok(Some(keys)),
+            _ => Ok(()),
+        }
+    }
+
+    fn key(&self) -> Option<Key<'_>> {
+        match self {
+            Self::Live(keys) => Some(Key::Aead(keys.payload())),
+            Self::Cm(keys) => Some(Key::Cm(keys)),
+            Self::Opaque => None,
+            Self::Missing => unreachable!("the caller validated direction"),
+        }
+    }
+
+    fn base(&self, algorithm: Algorithm) -> Base {
+        match algorithm {
+            Algorithm::Aead(_) => {
+                let iv = match self {
+                    Self::Live(keys) => keys.iv(),
+                    _ => [0; 12],
+                };
+                Base::Aead(Zeroizing::new(iv))
+            }
+            Algorithm::Cm => {
+                let salt = match self {
+                    Self::Cm(keys) => *keys.salt(),
+                    _ => [0; 14],
+                };
+                Base::Cm(Zeroizing::new(salt))
+            }
         }
     }
 
     fn erase(&mut self) {
-        if matches!(self, Self::Live(_)) {
+        if matches!(self, Self::Live(_) | Self::Cm(_)) {
             *self = Self::Opaque;
         }
     }
@@ -51,7 +82,7 @@ pub enum ImportError {
 
 pub struct Epoch<C> {
     format: NonceFormat,
-    algorithm: AeadAlg,
+    algorithm: Algorithm,
     send: DirectionKeys,
     receive: DirectionKeys,
     domains: Option<BTreeMap<u64, C>>,
@@ -59,15 +90,15 @@ pub struct Epoch<C> {
 
 pub struct Sealer<'a, C> {
     pub counter: SenderCounter,
-    pub algorithm: AeadAlg,
-    pub key: Option<&'a [u8]>,
+    pub algorithm: Algorithm,
+    pub key: Option<Key<'a>>,
     pub charge: C,
 }
 
 pub struct Opener<'a, C> {
     pub nonce: ReceiverNonce,
-    pub algorithm: AeadAlg,
-    pub key: Option<&'a [u8]>,
+    pub algorithm: Algorithm,
+    pub key: Option<Key<'a>>,
     pub charge: C,
 }
 
@@ -188,6 +219,15 @@ impl<C> Epoch<C> {
         send: DirectionKeys,
         receive: DirectionKeys,
     ) -> Self {
+        Self::with_algorithm(format, Algorithm::Aead(algorithm), send, receive)
+    }
+
+    fn with_algorithm(
+        format: NonceFormat,
+        algorithm: Algorithm,
+        send: DirectionKeys,
+        receive: DirectionKeys,
+    ) -> Self {
         Self {
             format,
             algorithm,
@@ -197,6 +237,16 @@ impl<C> Epoch<C> {
         }
     }
 
+    pub(super) fn srtp(
+        format: NonceFormat,
+        profile: SrtpProfile,
+        send: DirectionKeys,
+        receive: DirectionKeys,
+    ) -> Self {
+        let algorithm = profile.algorithm().map_or(Algorithm::Cm, Algorithm::Aead);
+        Self::with_algorithm(format, algorithm, send, receive)
+    }
+
     /// The caller admits the cipher and entry together, then partitions their charges.
     pub fn sealer(
         &mut self,
@@ -204,7 +254,7 @@ impl<C> Epoch<C> {
         floor: u64,
         admit: impl FnOnce(u64) -> Result<(C, C), u64>,
     ) -> Result<Sealer<'_, C>, IssueError> {
-        let keys = self.send.key()?;
+        self.send.validate()?;
         if !self.format.valid_domain(domain) {
             return Err(IssueError::Invalid);
         }
@@ -219,18 +269,14 @@ impl<C> Epoch<C> {
                 requested,
                 available,
             })?;
-        let counter = SenderCounter::new(
-            self.format,
-            keys.map_or([0; 12], Tls13PacketKeys::iv),
-            domain,
-            floor,
-        )
-        .unwrap();
+        let counter =
+            SenderCounter::with_base(self.format, self.send.base(self.algorithm), domain, floor)
+                .unwrap();
         entry.insert(domain_charge);
         Ok(Sealer {
             counter,
             algorithm: self.algorithm,
-            key: keys.map(Tls13PacketKeys::payload),
+            key: self.send.key(),
             charge,
         })
     }
@@ -239,7 +285,7 @@ impl<C> Epoch<C> {
         &self,
         admit: impl FnOnce(u64) -> Result<C, u64>,
     ) -> Result<Opener<'_, C>, IssueError> {
-        let keys = self.receive.key()?;
+        self.receive.validate()?;
         if self.domains.is_none() {
             return Err(IssueError::Spent);
         }
@@ -247,11 +293,11 @@ impl<C> Epoch<C> {
             requested: CIPHER_CHARGE,
             available,
         })?;
-        let nonce = ReceiverNonce::new(self.format, keys.map_or([0; 12], Tls13PacketKeys::iv));
+        let nonce = ReceiverNonce::with_base(self.format, self.receive.base(self.algorithm));
         Ok(Opener {
             nonce,
             algorithm: self.algorithm,
-            key: keys.map(Tls13PacketKeys::payload),
+            key: self.receive.key(),
             charge,
         })
     }
@@ -267,7 +313,8 @@ impl<C> Epoch<C> {
         ) {
             return Err(IssueError::Invalid);
         }
-        let keys = if local { &self.send } else { &self.receive }.key()?;
+        let direction = if local { &self.send } else { &self.receive };
+        direction.validate()?;
         if self.domains.is_none() {
             return Err(IssueError::Spent);
         }
@@ -275,8 +322,13 @@ impl<C> Epoch<C> {
             requested: MASK_CHARGE,
             available,
         })?;
-        let mask =
-            keys.map(|keys| HeaderMask::new(self.algorithm, keys.header().unwrap()).unwrap());
+        let mask = match (self.algorithm, direction) {
+            (Algorithm::Aead(algorithm), DirectionKeys::Live(keys)) => {
+                Some(HeaderMask::new(algorithm, keys.header().unwrap()).unwrap())
+            }
+            (_, DirectionKeys::Opaque) => None,
+            _ => unreachable!("validated header mask profile and direction"),
+        };
         Ok((mask, charge))
     }
 

@@ -7,13 +7,14 @@ use hirsel_core_net::{
     packet_cipher::HeaderMask,
     packet_epoch::{DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
     packet_nonce::{ReceiverNonce, SenderCounter},
+    packet_protection::{self, Algorithm},
     packet_schedule,
-    secret_aead::AeadAlg,
     tls_kdf::Side,
 };
 
 const INITIAL: usize = 0;
 pub(super) type Paid = media::Payment;
+type Cipher = packet_protection::Cipher<crate::os_tls::packet_cipher::PacketCipher>;
 
 pub(super) struct Schedule {
     pub(super) state: packet_schedule::Schedule<Paid>,
@@ -23,16 +24,16 @@ pub(super) struct Schedule {
 
 pub(super) struct Sealer {
     pub(super) counter: SenderCounter,
-    pub(super) algorithm: AeadAlg,
-    pub(super) cipher: Option<crate::os_tls::packet_cipher::PacketCipher>,
+    pub(super) algorithm: Algorithm,
+    pub(super) cipher: Option<Cipher>,
     pub(super) origin: u64,
     _charge: Paid,
 }
 
 pub(super) struct Opener {
     pub(super) nonce: ReceiverNonce,
-    pub(super) algorithm: AeadAlg,
-    pub(super) cipher: Option<crate::os_tls::packet_cipher::PacketCipher>,
+    pub(super) algorithm: Algorithm,
+    pub(super) cipher: Option<Cipher>,
     pub(super) origin: u64,
     _charge: Paid,
 }
@@ -169,9 +170,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
             owned(Sealer {
                 counter: issued.counter,
                 algorithm: issued.algorithm,
-                cipher: issued.key.map(|key| {
-                    crate::os_tls::packet_cipher::PacketCipher::new(issued.algorithm, key).unwrap()
-                }),
+                cipher: issued
+                    .key
+                    .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
                 origin,
                 _charge: issued.charge,
             })
@@ -210,9 +211,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
             owned(Opener {
                 nonce: issued.nonce,
                 algorithm: issued.algorithm,
-                cipher: issued.key.map(|key| {
-                    crate::os_tls::packet_cipher::PacketCipher::new(issued.algorithm, key).unwrap()
-                }),
+                cipher: issued
+                    .key
+                    .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
                 origin,
                 _charge: issued.charge,
             })

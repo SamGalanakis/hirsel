@@ -372,8 +372,12 @@ fn dtls13_seq_beyond_48_bits() {
     let (_, _) = receive.header_mask(false, |_| Ok(())).unwrap();
     let mut sealer = send.sealer(0, 0, |_| Ok(((), ()))).unwrap();
     let opener = receive.opener(|_| Ok(())).unwrap();
-    let encryption = PacketCipher::new(algorithm, sealer.key.unwrap()).unwrap();
-    let decryption = PacketCipher::new(algorithm, opener.key.unwrap()).unwrap();
+    use crate::packet_protection::Key;
+    let (Some(Key::Aead(send)), Some(Key::Aead(receive))) = (sealer.key, opener.key) else {
+        panic!("DTLS 1.3 uses AEAD keys");
+    };
+    let encryption = PacketCipher::new(algorithm, send).unwrap();
+    let decryption = PacketCipher::new(algorithm, receive).unwrap();
     let aad = [0x2c, 0, 1];
     let plain = b"dtls13 width";
     // Python hmac with RFC 9147 §5.9's label prefix, and OpenSSL AES-GCM.

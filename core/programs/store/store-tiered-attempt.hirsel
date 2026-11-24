@@ -1,0 +1,67 @@
+type TieredAttemptStop: send = AttemptMiss(TieredTarget) | AttemptPinLimit(Capacity) | AttemptAllocation(Capacity)
+
+type TieredTouchSet: send {
+    stamps: Map[u64, ()],
+    touched_bytes: u64,
+    slots: u64,
+    partition: u64,
+    frames: List[Arc[TieredFrame]],
+    stopped: Option[TieredAttemptStop]
+}
+
+fn tiered_touch_set(partition: u64, initial: u64) -> Result[TieredTouchSet, Capacity] {
+    let mut stamps: Map[u64, ()] = map.new()
+    let mut frames: List[Arc[TieredFrame]] = list.new()
+    map.try_reserve(mut stamps, initial)?
+    list.try_reserve(mut frames, initial)?
+    Ok(TieredTouchSet(stamps: take stamps, touched_bytes: 0, slots: initial, partition: partition, frames: take frames, stopped: None))
+}
+
+fn tiered_touch_grow(mut attempt: TieredTouchSet) -> Result[(), Capacity] {
+    let growth = order.max(attempt.slots, 1u64)
+    map.try_reserve(mut attempt.stamps, growth)?
+    list.try_reserve(mut attempt.frames, growth)?
+    attempt.slots = int.saturating_add(attempt.slots, growth)
+    Ok(())
+}
+
+// Hot and Cold payloads use one first-touch counter. A Hot PAGE passes the
+// image length, a Hot BLOB passes 8 + value length, and Cold uses the edge.
+fn tiered_touch(mut attempt: TieredTouchSet, stamp: u64, payload: u64) -> bool {
+    if let Some(_) = attempt.stopped {
+        return false
+    }
+    if map.contains(attempt.stamps, stamp) {
+        return true
+    }
+    if map.len(attempt.stamps) == attempt.slots {
+        if let Error(problem) = tiered_touch_grow(mut attempt) {
+            attempt.stopped = Some(AttemptAllocation(problem))
+            return false
+        }
+    }
+    map.insert(mut attempt.stamps, stamp, ())
+    attempt.touched_bytes = int.saturating_add(attempt.touched_bytes, 16 + payload)
+    if attempt.touched_bytes > attempt.partition {
+        attempt.stopped = Some(AttemptPinLimit(Capacity(requested: attempt.touched_bytes, available: attempt.partition)))
+        return false
+    }
+    true
+}
+
+fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], path: String, target: TieredTarget) -> Result[Option[Arc[TieredFrame]], Error] {
+    let facts = tiered_frame_id(target)
+    let was_touched = map.contains(attempt.stamps, facts.stamp)
+    if !tiered_touch(mut attempt, facts.stamp, facts.len) {
+        return Ok(None)
+    }
+    let Some(frame) = map.get(visible, tiered_cache_key(facts)) else {
+        attempt.stopped = Some(AttemptMiss(clone(target)))
+        return Ok(None)
+    }
+    verify_tiered_edge(path, target, frame.identity)?
+    if !was_touched {
+        list.push(mut attempt.frames, arc.share(frame))
+    }
+    Ok(Some(arc.share(frame)))
+}

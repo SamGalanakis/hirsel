@@ -484,27 +484,43 @@ pub fn add(mut b: Builder, kind: u16, value: Bytes, mut out: Bytes) -> Result[()
 }
 
 pub fn add_xor_addr(mut b: Builder, kind: u16, a: Addr, mut out: Bytes) -> Result[(), Error] {
-    let len: u64 = match a.ip {
+    let data = reserve_attr(mut b, kind, xor_addr_len(a), mut out)?
+    put_xor_addr(mut out, data, a, b.transaction)
+    Ok(())
+}
+
+/// The value length of an XOR address attribute: 8 for IPv4, 20 for IPv6.
+pub fn xor_addr_len(a: Addr) -> u64 {
+    match a.ip {
         V4(_) => 8,
         V6(_, _) => 20,
     }
-    let data = reserve_attr(mut b, kind, len, mut out)?
-    out[data] = 0
-    list.set_word_be(mut out, data + 2, a.port ^ 0x2112)
+}
+
+/// Write an XOR address attribute value at out[at..] for the message's transaction.
+pub fn put_xor_addr(mut out: Bytes, at: u64, a: Addr, tx: Transaction) {
+    out[at] = 0
+    list.set_word_be(mut out, at + 2, a.port ^ 0x2112)
     match a.ip {
         V4(ip) => {
-            out[data + 1] = 1
-            list.set_word_be(mut out, data + 4, ip ^ COOKIE)
+            out[at + 1] = 1
+            list.set_word_be(mut out, at + 4, ip ^ COOKIE)
         },
         V6(hi, lo) => {
-            out[data + 1] = 2
+            out[at + 1] = 2
             let cookie: u64 = int.widen(COOKIE)
-            let mask = (cookie << 32) | int.widen(b.transaction.high)
-            list.set_word_be(mut out, data + 4, hi ^ mask)
-            list.set_word_be(mut out, data + 12, lo ^ b.transaction.low)
+            let mask = (cookie << 32) | int.widen(tx.high)
+            list.set_word_be(mut out, at + 4, hi ^ mask)
+            list.set_word_be(mut out, at + 12, lo ^ tx.low)
         },
     }
-    Ok(())
+}
+
+/// Decode an XOR address attribute value of a framed message (XOR-MAPPED-ADDRESS,
+/// XOR-PEER-ADDRESS, XOR-RELAYED-ADDRESS).
+pub fn xor_addr(packet: Bytes, value: Range) -> Result[Addr, Error] {
+    let tx = Transaction(high: list.word_be(packet, 8), low: list.word_be(packet, 12))
+    mapped_address(packet, value.lo, value.hi - value.lo, tx, true)
 }
 
 pub fn add_error(mut b: Builder, code: u16, mut out: Bytes) -> Result[(), Error] {

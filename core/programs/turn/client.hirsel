@@ -1,0 +1,642 @@
+// TURN-6: the client's state, timers and requests. Responses are in client_rx.hirsel.
+/// Bytes the caller leaves before lo for send_to (a Send indication to an IPv6 peer).
+pub const HEADROOM: u64 = 48
+
+const MS_NS: u64 = 1000000
+
+const MARGIN_NS: u64 = 60000000000
+
+const PERMISSION_REFRESH_NS: u64 = 240000000000
+
+const CHANNEL_REFRESH_NS: u64 = 540000000000
+
+const QUARANTINE_NS: u64 = 300000000000
+
+const FIRST_CHANNEL: u16 = 0x4000
+
+const LAST_CHANNEL: u16 = 0x4fff
+
+const NEVER: u64 = 0xffffffffffffffff
+
+/// Every request this client builds fits here; poll grows out to it.
+const REQUEST_MAX: u64 = 512
+
+pub type ClientConfig {
+    transport: Transport,
+    family: Family,
+    lifetime_s: u32,
+    rto_ms: u32,
+    rc: u8,
+    rm: u8,
+    ti_ms: u32,
+    channels: u16
+}
+
+pub type Allocation {
+    relayed: Addr,
+    mapped: Addr,
+    expires_ns: u64
+}
+
+pub type ClientState = Allocating | Allocated(Allocation) | Closed(Failure)
+
+pub type Received = Data(Addr, stun_ice.Range) | Control | Discarded
+
+/// refused counts the 403, 443 and 508 answers that dropped a permission or channel.
+pub type ClientDiscards {
+    malformed: u64,
+    stray: u64,
+    tampered: u64,
+    unauthenticated: u64,
+    unbound_channel: u64,
+    refused: u64
+}
+
+type Job = AllocateJob | RefreshJob(u32) | PermitJob(Addr) | BindJob(u16, Addr)
+
+/// One transaction. fresh: it takes a new transaction ID and its first send at the next poll.
+type Tx {
+    job: Job,
+    id: stun_ice.Transaction,
+    authed: bool,
+    stale: bool,
+    fresh: bool,
+    sends: u8,
+    start_ns: u64
+}
+
+type Perm {
+    peer: Addr,
+    installed: bool,
+    busy: bool,
+    refresh_ns: u64
+}
+
+/// A channel number in use (live) or lapsed at lapsed_ns and not reusable for 300 s.
+type Chan {
+    number: u16,
+    peer: Addr,
+    live: bool,
+    confirmed: bool,
+    busy: bool,
+    refresh_ns: u64,
+    lapsed_ns: u64
+}
+
+pub opaque type Client {
+    c: ClientConfig,
+    server: Addr,
+    username: Bytes,
+    password: Secret,
+    realm: Bytes,
+    nonce: Bytes,
+    algorithms: Bytes,
+    seen_algorithms: bool,
+    anonymity: bool,
+    algorithm: Algorithm,
+    key: Option[Secret],
+    key_realm: Bytes,
+    derivations: u64,
+    state: ClientState,
+    started: bool,
+    last_ns: u64,
+    txs: List[Tx],
+    refreshing: bool,
+    refresh_ns: u64,
+    perms: List[Perm],
+    chans: List[Chan],
+    ind_high: u32,
+    ind_low: u64,
+    close_pending: bool,
+    discards: ClientDiscards,
+    scratch: Bytes
+}
+
+pub fn client_defaults() -> ClientConfig {
+    ClientConfig(transport: Datagram, family: V4, lifetime_s: 600, rto_ms: 500, rc: 7, rm: 16, ti_ms: 39500, channels: 64)
+}
+
+/// password is the long-term password as a Secret with `digest`.
+pub fn client(c: ClientConfig, server: Addr, take username: Bytes, take password: Secret) -> Result[Client, TurnError] {
+    let n = list.len(username)
+    if n == 0 || n > 763 || c.rc == 0 || c.channels == 0 || c.channels > 4096 {
+        return Error(Config)
+    }
+    if c.transport == Datagram && c.rto_ms == 0 || c.transport == Stream && c.ti_ms == 0 {
+        return Error(Config)
+    }
+    if c.transport == Datagram && c.rc > 32 {
+        return Error(Config)
+    }
+    let mut scratch: Bytes = list.new()
+    list.try_reserve(mut scratch, REQUEST_MAX) ?=> Capacity
+    list.fill(mut scratch, REQUEST_MAX, 0)
+    Ok(Client(c: c, server: server, username: take username, password: take password, realm: list.new(), nonce: list.new(), algorithms: list.new(), seen_algorithms: false, anonymity: false, algorithm: Md5, key: None, key_realm: list.new(), derivations: 0, state: Allocating, started: false, last_ns: 0, txs: list.new(), refreshing: false, refresh_ns: NEVER, perms: list.new(), chans: list.new(), ind_high: 0, ind_low: 0, close_pending: false, discards: ClientDiscards(malformed: 0, stray: 0, tampered: 0, unauthenticated: 0, unbound_channel: 0, refused: 0), scratch: take scratch))
+}
+
+pub fn client_state(c: Client) -> ClientState {
+    c.state
+}
+
+pub fn client_discards(c: Client) -> ClientDiscards {
+    c.discards
+}
+
+/// The long-term keys this client has derived: one per realm and algorithm.
+pub fn client_derivations(c: Client) -> u64 {
+    c.derivations
+}
+
+fn closed_failure(c: Client) -> Option[Failure] {
+    if let Closed(f) = c.state {
+        Some(f)
+    } else {
+        None
+    }
+}
+
+fn allocated(c: Client) -> bool {
+    if let Allocated(_) = c.state {
+        true
+    } else {
+        false
+    }
+}
+
+/// Every caller-facing check before a call that needs an allocation.
+fn ready(mut c: Client, now: Now) -> Result[(), TurnError] {
+    if let Some(f) = closed_failure(c) {
+        return Error(Closed(f))
+    }
+    if now.mono_ns < c.last_ns {
+        return Error(Clock)
+    }
+    c.last_ns = now.mono_ns
+    if !allocated(c) {
+        return Error(NotAllocated)
+    }
+    Ok(())
+}
+
+/// Moves to Closed(f) and drops every transaction; the answer to the call that saw it.
+fn fail(mut c: Client, f: Failure) -> TurnError {
+    c.state = Closed(f)
+    list.clear(mut c.txs)
+    Closed(f)
+}
+
+/// TURN-3: every error other than these is fatal for a Client.
+fn fatal(mut c: Client, e: TurnError) -> TurnError {
+    match e {
+        Capacity(_) => e,
+        Config => e,
+        Clock => e,
+        NotAllocated => e,
+        Unpermitted(_) => e,
+        ChannelsFull => e,
+        StreamsFull => e,
+        Closed(f) => {
+            c.state = Closed(f)
+            list.clear(mut c.txs)
+            e
+        },
+        _ => {
+            let _ = fail(mut c, Local)
+            e
+        },
+    }
+}
+
+fn new_tx(c: Client, job: Job) -> Tx {
+    let authed = if let Some(_) = c.key {
+        true
+    } else {
+        false
+    }
+    Tx(job: job, id: stun_ice.Transaction(high: 0, low: 0), authed: authed, stale: false, fresh: true, sends: 0, start_ns: 0)
+}
+
+fn find_perm(c: Client, peer: Addr) -> Option[u64] {
+    for i in 0u64 .. list.len(c.perms) {
+        if c.perms[i].peer.ip == peer.ip {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Install a permission for peer's IP, refreshed every 240 s while the client lives.
+pub fn permit(mut c: Client, peer: Addr, now: Now) -> Result[(), TurnError] {
+    ready(mut c, now)?
+    if let Some(_) = find_perm(c, peer) {
+        return Ok(())
+    }
+    let ip_only = Addr(ip: peer.ip, port: 0)
+    list.try_reserve(mut c.perms, 1) ?=> Capacity
+    list.try_reserve(mut c.txs, 1) ?=> Capacity
+    list.push(mut c.perms, Perm(peer: ip_only, installed: false, busy: true, refresh_ns: NEVER))
+    let tx = new_tx(c, PermitJob(ip_only))
+    list.push(mut c.txs, tx)
+    Ok(())
+}
+
+fn number_free(c: Client, n: u16, now_ns: u64) -> bool {
+    for i in 0u64 .. list.len(c.chans) {
+        let ch = c.chans[i]
+        if ch.number == n && (ch.live || now_ns < ch.lapsed_ns + QUARANTINE_NS) {
+            return false
+        }
+    }
+    true
+}
+
+/// Bind the lowest free channel number from 0x4000 to peer, and permit its IP.
+pub fn bind(mut c: Client, peer: Addr, now: Now) -> Result[u16, TurnError] {
+    ready(mut c, now)?
+    let mut live = 0u64
+    let mut i = 0u64
+    while i < list.len(c.chans) {
+        let ch = c.chans[i]
+        if ch.live && ch.peer == peer {
+            return Ok(ch.number)
+        }
+        if !ch.live && now.mono_ns >= ch.lapsed_ns + QUARANTINE_NS {
+            let _ = list.swap_remove(mut c.chans, i)
+            continue
+        }
+        if ch.live {
+            live += 1
+        }
+        i += 1
+    }
+    let most: u64 = int.widen(c.c.channels)
+    if live >= most {
+        return Error(ChannelsFull)
+    }
+    let mut n = FIRST_CHANNEL
+    while !number_free(c, n, now.mono_ns) {
+        if n == LAST_CHANNEL {
+            return Error(ChannelsFull)
+        }
+        n += 1
+    }
+    permit(mut c, peer, now)?
+    list.try_reserve(mut c.chans, 1) ?=> Capacity
+    list.try_reserve(mut c.txs, 1) ?=> Capacity
+    list.push(mut c.chans, Chan(number: n, peer: peer, live: true, confirmed: false, busy: true, refresh_ns: NEVER, lapsed_ns: 0))
+    let tx = new_tx(c, BindJob(n, peer))
+    list.push(mut c.txs, tx)
+    Ok(n)
+}
+
+/// Send Refresh with LIFETIME 0 at the next poll, without retransmission, and close.
+pub fn close(mut c: Client, now: Now) {
+    if let Some(_) = closed_failure(c) {
+        return
+    }
+    if now.mono_ns < c.last_ns {
+        return
+    }
+    c.last_ns = now.mono_ns
+    c.close_pending = allocated(c)
+    let _ = fail(mut c, Local)
+}
+
+fn padded(n: u64) -> u64 {
+    (n + 3) & 0xfffffffffffffffc
+}
+
+/// Frame slot[lo..hi] in place for peer: ChannelData once its channel is confirmed, else a
+/// Send indication. The caller leaves HEADROOM before lo and 3 bytes after hi.
+pub fn send_to(mut c: Client, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[stun_ice.Range, TurnError] {
+    if let Some(f) = closed_failure(c) {
+        return Error(Closed(f))
+    }
+    if !allocated(c) {
+        return Error(NotAllocated)
+    }
+    if lo < HEADROOM || hi < lo || hi + 3 > list.len(slot) || hi - lo > 65000 {
+        return Error(Config)
+    }
+    let Some(p) = find_perm(c, peer) else {
+        return Error(Unpermitted(peer))
+    }
+    if !c.perms[p].installed {
+        return Error(Unpermitted(peer))
+    }
+    let len = hi - lo
+    let len16: u16 = int.narrow(len)
+    for i in 0u64 .. list.len(c.chans) {
+        let ch = c.chans[i]
+        if ch.live && ch.confirmed && ch.peer == peer {
+            list.set_word_be(mut slot, lo - 4, ch.number)
+            list.set_word_be(mut slot, lo - 2, len16)
+            let end = if c.c.transport == Stream {
+                padded(len)
+            } else {
+                len
+            }
+            list.fill_slice(mut slot, hi, lo + end - hi, 0)
+            return Ok(stun_ice.Range(lo: lo - 4, hi: lo + end))
+        }
+    }
+    let xlen = stun_ice.xor_addr_len(peer)
+    let start = lo - 4 - (4 + xlen) - 20
+    let tx = stun_ice.Transaction(high: c.ind_high, low: c.ind_low)
+    c.ind_low = int.wrapping_add(c.ind_low, 1)
+    let body: u16 = int.narrow(4 + xlen + 4 + padded(len))
+    let xlen16: u16 = int.narrow(xlen)
+    list.set_word_be(mut slot, start, 0x0016u16)
+    list.set_word_be(mut slot, start + 2, body)
+    list.set_word_be(mut slot, start + 4, 0x2112a442u32)
+    list.set_word_be(mut slot, start + 8, tx.high)
+    list.set_word_be(mut slot, start + 12, tx.low)
+    list.set_word_be(mut slot, start + 20, stun_ice.XOR_PEER_ADDRESS)
+    list.set_word_be(mut slot, start + 22, xlen16)
+    stun_ice.put_xor_addr(mut slot, start + 24, peer, tx)
+    list.set_word_be(mut slot, lo - 4, stun_ice.DATA)
+    list.set_word_be(mut slot, lo - 2, len16)
+    list.fill_slice(mut slot, hi, lo + padded(len) - hi, 0)
+    Ok(stun_ice.Range(lo: start, hi: lo + padded(len)))
+}
+
+fn draw_tx(r: Random) -> stun_ice.Transaction {
+    let mut b: Bytes = list.with_capacity(12)
+    host.random(r, mut b)
+    stun_ice.Transaction(high: list.word_be(b, 0), low: list.word_be(b, 4))
+}
+
+fn method_of(job: Job) -> u16 {
+    match job {
+        AllocateJob => stun_ice.ALLOCATE,
+        RefreshJob(_) => stun_ice.REFRESH,
+        PermitJob(_) => stun_ice.CREATE_PERMISSION,
+        BindJob(_, _) => stun_ice.CHANNEL_BIND,
+    }
+}
+
+fn add_u32(mut b: stun_ice.Builder, kind: u16, v: u32, mut out: Bytes) -> Result[(), TurnError] {
+    let mut value: Bytes = list.with_capacity(4)
+    list.put_word_be(mut value, v)
+    stun_ice.add(mut b, kind, value, mut out) ?=> Wire
+    Ok(())
+}
+
+fn algorithm_value(a: Algorithm) -> Bytes {
+    match a {
+        Md5 => b"\x00\x01\x00\x00",
+        Sha256 => b"\x00\x02\x00\x00",
+    }
+}
+
+/// Write one request of job under id into out[0..n). With integrity it carries the
+/// credentials of RFC 8489 section 9.2.3, PASSWORD-ALGORITHM(S) unless processed as legacy MD5.
+fn build(mut c: Client, job: Job, id: stun_ice.Transaction, authed: bool, mut out: Bytes) -> Result[u64, TurnError] {
+    let have = list.len(out)
+    if have < REQUEST_MAX {
+        list.try_reserve(mut out, REQUEST_MAX - have) ?=> Capacity
+        list.fill(mut out, REQUEST_MAX, 0)
+    }
+    let mut b = stun_ice.start(method_of(job), Request, id, mut out) ?=> Wire
+    match job {
+        AllocateJob => {
+            stun_ice.add(mut b, stun_ice.REQUESTED_TRANSPORT, b"\x11\x00\x00\x00", mut out) ?=> Wire
+            if c.c.family == V6 {
+                stun_ice.add(mut b, stun_ice.REQUESTED_ADDRESS_FAMILY, b"\x02\x00\x00\x00", mut out) ?=> Wire
+            }
+            if c.c.lifetime_s != 0 {
+                add_u32(mut b, stun_ice.LIFETIME, c.c.lifetime_s, mut out)?
+            }
+        },
+        RefreshJob(lifetime) => add_u32(mut b, stun_ice.LIFETIME, lifetime, mut out)?,
+        PermitJob(peer) => stun_ice.add_xor_addr(mut b, stun_ice.XOR_PEER_ADDRESS, peer, mut out) ?=> Wire,
+        BindJob(number, peer) => {
+            let wide: u32 = int.widen(number)
+            add_u32(mut b, stun_ice.CHANNEL_NUMBER, wide << 16, mut out)?
+            stun_ice.add_xor_addr(mut b, stun_ice.XOR_PEER_ADDRESS, peer, mut out) ?=> Wire
+        },
+    }
+    if !authed {
+        return Ok(stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut c.scratch) ?=> Wire)
+    }
+    if c.anonymity {
+        let hash = userhash(c.username, c.realm)
+        let mut value: Bytes = list.with_capacity(32)
+        for i in 0u64 .. 32 {
+            list.push(mut value, hash[i])
+        }
+        stun_ice.add(mut b, stun_ice.USERHASH, value, mut out) ?=> Wire
+    } else {
+        stun_ice.add(mut b, 0x0006, c.username, mut out) ?=> Wire
+    }
+    stun_ice.add(mut b, stun_ice.REALM, c.realm, mut out) ?=> Wire
+    stun_ice.add(mut b, stun_ice.NONCE, c.nonce, mut out) ?=> Wire
+    let legacy = list.len(c.algorithms) == 0
+    if !legacy {
+        stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHMS, c.algorithms, mut out) ?=> Wire
+        stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHM, algorithm_value(c.algorithm), mut out) ?=> Wire
+    }
+    let integrity: stun_ice.Integrity = if legacy {
+        Sha1
+    } else {
+        Sha256
+    }
+    if let Some(key) = c.key {
+        return Ok(stun_ice.finish(take b, integrity, Long(secret.share(key)), false, mut out, mut c.scratch) ?=> Wire)
+    }
+    Error(Config)
+}
+
+fn rto_ns(c: Client) -> u64 {
+    let ms: u64 = int.widen(c.c.rto_ms)
+    ms * MS_NS
+}
+
+fn sends_max(c: Client) -> u8 {
+    if c.c.transport == Datagram {
+        c.c.rc
+    } else {
+        1
+    }
+}
+
+/// RFC 8489 section 6.2.1: send k (from 0) at rto·(2^k − 1).
+fn send_offset(c: Client, k: u8) -> u64 {
+    let shift: u64 = int.widen(k)
+    rto_ns(c) * ((1u64 << shift) - 1)
+}
+
+/// The failure time after the first send: the last send plus rm·rto, or ti over a stream.
+fn deadline(c: Client) -> u64 {
+    if c.c.transport == Datagram {
+        let rm: u64 = int.widen(c.c.rm)
+        send_offset(c, c.c.rc - 1) + rm * rto_ns(c)
+    } else {
+        let ti: u64 = int.widen(c.c.ti_ms)
+        ti * MS_NS
+    }
+}
+
+/// The next time tx needs the poll: its next send or its failure.
+fn tx_due(c: Client, tx: Tx) -> u64 {
+    if tx.fresh {
+        0
+    } else if tx.sends < sends_max(c) {
+        tx.start_ns + send_offset(c, tx.sends)
+    } else {
+        tx.start_ns + deadline(c)
+    }
+}
+
+fn drop_perm(mut c: Client, peer: Addr) {
+    if let Some(i) = find_perm(c, peer) {
+        let _ = list.swap_remove(mut c.perms, i)
+    }
+}
+
+fn lapse_chan(mut c: Client, number: u16, now_ns: u64) {
+    for i in 0u64 .. list.len(c.chans) {
+        if c.chans[i].live && c.chans[i].number == number {
+            c.chans[i].live = false
+            c.chans[i].confirmed = false
+            c.chans[i].lapsed_ns = now_ns
+        }
+    }
+}
+
+/// A transaction that got no answer: fatal for Allocate and Refresh, else drop its object.
+fn time_out(mut c: Client, i: u64, now_ns: u64) -> Result[(), TurnError] {
+    let job = c.txs[i].job
+    let _ = list.swap_remove(mut c.txs, i)
+    match job {
+        AllocateJob => Error(fail(mut c, Timeout)),
+        RefreshJob(_) => Error(fail(mut c, Timeout)),
+        PermitJob(peer) => {
+            drop_perm(mut c, peer)
+            Ok(())
+        },
+        BindJob(number, _) => {
+            lapse_chan(mut c, number, now_ns)
+            Ok(())
+        },
+    }
+}
+
+/// Start the periodic refreshes that are due, as new transactions.
+fn refreshes(mut c: Client, now_ns: u64) -> Result[(), TurnError] {
+    if !allocated(c) {
+        return Ok(())
+    }
+    if !c.refreshing && now_ns >= c.refresh_ns {
+        c.refreshing = true
+        list.try_reserve(mut c.txs, 1) ?=> Capacity
+        let tx = new_tx(c, RefreshJob(c.c.lifetime_s))
+        list.push(mut c.txs, tx)
+    }
+    for i in 0u64 .. list.len(c.perms) {
+        if c.perms[i].installed && !c.perms[i].busy && now_ns >= c.perms[i].refresh_ns {
+            c.perms[i].busy = true
+            list.try_reserve(mut c.txs, 1) ?=> Capacity
+            let tx = new_tx(c, PermitJob(c.perms[i].peer))
+            list.push(mut c.txs, tx)
+        }
+    }
+    for i in 0u64 .. list.len(c.chans) {
+        let ch = c.chans[i]
+        if ch.live && ch.confirmed && !ch.busy && now_ns >= ch.refresh_ns {
+            c.chans[i].busy = true
+            list.try_reserve(mut c.txs, 1) ?=> Capacity
+            let tx = new_tx(c, BindJob(ch.number, ch.peer))
+            list.push(mut c.txs, tx)
+        }
+    }
+    Ok(())
+}
+
+fn earliest(c: Client) -> u64 {
+    let mut at = NEVER
+    for i in 0u64 .. list.len(c.txs) {
+        at = order.min(at, tx_due(c, c.txs[i]))
+    }
+    if allocated(c) {
+        if !c.refreshing {
+            at = order.min(at, c.refresh_ns)
+        }
+        for i in 0u64 .. list.len(c.perms) {
+            if c.perms[i].installed && !c.perms[i].busy {
+                at = order.min(at, c.perms[i].refresh_ns)
+            }
+        }
+        for i in 0u64 .. list.len(c.chans) {
+            let ch = c.chans[i]
+            if ch.live && ch.confirmed && !ch.busy {
+                at = order.min(at, ch.refresh_ns)
+            }
+        }
+    }
+    at
+}
+
+fn step(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, TurnError] {
+    let now_ns = now.mono_ns
+    if !c.started {
+        c.started = true
+        let ind = draw_tx(r)
+        c.ind_high = ind.high
+        c.ind_low = ind.low
+        list.try_reserve(mut c.txs, 1) ?=> Capacity
+        let tx = new_tx(c, AllocateJob)
+        list.push(mut c.txs, tx)
+    }
+    refreshes(mut c, now_ns)?
+    let mut i = 0u64
+    while i < list.len(c.txs) {
+        let tx = c.txs[i]
+        if tx.fresh {
+            let id = draw_tx(r)
+            c.txs[i].id = id
+            c.txs[i].fresh = false
+            c.txs[i].sends = 1
+            c.txs[i].start_ns = now_ns
+            return Ok(Send(build(mut c, tx.job, id, tx.authed, mut out)?))
+        }
+        if tx.sends < sends_max(c) && now_ns >= tx.start_ns + send_offset(c, tx.sends) {
+            c.txs[i].sends = tx.sends + 1
+            return Ok(Send(build(mut c, tx.job, tx.id, tx.authed, mut out)?))
+        }
+        if tx.sends >= sends_max(c) && now_ns >= tx.start_ns + deadline(c) {
+            time_out(mut c, i, now_ns)?
+            continue
+        }
+        i += 1
+    }
+    let at = earliest(c)
+    if at == NEVER {
+        Ok(Idle)
+    } else {
+        Ok(WakeAt(at))
+    }
+}
+
+/// Hand out one queued message in out[0..n) as Send(n), run due timers, or answer when to call again.
+pub fn poll(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, TurnError] {
+    if now.mono_ns < c.last_ns {
+        return Error(Clock)
+    }
+    c.last_ns = now.mono_ns
+    if c.close_pending {
+        c.close_pending = false
+        let id = draw_tx(r)
+        return match build(mut c, RefreshJob(0), id, true, mut out) {
+            Ok(n) => Ok(Send(n)),
+            Error(e) => Error(e),
+        }
+    }
+    if let Some(f) = closed_failure(c) {
+        return Error(Closed(f))
+    }
+    match step(mut c, now, r, mut out) {
+        Ok(p) => Ok(p),
+        Error(e) => Error(fatal(mut c, e)),
+    }
+}

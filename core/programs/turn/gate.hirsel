@@ -1,0 +1,448 @@
+// TURN-5's server check order (RFC 8489 section 9.2.4 as amended there), the source table
+// and the revoked set. The relay (TURN-7) calls admit for every request.
+const SECOND_NS: u64 = 1000000000
+
+const UNKNOWN_ATTRIBUTES: u16 = 0x000a
+
+const USERNAME: u16 = 0x0006
+
+const MI_SHA1: u16 = 0x0008
+
+pub type GateConfig {
+    realm: Bytes,
+    nonce_s: u32,
+    credential_max_s: u32,
+    sources: u32,
+    challenge_per_s: u16,
+    derive_per_source_s: u16
+}
+
+/// Discards by cause, and every relay_key derivation the gate made.
+pub type GateCounts {
+    malformed: u64,
+    challenged: u64,
+    throttled: u64,
+    derivations: u64
+}
+
+/// The allocation a request arrives on: its username and the key derived at its Allocate.
+pub type Held {
+    username: Bytes,
+    key: Secret
+}
+
+/// An authenticated request. respond is the integrity every response to it carries:
+/// Sha1 when it was processed as MD5 without PASSWORD-ALGORITHM(S), else Sha256.
+pub type Verified {
+    key: Secret,
+    algorithm: Algorithm,
+    legacy: bool,
+    respond: stun_ice.Integrity,
+    username: Username,
+    derived: bool
+}
+
+/// Authentic: go on to the method. Reply(n): n response bytes in out for the origin.
+/// Dropped: discarded and counted.
+pub type Admit = Authentic(Verified) | Reply(u64) | Dropped
+
+type Slot {
+    second: u64,
+    challenges: u16,
+    derivations: u16
+}
+
+type Revoked {
+    subject: Bytes,
+    until: u64
+}
+
+pub opaque type Gate {
+    c: GateConfig,
+    master: Secret,
+    nonce_key: Secret,
+    k0: u64,
+    k1: u64,
+    slots: List[Slot],
+    revoked: List[Revoked],
+    counts: GateCounts,
+    last_ns: u64
+}
+
+fn printable(b: Bytes) -> bool {
+    for i in 0u64 .. list.len(b) {
+        if b[i] < 0x20 || b[i] > 0x7e {
+            return false
+        }
+    }
+    true
+}
+
+fn draw_u64(r: Random) -> u64 {
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(r, mut b)
+    list.word_be(b, 0)
+}
+
+/// The master needs `kdf`; the nonce key needs `mac`. The slot key comes from rnd.
+pub fn gate(take c: GateConfig, rnd: Random, take master: Secret, take nonce_key: Secret) -> Result[Gate, TurnError] {
+    let n = list.len(c.realm)
+    if n == 0 || n > 64 || !printable(c.realm) || c.nonce_s == 0 || c.credential_max_s == 0 || c.sources == 0 {
+        return Error(Config)
+    }
+    let count: u64 = int.widen(c.sources)
+    let mut slots: List[Slot] = list.new()
+    list.try_reserve(mut slots, count) ?=> Capacity
+    for _ in 0u64 .. count {
+        list.push(mut slots, Slot(second: 0, challenges: 0, derivations: 0))
+    }
+    let k0 = draw_u64(rnd)
+    let k1 = draw_u64(rnd)
+    Ok(Gate(c: take c, master: take master, nonce_key: take nonce_key, k0: k0, k1: k1, slots: take slots, revoked: list.new(), counts: GateCounts(malformed: 0, challenged: 0, throttled: 0, derivations: 0), last_ns: 0))
+}
+
+pub fn gate_counts(g: Gate) -> GateCounts {
+    g.counts
+}
+
+/// Refuse subject at step 4 until until_unix_s (TURN-9).
+pub fn gate_revoke(mut g: Gate, subject: Bytes, until_unix_s: u64) {
+    for i in 0u64 .. list.len(g.revoked) {
+        if list.compare_bytes(g.revoked[i].subject, subject) == Equal {
+            if g.revoked[i].until < until_unix_s {
+                g.revoked[i].until = until_unix_s
+            }
+            return
+        }
+    }
+    let mut subject_copy: Bytes = list.with_capacity(list.len(subject))
+    list.append(mut subject_copy, subject)
+    list.push(mut g.revoked, Revoked(subject: take subject_copy, until: until_unix_s))
+}
+
+fn revoked(mut g: Gate, packet: Bytes, subject: stun_ice.Range, unix_s: u64) -> bool {
+    let mut i = 0u64
+    let mut hit = false
+    while i < list.len(g.revoked) {
+        if g.revoked[i].until <= unix_s {
+            let _ = list.swap_remove(mut g.revoked, i)
+            continue
+        }
+        if list.compare_bytes(g.revoked[i].subject, list.slice(packet, subject.lo, subject.hi)) == Equal {
+            hit = true
+        }
+        i += 1
+    }
+    hit
+}
+
+fn mix(x: u64) -> u64 {
+    let mut z = int.wrapping_add(x, 0x9e3779b97f4a7c15u64)
+    z = int.wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9u64)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94d049bb133111ebu64)
+    z ^ (z >> 31)
+}
+
+/// A source prefix is the IPv4 /32 or the IPv6 /64; an IPv4-mapped address counts as IPv4.
+fn slot_of(g: Gate, a: Addr) -> u64 {
+    let (family, prefix) = match a.ip {
+        V4(ip) => {
+            let wide: u64 = int.widen(ip)
+            (4u64, wide)
+        },
+        V6(high, low) => if high == 0 && (low >> 32) == 0xffff {
+            (4u64, low & 0xffffffff)
+        } else {
+            (6u64, high)
+        },
+    }
+    let count: u64 = int.widen(g.c.sources)
+    mix(mix(g.k0 ^ family) ^ prefix ^ g.k1) % count
+}
+
+fn fresh_slot(mut g: Gate, i: u64, second: u64) {
+    if g.slots[i].second != second {
+        g.slots[i] = Slot(second: second, challenges: 0, derivations: 0)
+    }
+}
+
+/// One pre-authentication reply. Udp ingress spends one unit of the source's
+/// challenge_per_s; with none left the request is discarded and counted.
+fn challenge(mut g: Gate, o: Origin, now: Now) -> bool {
+    if let Stream(_) = o.ingress {
+        return true
+    }
+    let i = slot_of(g, o.client)
+    fresh_slot(mut g, i, now.mono_ns / SECOND_NS)
+    if g.slots[i].challenges >= g.c.challenge_per_s {
+        g.counts.challenged += 1
+        return false
+    }
+    g.slots[i].challenges += 1
+    true
+}
+
+fn derivation(mut g: Gate, o: Origin, now: Now) -> bool {
+    let i = slot_of(g, o.client)
+    fresh_slot(mut g, i, now.mono_ns / SECOND_NS)
+    if g.slots[i].derivations >= g.c.derive_per_source_s {
+        g.counts.throttled += 1
+        return false
+    }
+    g.slots[i].derivations += 1
+    true
+}
+
+type Request {
+    method: u16,
+    tx: stun_ice.Transaction,
+    integrity: stun_ice.Integrity,
+    unknown: Option[u16],
+    username: Option[stun_ice.Range],
+    userhash: bool,
+    realm: bool,
+    nonce: Option[stun_ice.Range],
+    algorithms: Option[stun_ice.Range],
+    algorithm: Option[stun_ice.Range]
+}
+
+fn integrity_of(fields: List[stun_ice.Attr]) -> stun_ice.Integrity {
+    let mut sha1 = false
+    let mut sha256 = false
+    for i in 0u64 .. list.len(fields) {
+        if fields[i].kind == MI_SHA1 {
+            sha1 = true
+        } else if fields[i].kind == stun_ice.MESSAGE_INTEGRITY_SHA256 {
+            sha256 = true
+        }
+    }
+    if sha1 && sha256 {
+        Both
+    } else if sha1 {
+        Sha1
+    } else if sha256 {
+        Sha256
+    } else {
+        NoIntegrity
+    }
+}
+
+fn request_of(packet: Bytes, mut fields: List[stun_ice.Attr]) -> Option[Request] {
+    let Ok(h) = stun_ice.header(packet) else {
+        return None
+    }
+    if h.class != Request {
+        return None
+    }
+    list.clear(mut fields)
+    let (integrity, unknown): (stun_ice.Integrity, Option[u16]) = match stun_ice.attrs(packet, mut fields) {
+        Ok(i) => (i, None),
+        Error(UnknownRequired(kind)) => (integrity_of(fields), Some(kind)),
+        Error(_) => return None,
+    }
+    let mut r = Request(method: h.method, tx: h.transaction, integrity: integrity, unknown: unknown, username: None, userhash: false, realm: false, nonce: None, algorithms: None, algorithm: None)
+    for i in 0u64 .. list.len(fields) {
+        let a = fields[i]
+        if a.kind == USERNAME {
+            if let None = r.username {
+                r.username = Some(a.value)
+            }
+        } else if a.kind == stun_ice.USERHASH {
+            r.userhash = true
+        } else if a.kind == stun_ice.REALM {
+            r.realm = true
+        } else if a.kind == stun_ice.NONCE {
+            if let None = r.nonce {
+                r.nonce = Some(a.value)
+            }
+        } else if a.kind == stun_ice.PASSWORD_ALGORITHMS {
+            if let None = r.algorithms {
+                r.algorithms = Some(a.value)
+            }
+        } else if a.kind == stun_ice.PASSWORD_ALGORITHM {
+            if let None = r.algorithm {
+                r.algorithm = Some(a.value)
+            }
+        }
+    }
+    Some(r)
+}
+
+/// PASSWORD-ALGORITHMS as this relay offers it: SHA-256, then MD5, each with no parameters.
+pub fn offered_algorithms() -> Bytes {
+    b"\x00\x02\x00\x00\x00\x01\x00\x00"
+}
+
+/// Step 3: None is a bid-down (400); Some((algorithm, legacy)).
+fn algorithm_of(packet: Bytes, r: Request) -> Option[(Algorithm, bool)] {
+    match (r.algorithms, r.algorithm) {
+        (None, None) => Some((Md5, true)),
+        (Some(list_range), Some(one)) => {
+            if list.compare_bytes(list.slice(packet, list_range.lo, list_range.hi), offered_algorithms()) != Equal || one.hi - one.lo != 4 {
+                return None
+            }
+            let number: u32 = list.word_be(packet, one.lo)
+            if number == 0x00020000 {
+                Some((Sha256, false))
+            } else if number == 0x00010000 {
+                Some((Md5, false))
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+fn stream_of(o: Origin) -> bool {
+    if let Stream(_) = o.ingress {
+        true
+    } else {
+        false
+    }
+}
+
+/// An unauthenticated error response: code, then REALM, a fresh NONCE and
+/// PASSWORD-ALGORITHMS when challenge is true.
+fn refuse(g: Gate, r: Request, code: u16, challenge_attrs: bool, now: Now, o: Origin, local: Addr, mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
+    let mut b = stun_ice.start(r.method, Failure, r.tx, mut out) ?=> Wire
+    stun_ice.add_error(mut b, code, mut out) ?=> Wire
+    if challenge_attrs {
+        stun_ice.add(mut b, stun_ice.REALM, g.c.realm, mut out) ?=> Wire
+        let mut n: Bytes = list.with_capacity(NONCE_LEN)
+        nonce(g.nonce_key, now.mono_ns, stream_of(o), local, o.client, mut n)?
+        stun_ice.add(mut b, stun_ice.NONCE, n, mut out) ?=> Wire
+        stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHMS, offered_algorithms(), mut out) ?=> Wire
+    }
+    Ok(stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut scratch) ?=> Wire)
+}
+
+/// A pre-authentication reply, sent only when the source's challenge budget allows.
+fn challenge_reply(mut g: Gate, r: Request, code: u16, challenge_attrs: bool, now: Now, o: Origin, local: Addr, mut out: Bytes, mut scratch: Bytes) -> Result[Admit, TurnError] {
+    if !challenge(mut g, o, now) {
+        return Ok(Dropped)
+    }
+    Ok(Reply(refuse(g, r, code, challenge_attrs, now, o, local, mut out, mut scratch)?))
+}
+
+/// Sign a response to an authenticated request under its key and integrity.
+pub fn sign(v: Verified, take b: stun_ice.Builder, mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
+    Ok(stun_ice.finish(take b, v.respond, Long(secret.share(v.key)), false, mut out, mut scratch) ?=> Wire)
+}
+
+fn signed_error(v: Verified, r: Request, code: u16, unknown: Option[u16], mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
+    let mut b = stun_ice.start(r.method, Failure, r.tx, mut out) ?=> Wire
+    stun_ice.add_error(mut b, code, mut out) ?=> Wire
+    if let Some(kind) = unknown {
+        let mut value: Bytes = list.with_capacity(2)
+        list.put_word_be(mut value, kind)
+        stun_ice.add(mut b, UNKNOWN_ATTRIBUTES, value, mut out) ?=> Wire
+    }
+    sign(v, take b, mut out, mut scratch)
+}
+
+/// TURN-5's check order for one request on origin o, received at local (for a stream
+/// behind H1, the PROXY v2 destination). existing is the allocation on o, if any.
+/// fields is the caller's attribute list, reused across calls.
+pub fn admit(mut g: Gate, now: Now, o: Origin, local: Addr, packet: Bytes, existing: Option[Held], mut fields: List[stun_ice.Attr], mut out: Bytes, mut scratch: Bytes) -> Result[Admit, TurnError] {
+    if now.mono_ns < g.last_ns {
+        return Error(Clock)
+    }
+    g.last_ns = now.mono_ns
+    let Some(r) = request_of(packet, mut fields) else {
+        g.counts.malformed += 1
+        return Ok(Dropped)
+    }
+    // 1. No integrity: the challenge.
+    if r.integrity == NoIntegrity {
+        return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch)
+    }
+    // 2. Integrity without its credentials.
+    let has_name = if let Some(_) = r.username {
+        true
+    } else {
+        r.userhash
+    }
+    let Some(n) = r.nonce else {
+        return challenge_reply(mut g, r, 400, false, now, o, local, mut out, mut scratch)
+    }
+    if !has_name || !r.realm {
+        return challenge_reply(mut g, r, 400, false, now, o, local, mut out, mut scratch)
+    }
+    // 3. Bid-down prevention.
+    let Some((algorithm, legacy)) = algorithm_of(packet, r) else {
+        return challenge_reply(mut g, r, 400, false, now, o, local, mut out, mut scratch)
+    }
+    // 4. USERHASH (not offered), the username grammar, expiry and revocation.
+    if r.userhash {
+        return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch)
+    }
+    let Some(name) = r.username else {
+        return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch)
+    }
+    let Some(user) = username_of(packet, name.lo, name.hi) else {
+        return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch)
+    }
+    let ceiling = int.saturating_add(now.unix_s, int.widen(g.c.credential_max_s))
+    if user.expiry <= now.unix_s || user.expiry > ceiling || revoked(mut g, packet, user.subject, now.unix_s) {
+        return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch)
+    }
+    // 5. The nonce was issued to this 5-tuple, and not after the current clock.
+    let now_ms = now.mono_ns / 1000000
+    let issued = nonce_time(g.nonce_key, packet, n.lo, n.hi, stream_of(o), local, o.client)?
+    let Some(t) = issued else {
+        return challenge_reply(mut g, r, 438, true, now, o, local, mut out, mut scratch)
+    }
+    if t > now_ms {
+        return challenge_reply(mut g, r, 438, true, now, o, local, mut out, mut scratch)
+    }
+    // 6. The key: the allocation's own, or one derivation within the source's budget.
+    let username = list.slice(packet, name.lo, name.hi)
+    let mut same = false
+    let mut held_key: Option[Secret] = None
+    if let Some(h) = existing {
+        if list.compare_bytes(h.username, username) == Equal {
+            same = true
+            held_key = Some(secret.share(h.key))
+        }
+    }
+    let mut derived = false
+    let key = match take held_key {
+        Some(k) => k,
+        None => {
+            if !derivation(mut g, o, now) {
+                return Ok(Dropped)
+            }
+            g.counts.derivations += 1
+            derived = true
+            relay_key(g.master, username, g.c.realm, algorithm)?
+        },
+    }
+    // 7. Integrity, strongest tag first; then any unknown comprehension-required attribute.
+    match stun_ice.verify_key(packet, Long(secret.share(key)), mut scratch) {
+        Ok(_) => (),
+        Error(BadIntegrity) => return challenge_reply(mut g, r, 401, true, now, o, local, mut out, mut scratch),
+        Error(e) => return Error(Wire(e)),
+    }
+    let respond: stun_ice.Integrity = if legacy {
+        Sha1
+    } else {
+        Sha256
+    }
+    let v = Verified(key: take key, algorithm: algorithm, legacy: legacy, respond: respond, username: user, derived: derived)
+    if let Some(kind) = r.unknown {
+        return Ok(Reply(signed_error(v, r, 420, Some(kind), mut out, mut scratch)?))
+    }
+    // 8. A genuine nonce that has aged.
+    let lifetime_ms: u64 = int.widen(g.c.nonce_s)
+    if now_ms - t >= 1000 * lifetime_ms {
+        return Ok(Reply(refuse(g, r, 438, true, now, o, local, mut out, mut scratch)?))
+    }
+    // 9. Another username on an existing allocation.
+    if let Some(_) = existing {
+        if !same {
+            return Ok(Reply(signed_error(v, r, 441, None, mut out, mut scratch)?))
+        }
+    }
+    Ok(Authentic(take v))
+}

@@ -1,0 +1,364 @@
+// TURN-6: what the client receives. RFC 8489 section 9.2.5's client rules, as TURN-5 states them.
+const ERROR_CODE: u16 = 0x0009
+
+const XOR_MAPPED_ADDRESS: u16 = 0x0020
+
+fn find(fields: List[stun_ice.Attr], kind: u16) -> Option[stun_ice.Range] {
+    for i in 0u64 .. list.len(fields) {
+        if fields[i].kind == kind {
+            return Some(fields[i].value)
+        }
+    }
+    None
+}
+
+fn error_code(packet: Bytes, fields: List[stun_ice.Attr]) -> Option[u16] {
+    let Some(v) = find(fields, ERROR_CODE) else {
+        return None
+    }
+    if v.hi - v.lo < 4 {
+        return None
+    }
+    let class: u16 = int.widen(packet[v.lo + 2] & 7)
+    let number: u16 = int.widen(packet[v.lo + 3])
+    if class < 3 || class > 6 || number > 99 {
+        return None
+    }
+    Some(class * 100 + number)
+}
+
+fn lifetime_of(packet: Bytes, fields: List[stun_ice.Attr]) -> Option[u32] {
+    let Some(v) = find(fields, stun_ice.LIFETIME) else {
+        return None
+    }
+    if v.hi - v.lo != 4 {
+        return None
+    }
+    let s: u32 = list.word_be(packet, v.lo)
+    Some(s)
+}
+
+fn find_tx(c: Client, id: stun_ice.Transaction, method: u16) -> Option[u64] {
+    for i in 0u64 .. list.len(c.txs) {
+        let tx = c.txs[i]
+        if !tx.fresh && tx.id == id && method_of(tx.job) == method {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn owned(b: Bytes, v: stun_ice.Range) -> Bytes {
+    let mut out: Bytes = list.with_capacity(v.hi - v.lo)
+    list.append(mut out, list.slice(b, v.lo, v.hi))
+    out
+}
+
+/// The algorithm a PASSWORD-ALGORITHMS value lets this client use: SHA-256 when listed,
+/// else MD5 when listed, else None.
+fn pick_algorithm(packet: Bytes, v: stun_ice.Range) -> Option[Algorithm] {
+    let mut at = v.lo
+    let mut md5 = false
+    while at + 4 <= v.hi {
+        let alg: u16 = list.word_be(packet, at)
+        let plen: u16 = list.word_be(packet, at + 2)
+        let wide: u64 = int.widen(plen)
+        if alg == 2 {
+            return Some(Sha256)
+        }
+        if alg == 1 {
+            md5 = true
+        }
+        at = at + 4 + ((wide + 3) & 0xfffffffffffffffc)
+    }
+    if md5 {
+        Some(Md5)
+    } else {
+        None
+    }
+}
+
+/// A 401 or 438 to a request without integrity: take REALM, NONCE and the algorithm,
+/// derive the key once for that realm and algorithm, and retry tx. false: discard it.
+fn take_challenge(mut c: Client, i: u64, packet: Bytes, fields: List[stun_ice.Attr]) -> Result[bool, TurnError] {
+    let (Some(realm), Some(n)) = (find(fields, stun_ice.REALM), find(fields, stun_ice.NONCE)) else {
+        return Ok(false)
+    }
+    let cookie = match cookie_of(packet, n.lo, n.hi) {
+        Some(k) => k,
+        None => Cookie(algorithms: false, anonymity: false),
+    }
+    let algorithm = if cookie.algorithms {
+        // RFC 8489 section 9.2.5: the bit without the attribute is a bid-down.
+        let Some(listed) = find(fields, stun_ice.PASSWORD_ALGORITHMS) else {
+            return Ok(false)
+        }
+        let Some(a) = pick_algorithm(packet, listed) else {
+            return Ok(false)
+        }
+        list.clear(mut c.algorithms)
+        list.append(mut c.algorithms, list.slice(packet, listed.lo, listed.hi))
+        c.seen_algorithms = true
+        a
+    } else {
+        if c.seen_algorithms {
+            return Ok(false)
+        }
+        list.clear(mut c.algorithms)
+        Md5
+    }
+    c.anonymity = cookie.anonymity
+    list.clear(mut c.nonce)
+    list.append(mut c.nonce, list.slice(packet, n.lo, n.hi))
+    let same_key = if let Some(_) = c.key {
+        algorithm == c.algorithm && list.compare_bytes(c.key_realm, list.slice(packet, realm.lo, realm.hi)) == Equal
+    } else {
+        false
+    }
+    if !same_key {
+        list.clear(mut c.realm)
+        list.append(mut c.realm, list.slice(packet, realm.lo, realm.hi))
+        let key = client_key(c.password, c.username, c.realm, algorithm)?
+        c.key = Some(take key)
+        c.key_realm = owned(packet, realm)
+        c.algorithm = algorithm
+        c.derivations += 1
+    }
+    c.txs[i].authed = true
+    c.txs[i].fresh = true
+    Ok(true)
+}
+
+fn ended(mut c: Client, i: u64) -> Job {
+    let job = c.txs[i].job
+    let _ = list.swap_remove(mut c.txs, i)
+    job
+}
+
+fn set_lifetime(mut c: Client, now_ns: u64, lifetime: u32) {
+    let s: u64 = int.widen(lifetime)
+    let life = s * 1000000000
+    let ahead = if life > MARGIN_NS {
+        life - MARGIN_NS
+    } else {
+        life / 2
+    }
+    c.refresh_ns = now_ns + ahead
+    c.refreshing = false
+    if let Allocated(a) = c.state {
+        c.state = Allocated(Allocation(relayed: a.relayed, mapped: a.mapped, expires_ns: now_ns + life))
+    }
+}
+
+fn succeeded(mut c: Client, i: u64, packet: Bytes, fields: List[stun_ice.Attr], now_ns: u64) -> Result[Received, TurnError] {
+    match ended(mut c, i) {
+        AllocateJob => {
+            let (Some(relayed), Some(mapped), Some(lifetime)) = (find(fields, stun_ice.XOR_RELAYED_ADDRESS), find(fields, XOR_MAPPED_ADDRESS), lifetime_of(packet, fields)) else {
+                return Error(fail(mut c, Rejected(0)))
+            }
+            let r = stun_ice.xor_addr(packet, relayed) ?=> Wire
+            let m = stun_ice.xor_addr(packet, mapped) ?=> Wire
+            c.state = Allocated(Allocation(relayed: r, mapped: m, expires_ns: 0))
+            set_lifetime(mut c, now_ns, lifetime)
+        },
+        RefreshJob(_) => {
+            let Some(lifetime) = lifetime_of(packet, fields) else {
+                return Error(fail(mut c, Rejected(0)))
+            }
+            set_lifetime(mut c, now_ns, lifetime)
+        },
+        PermitJob(peer) => if let Some(p) = find_perm(c, peer) {
+            c.perms[p].installed = true
+            c.perms[p].busy = false
+            c.perms[p].refresh_ns = now_ns + PERMISSION_REFRESH_NS
+        },
+        BindJob(number, _) => {
+            for k in 0u64 .. list.len(c.chans) {
+                if c.chans[k].live && c.chans[k].number == number {
+                    c.chans[k].confirmed = true
+                    c.chans[k].busy = false
+                    c.chans[k].refresh_ns = now_ns + CHANNEL_REFRESH_NS
+                }
+            }
+        },
+    }
+    Ok(Control)
+}
+
+fn failed(mut c: Client, i: u64, code: u16, now_ns: u64) -> Result[Received, TurnError] {
+    if code == 437 {
+        return Error(fail(mut c, Mismatch))
+    }
+    if code == 441 {
+        return Error(fail(mut c, Credentials))
+    }
+    match ended(mut c, i) {
+        AllocateJob => Error(fail(mut c, Rejected(code))),
+        RefreshJob(_) => Error(fail(mut c, Rejected(code))),
+        PermitJob(peer) => {
+            c.discards.refused += 1
+            drop_perm(mut c, peer)
+            Ok(Discarded)
+        },
+        BindJob(number, _) => {
+            c.discards.refused += 1
+            lapse_chan(mut c, number, now_ns)
+            Ok(Discarded)
+        },
+    }
+}
+
+fn discard_unauthenticated(mut c: Client) -> Result[Received, TurnError] {
+    c.discards.unauthenticated += 1
+    Ok(Discarded)
+}
+
+fn response(mut c: Client, now: Now, h: stun_ice.Header, packet: Bytes) -> Result[Received, TurnError] {
+    let Some(i) = find_tx(c, h.transaction, h.method) else {
+        c.discards.stray += 1
+        return Ok(Discarded)
+    }
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let integrity = match stun_ice.attrs(packet, mut fields) {
+        Ok(k) => k,
+        Error(_) => {
+            c.discards.malformed += 1
+            return Ok(Discarded)
+        },
+    }
+    let tx = c.txs[i]
+    let code = if h.class == Failure {
+        let Some(code) = error_code(packet, fields) else {
+            c.discards.malformed += 1
+            return Ok(Discarded)
+        }
+        code
+    } else {
+        0u16
+    }
+    // 401 and 438 carry no integrity (TURN-5 steps 1, 4, 5, 7 and 8).
+    if code == 401 || (code == 438 && !tx.authed) {
+        if tx.authed {
+            return Error(fail(mut c, Credentials))
+        }
+        if !take_challenge(mut c, i, packet, fields)? {
+            return discard_unauthenticated(mut c)
+        }
+        return Ok(Control)
+    }
+    if code == 438 {
+        let Some(n) = find(fields, stun_ice.NONCE) else {
+            c.discards.malformed += 1
+            return Ok(Discarded)
+        }
+        if tx.stale {
+            return failed(mut c, i, 438, now.mono_ns)
+        }
+        list.clear(mut c.nonce)
+        list.append(mut c.nonce, list.slice(packet, n.lo, n.hi))
+        c.txs[i].stale = true
+        c.txs[i].fresh = true
+        return Ok(Control)
+    }
+    if !tx.authed || integrity == NoIntegrity {
+        if !tx.authed && h.class == Failure {
+            return failed(mut c, i, code, now.mono_ns)
+        }
+        return discard_unauthenticated(mut c)
+    }
+    let have = list.len(c.scratch)
+    if have < list.len(packet) {
+        list.try_reserve(mut c.scratch, list.len(packet) - have) ?=> Capacity
+        list.fill(mut c.scratch, list.len(packet), 0)
+    }
+    let mut held: Option[Secret] = None
+    if let Some(k) = c.key {
+        held = Some(secret.share(k))
+    }
+    let key = match take held {
+        Some(k) => k,
+        None => return discard_unauthenticated(mut c),
+    }
+    match stun_ice.verify_key(packet, Long(take key), mut c.scratch) {
+        Ok(_) => (),
+        Error(BadIntegrity) => {
+            c.discards.tampered += 1
+            return Ok(Discarded)
+        },
+        Error(Mac(e)) => return Error(Mac(e)),
+        Error(_) => {
+            c.discards.tampered += 1
+            return Ok(Discarded)
+        },
+    }
+    if h.class == Success {
+        succeeded(mut c, i, packet, fields, now.mono_ns)
+    } else {
+        failed(mut c, i, code, now.mono_ns)
+    }
+}
+
+fn data_indication(mut c: Client, packet: Bytes) -> Result[Received, TurnError] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let Ok(_) = stun_ice.attrs(packet, mut fields) else {
+        c.discards.malformed += 1
+        return Ok(Discarded)
+    }
+    let (Some(p), Some(d)) = (find(fields, stun_ice.XOR_PEER_ADDRESS), find(fields, stun_ice.DATA)) else {
+        c.discards.malformed += 1
+        return Ok(Discarded)
+    }
+    let Ok(peer) = stun_ice.xor_addr(packet, p) else {
+        c.discards.malformed += 1
+        return Ok(Discarded)
+    }
+    Ok(Data(peer, d))
+}
+
+fn channel_data(mut c: Client, packet: Bytes) -> Received {
+    let number: u16 = list.word_be(packet, 0)
+    let len: u16 = list.word_be(packet, 2)
+    let wide: u64 = int.widen(len)
+    if 4 + wide > list.len(packet) {
+        c.discards.malformed += 1
+        return Discarded
+    }
+    for i in 0u64 .. list.len(c.chans) {
+        let ch = c.chans[i]
+        if ch.live && ch.confirmed && ch.number == number {
+            return Data(ch.peer, stun_ice.Range(lo: 4, hi: 4 + wide))
+        }
+    }
+    c.discards.unbound_channel += 1
+    Discarded
+}
+
+/// One whole datagram, or one whole message from the stream framer.
+pub fn receive(mut c: Client, now: Now, r: Random, mut packet: Bytes) -> Result[Received, TurnError] {
+    if let Some(f) = closed_failure(c) {
+        return Error(Closed(f))
+    }
+    if now.mono_ns < c.last_ns {
+        return Error(Clock)
+    }
+    c.last_ns = now.mono_ns
+    if list.len(packet) >= 4 && (packet[0] & 0xc0) == 0x40 {
+        return Ok(channel_data(mut c, packet))
+    }
+    let Ok(h) = stun_ice.header(packet) else {
+        c.discards.malformed += 1
+        return Ok(Discarded)
+    }
+    let got = if h.class == Indication && h.method == stun_ice.DATA_METHOD {
+        data_indication(mut c, packet)
+    } else if h.class == Success || h.class == Failure {
+        response(mut c, now, h, packet)
+    } else {
+        c.discards.stray += 1
+        Ok(Discarded)
+    }
+    match got {
+        Ok(x) => Ok(x),
+        Error(e) => Error(fatal(mut c, e)),
+    }
+}

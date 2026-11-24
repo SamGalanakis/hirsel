@@ -1,0 +1,8 @@
+hirsel.laws 1
+turn@1/laws/bid_down_refused src=cdada8695937acde sig=8c1835f29851a8e4 run=c2c0c6612d4cbb79 bug=646b7010630cd718 oracle=c0e9fc271076be06 rows=pending
+turn@1/laws/challenge_exchange src=36afc803058835f2 sig=3621bd0f25c085e2 run=c2c0c6612d4cbb79 bug=897c35371728bc96 oracle=287d552963f9d813 rows=pending
+turn@1/laws/expired_costs_no_derivation src=7df0ad9b88060d31 sig=ceec009c2529cf3d run=c2c0c6612d4cbb79 bug=d01af20791f08f83 oracle=b4bbe9b976b26115 rows=pending
+turn@1/laws/lifetimes_exact src=0a0bc0493eb14210 sig=170ee1a72c32b272 run=c2c0c6612d4cbb79 bug=622964c1bd28aa15 oracle=36ff6139206f207e rows=pending
+turn@1/laws/nonce_bound_to_tuple src=2f84beb0cd0914b2 sig=be59f591e6f0f52b run=c2c0c6612d4cbb79 bug=905987db0621b22b oracle=f8acb5e150c373d1 rows=pending
+turn@1/laws/retransmit_schedule src=68b7ed256c9b9203 sig=11291391bf92d4dc run=c2c0c6612d4cbb79 bug=137bc2662447c1a7 oracle=ad78e61507804df8 rows=pending
+turn@1/laws/userhash_vector src=a490089ca9be6563 sig=09a1d63135fc4228 run=c2c0c6612d4cbb79 bug=3242c69d6fc5b466 oracle=1c949b07f68d020c rows=pending

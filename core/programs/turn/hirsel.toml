@@ -1,0 +1,22 @@
+[package]
+name = "turn"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+stun_ice = { major = 1, path = "../stun_ice" }
+
+[sources]
+"types.hirsel" = "turn"
+"credentials.hirsel" = "turn"
+"gate.hirsel" = "turn"
+"client.hirsel" = "turn"
+"client_rx.hirsel" = "turn"
+
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"laws.hirsel" = "laws"

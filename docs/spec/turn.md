@@ -24,7 +24,7 @@ and ICE ([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489),
 
 - **TURN** ([RFC 8656](https://www.rfc-editor.org/rfc/rfc8656)): Allocate, Refresh,
   CreatePermission, ChannelBind, Send and Data indications, and ChannelData, as a sans-IO
-  client and a sans-IO relay server, in a new package `core/programs/turn/`<!-- doc-ref: planned -->.
+  client and a sans-IO relay server, in a new package `core/programs/turn/`.
 - **Long-term credentials** (RFC 8489 §9.2): realm, nonce, the nonce cookie and bid-down
   prevention, PASSWORD-ALGORITHM(S), MESSAGE-INTEGRITY and MESSAGE-INTEGRITY-SHA256 keyed
   by a `Secret`, and USERHASH. The STUN message layer for them lands in `stun_ice` itself
@@ -737,7 +737,7 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`), LiveKit (`/tmp/ref-livekit` at `d210b4d`)
 ## Build laws
 
 Each law is written red first in its named harness, with an oracle outside the code under
-test. The harnesses are `core/programs/turn/laws.hirsel`<!-- doc-ref: planned -->, the
+test. The harnesses are `core/programs/turn/laws.hirsel`, the
 existing `core/programs/stun_ice/laws.hirsel` for U0, and TLS-5's sink laws for U1. Interop
 runs from `core/programs/turn/interop.py`<!-- doc-ref: planned --> on loopback, with coturn
 and Pion built from clones in `/tmp`, never vendored. The existing `binding_vectors` law is
@@ -883,7 +883,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 |---|---|---|---|---|
 | **U0** STUN message layer | M | — | TURN-4 in `stun_ice`: `Key`, `Attr`, `Header`, `attrs`, `verify_key`, `Builder`; Binding functions rebuilt over them; constants; law lock rewritten | existing `binding_vectors`, `full_connectivity`, `lite_nat_rebinding`, `lite_peer_signaling` stay green |
 | **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and no `digest` or `kdf` in a `derive_digest` child; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
-| **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/`<!-- doc-ref: planned --> package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
+| **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/` package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
 | **U4** relay policy, quota, revocation | M | U3, NET-18 S1 | TURN-7 policy with `local` and `net.class` (after NET-18 S1), the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
 | **U5** streams and simulation | M | U3 | TURN-8 `Framer` with the length and cookie checks; stream origins, `connected`, `streams`, `stream_allocate_s` and `Close(conn)`; the sim runs | `stream_framing`, `sim_relay_loss` |

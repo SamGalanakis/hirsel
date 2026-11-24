@@ -1,0 +1,709 @@
+// TURN-5 and TURN-6 laws (slice U2). Requests on the relay side are built with stun_ice
+// alone; the turn.client is driven against turn.admit and a success builder on the test side.
+const MS: u64 = 1000000
+
+const S: u64 = 1000000000
+
+const UNIX: u64 = 1699990000
+
+const NEVER: u64 = 0xffffffffffffffff
+
+const SERVER: Addr = Addr(ip: V4(0xc0000264), port: 3478)
+
+const RELAYED: Addr = Addr(ip: V4(0xc0000264), port: 50000)
+
+const HOST_A: Addr = Addr(ip: V4(0xc0000201), port: 40000)
+
+const HOST_B: Addr = Addr(ip: V4(0xcb007105), port: 40000)
+
+const USERNAME: u16 = 0x0006
+
+const MI_SHA1: u16 = 0x0008
+
+fn buffer(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0)
+    b
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+fn sealed(n: u64, x: u8, uses: String) -> Secret {
+    let raw = buffer(n)
+    let mut b = take raw
+    list.fill_slice(mut b, 0, n, x)
+    result.unwrap(secret.seal(take b, uses))
+}
+
+fn at(ms: u64) -> turn.Now {
+    turn.Now(mono_ns: ms * MS, unix_s: UNIX)
+}
+
+fn config() -> turn.GateConfig {
+    turn.GateConfig(realm: b"example.org", nonce_s: 600, credential_max_s: 86400, sources: 64, challenge_per_s: 10, derive_per_source_s: 10)
+}
+
+fn new_gate(take c: turn.GateConfig, seed: u64) -> turn.Gate {
+    // RFC 4231 test case 1's key as the master, a fixed nonce key, and a fixed slot key.
+    let rnd = provide.random(seed)
+    result.unwrap(turn.gate(take c, rnd, sealed(20, 0x0b, "kdf"), sealed(32, 0x5a, "mac")))
+}
+
+fn username() -> Bytes {
+    b"1700000000:alice"
+}
+
+/// The minted password for 1700000000:alice, held as the turn.client holds it.
+fn user_password() -> Secret {
+    let mut name: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    result.unwrap(turn.mint(sealed(20, 0x0b, "mac"), 1700000000, b"alice", mut name, mut password))
+    if list.compare_bytes(name, username()) != Equal || list.compare_bytes(password, b"drQMYrWe3ae7X1QibpxONspvq5SLSuj98Wl9nLNQNGw=") != Equal {
+        fail("turn.mint differs from Python hmac over 1700000000:alice")
+    }
+    result.unwrap(secret.seal(take password, "digest"))
+}
+
+fn user_key(alg: turn.Algorithm) -> Secret {
+    result.unwrap(turn.client_key(user_password(), username(), b"example.org", alg))
+}
+
+fn find(packet: Bytes, kind: u16) -> Option[stun_ice.Range] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let _ = stun_ice.attrs(packet, mut fields)
+    for i in 0u64 .. list.len(fields) {
+        if fields[i].kind == kind {
+            return Some(fields[i].value)
+        }
+    }
+    None
+}
+
+/// 0 for a success response, else its ERROR-CODE, or 1 when it has none.
+fn code_of(packet: Bytes) -> u16 {
+    let h = result.unwrap(stun_ice.header(packet))
+    if h.class == Success {
+        return 0
+    }
+    let Some(v) = find(packet, 0x0009) else {
+        return 1
+    }
+    let class: u16 = int.widen(packet[v.lo + 2] & 7)
+    let number: u16 = int.widen(packet[v.lo + 3])
+    class * 100 + number
+}
+
+fn value_of(packet: Bytes, kind: u16) -> Bytes {
+    let Some(v) = find(packet, kind) else {
+        fail("attribute missing")
+    }
+    copy_of(list.slice(packet, v.lo, v.hi))
+}
+
+fn add_credentials(mut b: stun_ice.Builder, name: Bytes, nonce: Bytes, algs: u8, mut out: Bytes) {
+    result.unwrap(stun_ice.add(mut b, USERNAME, name, mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.REALM, b"example.org", mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.NONCE, nonce, mut out))
+    if algs == 1 {
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHMS, b"\x00\x02\x00\x00\x00\x01\x00\x00", mut out))
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHM, b"\x00\x02\x00\x00", mut out))
+    } else if algs == 2 {
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHM, b"\x00\x02\x00\x00", mut out))
+    } else if algs == 3 {
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHMS, b"\x00\x01\x00\x00", mut out))
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHM, b"\x00\x01\x00\x00", mut out))
+    }
+}
+
+/// A request signed under key. algs: 0 neither PASSWORD-ALGORITHM(S), 1 the offer and
+/// SHA-256, 2 PASSWORD-ALGORITHM alone, 3 a list of MD5 alone and MD5.
+fn request(method: u16, low: u64, name: Bytes, nonce: Bytes, algs: u8, take key: Secret, integrity: stun_ice.Integrity) -> Bytes {
+    let mut out = buffer(512)
+    let mut scratch = buffer(512)
+    let tx = stun_ice.Transaction(high: 0x01020304, low: low)
+    let mut b = result.unwrap(stun_ice.start(method, Request, tx, mut out))
+    if method == stun_ice.ALLOCATE {
+        result.unwrap(stun_ice.add(mut b, stun_ice.REQUESTED_TRANSPORT, b"\x11\x00\x00\x00", mut out))
+    }
+    add_credentials(mut b, name, nonce, algs, mut out)
+    let n = result.unwrap(stun_ice.finish(take b, integrity, Long(take key), false, mut out, mut scratch))
+    list.truncate(mut out, n)
+    out
+}
+
+fn bare(low: u64) -> Bytes {
+    let mut out = buffer(512)
+    let mut scratch = buffer(64)
+    let tx = stun_ice.Transaction(high: 0x01020304, low: low)
+    let mut b = result.unwrap(stun_ice.start(stun_ice.ALLOCATE, Request, tx, mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.REQUESTED_TRANSPORT, b"\x11\x00\x00\x00", mut out))
+    let n = result.unwrap(stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut scratch))
+    list.truncate(mut out, n)
+    out
+}
+
+/// What turn.admit answered: 0 Authentic, 1 Dropped, else the reply's code.
+fn admit_code(mut g: turn.Gate, now: turn.Now, from: Addr, packet: Bytes, existing: Option[turn.Held]) -> Result[u16, turn.TurnError] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut out = buffer(1500)
+    let mut scratch = buffer(1500)
+    match turn.admit(mut g, now, turn.Origin(ingress: Udp(from), client: from), SERVER, packet, existing, mut fields, mut out, mut scratch)? {
+        Authentic(_) => Ok(0),
+        Dropped => Ok(1),
+        Reply(m) => {
+            list.truncate(mut out, m)
+            Ok(code_of(out))
+        },
+    }
+}
+
+/// The NONCE of the challenge this turn.gate answers a bare Allocate from with.
+fn challenge_nonce(mut g: turn.Gate, now: turn.Now, from: Addr) -> Result[Bytes, turn.TurnError] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut out = buffer(1500)
+    let mut scratch = buffer(1500)
+    let Reply(m) = turn.admit(mut g, now, turn.Origin(ingress: Udp(from), client: from), SERVER, bare(7), None, mut fields, mut out, mut scratch)? else {
+        fail("bare Allocate was not challenged")
+    }
+    list.truncate(mut out, m)
+    if code_of(out) != 401 {
+        fail("bare Allocate was not answered 401")
+    }
+    Ok(value_of(out, stun_ice.NONCE))
+}
+
+type Sent {
+    method: u16,
+    ns: u64
+}
+
+/// The relay side for a client: turn.admit, then a success signed by sign. Grants
+/// max(600, min(requested, grant_max)) seconds, 0 for a Refresh of 0.
+type Relay {
+    g: turn.Gate,
+    held: Option[turn.Held],
+    from: Addr,
+    grant_max: u32,
+    refuse: u16,
+    sent: List[Sent]
+}
+
+fn relay_for(take c: turn.GateConfig, seed: u64) -> Relay {
+    Relay(g: new_gate(take c, seed), held: None, from: HOST_A, grant_max: 3600, refuse: 0, sent: list.new())
+}
+
+fn grant(rl: Relay, packet: Bytes, method: u16) -> u32 {
+    let requested: u32 = match find(packet, stun_ice.LIFETIME) {
+        Some(v) => list.word_be(packet, v.lo),
+        None => 600,
+    }
+    if method == stun_ice.REFRESH && requested == 0 {
+        return 0
+    }
+    order.max(600u32, order.min(requested, rl.grant_max))
+}
+
+fn add_u32(mut b: stun_ice.Builder, kind: u16, v: u32, mut out: Bytes) {
+    let mut value: Bytes = list.with_capacity(4)
+    list.put_word_be(mut value, v)
+    result.unwrap(stun_ice.add(mut b, kind, value, mut out))
+}
+
+fn serve(mut rl: Relay, now: turn.Now, packet: Bytes, mut reply: Bytes) -> Result[u64, turn.TurnError] {
+    let h = stun_ice.header(packet) ?=> Wire
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut scratch = buffer(1500)
+    match turn.admit(mut rl.g, now, turn.Origin(ingress: Udp(rl.from), client: rl.from), SERVER, packet, rl.held, mut fields, mut reply, mut scratch)? {
+        Dropped => Ok(0),
+        Reply(m) => Ok(m),
+        Authentic(v) => {
+            if h.method == stun_ice.CHANNEL_BIND && rl.refuse != 0 {
+                let mut b = stun_ice.start(h.method, Failure, h.transaction, mut reply) ?=> Wire
+                stun_ice.add_error(mut b, rl.refuse, mut reply) ?=> Wire
+                return turn.sign(v, take b, mut reply, mut scratch)
+            }
+            let mut b = stun_ice.start(h.method, Success, h.transaction, mut reply) ?=> Wire
+            if h.method == stun_ice.ALLOCATE {
+                stun_ice.add_xor_addr(mut b, stun_ice.XOR_RELAYED_ADDRESS, RELAYED, mut reply) ?=> Wire
+                stun_ice.add_xor_addr(mut b, 0x0020, rl.from, mut reply) ?=> Wire
+                add_u32(mut b, stun_ice.LIFETIME, grant(rl, packet, h.method), mut reply)
+            } else if h.method == stun_ice.REFRESH {
+                add_u32(mut b, stun_ice.LIFETIME, grant(rl, packet, h.method), mut reply)
+            }
+            let n = turn.sign(v, take b, mut reply, mut scratch)?
+            if h.method == stun_ice.ALLOCATE {
+                rl.held = Some(turn.Held(username: value_of(packet, USERNAME), key: secret.share(v.key)))
+            }
+            Ok(n)
+        },
+    }
+}
+
+/// Run turn.client and relay at now until the turn.client asks to be woken: its WakeAt or Idle.
+fn drive(mut cl: turn.Client, mut rl: Relay, now: turn.Now, rnd: Random) -> Result[turn.Poll, turn.TurnError] {
+    for _ in 0u64 .. 64 {
+        let mut out = buffer(512)
+        match turn.poll(mut cl, now, rnd, mut out)? {
+            Send(n) => {
+                list.truncate(mut out, n)
+                let h = stun_ice.header(out) ?=> Wire
+                list.push(mut rl.sent, Sent(method: h.method, ns: now.mono_ns))
+                let mut reply = buffer(1500)
+                let m = serve(mut rl, now, out, mut reply)?
+                if m > 0 {
+                    list.truncate(mut reply, m)
+                    let _ = turn.receive(mut cl, now, rnd, mut reply)?
+                }
+            },
+            p => return Ok(p),
+        }
+    }
+    fail("turn.client kept sending")
+}
+
+fn wake_of(p: turn.Poll) -> u64 {
+    if let WakeAt(t) = p {
+        t
+    } else {
+        NEVER
+    }
+}
+
+fn expires(cl: turn.Client) -> u64 {
+    if let Allocated(a) = turn.client_state(cl) {
+        a.expires_ns
+    } else {
+        NEVER
+    }
+}
+
+/// A 401 to the client's first request, from the request's own transaction.
+fn challenge_for(first_msg: Bytes, nonce: Bytes, algorithms: Bytes) -> Bytes {
+    let h = result.unwrap(stun_ice.header(first_msg))
+    let mut out = buffer(512)
+    let mut scratch = buffer(64)
+    let mut b = result.unwrap(stun_ice.start(h.method, Failure, h.transaction, mut out))
+    result.unwrap(stun_ice.add_error(mut b, 401, mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.REALM, b"example.org", mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.NONCE, nonce, mut out))
+    if list.len(algorithms) > 0 {
+        result.unwrap(stun_ice.add(mut b, stun_ice.PASSWORD_ALGORITHMS, algorithms, mut out))
+    }
+    let n = result.unwrap(stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut scratch))
+    list.truncate(mut out, n)
+    out
+}
+
+fn first_request(mut cl: turn.Client, now: turn.Now, rnd: Random) -> Result[Bytes, turn.TurnError] {
+    let mut out = buffer(512)
+    let Send(n) = turn.poll(mut cl, now, rnd, mut out)? else {
+        fail("turn.client did not start with Allocate")
+    }
+    list.truncate(mut out, n)
+    Ok(out)
+}
+
+/// bug: hash the username without the realm, or send USERNAME beside USERHASH when the
+/// nonce cookie offers anonymity.
+/// oracle: RFC 8489 Appendix B.1's USERHASH 4a3cf38f…7f1704 for マトリックス and example.org.
+@test
+fn userhash_vector() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(21)
+    let name = b"\xe3\x83\x9e\xe3\x83\x88\xe3\x83\xaa\xe3\x83\x83\xe3\x82\xaf\xe3\x82\xb9"
+    let mut cl = turn.client(turn.client_defaults(), SERVER, copy_of(name), sealed(9, 0x41, "digest"))?
+    let first = first_request(mut cl, at(1000), rnd)?
+    // Cookie features "wAAA": bit 0 (Password algorithms) and bit 1 (Username anonymity).
+    let challenge = challenge_for(first, b"obMatJos2wAAAf//499k954d6OL34oL9FSTvy64sA", b"\x00\x02\x00\x00\x00\x01\x00\x00")
+    let mut packet = take challenge
+    if let Control = turn.receive(mut cl, at(1001), rnd, mut packet)? {} else {
+        fail("anonymity challenge not taken")
+    }
+    let mut out = buffer(512)
+    let Send(n) = turn.poll(mut cl, at(1001), rnd, mut out)? else {
+        fail("no authenticated retry")
+    }
+    list.truncate(mut out, n)
+    if let Some(_) = find(out, USERNAME) {
+        fail("USERNAME sent beside USERHASH")
+    }
+    let hash = value_of(out, stun_ice.USERHASH)
+    if list.compare_bytes(hash, b"\x4a\x3c\xf3\x8f\xef\x69\x92\xbd\xa9\x52\xc6\x78\x04\x17\xda\x0f\x24\x81\x94\x15\x56\x9e\x60\xb2\x05\xc4\x6e\x41\x40\x7f\x17\x04") != Equal {
+        fail("USERHASH differs from RFC 8489 Appendix B.1")
+    }
+    Ok(())
+}
+
+/// bug: accept a nonce from another address, a forged tag, an aged nonce, or one
+/// stamped after a restarted clock, or spend a derivation on the first two.
+/// oracle: TURN-5 steps 5 and 8 by hand: 438 each time, success at nonce_s − 1 ms.
+@test
+fn nonce_bound_to_tuple() -> Result[(), turn.TurnError] {
+    let mut g = new_gate(config(), 31)
+    let n = challenge_nonce(mut g, at(1000), HOST_A)?
+    if list.len(n) != 61 {
+        fail("nonce is not 61 bytes")
+    }
+    let good = request(stun_ice.ALLOCATE, 1, username(), n, 1, user_key(Sha256), Sha256)
+    if admit_code(mut g, at(2000), HOST_B, good, None)? != 438 {
+        fail("nonce replayed from another address accepted")
+    }
+    let mut forged = copy_of(n)
+    forged[60] = if forged[60] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    }
+    let bad = request(stun_ice.ALLOCATE, 2, username(), forged, 1, user_key(Sha256), Sha256)
+    if admit_code(mut g, at(2000), HOST_A, bad, None)? != 438 {
+        fail("nonce with a forged tag accepted")
+    }
+    if turn.gate_counts(g).derivations != 0 {
+        fail("a derivation before the nonce verified")
+    }
+    if admit_code(mut g, at(1000 + 599999), HOST_A, good, None)? != 0 {
+        fail("genuine nonce refused at nonce_s - 1 ms")
+    }
+    if admit_code(mut g, at(1000 + 600000), HOST_A, good, None)? != 438 {
+        fail("nonce accepted at nonce_s")
+    }
+    let mut restarted = new_gate(config(), 32)
+    if admit_code(mut restarted, at(500), HOST_A, good, None)? != 438 {
+        fail("nonce stamped after a restarted clock accepted")
+    }
+    if turn.gate_counts(restarted).derivations != 0 {
+        fail("restarted relay derived for a future nonce")
+    }
+    Ok(())
+}
+
+/// bug: let a request with PASSWORD-ALGORITHMS other than the offer, or with one of the two
+/// attributes, through; refuse the browser's MD5 without either; answer that MD5 with
+/// MESSAGE-INTEGRITY-SHA256; or let the turn.client retry after the cookie bit without the list.
+/// oracle: RFC 8489 sections 9.2.1, 9.2.4 and 9.2.5 by hand: 400, 400, success with
+/// MESSAGE-INTEGRITY only, and a counted turn.client discard.
+@test
+fn bid_down_refused() -> Result[(), turn.TurnError] {
+    let mut g = new_gate(config(), 41)
+    let n = challenge_nonce(mut g, at(1000), HOST_A)?
+    if admit_code(mut g, at(1000), HOST_A, request(stun_ice.ALLOCATE, 1, username(), n, 3, user_key(Md5), Sha256), None)? != 400 {
+        fail("PASSWORD-ALGORITHMS other than the offer admitted")
+    }
+    if admit_code(mut g, at(1000), HOST_A, request(stun_ice.ALLOCATE, 2, username(), n, 2, user_key(Sha256), Sha256), None)? != 400 {
+        fail("PASSWORD-ALGORITHM alone admitted")
+    }
+    if admit_code(mut g, at(1000), HOST_A, request(stun_ice.ALLOCATE, 3, username(), n, 1, user_key(Sha256), Sha256), None)? != 0 {
+        fail("the offered algorithms refused")
+    }
+    let legacy = request(stun_ice.ALLOCATE, 4, username(), n, 0, user_key(Md5), Sha1)
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut out = buffer(1500)
+    let mut scratch = buffer(1500)
+    let Authentic(v) = turn.admit(mut g, at(1000), turn.Origin(ingress: Udp(HOST_A), client: HOST_A), SERVER, legacy, None, mut fields, mut out, mut scratch)? else {
+        fail("MD5 without PASSWORD-ALGORITHM(S) refused")
+    }
+    let h = result.unwrap(stun_ice.header(legacy))
+    let b = stun_ice.start(h.method, Success, h.transaction, mut out) ?=> Wire
+    let m = turn.sign(v, take b, mut out, mut scratch)?
+    list.truncate(mut out, m)
+    if let None = find(out, MI_SHA1) {
+        fail("MD5 response without MESSAGE-INTEGRITY")
+    }
+    if let Some(_) = find(out, stun_ice.MESSAGE_INTEGRITY_SHA256) {
+        fail("MD5 response with MESSAGE-INTEGRITY-SHA256")
+    }
+    let rnd = provide.random(42)
+    let mut cl = turn.client(turn.client_defaults(), SERVER, username(), user_password())?
+    let first = first_request(mut cl, at(1000), rnd)?
+    let challenge = challenge_for(first, b"obMatJos2gAAAf//499k954d6OL34oL9FSTvy64sA", b"")
+    let mut packet = take challenge
+    if let Discarded = turn.receive(mut cl, at(1001), rnd, mut packet)? {} else {
+        fail("cookie bit without PASSWORD-ALGORITHMS taken")
+    }
+    if turn.client_discards(cl).unauthenticated != 1 || turn.client_derivations(cl) != 0 {
+        fail("bid-down challenge not counted, or a key derived")
+    }
+    let mut next = buffer(512)
+    if wake_of(turn.poll(mut cl, at(1001), rnd, mut next)?) != 1500 * MS {
+        fail("turn.client retried after a bid-down challenge")
+    }
+    Ok(())
+}
+
+fn forged_key() -> Secret {
+    sealed(32, 0x77, "mac")
+}
+
+/// Every Authentic answer counted, the first one's key kept as the allocation's.
+fn flood(mut g: turn.Gate, now: turn.Now, from: Addr, packet: Bytes, count: u64, mut held: Option[turn.Held]) -> Result[u64, turn.TurnError] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut out = buffer(1500)
+    let mut scratch = buffer(1500)
+    let mut authentic = 0u64
+    for _ in 0u64 .. count {
+        match turn.admit(mut g, now, turn.Origin(ingress: Udp(from), client: from), SERVER, packet, None, mut fields, mut out, mut scratch)? {
+            Authentic(v) => {
+                authentic += 1
+                if let None = held {
+                    held = Some(turn.Held(username: username(), key: secret.share(v.key)))
+                }
+            },
+            _ => (),
+        }
+    }
+    Ok(authentic)
+}
+
+fn replies(mut g: turn.Gate, now: turn.Now, from: Addr, packet: Bytes, count: u64) -> Result[u64, turn.TurnError] {
+    let mut fields: List[stun_ice.Attr] = list.new()
+    let mut out = buffer(1500)
+    let mut scratch = buffer(1500)
+    let mut sent = 0u64
+    for _ in 0u64 .. count {
+        if let Reply(_) = turn.admit(mut g, now, turn.Origin(ingress: Udp(from), client: from), SERVER, packet, None, mut fields, mut out, mut scratch)? {
+            sent += 1
+        }
+    }
+    Ok(sent)
+}
+
+/// bug: derive a key for an expired, malformed, revoked or far-future username or a
+/// forged nonce; derive more than derive_per_source_s a second for one source, or for a
+/// Refresh; or answer more than challenge_per_s pre-authentication requests a second.
+/// oracle: TURN-5 by hand: no derivation for the first group or the Refreshes; exactly 10
+/// derivations in the second with the rest throttled; exactly 10 replies to bare and to
+/// forged-nonce requests, the rest challenged; the second source's Allocate succeeds.
+@test
+fn expired_costs_no_derivation() -> Result[(), turn.TurnError] {
+    let mut g = new_gate(config(), 51)
+    let n = challenge_nonce(mut g, at(1000), HOST_A)?
+    turn.gate_revoke(mut g, b"mallory", 1700000001)
+    let mut forged = copy_of(n)
+    forged[40] = if forged[40] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    }
+    let mut costless: List[Bytes] = list.new()
+    list.push(mut costless, request(stun_ice.ALLOCATE, 1, b"1699980000:alice", n, 1, forged_key(), Sha256))
+    list.push(mut costless, request(stun_ice.ALLOCATE, 2, b"alice", n, 1, forged_key(), Sha256))
+    list.push(mut costless, request(stun_ice.ALLOCATE, 3, b"1700000000:mallory", n, 1, forged_key(), Sha256))
+    list.push(mut costless, request(stun_ice.ALLOCATE, 4, b"1800000000:alice", n, 1, forged_key(), Sha256))
+    list.push(mut costless, request(stun_ice.ALLOCATE, 5, b"01700000000:alice", n, 1, forged_key(), Sha256))
+    list.push(mut costless, request(stun_ice.ALLOCATE, 6, username(), forged, 1, forged_key(), Sha256))
+    for i in 0u64 .. 10000 {
+        let _ = admit_code(mut g, at(2000), HOST_A, costless[i % 6], None)?
+    }
+    if turn.gate_counts(g).derivations != 0 {
+        fail("a derivation for a costless refusal")
+    }
+    let good = request(stun_ice.ALLOCATE, 7, username(), n, 1, user_key(Sha256), Sha256)
+    let mut held: Option[turn.Held] = None
+    if flood(mut g, at(3000), HOST_A, good, 2000, mut held)? != 10 {
+        fail("not exactly derive_per_source_s Allocates in one second")
+    }
+    let counts = turn.gate_counts(g)
+    if counts.derivations != 10 || counts.throttled != 1990 {
+        fail("derivations past the source's budget, or uncounted throttling")
+    }
+    let refresh = request(stun_ice.REFRESH, 8, username(), n, 1, user_key(Sha256), Sha256)
+    for _ in 0u64 .. 10 {
+        if admit_code(mut g, at(4000), HOST_A, refresh, held)? != 0 {
+            fail("Refresh on the allocation refused")
+        }
+    }
+    if turn.gate_counts(g).derivations != 10 {
+        fail("Refresh derived a key")
+    }
+    let mut bare_gate = new_gate(config(), 52)
+    if replies(mut bare_gate, at(5000), HOST_A, bare(9), 10000)? != 10 || turn.gate_counts(bare_gate).challenged != 9990 {
+        fail("not exactly challenge_per_s answers to bare requests")
+    }
+    let mut spoofed = new_gate(config(), 53)
+    let forged_nonce = request(stun_ice.ALLOCATE, 10, username(), forged, 1, forged_key(), Sha256)
+    if replies(mut spoofed, at(5000), HOST_A, forged_nonce, 10000)? != 10 || turn.gate_counts(spoofed).challenged != 9990 || turn.gate_counts(spoofed).derivations != 0 {
+        fail("not exactly challenge_per_s answers to forged nonces, or a derivation")
+    }
+    // Seed 54 puts HOST_A's and HOST_B's prefixes in different slots.
+    let mut shared = new_gate(config(), 54)
+    let na = challenge_nonce(mut shared, at(1000), HOST_A)?
+    let nb = challenge_nonce(mut shared, at(1000), HOST_B)?
+    let impostor = request(stun_ice.ALLOCATE, 11, b"1700000000:eve", na, 1, forged_key(), Sha256)
+    let mut none: Option[turn.Held] = None
+    let _ = flood(mut shared, at(6000), HOST_A, impostor, 2000, mut none)?
+    let honest = request(stun_ice.ALLOCATE, 12, username(), nb, 1, user_key(Sha256), Sha256)
+    if admit_code(mut shared, at(6000), HOST_B, honest, None)? != 0 {
+        fail("one source's forged usernames refused another source's Allocate")
+    }
+    let shared_counts = turn.gate_counts(shared)
+    if shared_counts.derivations != 11 || shared_counts.throttled != 1990 {
+        fail("forged usernames derived past their source's budget")
+    }
+    Ok(())
+}
+
+/// bug: loop on 401, re-derive on 438, or keep going with a wrong password.
+/// oracle: RFC 8489 section 9.2.5 by hand: one derivation per realm and algorithm; a stale
+/// nonce costs one retry; a second 401 is Closed(Credentials) after two sends.
+@test
+fn challenge_exchange() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(61)
+    let mut c = config()
+    c.nonce_s = 60
+    let mut rl = relay_for(take c, 62)
+    let mut cl = turn.client(turn.client_defaults(), SERVER, username(), user_password())?
+    let p = drive(mut cl, mut rl, at(1000), rnd)?
+    let Allocated(a) = turn.client_state(cl) else {
+        fail("no allocation after the challenge")
+    }
+    if a.relayed != RELAYED || a.mapped != HOST_A || a.expires_ns != 601 * S {
+        fail("allocation addresses or expiry")
+    }
+    if list.len(rl.sent) != 2 || turn.client_derivations(cl) != 1 || turn.gate_counts(rl.g).derivations != 1 {
+        fail("not one challenge, one authenticated Allocate and one derivation each side")
+    }
+    if wake_of(p) != 541 * S {
+        fail("refresh not at granted lifetime minus 60 s")
+    }
+    // The nonce from 1 s is older than nonce_s at 541 s: 438, then one retry.
+    let _ = drive(mut cl, mut rl, at(541000), rnd)?
+    if list.len(rl.sent) != 4 || rl.sent[2].method != stun_ice.REFRESH || rl.sent[3].method != stun_ice.REFRESH {
+        fail("stale nonce did not cost exactly one Refresh retry")
+    }
+    if turn.client_derivations(cl) != 1 || turn.gate_counts(rl.g).derivations != 1 || expires(cl) != 1141 * S {
+        fail("stale nonce re-derived, or the Refresh did not take")
+    }
+    let mut wrong_rl = relay_for(config(), 63)
+    let mut wrong = turn.client(turn.client_defaults(), SERVER, username(), sealed(44, 0x41, "digest"))?
+    match drive(mut wrong, mut wrong_rl, at(1000), rnd) {
+        Error(Closed(Credentials)) => (),
+        _ => fail("wrong password did not end Closed(Credentials)"),
+    }
+    if list.len(wrong_rl.sent) != 2 || turn.client_derivations(wrong) != 1 {
+        fail("wrong password retried more than once")
+    }
+    if let Closed(Credentials) = turn.client_state(wrong) {} else {
+        fail("wrong password state")
+    }
+    Ok(())
+}
+
+fn schedule(transport: turn.Transport, rnd: Random) -> Result[(), turn.TurnError] {
+    let mut c = turn.client_defaults()
+    c.transport = transport
+    let mut cl = turn.client(c, SERVER, username(), user_password())?
+    let t0 = 1000 * MS
+    let sends = if transport == Datagram {
+        7u64
+    } else {
+        1u64
+    }
+    let offsets =[0u64, 500u64, 1500u64, 3500u64, 7500u64, 15500u64, 31500u64]
+    let mut first = buffer(0)
+    for k in 0u64 .. sends {
+        let due = t0 + offsets[k] * MS
+        let mut out = buffer(512)
+        if k > 0 && wake_of(turn.poll(mut cl, turn.Now(mono_ns: due - 1, unix_s: UNIX), rnd, mut out)?) != due {
+            fail("retransmission wake is not exact")
+        }
+        let Send(n) = turn.poll(mut cl, turn.Now(mono_ns: due, unix_s: UNIX), rnd, mut out)? else {
+            fail("no send at the RFC 8489 time")
+        }
+        list.truncate(mut out, n)
+        if k == 0 {
+            first = copy_of(out)
+        } else if list.compare_bytes(out, first) != Equal {
+            fail("a retransmission differs from the first send")
+        }
+    }
+    let end = t0 + 39500 * MS
+    let mut out = buffer(512)
+    if wake_of(turn.poll(mut cl, turn.Now(mono_ns: end - 1, unix_s: UNIX), rnd, mut out)?) != end {
+        fail("failure wake is not 39.5 s after the first send")
+    }
+    match turn.poll(mut cl, turn.Now(mono_ns: end, unix_s: UNIX), rnd, mut out) {
+        Error(Closed(Timeout)) => (),
+        _ => fail("unanswered Allocate did not time out"),
+    }
+    Ok(())
+}
+
+/// bug: retransmit on the wrong schedule, over a stream at all, or fail at the wrong time.
+/// oracle: RFC 8489 section 6.2.1 (0, 500, 1,500, 3,500, 7,500, 15,500, 31,500 ms; failure
+/// at 39,500 ms) and section 6.2.2 (one send, failure at 39,500 ms).
+@test
+fn retransmit_schedule() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(71)
+    schedule(Datagram, rnd)?
+    schedule(Stream, rnd)
+}
+
+fn allocated_at(lifetime_s: u32, rnd: Random) -> Result[u64, turn.TurnError] {
+    let mut c = config()
+    c.nonce_s = 86400
+    let mut rl = relay_for(take c, 81)
+    let mut cc = turn.client_defaults()
+    cc.lifetime_s = lifetime_s
+    let mut cl = turn.client(cc, SERVER, username(), user_password())?
+    Ok(wake_of(drive(mut cl, mut rl, at(1000), rnd)?))
+}
+
+/// bug: refresh at the requested instead of the granted lifetime, miss the 240 s
+/// permission or 540 s channel refresh, or reuse a lapsed channel number within 300 s.
+/// oracle: RFC 8656 sections 7, 9 and 12 by hand, to the nanosecond.
+@test
+fn lifetimes_exact() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(91)
+    // Below the default the relay grants 600 s; above its maximum, 3,600 s.
+    if allocated_at(300, rnd)? != 541 * S || allocated_at(7200, rnd)? != 3541 * S {
+        fail("refresh not at the granted lifetime minus 60 s")
+    }
+    let mut c = config()
+    c.nonce_s = 86400
+    let mut rl = relay_for(take c, 92)
+    let mut cl = turn.client(turn.client_defaults(), SERVER, username(), user_password())?
+    let _ = drive(mut cl, mut rl, at(1000), rnd)?
+    let peer = Addr(ip: V4(0xc6336401), port: 9000)
+    let other = Addr(ip: V4(0xc6336402), port: 9000)
+    turn.permit(mut cl, peer, at(2000))?
+    let _ = drive(mut cl, mut rl, at(2000), rnd)?
+    if turn.bind(mut cl, other, at(3000))? != 0x4000 {
+        fail("first channel is not 0x4000")
+    }
+    let mut next = drive(mut cl, mut rl, at(3000), rnd)?
+    let start = list.len(rl.sent)
+    while wake_of(next) <= 543 * S {
+        let t = wake_of(next)
+        if t == 543 * S {
+            rl.refuse = 403
+        }
+        next = drive(mut cl, mut rl, turn.Now(mono_ns: t, unix_s: UNIX), rnd)?
+    }
+    rl.refuse = 0
+    let want =[(8u16, 242u64), (8u16, 243u64), (8u16, 482u64), (8u16, 483u64), (4u16, 541u64), (9u16, 543u64)]
+    if list.len(rl.sent) - start != 6 {
+        fail("refreshes other than the six RFC 8656 times")
+    }
+    for i in 0u64 .. 6 {
+        let (method, s) = want[i]
+        if rl.sent[start + i].method != method || rl.sent[start + i].ns != s * S {
+            fail("refresh at the wrong time")
+        }
+    }
+    if expires(cl) != 1141 * S || turn.client_discards(cl).refused != 1 {
+        fail("allocation refresh not granted, or the refused channel not counted")
+    }
+    let third = Addr(ip: V4(0xc6336403), port: 9000)
+    let fourth = Addr(ip: V4(0xc6336404), port: 9000)
+    if turn.bind(mut cl, third, at(544000))? != 0x4001 {
+        fail("lapsed channel number reused within 300 s")
+    }
+    let _ = drive(mut cl, mut rl, at(544000), rnd)?
+    if turn.bind(mut cl, fourth, turn.Now(mono_ns: 843 * S, unix_s: UNIX))? != 0x4000 {
+        fail("lapsed channel number not free 300 s after it lapsed")
+    }
+    Ok(())
+}

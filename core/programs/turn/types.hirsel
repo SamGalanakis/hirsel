@@ -1,0 +1,29 @@
+pub type Family: key = V4 | V6
+
+/// RFC 8489 section 18.5.1's password algorithms.
+pub type Algorithm: key = Md5 | Sha256
+
+/// The client-to-server leg. The relay leg is always UDP.
+pub type Transport: key = Datagram | Stream
+
+/// mono_ns runs the timers; unix_s is compared only with a credential's expiry.
+pub type Now {
+    mono_ns: u64,
+    unix_s: u64
+}
+
+/// Close is answered only by a relay.
+pub type Poll = Send(u64) | WakeAt(u64) | Close(u64) | Idle
+
+pub type Failure = Local | Rejected(u16) | Timeout | Credentials | Mismatch | Disconnected
+
+pub type TurnError = Config | Clock | Closed(Failure) | NotAllocated | Unpermitted(Addr) | ChannelsFull | StreamsFull | Framing | Wire(stun_ice.Error) | Secret(SecretError) | Mac(MacError) | Capacity(Capacity)
+
+/// The local UDP address a datagram arrived on, or an accepted stream connection.
+pub type Ingress = Udp(Addr) | Stream(u64)
+
+/// The client side of the 5-tuple.
+pub type Origin {
+    ingress: Ingress,
+    client: Addr
+}

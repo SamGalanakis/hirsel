@@ -45,3 +45,61 @@ fn png_up_prefix(mut row: Bytes, at: u64, n: u64) -> u64 {
     }
     offset
 }
+
+const PAETH_FIRST: Inline[u8, 16] =[0, 255, 1, 255, 2, 255, 3, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+
+const PAETH_SECOND: Inline[u8, 16] =[4, 255, 5, 255, 6, 255, 7, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+
+const PAETH_THIRD: Inline[u8, 16] =[8, 255, 9, 255, 10, 255, 11, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+
+const PAETH_FOURTH: Inline[u8, 16] =[12, 255, 13, 255, 14, 255, 15, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+
+fn png_paeth4_prefix(mut row: Bytes, at: u64, n: u64) -> u64 {
+    let first = simd.from(PAETH_FIRST)
+    let second = simd.from(PAETH_SECOND)
+    let third = simd.from(PAETH_THIRD)
+    let fourth = simd.from(PAETH_FOURTH)
+    let even: Simd[u8, 16] = simd.from([0, 1, 2, 3, 255, 255, 255, 255, 8, 9, 10, 11, 255, 255, 255, 255])
+    let odd: Simd[u8, 16] = simd.from([255, 255, 255, 255, 0, 1, 2, 3, 255, 255, 255, 255, 8, 9, 10, 11])
+    let mut left: Simd[i16, 8] = simd.splat(0)
+    let mut diagonal: Simd[i16, 8] = simd.splat(0)
+    let mut offset = 0u64
+    let above = at - n - 1
+    while n - offset >= 16 {
+        let filtered: Simd[u8, 16] = list.lanes(row, at + offset)
+        let previous: Simd[u8, 16] = list.lanes(row, above + offset)
+        let u0: Simd[i16, 8] = simd.cast(simd.swizzle(previous, first))
+        let u1: Simd[i16, 8] = simd.cast(simd.swizzle(previous, second))
+        let u2: Simd[i16, 8] = simd.cast(simd.swizzle(previous, third))
+        let u3: Simd[i16, 8] = simd.cast(simd.swizzle(previous, fourth))
+        let p0 = png_paeth_pixel(simd.cast(simd.swizzle(filtered, first)), left, u0, diagonal)
+        let p1 = png_paeth_pixel(simd.cast(simd.swizzle(filtered, second)), p0, u1, u0)
+        let p2 = png_paeth_pixel(simd.cast(simd.swizzle(filtered, third)), p1, u2, u1)
+        let p3 = png_paeth_pixel(simd.cast(simd.swizzle(filtered, fourth)), p2, u3, u2)
+        let e: Simd[u8, 16] = simd.pack_saturating(p0, p2)
+        let o: Simd[u8, 16] = simd.pack_saturating(p1, p3)
+        list.set_lanes(mut row, at + offset, simd.swizzle(e, even) | simd.swizzle(o, odd))
+        left = p3
+        diagonal = u3
+        offset += 16
+    }
+    offset
+}
+
+fn png_paeth_pixel(filtered: Simd[i16, 8], left: Simd[i16, 8], up: Simd[i16, 8], diagonal: Simd[i16, 8]) -> Simd[i16, 8] {
+    let du = simd.wrapping_sub(up, diagonal)
+    let dl = simd.wrapping_sub(left, diagonal)
+    let dd = simd.wrapping_add(du, dl)
+    let da = png_abs_lanes(du)
+    let db = png_abs_lanes(dl)
+    let dc = png_abs_lanes(dd)
+    let choose_left = ~(simd.lt(db, da) | simd.lt(dc, da))
+    let choose_up = ~choose_left & ~simd.lt(dc, db)
+    let predictor = (left & choose_left) | (up & choose_up) | (diagonal & ~(choose_left | choose_up))
+    simd.wrapping_add(filtered, predictor) & simd.splat(255)
+}
+
+fn png_abs_lanes(v: Simd[i16, 8]) -> Simd[i16, 8] {
+    let signs = v >> 15
+    simd.wrapping_sub(v ^ signs, signs)
+}

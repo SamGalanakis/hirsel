@@ -1,0 +1,136 @@
+// LANG-6: a view-returning call's temporary, carried by a block's tail, an operand of
+// `&&` or `||`, or an argument before a `?` that leaves, is freed exactly once: every
+// run admits nothing at its end (a String left uncleaned stays admitted), and each
+// Mark is finalized once, the temporary before the body's locals.
+// tail: last byte of "abc" = 99; tail_mark: 3, trace 3.
+// both: the right operand runs only when c == 1 (width 3 == 3): 1, else 0.
+// either: c == 1 skips the right operand; otherwise width 3 == c + 3 holds at c == 0.
+// both_mark: c == 1 makes and frees Mark 3; c == 0 makes none.
+// tried: two("abc", 1) = 4; at c == 0 `?` leaves after the String is made: 0.
+// tried_mark: the temporary 3 ends before the local a (1) on both paths.
+// expect: run tail(0) = 99
+// expect: run tail_mark(0) = 3 trace 3
+// expect: run both(1) = 1
+// expect: run both(0) = 0
+// expect: run either(1) = 1
+// expect: run either(0) = 1
+// expect: run either(2) = 0
+// expect: run both_mark(1) = 1 trace 3
+// expect: run both_mark(0) = 0
+// expect: run either_mark(0) = 1 trace 3
+// expect: run tried(1) = 4
+// expect: run tried(0) = 0
+// expect: run tried_mark(1) = 4 trace 3,1
+// expect: run tried_mark(0) = 0 trace 3,1
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn mk(i: u64) -> Mark {
+    result.unwrap(Mark(id: i))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn width(b: Bytes) -> u64 {
+    list.len(b)
+}
+
+fn tail(c: u64) -> u64 {
+    last_byte({
+        string.as_bytes(made("abc"))
+    })
+}
+
+fn tail_mark(c: u64) -> u64 {
+    id_of({
+        me(mk(3))
+    })
+}
+
+fn both(c: u64) -> u64 {
+    if c == 1 && width(string.as_bytes(made("abc"))) == 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn either(c: u64) -> u64 {
+    if c == 1 || width(string.as_bytes(made("abc"))) == c + 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn both_mark(c: u64) -> u64 {
+    if c == 1 && id_of(me(mk(3))) == 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn either_mark(c: u64) -> u64 {
+    if c == 1 || id_of(me(mk(3))) == c + 3 {
+        1
+    } else {
+        0
+    }
+}
+
+fn opt(c: u64) -> Option[u64] {
+    if c == 1 {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn two(b: Bytes, n: u64) -> u64 {
+    list.len(b) + n
+}
+
+fn two_mark(m: Mark, n: u64) -> u64 {
+    m.id + n
+}
+
+fn tried_in(c: u64) -> Option[u64] {
+    Some(two(string.as_bytes(made("abc")), opt(c)?))
+}
+
+fn tried(c: u64) -> u64 {
+    match tried_in(c) {
+        Some(x) => x,
+        None => 0
+    }
+}
+
+fn tried_mark_in(c: u64) -> Option[u64] {
+    let a = mk(1)
+    Some(two_mark(me(mk(3)), opt(c)?))
+}
+
+fn tried_mark(c: u64) -> u64 {
+    match tried_mark_in(c) {
+        Some(x) => x,
+        None => 0
+    }
+}

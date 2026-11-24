@@ -35,10 +35,12 @@ Both compilers extract source-relative debug rows when they emit native code.
 The LLVM release cache identifies locations by emitted instruction order, so
 source-coordinate edits can reuse code while rebinding its debug rows.
 The link step resolves these rows to file, line and column, with the inlined
-call chain and Hirsel definition path where available. It writes a separate
-ELF DWARF file beside the executable. A GNU build ID selects
-`.build-id/XX/REST.debug`, where `XX` is the first byte in hex. If the image
-has no GNU build ID, its exact byte digest selects `.hirsel-debug/DIGEST.debug`.
+call chain and Hirsel definition path where available. `hirsel build -o PATH`
+writes the detached ELF DWARF under the directory containing `PATH`. A GNU
+build ID selects `.build-id/XX/REST.debug`, where `XX` is the first byte in
+hex. With no GNU build ID, the file is `.hirsel-debug/DIGEST.debug`, where
+`DIGEST` is the exact image byte digest. `hirsel prof` looks for that path
+relative to the executable's directory, regardless of its working directory.
 `--debug-lines on` also embeds the DWARF. Object emission is the same with
 either flag setting.
 

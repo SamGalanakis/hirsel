@@ -89,6 +89,13 @@ export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,re
     return {...h,...left,right,emit,done,call};
   }
   const at=(sub,k=1)=>sub.get(0,bytes(k)).value?.value.value[0];
+  // Holds the next storage.write until released; a failing law still releases it
+  // so closing the client does not wait behind the held write.
+  async function holdingWrite(storage,law) {
+    let release=()=>{};
+    storage.beforeWrite=()=>{storage.beforeWrite=undefined;return new Promise(r=>{release=r;});};
+    try { await law(()=>release()); } finally { release(); }
+  }
 
   return {
     async 'L-D3a_queue_order'() {
@@ -201,6 +208,72 @@ export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,re
       await emit(3,[],[],[done(1)]);
       assert.equal((await throwing).tag,'Returned');
       assert.equal(changes.length,1);
+    },
+    async 'L-D3f_overlay_on_calling_tick'() {
+      // An earlier call holds the queue on its durable write; the next call's
+      // overlay is still visible and notified before the caller's tick ends.
+      const {sub,changes,call,server,storage,emit,done}=await board();
+      await holdingWrite(storage,async release=>{
+        const first=call();
+        await settle();
+        assert.equal(server.calls.length,0,'the first call must be waiting on storage.write');
+        changes.length=0;
+        const second=call(draft=>draft.put(sub,0,bytes(1),row(0,1,12)));
+        for (const pending of [first,second]) void pending.catch(()=>{});
+        assert.equal(at(sub),12);
+        assert.deepEqual(changes.map(({change})=>change.rows),[[{slot:0,key:'01',old:row(0,1,10),new:row(0,1,12)}]]);
+        release();await settle();
+        assert.equal(server.calls.length,1);
+        await emit(2,[],[],[done(0)]);
+        await emit(3,[],[group(0,[row(0,1,12)])],[done(1)]);
+        assert.deepEqual((await Promise.all([first,second])).map(x=>x.tag),['Returned','Returned']);
+        assert.equal(at(sub),12);
+      });
+    },
+    async 'L-D3h_overlay_during_outcome_commit'() {
+      // A Batch is persisting the earlier call's outcome when the next call starts:
+      // its overlay and change still arrive on the calling tick, and the batch then
+      // confirms the first overlay with a single change.
+      const {sub,changes,call,server,storage,emit,done}=await board();
+      const first=call(draft=>draft.put(sub,0,bytes(2),row(0,2,20)));
+      await settle();
+      assert.equal(server.calls.length,1);
+      await holdingWrite(storage,async release=>{
+        void emit(2,[],[group(0,[row(0,2,20)])],[done(0)]);
+        await settle();
+        changes.length=0;
+        const second=call(draft=>draft.put(sub,0,bytes(1),row(0,1,12)));
+        for (const pending of [first,second]) void pending.catch(()=>{});
+        assert.equal(at(sub),12);
+        assert.deepEqual(changes.map(({change})=>change.rows),[[{slot:0,key:'01',old:row(0,1,10),new:row(0,1,12)}]]);
+        release();await settle();
+        assert.equal((await first).tag,'Returned');
+        assert.equal(changes.length,1,'confirming the first overlay must be silent');
+        assert.deepEqual([at(sub),at(sub,2)],[12,20]);
+        await emit(3,[],[group(0,[row(0,1,12)])],[done(1)]);
+        assert.equal((await second).tag,'Returned');
+      });
+    },
+    async 'L-D3g_refused_send_drops_early_overlay'() {
+      // The earlier call's send fails, so the client backs off before the next
+      // call reaches the queue: that call is refused and its overlay must not
+      // return on the resubscribed image.
+      const {sub,call,server,storage,time,emit}=await board();
+      await holdingWrite(storage,async release=>{
+        const first=call();
+        void first.catch(()=>{});
+        await settle();
+        server.sockets.at(-1).send=()=>{throw new Error('socket refused the Call');};
+        const second=call(draft=>draft.put(sub,0,bytes(1),row(0,1,12)));
+        const refused=assert.rejects(second,error=>error.code==='Backoff');
+        assert.equal(at(sub),12);
+        release();await settle();
+        await refused;
+        await time.advance(50);
+        await emit(1,[1],[group(1,[row(0,1,10)],bytes(4))]);
+        assert.equal(sub.current(),true);
+        assert.equal(at(sub),10);
+      });
     },
     async 'L-D3e_early_done_after_loss'() {
       const {sub,right,changes,call,server,time,emit,done}=await board(true);

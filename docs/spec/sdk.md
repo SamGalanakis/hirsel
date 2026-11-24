@@ -155,7 +155,10 @@ and encoder. A row passed to `put` must match its slot and key and carry a
 
 Write synchronous functions that use the draft for reads and writes. The
 client runs them in queue order over the latest server images on every
-commit and whenever optimistic work enters or leaves the queue. A throwing
+commit and whenever optimistic work enters or leaves the queue. A call made
+while the client is `Ready` runs its function and notifies the changed
+subscriptions before `call` returns, even while earlier work is still being
+written to storage. If the call is then refused, its writes are removed. A throwing
 function loses its changes and reports its error to `onDiagnostic`. The
 call continues. The functions live in memory and disappear on reload.
 

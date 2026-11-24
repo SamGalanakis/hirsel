@@ -5,8 +5,8 @@ import {CorruptState, emptyStream, fresh, hex, intact, maxU64, randomGeneration,
 export {CorruptState, RECOVERY_VERSION, intact, validCaller, validHttpRequest} from './persistence.js';
 export type {Clock, Socket} from './browser.js';
 export type {Caller, HttpRequest, Installation, Lease, Pending, Storage, StreamId, StreamRecord} from './persistence.js';
-import {applyImage, commitVisible, equal, freezeDecoded, imageEdits, invalidation, key, mergeLayer, rawSubscription,
-  slotEdits, stageImage, subscriptionHandle, type CallOptions, type Change, type Draft, type ImageEdits, type ImageSlots,
+import {applyImage, commitVisible, equal, invalidation, rawSubscription, runOverlay,
+  stageImage, subscriptionHandle, type CallOptions, type Change, type Draft, type ImageEdits, type ImageSlots,
   type Layer, type Overlay, type Sub, type Subscription, type SubscriptionCodec} from './image.js';
 import {RoomMember, type Decoded, type LiveLink, type LiveRoom, type RoomCodec, type RoomHandlers} from './room.js';
 export type {LiveRoom, PeerId, RoomCodec, RoomHandlers, RoomPeer, RoomPeersChange, ValueCodec} from './room.js';
@@ -99,6 +99,7 @@ export class Client implements Transport {
   };
   private handles = new WeakMap<object, Sub>();
   private overlays = new Map<symbol, Overlay>();
+  private earlyOverlays = new Set<symbol>();
   private layer: Layer = new Map();
   private version = 0n;
   private notifications?: Array<() => void>;
@@ -518,8 +519,12 @@ export class Client implements Transport {
   }
   private queueCall(want: Want, args: Uint8Array, optimistic?: CallOptions['optimistic'], http?: HttpRequest): Promise<Outcome<Uint8Array>> {
     const copied = copyWant(want), arg = args.slice();
+    // Shown on the calling tick when Ready; the queued step still decides whether the call is sent.
+    let overlay = optimistic && this.state === 'Ready' && this.wants.some(w => sameWant(w, copied)) ? this.addOverlay(optimistic) : undefined;
+    let queued = false;
     return new Promise((resolve, reject) => {
       void this.enqueue(async () => {
+        if (overlay) this.earlyOverlays.delete(overlay);
         if (this.state !== 'Ready') throw new ClientError(this.state);
         const slot = http ? 0 : this.wants.findIndex(w => sameWant(w, copied));
         if (slot < 0) throw new ClientError('UnknownWant');
@@ -530,15 +535,27 @@ export class Client implements Transport {
           await this.sendPending();
           return;
         }
-        const overlay = optimistic && Symbol();
-        this.calls.add({want: copied, args: arg, slot, overlay, http, resolve, reject});
-        if (overlay && optimistic) {
-          this.overlays.set(overlay, {run: optimistic, writes: new Set(), done: false});
-          this.recompute();
-        }
+        overlay ??= optimistic && this.addOverlay(optimistic, true);
+        this.calls.add({want: copied, args: arg, slot, overlay, http, resolve, reject}); queued = true;
         await this.startNextCall();
-      }).catch(reject);
+      }).catch(error => {
+        if (!queued && overlay && this.overlays.delete(overlay)) this.recompute();
+        reject(error);
+      });
     });
+  }
+  // Overlays apply in call order: a queued one goes before later calls' overlays already shown early.
+  private addOverlay(run: NonNullable<CallOptions['optimistic']>, queued = false): symbol {
+    const id = Symbol(), later = queued ? [...this.overlays].filter(([k]) => this.earlyOverlays.has(k)) : [];
+    for (const [k] of later) this.overlays.delete(k);
+    this.overlays.set(id, {run, writes: new Set(), done: false});
+    for (const [k, v] of later) this.overlays.set(k, v);
+    if (queued) { this.recompute(); return id; }
+    // A commit holding notifications has queued only call outcomes so far, so the
+    // caller's change can go out now without passing any image change.
+    const held = this.notifications; this.notifications = undefined;
+    this.earlyOverlays.add(id); this.recompute(); this.notifications = held;
+    return id;
   }
   private async startNextCall(): Promise<void> {
     if (this.state !== 'Ready' || this.record.pending) return;
@@ -812,56 +829,6 @@ export class Client implements Transport {
     }
     this.notify(() => { if (call) call.resolve(outcome); else this.options.onRecovered?.(outcome); });
   }
-  private runOverlay(overlay: Overlay, layer: Layer): void {
-    const patch: Layer = new Map();
-    let open = true;
-    const find = (handle: object) => {
-      if (!open) throw new ClientError('DraftExpired');
-      const sub = this.handles.get(handle);
-      if (!sub) throw new ClientError('ForeignSubscription');
-      return sub.active ? sub : undefined;
-    };
-    try {
-      overlay.run({
-        get: (handle, slot, typedKey) => {
-          const sub = find(handle);
-          if (!sub) return undefined;
-          const hex = key(sub.codec.key(slot, typedKey));
-          for (const pending of [patch, layer]) {
-            const entries = pending.get(sub)?.slots.get(slot);
-            if (entries?.has(hex)) return entries.get(hex)?.decoded as never;
-          }
-          return sub.server?.slots.get(slot)?.entries.get(hex)?.decoded as never;
-        },
-        put: (handle, slot, typedKey, row) => {
-          const sub = find(handle);
-          if (!sub) return;
-          const encoded = sub.codec.key(slot, typedKey);
-          if (!sub.codec.encodeRow) throw new ClientError('DraftRowEncoderRequired');
-          const {raw, decoded} = sub.codec.encodeRow(slot, encoded, row);
-          slotEdits(imageEdits(patch, sub).slots, slot).set(key(encoded), {raw, decoded: freezeDecoded(decoded)});
-        },
-        delete: (handle, slot, typedKey) => {
-          const sub = find(handle);
-          if (!sub) return;
-          const hex = key(sub.codec.key(slot, typedKey));
-          slotEdits(imageEdits(patch, sub).slots, slot).set(hex, undefined);
-        },
-        value: (handle, value) => {
-          const sub = find(handle);
-          if (!sub) return;
-          if (!sub.codec.encodeValue) throw new ClientError('DraftValueEncoderRequired');
-          const raw = sub.codec.encodeValue(value).slice();
-          imageEdits(patch, sub).value = {raw, decoded: freezeDecoded(sub.codec.value(raw))};
-        },
-      });
-    } finally {
-      open = false;
-    }
-    overlay.writes = new Set([...overlay.writes].filter(sub => sub.active && !sub.server));
-    for (const sub of patch.keys()) overlay.writes.add(sub);
-    mergeLayer(layer, patch);
-  }
   private recompute(staged?: Map<Sub, ReturnType<typeof stageImage>>): void {
     const next: Layer = new Map();
     const diagnostics: string[] = [];
@@ -870,7 +837,7 @@ export class Client implements Transport {
         this.overlays.delete(id);
         continue;
       }
-      try { this.runOverlay(overlay, next); }
+      try { runOverlay(overlay, next, this.handles, code => new ClientError(code)); }
       catch (error) {
         this.overlays.delete(id);
         diagnostics.push(String(error));

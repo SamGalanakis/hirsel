@@ -241,3 +241,54 @@ export function subscriptionHandle<V, Slots extends object, Keys extends Record<
   };
   return handle;
 }
+// Runs one optimistic recipe over the server image and earlier overlays, merging its writes into layer.
+export function runOverlay(overlay: Overlay, layer: Layer, handles: WeakMap<object, Sub>, refuse: (code: string) => Error): void {
+  const patch: Layer = new Map();
+  let open = true;
+  const find = (handle: object) => {
+    if (!open) throw refuse('DraftExpired');
+    const sub = handles.get(handle);
+    if (!sub) throw refuse('ForeignSubscription');
+    return sub.active ? sub : undefined;
+  };
+  try {
+    overlay.run({
+      get: (handle, slot, typedKey) => {
+        const sub = find(handle);
+        if (!sub) return undefined;
+        const hex = key(sub.codec.key(slot, typedKey));
+        for (const pending of [patch, layer]) {
+          const entries = pending.get(sub)?.slots.get(slot);
+          if (entries?.has(hex)) return entries.get(hex)?.decoded as never;
+        }
+        return sub.server?.slots.get(slot)?.entries.get(hex)?.decoded as never;
+      },
+      put: (handle, slot, typedKey, row) => {
+        const sub = find(handle);
+        if (!sub) return;
+        const encoded = sub.codec.key(slot, typedKey);
+        if (!sub.codec.encodeRow) throw refuse('DraftRowEncoderRequired');
+        const {raw, decoded} = sub.codec.encodeRow(slot, encoded, row);
+        slotEdits(imageEdits(patch, sub).slots, slot).set(key(encoded), {raw, decoded: freezeDecoded(decoded)});
+      },
+      delete: (handle, slot, typedKey) => {
+        const sub = find(handle);
+        if (!sub) return;
+        const hex = key(sub.codec.key(slot, typedKey));
+        slotEdits(imageEdits(patch, sub).slots, slot).set(hex, undefined);
+      },
+      value: (handle, value) => {
+        const sub = find(handle);
+        if (!sub) return;
+        if (!sub.codec.encodeValue) throw refuse('DraftValueEncoderRequired');
+        const raw = sub.codec.encodeValue(value).slice();
+        imageEdits(patch, sub).value = {raw, decoded: freezeDecoded(sub.codec.value(raw))};
+      },
+    });
+  } finally {
+    open = false;
+  }
+  overlay.writes = new Set([...overlay.writes].filter(sub => sub.active && !sub.server));
+  for (const sub of patch.keys()) overlay.writes.add(sub);
+  mergeLayer(layer, patch);
+}

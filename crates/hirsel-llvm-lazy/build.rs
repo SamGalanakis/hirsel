@@ -71,7 +71,7 @@ fn main() {
             source.with_file_name(header).display()
         );
     }
-    let compose_objects = ["compose", "builder", "parts", "key"].map(|name| {
+    let compose_objects = ["compose", "builder", "parts", "key", "out_of_memory"].map(|name| {
         let source = source.with_file_name(format!("{name}.cpp"));
         println!("cargo:rerun-if-changed={}", source.display());
         let object = out.join(format!("{name}.o"));

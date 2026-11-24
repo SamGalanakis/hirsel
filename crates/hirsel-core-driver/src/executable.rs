@@ -21,11 +21,30 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                // SAFETY: unshare(CLONE_FILES) gives this thread a private copy
-                // of the descriptor table; no memory is involved, and the table
-                // is released when the thread exits.
-                if unsafe { libc::unshare(libc::CLONE_FILES) } != 0 {
-                    return Err(io::Error::last_os_error());
+                // Docker's default seccomp profile blocks unshare. Use the
+                // close_range syscall directly for the glibc 2.28 ABI floor.
+                // SAFETY: close_range takes no pointers. The empty range keeps
+                // open descriptors while the kernel gives this thread a
+                // private descriptor table, released at thread exit.
+                if unsafe {
+                    libc::syscall(
+                        libc::SYS_close_range,
+                        u32::MAX,
+                        u32::MAX,
+                        libc::CLOSE_RANGE_UNSHARE,
+                    )
+                } != 0
+                {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ENOSYS) {
+                        return Err(error);
+                    }
+                    // Kernels without close_range still support unshare.
+                    // SAFETY: CLONE_FILES takes no pointers and gives this
+                    // thread a private copy of the descriptor table.
+                    if unsafe { libc::unshare(libc::CLONE_FILES) } != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
                 file.write_all(bytes)?;

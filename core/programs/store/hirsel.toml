@@ -22,6 +22,7 @@ std = { major = 1 }
 "store-tiered-plan.hirsel" = "store"
 "store-tiered-point-read.hirsel" = "store"
 "store-tiered-count.hirsel" = "store"
+"store-tiered-scan.hirsel" = "store"
 "store-tiered-pins.hirsel" = "store"
 "store-tiered-overlay.hirsel" = "store"
 "store-tiered-replay.hirsel" = "store"

@@ -237,10 +237,43 @@ fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes
     byte_cursor(data, take start, high)
 }
 
+fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, inventory: TieredReadInventory, edge: std.page.Slot,
+    descriptor: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] waits {
+    let mut start = copied(rows.low)?
+    let mut stop = copied(rows.high)?
+    if let Some(previous) = view rows.last {
+        if rows.reverse {
+            stop = copied(previous)?
+        } else {
+            start = copied(previous)?
+            list.push(mut start, 0u8)
+        }
+    }
+    let (take source, take grant, root) = snapshot_pager(r, rows.capture, inventory)?
+    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, inventory.touch_slots)
+}
+
 pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Error] waits {
     read_access(r, rows.capture)?
     if rows.done { return Ok(None) }
     readable(rows.capture.roots, rows.catalog_key, rows.catalog_page, rows.source)?
+    if let None = rows.decoder.skip {
+        let data = view rows.capture.roots.collections
+        if let Some(inventory) = view data.paging {
+            if let Some((edge, descriptor)) = std.page.collection_slot(data.root, prefix(rows.source)?) {
+                if descriptor[53u64] == 1 {
+                    let Some((take key, take raw)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
+                        rows.done = true
+                        return Ok(None)
+                    }
+                    let result = advance_rows(rows.decoder, data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })?
+                    rows.last = Some(take key)
+                    let (take selected, _) = option.unwrap(take result)
+                    return Ok(Some(take selected))
+                }
+            }
+        }
+    }
     let selected = {
         let data = view rows.capture.roots.collections
         let mut cursor = resume_data(data, rows.low, rows.high, rows.last, rows.reverse)?

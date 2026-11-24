@@ -63,3 +63,71 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
     let _ = result.unwrap(task.join(take worker))
     answered
 }
+
+fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
+    let collection = rows_handle.id
+    let mut draw = stamp_after(db.next_node)?
+    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut stored: Bytes = list.with_capacity(6)
+    list.put_word_le(mut stored, rows_handle.readers.current)
+    list.put_word_le(mut stored, 20u32)
+    let inserted = JournalOp(key: log_key(collection, 2)?, value: Some(take stored), prior: 0, trim: None)
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayOrigin(ordinal: 1, branch: 0), ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
+    let deleted = JournalOp(key: log_key(collection, 3)?, value: None, prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayOrigin(ordinal: 2, branch: 0), ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    Ok(())
+}
+
+fn l62_snapshot_scan_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let mut forward = scan(read_handle, s, rows_handle, Unbounded, Unbounded)?
+    if next(read_handle, mut forward)? != Some((1u64, 10u32)) ||
+        next(read_handle, mut forward)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut forward)? != Some((5u64, 50u32)) ||
+        next(read_handle, mut forward)? != None ||
+        next(read_handle, mut forward)? != None {
+        fail("L62: a forward scan must merge Cold rows with replay puts and deletes")
+    }
+    let mut backward = scan_reverse(read_handle, s, rows_handle, Included(2u64), Excluded(5u64))?
+    if next(read_handle, mut backward)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut backward)? != None {
+        fail("L62: a reverse scan must resume below its last key within the bounds")
+    }
+    let mut reverse_all = scan_reverse(read_handle, s, rows_handle, Unbounded, Unbounded)?
+    if next(read_handle, mut reverse_all)? != Some((5u64, 50u32)) ||
+        next(read_handle, mut reverse_all)? != Some((2u64, 20u32)) ||
+        next(read_handle, mut reverse_all)? != Some((1u64, 10u32)) ||
+        next(read_handle, mut reverse_all)? != None {
+        fail("L62: a reverse scan must include surviving Cold rows on both sides of the overlay")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows_handle), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L62: fixture inserts did not commit")
+    }
+    let collection = rows_handle.id
+    l62_prepare_snapshot_pages(mut db, fixtures, collection)?
+    l62_prepare_scan_overlay(mut db, rows_handle)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = l62_snapshot_scan_reads(db, rows_handle)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
+}

@@ -4,6 +4,8 @@ use crate::secret_aead::AeadAlg;
 use ring::{digest, hkdf, hmac};
 use zeroize::Zeroizing;
 
+pub mod dtls12;
+
 const MAX_HASH_LEN: usize = 48;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

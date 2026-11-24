@@ -229,3 +229,102 @@ fn mask_keeps_a_populated_sender_ledger_until_retire() {
         assert_eq!(paid.get(), 0);
     }
 }
+
+#[test]
+fn dtls12_record_keys_finished_and_exporter_match_openssl() {
+    use super::dtls12::Dtls12Keys;
+    use crate::{packet_cipher::PacketCipher, secret_aead::AeadAlg};
+    let shared = bytes("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d");
+    let client = std::array::from_fn(|index| index as u8);
+    let server = std::array::from_fn(|index| 160 + index as u8);
+    let seq = 0x0001_0000_0000_0001u64.to_be_bytes();
+    let mut aad = [0; 13];
+    aad[..8].copy_from_slice(&seq);
+    aad[8..].copy_from_slice(&[23, 0xfe, 0xfd, 0, 22]);
+    // P_hash with Python hmac, independently capped at each requested length.
+    // OpenSSL AES-GCM and ChaCha20-Poly1305 provide the expected records.
+    for (algorithm, ems, record, exporter, finished) in [
+        (
+            AeadAlg::Aes128Gcm,
+            false,
+            "5838181a5c0e550b83a796bc0420474963330d92aa3ee92302d6c35801c0869e745a4d1344d6",
+            "75c76a55ba0558066cd1941b4a47836e558dc4e0f19dfe9e32f729b08832bdd638e40b88a3b77eb4c8e5bd8d19a2a7c86908cb4d93ec8d5e",
+            "cdf7b3a0776ff52c4601258e",
+        ),
+        (
+            AeadAlg::Aes128Gcm,
+            true,
+            "e064f066f85a8648b81b5c64ee9b88c57680bf39d36cb15997a8a6b94d6edd661b66f6d048ba",
+            "2378f83434d06bf54074c98305451b49d694859425006ed23ae8909db145dacd8b046e1dc515e4a3145b174187044d6a9c373627f61b1764",
+            "55c67a1e89d48a06231bfcc9",
+        ),
+        (
+            AeadAlg::Aes256Gcm,
+            false,
+            "64adde471a0f0f1652eb3bcd46870341d070710b9b682c68595c0fd8ae7aadfb87865970df0d",
+            "613d93e5bd40ce17e28fa24d7c4df4f6c245712e1afb397927a98f8ef9b07916f50fec0ab03d95a3dbe61969b162ccea4486a1e4cf982455",
+            "1725abd8c2457a08d6a35e8e",
+        ),
+        (
+            AeadAlg::Aes256Gcm,
+            true,
+            "c7895b6b0c565abe094851ac9f1aa5eb6843f3dfe6c846cbce835343546e739e87692dbcdffb",
+            "b51c305f0737929f4ab29f20b2548715b6c6a7372bd3373f9ebece6050631903927a042bc3b1db4e1a976f721fd72769699e1279fc8c6689",
+            "c7d34b30663fda4c330392ad",
+        ),
+        (
+            AeadAlg::ChaCha20Poly1305,
+            false,
+            "9341ef93d6f84fb2235c3e8552d3f190e7c65c129d79c3188f7d9191224da2de5d386af172a7",
+            "75c76a55ba0558066cd1941b4a47836e558dc4e0f19dfe9e32f729b08832bdd638e40b88a3b77eb4c8e5bd8d19a2a7c86908cb4d93ec8d5e",
+            "cdf7b3a0776ff52c4601258e",
+        ),
+        (
+            AeadAlg::ChaCha20Poly1305,
+            true,
+            "aec8a50ce0e2ce8ae0adddda95021f655764a34d32a0e82934ff90f9b30260f5ee0358ee524d",
+            "2378f83434d06bf54074c98305451b49d694859425006ed23ae8909db145dacd8b046e1dc515e4a3145b174187044d6a9c373627f61b1764",
+            "55c67a1e89d48a06231bfcc9",
+        ),
+    ] {
+        let hash_len = if algorithm == AeadAlg::Aes256Gcm {
+            48
+        } else {
+            32
+        };
+        let transcript = [0x5e; 48];
+        let keys = Dtls12Keys::new(
+            algorithm,
+            shared.as_slice().try_into().unwrap(),
+            client,
+            server,
+            ems.then_some(&transcript[..hash_len]),
+        )
+        .unwrap();
+        let mut nonce = keys.iv(Side::Client);
+        for (dst, src) in nonce[4..].iter_mut().zip(seq) {
+            *dst ^= src;
+        }
+        let cipher = PacketCipher::new(algorithm, keys.payload(Side::Client)).unwrap();
+        let mut plaintext = b"DTLS record transcript".to_vec();
+        let tag = cipher.seal(nonce, &aad, &mut plaintext).unwrap();
+        plaintext.extend(tag);
+        assert_eq!(plaintext, bytes(record), "{algorithm:?} EMS={ems}");
+        let mut output = [0; 56];
+        keys.srtp_export(&mut output);
+        assert_eq!(
+            output.as_slice(),
+            bytes(exporter),
+            "{algorithm:?} EMS={ems}"
+        );
+        let finished_bytes = keys
+            .finished(Side::Server, &[0xab; 48][..hash_len])
+            .unwrap();
+        assert_eq!(
+            finished_bytes.as_slice(),
+            bytes(finished),
+            "{algorithm:?} EMS={ems}"
+        );
+        assert!(keys.finished(Side::Server, &[]).is_none());
+    }
+}

@@ -295,8 +295,8 @@ most once:
 | `tls_send(<patterns>)` | `tls.send_secret` and `secret.scram_sha256` on a stream whose verified name one of the comma-separated TLS-3 patterns covers |
 | `mac` | the MAC signing and verification sinks below |
 | `verify` | the MAC verification sinks below |
-| `kdf` | `secret.derive_hmac_sha256`, `secret.derive_hkdf_sha256` and `secret.derive_argon2id` with the secret as parent (the derivation sinks, below); a policy holding `mac` or `digest` too is `Invalid` |
-| `digest` | `secret.derive_digest` (unbuilt, [turn.md TURN-5](turn.md#turn-5-long-term-credentials-and-secrets)) with the secret as parent; a policy holding `kdf` too is `Invalid` |
+| `kdf` | `secret.derive_hmac_sha256`, `secret.derive_hkdf_sha256` and `secret.derive_argon2id` with the secret as parent (the derivation sinks, below) |
+| `digest` | `secret.derive_digest` (unbuilt, [turn.md TURN-5](turn.md#turn-5-long-term-credentials-and-secrets)) with the secret as parent. It also reads what `kdf` seals from the same bytes under a key over 64 bytes: the digest is that child's HMAC key (the long-key rules, below) |
 | `sign(<alg>)` | `secret.sign` with `<alg>`, one of `ed25519`, `p256` and `rs256` (key operations, below) |
 | `aead(<alg>)` | `secret.aead_seal` and `secret.aead_open` with `<alg>`, one of `chacha20-poly1305`, `aes128-gcm` and `aes256-gcm` (the AEAD sink, below) |
 | `open(<alg>)` | `secret.aead_open` only, with `<alg>` |
@@ -306,10 +306,15 @@ most once:
 | `mtls_client_id` | use as a TLS client identity |
 
 `mac` includes `verify`, so the two are not written together, and `aead(<alg>)` includes
-`open(<alg>)` for the same `<alg>`, so neither are those. `kdf` stands with neither `mac` nor
-`digest`: a `mac` holder would read the child of `derive_hmac_sha256(s, "", data, …)` as the
-tag `hmac_sha256(s, data)`, and a `digest` holder could compute the key that reads a long-key
-child (the long-key rules, below). `verify` with `kdf` is allowed. An import use stands alone: a
+`open(<alg>)` for the same `<alg>`, so neither are those. A holder's authority over a secret's bytes is every use it holds on
+them, in one policy or over several designations. `mac` with `kdf` reads the child of
+`derive_hmac_sha256(s, "", data, …)` as the tag `hmac_sha256(s, data)`, and `digest` with
+`kdf` reads long-key HMAC children (the long-key rules, below). A derivation's caller picks
+`uses` and may derive the same child again, so over a child it holds the whole child set.
+What a grant withholds, it withholds from the granted bytes only. So a `kdf` grant confers
+MAC authority over that secret's children: a holder of a SigV4 secret key as `kdf` derives
+`kDate` as `mac`, reads `kRegion` as its tag, and can export a signing key for any day it
+chooses. An import use stands alone: a
 policy holding `srtp_import(<dir>)` or `traffic_import(<dir>)` holds no other use (TLS-8). A name is a destination
 only inside `tls_send(...)` and a use word only outside it, so `tls_send(mac)` sends to
 the host `mac` and permits no MAC. A policy with no use, a word given twice, an unknown
@@ -611,11 +616,12 @@ below, with `digest` on the parent, and its charges, frames and replay are
 §2) replaces a key longer than its 64-byte block with the key's SHA-256, so `SHA-256(P ‖ s)`
 is the key `derive_hmac_sha256(s, P, …)` uses when `P ‖ s` is over 64 bytes (RFC 4231 test
 case 6, 131 bytes of 0xaa, gives the published tag `60e43159…0ee37f54` either way). Two rules
-keep that digest from one holder: `derive_digest` with `Raw` and `Sha256` and both `prefix`
-and `suffix` empty is `Invalid` before issue; and `derive_digest` needs `digest`, which
-stands with no `kdf`, so no holder can both derive a child and compute the key that reads
-it. `derive_hmac_sha256` takes a key of any length, so SigV4 secret keys of any length
-derive.
+keep that digest from a holder not granted it: `derive_digest` with `Raw` and `Sha256` and
+both `prefix` and `suffix` empty is `Invalid` before issue; and `derive_digest` needs
+`digest`, so a secret granted `kdf` alone, of any length, never becomes a MAC key and its
+children stay sealed. A digest's child never holds `digest`: a digest of a digest under the
+two HMAC pads is HMAC-SHA256 with the secret as its message, which is HKDF's PRK.
+`derive_hmac_sha256` takes a key of any length, so SigV4 secret keys of any length derive.
 
 **The HKDF and Argon2id derivation sinks.**
 
@@ -646,7 +652,8 @@ first, and an empty `salt` is an HMAC key of no bytes, which HMAC pads to the sa
   `digest`, `aead(<alg>)` and `open(<alg>)`;
   `len` is outside `1` to `8160` (255 SHA-256 blocks, RFC 5869 §2.3) for HKDF; or, for
   Argon2id, any of `argon2.id`'s `Params` checks fails, `key` and `data` being empty; or,
-  for `derive_digest`, `Raw` with `Sha256` and both `prefix` and `suffix` empty.
+  for `derive_digest`, `Raw` with `Sha256` and both `prefix` and `suffix` empty, or `uses`
+  holding `digest`.
 - For Argon2id only, its steps: one for each block compression, taken at the call before
   issue exactly as `argon2.id` takes them ([MEM-30](budgets.md#mem-30-step-bounds)). If
   the current bound has fewer left, the call raises `OutOfTime` there, having admitted and
@@ -2006,7 +2013,7 @@ endpoint by name.
 | **KD1** HKDF vectors | Extract and Expand swapped, salt and IKM swapped, or the empty-salt rule wrong | For [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869) A.1, A.2 and A.3, the IKM sealed as `kdf` and the case's salt, info and `L`, with `uses` `mac`: `secret.hmac_sha256(child, "x")` equals Python's `hmac.new(OKM, b"x", "sha256")` over the case's `OKM`. A.3 has an empty salt and info. |
 | **KD2** HKDF corpus and length bound | an off-by-one at 255 blocks, or the bound checked after work | Over `hkdf_sha256_test.json` at that commit, each `valid` case passes KD1's check against its `okm`, sizes up to 8160 among them. tcIds 25, 48 and 74 (`size` 8161) give `Invalid` before issue. |
 | **KD3** HKDF to AEAD | a child key of the wrong bytes reaching the AEAD sink | A.1's IKM, salt and info with `len = 32` and `uses` `aead(chacha20-poly1305)`, then AE1's nonce, AAD and plaintext sealed under the child: the result equals Python `cryptography`'s `ChaCha20Poly1305(okm[:32]).encrypt(nonce, plain, aad)`, `okm` being A.1's OKM, whose first 32 bytes are the 32-byte output by RFC 5869's construction. |
-| **KD4** child policy and opacity | a derived key escalated to a credential, a child of a granted key treated as program-held, or a `kdf`-only key or a sealed child reached as a MAC key through HMAC's long-key hash | Each child policy gives `Invalid` before issue for all three derivations: `tls_send(alpha.test)`, `sign(ed25519)`, `wrap`, `mtls_client_id`, and `mac` from a parent without `kdf`. `derive_hmac_sha256` with `uses` `aead(aes256-gcm)` succeeds. A child derived from a granted parent, wrapped under a sealed KEK, gives `Denied`; a child of a sealed parent wraps. Long keys (with U1 of [turn.md](turn.md#build-slices)): RFC 4231 test case 6's key (131 bytes of 0xaa) sealed as `kdf` only gives `Invalid` before issue with no child for `derive_digest(s, Sha256, "", Raw, "", "mac")`, and sealed as `digest` the same call gives `Invalid` before issue; without the rules, `hmac_sha256` under that child over "Test Using Larger Than Block-Size Key - Hash Key First" returns the published tag `60e43159…0ee37f54`. Sealing or narrowing to `kdf digest` or to `mac kdf` gives `Invalid`; `verify kdf` is a policy. |
+| **KD4** child policy and opacity | a derived key escalated to a credential, a child of a granted key treated as program-held, or a `kdf`-only key or a sealed child reached as a MAC key through HMAC's long-key hash | Each child policy gives `Invalid` before issue for all three derivations: `tls_send(alpha.test)`, `sign(ed25519)`, `wrap`, `mtls_client_id`, and `mac` from a parent without `kdf`. `derive_hmac_sha256` with `uses` `aead(aes256-gcm)` succeeds. A child derived from a granted parent, wrapped under a sealed KEK, gives `Denied`; a child of a sealed parent wraps. Long keys (with U1 of [turn.md](turn.md#build-slices)): RFC 4231 test case 6's key (131 bytes of 0xaa) sealed as `kdf` only gives `Invalid` before issue with no child for `derive_digest(s, Sha256, "", Raw, "", "mac")`, and sealed as `digest` the same call gives `Invalid` before issue; without the rules, `hmac_sha256` under that child over "Test Using Larger Than Block-Size Key - Hash Key First" returns the published tag `60e43159…0ee37f54`. RFC 5869 A.1's IKM (22 bytes of 0x0b) sealed as `digest`, with `K` its 13-byte salt zero-padded to 64 bytes, gives `Invalid` before issue with no child for `derive_digest(s, Sha256, K ⊕ ipad, Raw, "", "digest")`; without the rule, `derive_digest` of that child with prefix `K ⊕ opad` and `uses` `mac` is A.1's PRK `07770936…d7c2b3e5`, and `hmac_sha256` under it over `info ‖ 0x01`, then `T(1) ‖ info ‖ 0x02`, returns A.1's 42-byte OKM `3cb25f25…87185865`. |
 | **KD5** Argon2id derivation | the derivation computed differently from `argon2.id`, the steps taken after the work, or working memory not admitted | A secret sealed from `password` as `kdf`, salt `somesalt`, `m = 256`, `t = 2`, `p = 2`, `len = 32`, `uses` `mac`: `secret.hmac_sha256(child, "x")` equals Python `hmac` keyed with the tag of that case in `src/test.c` ([core AR2](core.md#argon2id-laws)). Under `bound steps 513` the call succeeds, and under `bound steps 512` it gives `Error(OutOfTime(steps: 512))` with no child made and the counting provider seeing no call. Under a limit with `262,207` bytes free it gives `Capacity(c)` with `requested` `262,208` (`262,144` working memory and 64 child storage), and with `262,208` free it succeeds, the working memory refunded after. |
 | **KD6** no derivation bytes in a recording | the parent's or child's bytes reaching a frame | Record KD1's A.1 case and KD5 with the parents from `file:` grants. The tape holds none of the IKM, the password, the OKM or the Argon2 tag, raw, hex or base64. Replayed with the files removed, both runs give the same MAC tags and end `Sealed`. |
 

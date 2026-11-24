@@ -1,7 +1,10 @@
 # TURN, long-term credentials and the TCP fallback
 
-Version note (2026-11-24, turn-amend2-2399): recheck 2383's N1 to N7 applied (`derive_digest`
-under its own `digest` use with `kdf` exclusive of `mac` and `digest`, replacing the 64-byte
+Version note (2026-11-24, turn-amend3-2424): recheck 2406's R1 to R5 applied (uses are the
+one mechanism, with no per-policy `kdf` exclusion; no `digest` in a `derive_digest` child; one
+place holding `mac kdf`; the relay-only recording; `streams_per_source` behind one NAT).
+Earlier (turn-amend2-2399): recheck 2383's N1 to N7 applied (`derive_digest`
+under its own `digest` use, replacing the 64-byte
 key cap; the 420's place; `relay`'s `Random`; `streams_per_source`; the source table's limit;
 H1-a's `proxy.accept`). Earlier (turn-spec-amend-2376): review 2354's seven amends
 (relay-local addresses, the 401 rate limit and per-source derivation budget, TLS-5's
@@ -233,13 +236,13 @@ pub fn verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacE
 - `derive_digest` keeps `H(prefix ‖ enc(bytes of s) ‖ suffix)` as a new sealed secret, where
   `enc` is the identity for `Raw` and RFC 4648 §4 padded base64 for `Base64`. It is under
   TLS-5's derivation rule, with the long-key rules of the next bullet: the parent needs
-  `digest`, the child set is the rule's (here `mac`), the child is opaque exactly when the parent is, and the
+  `digest`, the child set is the rule's without `digest` (here `mac`), the child is opaque exactly when the parent is, and the
   charges, frames and replay follow `derive_hmac_sha256`'s. MD5 runs in the provider over
   RustCrypto `md-5` (ring has none), SHA-256 over ring's `digest`. MD5 is offered only
   because RFC 8489 makes it the algorithm every TURN client without PASSWORD-ALGORITHMS
   uses, which is every browser today.
 - `derive_digest` with `Raw` and `Sha256` is `Invalid` when `prefix` and `suffix` are both
-  empty, and `derive_digest` needs `digest`, which no policy holds together with `kdf`
+  empty, and `derive_digest` needs `digest`, which a `kdf` grant does not carry
   ([TLS-5, the long-key rules](tls.md#tls-5-secrets)). HMAC-SHA256 replaces a key longer
   than its 64-byte block with the key's SHA-256, so without these rules a secret could be
   turned into its own MAC key, and a derived child's sealed bytes could be recomputed in
@@ -274,9 +277,9 @@ at `expiry`, which must therefore cover the session: TURN-5 step 4 runs on Refre
 an allocation ends within one lifetime of its credential's expiry. `relay_key` is for the relay: `derive_hmac_sha256(master, "", username,
 "digest")`, then `derive_digest(that, alg, username ":" realm ":", Base64, "", "mac")`. The
 relay's master needs only `kdf`; the relay never holds the password or the key in plaintext.
-Signaling and the relay are each granted the master with its one use, whether they run as
-one place or two: a policy holding both `mac` and `kdf` is `Invalid`
-([TLS-5](tls.md#tls-5-secrets)).
+Signaling and the relay may be separate places, each granted the master with its one use.
+Run as one place the grant is `mac kdf`: that place computes every password and key in
+plaintext, as signaling does, and its one recording is a signaling recording.
 
 A **client** holding a password that it did not mint (a configured corporate TURN server)
 takes it as a `Secret` with `digest`, from a grant or `seal`, and derives
@@ -517,7 +520,11 @@ source). The client's address arrives again, as for UDP, in each `from_client`'s
 `Origin.client`. With `streams` connections open, or `streams_per_source` of them from the
 client's prefix (the source table's prefix), it answers `StreamsFull`, and the caller closes
 the connection. A `Stream(conn)` origin that was never `connected`, or whose `Origin.client`
-differs from `connected`'s, is discarded and counted `unknown_stream`. A connection that holds no allocation `stream_allocate_s` after
+differs from `connected`'s, is discarded and counted `unknown_stream`. All stream clients
+behind one NAT share its prefix's `streams_per_source`, so a deployment serving a large site
+behind one address raises it; an attacker holding `streams / streams_per_source` prefixes (64
+by default, one IPv6 /58) can still hold every stream slot for `stream_allocate_s` at a time.
+A connection that holds no allocation `stream_allocate_s` after
 `connected`, or `stream_allocate_s` after its last allocation ended (the timer restarts
 then), is forgotten by the relay, counted `idle_stream`, and `poll` answers `Close(conn)`:
 the caller closes it, need not call `disconnected`, and calls `poll` again until it answers
@@ -828,7 +835,8 @@ not re-pinned; U0 must leave it green.
 - **`interop_pion`** (U7). *Scenario:* Pion's `examples/turn-client` (UDP and TCP) against the
   Hirsel relay with minted credentials. *Oracle:* an independent client.
 - **`no_key_in_recording`** (U1, U3). *Scenario:* the relay side of `minted_credentials` and
-  `challenge_exchange` recorded (the signaling side's recording holds minted passwords by
+  `challenge_exchange`, recorded as its own run that holds the master as `kdf` only from a
+  `file:` grant and never calls `mint` (the signaling side's recording holds minted passwords by
   design, TURN-5). *Oracle:* the known password, both known keys and the known master bytes
   from the case occur nowhere in the recording file, raw, hex or base64, as TLS-5's KD6
   searches.
@@ -862,7 +870,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | slice | size | depends on | content | laws |
 |---|---|---|---|---|
 | **U0** STUN message layer | M | — | TURN-4 in `stun_ice`: `Key`, `Attr`, `Header`, `attrs`, `verify_key`, `Builder`; Binding functions rebuilt over them; constants; law lock rewritten | existing `binding_vectors`, `full_connectivity`, `lite_nat_rebinding`, `lite_peer_signaling` stay green |
-| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and `kdf` exclusive of `mac` and `digest` in the policy parser (a change to the built parser; no policy on main holds `mac` with `kdf`); std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
+| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and no `digest` in a `derive_digest` child; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
 | **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/`<!-- doc-ref: planned --> package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
 | **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy with `local` and `default_deny`, the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
@@ -881,5 +889,5 @@ revocation) is Sol. Each of U1, U2 and U4 gets an Astra security attack before i
 key custody, the derivation sink's opacity and frames, the check order's pre-authentication
 cost, bid-down, nonce replay, and relay abuse toward internal ranges and the relay's own
 addresses. U1's attack has one more named target: a child's sealed bytes reached as a MAC key or
-a plaintext tag, through HMAC's long-key hashing or through one policy holding `kdf` with
-`digest` or `mac` (TLS-5's long-key rules and use exclusions).
+a plaintext tag through HMAC's long-key hashing, from a parent granted `kdf` alone (TLS-5's
+long-key rules).

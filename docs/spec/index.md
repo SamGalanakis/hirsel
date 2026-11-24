@@ -105,6 +105,7 @@ and keyed operations (Part B, design).
 The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (design, RTC-1 to RTC-8):
 JSEP SDP, the sans-IO PeerSession, and the room router with dynacast, active speakers and
 the revocation fence.
+The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (design, not yet built).
 The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
 workspaces, library roots and package archives.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over

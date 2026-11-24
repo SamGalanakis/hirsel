@@ -72,7 +72,7 @@ where this package must use them in a particular way.
 | `revoke(room_id, participant_id, epoch)`, one fence per participant | RTC-7, `revoke(r, room, participant, epoch)`, with fence capacity reserved at admission |
 | Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 5, by session-generation tags on every queue (W14, W15) |
 | Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit has applied the fence and every writer has handed off or cancelled its work, with both endpoints rechecked before any later send or retry (W14) |
-| TURN over TLS, or ICE-TCP, for strict firewalls | RTC-8 passive ICE-TCP (slice S8, W17); TURN over TLS is follow-up F3 for `stun_ice` |
+| TURN over TLS, or ICE-TCP, for strict firewalls | TURN over a stream with UDP relays, [turn.md](turn.md) TURN-2; ICE-TCP is withdrawn (S8, W17) |
 | runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the roster incarnation, revision and snapshot (runner slice R1), the Hirsel room client (F1) and the SDK room API (F2) |
 | Idle lease (contract §4) | not this package's: hirsel4-rooms-2301 reports it. The service holds a room membership for each room it routes, so it is affected only if that membership keeps a Place alive |
 
@@ -354,8 +354,7 @@ keeps one `Tag` beside each `UdpTx`, at the same position in `out.tags`. A tag n
 destination session's generation `dst` (the subscriber's `(id, epoch)`, RTC-5) and, for
 media and repair, the source publisher's generation `src`. Every other queue of this
 package carries the same pair: pacer entries, the cross-unit `Media` and `RepairReply`
-messages (RTC-5), the uncommitted suffix of a partial `udp_send`, and the TCP write queue of
-an ICE-TCP path (RTC-8). RTC-7 fences by these tags, so it never has to infer an owner from
+messages (RTC-5), and the uncommitted suffix of a partial `udp_send`. RTC-7 fences by these tags, so it never has to infer an owner from
 an SSRC or an address.
 
 **Demultiplexing ([RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §3, which updates
@@ -853,8 +852,7 @@ the unit does each of these before it routes any datagram or media message:
    answer, and their DTLS and SRTP state is erased, so nothing they hold can be unprotected.
 2. **Every queue, by tag.** Every entry whose `Tag` (RTC-3) has a fenced `src` or a fenced
    `dst` is removed: in `out`, in the uncommitted suffix of a partial `udp_send`, in every
-   pacer (`Pacer.remove(stream)` with the handed-back entries discarded), in the ICE-TCP
-   write queues, and among the `RepairAsk` and `RepairReply` messages it holds. This covers
+   pacer (`Pacer.remove(stream)` with the handed-back entries discarded), and among the `RepairAsk` and `RepairReply` messages it holds. This covers
    media, RTX repair (late-packet RTX and NACK answers), and RTCP addressed to a fenced
    session.
 3. **Routing state.** Every down-track of their publications, and every down-track they
@@ -864,11 +862,9 @@ the unit does each of these before it routes any datagram or media message:
 4. **In flight between units.** A `Media`, `RepairAsk` or `RepairReply` message whose `src`
    or `dst` is fenced at its epoch is dropped when it is taken. The fence is set first, so a
    message posted before the revoke and taken after it is dropped.
-5. **Writers.** An ICE-TCP path (RTC-8) whose current frame is partly written and carries a
-   fenced `src` or `dst` cannot drop the rest of the frame without corrupting the RFC 4571
-   stream, so the path is closed. A path whose frame is untouched has that frame removed in
-   step 2. UDP needs no such step. `udp_send` commits whole datagrams (NET-16), and the
-   suffix it did not commit was purged in step 2.
+5. **Writers.** Media units write only UDP (RTC-8 Strict firewalls). `udp_send` commits whole
+   datagrams (NET-16), and the suffix it did not commit was purged in step 2, so no writer
+   holds a partly sent packet.
 
 **The acknowledgement.** The control unit applies the revoke, sends it to every other unit
 (not only those it thinks are involved, since a subscription change can be in flight), rings
@@ -876,10 +872,10 @@ their doorbells, and returns `Ok(())` when every unit has acknowledged it. A uni
 acknowledges only after steps 1 to 5 hold together. Every older admission of the
 participant has stopped routing, and every writer has either finished handing its bytes to
 the kernel before the fence point or had its uncommitted work cancelled. No `udp_send`
-and no TCP write is in progress on a unit at its fence point, because the unit runs them on
+is in progress on a unit at its fence point, because the unit runs them on
 its own task between fence points. So once `revoke` returns:
 
-- no unit will pass to `udp_send`, or write to a TCP path, a datagram that carries media or
+- no unit will pass to `udp_send` a datagram that carries media or
   repair of the participant at a fenced epoch, or that is addressed to one of its fenced
   sessions. Before every send and every retry of an uncommitted suffix, the unit rechecks
   both endpoints' tags against the fences;
@@ -1042,21 +1038,15 @@ R1 changes no wire field that a shipped client reads, since F1 and F2 do not exi
 Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and reads
 `RoomOut`. Its laws run that way. The browser end-to-end case waits on F1 and F2.
 
-**ICE over TCP for strict firewalls.** A unit may also listen on TCP (its `Listen` rule,
-NET-6) and offer a passive ICE-TCP host candidate
-([RFC 6544](https://www.rfc-editor.org/rfc/rfc6544), `tcptype passive`). An accepted
-connection carries RFC 4571 framing: each datagram is preceded by its 16-bit big-endian length.
-The unit deframes into the same receive slot and feeds `receive` with the connection as the
-path. A zero-length frame consumes only its 2-byte prefix and is dropped. The unit frames the
-session's output for that path into the path's write queue, tagged as in RTC-3, instead of
-putting it in the UDP batch. It writes from the queue on its own task, between fence points,
-with a deadline no later than the turn's. A frame written only in part keeps a cursor, and
-the next turn continues it. Abandoning a fenced frame part-way closes the path (RTC-7
-step 5). ICE-Lite permits a passive TCP candidate (RFC 6544 §7.2). A browser behind a
-firewall that passes TCP to the server's port then needs no TURN server. That is slice S8.
-TURN over TLS (RFC 8656 §3.2, for networks that pass only proxied TLS) needs a TURN server and
-server-side TLS. It is follow-up F3 for `stun_ice`, since TLS-4 has no server handshake
-today.
+**Strict firewalls.** Media units listen on UDP only. A browser that cannot reach them over
+UDP uses TURN over TCP or TLS on 443 with a UDP relay ([turn.md](turn.md) TURN-2). The relay is
+a sibling place on the same host, so a relayed browser reaches a unit as an ordinary UDP
+source, authenticated by ICE and DTLS like any other (TURN-8). Signaling mints the TURN
+username and password beside the ICE credentials (TURN-5). A revoke also reaches the relay
+(TURN-9), outside RTC-7's acknowledgement: the fence already drops the epoch's packets on
+every path. Passive ICE-TCP (RFC 6544), once slice S8, is withdrawn: TURN over TLS reaches
+every network it reached, and networks that pass only TLS, and media units keep one transport
+and one writer kind.
 
 ## WebRTC build laws
 
@@ -1192,20 +1182,20 @@ unless named otherwise.
 - **W14 `revoke_fence_schedules`.** *Model:* a control unit and two media units. Steps: unit 0
   takes a datagram, routes it locally and posts `Media` to unit 1; unit 1's subscriber NACKs
   a packet and unit 0 posts a `RepairReply`; unit 0's `udp_send` commits only a prefix of its
-  batch; unit 1 has a partly written ICE-TCP frame; the control unit sends the revoke; each
+  batch; the control unit sends the revoke; each
   unit applies it and acknowledges; each unit takes its messages, retries its suffix and
   writes. Every interleaving that keeps each unit's own order is run, through a test-only
   seam that pauses each step, for the revoked participant as publisher and as subscriber.
-  *Oracle:* exhaustive enumeration against the invariant that no `udp_send` or TCP write
+  *Oracle:* exhaustive enumeration against the invariant that no `udp_send`
   after `revoke` returns carries the participant's media or repair at the fenced epoch, or
   goes to its fenced session. The same enumeration runs `suspend`. A negative control that
   acknowledges while a writer still holds a fenced packet (the uncommitted suffix kept for
   retry) must fail the enumeration.
-- **W15 `revoke_stops_everything`.** Real units over `sim.udp` with one ICE-TCP path. The
+- **W15 `revoke_stops_everything`.** Real units over `sim.udp`. The
   revoked participant publishes video with NACK-driven RTX queued, and subscribes to two
-  publications. At the revoke, an RTX reply, a UDP suffix and a TCP frame are each held across
+  publications. At the revoke, an RTX reply and a UDP suffix are each held across
   the acknowledgement, in both directions. After `revoke` returns: *Oracle:* by hand from
-  RTC-7, from captures at each writer (UDP and TCP). Across 200 ms of further input, no
+  RTC-7, from captures at each unit's writer. Across 200 ms of further input, no
   captured datagram or frame carries any of its down-tracks' SSRCs or any packet of its
   publications. A Binding request under its old ufrag gets no response. A DTLS record and an
   SRTP packet from its old 5-tuple are dropped and counted. An unrelated participant's media
@@ -1222,10 +1212,7 @@ unless named otherwise.
   never leaves, the stale snapshot is discarded and the room stays suspended, the gone peer
   is revoked with `Fenced` sent, the unchanged peer resumes with its id and epoch, and in
   the last two cases every pre-gap admission is revoked, the same-number peer included.
-- **W17 `ice_tcp_framing`.** RFC 4571 frames split across reads and joined in one read, plus
-  a 0-length and a 65,535-byte frame. *Oracle:* hand-derived frame boundaries from RFC 4571
-  §2. The null frame consumes only its 2-byte prefix. The passive candidate line in the
-  answer is checked against RFC 6544 §4.5's grammar, by hand.
+- **W17** withdrawn with ICE-TCP; stream framing is turn.md's `stream_framing`.
 - **W18 `forward_allocates_nothing`.** Forwarding RTP packets to 8 down-tracks on one unit,
   after warm-up, runs under a zero-byte allocation bound, as `stun_ice`'s Binding laws do.
   The measured turn must deliver eight packets, so dropping all traffic cannot pass.
@@ -1247,8 +1234,8 @@ a land.
 - **N1 `browser_room`:** headless Chromium and Firefox publish Opus and three-encoding VP8
   simulcast, and subscribe to each other through the service. This is the interop oracle for
   RTC-2 to RTC-4 against a real DTLS, SRTP and RTCP stack. It covers a layer switch, an
-  `audio_forward` gate, a revoke whose subscriber stops receiving at once, and ICE-TCP with UDP
-  blocked. It waits on F1 and F2.
+  `audio_forward` gate, a revoke whose subscriber stops receiving at once, and a relayed
+  session over TURN with UDP blocked (turn.md U8). It waits on F1 and F2.
 - **N2 `room_vopr`:** 100 participants over `sim.udp`, with Gilbert-Elliott loss, reordering,
   NAT rebinding, joins, leaves, revokes and target changes from a seed. The invariants are
   RTC-7's, the TLS-8 nonce rules (no `Reused`, `Issued` or `Range` from any sealer), RTC-4's
@@ -1271,7 +1258,7 @@ them under the host rules' matched-comparison terms, against mediasoup's
 
 ## Build slices
 
-Each slice lands on its own with its laws. A Sol lane can run S1 to S6 in order. S7 and S8
+Each slice lands on its own with its laws. A Sol lane can run S1 to S6 in order. S7
 can run beside S5. R1 is a runner slice and can run at any time. Reds that may ride a land
 are the nightly N1 and N2, and any cost target not yet met. A red law of a slice's own blocks
 that slice. A TLS-8 `Reused`, `Issued` or `Range` anywhere, or any red in W14, W15, W16 or
@@ -1286,7 +1273,7 @@ W19, blocks, because those are soundness reds.
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
 | **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S4 | W11, W12, W13 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness until F1 | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
-| **S8** ICE-TCP | RTC-8's passive TCP candidate, RFC 4571 framing, tagged TCP write queues and the close of an abandoned frame | S3, S5 | W17 |
+| **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1, F2 for N1 | the cost targets |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
@@ -1296,7 +1283,7 @@ W19, blocks, because those are soundness reds.
   and feed `RoomIn`, including R1's Part head.
 - **F2** (SDK): room calls in the generated JS SDK, for unicast `Message`, the roster with its
   incarnation and revision, and state.
-- **F3** (`stun_ice`): TURN over TLS (RFC 8656) for proxied networks. It needs server-side TLS.
+- **F3** is [turn.md](turn.md): TURN client and relay, long-term credentials, the stream fallback.
 - **Ownership:** the active-speaker detector is this package's (RTC-6), not the rtp lane's.
   The rtp lane parses the RFC 6464 extension.
 

@@ -32,6 +32,8 @@ class Law:
     seeds: int
     seed_zero: dict | None
     min_traces: int = 0
+    build: str | None = None
+    required_witnesses: tuple[str, ...] = ()
 
 
 def allocate(db, campaign, shards, count):
@@ -64,6 +66,10 @@ def allocate_ranges(db, campaign, laws):
         PRIMARY KEY (campaign, shard),
         FOREIGN KEY (campaign, shard) REFERENCES shard_laws (campaign, shard)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS law_reach (
+        campaign TEXT, build TEXT, law TEXT, label TEXT, true_calls TEXT,
+        PRIMARY KEY (campaign, build, law, label)
+    )""")
     with db:
         db.execute("BEGIN IMMEDIATE")
         first = db.execute("SELECT coalesce(max(stop_seed), 1) FROM shards").fetchone()[0]
@@ -79,9 +85,32 @@ def allocate_ranges(db, campaign, laws):
     return ranges
 
 
-def outcome(ran):
+def read_witnesses(path):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != "hirsel-laws-observation 2" or lines[-1] != "end":
+            return None
+        witnesses = {}
+        for line in lines[1:-1]:
+            kind, *fields = line.split("\t")
+            if kind in ("row", "model"):
+                continue
+            if kind != "witness":
+                return None
+            count, label = fields
+            label = bytes.fromhex(label).decode("utf-8")
+            count = int(count)
+            if label in witnesses or not 0 <= count < 2**64:
+                return None
+            witnesses[label] = count
+        return witnesses
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def outcome(ran, observation):
     return {"status": ran.returncode, "stdout": ran.stdout.decode(errors="replace"),
-            "stderr": ran.stderr.decode(errors="replace")}
+            "stderr": ran.stderr.decode(errors="replace"), "witnesses": read_witnesses(observation)}
 
 
 # A law's message names its class; the exit contract stays nonzero for any red.
@@ -99,19 +128,23 @@ def failure_class(row):
 
 def run_seed(executable, seed, diagnose_red=False):
     with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+        observation = Path(directory) / "laws"
         inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
-                  "env": {"HIRSEL_TEST_SIM_SEED": str(seed)}, "capture_output": True}
+                  "env": {"HIRSEL_TEST_SIM_SEED": str(seed), "HIRSEL_LAWS": str(observation)},
+                  "capture_output": True}
         ran = subprocess.run([executable], **inputs)
-        row = {"seed": seed, **outcome(ran)}
+        verdict = outcome(ran, observation)
+        row = {"seed": seed, **verdict}
         row["failure_class"] = failure_class(row)
         if diagnose_red and ran.returncode != 0:
             # Recreate the empty directory at the same path the first run saw.
             shutil.rmtree(directory)
             Path(directory).mkdir(mode=0o700)
             replay = subprocess.run([executable], **inputs)
-            row["diagnostic_replay"] = outcome(replay)
+            row["diagnostic_replay"] = outcome(replay, observation)
             row["same_build_nondeterminism"] = (ran.returncode, ran.stdout, ran.stderr) != (
-                replay.returncode, replay.stdout, replay.stderr)
+                replay.returncode, replay.stdout, replay.stderr) or (
+                verdict["witnesses"] != row["diagnostic_replay"]["witnesses"])
     return row
 
 
@@ -126,7 +159,7 @@ def seed_zero_failed(db, campaign, law, results):
     verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
     if verdict["status"] == 0:
         return False
-    row = {**verdict, "law": law.name, "seed": 0, "kind": "deterministic_red",
+    row = {**verdict, "law": law.name, "build": law.build, "seed": 0, "kind": "deterministic_red",
            "failure_class": failure_class(verdict)}
     line = json.dumps(row)
     with db:
@@ -146,7 +179,8 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
     replays = []
     classes = []
     traces = defaultdict(set)
-    trace_reds = []
+    reach = defaultdict(dict)
+    law_reds = []
     malformed = False
     stops = [stop for _, stop in ranges]
     for line in output:
@@ -156,6 +190,10 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             if (type(seed) is not int or type(status) is not int or seed in observed
                     or not ranges[0][0] <= seed < ranges[-1][1]):
                 raise ValueError("unexpected seed result")
+            witnesses = row.get("witnesses")
+            if witnesses is not None and (not isinstance(witnesses, dict) or any(
+                    type(count) is not int or not 0 <= count < 2**64 for count in witnesses.values())):
+                raise ValueError("invalid seed witness counts")
             if "diagnostic_replay" in row:
                 replay = row["diagnostic_replay"]
                 changed = row["same_build_nondeterminism"]
@@ -173,6 +211,11 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             shard = bisect_right(stops, seed)
             law = laws[shard]
             row["law"], executable = law.name, law.binary
+            if law.build is not None:
+                row["build"] = law.build
+            for label, count in (witnesses or {}).items():
+                totals = reach[shard]
+                totals[label] = totals.get(label, 0) + count
             hashes = TRACE.findall(row.get("stdout", ""))
             if len(hashes) == 1:
                 traces[shard].add(hashes[0])
@@ -190,17 +233,28 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             if laws is not None:
                 law = laws[shard]
                 distinct = len(traces[shard])
-                failed = len(statuses) == stop - start and distinct < law.min_traces
+                finished = len(statuses) == stop - start
+                failed = finished and distinct < law.min_traces
                 db.execute("INSERT INTO law_trace_counts VALUES (?, ?, ?, ?, ?)",
                            (campaign, shard, distinct, law.min_traces, failed))
                 if failed:
-                    trace_reds.append({"law": law.name, "kind": "trace_diversity_red", "distinct_hashes": distinct,
-                                       "minimum": law.min_traces})
-    for red in trace_reds:
+                    law_reds.append({"build": law.build, "law": law.name, "kind": "trace_diversity_red",
+                                     "distinct_hashes": distinct, "minimum": law.min_traces})
+                    print(f"{law.name}: {distinct} distinct trace hashes, need {law.min_traces}", file=sys.stderr)
+                if finished:
+                    for label in law.required_witnesses:
+                        count = reach[shard].get(label)
+                        db.execute("INSERT INTO law_reach VALUES (?, ?, ?, ?, ?)",
+                                   (campaign, law.build, law.name, label, None if count is None else str(count)))
+                        if not count:
+                            law_reds.append({"build": law.build, "law": law.name, "kind": "reach_red",
+                                             "label": label, "true_calls": count})
+                            print(f"{law.name}: witness {label!r} had "
+                                  f"{'no observation' if count is None else 'zero true calls'}", file=sys.stderr)
+    for red in law_reds:
         print(json.dumps(red), file=results, flush=True)
-        print(f"{red['law']}: {red['distinct_hashes']} distinct trace hashes, need {red['minimum']}", file=sys.stderr)
     complete = not malformed and len(observed) == ranges[-1][1] - ranges[0][0]
-    return complete, sum(status != 0 for status in observed.values()) + len(trace_reds)
+    return complete, sum(status != 0 for status in observed.values()) + len(law_reds)
 
 
 def dispatch(args):
@@ -292,7 +346,14 @@ def read_laws(path):
         minimum = entry.get("min_traces", 0)
         if type(minimum) is not int or not 0 <= minimum <= count:
             raise ValueError(f"invalid trace diversity floor for {law}")
-        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero, minimum))
+        build = entry.get("build")
+        required = entry.get("required_witnesses", [])
+        if (build is not None and (not isinstance(build, str) or not build)
+                or not isinstance(required, list)
+                or any(not isinstance(label, str) for label in required)
+                or len(set(required)) != len(required) or (required and build is None)):
+            raise ValueError(f"invalid reach witness declaration for {law}")
+        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero, minimum, build, tuple(required)))
         names.add(law)
     return laws
 

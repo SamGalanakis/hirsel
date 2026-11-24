@@ -26,6 +26,7 @@ FLOOD_SEEDS = {
     'harness@1/provider_laws/test_warm_and_hedge': 3,
 }
 TRACE_FLOORS = {'store@1/store/bucket_test_m2_register_fence': 2}
+REACH_WITNESSES = {'store@1/store/test_model': ['64 or more commands']}
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
     'startup_ready_deadline', 'fatal_error_during_sync', 'comma_host_refused',
@@ -206,12 +207,15 @@ def run_preparation(command, scratch, report, expected):
     return rows
 
 
-def prepare(compiler, work, kind, group, jobs, seeds):
+def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime):
     scratch = work / kind
     scratch.mkdir()
     output = scratch / 'bin'
     command = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
                '--store', str(scratch / 'objects'), '-o', str(output), '--json']
+    normal = ['--runtime', str(runtime)] if runtime else []
+    libraries = ['--libraries', str(ROOT / 'core')] if runtime else []
+    recording = ['--runtime', str(recording_runtime)] if recording_runtime else []
     reports = {}
     rows = {}
     if kind in PACKAGE_LAWS:
@@ -226,13 +230,14 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         for index, definition in enumerate(entries.values()):
             report = scratch / f'prepare-{index}.json'
             reports[definition] = report
-            rows.update(run_preparation(command + [str(programs / kind)],
+            launch = ['--laws', *recording] if definition in REACH_WITNESSES else normal
+            rows.update(run_preparation(command + launch + libraries + [str(programs / kind)],
                                         scratch, report, [definition]))
     elif kind == 'postgres':
         package = scratch / 'postgres'
         shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
         entries = {law: law for law in group}
-        command.append(str(package))
+        command.extend(libraries + [str(package)])
     else:
         inputs, entries = (contract_inputs if kind == 'contracts' else runner_inputs)(group, scratch)
         manifest = scratch / 'inputs.json'
@@ -246,7 +251,7 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
         report = scratch / 'prepare.json'
         reports = dict.fromkeys(entries.values(), report)
-        rows = run_preparation(command, scratch, report, entries.values())
+        rows = run_preparation(command + normal, scratch, report, entries.values())
     laws = []
     for law, definition in entries.items():
         report = reports[definition]
@@ -257,8 +262,9 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
                      'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
         count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
-        laws.append({'law': law, 'executable': str(binary), 'seeds': count, 'seed_zero': seed_zero,
-                     'min_traces': min(count, TRACE_FLOORS.get(law, 0))})
+        laws.append({'build': build, 'law': law, 'executable': str(binary), 'seeds': count,
+                     'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
+                     'required_witnesses': REACH_WITNESSES.get(law, [])})
     shutil.rmtree(scratch / 'objects')
     return laws
 
@@ -266,6 +272,8 @@ def prepare(compiler, work, kind, group, jobs, seeds):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path)
+    parser.add_argument('--runtime', type=Path, help='normal runtime archive for an uninstalled compiler')
+    parser.add_argument('--recording-runtime', type=Path, help='recording archive for an uninstalled compiler')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
@@ -287,13 +295,19 @@ def main():
         return
     if not args.compiler or not args.work or (args.seeds is not None and args.seeds <= 0):
         parser.error('preparation needs --compiler and --work, with a positive --seeds override')
+    if bool(args.runtime) != bool(args.recording_runtime):
+        parser.error('--runtime and --recording-runtime must be supplied together')
+    build = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    runtime = args.runtime.resolve(strict=True) if args.runtime else None
+    recording_runtime = args.recording_runtime.resolve(strict=True) if args.recording_runtime else None
     work = args.work.resolve()
     work.mkdir()
     laws = []
     for kind, group in inventory.items():
         group = {name: case for name, case in group.items() if not args.law or name == args.law}
         if group:
-            laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds))
+            laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds,
+                                build, runtime, recording_runtime))
     (work / 'manifest.json').write_text(json.dumps(laws, indent=2) + '\n')
 
 

@@ -425,7 +425,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         fail("location law: old parent copy must remain in a listed pack")
     }
     let still_saved = option.unwrap(pinned(db, "a-old"))
-    if list.len(changes(result.unwrap(reader(db, 0u64)), saved, still_saved)?) != 0 {
+    if list.len((changes(result.unwrap(reader(db, 0u64)), saved, still_saved)?).rows) != 0 {
         fail("location law: relocation changed pinned rows")
     }
     let _ = unpin(mut db, "z-old")?

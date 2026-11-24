@@ -386,7 +386,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
     // changes(empty, now) publishes the same values, and the row of "other" is not t's.
     let mut ours = 0u64
     let mut foreign = 0u64
-    for ch in result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, now)) {
+    for ch in result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, now)).rows {
         match published_value(sh, ch) {
             Ok(Some(v)) => {
                 let i = if ch.tree_key == acc[0].tree_key {
@@ -427,7 +427,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
         Ok(Committed(_)) => {},
         _ => return false
     }
-    let removed = result.unwrap(changes(result.unwrap(reader(db, 0u64)), now, snapshot(db)))
+    let removed = result.unwrap(changes(result.unwrap(reader(db, 0u64)), now, snapshot(db))).rows
     list.len(removed) == 1 && removed[0].tree_key == acc[0].tree_key && match published_value(sh, removed[0]) {
         Ok(None) => true,
         _ => false

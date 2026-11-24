@@ -82,7 +82,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     let mut reverse = open_page_range(tree, Some(logical_key(7, key_word(111))?), false, true, None)?
     let Some((key, _)) = next_page_range(mut reverse)? else { return Error(Missing("reverse row")) }
     if key != logical_key(7, key_word(110))? { return Error(Foreign) }
-    let delta = compare_page_collections(earlier, tree)?
+    let delta = (compare_page_collections(earlier, tree)?).rows
     if list.len(delta) != 41 { return Error(Foreign) }
     for row in 0u64 .. 40 {
         if delta[row].tree_key != logical_key(7, key_word(row))? { return Error(Foreign) }

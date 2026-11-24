@@ -343,3 +343,54 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
     }
     Ok(take operations)
 }
+
+pub fn published_log[V](l: Log[V], change: Change) -> Result[Option[Bytes], Error] {
+    if list.len(change.tree_key) != 12 || list.slice(change.tree_key, 0, 4) != prefix(l.binding.id)? {
+        return Error(Missing("log"))
+    }
+    publish_row(l.binding.id, l.binding.readers, change)
+}
+
+pub fn tail_window[V](r: Reader, s: Snapshot, l: Log[V], t: u64) -> Result[LogBounds, Error] waits {
+    if t == 0 { return Error(Missing("n")) }
+    let ends = log_bounds(r, s, l)?
+    Ok(LogBounds(first: ends.next - order.min(t, ends.next - ends.first), next: ends.next))
+}
+
+fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
+    for seq in lo .. hi {
+        list.push(mut out.rows, Change(tree_key: log_key(id, seq)?, value: None))
+    }
+    Ok(())
+}
+
+fn window_insertions(mut out: ChangeOutput, after: PageTree, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
+    if lo < hi {
+        let mut rows = byte_cursor(after, Included(log_key(id, lo)?), log_key(id, hi)?)?
+        while let Some((take key, take value)) = next_bytes(mut rows)? {
+            list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
+        }
+    }
+    Ok(())
+}
+
+pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64) -> Result[List[Change], Error] waits {
+    let old = tail_window(r, a, l, t)?
+    let new = tail_window(r, b, l, t)?
+    let id = l.binding.id
+    let mut out = change_output(None)
+    let overlap_first = order.max(old.first, new.first)
+    let overlap_next = order.min(old.next, new.next)
+    window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
+    window_insertions(mut out, b.roots.collections, id, new.first, order.min(new.next, old.first))?
+    if a.branch != b.branch && overlap_first < overlap_next {
+        let key = prefix(id)?
+        let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(key_word(overlap_first)))
+        let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(key_word(overlap_first)))
+        let _ = page_change_rows(mut out, id, mut previous, mut current, Some(key_word(overlap_next)))?
+    }
+    window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
+    window_insertions(mut out, b.roots.collections, id, order.max(new.first, old.next), new.next)?
+    let ChangeOutput(rows: take items, ..) = take out
+    Ok(take items)
+}

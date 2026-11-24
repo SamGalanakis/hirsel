@@ -295,7 +295,7 @@ fn round_bytes(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> 
     match take ran { Ok(Committed(_)) => (), _ => fail("journal: submit did not commit") }
     let after = store.snapshot(db)
     let mut total = 0u64
-    for c in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), before, after)) {
+    for c in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), before, after)).rows {
         total += list.len(c.tree_key)
         if let Some(v) = c.value { total += list.len(v) }
     }

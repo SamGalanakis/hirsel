@@ -306,3 +306,10 @@ fn seal_cell_edits(mut rows: DataRows, cells: Map[u32, CellEdit]) {
         }
     }
 }
+
+pub fn published_cell[V](c: Cell[V], change: Change) -> Result[Option[Bytes], Error] {
+    if change.tree_key != prefix(c.binding.id)? {
+        return Error(Missing("cell"))
+    }
+    publish_row(c.binding.id, c.binding.readers, change)
+}

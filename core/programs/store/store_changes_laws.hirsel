@@ -589,7 +589,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
 }
 
 fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) -> bool waits {
-    let delta = result.unwrap(changes(law_reader(a), a, b))
+    let delta = result.unwrap(changes(law_reader(a), a, b)).rows
     let mut at: u64 = 0
     for k in 0u64 .. list.len(before) {
         if before[k] != after[k] {
@@ -660,7 +660,7 @@ pub fn law_changes(c: Clock) -> bool waits {
         changes(result.unwrap(reader(db, 0u64)), b, b)
     })
     match take same_root {
-        Ok(rows) => if list.len(rows) != 0 {
+        Ok(delta) => if list.len(delta.rows) != 0 {
             return false
         },
         _ => return false
@@ -680,7 +680,7 @@ pub fn law_changes(c: Clock) -> bool waits {
     }
     // R1: the diff's own allocation is refused under a zero bound and raises
     // Capacity; changes has no refusal value of its own.
-    let no_room = isolate(fn() -> Result[Result[List[Change], Error], Capacity] {
+    let no_room = isolate(fn() -> Result[Result[Changes, Error], Capacity] {
         bound bytes 0 {
             compare_page_collections(a.roots.collections, b.roots.collections)
         }
@@ -711,7 +711,7 @@ pub fn law_shared_changes(c: Clock) -> bool waits {
     let high = result.unwrap(prefix(2))
     let delta = result.unwrap(result.unwrap(bound bytes 4096 {
         changes(result.unwrap(reader(db, 0u64)), before, after)
-    }))
+    })).rows
     let rows = result.unwrap(result.unwrap(bound bytes 4096 {
         span_changes(result.unwrap(reader(db, 0u64)), after, low, high)
     }))
@@ -803,7 +803,7 @@ pub fn law_changes_identity(c: Clock) -> bool waits {
     if !is_foreign(changes(law_reader(a), a, other_open)) || !is_foreign(changes(law_reader(a), a, other_store)) {
         return false
     }
-    list.len(result.unwrap(changes(law_reader(a), a, br))) == 0
+    list.len(result.unwrap(changes(law_reader(a), a, br)).rows) == 0
 }
 
 @test
@@ -869,7 +869,7 @@ fn same_value_pair(c: Clock) -> (Snapshot, Snapshot) {
 pub fn law_changes_rewritten_equal(c: Clock) -> bool waits {
     let pair = same_value_pair(c)
     let (take a, take b) = take pair
-    let delta = result.unwrap(changes(law_reader(a), a, b))
+    let delta = result.unwrap(changes(law_reader(a), a, b)).rows
     if list.len(delta) != 0 {
         return false
     }

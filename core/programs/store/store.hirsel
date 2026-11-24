@@ -3204,6 +3204,10 @@ pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes],
     if list.len(c.tree_key) < 4 || list.slice(c.tree_key, 0, 4) != list.slice(mine, 0, 4) {
         return Error(Missing("table"))
     }
+    publish_row(t.id, t.readers, c)
+}
+
+fn publish_row[V](id: u32, registered: Readers[V], c: Change) -> Result[Option[Bytes], Error] {
     let raw = match c.value {
         Some(v) => v,
         None => return Ok(None)
@@ -3213,12 +3217,12 @@ pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes],
     }
     let number: u16 = int.truncate(read_le(raw, 0, 2))
     let mut out: Bytes = list.with_capacity(list.len(raw) - 2)
-    if number == t.readers.current {
+    if number == registered.current {
         list.append(mut out, list.slice(raw, 2, list.len(raw)))
         return Ok(Some(take out))
     }
-    let v = row_value(t.readers, t.id, raw)?
-    std.codec.encode(t.readers.codec, v, mut out) ?=> |_| Limit(Value)
+    let v = row_value(registered, id, raw)?
+    std.codec.encode(registered.codec, v, mut out) ?=> |_| Limit(Value)
     Ok(Some(take out))
 }
 
@@ -4295,7 +4299,7 @@ pub type Change {
     value: Option[Arc[Bytes]]
 }
 
-pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[List[Change], Error] waits {
+pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits {
     read_access(r, a)?
     read_access(r, b)?
     if !same(a.store, b.store) || a.open != b.open {

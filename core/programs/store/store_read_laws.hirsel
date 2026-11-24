@@ -617,7 +617,7 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let b = snapshot(db)
-    let unreturned_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), a, b))
+    let unreturned_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), a, b)).rows
     let untouched = observe_lookup(b, ix, 1)
     if read_set_hit(reads, unreturned_delta) || untouched.0 != values {
         return false
@@ -626,7 +626,7 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let d = snapshot(db)
-    let changed = result.unwrap(changes(result.unwrap(reader(db, 0u64)), b, d))
+    let changed = result.unwrap(changes(result.unwrap(reader(db, 0u64)), b, d)).rows
     let changed_answer = observe_lookup(d, ix, 1)
     if list.len(changed) != 1 || !read_set_hit(reads, changed) || changed_answer.0 == values {
         return false
@@ -640,7 +640,7 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         _ => return false
     }
     let e = snapshot(db)
-    let replaced_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), d, e))
+    let replaced_delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), d, e)).rows
     if list.len(replaced_delta) != 1 || !read_set_hit(changed_answer.1, replaced_delta) {
         return false
     }
@@ -808,7 +808,7 @@ pub fn law_read_cover(c: Clock) -> bool waits {
             _ => return false
         }
         let second = snapshot(db)
-        let delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), first, second))
+        let delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), first, second)).rows
         let observed = observe_cover(second, sa, sb, ia, ib, state)
         if read_set_hit(reads, delta) {
             hits += 1
@@ -870,7 +870,7 @@ pub fn law_read_spans(c: Clock) -> bool waits {
         }
     }
     let after = snapshot(db)
-    let d = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after))
+    let d = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after)).rows
     if list.len(d) != 5 {
         return false
     }
@@ -944,14 +944,14 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
         return false
     }
     let inserted_left = snapshot(db)
-    let left = result.unwrap(changes(result.unwrap(reader(db, 0u64)), base, inserted_left))
+    let left = result.unwrap(changes(result.unwrap(reader(db, 0u64)), base, inserted_left)).rows
     if !read_set_hit(forward, left) || read_set_hit(reverse, left) || !read_set_hit(fully_reverse, left) {
         return false
     }
     if !typed_put(mut db, t, 8, 80) {
         return false
     }
-    let right = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_left, snapshot(db)))
+    let right = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_left, snapshot(db))).rows
     if read_set_hit(forward, right) || read_set_hit(two_forward, right) || !read_set_hit(fully_forward, right) || !read_set_hit(reverse, right) {
         return false
     }
@@ -959,7 +959,7 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
     if !typed_put(mut db, t, 5, 50) {
         return false
     }
-    let middle = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_right, snapshot(db)))
+    let middle = result.unwrap(changes(result.unwrap(reader(db, 0u64)), inserted_right, snapshot(db))).rows
     if read_set_hit(forward, middle) || !read_set_hit(two_forward, middle) {
         return false
     }

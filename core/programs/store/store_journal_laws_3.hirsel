@@ -765,7 +765,7 @@ pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks)
         _ => return false
     }
     let after = snapshot(db)
-    let found = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after))
+    let found = result.unwrap(changes(result.unwrap(reader(db, 0u64)), before, after)).rows
     if list.len(found) != 3 {
         return false
     }

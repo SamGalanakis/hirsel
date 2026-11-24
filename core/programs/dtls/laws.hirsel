@@ -1,0 +1,374 @@
+fn nibble(c: u8) -> u8 {
+    if c >= b'a' {
+        c - b'a' + 10u8
+    } else {
+        c - b'0'
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let hex = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(hex) / 2)
+    for i in 0u64 .. list.len(hex) / 2 {
+        list.push(mut out, nibble(hex[2 * i]) * 16u8 + nibble(hex[2 * i + 1]))
+    }
+    out
+}
+
+// Record headers and AAD are assembled by hand. The ciphertext and tag use
+// Python cryptography over the RFC 7627 PRF and RFC 5246 key block.
+fn finished_zero() -> Bytes {
+    unhex("16fefd000100000000000000300001000000000000c2747a6bc07facf7eac66f98da7a85ceefe61b4151209fce1d2b83bc16bee94e228db0ffaaf262a1")
+}
+
+fn finished_one() -> Bytes {
+    unhex("16fefd000100000000000100300001000000000001b030bc39d82de32bd76938489ae8eba801e6cb57ab113b502b221b3dd892f894dc316b2c09581c42")
+}
+
+fn app_two() -> Bytes {
+    unhex("17fefd0001000000000002001b00010000000000029a3be79cd398df04be7fd77af5a03947f93cc1")
+}
+
+fn app_three() -> Bytes {
+    unhex("17fefd0001000000000003001d0001000000000003cc7b2b5c13b55ab5b1027eef8c4046a767f4266365")
+}
+
+fn app_ten() -> Bytes {
+    unhex("17fefd000100000000000a001b000100000000000a31afa6517886e75e9a4e95f5a42523e93abefc")
+}
+
+fn app_seventy_three() -> Bytes {
+    unhex("17fefd0001000000000049001e1122334455667788a133c2fd4e21cdcbe77de6d8c8e50bead7f2aa7ecde3")
+}
+
+fn app_seventy_four() -> Bytes {
+    unhex("17fefd000100000000004a001c000100000000004aa3fbcfc9de85e1ec370e446a443f7db487c74c40")
+}
+
+fn chacha_zero() -> Bytes {
+    unhex("16fefd00010000000000000028d60e4d7aef1dddf9714e53aac9a93e89b55d26e0206e90bfa38bb03b040a826a8be961a6d6f69df0")
+}
+
+fn bad_tag() -> Bytes {
+    unhex("17fefd0001000000002710001b00010000000027109cb450bdbc9e9880e82bf93f4b76a9c5861fed")
+}
+
+fn schedules(suite: schedule.Suite12) -> (schedule.Schedule, schedule.Schedule) {
+    let a = provide.random_tape(unhex("49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005"))
+    let b = provide.random_tape(unhex("b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e"))
+    let mut cp: Bytes = list.with_capacity(32)
+    let mut sp: Bytes = list.with_capacity(32)
+    let local = result.unwrap(secret.key_share(a, X25519, mut cp))
+    let remote = result.unwrap(secret.key_share(b, X25519, mut sp))
+    let cr = unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    let sr = unhex("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf")
+    let mut hash: Bytes = list.with_capacity(32)
+    list.fill(mut hash, 32, 0x5e)
+    let session = Some(take hash)
+    let client = result.unwrap(schedule.dtls12(suite, Client, 1, take local, sp, cr, sr, session))
+    let server = result.unwrap(schedule.dtls12(suite, Server, 1, take remote, cp, cr, sr, session))
+    (take client, take server)
+}
+
+fn received(mut r: dtls.Records, mut a: dtls.Ahead, wire: Bytes) -> dtls.RecordEvent {
+    let mut at = 0u64
+    let event = result.unwrap(dtls.next_record(mut r, mut a, Fixed, wire, mut at))
+    if at != list.len(wire) {
+        fail("record cursor")
+    }
+    take event
+}
+
+fn application(mut r: dtls.Records, mut a: dtls.Ahead, wire: Bytes, want: Bytes) {
+    match received(mut r, mut a, wire) {
+        ApplicationData(body) if body == want => (),
+        _ => fail("genuine application record"),
+    }
+}
+
+fn dropped(mut r: dtls.Records, mut a: dtls.Ahead, wire: Bytes, replayed: u64, tampered: u64, stale: u64) {
+    if let Discarded = received(mut r, mut a, wire) {} else {
+        fail("expected discard")
+    }
+    let counts = dtls.record_discards(r)
+    if counts.replayed != replayed || counts.tampered != tampered || counts.stale_epoch != stale || counts.malformed != 0 || counts.overflow != 1 {
+        fail("discard class")
+    }
+    if let Some(_) = dtls.record_close(r) {
+        fail("discard closed the association")
+    }
+}
+
+fn receive_flight_six(mut r: dtls.Records, mut a: dtls.Ahead, server: schedule.Schedule) {
+    let mut hs = dtls.reassembly(4, 16384)
+    let hello_done = unhex("16fefd0000000000000003000c0e0000000004000000000000")
+    let high_copy = unhex("16fefd0000ffffffffffff000c0e0000000004000000000000")
+    for wire in[hello_done, high_copy] {
+        let HandshakeRecord(h, take body) = received(mut r, mut a, wire) else {
+            fail("plaintext handshake record")
+        }
+        let mut at = 0u64
+        let event = result.unwrap(dtls.receive_fragment(mut hs, mut r, mut a, h.epoch, body, mut at))
+        match event {
+            Buffered => {
+                let Some(message) = dtls.next_message(mut hs, mut a) else {
+                    fail("ServerHelloDone missing")
+                }
+                if message.kind != 14 || message.sequence != 4 {
+                    fail("ServerHelloDone header")
+                }
+            },
+            Retransmission => {
+                if let Some(_) = dtls.next_message(mut hs, mut a) {
+                    fail("retransmitted ServerHelloDone entered again")
+                }
+            },
+            _ => fail("ServerHelloDone reassembly"),
+        }
+    }
+    if let Held = received(mut r, mut a, finished_zero()) {} else {
+        fail("Finished overtook ChangeCipherSpec")
+    }
+    let ccs = unhex("14fefd0000000000000004000101")
+    if let ChangeCipherSpec = received(mut r, mut a, ccs) {} else {
+        fail("low epoch-0 number refused")
+    }
+    result.unwrap(dtls.start_receiving_protected(mut r, server, Aes128GcmSha256))
+    if let Ignored = received(mut r, mut a, ccs) {} else {
+        fail("repeated ChangeCipherSpec")
+    }
+    let HandshakeRecord(h, take body) = result.unwrap(dtls.next_early_record(mut r, mut a)) else {
+        fail("held Finished missing")
+    }
+    if h.epoch != 1 || h.sequence != 0 || body != unhex("1400000c000500000000000c000102030405060708090a0b") {
+        fail("Finished wire and plaintext")
+    }
+    let counts = dtls.record_discards(r)
+    if counts.replayed != 0 || counts.malformed != 0 || counts.tampered != 0 || counts.stale_epoch != 0 {
+        fail("epoch-0 sequence advanced replay state")
+    }
+}
+
+fn check_write(mut s: schedule.Schedule, suite: schedule.Suite12, zero: Bytes, repeat: Option[Bytes]) {
+    let mut r = dtls.records(4)
+    let mut out: Bytes = list.with_capacity(256)
+    let ccs = unhex("14fefd0000000000000004000101")
+    let n = result.unwrap(dtls.write_record(mut r, 256, 20, b"\x01", mut out))
+    if n != 14 || out != ccs {
+        fail("ChangeCipherSpec framing")
+    }
+    result.unwrap(dtls.start_sending_protected(mut r, mut s, suite))
+    let finished = unhex("1400000c000500000000000c000102030405060708090a0b")
+    let used = list.len(out)
+    let wrote = result.unwrap(dtls.write_record(mut r, 256, 22, finished, mut out))
+    if wrote != list.len(zero) || list.compare_bytes(list.slice(out, used, list.len(out)), zero) != Equal {
+        fail("epoch-1 record ciphertext, number, explicit nonce or length")
+    }
+    if let Some(expected) = repeat {
+        list.clear(mut out)
+        result.unwrap(dtls.write_record(mut r, 256, 22, finished, mut out))
+        if out != expected {
+            fail("retransmission reused its record number")
+        }
+    }
+}
+
+/// bug: advance an epoch-0 replay window, or mark a high epoch-1 record before authenticating it.
+/// oracle: RFC 6347 sections 4.1.2.6, 4.1.2.7 and 4.2.2 with hand-built wire records.
+@test
+fn record_replay_and_discards() -> Result[(), ()] {
+    let (take client, take server) = schedules(Aes128GcmSha256)
+    let mut sender = take client
+    check_write(mut sender, Aes128GcmSha256, finished_zero(), Some(finished_one()))
+    let mut r = dtls.records(0)
+    let mut a = dtls.ahead(1)
+    receive_flight_six(mut r, mut a, server)
+    if let Held = received(mut r, mut a, app_two()) {} else {
+        fail("application escaped before Connected")
+    }
+    if let Discarded = received(mut r, mut a, app_ten()) {} else {
+        fail("early application bypassed the shared budget")
+    }
+    if let None = dtls.next_held_application(r, mut a) {} else {
+        fail("early application escaped")
+    }
+    dtls.records_connected(mut r)
+    let Some(held) = dtls.next_held_application(r, mut a) else {
+        fail("early application missing")
+    }
+    if held != b"two" {
+        fail("early application plaintext")
+    }
+    dropped(mut r, mut a, app_two(), 1, 0, 0)
+    application(mut r, mut a, app_seventy_three(), b"newest")
+    dropped(mut r, mut a, app_three(), 2, 0, 0)
+    application(mut r, mut a, app_ten(), b"ten")
+    dropped(mut r, mut a, bad_tag(), 2, 1, 0)
+    dropped(mut r, mut a, unhex("17fefd000200000000004a0000"), 2, 1, 1)
+    application(mut r, mut a, app_seventy_four(), b"next")
+    let (take chacha_client, take chacha_server) = schedules(ChaCha20Poly1305Sha256)
+    let mut chacha_send = take chacha_client
+    check_write(mut chacha_send, ChaCha20Poly1305Sha256, chacha_zero(), None)
+    let mut chacha_receive = dtls.records(0)
+    result.unwrap(dtls.start_receiving_protected(mut chacha_receive, chacha_server, ChaCha20Poly1305Sha256))
+    let HandshakeRecord(_, take chacha_body) = received(mut chacha_receive, mut a, chacha_zero()) else {
+        fail("ChaCha20 record did not authenticate")
+    }
+    if chacha_body != unhex("1400000c000500000000000c000102030405060708090a0b") {
+        fail("ChaCha20 plaintext")
+    }
+    Ok(())
+}
+
+fn certificate_bytes() -> Bytes {
+    let mut body: Bytes = list.with_capacity(3000)
+    for i in 0u64 .. 3000 {
+        list.push(mut body, int.narrow(i & 255))
+    }
+    body
+}
+
+fn fragment(prefix: String, body: Bytes, lo: u64, hi: u64) -> Bytes {
+    let mut wire = unhex(prefix)
+    list.append(mut wire, list.slice(body, lo, hi))
+    wire
+}
+
+fn feed(mut rx: dtls.Reassembly, mut r: dtls.Records, mut a: dtls.Ahead, input: Bytes) -> Result[dtls.FragmentEvent, dtls.HandshakeError] {
+    let mut at = 0u64
+    let event = dtls.receive_fragment(mut rx, mut r, mut a, 0, input, mut at)?
+    if list.len(input) != at {
+        fail("fragment cursor")
+    }
+    Ok(event)
+}
+
+fn check_fragment_writes(body: Bytes) {
+    let mut r = dtls.records(0)
+    let mut offset = 0u64
+    let mut datagram: Bytes = list.with_capacity(300)
+    let done = result.unwrap(dtls.write_handshake_record(mut r, 300, 11, 1, body, mut offset, mut datagram))
+    let first = fragment("16fefd0000000000000000011f0b000bb80001000000000113", body, 0, 275)
+    if done || offset != 275 || datagram != first {
+        fail("fragment at MTU boundary")
+    }
+    match dtls.write_handshake_record(mut r, 300, 11, 1, body, mut offset, mut datagram) {
+        Error(Record(DatagramFull)) => (),
+        _ => fail("full datagram accepted another fragment"),
+    }
+    if offset != 275 || datagram != first {
+        fail("refusal changed output or offset")
+    }
+    list.clear(mut datagram)
+    let _: bool = result.unwrap(dtls.write_handshake_record(mut r, 300, 11, 1, body, mut offset, mut datagram))
+    let second = fragment("16fefd0000000000000001011f0b000bb80001000113000113", body, 275, 550)
+    if offset != 550 || datagram != second {
+        fail("next fragment offset or record sequence")
+    }
+}
+
+fn check_fragment_refusals(body: Bytes) {
+    let mut r = dtls.records(0)
+    let mut a = dtls.ahead(1)
+    let mut rx = dtls.reassembly(0, 3000)
+    result.unwrap(feed(mut rx, mut r, mut a, fragment("0b000bb80000000000000002", body, 0, 2)))
+    match feed(mut rx, mut r, mut a, fragment("0b000bb70000000002000002", body, 2, 4)) {
+        Error(IllegalParameter) => (),
+        _ => fail("contradictory message length accepted"),
+    }
+    match feed(mut rx, mut r, mut a, fragment("0b000bb80000000bb7000002", body, 0, 2)) {
+        Error(IllegalParameter) => (),
+        _ => fail("fragment past declared message length accepted"),
+    }
+    match feed(mut rx, mut r, mut a, fragment("0b000bb90001000000000001", body, 0, 1)) {
+        Error(IllegalParameter) => (),
+        _ => fail("message above max_message accepted"),
+    }
+    match feed(mut rx, mut r, mut a, unhex("0b000bb80000000001000001ff")) {
+        Error(IllegalParameter) => (),
+        _ => fail("conflicting overlap accepted"),
+    }
+    let far = unhex("0e0000000003000000000000")
+    result.unwrap(feed(mut rx, mut r, mut a, far))
+    if let Duplicate = result.unwrap(feed(mut rx, mut r, mut a, far)) {} else {
+        fail("duplicate used another slot")
+    }
+    if let Discarded = received(mut r, mut a, finished_zero()) {} else {
+        fail("early record bypassed fragment limit")
+    }
+    if dtls.record_discards(r).overflow != 1 {
+        fail("shared max_ahead count")
+    }
+}
+
+/// bug: concatenate fragments in arrival order, count overlaps twice, or transcript a retransmission.
+/// oracle: RFC 6347 sections 4.2.3 and 4.2.6 with hand-built headers and original message bytes.
+@test
+fn fragments_reassemble() -> Result[(), ()] {
+    let mut r = dtls.records(0)
+    let mut a = dtls.ahead(2)
+    let mut rx = dtls.reassembly(0, 3000)
+    let mut t = dtls.transcript(3000)
+    let hello = unhex("fefd000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000002c02b0100")
+    let hello_tail = fragment("0100002a0000000014000016", hello, 20, 42)
+    let hello_head = fragment("0100002a0000000000000014", hello, 0, 20)
+    result.unwrap(feed(mut rx, mut r, mut a, hello_tail))
+    if let Some(_) = dtls.next_message(mut rx, mut a) {
+        fail("incomplete ClientHello delivered")
+    }
+    result.unwrap(feed(mut rx, mut r, mut a, hello_head))
+    let Some(msg) = dtls.next_message(mut rx, mut a) else {
+        fail("missing ClientHello")
+    }
+    if msg.kind != 1 || msg.sequence != 0 || msg.body != hello {
+        fail("ClientHello reconstruction")
+    }
+    result.unwrap(dtls.append_transcript(mut t, msg.kind, msg.sequence, msg.body))
+    let body = certificate_bytes()
+    let tail = fragment("0b000bb8000100076c00044c", body, 1900, 3000)
+    let mid = fragment("0b000bb800010003e80003e8", body, 1000, 2000)
+    let head = fragment("0b000bb800010000000003e8", body, 0, 1000)
+    result.unwrap(feed(mut rx, mut r, mut a, tail))
+    result.unwrap(feed(mut rx, mut r, mut a, mid))
+    if let Duplicate = result.unwrap(feed(mut rx, mut r, mut a, mid)) {} else {
+        fail("overlapped duplicate fragment")
+    }
+    if let Some(_) = dtls.next_message(mut rx, mut a) {
+        fail("incomplete Certificate delivered")
+    }
+    result.unwrap(feed(mut rx, mut r, mut a, head))
+    let Some(cert) = dtls.next_message(mut rx, mut a) else {
+        fail("missing Certificate")
+    }
+    if cert.kind != 11 || cert.sequence != 1 || cert.body != body {
+        fail("Certificate reconstruction")
+    }
+    result.unwrap(dtls.append_transcript(mut t, cert.kind, cert.sequence, cert.body))
+    if let Retransmission = result.unwrap(feed(mut rx, mut r, mut a, head)) {} else {
+        fail("processed Certificate entered again")
+    }
+    if let Some(_) = dtls.next_message(mut rx, mut a) {
+        fail("retransmission delivered again")
+    }
+    result.unwrap(dtls.append_transcript(mut t, 3, 0, b"verify request"))
+    let mut expected = fragment("0100002a000000000000002a", hello, 0, 42)
+    list.append(mut expected, fragment("0b000bb80001000000000bb8", body, 0, 3000))
+    if list.compare_bytes(dtls.transcript_bytes(t), expected) != Equal {
+        fail("canonical transcript")
+    }
+    dtls.clear_transcript(mut t)
+    if list.len(dtls.transcript_bytes(t)) != 0 {
+        fail("transcript clear")
+    }
+    let mut bounded = dtls.transcript(5)
+    result.unwrap(dtls.append_transcript(mut bounded, 1, 0, b"123"))
+    if let Error(HandshakeFailure) = dtls.append_transcript(mut bounded, 2, 1, b"") {} else {
+        fail("transcript grew past 3 * max_message")
+    }
+    if list.compare_bytes(dtls.transcript_bytes(bounded), unhex("010000030000000000000003313233")) != Equal {
+        fail("transcript changed on refusal")
+    }
+    check_fragment_writes(body)
+    check_fragment_refusals(body)
+    Ok(())
+}

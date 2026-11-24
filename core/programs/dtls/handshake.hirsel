@@ -1,0 +1,286 @@
+const HANDSHAKE_HEADER: u64 = 12
+
+const U24_MAX: u64 = 0xffffff
+
+const HELLO_VERIFY_REQUEST: u8 = 3
+
+pub type HandshakeError = IllegalParameter | HandshakeFailure | Capacity(Capacity) | Record(RecordError)
+
+pub type FragmentEvent = Buffered | Duplicate | Retransmission | FragmentOverflow
+
+pub type HandshakeMessage {
+    kind: u8,
+    sequence: u16,
+    epoch: u16,
+    body: Bytes
+}
+
+type Fragment {
+    kind: u8,
+    sequence: u16,
+    total: u64,
+    offset: u64,
+    start: u64,
+    end: u64
+}
+
+type PartialMessage {
+    kind: u8,
+    sequence: u16,
+    epoch: u16,
+    body: Bytes,
+    received: Bytes,
+    remaining: u64,
+    ahead_fragments: u64
+}
+
+pub opaque type Reassembly {
+    expected: u64,
+    max_message: u64,
+    pending: List[PartialMessage]
+}
+
+pub opaque type Transcript {
+    limit: u64,
+    data: Bytes
+}
+
+fn read_u24(b: Bytes, at: u64) -> u64 {
+    let high: u64 = int.widen(b[at])
+    let low: u16 = list.word_be(b, at + 1)
+    (high << 16) | int.widen(low)
+}
+
+fn put_u24(mut b: Bytes, value: u64) {
+    list.push(mut b, int.narrow(value >> 16))
+    let low: u16 = int.narrow(value & 0xffff)
+    list.put_word_be(mut b, low)
+}
+
+fn fragment_header(mut b: Bytes, kind: u8, sequence: u16, total: u64, offset: u64, length: u64) {
+    list.push(mut b, kind)
+    put_u24(mut b, total)
+    list.put_word_be(mut b, sequence)
+    put_u24(mut b, offset)
+    put_u24(mut b, length)
+}
+
+fn fragment_at(b: Bytes, at: u64, max_message: u64) -> Result[Fragment, HandshakeError] {
+    let len = list.len(b)
+    if at > len || len - at < HANDSHAKE_HEADER {
+        return Error(IllegalParameter)
+    }
+    let total = read_u24(b, at + 1)
+    let sequence: u16 = list.word_be(b, at + 4)
+    let offset = read_u24(b, at + 6)
+    let count = read_u24(b, at + 9)
+    let start = at + HANDSHAKE_HEADER
+    if total > max_message || offset > total || count > total - offset || count > len - start {
+        return Error(IllegalParameter)
+    }
+    Ok(Fragment(kind: b[at], sequence: sequence, total: total, offset: offset, start: start, end: start + count))
+}
+
+pub fn reassembly(first_sequence: u16, max_message: u32) -> Reassembly {
+    Reassembly(expected: int.widen(first_sequence), max_message: int.widen(max_message), pending: list.new())
+}
+
+fn partial_index(r: Reassembly, sequence: u16) -> Option[u64] {
+    for i in 0 .. list.len(r.pending) {
+        if r.pending[i].sequence == sequence {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn handshake_room(mut b: Bytes, needed: u64) -> Result[(), HandshakeError] {
+    match list.try_reserve(mut b, needed) {
+        Error(c) => Error(Capacity(c)),
+        Ok(()) => Ok(()),
+    }
+}
+
+fn partial(f: Fragment, epoch: u16) -> Result[PartialMessage, HandshakeError] {
+    let mut body: Bytes = list.new()
+    let mut received: Bytes = list.new()
+    handshake_room(mut body, f.total)?
+    handshake_room(mut received, f.total)?
+    list.fill(mut body, f.total, 0)
+    list.fill(mut received, f.total, 0)
+    Ok(PartialMessage(kind: f.kind, sequence: f.sequence, epoch: epoch, body: take body, received: take received, remaining: f.total, ahead_fragments: 0))
+}
+
+fn check_overlap(p: PartialMessage, f: Fragment, input: Bytes) -> Result[u64, HandshakeError] {
+    let mut new_bytes = 0u64
+    for i in f.start .. f.end {
+        let j = f.offset + (i - f.start)
+        if p.received[j] == 0 {
+            new_bytes += 1
+        } else if p.body[j] != input[i] {
+            return Error(IllegalParameter)
+        }
+    }
+    Ok(new_bytes)
+}
+
+fn merge(mut p: PartialMessage, f: Fragment, input: Bytes, new_bytes: u64, far: bool) {
+    let count = f.end - f.start
+    list.copy_from_slice(mut p.body, f.offset, list.slice(input, f.start, f.end))
+    list.fill_slice(mut p.received, f.offset, count, 1)
+    p.remaining -= new_bytes
+    if far {
+        p.ahead_fragments += 1
+    }
+}
+
+/// Feed each handshake fragment in the record. A complete message can be read
+/// with next_message. Retransmission does not re-enter the transcript.
+pub fn receive_fragment(mut r: Reassembly, mut layer: Records, mut a: Ahead, epoch: u16, input: Bytes, mut at: u64) -> Result[FragmentEvent, HandshakeError] {
+    let f = fragment_at(input, at, r.max_message)?
+    let sequence: u64 = int.widen(f.sequence)
+    if sequence < r.expected {
+        at = f.end
+        return Ok(Retransmission)
+    }
+    let far = sequence > r.expected + 1
+    if let Some(i) = partial_index(r, f.sequence) {
+        let new_bytes = {
+            let p = r.pending[i]
+            if list.len(p.body) != f.total || p.kind != f.kind || p.epoch != epoch {
+                return Error(IllegalParameter)
+            }
+            check_overlap(p, f, input)?
+        }
+        if new_bytes == 0 {
+            at = f.end
+            return Ok(Duplicate)
+        }
+        if far && ahead_full(a) {
+            overflow(mut layer.dropped)
+            at = f.end
+            return Ok(FragmentOverflow)
+        }
+        merge(mut r.pending[i], f, input, new_bytes, far)
+    } else {
+        if f.start == f.end && f.total != 0 {
+            at = f.end
+            return Ok(Duplicate)
+        }
+        if far && ahead_full(a) {
+            overflow(mut layer.dropped)
+            at = f.end
+            return Ok(FragmentOverflow)
+        }
+        let mut p = partial(f, epoch)?
+        merge(mut p, f, input, f.end - f.start, far)
+        match list.try_reserve(mut r.pending, 1) {
+            Error(c) => {
+                return Error(Capacity(c))
+            },
+            Ok(()) => list.push(mut r.pending, take p),
+        }
+    }
+    if far {
+        a.fragments += 1
+    }
+    at = f.end
+    Ok(Buffered)
+}
+
+pub fn next_message(mut r: Reassembly, mut a: Ahead) -> Option[HandshakeMessage] {
+    if r.expected > 0xffff {
+        return None
+    }
+    let Some(i) = partial_index(r, int.narrow(r.expected)) else {
+        return None
+    }
+    if r.pending[i].remaining != 0 {
+        return None
+    }
+    let last = list.len(r.pending) - 1
+    list.swap(mut r.pending, i, last)
+    let Some(take p) = list.pop(mut r.pending) else {
+        return None
+    }
+    let PartialMessage(kind, sequence, epoch, body: take body, ..) = take p
+    r.expected += 1
+    for j in 0 .. list.len(r.pending) {
+        let seq: u64 = int.widen(r.pending[j].sequence)
+        if seq == r.expected + 1 {
+            a.fragments -= r.pending[j].ahead_fragments
+            r.pending[j].ahead_fragments = 0
+            break
+        }
+    }
+    Some(HandshakeMessage(kind: kind, sequence: sequence, epoch: epoch, body: take body))
+}
+
+pub fn transcript(max_message: u32) -> Transcript {
+    let wide: u64 = int.widen(max_message)
+    Transcript(limit: 3 * wide, data: list.new())
+}
+
+pub fn transcript_bytes(t: Transcript) -> View[Bytes] in t {
+    view t.data
+}
+
+/// Clear on HelloVerifyRequest before recording the replacement ClientHello,
+/// and on reaching Connected to free the transcript backing.
+pub fn clear_transcript(mut t: Transcript) {
+    t.data = list.new()
+}
+
+/// Append a new, order-checked message in its canonical unfragmented form.
+pub fn append_transcript(mut t: Transcript, kind: u8, sequence: u16, body: Bytes) -> Result[(), HandshakeError] {
+    if kind == HELLO_VERIFY_REQUEST {
+        return Ok(())
+    }
+    let len = list.len(body)
+    let need = HANDSHAKE_HEADER + len
+    if len > U24_MAX || need > t.limit - list.len(t.data) {
+        return Error(HandshakeFailure)
+    }
+    handshake_room(mut t.data, need)?
+    fragment_header(mut t.data, kind, sequence, len, 0, len)
+    list.append(mut t.data, body)
+    Ok(())
+}
+
+/// Write the next fragment into the current datagram. A full datagram can be
+/// emitted and retried with the same offset. True means the message is complete.
+pub fn write_handshake_record(mut r: Records, mtu: u16, kind: u8, sequence: u16, body: Bytes, mut offset: u64, mut out: Bytes) -> Result[bool, HandshakeError] {
+    let total = list.len(body)
+    if total > U24_MAX || offset > total {
+        return Error(IllegalParameter)
+    }
+    let overhead = record_overhead(r) + HANDSHAKE_HEADER
+    let room: u64 = int.widen(mtu)
+    let used = list.len(out)
+    if used > room || room - used < overhead {
+        return Error(Record(DatagramFull))
+    }
+    let limit = room - used - overhead
+    let remaining = total - offset
+    let mut count = remaining
+    if count > limit {
+        count = limit
+    }
+    if count > MAX_PLAINTEXT - HANDSHAKE_HEADER {
+        count = MAX_PLAINTEXT - HANDSHAKE_HEADER
+    }
+    if count == 0 && remaining != 0 {
+        return Error(Record(DatagramFull))
+    }
+    let mut fragment: Bytes = list.new()
+    handshake_room(mut fragment, HANDSHAKE_HEADER + count)?
+    fragment_header(mut fragment, kind, sequence, total, offset, count)
+    list.append(mut fragment, list.slice(body, offset, offset + count))
+    match write_record(mut r, mtu, HANDSHAKE, fragment, mut out) {
+        Error(e) => Error(Record(e)),
+        Ok(_) => {
+            offset += count
+            Ok(offset == total)
+        },
+    }
+}

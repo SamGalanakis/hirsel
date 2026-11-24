@@ -1,0 +1,3 @@
+hirsel.laws 1
+dtls@1/laws/fragments_reassemble src=982f0e20cd9ac99c sig=b436169c1195d49b run=acdd7fe37d41c86f bug=abf59674c58f4427 oracle=a2a510cb20c7741b rows=pending
+dtls@1/laws/record_replay_and_discards src=0dbcf6543c42172c sig=06805c148e807ffe run=acdd7fe37d41c86f bug=97bebee183cbe9c1 oracle=bfa2c25b3df5cada rows=pending

@@ -1,0 +1,80 @@
+const RECORD_HEADER: u64 = 13
+
+const MAX_RECORD_SEQUENCE: u64 = 0xffffffffffff
+
+const MAX_PLAINTEXT: u64 = 16384
+
+const TAG: u64 = 16
+
+const EXPLICIT_NONCE: u64 = 8
+
+const CCS: u8 = 20
+
+const ALERT: u8 = 21
+
+const HANDSHAKE: u8 = 22
+
+const APPLICATION: u8 = 23
+
+pub type RecordVersion = Fixed | BeforeServerHello | ClientHelloOnly
+
+pub type RecordHeader {
+    kind: u8,
+    epoch: u16,
+    sequence: u64,
+    start: u64,
+    end: u64
+}
+
+pub fn record_header(datagram: Bytes, at: u64, version: RecordVersion) -> Option[RecordHeader] {
+    let size = list.len(datagram)
+    if at > size || size - at < RECORD_HEADER {
+        return None
+    }
+    let kind = datagram[at]
+    let record_version: u16 = list.word_be(datagram, at + 1)
+    let number: u64 = list.word_be(datagram, at + 3)
+    let epoch: u16 = int.narrow(number >> 48)
+    let length: u16 = list.word_be(datagram, at + 11)
+    let start = at + RECORD_HEADER
+    let end = start + int.widen(length)
+    if kind < CCS || kind > APPLICATION || end > size {
+        return None
+    }
+    if record_version != 0xfefd {
+        if record_version != 0xfeff || epoch != 0 || kind != HANDSHAKE || start == end {
+            return None
+        }
+        match version {
+            Fixed => {
+                return None
+            },
+            ClientHelloOnly if datagram[start] != 1 => {
+                return None
+            },
+            _ => (),
+        }
+    }
+    Some(RecordHeader(kind: kind, epoch: epoch, sequence: number & MAX_RECORD_SEQUENCE, start: start, end: end))
+}
+
+fn record_number(epoch: u16, sequence: u64) -> u64 {
+    let wide: u64 = int.widen(epoch)
+    (wide << 48) | sequence
+}
+
+fn record_prefix(mut out: Bytes, kind: u8, version: u16, number: u64, length: u16) {
+    list.push(mut out, kind)
+    list.put_word_be(mut out, version)
+    list.put_word_be(mut out, number)
+    list.put_word_be(mut out, length)
+}
+
+fn record_aad(kind: u8, number: u64, length: u16) -> Bytes {
+    let mut aad: Bytes = list.with_capacity(RECORD_HEADER)
+    list.put_word_be(mut aad, number)
+    list.push(mut aad, kind)
+    list.put_word_be(mut aad, 0xfefdu16)
+    list.put_word_be(mut aad, length)
+    aad
+}

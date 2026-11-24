@@ -160,6 +160,19 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
 }
 
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
+    if i == 0u64 {
+        for reply_slot in 0u64 .. ran.replies.count {
+            let drafted_reply = data_row(ran.replies, reply_slot)
+            if map.contains(db.admits, drafted_reply.key) {
+                if let Some(raw) = drafted_reply.value {
+                    let encoded = staged_bytes(raw)
+                    if result.unwrap(stream_state(encoded)).state == 2u8 {
+                        let _ = map.remove(mut db.admits, drafted_reply.key)
+                    }
+                }
+            }
+        }
+    }
     let Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
     match db.disk {
         Some(mut state) => {

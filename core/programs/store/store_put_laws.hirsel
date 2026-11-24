@@ -74,7 +74,7 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
             return Error(Exists("call"))
         }
     }
-    let (take key, take value) = reply_row(tx, c.stream, p, r)?
+    let (take key, take value) = reply_row(tx, result.unwrap(stream_key_bytes(c.stream)), p, r)?
     call_checked(c)?
     let size = call_section_bytes(c, None)
     stream_write(mut tx, take key, take value, size)?

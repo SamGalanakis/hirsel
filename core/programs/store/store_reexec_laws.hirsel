@@ -47,9 +47,9 @@ fn verdict_code(v: Verdict) -> u8 {
 }
 
 fn reexecute_admit(mut db: Db, stream: u64) -> (Completion, CallRecord) waits {
-    let key = key_word(stream)
+    let key = law_stream_bytes(key_word(stream), keyed_time(db))
     let record = call_for(key, 32)
-    let admitted = result.unwrap(admit(mut db, key, 0, request_digest(record.key, record.args)))
+    let admitted = result.unwrap(admit(mut db, record.stream, 0, request_digest(record.key, record.args)))
     let Admitted(take complete) = take admitted else {
         fail("re-execution law: expected an admitted call")
     }

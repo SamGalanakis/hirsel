@@ -238,7 +238,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let caller = option.unwrap(anonymous_caller(random))
-    let stream = wire_stream(caller, store.StreamId(t: 0u64, n: 77u64))
+    let stream = store.StreamKey(caller: clone(caller), id: store.StreamId(t: store.keyed_time(db), n: 77u64))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
     let (to_head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(5u64)
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(5u64)
@@ -524,7 +524,8 @@ pub fn law_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random)
     let (to, from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1)
     let req = head_request(take caller, stream, 0u64, take chosen, w3c_arg(7u32), take to)
     let Req(e: Requested(take request)) = take req else { return false }
-    let admission = result.unwrap(store.admit(mut rig.head.db, request.stream, request.p, request.digest))
+    let saved = store.StreamKey(caller: clone(request.caller), id: request.stream_id)
+    let admission = result.unwrap(store.admit(mut rig.head.db, saved, request.p, request.digest))
     let Admitted(take complete) = take admission else { return false }
     let before = store.version(store.snapshot(rig.head.db))
     store.fixture_broken_handoff(mut rig.head.db)

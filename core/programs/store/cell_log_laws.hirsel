@@ -180,7 +180,7 @@ fn cell_log_frame_case() -> bool {
     list.fill(mut payload, 17, 0u8)
     let frame_ops = result.unwrap(journal_decode_commit("frame", payload))
     let Some(call) = view frame_ops.call else { return false }
-    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream != string.as_bytes("s") ||
+    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream.caller.subject != string.as_bytes("s") ||
         frame_ops.data[0].key != seven || frame_ops.data[1].key != eight {
         return false
     }

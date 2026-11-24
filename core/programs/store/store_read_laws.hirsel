@@ -7,19 +7,34 @@
 // stream admitting p > 0; a reply at a position not Admitted; a record
 // without a reply, twice, or with a 31-byte revision. L29: COMMIT sizes with
 // a streams section, with and without a data head, and a CALL section.
+fn law_stream_name(label: Bytes, time: u64) -> StreamKey {
+    StreamKey(caller: Caller(issuer: 2u8, subject: clone(label)), id: StreamId(t: time, n: 0u64))
+}
+
+fn law_stream_bytes(label: Bytes, time: u64) -> Bytes {
+    result.unwrap(stream_key_bytes(law_stream_name(label, time)))
+}
+
+fn admit_law_stream(mut db: Db, raw: Bytes, p: u64, digest: RequestDigest) -> Result[Admission, Error] waits {
+    let name = option.unwrap(parse_stream_key(raw))
+    admit(mut db, name, p, digest)
+}
+
 pub fn law_streams(c: Clock) -> bool waits {
     let mut db = raw_test_db(c, 1073741824)
-    let s = result.unwrap(copied(string.as_bytes("s")))
+    let birth = keyed_time(db)
+    let s = law_stream_bytes(b"s", birth)
+    let other_stream = law_stream_name(b"u", birth)
     let d = digest_for("d")
     let e = digest_for("e")
-    match result.unwrap(admit(mut db, s, 1, d)) {
-        Rejected(0) => {},
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
+        HistoryUnavailable => {},
         _ => return false
     }
     if db.heads[0].head != 0 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Admitted(t) => if !mark_is(ticket(t), 1) {
             return false
         },
@@ -29,17 +44,17 @@ pub fn law_streams(c: Clock) -> bool waits {
         return false
     }
     // S7: latest + 1 over an unreplied latest commits nothing.
-    match result.unwrap(admit(mut db, s, 1, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
         Rejected(0) => {},
         _ => return false
     }
     // AH1: another request at latest mismatches before Abandoned, binds
     // nothing, and the bound request is still Abandoned after it.
-    match result.unwrap(admit(mut db, s, 0, e)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, e)) {
         RequestMismatch => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 1) {
             return false
         },
@@ -80,11 +95,11 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // The reply keeps d: e still mismatches, before Duplicate, and d's
     // Duplicate follows it.
-    match result.unwrap(admit(mut db, s, 0, e)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, e)) {
         RequestMismatch => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 0, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
         Duplicate(r) => if r.reply != string.as_bytes("r0") {
             return false
         },
@@ -93,7 +108,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 2 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 1, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
         Admitted(t) => if !mark_is(ticket(t), 3) {
             return false
         },
@@ -107,9 +122,9 @@ pub fn law_streams(c: Clock) -> bool waits {
         if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(copied(string.as_bytes("r1")))) {
             return Error(2)
         }
-        // A 95-byte reply frame plus the 5-byte data head and one 33-byte put.
+        // A 113-byte reply frame plus the 5-byte data head and one 33-byte put.
         let ci = info(mut tx)
-        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 133 {
+        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 151 {
             return Error(3)
         }
         Error(7)
@@ -126,7 +141,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) {
         return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Admitted(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -144,7 +159,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         Aborted(Undone(value: 8, ticket: None)) => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -160,7 +175,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         Failed(_) => {},
         _ => return false
     }
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -192,12 +207,12 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     // Ruling 3: an admit over the bound is Full and binds nothing.
-    match admit(mut db, string.as_bytes("u"), 0, e) {
+    match admit(mut db, other_stream, 0, e) {
         Error(Full(_)) => {},
         _ => return false
     }
     db.ceiling = ceiling
-    match result.unwrap(admit(mut db, s, 2, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
         },
@@ -208,13 +223,13 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // AH2: below latest there is no digest to compare, whatever the bytes.
     for (p, x) in[(1u64, d), (1u64, e), (0u64, d)] {
-        match result.unwrap(admit(mut db, s, p, x)) {
+        match result.unwrap(admit_law_stream(mut db, s, p, x)) {
             HistoryUnavailable => {},
             _ => return false
         }
     }
     for p in[3u64, 5u64] {
-        match result.unwrap(admit(mut db, s, p, d)) {
+        match result.unwrap(admit_law_stream(mut db, s, p, d)) {
             Rejected(2) => {},
             _ => return false
         }
@@ -251,14 +266,14 @@ pub fn law_streams(c: Clock) -> bool waits {
     if db.heads[0].head != 6 {
         return false
     }
-    match result.unwrap(admit(mut db, s, 3, d)) {
+    match result.unwrap(admit_law_stream(mut db, s, 3, d)) {
         Admitted(t) => if !mark_is(ticket(t), 7) {
             return false
         },
         _ => return false
     }
     // L29 by section 2.4: head 16, call info 21, streams section 5 + op
-    // (1 + 4 + 1 + 4 + 43) = 58, so 95 with no data section. The CALL
+    // (1 + 4 + 19 + 4 + 43) = 76, so 113 with no data section. The CALL
     // is 145 B (four blobs of sizes 32, 16, 32 and 48, and the settle byte).
     // A 12-byte key, 4-byte prior length and 8-byte value add 38 B for data.
     let measured = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
@@ -267,18 +282,18 @@ pub fn law_streams(c: Clock) -> bool waits {
         }
         let ci = info(mut tx)
         let one = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72)))
-        if one != 95 {
+        if one != 113 {
             return Error(2)
         }
         let two = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if two != 240 {
+        if two != 258 {
             return Error(4)
         }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) {
             return Error(5)
         }
         let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if three != 278 {
+        if three != 296 {
             return Error(6)
         }
         Ok(())
@@ -288,7 +303,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     // The Full admit of e at u bound nothing: d admits there.
-    match result.unwrap(admit(mut db, string.as_bytes("u"), 0, d)) {
+    match result.unwrap(admit(mut db, other_stream, 0, d)) {
         Admitted(_) => true,
         _ => false
     }
@@ -342,6 +357,30 @@ fn test_streams(c: Clock) -> Result[(), ()] waits {
     } else {
         Error(())
     }
+}
+
+@test
+fn stream_quota_preserves_eviction_floor(c: Clock) -> Result[(), u64] waits {
+    let mut db = raw_test_db(c, 1073741824u64)
+    db.streams_per_caller_max = 1u64
+    db.streams_max = 1u64
+    let time = keyed_time(db)
+    let caller = Caller(issuer: 2u8, subject: clone(b"same caller"))
+    let older = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 1u64))
+    let first = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 2u64))
+    let second = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 3u64))
+    let digest = digest_for("same request")
+    if let Admitted(_) = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(1u64) }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, older, 0u64, digest)) {} else { return Error(2u64) }
+    if let StreamOverloaded = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(3u64) }
+    let raw = result.unwrap(stream_key_bytes(first))
+    let committed = result.unwrap(run(mut db, None, raw, fn(mut tx, key) -> Result[(), Error] {
+        reply(mut tx, key, 0u64, clone(b"result"))
+    }))
+    if let Committed(_) = committed {} else { return Error(4u64) }
+    if let Admitted(_) = result.unwrap(admit(mut db, second, 0u64, digest)) {} else { return Error(5u64) }
+    if let HistoryUnavailable = result.unwrap(admit(mut db, first, 0u64, digest)) {} else { return Error(6u64) }
+    Ok(())
 }
 
 // J1: same J rewrites only the primary key; changing J rewrites old+new index

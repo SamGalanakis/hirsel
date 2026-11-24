@@ -254,7 +254,8 @@ fn word(n: u64, fill: u8) -> Bytes {
 fn record_call(mut db: store.Db, bounds: store.Plan) -> u64 waits {
     let opened = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let t = view opened.source
-    let rec = store.CallRecord(key: word(32u64, 1u8), args: word(16u64, 2u8), stream: word(8u64, 5u8), revision: Some(word(32u64, 3u8)), code: word(48u64, 9u8))
+    let stream = store.StreamKey(caller: store.Caller(issuer: 2u8, subject: word(8u64, 5u8)), id: store.StreamId(t: store.keyed_time(db), n: 0u64))
+    let rec = store.CallRecord(key: word(32u64, 1u8), args: word(16u64, 2u8), stream: take stream, revision: Some(word(32u64, 3u8)), code: word(48u64, 9u8))
     let admission = result.unwrap(store.admit(mut db, clone(rec.stream), 0u64, store.request_digest(rec.key, rec.args)))
     let Admitted(take complete) = take admission else {
         fail("record_call: not admitted")

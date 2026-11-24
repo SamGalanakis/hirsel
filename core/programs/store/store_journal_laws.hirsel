@@ -526,7 +526,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let b = main_branch(reopened)
     match result.unwrap(recorded(reopened, b, 1)) {
-        Some(call_record) => if call_record.record.key != string.as_bytes("entry") || call_record.record.args != string.as_bytes("arguments") || call_record.record.stream != string.as_bytes("stream") || !revision_is_vector(call_record.record.revision) {
+        Some(call_record) => if call_record.record.key != string.as_bytes("entry") || call_record.record.args != string.as_bytes("arguments") || call_record.record.stream.caller.subject != string.as_bytes("stream") || !revision_is_vector(call_record.record.revision) {
             return false
         },
         None => return false
@@ -628,7 +628,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     let (f, _) = result.unwrap(fork(mut db, "f", early))
     let commit_ticket = result.unwrap(journal_fixture_call(mut db, 1, false, Some(revision_vector())))
     match result.unwrap(recorded(db, f, 2)) {
-        Some(captured) => if !revision_is_vector(captured.record.revision) || captured.record.stream != string.as_bytes("stream00") {
+        Some(captured) => if !revision_is_vector(captured.record.revision) || captured.record.stream.caller.subject != string.as_bytes("stream00") {
             return false
         },
         None => return false

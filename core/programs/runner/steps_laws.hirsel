@@ -207,7 +207,7 @@ pub fn journal_law_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     match got { Ok(1u64) => no_repeat && repeated && triggers.number(second) == 2u64, _ => false }
 }
 
-fn law_history_call(mut db: store.Db, stream: Bytes, position: u64) -> u64 waits {
+fn law_history_call(mut db: store.Db, stream: store.StreamKey, position: u64) -> u64 waits {
     let entry = string.as_bytes("history-control")
     let request: Bytes = list.new()
     let admitted = result.unwrap(store.admit(mut db, stream, position, store.request_digest(entry, request)))
@@ -230,7 +230,7 @@ pub fn journal_law_steps_own_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let id = law_enroll(mut law, 1u64)
     let first = law_attempt(mut law, id, string.as_bytes("r1"))
     let effect = law_transaction(mut law, first, 0u64, code.describe(law_bump), 7u64)
-    let stream = string.as_bytes("recorded-history")
+    let stream = store.StreamKey(caller: store.Caller(issuer: 2u8, subject: clone(b"recorded-history")), id: store.StreamId(t: store.keyed_time(law.db), n: 0u64))
     let before = law_history_call(mut law.db, stream, 0u64)
     let _ = law_history_call(mut law.db, stream, 1u64)
     let before_cut = result.unwrap(store.recorded(law.db, store.main_branch(law.db), before))

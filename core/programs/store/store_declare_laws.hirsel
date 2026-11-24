@@ -431,9 +431,9 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     if version(unchanged) != before || get(result.unwrap(reader(db, 0)), unchanged, items, 1)? != None {
         return Error(MigrationFault)
     }
-    let stream = key_word(23)
+    let stream = law_stream_bytes(key_word(23), keyed_time(db))
     let request = request_digest(stream, stream)
-    let admitted = admit(mut db, stream, 0, request)?
+    let admitted = admit_law_stream(mut db, stream, 0, request)?
     let Admitted(take complete) = take admitted else { return Error(MigrationFault) }
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let served = serve(mut db, take complete, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
@@ -445,7 +445,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
         _ => return Error(MigrationFault),
     }
     if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None { return Error(MigrationFault) }
-    let next_admission = admit(mut db, stream, 1, request)?
+    let next_admission = admit_law_stream(mut db, stream, 1, request)?
     let Admitted(take next_completion) = take next_admission else { return Error(MigrationFault) }
     let staged_base = version(snapshot(db))
     let next_result = serve(mut db, take next_completion, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {

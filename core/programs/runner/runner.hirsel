@@ -2432,29 +2432,6 @@ fn next_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
     Ok(false)
 }
 
-// H2 on the store's admit (STORE-SPEC v2.24). Below latest the store cannot say whether p
-// ran these bytes (AH2), and at latest another digest is not this request (AH1): both are
-// answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
-// neither marks the stream.
-fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
-    let a = match store.admit(mut hd.db, q.stream, q.p, q.digest) {
-        Ok(take x) => take x,
-        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
-        Error(e) => return Error(e),
-    }
-    match take a {
-        Admitted(take complete) => execute(mut hd, take q, take complete),
-        Abandoned(take complete) => execute(mut hd, take q, take complete),
-        Duplicate(stored) => duplicate_reply(mut hd, take q, stored),
-        Rejected(_) => {
-            list.push(mut hd.waiting, Waiting(req: take q, parked: true, held_by_pause: false))
-            Ok(())
-        },
-        HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),
-        RequestMismatch => commitless(mut hd, take q, Refused(RequestMismatch)),
-    }
-}
-
 fn copy_bytes(b: Bytes) -> Result[Bytes, store.Error] {
     let mut out: Bytes = list.new()
     list.append(mut out, b)
@@ -2474,7 +2451,8 @@ fn record_request(q: Request, revision: Option[Bytes], n: u64, s: u64, replay_id
         Ok(take bytes_in) => take bytes_in,
         Error(problem) => return Error(Full(Allocation(problem))),
     }
-    Ok(store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev, code: take code))
+    let stream = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    Ok(store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: take stream, revision: take rev, code: take code))
 }
 
 fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes] {
@@ -2618,6 +2596,11 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
                     }
                 }
                 publish_release(mut hd, Release(version: d, snapshot: Some(take at), answers: take answers))
+                match sweep_head_streams(mut hd.db, hd.busy, hd.waiting) {
+                    Ok(()) => (),
+                    Error(Full(_)) => (),
+                    Error(take problem) => return Error(take problem),
+                }
                 refresh_waiting(mut hd, true)
             },
         }

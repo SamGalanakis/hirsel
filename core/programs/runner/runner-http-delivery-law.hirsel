@@ -374,7 +374,9 @@ fn l15_response(mut client: std.http_client.Connection, number: u64, replayed: b
 }
 
 fn l15_disk(directory: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, reopening: bool) waits {
-    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    // Keep the replay fixture's fixed IDs across separate process phases.
+    options.stream_retention_ms = 18446744073709551615u64
     let db = result.unwrap(store.open(tasks, directory, clock, random, options))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let publisher_in = result.unwrap(mailbox(16u64))

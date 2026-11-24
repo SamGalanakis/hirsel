@@ -816,7 +816,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
     let data = result.unwrap(open_data(db))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
-    let stream = runner.wire_client.stream(result.unwrap(runner.ingress.caller((), named)), 0u32)
+    let stream = store.StreamKey(caller: result.unwrap(runner.ingress.caller((), named)), id: store.StreamId(t: store.keyed_time(db), n: 0u64))
     want(match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), data.t, 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
     let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
     match result.unwrap(store.admit(mut db, stream, 0u64, digest)) {

@@ -1,11 +1,15 @@
 // A Head's calls into the store (STORE-SPEC §13.3a): a call is served, settled
 // into its answer, or parked, and a parked call is resumed when its pages land.
-
-type ParkedCall { req: Request, served: store.Parked }
+type ParkedCall {
+    req: Request,
+    served: store.Parked
+}
 
 fn parked_stream[G: send, H: shareable + inert + send](hd: Head[G, H], stream: Bytes) -> bool {
     for entry in hd.parked {
-        if entry.req.stream == stream { return true }
+        if entry.req.stream == stream {
+            return true
+        }
     }
     false
 }
@@ -13,7 +17,9 @@ fn parked_stream[G: send, H: shareable + inert + send](hd: Head[G, H], stream: B
 // STORE-SPEC §13.3a: poll the store's parked calls and resume each ready one in the order
 // returned. A parked request past its deadline is cancelled and answered Refused(Deadline).
 fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
-    if list.len(hd.parked) == 0u64 { return Ok(false) }
+    if list.len(hd.parked) == 0u64 {
+        return Ok(false)
+    }
     if let Some(control) = drain {
         let now = host.mono_ns(control.clock)
         let mut i = 0u64
@@ -32,9 +38,13 @@ fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
     for id in ready {
         let mut place: Option[u64] = None
         for i in 0u64 .. list.len(hd.parked) {
-            if store.park_id(hd.parked[i].served) == id { place = Some(i) }
+            if store.park_id(hd.parked[i].served) == id {
+                place = Some(i)
+            }
         }
-        let Some(i) = place else { continue }
+        let Some(i) = place else {
+            continue
+        }
         let ParkedCall(req: take q, served: take parked_call) = list.remove(mut hd.parked, i)
         let ran = match map.get(hd.r.slots, q.key) {
             Some(Transact(_, _, _, _, go)) => (go.resume)(mut hd.db, take parked_call, hd.h, q.caller, q.arg),
@@ -79,5 +89,57 @@ fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Re
     match std.codec.decode(co, receipt.reply) {
         Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
         _ => fail("runner: stored reply did not decode"),
+    }
+}
+
+fn held_stream(busy: Map[Bytes, Worker], waiting: List[Waiting], pending: store.StreamKey) -> bool {
+    for (raw, _) in busy {
+        if store.stream_record_matches(raw, pending) {
+            return true
+        }
+    }
+    for pending_call in waiting {
+        if pending_call.req.caller == pending.caller && pending_call.req.stream_id == pending.id {
+            return true
+        }
+    }
+    false
+}
+
+fn admit_head_stream(mut db: store.Db, busy: Map[Bytes, Worker], waiting: List[Waiting], name: store.StreamKey, p: u64, digest: store.RequestDigest) -> Result[store.Admission, store.Error] waits {
+    store.admit_while(mut db, name, p, digest, fn(candidate: store.StreamKey) -> bool {
+        held_stream(busy, waiting, candidate)
+    })
+}
+
+fn sweep_head_streams(mut db: store.Db, busy: Map[Bytes, Worker], waiting: List[Waiting]) -> Result[(), store.Error] waits {
+    store.sweep_streams(mut db, fn(candidate: store.StreamKey) -> bool {
+        held_stream(busy, waiting, candidate)
+    })
+}
+
+// H2 on the store's admit (STORE-SPEC v2.24). Below latest the store cannot say whether p
+// ran these bytes (AH2), and at latest another digest is not this request (AH1): both are
+// answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
+// neither marks the stream.
+fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
+    let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    let a = match admit_head_stream(mut hd.db, hd.busy, hd.waiting, name, q.p, q.digest) {
+        Ok(take x) => take x,
+        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
+        Error(e) => return Error(e),
+    }
+    match take a {
+        Admitted(take complete) => execute(mut hd, take q, take complete),
+        Abandoned(take complete) => execute(mut hd, take q, take complete),
+        Duplicate(stored) => duplicate_reply(mut hd, take q, stored),
+        Rejected(_) => {
+            list.push(mut hd.waiting, Waiting(req: take q, parked: true, held_by_pause: false))
+            Ok(())
+        },
+        HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),
+        RequestMismatch => commitless(mut hd, take q, Refused(RequestMismatch)),
+        StreamFuture(at) => commitless(mut hd, take q, Refused(Malformed(Bad(kind: 7u32, at: at)))),
+        StreamOverloaded => commitless(mut hd, take q, Refused(Overloaded)),
     }
 }

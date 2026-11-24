@@ -1382,7 +1382,7 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
 
 fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
     match got {
-        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && c.record.stream == wire_client.stream(result.unwrap(ingress.caller((), token)), 0u32) && if entry == 0u64 {
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)), 0u32) && if entry == 0u64 {
             revision_is(c.record.revision, code.describe(write))
         } else if entry == 1u64 {
             revision_is(c.record.revision, code.describe(refuse))
@@ -1403,29 +1403,29 @@ fn disk_options() -> store.Options {
     o
 }
 
-fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
+fn drained(take fresh: store.Db, tasks: Tasks, birth: u64) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8u64)
-    let first = drain_send(to, "held", 0u64, 40u64)
-    let fifo = drain_send(to, "held", 1u64, 41u64)
+    let first = drain_send(to, "held", birth, 0u64, 40u64)
+    let fifo = drain_send(to, "held", birth, 1u64, 41u64)
     result.unwrap(channel.send(to, HeadClose))
-    let join = drain_send(to, "held", 0u64, 40u64)
-    let fresh_request = drain_send(to, "new", 0u64, 42u64)
+    let join = drain_send(to, "held", birth, 0u64, 40u64)
+    let fresh_request = drain_send(to, "new", birth, 0u64, 42u64)
     let _ = take to
     let mail = result.unwrap(runner.mailbox(4u64))
     result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take from, take mail, tasks, 1048576u64))
-    let admitted = drain_answer(first, "held", 0u64)
-    let joined = drain_answer(join, "held", 0u64)
-    match (admitted, joined, drain_answer(fifo, "held", 1u64), drain_answer(fresh_request, "new", 0u64)) {
+    let admitted = drain_answer(first, "held", birth, 0u64)
+    let joined = drain_answer(join, "held", birth, 0u64)
+    match (admitted, joined, drain_answer(fifo, "held", birth, 1u64), drain_answer(fresh_request, "new", birth, 0u64)) {
         (Returned(original), Returned(same), Refused(Overloaded), Refused(Overloaded)) => original == same,
         _ => false,
     }
 }
 
 pub fn law_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    drained(store.memory(c, r, disk_options()), tasks)
+    drained(store.memory(c, r, disk_options()), tasks, host.wall_ms(c))
 }
 
 @test
@@ -1437,7 +1437,8 @@ fn test_drain_answers_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks) { return Error(()) }
+    let birth = host.wall_ms(c)
+    if !drained(result.unwrap(store.open(tasks, dir, c, r, disk_options())), tasks, birth) { return Error(()) }
     let mut options = disk_options()
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
@@ -1447,8 +1448,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
     let key = k_write()
-    let held = drain_stream("held")
-    let fresh_stream = drain_stream("new")
+    let (take held, take fresh_stream) = (drain_stream("held", birth), drain_stream("new", birth))
     if let Duplicate(_) = result.unwrap(store.admit(mut db, held, 0u64, store.request_digest(key, u64_arg(40u64)))) {} else { fail("drain: admitted reply did not survive reopen") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, held, 1u64, store.request_digest(key, u64_arg(41u64)))) {} else { fail("drain: refused FIFO position left a row") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, fresh_stream, 0u64, store.request_digest(key, u64_arg(42u64)))) {} else { fail("drain: refused fresh position left a row") }

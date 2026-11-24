@@ -759,7 +759,7 @@ fn call_for(stream: Bytes, revision: u64) -> CallRecord {
     list.fill(mut args, 16, 2u8)
     let mut r: Bytes = list.new()
     list.fill(mut r, revision, 3u8)
-    CallRecord(key: take key, args: take args, stream: result.unwrap(copied(stream)), revision: Some(take r), code: code_vector())
+    CallRecord(key: take key, args: take args, stream: option.unwrap(parse_stream_key(stream)), revision: Some(take r), code: code_vector())
 }
 
 // The digest of a request with call_for's entry key and these args.

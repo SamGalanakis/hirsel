@@ -263,10 +263,10 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let dir = disk_test_directory(d)
     let options = journal_crash_options()
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
-    let stream = key_word(55)
+    let stream = law_stream_bytes(key_word(55), keyed_time(db))
     let rec = call_for(stream, 32)
     let request = request_digest(rec.key, rec.args)
-    let admission = result.unwrap(admit(mut db, stream, 0, request))
+    let admission = result.unwrap(admit_law_stream(mut db, stream, 0, request))
     let Admitted(take complete) = take admission else { return false }
     result.unwrap(durable(mut db, ticket(complete)))
     let original_at = 0x8000_0000_0000_0000u64
@@ -306,7 +306,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     if found.settle != way || found.base != 1 || found.at != original_at || found.seed != ctx.seed || reopened.heads[0].at != original_at + 1u64 {
         return false
     }
-    let duplicate = result.unwrap(admit(mut reopened, stream, 0, request))
+    let duplicate = result.unwrap(admit_law_stream(mut reopened, stream, 0, request))
     let good = match duplicate {
         Duplicate(stored) => stored.reply == key_word(2),
         _ => false,

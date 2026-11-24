@@ -1946,8 +1946,10 @@ pub type CallInfo { id: CallId, at: u64, seed: u64 }
 pub opaque type RequestDigest: shareable + send   // 32 bytes; made only by request_digest or read from a streams value; compared with == (AH1)
 pub fn request_digest(key: Bytes, args: Bytes) -> RequestDigest   // SHA-256 (std, std-sha256-1071) of u8 17 ‖ "hirsel.request.v1" ‖ u32 len ‖ key ‖ u32 len ‖ args
 pub type Admission = Admitted(Completion) | Duplicate(Stored) | Rejected(u64) | Abandoned(Completion)   // store rule (D6): re-admission under a new open; v2.28 AL1, AL2
-                   | RequestMismatch | HistoryUnavailable   // AH1, AH2: RUNNER-SPEC v2.11.3 Refusal tags 6 and 7, mapped 1:1
-pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admission, Error] waits
+                   | RequestMismatch | HistoryUnavailable | StreamFuture(u64) | StreamOverloaded
+pub type StreamId: codec + key + shareable + send { t: u64, n: u64 }
+pub type StreamKey: codec + key + shareable + send { caller: Caller, id: StreamId }
+pub fn admit(mut db: Db, stream: StreamKey, p: u64, d: RequestDigest) -> Result[Admission, Error] waits
 pub type Stored { reply: Bytes }   // v2.30 AN2: the saved reply, unchanged
 pub fn ticket(c: Completion) -> Ticket   // v2.28 AL1: the admit's ticket, which the rows below call `t`
 // v2.27's `reply` is deleted (v2.28 AL1): `serve` writes the reply
@@ -1955,7 +1957,11 @@ pub fn ticket(c: Completion) -> Ticket   // v2.28 AL1: the admit's ticket, which
 
 **v2.28 AL1:** in the table below, `Admitted(t)` and `Abandoned(t)` carry the position's `Completion`, and `t` is its `ticket`.
 
-Stream state lives in the `streams` tree: key = the stream name, value = (position, digest, Admitted | Replied(reply)) (AH1, v2.30 AN2).
+A stream row's key is `issuer u8 ‖ subject length u8 ‖ subject ‖ t u64 BE ‖ n u64 BE`. The subject is at most 64 bytes. The metadata for its Caller uses the same prefix with no stamp. The stream row holds (position, digest, Admitted | Replied(reply)). The caller row holds a little-endian u64 row count and an optional floor encoded as a tag byte and, when present, the two big-endian words.
+
+One admission samples keyed time, `at = max(wall_ms, main.at)`. A stamp more than 300,000 ms ahead yields `StreamFuture(at)`. A stamp at or below the durable expiry floor yields `HistoryUnavailable`. A stream also ages when `at ≥ retention_ms` and `t ≤ at − retention_ms`. Before answering an age refusal, record that cutoff in a durable commit. A longer retention on reopen cannot revive the refused identity.
+
+For a missing row at p = 0, apply the Caller's floor before considering admission. Reclaim up to two expired idle rows and, at the Caller's quota, replace only the oldest row. An older candidate is refused with `HistoryUnavailable`. A busy victim or a new row that would exceed the Place cap gives `StreamOverloaded`. A worker, a queued request, or a retained completion keeps a row busy. The admitting commit writes the floors and counts along with any deletions and the new row. The Place sweep examines up to eight entries per run and raises the durable expiry floor when it deletes a stream or a retired Caller floor.
 
 **The request digest (AH1).** `request_digest(key, args)` is SHA-256, std's (std-sha256-1071), over `u8 17 ‖ "hirsel.request.v1" ‖ u32 len(key) ‖ key ‖ u32 len(args) ‖ args` (integers little-endian, §2). The 17 ASCII bytes name the encoding and its version 1. `key` is the immutable entry Key, 32 bytes (16 identity ‖ 8 args_fp ‖ 8 result_fp; for a gone entry, the key the slot requested). `args` are the exact argument bytes.
 - Not inputs: the connection's slot, the deadline and the server's executable revision. A reconnect remaps slots, a retry changes its deadline, and deployed code may change, so an unchanged retry has an unchanged digest.
@@ -1973,11 +1979,11 @@ Stream state lives in the `streams` tree: key = the stream name, value = (positi
 | `p` is the latest, with digest `d`, and has a reply | `Duplicate(Stored{reply})` (v2.30 AN2) |
 | `p` is the latest, with digest `d`, admitted by an earlier open and never replied | re-commits (`p`, `d`, Admitted) under this open, keeping the digest, and returns `Abandoned(t)` with its ticket (an earlier open's ticket is `Foreign`, L20). The caller runs `p` again (`t` need be durable first only before an effect outside the store); nothing committed at `p`, because a reply shares its commit with the effect. |
 | `p` is the latest, with digest `d`, admitted in this open and never replied (its run aborted without a `reply` call, failed or was refused) | `Abandoned(t)` with the existing ticket; nothing is committed |
-| the stream is new and `p` ≠ 0 | `Rejected(0)`; nothing is committed (AE1) |
+| the stream has no row and `p` ≠ 0 | `HistoryUnavailable`; nothing is committed |
 | `p` < the latest | `HistoryUnavailable`; nothing is committed (AH2). The store keeps one state per stream, so it holds no digest for `p` and cannot say whether `p` ran these bytes. |
 | `p` > the latest + 1 | `Rejected(latest)` |
 
-**An admit past `resident_limit` (AE3).** The two rows that commit, `Admitted(p)` and the `Abandoned` re-commit for an earlier open, are admitted against the account as every commit is (§1.11): `admit` first settles unsettled charges, exactly as `run` does (AF1). If the account after it would still pass `resident_limit`, the result is `Error(Full(c))`, with `c` = `Capacity{requested: the account after it, available: resident_limit}`, and nothing is committed: the stream keeps its state. `Duplicate`, `Rejected`, `RequestMismatch`, `HistoryUnavailable` and the same-open `Abandoned` commit nothing, so they answer whatever the account holds. The digest is compared before the settle and the limit check; a `Full` binds nothing.
+**An admit past `resident_limit` (AE3).** The two rows that commit, `Admitted(p)` and the `Abandoned` re-commit for an earlier open, are admitted against the account as every commit is (§1.11): `admit` first settles unsettled charges, exactly as `run` does (AF1). If the account after it would still pass `resident_limit`, the result is `Error(Full(c))`, with `c` = `Capacity{requested: the account after it, available: resident_limit}`, and nothing is committed: the stream keeps its state. `Duplicate`, `Rejected`, `RequestMismatch`, and the same-open `Abandoned` commit nothing. A new age cutoff may need its own commit. The digest is compared before the settle and the limit check; a `Full` binds nothing.
 
 **Client positions (AG1, AH1, AH2).** `admit` takes the request's digest. At the latest position the store tells two requests apart and refuses the second (`RequestMismatch`). Below latest it keeps no digest, so it answers `HistoryUnavailable`. Only `Admitted` binds a digest to a position.
 
@@ -2003,7 +2009,7 @@ Stream state lives in the `streams` tree: key = the stream name, value = (positi
 - **A reply with no effect** (a gone entry, RUNNER §6; a `Failed` call) is a `conclude` (v2.28 AL1: of a `Pending` from `serve`'s `Failed`, or from `untried` for a gone key): `Committed`, with a frame that has only a streams section (F4). A re-send of `p` gets it back as `Duplicate`.
 - **Below latest** the store answers `HistoryUnavailable` (AH2), so it gives no basis for the runner's `Superseded`; v2.24 withdraws F4's proof.
 
-**Retention** is one state per stream (M4-PLAN §2.4).
+**Retention.** The defaults are 60 days, 256 streams per Caller, and one Place stream per 4 KiB of the sized resident allowance. A bound stream that was deleted cannot admit a new position 0. Expiry raises the Place floor. Eviction raises the Caller floor. When a sweep deletes the Caller floor, the same commit incorporates its time into the Place floor.
 
 ### 1.9 Pins and forks (rows 8 and 9)
 
@@ -2284,6 +2290,8 @@ objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), pack
 **Identity.** 16 bytes from `host.random(r, mut b)`, drawn once at genesis and never again (D7). §1.7's uniqueness claim rests on it. The field holds those bytes in draw order. `StoreId.hi` is bytes [0, 8) as u64 LE, and `lo` is bytes [8, 16) as u64 LE (V3).
 
 ### 2.4 Journal segment `j-<seq>` and its end file
+
+**Format 6.** The header word is 6. Sections 0 and 1 use the format-5 data and stream operation grammars. Section 2 is a control section with one put and an empty key. The value is `streams_max u64 LE ‖ streams_count u64 LE ‖ expiry_floor Option[u64 LE]`. The option starts with one tag byte. Section 1 carries the typed stream keys and Caller metadata from §1.8. Checkpoints carry the control value at the reserved empty key alongside the stream rows. Readers accept format 6.
 
 **COMMIT (kind 0x0011, MUST)**, payload:
 

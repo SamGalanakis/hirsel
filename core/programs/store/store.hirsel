@@ -6,7 +6,7 @@ pub type StoreId: codec + key {
 
 pub type StorageKind: send = Directory() | Bucket(std.object.Bucket)
 
-pub type Caller: codec + key + send {
+pub type Caller: codec + key + shareable + send {
     issuer: u8,
     subject: Bytes
 }
@@ -80,7 +80,11 @@ pub opaque type Db {
     ceiling: u64,
     checkpointed: u64,
     // Stream name to the unreplied Admitted(p) this open committed (§1.8).
-    admits: Map[Bytes, OpenAdmit]
+    admits: Map[Bytes, OpenAdmit],
+    stream_retention_ms: u64,
+    streams_per_caller_max: u64,
+    streams_max: u64,
+    stream_sweep_after: Option[StreamSweepCursor],
 }
 
 pub type Branch {
@@ -597,7 +601,8 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new(),
+        stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None)
 }
 
 pub type Accounts {
@@ -988,6 +993,8 @@ pub fn next_call_info(db: Db) -> CallInfo {
     call_info(db.store, 0, db.heads[0].head + 1, host.wall_ms(db.clock), db.heads[0].at)
 }
 
+pub fn stream_retention_ms(db: Db) -> u64 { db.stream_retention_ms }
+
 pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempted: CallInfo) -> Pending {
     Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
 }
@@ -1194,7 +1201,12 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
 
 // The store's own bodies, which read no Tiered row, run here unbounded.
 fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    let outcome = append_transaction(mut db, i, steps, keep_reply, body)
+    let wall = host.wall_ms(db.clock)
+    store_body_at(mut db, i, wall, steps, keep_reply, body)
+}
+
+fn store_body_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    let outcome = append_transaction_at(mut db, i, wall, steps, keep_reply, body)
     if let Ok(Refused(Journal(_))) = outcome {
         return take outcome
     }
@@ -1202,8 +1214,7 @@ fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Optio
     take outcome
 }
 
-fn append_transaction[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    let wall = host.wall_ms(db.clock)
+fn append_transaction_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, body)? {
         Over(take o) => Ok(take o),
         Ran(take ran) => settle_admit(mut db, i, take ran),
@@ -1667,282 +1678,6 @@ pub type Stored {
     reply: Bytes
 }
 
-fn stream_bytes(p: u64, request: RequestDigest, replied: bool, answer: Bytes) -> Result[Bytes, Error] {
-    let size = if replied {
-        list.len(answer)
-    } else {
-        0u64
-    }
-    let mut value: Bytes = list.with_capacity(41 + size)
-    capacity(le(mut value, p, 8))?
-    for byte in request.b {
-        list.push(mut value, byte)
-    }
-    if replied {
-        capacity(le(mut value, 2, 1))?
-        list.append(mut value, answer)
-    } else {
-        capacity(le(mut value, 1, 1))?
-    }
-    Ok(take value)
-}
-
-fn word_be(raw: Bytes, offset: u64) -> u64 {
-    let mut value = 0u64
-    for i in 0u64 .. 8 {
-        value = (value << 8) | int.widen(raw[offset + i])
-    }
-    value
-}
-
-fn stored_reply(raw: Bytes) -> Result[Stored, Error] {
-    Ok(Stored(reply: copied(list.slice(raw, 41, list.len(raw)))?))
-}
-
-type StreamState {
-    p: u64,
-    digest: RequestDigest,
-    state: u8
-}
-
-fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
-    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
-        return Error(malformed(0))
-    }
-    let mut b: Inline[u8, 32] =[0u8; 32]
-    for i in 0u64 .. 32 {
-        b[i] = raw[8 + i]
-    }
-    Ok(StreamState(p: read_le(raw, 0, 8), digest: RequestDigest(b: b), state: raw[40]))
-}
-
-// One write to the streams tree, charged and sized like a data write.
-fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) -> Result[(), Error] {
-    if list.len(key) > 4096 {
-        return Error(Limit(Key))
-    }
-    if list.len(value) > 1048576 {
-        return Error(Limit(Value))
-    }
-    let mut extra = 0u64
-    if let Some(frame_bytes) = tx.frame_bytes {
-        let head = if tx.streams == 0 {
-            5u64
-        } else {
-            0u64
-        }
-        let data_head = if tx.rows + tx.cell_rows + tx.trim_rows == 0 {
-            5u64
-        } else {
-            0u64
-        }
-        extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 9 + list.len(key) + list.len(value) + call_size)
-        if int.saturating_add(frame_bytes, extra) - data_head - 16 > 16777280 {
-            return Error(Limit(Transaction))
-        }
-    }
-    let charge = entry(key, value)
-    // As in apply_put: both retention modes take the same steps.
-    let previous = match transaction_stream(tx, key) {
-        Some(old) => entry(key, old),
-        None => 0
-    }
-    let old_charge = if tx.retain_old {
-        0u64
-    } else {
-        previous
-    }
-    let height = tree_height(tx.roots.streams)
-    let _ = reserve_ids(mut tx, height)?
-    let raw = stage_value(take value, tx.roots.streams.inline)
-    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, Some(take raw))
-    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
-    tx.extra_bytes = extra
-    tx.wrote = true
-    Ok(())
-}
-
-fn reply_row(tx: Tx, stream: Bytes, p: u64, output: Bytes) -> Result[(Bytes, Bytes), Error] {
-    // The reply keeps the digest bound at p (AH1).
-    let held = match transaction_stream(tx, stream) {
-        Some(raw) => {
-            let at = stream_state(raw)?
-            if at.p == p && at.state == 1 {
-                Some(at.digest)
-            } else {
-                None
-            }
-        },
-        None => None
-    }
-    let d = match held {
-        Some(d) => d,
-        None => return Error(Missing("reply"))
-    }
-    let value = stream_bytes(p, d, true, output)?
-    Ok((copied(stream)?, take value))
-}
-
-fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
-    let (take key, take value) = reply_row(tx, stream, p, r)?
-    stream_write(mut tx, take key, take value, 0)
-}
-
-pub opaque type Completion {
-    admitted: Ticket,
-    stream: Bytes,
-    p: u64,
-    request: RequestDigest
-}
-
-pub fn ticket(c: Completion) -> Ticket {
-    c.admitted
-}
-
-pub type Admission = Admitted(Completion) | Duplicate(Stored) | Rejected(u64) | Abandoned(Completion) | RequestMismatch | HistoryUnavailable
-
-// An Admitted(p) this open committed on main: a later admit of p while it is
-// still unreplied answers Abandoned with this commit_ticket and commits nothing.
-// `ticket` is None while the entry is only reserved (admit_commit), and a None
-// entry answers nothing.
-type OpenAdmit: shareable + send {
-    p: u64,
-    ticket: Option[Ticket]
-}
-
-pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admission, Error] waits {
-    journal_poll(mut db)?
-    healthy(db)?
-    let state = match get_page_row(db.heads[0].roots.streams, stream) {
-        Some(raw) => Some(stream_state(raw)?),
-        None => None
-    }
-    let at = match take state {
-        Some(x) => x,
-        // AE1: a new stream admits position 0 only.
-        None => return if p == 0 {
-            admit_commit(mut db, stream, 0, d, false)
-        } else {
-            Ok(Rejected(0))
-        }
-    }
-    let latest = at.p
-    if p < latest {
-        // AH2: one state per stream keeps no digest below latest.
-        return Ok(HistoryUnavailable)
-    }
-    if p > latest {
-        // S7: latest + 1 only after latest has its reply.
-        return if p == latest + 1 && at.state == 2 {
-            admit_commit(mut db, stream, p, d, false)
-        } else {
-            Ok(Rejected(latest))
-        }
-    }
-    // AH1: at latest the digest is compared before any other answer.
-    if at.digest != d {
-        return Ok(RequestMismatch)
-    }
-    if at.state == 2 {
-        let r = match get_page_row(db.heads[0].roots.streams, stream) {
-            Some(raw) => stored_reply(raw)?,
-            None => return Error(malformed(0))
-        }
-        return Ok(Duplicate(take r))
-    }
-    let mine = match map.get(db.admits, stream) {
-        Some(a) => if a.p == p {
-            a.ticket
-        } else {
-            None
-        },
-        None => None
-    }
-    if let Some(t) = mine {
-        return Ok(Abandoned(Completion(admitted: t, stream: copied(stream)?, p: p, request: d)))
-    }
-    // An earlier open's admit: re-commit, keeping the digest bound at p.
-    admit_commit(mut db, stream, p, at.digest, true)
-}
-
-fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: bool) -> Result[Admission, Error] waits {
-    let held_stream = copied(stream)?
-    let key = copied(stream)?
-    // §1.8: a later admit of p in this open commits nothing, so the entry that
-    // remembers this one is reserved before the commit. Without room the admit
-    // is Full and commits nothing; the map is kept as it was.
-    if !map.contains(db.admits, key) {
-        capacity(map.try_reserve(mut db.admits, 1))?
-    }
-    journal_poll(mut db)?
-    healthy(db)?
-    let i = branch_index(db, main_branch(db))?
-    let keep: Option[fn(Error) -> bool] = None
-    let outcome = store_body_on(mut db, i, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        let value = stream_bytes(p, d, false, list.new())?
-        stream_write(mut tx, copied(stream)?, take value, 0)
-    })?
-    let admitted = match take outcome {
-        Committed(done) => done.ticket,
-        // Ruling 3: an admit over resident_limit is Full.
-        Refused(c) => return Error(Full(c)),
-        Aborted(Undone(value: take e, ticket: _)) => return Error(take e),
-        // The body is the store's own, runs unbounded and does not fault.
-        Failed(_) => return Error(Missing("admit")),
-        Stopped(_) => return Error(Missing("admit"))
-    }
-    map.insert(mut db.admits, take key, OpenAdmit(p: p, ticket: Some(admitted)))
-    let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d)
-    Ok(if abandoned {
-        Abandoned(take completion)
-    } else {
-        Admitted(take completion)
-    })
-}
-
-fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error] {
-    match limit {
-        Unbounded => prefix(if high {
-            id + 1
-        } else {
-            id
-        }),
-        Included(k) => {
-            let mut p = logical_key(id, k)?
-            if high {
-                list.push(mut p, 0u8)
-            }
-            Ok(take p)
-        },
-        Excluded(k) => {
-            let mut p = logical_key(id, k)?
-            if !high {
-                list.push(mut p, 0u8)
-            }
-            Ok(take p)
-        }
-    }
-}
-
-fn byte_cursor(data: PageTree, take low: Bound[Bytes], high: Bytes) -> Result[PageRange, Error] {
-    let empty: Bytes = list.new()
-    let (take start, inclusive) = match take low {
-        Unbounded => (take empty, true),
-        Included(take key) => (take key, true),
-        Excluded(take key) => (take key, false),
-    }
-    open_page_range(data, Some(take start), inclusive, false, Some(copied(high)?))
-}
-
-fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[PageRange, Error] {
-    open_page_range(data, Some(copied(high)?), false, true, Some(copied(low)?))
-}
-
-fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    next_page_range(mut rows)
-}
-
-// Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
 fn key_word(n: u64) -> Bytes {
     let mut b: Bytes = list.with_capacity(8)
     for i in 0u64 .. 8 {
@@ -2203,7 +1938,7 @@ fn encode_log_trim(mut payload: Bytes, key: Bytes, floor: u64, dropped: u64) {
 
 fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
     if let (Some(raw), Some(record)) = (view operation.value, view call) {
-        if operation.key == record.stream {
+        if stream_record_matches(operation.key, record.stream) {
             le(mut payload, 3, 1)?
             blob(mut payload, operation.key)?
             blob(mut payload, staged_bytes(raw))?
@@ -2213,12 +1948,20 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
     encode_data_op(mut payload, operation.key, operation.value, None)
 }
 
-fn encode_stream_ops(mut payload: Bytes, ops: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
+fn stream_control_slot(ops: DataRows) -> Option[u64] {
+    for slot in 0u64 .. ops.count {
+        if list.len(data_row(ops, slot).key) == 0u64 { return Some(slot) }
+    }
+    None
+}
+
+fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
     le(mut payload, 1, 1)?
-    le(mut payload, ops.count, 4)?
+    le(mut payload, stream_count, 4)?
     let order = data_order(ops)?
     for slot_order in 0u64 .. ops.count {
-        encode_stream_op(mut payload, ordered_row(ops, order, slot_order), call, settlement)?
+        let operation = ordered_row(ops, order, slot_order)
+        if list.len(operation.key) != 0u64 { encode_stream_op(mut payload, operation, call, settlement)? }
     }
     Ok(())
 }
@@ -2265,16 +2008,18 @@ fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View
 
 fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let data = ops.count != 0 || streams.count == 0
-    let stream = streams.count != 0
+    let control = stream_control_slot(streams)
+    let control_count = if let Some(_) = control { 1u64 } else { 0u64 }
+    let stream_count = streams.count - control_count
     let sections = (if data {
         1u64
     } else {
         0u64
-    }) + (if stream {
+    }) + (if stream_count != 0u64 {
         1u64
     } else {
         0u64
-    })
+    }) + control_count
     let mut size = 21 + 5 * sections
     for slot in 0u64 .. ops.count {
         let operation = data_row(ops, slot)
@@ -2284,7 +2029,7 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
         let operation = data_row(streams, slot)
         size += data_op_size(operation, true)
         if let (Some(_), Some(record)) = (view operation.value, view call) {
-            if operation.key == record.stream {
+            if stream_record_matches(operation.key, record.stream) {
                 size += call_section_bytes(record, settlement)
             }
         }
@@ -2311,8 +2056,14 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[
     if data {
         encode_data_ops(mut out, base, tiered, ops, order)?
     }
-    if stream {
-        encode_stream_ops(mut out, streams, call, settlement)?
+    if stream_count != 0u64 {
+        encode_stream_ops(mut out, streams, stream_count, call, settlement)?
+    }
+    if let Some(slot) = control {
+        le(mut out, 2u64, 1u64)?
+        le(mut out, 1u64, 4u64)?
+        let operation = data_row(streams, slot)
+        encode_data_op(mut out, operation.key, operation.value, None)?
     }
     seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
     Ok(take out)
@@ -3423,7 +3174,7 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
 }
 
 // Format-3 disk framing. STORE-SPEC §11.
-const DISK_FORMAT: u64 = 5
+const DISK_FORMAT: u64 = 6
 
 type DiskContext {
     store: StoreId,
@@ -5364,7 +5115,7 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
 pub type CallRecord: codec + shareable + send {
     key: Bytes,
     args: Bytes,
-    stream: Bytes,
+    stream: StreamKey,
     // AD1: code.revision of the entry that ran, exactly 32 bytes; None only
     // when the program was assembled without revisions. Never 32 zero bytes.
     revision: Option[Bytes],
@@ -5430,7 +5181,7 @@ fn call_checked(c: CallRecord) -> Result[(), Error] {
 
 fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Result[(), Error] {
     if let Some(c) = rec {
-        if c.stream != complete.stream {
+        if !stream_record_matches(complete.stream, c.stream) {
             return Error(Foreign)
         }
         call_checked(c)?
@@ -5583,7 +5334,8 @@ fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Res
         2 => Some(decode_settlement(file, raw, mut at, way)?),
         _ => return Error(disk_fault(file, at - 1, Malformed)),
     }
-    let record = CallRecord(key: take key, args: take args, stream: take stream, revision: take revision, code: take code)
+    let Some(take name) = parse_stream_key(stream) else { return Error(disk_fault(file, at, Malformed)) }
+    let record = CallRecord(key: take key, args: take args, stream: take name, revision: take revision, code: take code)
     Ok(CallSection(record: take record, settlement: settlement))
 }
 
@@ -5593,21 +5345,41 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
     let head = disk_number(file, raw, mut at, 8)?
     let wall = disk_number(file, raw, mut at, 8)?
     let sections = disk_number(file, raw, mut at, 1)?
-    if sections == 0 || sections > 2 {
+    if sections == 0 || sections > 3 {
         return Error(disk_fault(file, at - 1, Malformed))
     }
     let mut data: List[JournalOp] = list.new()
     let mut streams: List[JournalOp] = list.new()
     let mut call: Option[CallSection] = None
-    for section in 0u64 .. sections {
+    let mut previous_tag: Option[u64] = None
+    for _ in 0u64 .. sections {
         let tag = disk_number(file, raw, mut at, 1)?
-        if tag > 1 || (sections == 2 && tag != section) {
+        if tag > 2u64 || (if let Some(prior_tag) = previous_tag { tag <= prior_tag } else { false }) {
             return Error(disk_fault(file, at - 1, Malformed))
         }
-        if tag == 0 {
-            data = journal_ops(file, raw, false, mut at, mut call)?
-        } else {
-            streams = journal_ops(file, raw, true, mut at, mut call)?
+        previous_tag = Some(tag)
+        match tag {
+            0 => { data = journal_ops(file, raw, false, mut at, mut call)? },
+            1 => {
+                streams = journal_ops(file, raw, true, mut at, mut call)?
+                for operation in streams {
+                    if list.len(operation.key) == 0u64 { return Error(disk_fault(file, at, Malformed)) }
+                }
+            },
+            _ => {
+                let mut no_call: Option[CallSection] = None
+                let mut control_rows = journal_ops(file, raw, true, mut at, mut no_call)?
+                if list.len(control_rows) != 1u64 || list.len(control_rows[0u64].key) != 0u64 {
+                    return Error(disk_fault(file, at, Malformed))
+                }
+                if let Some(_) = no_call { return Error(disk_fault(file, at, Malformed)) }
+                let row = option.unwrap(list.pop(mut control_rows))
+                {
+                    let Some(control) = view row.value else { return Error(disk_fault(file, at, Malformed)) }
+                    let _ = decode_stream_control(control) ?=> |_| disk_fault(file, at, Malformed)
+                }
+                list.insert(mut streams, 0u64, take row)
+            },
         }
     }
     if at != list.len(raw) {
@@ -5616,7 +5388,7 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
     if let Some(c) = call {
         let mut matching = 0u64
         for op in streams {
-            if op.key == c.record.stream {
+            if stream_record_matches(op.key, c.record.stream) {
                 matching += 1
             }
         }
@@ -5986,6 +5758,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     let key = key_word(23)
     let request = request_digest(key, key)
+    let stream_name = StreamKey(caller: Caller(issuer: 2u8, subject: take key), id: StreamId(t: keyed_time(db), n: 0u64))
     let no_record: Option[CallRecord] = None
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     for fault in[false, true] {
@@ -5994,7 +5767,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         } else {
             0u64
         }
-        let admission = result.unwrap(admit(mut db, key, p, request))
+        let admission = result.unwrap(admit(mut db, stream_name, p, request))
         let Admitted(take complete) = take admission else {
             return false
         }
@@ -6035,7 +5808,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             },
             _ => return false,
         }
-        let retry = result.unwrap(admit(mut db, key, p, request))
+        let retry = result.unwrap(admit(mut db, stream_name, p, request))
         let Abandoned(take completion) = take retry else {
             return false
         }
@@ -6057,7 +5830,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
     }
-    let admission = result.unwrap(admit(mut db, key, 2, request))
+    let admission = result.unwrap(admit(mut db, stream_name, 2, request))
     let Admitted(take complete) = take admission else {
         return false
     }
@@ -6103,8 +5876,9 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
             return false
         }
     }
-    let stream = key_word(47)
-    let request = request_digest(stream, stream)
+    let label = key_word(47)
+    let request = request_digest(label, label)
+    let stream = StreamKey(caller: Caller(issuer: 2u8, subject: take label), id: StreamId(t: keyed_time(db), n: 0u64))
     let admission = result.unwrap(admit(mut db, stream, 0, request))
     let Admitted(take complete) = take admission else {
         return false

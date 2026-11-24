@@ -9,6 +9,7 @@ std = { major = 1 }
 [sources]
 "store.hirsel" = "store"
 "store-stream-key.hirsel" = "store"
+"store-streams.hirsel" = "store"
 "store-attempts.hirsel" = "store"
 "store-commit.hirsel" = "store"
 "store-mux.hirsel" = "store"

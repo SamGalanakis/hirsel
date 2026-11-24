@@ -713,7 +713,7 @@ pub fn journal_law_payload() -> bool {
         None => return false
     }
     match got.call {
-        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != string.as_bytes("stream") || !revision_is_vector(c.record.revision) {
+        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream.caller.subject != string.as_bytes("stream") || !revision_is_vector(c.record.revision) {
             return false
         },
         None => return false

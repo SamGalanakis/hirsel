@@ -287,9 +287,9 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, watermark: u64, ci: Ca
 
 // The reply the frame wrote on the record's stream: position 8, digest 32,
 // state 2, then the reply (AH3).
-fn recorded_reply(commit: JournalCommit, stream: Bytes) -> Option[View[Bytes]] in commit {
+fn recorded_reply(commit: JournalCommit, stream: StreamKey) -> Option[View[Bytes]] in commit {
     for op in commit.streams {
-        if op.key == stream {
+        if stream_record_matches(op.key, stream) {
             if let Some(raw) = view op.value {
                 if list.len(raw) >= 41 && raw[40u64] == 2u8 {
                     return Some(view raw)

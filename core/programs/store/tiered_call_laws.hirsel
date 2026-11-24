@@ -149,7 +149,7 @@ fn test_l63_missed_attempt_fallback_commits_nothing(d: Dir, c: Clock, tasks: Tas
 // again, and the rerun commits once with the hit's write and reply. With no
 // pager the same miss is `Before(Io(Closed))`, so row 3 really is Cold.
 fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
-    let stream = key_word(23)
+    let stream = law_stream_bytes(key_word(23), keyed_time(db))
     let request = request_digest(stream, stream)
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let body = fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[Bytes, Bytes] {
@@ -164,7 +164,7 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
             },
         }
     }
-    let Admitted(take first) = admit(mut db, stream, 0, request)? else {
+    let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the serve call is admitted")
     }
     let requests = replace(mut db.pager, None)
@@ -174,7 +174,7 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
         fail("L63: a served miss with no pager is Before(Io(Closed))")
     }
     // A partition too small for one pin latches the pin limit: NoRoom(Cache).
-    let Abandoned(take starved) = admit(mut db, stream, 0, request)? else {
+    let Abandoned(take starved) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the unserved call is handed back as Abandoned")
     }
     let partition = replace(mut db.writer_pin_bytes, 1)
@@ -184,7 +184,7 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
         fail("L63: a served call over its pin partition is NoRoom(Cache)")
     }
     let before = version(snapshot(db))
-    let Abandoned(take again) = admit(mut db, stream, 0, request)? else {
+    let Abandoned(take again) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the refused call is handed back as Abandoned")
     }
     let parked = serve(mut db, take again, plan, None, copy_env(handles), body)
@@ -267,10 +267,10 @@ fn l63_parking_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Resu
 // carries the write's value and its own version, which is the write's + 1,
 // and it commits once.
 fn l63_moved_head(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
-    let stream = key_word(29)
+    let stream = law_stream_bytes(key_word(29), keyed_time(db))
     let request = request_digest(stream, stream)
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
-    let Admitted(take first) = admit(mut db, stream, 0, request)? else {
+    let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the parking call is admitted")
     }
     let parked = serve(mut db, take first, plan, None, copy_env(handles), l63_parking_body)
@@ -311,12 +311,12 @@ fn test_l63_parked_call_reruns_at_moved_head(d: Dir, c: Clock, tasks: Tasks) -> 
 // parks in its old place; then P and Q each rerun and commit once.
 fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
-    let p_stream = key_word(31)
-    let Admitted(take p_first) = admit(mut db, p_stream, 0, request_digest(p_stream, p_stream))? else {
+    let p_stream = law_stream_bytes(key_word(31), keyed_time(db))
+    let Admitted(take p_first) = admit_law_stream(mut db, p_stream, 0, request_digest(p_stream, p_stream))? else {
         fail("L63: P is admitted")
     }
-    let q_stream = key_word(37)
-    let Admitted(take q_first) = admit(mut db, q_stream, 0, request_digest(q_stream, q_stream))? else {
+    let q_stream = law_stream_bytes(key_word(37), keyed_time(db))
+    let Admitted(take q_first) = admit_law_stream(mut db, q_stream, 0, request_digest(q_stream, q_stream))? else {
         fail("L63: Q is admitted")
     }
     let Ok(Parked(take p)) = serve(mut db, take p_first, plan, None, copy_env(handles), l63_parking_body) else {

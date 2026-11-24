@@ -58,7 +58,8 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
     let Req(e: Requested(take q)) = head_request(take author, id, 0u64, take key, take arg_bytes, take reply_to) else {
         fail("replay expected a request")
     }
-    let admission = result.unwrap(store.admit(mut db, q.stream, q.p, q.digest))
+    let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    let admission = result.unwrap(store.admit(mut db, name, q.p, q.digest))
     let Admitted(take complete) = take admission else { fail("replay expected admission") }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
     let tried = result.unwrap(run_effect(mut db, identity, registered, h, q, take complete))

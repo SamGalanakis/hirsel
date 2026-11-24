@@ -1,16 +1,16 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=643f08b75774b170 sig=9162b112d6835045 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=a3baa7be2dbbfeea run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=404df53be304a90f run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_one_head src=f7acc5a529061ae0 sig=90dcb927efa9d90a run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=375ba1555a62d4cc sig=cd61c3932d2ae31c run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_route_during_unload src=16e06887135bce1a sig=9e9cd4f5d57675c5 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=ebeb721e05c115a1 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=e0fc820c1c4d5134 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=f7acc5a529061ae0 sig=d3cedbca149aa2bb run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=375ba1555a62d4cc sig=9496160cac89acac run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=16e06887135bce1a sig=28a4e315737fc337 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_platform_serve_budgets src=75b96fbd5600f3bd sig=498faefd96804d6b run=ad4c20fab40b1abf bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=c84873355210ce3b sig=9d7c65489d6c1abc run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=b93e7f9966f1aaa2 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cc082b9fc99b3ee1 sig=ce6a40321abe91a7 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cc082b9fc99b3ee1 sig=686079f04d358f4a run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_hand_install_adopts_at_12 src=eaaab1dc3308b19b sig=a3840b2e60404a92 run=dbf6722727633166 bug=- oracle=- rows=pending
-platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=6bcd3dd788ea5e3a run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=cb73beda01b1d714 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=8ddf134b88d7e695 sig=9350c2ae4c1a559a run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=524ae9e5bc007d28 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=3af4467f2f9d8665 sig=f536d2eda2f8d83c run=b1818af2b24835d3 bug=- oracle=- rows=pending

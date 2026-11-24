@@ -251,7 +251,7 @@ fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core
     Ok(first)
 }
 
-fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[List[u64], Error] {
+fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: List[u64], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[List[u64], Error] {
     let mut retired: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -260,7 +260,7 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_fr
         }
         let key = key_word(seq)
         // A Tiered pack stays in the inventory until a probe retires it.
-        if pack.class < 3 && pack.live == 0 {
+        if (pack.class < 3 && pack.live == 0) || (pack.class >= 3 && list.contains(retiring, seq)) {
             let listed = match std.page.lookup(root, key) {
                 Some(_) => true,
                 None => false
@@ -377,7 +377,7 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
 fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQueue, rows: Lineage, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
-    let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
+    let data_retired = edit_pack_list(mut pack_root, known, queue.retiring, private_from, mut next_stamp, issued)?
     change_list_root(mut known, installed.packs, pack_root, 0)?
     let mut deferred_root = arc.share(installed.deferred)
     let mut deferred_next = installed.deferred_next

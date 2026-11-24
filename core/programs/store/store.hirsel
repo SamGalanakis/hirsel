@@ -4289,7 +4289,8 @@ type PageDisk: send {
     owners: Map[IncomingEdge, u64],
     carried: List[u64],
     deferred: Option[u64],
-    forked: List[LineageFork]
+    forked: List[LineageFork],
+    compaction: TieredCompaction
 }
 
 type DiskStartup: send {
@@ -4390,7 +4391,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
             let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
             disk_publish_manifest(d, id, manifest)?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
-            let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new())
+            let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
             return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, pages: take pages))
         },
         Error(take problem) => return Error(take problem),
@@ -4422,7 +4423,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     disk_io(host.sync_dir(d))?
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
     let DiskLoaded(store: id, manifest: take manifest, lists: take lists, locations: take locations, ..) = take loaded
-    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked)
+    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, compaction: no_tiered_compaction())
     Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages))
 }
 
@@ -4745,40 +4746,6 @@ fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), E
     journal_poll(mut db)
 }
 
-fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
-    let mut locations = share_page_locations(layout.locations)
-    let mut packs: List[u64] = list.new()
-    let mut carried: List[u64] = list.new()
-    for seq in layout.lists.removals {
-        if pack_leased(lease, seq) || scrub_leased(scrubs, seq) {
-            list.push(mut carried, seq)
-        } else {
-            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
-            list.push(mut packs, seq)
-        }
-    }
-    let range_lease = match lease {
-        Some(held) => Some((held.first, held.terminal)),
-        None => None
-    }
-    let (before, after) = removal_spans(first, end, range_lease)
-    let deferred: Option[u64] = if before.end < after.first {
-        Some(before.end)
-    } else {
-        None
-    }
-    let plan = DiskRemovals(packs: take packs, before: before, after: after, name: string.with_capacity(26))
-    let mut owners: Map[IncomingEdge, u64] = map.new()
-    for held in holders {
-        let stamp = std.page.stamp(std.page.image_of(held.root))
-        if stamp != 0 {
-            map.insert(mut owners, held.source, stamp)
-        }
-    }
-    let installed_lists: PagedLists = clone(layout.lists.roots)
-    Ok((PageDisk(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new()), take plan))
-}
-
 fn cut_io_error(mut db: Db, take problem: Error) -> Error {
     match take problem {
         Io(e) => {
@@ -4850,6 +4817,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     prepare_holder_slot(mut db, delta)?
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         prune_scrubs(mut state.scrubs)
+        prune_tiered_leases(mut state.pages.compaction.held)
     })
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
         cut_participants(db, delta)
@@ -4887,7 +4855,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         let PackBuffers(out: take out, ..) = take buffers
         let mut manifest = take out
         let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-            cut_retirement(layout, holders, disk_state(db).lease, disk_state(db).scrubs, prev_first, seq)
+            cut_retirement(layout, holders, disk_state(db).lease, disk_state(db).scrubs, staged.compaction, prev_first, seq)
         })?
         fill_cut_manifest(mut manifest, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))

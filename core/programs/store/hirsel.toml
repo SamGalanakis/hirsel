@@ -46,6 +46,7 @@ std = { major = 1 }
 "store-tiered-probe.hirsel" = "store"
 "store-tiered-probe-index.hirsel" = "store"
 "store-tiered-promote.hirsel" = "store"
+"store-tiered-compact.hirsel" = "store"
 "store-tiered-frees.hirsel" = "store"
 "store-tiered-lineage.hirsel" = "store"
 "store-tiered-residency.hirsel" = "store"
@@ -57,6 +58,7 @@ std = { major = 1 }
 "store-packs.hirsel" = "store"
 "store-pack-index.hirsel" = "store"
 "store-scrub.hirsel" = "store"
+"store-cut-retirement.hirsel" = "store"
 "store-history.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
@@ -147,6 +149,7 @@ dirs = ["."]
 "tiered_open_laws.hirsel" = "store"
 "tiered_queue_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
+"tiered_compact_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"
@@ -194,6 +197,9 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_f3_corrupt_fold_refuses_the_call"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l88_compaction_retires_a_cold_pack"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_l68_fold_cut_publishes_replayed_writes"]

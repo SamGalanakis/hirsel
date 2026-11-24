@@ -1,0 +1,175 @@
+// L88 (h), Cold half (§13.6 compaction, §13.6a T8 step 7): a Tiered pack
+// whose live bytes fall below the ratio is probed one PACK_INDEX row per
+// cut, every match moves to a fresh pack, and the pack retires when the
+// probe ends. The oracle walks the published tree frame by frame from the
+// pack files, independently of the store's location records.
+
+type CompactWalk {
+    // pack -> payload bytes of the reachable frames it holds.
+    live: Map[u64, u64],
+    // stamp -> (pack, offset): one location per stamp.
+    places: Map[u64, (u64, u64)]
+}
+
+fn compact_walk_frame(d: Dir, db: Db, ptr: std.page.PagePtr, mut walk: CompactWalk) -> Result[(), Error] waits {
+    if let Some(seen) = map.get(walk.places, ptr.stamp) {
+        if seen != (ptr.pack, ptr.offset) {
+            fail("L88 (h): one stamp is reached at two locations")
+        }
+        return Ok(())
+    }
+    map.insert(mut walk.places, ptr.stamp, (ptr.pack, ptr.offset))
+    let width: u64 = int.widen(ptr.len)
+    map.update_or_insert(mut walk.live, ptr.pack, 0, fn(mut total: u64) {
+        total += width
+    })
+    let path = paged_pack_path(ptr.pack)?
+    let wire = disk_read_file(d, path, 4194304)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
+    let page = fold_page(frame)
+    for slot in 0u64 .. std.page.count(std.page.image_of(page)) {
+        if let Some(ColdPage(child)) = std.page.child_slot(page, slot) {
+            compact_walk_frame(d, db, child, mut walk)?
+        }
+    }
+    Ok(())
+}
+
+fn compact_walk(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] waits {
+    let id = prefix(collection)?
+    let Some((ColdPage(root), _)) = std.page.collection_slot(db.heads[0u64].roots.collections.root, id) else {
+        fail("L88 (h): each cut leaves the Log root Cold")
+    }
+    let mut walk = CompactWalk(live: map.new(), places: map.new())
+    compact_walk_frame(d, db, root, mut walk)?
+    Ok(take walk)
+}
+
+fn compact_entry(seq: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(48)
+    list.fill(mut body, 48, int.truncate(seq))
+    take body
+}
+
+fn compact_check_rows(r: Reader, s: Snapshot, events: Log[Bytes], floor_seq: u64) -> Result[(), Error] waits {
+    for seq in 0u64 .. 120 {
+        let wanted: Option[Bytes] = if seq < floor_seq { None } else { Some(compact_entry(seq)) }
+        if log_get(r, s, events, seq)? != wanted {
+            fail("L88 (h): every acknowledged entry reads back, and none below the floor")
+        }
+    }
+    Ok(())
+}
+
+fn compact_listed(db: Db, seq: u64) -> bool {
+    match disk_index_get(disk_state(db).pages.locations.packs, seq) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn compact_dead_pack(db: Db) -> bool {
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((_, listed)) = std.omap.next(mut inventory) {
+        if listed.class >= 3 && listed.live == 0 {
+            return true
+        }
+    }
+    false
+}
+
+@test
+fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let events = l87_cold_log(d, c, r, tasks, floor, 120, 48)?
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 1
+    options.compact_permille = 900
+    let mut db = open(tasks, d, c, r, options)?
+    let (leaf, floor_seq) = l87_first_leaf(d, db, events.binding.id)?
+    let probed = leaf.pack
+    // The trim detaches the first leaf; its cut drains the queue row and
+    // kills the leaf and the replaced root in the probed pack.
+    let trimmed: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000), copy_env((trimmed, floor_seq)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L88 (h): the trim commits")
+    }
+    let _ = checkpoint(mut db)?
+    let frames: u64 = match disk_index_get(disk_state(db).pages.locations.packs, probed) {
+        Some(pack) => int.widen(pack.frames),
+        None => fail("L88 (h): the probed pack is still listed after the trim"),
+    }
+    let before = snapshot(db)
+    let mut cuts = 0u64
+    while compact_listed(db, probed) {
+        if cuts == 64 {
+            fail("L88 (h): the probe ends")
+        }
+        let _ = checkpoint(mut db)?
+        cuts += 1
+        // Every cut, the published tree reaches each frame once, never in a
+        // pack the inventory no longer lists.
+        let walk = compact_walk(d, db, events.binding.id)?
+        for (seq, _) in walk.live {
+            if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+                fail("L88 (h): a reachable frame lives in a listed pack on disk")
+            }
+        }
+    }
+    // A budget of one row per cut walks the pack's index one frame a cut.
+    if cuts < frames {
+        fail("L88 (h): the probe walks at most probe_budget rows per cut")
+    }
+    let walk = compact_walk(d, db, events.binding.id)?
+    if map.contains(walk.live, probed) {
+        fail("L88 (h): the retired pack holds no reachable frame")
+    }
+    // Each listed Tiered pack's live bytes are exactly the frames the tree
+    // reaches in it: a move kills each old ancestor once.
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class == 3 && listed.live != map.get_or(walk.live, seq, 0) {
+            fail("L88 (h): a Tiered pack's live bytes are its reachable frames")
+        }
+    }
+    // A Snapshot taken before the probe still reads through the retired pack,
+    // and further cuts keep its file while the Snapshot lives. They also
+    // retire, with no match to move, each pack the first moves left dead.
+    let mut idle = 0u64
+    while idle < 3 || compact_dead_pack(db) {
+        if idle == 16 {
+            fail("L88 (h): a dead Tiered pack retires")
+        }
+        let _ = checkpoint(mut db)?
+        idle += 1
+        if !disk_exists(d, paged_pack_path(probed)?)? {
+            fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
+        }
+    }
+    let settled = compact_walk(d, db, events.binding.id)?
+    let mut packs_after = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut packs_after) {
+        if listed.class == 3 && listed.live != map.get_or(settled.live, seq, 0) {
+            fail("L88 (h): live bytes stay the reachable frames after the dead packs retire")
+        }
+    }
+    {
+        let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+        compact_check_rows(read_handle, before, events, floor_seq)?
+        compact_check_rows(read_handle, snapshot(db), events, floor_seq)?
+        drop(take read_handle)
+    }
+    drop(take before)
+    let _ = checkpoint(mut db)?
+    if disk_exists(d, paged_pack_path(probed)?)? {
+        fail("L88 (h): the cut after the last reader removes the retired file")
+    }
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let again = reader(reopened, VALUE_LIMIT + 1048576)?
+    compact_check_rows(again, snapshot(reopened), events, floor_seq)?
+    drop(take again)
+    close(take reopened)
+}

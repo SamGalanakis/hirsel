@@ -68,7 +68,9 @@ fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: Tiere
 
 // The cursor retains positions and the front-coded predecessor key. A cut
 // brings its own visitor and installs the advanced cursor only on publication.
-type TieredProbeCursor {
+// A visitor that returns false stops the probe before that row: the cursor
+// stays where it was, so a later cut decides the row again.
+type TieredProbeCursor: send {
     index_at: u64,
     previous_index: u64,
     inside: Option[PackIndexCursor],
@@ -80,7 +82,7 @@ fn start_tiered_probe(pack: PagePack) -> TieredProbeCursor {
     TieredProbeCursor(index_at: pack.index, previous_index: 0, inside: None, next_data: 72, rows: 0)
 }
 
-fn probe_tiered_index(cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, visit: scoped fn(PackIndexRow) -> Result[(), Error] waits) -> Result[bool, Error] waits {
+fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, PackIndexRow) -> Result[bool, Error] waits) -> Result[bool, Error] waits {
     let path = paged_pack_path(seq)?
     let Some(listed) = std.omap.get(cut.packs, seq) else {
         return Error(disk_fault(path, cursor.index_at, Absent))
@@ -102,6 +104,7 @@ fn probe_tiered_index(cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCu
             },
         }
         while work < budget {
+            let before: PackIndexCursor = clone(inside)
             let Some(take row) = next_pack_index(path, at, payload, mut inside)? else {
                 break
             }
@@ -112,7 +115,10 @@ fn probe_tiered_index(cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCu
                 return Error(disk_fault(path, at, Malformed))
             }
             let _ = probe_routing_key(seq, row)?
-            visit(row)?
+            if !visit(mut state, row)? {
+                cursor.inside = Some(take before)
+                return Ok(false)
+            }
             cursor.next_data += 16 + width
             cursor.rows += 1
             work += 1

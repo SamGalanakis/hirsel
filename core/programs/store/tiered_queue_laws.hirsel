@@ -79,6 +79,9 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
 fn l87_options(floor: u64, budget: u64) -> Result[Options, Error] {
     let mut options = l70_open_options(floor)?
     options.free_budget = budget
+    // These laws count each pack's live bytes across cuts; compaction,
+    // proved by L88 (h), would retire the packs they watch.
+    options.probe_budget = 0
     Ok(take options)
 }
 

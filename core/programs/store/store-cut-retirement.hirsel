@@ -1,0 +1,42 @@
+// The cut's retirements: which removed packs leave now, which a lease
+// carries to a later cut, and the generation's new PageDisk.
+
+fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], compaction: TieredCompaction, first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
+    let mut locations = share_page_locations(layout.locations)
+    let mut packs: List[u64] = list.new()
+    let mut carried: List[u64] = list.new()
+    for seq in layout.lists.removals {
+        if tiered_leased(compaction.held, seq) {
+            // A retired Tiered pack leaves the inventory at once; its file
+            // waits for the last read inventory that lists it.
+            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
+            list.push(mut carried, seq)
+        } else if pack_leased(lease, seq) || scrub_leased(scrubs, seq) {
+            list.push(mut carried, seq)
+        } else {
+            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
+            list.push(mut packs, seq)
+        }
+    }
+    let range_lease = match lease {
+        Some(held) => Some((held.first, held.terminal)),
+        None => None
+    }
+    let (before, after) = removal_spans(first, end, range_lease)
+    let deferred: Option[u64] = if before.end < after.first {
+        Some(before.end)
+    } else {
+        None
+    }
+    let plan = DiskRemovals(packs: take packs, before: before, after: after, name: string.with_capacity(26))
+    let mut owners: Map[IncomingEdge, u64] = map.new()
+    for held in holders {
+        let stamp = std.page.stamp(std.page.image_of(held.root))
+        if stamp != 0 {
+            map.insert(mut owners, held.source, stamp)
+        }
+    }
+    let installed_lists: PagedLists = clone(layout.lists.roots)
+    let kept_compaction: TieredCompaction = clone(compaction)
+    Ok((PageDisk(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new(), compaction: take kept_compaction), take plan))
+}

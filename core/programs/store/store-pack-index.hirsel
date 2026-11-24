@@ -100,7 +100,7 @@ fn append_pack_index_frame(mut out: Bytes, context: DiskContext, prev: u64, rows
     Ok(())
 }
 
-type PackIndexCursor {
+type PackIndexCursor: send {
     at: u64,
     remaining: u64,
     last_data: u64,

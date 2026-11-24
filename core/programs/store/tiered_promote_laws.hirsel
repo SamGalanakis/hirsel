@@ -143,11 +143,13 @@ fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original
             list.clear(mut promotion.lookup)
             list.push(mut promotion.lookup, PromotionPage(HotPage(take copied_leaf)))
         }
-        let finished = probe_tiered_index(captured, 7, mut cursor, 1, scoped fn(row: PackIndexRow) -> Result[(), Error] {
+        let mut visits = 0u64
+        let finished = probe_tiered_index(captured, 7, mut cursor, 1, mut visits, scoped fn(mut seen: u64, row: PackIndexRow) -> Result[bool, Error] {
             if row.stamp != 30 + cut {
                 fail("L88(f): the probe must visit the next index row after each promotion")
             }
-            Ok(())
+            seen += 1
+            Ok(true)
         })?
         if finished != (cut == 3) || cursor.rows != cut + 1 {
             fail("L88(f): a four-row probe at budget one must finish at cut four")

@@ -1,0 +1,340 @@
+// §13.6 compaction on the log@1 cut (§13.6a T3, T8 steps 6 and 7).
+// A pack whose `live` falls below `compact_permille` of its payload gets a
+// compaction probe. Each cut walks up to `probe_budget` PACK_INDEX rows
+// against the roots the cut publishes, and moves every match at that cut: the
+// matched frame and the path above it become Hot copies with their own stamps
+// (R6), so T2 emits each once into a fresh pack and every root that matched
+// takes the one new location. The cut whose cursor reaches the end of the
+// index retires the pack. Cursors are writer memory: a crash loses them and
+// the next cut restarts the probe (§13.6 "Progress").
+//
+// Not built yet: recount probes (`repair_cuts`); moving a frame that a queue
+// row reaches (the probe stops before that row until the drain consumes it);
+// moving deadlist cells with their frames, so a cell on a retiring pack is
+// deleted with it and its holder's later kill is not filed (an over-count);
+// and the mandatory-only retry still carries this cut's moves.
+
+type TieredCompaction: send {
+    probes: Map[u64, TieredProbeCursor],
+    // One share of each generation's read inventory. A Snapshot reads its
+    // Cold slots through the inventory of the generation it was taken at, so
+    // Remove defers a retired Tiered pack while a share other than this one
+    // lists it (§13.5: on log@1 a lease defers Remove). Each cut drops the
+    // shares nothing else holds.
+    held: List[Arc[TieredReadInventory]]
+}
+
+fn no_tiered_compaction() -> TieredCompaction {
+    TieredCompaction(probes: map.new(), held: list.new())
+}
+
+fn prune_tiered_leases(mut held: List[Arc[TieredReadInventory]]) {
+    let mut slot = 0u64
+    while slot < list.len(held) {
+        let ended = match arc.with_unique(mut held[slot], fn(mut _inventory: TieredReadInventory) {}) {
+            Some(_) => true,
+            None => false
+        }
+        if ended {
+            let _ = list.swap_remove(mut held, slot)
+        } else {
+            slot += 1
+        }
+    }
+}
+
+fn tiered_leased(held: List[Arc[TieredReadInventory]], seq: u64) -> bool {
+    for inventory in held {
+        if let Some(_) = std.omap.get(inventory.packs, seq) {
+            return true
+        }
+    }
+    false
+}
+
+// The participants' current inventories join the leases, once per generation.
+fn lease_cut_inventories(installed: TieredCompaction, roots: List[Roots]) -> Result[List[Arc[TieredReadInventory]], Error] {
+    let mut held: List[Arc[TieredReadInventory]] = clone(installed.held)
+    for participant in roots {
+        if let Some(inventory) = view participant.collections.paging {
+            let mut known = false
+            for leased in held {
+                if leased.generation == inventory.generation {
+                    known = true
+                }
+            }
+            if !known {
+                capacity(list.try_reserve(mut held, 1))?
+                list.push(mut held, arc.share(inventory))
+            }
+        }
+    }
+    Ok(take held)
+}
+
+type TieredCompactWork {
+    roots: List[Roots],
+    next_stamp: u64,
+    // (pack, len) of each Cold ancestor a move re-emitted, once per stamp.
+    moved: List[(u64, u64)],
+    moved_stamps: Map[u64, ()]
+}
+
+type TieredCompactStep {
+    probes: Map[u64, TieredProbeCursor],
+    retiring: List[u64],
+    moved: List[(u64, u64)]
+}
+
+fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std.page.Page], Error] waits {
+    match edge {
+        ColdPage(ptr) => {
+            let frame = fold_frame_at(source, TieredPage(ptr))?
+            disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
+                Ok(std.page.copy_with_stamp(fold_page(frame), ptr.stamp))
+            })
+        },
+        HotPage(page) => Ok(arc.share(page)),
+    }
+}
+
+// The page with its stamp, one child or one BLOB replaced. Every other slot
+// keeps its location.
+fn compact_rebuild(page: Arc[std.page.Page], at: u64, child: Option[std.page.Slot], body: Option[std.page.BlobSlot]) -> Result[std.page.Slot, Error] {
+    let image = std.page.image_of(page)
+    disk_allocation(scoped fn() -> Result[std.page.Slot, Error] {
+        let mut rows: List[std.page.Entry] = list.new()
+        let mut kids: List[std.page.Slot] = list.new()
+        let mut bodies: List[std.page.BlobSlot] = list.new()
+        for slot in 0u64 .. std.page.count(image) {
+            let mut row = option.unwrap(std.page.entry(image, slot))
+            match row.cell {
+                Child(mut edge) => {
+                    let mut kept: std.page.Slot = clone(option.unwrap(std.page.child_slot(page, slot)))
+                    if slot == at {
+                        let Some(replacement) = view child else {
+                            fail("store: compaction lost the moved child")
+                        }
+                        kept = clone(replacement)
+                    }
+                    edge.child = match kept {
+                        ColdPage(ptr) => ptr,
+                        HotPage(_) => std.page.unlocated(edge.child.stamp),
+                    }
+                    list.push(mut kids, take kept)
+                },
+                BlobValue(mut reference) => {
+                    let mut kept: std.page.BlobSlot = clone(option.unwrap(std.page.blob_slot(page, reference.body)))
+                    if slot == at {
+                        let Some(replacement) = view body else {
+                            fail("store: compaction lost the moved BLOB")
+                        }
+                        kept = clone(replacement)
+                    }
+                    reference = promotion_ref(reference, mut kept, int.truncate(list.len(bodies)))
+                    list.push(mut bodies, take kept)
+                },
+                InlineValue(_) => (),
+            }
+            list.push(mut rows, take row)
+        }
+        let ready = page_result(std.page.encode(rows, std.page.level(image), std.page.stamp(image), std.page.key_domain(image)))?
+        Ok(HotPage(page_result(std.page.attach(take ready, take kids, take bodies))?))
+    })
+}
+
+fn compact_note_moved(mut work: TieredCompactWork, ptr: std.page.PagePtr) -> Result[(), Error] {
+    if map.contains(work.moved_stamps, ptr.stamp) {
+        return Ok(())
+    }
+    capacity(map.try_reserve(mut work.moved_stamps, 1))?
+    map.insert(mut work.moved_stamps, ptr.stamp, ())
+    capacity(list.try_reserve(mut work.moved, 1))?
+    list.push(mut work.moved, (ptr.pack, int.widen(ptr.len)))
+    Ok(())
+}
+
+// The path's copy from `depth` down. Each Cold ancestor's old copy is dead
+// once every root that reached it takes the new path.
+fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredProbePath, depth: u64, mut work: TieredCompactWork) -> Result[std.page.Slot, Error] waits {
+    let page = compact_load(source, edge)?
+    let path_end = list.len(path.slots)
+    if depth == path_end {
+        return Ok(HotPage(take page))
+    }
+    if let ColdPage(ptr) = view edge {
+        compact_note_moved(mut work, ptr)?
+    }
+    let at = path.slots[depth]
+    if depth + 1 == path_end {
+        if let TieredBlob(ptr) = view path.target {
+            let frame = fold_frame_at(source, TieredBlob(ptr))?
+            let TieredValue(body) = view frame.payload else {
+                fail("store: a BLOB reference resolved to a PAGE")
+            }
+            let moved_body = disk_allocation(scoped fn() -> Result[std.page.BlobSlot, Error] {
+                Ok(HotBlob(arc.new(copied(body)?)))
+            })?
+            return compact_rebuild(page, at, None, Some(moved_body))
+        }
+    }
+    let child: std.page.Slot = clone(option.unwrap(std.page.child_slot(page, at)))
+    let moved_child = compact_relocate(source, child, path, depth + 1, mut work)?
+    compact_rebuild(page, at, Some(moved_child), None)
+}
+
+// One PACK_INDEX row. A frame that a queue row reaches stops the probe: the
+// drain still has to read it where it is. Otherwise every root that reaches
+// the frame takes a moved path.
+fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], seq: u64, row: PackIndexRow) -> Result[bool, Error] waits {
+    let mut rows = std.page.cursor_open(arc.share(installed_queue), None, true, false)
+    while let Some(queue_row) = std.page.cursor_next(mut rows) {
+        if let Some(_) = probe_deferred_root(source, queued_free(queue_row.value).target, seq, row)? {
+            return Ok(false)
+        }
+    }
+    for added in queued {
+        if let Some(_) = probe_deferred_root(source, added.target, seq, row)? {
+            return Ok(false)
+        }
+    }
+    let key = prefix(row.collection)?
+    for slot in 0u64 .. list.len(work.roots) {
+        let Some(edge) = promotion_collection_root(work.roots[slot].collections, row.collection)? else {
+            continue
+        }
+        let Some(path) = probe_tiered_path(source, edge, seq, row)? else {
+            continue
+        }
+        let moved_root = compact_relocate(source, edge, path, 0, mut work)?
+        let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+            let mut candidate = arc.share(work.roots[slot].collections.root)
+            let mut draw = work.next_stamp
+            page_result(std.page.install_tiered_root(mut candidate, key, moved_root, mut draw))?
+            Ok((take candidate, draw))
+        })?
+        work.roots[slot].collections.root = take mapped
+        work.next_stamp = following
+    }
+    Ok(true)
+}
+
+fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
+    let mut packs_in_order: List[u64] = list.new()
+    for (seq, _) in probes {
+        capacity(list.try_reserve(mut packs_in_order, 1))?
+        list.push(mut packs_in_order, seq)
+    }
+    list.sort(mut packs_in_order, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let mut left = budget
+    for seq in packs_in_order {
+        if left == 0 {
+            break
+        }
+        let Some(take cursor) = map.remove(mut probes, seq) else {
+            continue
+        }
+        let mut walk = take cursor
+        let rows_before = walk.rows
+        let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: PackIndexRow) -> Result[bool, Error] waits {
+            compact_row(mut state, source, queued, installed_queue, seq, row)
+        })?
+        left = int.saturating_sub(left, walk.rows - rows_before)
+        if finished {
+            capacity(list.try_reserve(mut retiring, 1))?
+            list.push(mut retiring, seq)
+        } else {
+            capacity(map.try_reserve(mut probes, 1))?
+            map.insert(mut probes, seq, take walk)
+        }
+    }
+    Ok(())
+}
+
+// §13.6 selection: a listed Tiered pack below the ratio starts a probe. A
+// pack keeps at most one probe.
+fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], Error] {
+    let mut probes: Map[u64, TieredProbeCursor] = map.new()
+    let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut inventory) {
+        if pack.class != 3 && pack.class != 4 {
+            continue
+        }
+        let cursor: TieredProbeCursor = match map.get(running, seq) {
+            Some(kept) => clone(kept),
+            None => {
+                // `live` counts frame payloads, so the ratio is taken over
+                // the payload a fresh pack was emitted with: the data region
+                // less one envelope per frame. A fresh pack is fully live.
+                let frame_count: u64 = int.widen(pack.frames)
+                let envelopes = 16 * frame_count
+                if pack.index < 72 + envelopes {
+                    continue
+                }
+                let emitted_bytes = pack.index - 72 - envelopes
+                let (Some(scaled), Some(threshold)) = (int.checked_mul(pack.live, 1000), int.checked_mul(emitted_bytes, permille)) else {
+                    continue
+                }
+                if scaled >= threshold {
+                    continue
+                }
+                start_tiered_probe(pack)
+            },
+        }
+        capacity(map.try_reserve(mut probes, 1))?
+        map.insert(mut probes, seq, take cursor)
+    }
+    Ok(take probes)
+}
+
+// AP16 item 3 for Tiered packs, after the fold and the candidate queue's
+// added rows, before the drain. A refused allocation drops the cut's probe
+// progress: the installed cursors stand, nothing retires, and every root
+// is the one the cut staged before the probes ran.
+fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], queued: List[DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
+    let installed = disk_state(db).pages
+    let running: Map[u64, TieredProbeCursor] = clone(installed.compaction.probes)
+    let budget = disk_state(db).options.probe_budget
+    let kept_probes: Map[u64, TieredProbeCursor] = clone(running)
+    let unchanged = TieredCompactStep(probes: take kept_probes, retiring: list.new(), moved: list.new())
+    if budget == 0 {
+        return Ok(take unchanged)
+    }
+    let selected = select_compaction(installed.locations, running, disk_state(db).options.compact_permille)?
+    if map.len(selected) == 0 {
+        return Ok(take unchanged)
+    }
+    let Some(requests) = pager else {
+        return Error(Io(Closed))
+    }
+    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed)?
+    let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    // A refusal restores these, so no root keeps a move whose old ancestors
+    // were never charged dead.
+    let saved = disk_allocation(scoped fn() -> Result[List[Roots], Error] {
+        let mut shares: List[Roots] = list.new()
+        capacity(list.try_reserve(mut shares, list.len(roots)))?
+        for held in roots {
+            list.push(mut shares, PageRoots(collections: share_page_tree(held.collections), streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
+        }
+        Ok(take shares)
+    })?
+    let mut work = TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new())
+    let mut probes = take selected
+    let mut retiring: List[u64] = list.new()
+    let ran = compact_probes(source, queued, installed.lists.deferred, mut work, mut probes, mut retiring, budget)
+    next_stamp = work.next_stamp
+    match ran {
+        Ok(()) => {
+            roots = replace(mut work.roots, list.new())
+            Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: replace(mut work.moved, list.new())))
+        },
+        Error(Full(Allocation(_))) => {
+            roots = take saved
+            Ok(take unchanged)
+        },
+        Error(take problem) => Error(take problem),
+    }
+}

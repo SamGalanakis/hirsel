@@ -15,6 +15,10 @@ pub type Options: send {
     pager_task_bytes: u64,
     // Pages each cut drains from the deferred-free queue (§13.6).
     free_budget: u64,
+    // §13.6: PACK_INDEX rows a cut's compaction probes walk, and the
+    // live/payload ratio, in thousandths, below which a Tiered pack starts one.
+    probe_budget: u64,
+    compact_permille: u64,
     authority: StorageKind,
     expect: Option[StoreId],
     activation: Option[u64],
@@ -289,7 +293,7 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
     let tiered = tiered_sizes(kind, resident, o)
-    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2,
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2,
         stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64)
 }
 

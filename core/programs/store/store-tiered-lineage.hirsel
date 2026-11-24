@@ -460,7 +460,31 @@ fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue
         file_lineage_kill(mut rows, chain_holders, mut packs, kill.branch_id, kill.frame)?
     }
     apply_lineage_drops(mut rows, chain_holders, mut packs)?
+    settle_compaction(mut rows, queue, mut packs)?
     Ok(take rows)
+}
+
+// §13.6 relocation: each re-emitted Cold ancestor's old copy is dead, unless
+// its pack retires at this cut. T8 step 7 deletes the cells that name a
+// retiring pack (step 6, moving them with their frames, is not built).
+fn settle_compaction(mut lineage: Lineage, queue: CutQueue, mut packs: DiskIndex[u64, PagePack]) -> Result[(), Error] {
+    for (pack, bytes_moved) in queue.moved {
+        if !list.contains(queue.retiring, pack) {
+            subtract_pack_live(mut packs, pack, bytes_moved)?
+        }
+    }
+    if list.len(queue.retiring) == 0 {
+        return Ok(())
+    }
+    let mut kept: Map[LineageCell, u64] = map.new()
+    capacity(map.try_reserve(mut kept, map.len(lineage.cells)))?
+    for (cell, live_bytes) in lineage.cells {
+        if !list.contains(queue.retiring, cell.pack) {
+            add_lineage_cell(mut kept, cell, live_bytes)?
+        }
+    }
+    lineage.cells = take kept
+    Ok(())
 }
 
 // A fork the next cut is the first to publish: a journaled fork's FORK

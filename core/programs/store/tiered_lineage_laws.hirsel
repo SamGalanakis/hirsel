@@ -141,6 +141,14 @@ fn l69_cold_root(db: Db, collection: u32) -> Result[std.page.PagePtr, Error] {
     }
 }
 
+// L69 counts the pinned leaf's pack across cuts; compaction, proved by
+// L88 (h), would retire it once its live bytes reach zero.
+fn l69_options(floor: u64) -> Result[Options, Error] {
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 0
+    Ok(take options)
+}
+
 fn l69_pack_live(db: Db, pack: u64) -> u64 {
     let Some(listed) = disk_index_get(disk_state(db).pages.locations.packs, pack) else {
         fail("L69: a Tiered pack stays listed until a probe retires it")
@@ -159,7 +167,7 @@ fn l69_pack_live(db: Db, pack: u64) -> u64 {
 fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     l68_cold_rows(d, c, r, tasks, floor)?
-    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let mut db = open(tasks, d, c, r, l69_options(floor)?)?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let leaf = l69_cold_root(db, rows.id)?
     let width: u64 = int.widen(leaf.len)
@@ -174,7 +182,7 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     let _ = checkpoint(mut db)?
     close(take db)?
 
-    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    db = open(tasks, d, c, r, l69_options(floor)?)?
     let cell = LineageCell(branch: 0, boundary: w, side: 1, interval: 0, pack: leaf.pack)
     let filed = map.len(disk_state(db).pages.lists.rows.cells) == 1 && map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) == width
     if !filed || l69_pack_live(db, leaf.pack) != before {
@@ -183,7 +191,7 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     let _ = unpin(mut db, "held")?
     close(take db)?
 
-    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    db = open(tasks, d, c, r, l69_options(floor)?)?
     if map.len(disk_state(db).pages.lists.rows.cells) != 0 || l69_pack_live(db, leaf.pack) != before - width {
         fail("L69: the last unpin at w drops the cell and charges exactly the leaf")
     }
@@ -194,7 +202,7 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     let _ = checkpoint(mut db)?
     close(take db)?
 
-    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let reopened = open(tasks, d, c, r, l69_options(floor)?)?
     if map.len(disk_state(reopened).pages.lists.rows.cells) != 0 || l69_pack_live(reopened, later.pack) != later_before - later_width {
         fail("L69: with no holder the overwrite's kill leaves live at its cut")
     }

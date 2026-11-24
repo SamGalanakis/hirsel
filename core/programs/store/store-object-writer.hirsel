@@ -147,7 +147,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let mut blank = disk_allocation(fn() -> Result[HistoryOpenBase, Error] {
-        let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new())
+        let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
         Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), pages: take pages))
     })?
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] { Ok(clone(options)) })?
@@ -329,7 +329,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, mut buffers, mut workspace, now)?
         fill_cut_manifest(mut buffers.out, db, delta, participants.roots, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-            cut_retirement(layout, participants.holders, None, list.new(), seq, seq)
+            cut_retirement(layout, participants.holders, None, list.new(), no_tiered_compaction(), seq, seq)
         })?
         let (_, take parsed) = disk_read_page_manifest("MANIFEST", buffers.out)?
         let mut manifest = take parsed

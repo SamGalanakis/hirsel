@@ -53,9 +53,9 @@ pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](
 fn room_live_minimum(state: u32, message: u32) -> u64 {
     let s: u64 = int.widen(state)
     let m: u64 = int.widen(message)
-    // Frame 8, Part 34, you 4, left 4, joined 9 + 64,
+    // Frame prefix, fixed Part, you 4, left 4, joined 9 + 64,
     // state tags and length 12, message peer, flag and length 9.
-    144u64 + s + m
+    ROOM_LIVE_PREFIX + ROOM_PART_FIXED + 102u64 + s + m
 }
 
 fn decode_room_value[V: codec](format: std.codec.Codec[V], raw: Bytes) -> RoomCodecCheck {
@@ -143,7 +143,7 @@ fn room_session_charge(m: RoomMaxima, frame_limit: u64) -> u64 {
 }
 
 fn start_room_relay[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig,
-    limit: u64, pub_to: Sender[PubIn], tasks: Tasks) -> Result[Option[(RoomLink, Task[()])], StartError] waits {
+    limit: u64, pub_to: Sender[PubIn], tasks: Tasks, random: Random) -> Result[Option[(RoomLink, Task[()])], StartError] waits {
     let maxima = room_maxima(r)
     if maxima.peers == 0u32 { return Ok(None) }
     let maximum: u64 = int.widen(LIVE_MAX)
@@ -163,7 +163,7 @@ fn start_room_relay[G: send, H: shareable + inert + send](r: Registry[G, H], c: 
     let Ok(take rounds) = channel.receive(reply) else { return Error(Open(PublisherStopped)) }
     let (to, inbox): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS * limit)
     let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: int.widen(maxima.message), live_limit: frame_limit)
-    let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, room_bytes: c.n_relay - relay_fixed, max_sessions: limit)
+    let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, random, room_bytes: c.n_relay - relay_fixed, max_sessions: limit)
     let task_bytes = c.n_relay - channel_bytes
     let spawned = task.try_spawn(tasks, bytes task_bytes, take seed, room_relay_run) ?=> |(cap, _)| Full(cap)
     Ok(Some((take link, take spawned)))

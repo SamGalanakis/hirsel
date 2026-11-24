@@ -176,7 +176,8 @@ fn room_flush_part(relay: RoomRelay, seat: RoomSeat, mut ring: RoomRing, mut liv
         return FullPart
     }
     let room_index = option.unwrap(find_room(relay.rooms, seat.key))
-    let peers = view relay.rooms[room_index].peers
+    let roster = view relay.rooms[room_index]
+    let peers = view roster.peers
     let mut gap = member.gap
     let head = room_head_message(relay, peers, member, mut ring, mut gap)
     if !member.complete && member.lost == 0u32 && gap == 0u32 && room_no_head(head) && !list.contains(member.changed, ROOM_STATE_PENDING) {
@@ -194,7 +195,8 @@ fn room_flush_part(relay: RoomRelay, seat: RoomSeat, mut ring: RoomRing, mut liv
     if let Some(entry) = message { room_to_send += 9u64 + int.widen(entry.len) }
     room_live_append(mut live, identity, scoped fn(mut out: Bytes) {
         let you = if member.complete { Some(member.peer) } else { None }
-        room_part_start(mut out, member.sub, member.complete, you)
+        // Every roster change marks its slot. An unblocked plan includes every pending slot.
+        room_part_start(mut out, member.sub, member.complete, you, roster.incarnation, roster.revision, !plan.blocked_state)
         room_write_joins(relay, peers, member, plan, mut out)
         room_write_states(relay, peers, plan, mut out)
         room_write_messages(relay, peers, member, plan, mut ring, mut out, mut room_to_send, mut gap)

@@ -13,6 +13,9 @@ pub type Part: codec + send {
     sub: u32,
     complete: bool,
     you: Option[u32],
+    incarnation: (u64, u64),
+    revision: u64,
+    snapshot: bool,
     joined: List[(u32, Caller)],
     states: List[(u32, Option[Bytes])],
     msgs: List[(u32, bool, Bytes)],
@@ -57,7 +60,7 @@ fn wire_done_bytes(done: List[Done]) -> u64 {
 }
 
 fn wire_part_size(p: Part) -> u64 {
-    let mut size = 34u64 + 4u64 * list.len(p.left)
+    let mut size = ROOM_PART_FIXED + 4u64 * list.len(p.left)
     if let Some(_) = p.you { size += 4u64 }
     for (_, caller) in p.joined { size += 9u64 + list.len(caller.subject) }
     for (_, state) in p.states { size += 8u64 + wire_optional_bytes(state) }

@@ -1,7 +1,7 @@
 // Encoded Parts stay in the session's LiveBuffer. The Part ranges are also
 // the receiver's admission checks, so filtering does not decode any payload.
 const ROOM_LIVE_PREFIX: u64 = 8u64
-const ROOM_PART_FIXED: u64 = 34u64
+const ROOM_PART_FIXED: u64 = 59u64
 
 type RoomPartRange: send { identity: RoomPartIdentity, start: u64, end: u64 }
 
@@ -53,13 +53,17 @@ fn room_live_keep(mut buffer: RoomLiveBuffer, keep: scoped fn(RoomPartIdentity) 
     count != 0u32
 }
 
-fn room_part_start(mut out: Bytes, sub: u32, complete: bool, you: Option[u32]) {
+fn room_part_start(mut out: Bytes, sub: u32, complete: bool, you: Option[u32],
+    incarnation: Inline[u8, 16], revision: u64, snapshot: bool) {
     std.codec.put_u32(sub, mut out)
     list.push(mut out, if complete { 1u8 } else { 0u8 })
     match you {
         Some(peer) => { std.codec.put_u32(1u32, mut out); std.codec.put_u32(peer, mut out) },
         None => std.codec.put_u32(0u32, mut out),
     }
+    for i in 0u64 .. 16u64 { list.push(mut out, incarnation[i]) }
+    std.codec.put_u64(revision, mut out)
+    list.push(mut out, if snapshot { 1u8 } else { 0u8 })
 }
 
 fn room_part_end(mut out: Bytes, gap: u32, lost: u32, full: bool) {
@@ -70,7 +74,7 @@ fn room_part_end(mut out: Bytes, gap: u32, lost: u32, full: bool) {
 
 fn room_live_full(mut buffer: RoomLiveBuffer, part: RoomPartIdentity) {
     room_live_append(mut buffer, part, scoped fn(mut data: Bytes) {
-        room_part_start(mut data, part.sub, false, None)
+        room_part_start(mut data, part.sub, false, None, [0u8; 16], 0u64, false)
         for _ in 0u64 .. 4u64 { std.codec.put_u32(0u32, mut data) }
         room_part_end(mut data, 0u32, 0u32, true)
     })

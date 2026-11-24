@@ -139,7 +139,8 @@ const roomSocket = (): Socket => {
   return socket;
 };
 const live = (part: Partial<codec.Part> & {sub: number}): Frame => ({tag: 'Live', value: [{
-  complete: false, you: {tag: 'None'}, joined: [], states: [], msgs: [], left: [], gap: 0, lost: 0, full: false, ...part,
+  complete: false, you: {tag: 'None'}, incarnation: [1n, 2n], revision: 1n, snapshot: true,
+  joined: [], states: [], msgs: [], left: [], gap: 0, lost: 0, full: false, ...part,
 }]});
 const deliver = async (frame: Frame) => {
   sockets.at(-1)!.onmessage?.({data: Frame.encode(frame)});

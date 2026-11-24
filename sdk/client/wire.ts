@@ -16,7 +16,9 @@ export interface Group { sub: number; value: Uint8Array; rows: SlotRow[] }
 export interface Done {stream: StreamId; p: bigint; outcome: Outcome<Uint8Array>}
 export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
 export interface Part {
-  sub: number; complete: boolean; you: Option<number>; joined: [number, Caller][];
+  sub: number; complete: boolean; you: Option<number>;
+  incarnation: [bigint, bigint]; revision: bigint; snapshot: boolean;
+  joined: [number, Caller][];
   states: [number, Option<Uint8Array>][]; msgs: [number, boolean, Uint8Array][];
   left: number[]; gap: number; lost: number; full: boolean;
 }

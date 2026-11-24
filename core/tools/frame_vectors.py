@@ -165,14 +165,18 @@ def vectors():
           'Set tag, sub, Some tag and state blob')
     frame('send_direct', 'Send(7u32, Some(8u32), b("aabb"))', pack('<II', 10, 7) + optional(u32(8)) + blob(identity),
           'Send tag, sub, Some tag, peer and message blob')
-    part = (pack('<IB', 7, 1) + optional(u32(8)) + seq([pack('<IB', 9, 2) + blob(subject)])
+    incarnation = bytes.fromhex('000102030405060708090a0b0c0d0e0f')
+    part = (pack('<IB', 7, 1) + optional(u32(8)) + incarnation + pack('<QB', V, 1)
+            + seq([pack('<IB', 9, 2) + blob(subject)])
             + seq([u32(9) + optional(blob(identity))]) + seq([pack('<IB', 9, 1) + blob(b'\xca\xfe')])
             + seq([u32(10)]) + pack('<IIB', 11, 12, 1))
-    part_expr = (f'runner.Part(sub: 7u32, complete: true, you: Some(8u32), joined: one((9u32, {caller})), '
+    part_expr = ('runner.Part(sub: 7u32, complete: true, you: Some(8u32), '
+                 f'incarnation: (0x0706050403020100u64, 0x0f0e0d0c0b0a0908u64), revision: {HV}, snapshot: true, '
+                 f'joined: one((9u32, {caller})), '
                  'states: one((9u32, Some(b("aabb")))), msgs: one((9u32, true, b("cafe"))), '
                  'left: one(10u32), gap: 11u32, lost: 12u32, full: true)')
     frame('live_all_fields', f'Live(one({part_expr}))', u32(11) + seq([part]),
-          'Live tag and one Part, with all options and lists populated', True)
+          'Live tag and one Part, with 16 incarnation bytes, a little-endian u64 revision and a snapshot byte after you', True)
     return cases
 
 

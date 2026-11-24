@@ -4743,7 +4743,7 @@ fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: Ser
         max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
     let registered = match placed(place, n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
-    let relay = start_room_relay(registered, config, limit, pub_to, tasks)?
+    let relay = start_room_relay(registered, config, limit, pub_to, tasks, random)?
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
         let mut service = wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
         if let Some((ports, _)) = relay { service.context.room_link = Some(copy_room_link(ports)) }

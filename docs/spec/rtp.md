@@ -2,7 +2,9 @@
 
 Version note (2026-11-24, media-rtp-spec-2318): first text of RTP-1 to RTP-12, Wave 1.4 of the
 real-time media track. Amended by rtp-spec-amend-2340 for the 16 findings of review 2336 and the
-rtp side of WebRTC review 2333 (findings 4 and 5). Not yet built; the fences are `unbuilt`. The
+rtp side of WebRTC review 2333 (findings 4 and 5). Amended by rtp-s8-rewrite-2476 for the five
+RTP-11 gaps slice S9 (2362) found: `Unit.frame`, `Unit`'s home, the H.264 caller state, the
+target-number sentence, and AV1 without chains; and for the switch projection's rounding. Not yet built; the fences are `unbuilt`. The
 section ends with the [build laws](#build-laws) and the [build slices](#build-slices).
 
 `rtp` is a pure Hirsel package at `core/programs/rtp/` <!-- doc-ref: planned -->. It holds the parts of a real-time
@@ -1036,7 +1038,7 @@ padding packet is representable. A full pacer refuses explicitly.
 
 ```hirsel unbuilt
 // module rewrite
-pub type Unit = Unit(start: bool, end: bool, keyframe: bool, needs: u32, switches: u32)
+pub type Unit = Unit(start: bool, end: bool, keyframe: bool, needs: u32, switches: u32, frame: u16)
 pub type Target = Off | Layer(source: u32, target: u8)
 pub type TargetError = Unrepresentable
 pub type Out = Forward(u64, u32) | Late(u64, u32) | Drop | Wait
@@ -1046,7 +1048,7 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError]
 pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, padding_only: bool, u: Unit) -> Out
 pub fn on_sr(mut r: Rewrite, source: u32, info: SenderInfo, at_ns: u64)
-pub fn sr_timestamp(r: Rewrite, now_ns: u64) -> Option[u32]
+pub fn sr_timestamp(mut r: Rewrite, now_ns: u64) -> Option[u32]
 pub fn switch_index(r: Rewrite) -> Option[u64]
 pub fn pending(r: Rewrite) -> Option[u32]
 pub fn close(mut r: Rewrite)
@@ -1090,7 +1092,19 @@ its signed extended timestamp ([RTP-2](#rtp-2-extended-sequence-numbers)) and a 
 - `needs` has bit `i` set when target `i` needs this frame. Targets are 0 to 31, so the
   mask has 32 bits, as many as an AV1 dependency descriptor's decode targets;
 - `switches` has bit `i` set when a decoder may begin to follow target `i` at this frame,
-  because every frame it references for that target has been forwarded or is in the frame.
+  because every frame it references for that target has been forwarded or is in the frame;
+- `frame` tells apart the frames that share one RTP timestamp. VP9 and AV1 send every
+  spatial layer of a picture as its own frame with the picture's timestamp, and each layer
+  frame has its own `needs`, so one decision per timestamp would forward or drop all of
+  them together. `frame` is the VP9 spatial id (`SID`), the AV1 dependency descriptor's
+  frame number, and 0 for VP8, H.264 and audio, which send one frame per timestamp.
+
+**Where `Unit` lives.** `Unit` is `rtp.rewrite.Unit`, the type `on_packet` takes. `rtp`
+depends on `std` alone, and `media_bits` has consumers that are not RTP (`image_core`,
+`image_pipeline`, `media_container`), so neither package depends on the other. The adapter
+answers its own `media_bits.unit.Unit` with the same five facts, and the caller, which
+depends on both, builds `rtp.rewrite.Unit` from it and adds `frame`. Moving the type to a
+package both import would change no decision.
 
 `rtp` knows no codec. The **unit adapter** in `media_bits` (slice S9) fills `Unit` from the
 payload and owns every codec fact, as the RFCs define them:
@@ -1106,20 +1120,45 @@ payload and owns every codec fact, as the RFCs define them:
 - H.264 ([RFC 6184 §§5.1, 5.7–5.8](https://www.rfc-editor.org/rfc/rfc6184#section-5.7)):
   `start` is the first packet of an access unit, never a FU start that only starts a NAL
   unit; `keyframe` is an IDR access unit with usable SPS and PPS, sent with it or before it
-  on this leg.
+  on this leg. A packet's payload cannot show whether it begins an access unit, so the
+  caller passes the adapter two facts it keeps per source and leg:
+  - `after_end`: the packet at `index − 1` of the same source was seen and ended an access
+    unit (its marker was set, or it had another timestamp). When that packet was lost or has
+    not arrived, `after_end` is false, and the packet is not a `start`. A frame's decision
+    never reads `start`, so this only delays a switch to the next access unit whose
+    predecessor arrived; it never changes which packets of a frame go out together.
+  - the parameter sets: the SPS and PPS **of that source** that were sent on this leg, and
+    those the packet carries. A PPS or SPS id names different sets in different sources, so
+    a pending source's IDR is judged against that source's own sets, never the current
+    source's. The caller keeps one set per source it presents and clears the leg's sets of
+    the old source at a switch, so an IDR from B is a keyframe only when B's SPS and PPS
+    reach the receiver with it or before it.
 - AV1 ([AV1 RTP Appendix A](https://aomediacodec.github.io/av1-rtp-spec/#appendix-a-dependency-descriptor-rtp-header-extension)):
   `needs` from each decode target's indication (a target needs a frame unless its indication
   is Not Present, §A.8.3); `switches` from a Switch indication, and only when the chains say
-  the frame's dependencies were forwarded.
-- For VP8, VP9 or H.264 temporal layers, target `i` needs every frame whose temporal layer
-  is at most `i`. A frame that starts a lower temporal layer allows that layer.
+  the frame's dependencies were forwarded. A decode target with no protecting chain
+  (a structure without chains, §A.5) has no way to show that, so its `switches` bit is set
+  only at a keyframe.
+
+**Target numbers.** The target numbering, and so which bits of `needs` and `switches` a
+frame sets, is the forwarding spec's stable map ([RTC-6](webrtc.md#rtc-6-layers-dynacast-and-active-speakers)):
+for VP8 and H.264, target `i` is temporal layer `i` and needs every frame of temporal layer
+at most `i`; for VP9, `i = 4 · S + T`; for AV1, the decode target index. `rtp` reads bits
+and never orders targets, because VP9's and AV1's numbers are not ordered by quality.
+**A down-switch is a switch point like any other**: it lives in the masks. At any frame
+start, a decoder that follows target `i` already has every frame a lower target `j`
+references, so the adapter sets bit `j` of `switches` for every `j` that the down-track's
+current target contains (for VP8 and H.264, every `j ≤ i` at any frame start, as VP9 does
+for its down-switches). An adapter that sets fewer bits keeps forwarding correct and only
+delays the down-switch to the next frame that sets them.
 
 **Targets.** `target(Layer(source, i))` asks to forward target `i` of `source`, and answers
 `Unrepresentable` for `i > 31`. `target(Off)` stops forwarding. The current layer changes
 only at a switch point:
 
 - within one source, from target `i` to `j` at a packet with `start` and bit `j` of
-  `switches`;
+  `switches`, whose frame has no decision yet (a frame some of whose packets were already
+  decided under `i` keeps that decision, so it is forwarded whole or not at all);
 - to another source, or from `Off`, only at a packet of that source with `start`,
   `keyframe` and bit `j` of `switches`.
 
@@ -1145,8 +1184,10 @@ generation, so its dropped packets close up nothing.
    nothing.
 5. A packet of the current source is decided **per frame**. The frame's decision is made at
    its first packet seen (forward when the current target's bit is set in `needs`), kept in a
-   ring of `frames` entries keyed by generation and timestamp, and applied to every packet of
-   the frame, in any order. A frame whose decision has left the ring answers `Drop`.
+   ring of `frames` entries keyed by generation, timestamp and `Unit.frame`, and applied to
+   every packet of the frame, in any order. A frame whose decision has left the ring answers
+   `Drop`: a packet with no entry whose index is at or below the highest index an evicted
+   entry saw is treated as such a frame, since a frame's packets are consecutive indices.
 
 **Sequence numbers.** A forwarded packet's outgoing index is `index − offset`.
 
@@ -1175,12 +1216,21 @@ mod `2^32`. Every timestamp difference of the source is kept, including equal ti
 within a frame. At a switch from source A to source B, at the accepted frame start:
 
 - The first new outgoing index is the last outgoing index plus 1.
-- Each SR's wire timestamp is extended on its own source's timeline (`estimate32`).
-- **With synchronized, usable SRs** from both sources, project B's capture time into A's
-  timeline: with `n = ntp_B + ((ts − rtp_B) · 2^32) / clock` the switch packet's capture time,
-  `t_A = rtp_A + ((n − ntp_A) · clock) / 2^32`, with signed floor division in 128 bits. The
-  anchor is `t_A − offset_A`: the projected value **minus A's current source-to-output
-  offset**, so it is on the output timeline.
+- Each SR's wire timestamp is extended on its own source's timeline (`estimate32`, against
+  that source's latest timestamp presented).
+- `on_sr` keeps the latest SR of the current source and of the pending source, with its
+  arrival time. An SR of any other source is ignored, and a source's SR is forgotten when it
+  stops being current or pending. **Usable** means kept, and both SRs come from one sender
+  clock (the publisher's), which the caller vouches for by presenting them on one rewrite.
+- **With usable SRs** from both sources, project B's capture time into A's timeline. Both
+  sources run at the one negotiated `clock`, so the RTP part carries over exactly and only the
+  NTP difference is scaled: `t_A = rtp_A + (ts − rtp_B) + floor(((ntp_B − ntp_A) · clock) / 2^32)`,
+  with `ntp_B − ntp_A` the signed 64-bit difference of the 32.32 NTP values and the product
+  floored exactly (128 bits). This is the capture time `ntp_B + (ts − rtp_B) / clock` of the
+  switch packet, read on A's clock; scaling `ts − rtp_B` through NTP units and back would
+  lose a tick to rounding (900 ticks at 90 kHz would come back as 899). The anchor is
+  `t_A − offset_A`: the projected value **minus A's current source-to-output offset**, so it
+  is on the output timeline.
 - **Otherwise**, advance the last outgoing timestamp by the elapsed arrival time at the
   negotiated clock rate: `last_out + ((at_ns − last_at_ns) · clock) / 10^9`.
 - Clamp the anchor to at least `last_out + 1`, so the output never goes back, set B's
@@ -1196,7 +1246,8 @@ the new generation. `switch_index` answers it, and the caller passes it to `Hist
 
 **Sender reports.** `sr_timestamp(now_ns)` answers the outgoing RTP timestamp for an SR the
 caller sends at `now_ns` under this stream's outgoing SSRC, with its own counts
-([RTP-5](#rtp-5-reception-statistics-reports-and-round-trip-time)):
+([RTP-5](#rtp-5-reception-statistics-reports-and-round-trip-time)). A call that answers a
+timestamp is the report, so it takes the rewrite `mut`:
 
 - `None` when nothing was forwarded since the last report: the caller sends an RR
   ([RFC 3550 §6.4](https://www.rfc-editor.org/rfc/rfc3550#section-6.4)).
@@ -1204,7 +1255,10 @@ caller sends at `now_ns` under this stream's outgoing SSRC, with its own counts
   SR's arrival: `rtp + ((now_ns − sr_at_ns) · clock) / 10^9 − offset`, mod `2^32`.
 - Otherwise, for an active sender without an upstream SR, extrapolate from the local anchor
   of the last forwarded packet, its outgoing timestamp and send time:
-  `last_out + ((now_ns − last_sent_ns) · clock) / 10^9`, mod `2^32`.
+  `last_out + ((now_ns − last_sent_ns) · clock) / 10^9`, mod `2^32`. The send time is the
+  `at_ns` the packet was presented with, since the rewrite sees no later time.
+- Both formulas floor signed values exactly, so a report time before the anchor's goes back
+  by the elapsed ticks.
 
 **Codec counters.** Payloads carry their own counters: the VP8 picture ID (absent, 7 or 15
 bits) and TL0PICIDX (8 bits), the VP9 picture ID (absent, 7 or 15 bits) and the dependency
@@ -1550,7 +1604,9 @@ written here and repeated in the law's comment.
   Target 2 is asked for at frame 1. It takes effect at the first frame whose `switches` has
   bit 2, and frames no target needs are closed up. From `Off`, the first packet with `start`,
   `keyframe` and the bit is forwarded (not `Wait`). A frame of three packets keeps one
-  decision even when its later packets carry other masks. *Oracle:* RTP-11, by hand.
+  decision even when its later packets carry other masks. Two layer frames of one picture
+  share a timestamp with `frame` 0 and 1, and only the first is needed by the target: the
+  first goes out and the second is closed up. *Oracle:* RTP-11, by hand.
 - **`codec_counter_continuity` (RTP-11).** *Oracle:* RTP-11's counter rules, by hand.
   A VP8 picture-ID counter (`Compact`, width 7) and a TL0PICIDX counter (`Compact`, width 8),
   target 0, then target 1 after the switch:

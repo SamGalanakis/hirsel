@@ -121,7 +121,7 @@ store@1/store/journal_test_step_stop src=8d2a266683ef556f sig=6b737b4c4126197e r
 store@1/store/journal_test_streams src=10f4ebd674ae1989 sig=ff4fa2d380e31e54 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_table_priors src=8efa7e725f4469df sig=21fa8240e107a98d run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_v264_recovery src=4770fcc4996eb078 sig=4547565fb62b3c4c run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/journal_test_worker src=676dd71b4767ea30 sig=b74995adff2feb94 run=722e0e8306f441ca bug=- oracle=- rows=pending
+store@1/store/journal_test_worker src=246d11ec4fcd4617 sig=3e25d28e36f236fb run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/journal_window_prefix src=44013812f71276c3 sig=ec997d6219fbe1b6 run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/log_changes_and_tail_window src=17ed4efb7b796d0f sig=65ea5c54025e7930 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/log_dense_and_append_fill src=f87123bd2e998fbe sig=f06290f1e71f5222 run=ea720f3846592392 bug=- oracle=- rows=pending

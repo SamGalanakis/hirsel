@@ -845,7 +845,7 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/platform/*.hirsel", "core/programs/store-crash/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/hirsel.toml", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/platform/hirsel.toml", "core/programs/store-crash/hirsel.toml", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/std_schedule.c"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_library", name="core-store-crash-provider", crate="store_crash_bridge",
                             crate_root="core/tools/store_crash_bridge.rs",
-                            srcs=["core/tools/store_crash_bridge.rs", "crates/hirsel-core-rt/src/test_provider.rs"],
+                            srcs=["core/tools/store_crash_bridge.rs", "core/tools/store_crash_window.rs", "crates/hirsel-core-rt/src/test_provider.rs"],
                             features=["testing"], deps=[], manifest_dir="crates/hirsel-core-rt",
                             package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_script_test", name="core-store-s2", script="core/tools/store_disk_tests.py",

@@ -706,3 +706,112 @@ fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
     }
     window_law_witness(dir, id, acked_image, frames[0])
 }
+
+fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
+    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node))
+}
+
+fn disk_window_width(commit_number: u64) -> u64 {
+    if commit_number < 3 { 3000u64 } else if commit_number == 3 { 96u64 } else { 12288u64 }
+}
+
+fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    for commit_number in 0u64 .. 5 {
+        let width = disk_window_width(commit_number)
+        let start_end = db.file_end
+        result.unwrap(stdout.write(out, "ISSUE"))
+        let edit = run(mut db, None, (copy_env(t), copy_env(commit_number), copy_env(width)), fn(mut tx, input) -> Result[(), Error] {
+            let mut value: Bytes = list.with_capacity(input.2 - 73)
+            list.fill(mut value, input.2 - 73, int.truncate(input.1 + 1))
+            put(mut tx, input.0, input.1, value)
+        })?
+        let Committed(done) = edit else { return Error(Missing("window commit")) }
+        if db.file_end - start_end != width { return Error(Missing("window commit size")) }
+        durable(mut db, done.ticket)?
+        journal_note(out, db.heads[0].head)
+        // The journal gets its idle turn before the next commit is queued.
+        let (wake, signal): (Sender[()], Receiver[()]) = channel.new(1)
+        let turn = task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn)
+        result.unwrap(channel.send(wake, ()))
+        result.unwrap(task.join(take turn))
+    }
+    Ok(())
+}
+
+fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, acknowledged: u64, poisoned: bool) -> Result[(), Error] waits {
+    let mut options = disk_crash_options("window")
+    options.create = false
+    let mut db = open(tasks, d, c, r, options)?
+    let t = table(mut db, "window", std.codec.key_u64(), std.codec.of_bytes())?
+    let captured = snapshot(db)
+    let recovered = captured.head - 1
+    if recovered > issued || acknowledged > recovered || (poisoned && recovered != acknowledged) {
+        return Error(Missing("window receipts and recovered prefix"))
+    }
+    let read_rows = reader(db, 0)?
+    for commit_number in 0u64 .. 5 {
+        let row = get(read_rows, captured, t, commit_number)?
+        if commit_number < recovered {
+            let Some(value) = row else { return Error(Missing("window recovered row")) }
+            if list.len(value) != disk_window_width(commit_number) - 73 { return Error(Missing("window recovered width")) }
+            for octet in value {
+                if octet != int.truncate(commit_number + 1) { return Error(Missing("window recovered bytes")) }
+            }
+        } else if let Some(_) = row {
+            return Error(Missing("window unissued row"))
+        }
+    }
+    let header = option.unwrap(journal_header(d, db.store, db.file_seq, false)?)
+    let segment = journal_path(db.file_seq - 1, "")?
+    let mut previous = disk_io(host.open(d, segment, Read))?
+    let size = disk_io(host.stat_file(mut previous))?.size
+    disk_io(host.close(take previous))?
+    let end = header.prev_end
+    let target = order.min(4194304u64, (end - 72) / 4096 * 4096)
+    // A pending group can extend the file as far as its issued frame end.
+    // The bridge checks the independent bound on every window chunk.
+    let mut issued_end = end
+    for commit_number in recovered .. issued { issued_end += disk_window_width(commit_number) }
+    if size < end || size > order.max(end + target, issued_end) {
+        return Error(disk_fault(segment, size, Malformed))
+    }
+    close(take db)
+}
+
+fn disk_window_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, phase: String, poisoned: bool) -> Result[(), Exit] waits {
+    let mut options = disk_crash_options("window")
+    if phase == "init" {
+        let mut db = open(tasks, d, c, r, options) ?=> |_| Exit(status: 71)
+        let _ = create_table(mut db, spec("window", std.codec.key_u64(), std.codec.of_bytes())) ?=> |_| Exit(status: 71)
+        close(take db) ?=> |_| Exit(status: 71)
+        return Ok(())
+    }
+    if phase == "write" {
+        options.create = false
+        let mut db = match open(tasks, d, c, r, options) {
+            Ok(take opened) => take opened,
+            Error(Io(_)) => return Ok(()),
+            Error(_) => return Error(Exit(status: 72)),
+        }
+        let t = table(mut db, "window", std.codec.key_u64(), std.codec.of_bytes()) ?=> |_| Exit(status: 72)
+        let worked = disk_window_work(mut db, t, tasks, out)
+        let closed = close(take db)
+        if poisoned {
+            if !journal_is_poisoned(take worked) || !journal_is_poisoned(take closed) { return Error(Exit(status: 73)) }
+        } else {
+            if let Error(Io(_)) = worked { return Ok(()) }
+            if let Error(Poisoned(_)) = worked { return Ok(()) }
+            worked ?=> |_| Exit(status: 72)
+            if let Error(Poisoned(_)) = closed { return Ok(()) }
+            closed ?=> |_| Exit(status: 72)
+        }
+        result.unwrap(stdout.write(out, "DONE"))
+        return Ok(())
+    }
+    let issued_arg = option.unwrap(args.get(argv, 2))
+    let acked_arg = option.unwrap(args.get(argv, 3))
+    let issued: u64 = result.unwrap(int.parse(issued_arg))
+    let floor: u64 = result.unwrap(int.parse(acked_arg))
+    disk_window_read(d, c, r, tasks, issued, int.saturating_sub(floor, 1), poisoned) ?=> |_| Exit(status: 74)
+    Ok(())
+}

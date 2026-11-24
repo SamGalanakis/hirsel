@@ -28,6 +28,12 @@ extern void store_crash_checkpoint_reopen(void *);
 extern void store_crash_expect_read_only(void *);
 extern void store_crash_journal_fork(void *, uint8_t);
 extern void store_crash_armed_io(void *, uint64_t *);
+extern void store_crash_window(void *);
+
+static struct {
+    uint64_t phase, issued;
+    int enabled, issuing;
+} window;
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
@@ -91,7 +97,13 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_stat(HirselCoreContext *ctx,uint8_
 }
 extern HirselCoreTransfer __real_hirsel_core_send(HirselCoreContext*,HirselCoreChannel*,void*,uint64_t);
 HirselCoreTransfer __wrap_hirsel_core_send(HirselCoreContext *ctx,HirselCoreChannel *channel,void *value,uint64_t site) {
-    cancel_wait(ctx); return __real_hirsel_core_send(ctx,channel,value,site);
+    cancel_wait(ctx);
+    HirselCoreTransfer sent=__real_hirsel_core_send(ctx,channel,value,site);
+    if(window.enabled && window.phase==1 && ctx==cancellation.root && window.issuing) {
+        window.issuing=0;
+        if(sent.transferred) window.issued++;
+    }
+    return sent;
 }
 extern HirselCoreTransfer __real_hirsel_core_receive(HirselCoreContext*,HirselCoreChannel*,void*,uint64_t);
 HirselCoreTransfer __wrap_hirsel_core_receive(HirselCoreContext *ctx,HirselCoreChannel *channel,void *value,uint64_t site) {
@@ -124,7 +136,7 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
     if(request->operation==15 || request->operation==77) return (HirselCoreWait){1,UINT64_MAX};
     const int probe=hold.schedule_probe && request->operation==12 &&
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
-    const int child=hold.child_probe && request->operation==2 && request->buffer.len>=20 &&
+    const int child=hold.child_probe && (request->operation==2 || request->operation==38) && request->buffer.len>=20 &&
         !memcmp(request->buffer.data,"\x11\0",2) && !memcmp(request->buffer.data+16,"\x01\0\0\0",4);
     if((hold.enabled && request->operation==16) || probe || child) {
         /* Tokens are unique per operation; concurrent syncs keep separate counts. */
@@ -141,6 +153,8 @@ static uint64_t scratch_dirs;
 static uint64_t park_wall_ms;
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
+    if(window.enabled && window.phase==1 && r->operation==12 &&
+        r->buffer.len==5 && !memcmp(r->buffer.data,"ISSUE",5)) window.issuing=1;
     if(r->operation==15 || r->operation==77) return (HirselCoreStep){0};
     if(park_wall_ms && r->operation==10) return (HirselCoreStep){.outcome.value=park_wall_ms};
     const uint64_t scratch_handle=UINT64_C(1)<<48;
@@ -219,7 +233,10 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     parked.enabled=!strcmp(scenario,"journal-worker-cancel");
     parked.target=cut;
     int uncut=!strcmp(raw_cut,"count");
-    enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8, SECOND_SEGMENT_SHORT_WRITE=9 };
+    enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8, SECOND_SEGMENT_SHORT_WRITE=9,
+        WINDOW_CHUNK_FAILURE=10, WINDOW_SYNC_FAILURE=11 };
+    window.enabled=!strcmp(scenario,"window") || !strcmp(scenario,"window-chunk-failure") || !strcmp(scenario,"window-sync-failure");
+    window.issued=0; window.issuing=0;
     int recovery_failure=!strcmp(scenario,"orphan-end-recovery-sync");
     int open_sync_failure=!strcmp(scenario,"checkpoint-reopen-sync-failure");
     int checkpoint_reopen=open_sync_failure || !strcmp(scenario,"checkpoint-reopen");
@@ -227,6 +244,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
         !strcmp(scenario,"poison-write")?4:!strcmp(scenario,"journal-place-split")?5:
         !strcmp(scenario,"journal-place-short")?SECOND_SEGMENT_SHORT_WRITE:
+        !strcmp(scenario,"window-chunk-failure")?WINDOW_CHUNK_FAILURE:
+        !strcmp(scenario,"window-sync-failure")?WINDOW_SYNC_FAILURE:
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
@@ -246,6 +265,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     if(input->args_len==4) store_crash_damage_seed(state,damage_seed);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
+    if(window.enabled) store_crash_window(state);
     if(checkpoint_reopen) store_crash_checkpoint_reopen(state);
     int fork_image=!strcmp(scenario,"journal-fork")?0:!strcmp(scenario,"journal-fork-ack-cut")?1:
         !strcmp(scenario,"journal-fork-complete")?2:!strcmp(scenario,"journal-fork-torn")?3:
@@ -270,7 +290,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         store_crash_phase(state,phase);
         if(phase==2 && read_only) store_crash_expect_read_only(state);
         if(phase==1 && read_only && input->args_len==4) original_manifest=store_crash_manifest_inode(state);
-        cancellation.phase=phase;
+        cancellation.phase=phase; window.phase=phase;
         /* Law 8 opens at midnight, noon and the following midnight. */
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         parked.phase=phase; parked.worker=0;
@@ -283,7 +303,11 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         int torn_manifest=phase==2 && read_only && input->args_len==4
             && store_crash_manifest_inode(state)!=original_manifest;
         const char *expected=store_crash_acked(state)||torn_manifest?"new":"prefix";
-        char floor[32];
+        char issued[32], floor[32];
+        if(window.enabled) {
+            snprintf(issued,sizeof issued,"%llu",(unsigned long long)window.issued);
+            expected=issued;
+        }
         snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
         const char *fixture=checkpoint_reopen?"checkpoint":scenario;
         HirselCoreBuffer args[4]={
@@ -297,7 +321,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         cfg.grants=grants; cfg.grants_len=input->parameters_len;
         cfg.provider=&provider; cfg.state=state; cfg.diagnostic=diagnostic;
         cfg.stop_fd=2; cfg.capabilities=caps; cfg.capabilities_len=input->parameters_len;
-        HirselCoreEntry run_entry=cancellation.enabled?cancellation_entry:entry;
+        HirselCoreEntry run_entry=(cancellation.enabled || window.enabled)?cancellation_entry:entry;
         if(seed) cfg.scheduler.event=schedule_event;
         status=seed?hirsel_core_test_run_scripted(&cfg,run_entry,seed):hirsel_core_run(&cfg,run_entry);
         if(status) {fprintf(stderr,"store phase %s: status %u\n",phases[phase],status);break;}

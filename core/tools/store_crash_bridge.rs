@@ -12,6 +12,9 @@ const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
 const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
 const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
+#[path = "store_crash_window.rs"]
+mod window;
+use window::{WINDOW_SYNC_FAILURE, WindowObservation};
 
 #[repr(C)]
 #[derive(Default)]
@@ -63,6 +66,7 @@ struct Bridge {
     fork_observation: Option<ForkObservation>,
     read_only: Option<Snapshot>,
     staged: Option<StagedCommit>,
+    window: Option<WindowObservation>,
 }
 
 /// A writer COMMIT the live read law stages through stdout ("STAGE").
@@ -370,6 +374,7 @@ impl Bridge {
             }
             2 | 38 => {
                 let file = self.files.get(&handle).expect("live provider descriptor");
+                let mode = file.mode;
                 let name = file.name.clone();
                 let cursor = if op == 38 {
                     let position = u64::from_le_bytes(path.try_into().expect("WriteAt offset"));
@@ -377,6 +382,13 @@ impl Bridge {
                 } else {
                     file.cursor
                 };
+                if self.phase == 1
+                    && is_segment(&name)
+                    && cursor >= 72
+                    && let Some(outcome) = self.window_write(cursor, &data[..len])
+                {
+                    return outcome;
+                }
                 if self.phase == 1 && is_segment(&name) {
                     if let Some(fork) = &self.fork_observation {
                         if fork.image == 5
@@ -432,7 +444,7 @@ impl Bridge {
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
-                let append = op == 2 && file.mode == 2
+                let append = op == 2 && mode == 2
                     || cursor != 0
                         && self
                             .fs
@@ -544,7 +556,12 @@ impl Bridge {
                     assert_eq!(self.failed_syncs, 0, "store synced after a short write");
                     self.segment_syncs += 1;
                 }
+                let window_sync = self.phase == 1 && is_segment(&name);
                 let matches = match self.sync_failure {
+                    WINDOW_SYNC_FAILURE if window_sync => self
+                        .window
+                        .as_ref()
+                        .is_some_and(WindowObservation::syncs_zeros),
                     1 => name.starts_with("j-") && !name.ends_with(".end"),
                     2 => name.starts_with("j-") && name.ends_with(".end"),
                     3 => name.starts_with("p-"),
@@ -562,7 +579,10 @@ impl Bridge {
                     }
                     _ => false,
                 };
-                if self.phase == 1 && self.armed && matches {
+                if self.phase == 1
+                    && (self.armed || self.sync_failure == WINDOW_SYNC_FAILURE)
+                    && matches
+                {
                     self.failed_syncs += 1;
                     if self.sync_failure == 5 {
                         // Only the first seven bytes of B reached storage.
@@ -616,6 +636,9 @@ impl Bridge {
                     }
                 }
                 if self.apply(Op::Sync(&name)) {
+                    if window_sync && let Some(window) = self.window.as_mut() {
+                        window.synced();
+                    }
                     if fork_start.is_some() {
                         let fork = self.fork_observation.as_mut().unwrap();
                         fork.synced = true;
@@ -710,6 +733,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         fork_observation: None,
         read_only: None,
         staged: None,
+        window: None,
     }))
     .cast()
 }
@@ -879,10 +903,11 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// # Safety
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
 /// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
-/// 7 (second segment sync), 8 (O1 open barrier), or 9 (second segment short write).
+/// 7 (second segment sync), 8 (O1 open barrier), 9 (second segment short write),
+/// 10 (window chunk), or 11 (window sync).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= SECOND_SEGMENT_SHORT_WRITE);
+    assert!(kind <= WINDOW_SYNC_FAILURE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

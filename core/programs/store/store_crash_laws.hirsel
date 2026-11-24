@@ -457,6 +457,9 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
 pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "window" || scenario == "window-chunk-failure" || scenario == "window-sync-failure" {
+        return disk_window_crash(d, c, r, tasks, argv, out, phase, scenario != "window")
+    }
     if scenario == "read-only" {
         if phase == "init" {
             disk_crash_init(d, c, r, tasks, "checkpoint") ?=> |_| Exit(status: 31)
@@ -993,8 +996,4 @@ fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
     } else {
         Error(())
     }
-}
-
-fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
-    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node))
 }

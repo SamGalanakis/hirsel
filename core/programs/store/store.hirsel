@@ -5527,6 +5527,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
 
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
+    let zero_extension = disk_io(host.zero_extension(d))?
     let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages) = take startup
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
         Ok(empty_db(c, id, options))
@@ -5543,14 +5544,13 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive) = take channels
-    let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
     let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: 100000000)
     let timer = match task.try_spawn(tasks, bytes JOURNAL_TIMER_GRANT, take timer_input, journal_idle_timer) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
-    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker, synced: take synced_send, idle: Some(take idle_send))
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send, idle: Some(take idle_send))
     let writer = match task.try_spawn(tasks, bytes reserve + JOURNAL_WORKER_SLACK, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),

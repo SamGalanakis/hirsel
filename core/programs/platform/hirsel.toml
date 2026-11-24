@@ -56,3 +56,6 @@ limit = 134217728
 # The place budget and the host's own catalog store.
 [tests.runs."platform@1/local_laws/test_local_reopen_keeps"]
 limit = 134217728
+
+[tests.runs."platform@1/platform/bucket_activation_witness_distinguishes_prepared"]
+limit = 134217728

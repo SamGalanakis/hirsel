@@ -6,7 +6,7 @@
 //! connection is made. The specification is docs/spec/sdk.md, "Calling an
 //! entry from the terminal".
 use crate::cli::{Invocation, OptionId};
-use crate::sdk::{Describe, Exported, Schema, stub_name};
+use crate::sdk::{Describe, Exported, Schema, duplicate_stub_name, stub_name};
 use serde_json::{Map, Number, Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -163,11 +163,7 @@ fn named(description: &Describe) -> Result<Vec<(String, &Exported)>, Error> {
     for entry in &description.exported {
         let name = stub_name(&entry.identity)?;
         if let Some((_, old)) = entries.iter().find(|(n, _)| *n == name) {
-            return Err(format!(
-                "DuplicateStubName({:?}, {:?})",
-                old.identity, entry.identity
-            )
-            .into());
+            return Err(duplicate_stub_name(&old.identity, &entry.identity));
         }
         entries.push((name, entry));
     }

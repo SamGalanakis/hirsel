@@ -433,8 +433,12 @@ pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
         .rsplit('/')
         .next()
         .ok_or("Malformed: definition identity")?;
+    Ok(String::from_utf8(decode_identity_component(name)?)?)
+}
+
+fn decode_identity_component(component: &str) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    let mut bytes = name.as_bytes().iter().copied();
+    let mut bytes = component.bytes();
     while let Some(b) = bytes.next() {
         out.push(if b == b'%' {
             let hi = bytes.next().ok_or("Malformed: percent escape")?;
@@ -444,7 +448,40 @@ pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
             b
         });
     }
-    Ok(String::from_utf8(out)?)
+    Ok(out)
+}
+
+pub(crate) fn duplicate_stub_name(first: &[u8], second: &[u8]) -> Error {
+    fn component_text(component: &str) -> String {
+        let Ok(bytes) = decode_identity_component(component) else {
+            return component.to_owned();
+        };
+        let mut text = String::new();
+        for chunk in bytes.utf8_chunks() {
+            text.push_str(chunk.valid());
+            for &byte in chunk.invalid() {
+                text.extend(byte.escape_ascii().map(char::from));
+            }
+        }
+        text
+    }
+
+    fn path_text(identity: &[u8]) -> String {
+        let path = entry_path(identity).expect("stub name already validated");
+        let (_, path) = path.split_once('/').unwrap_or(("", path));
+        let Some((module, entry)) = path.rsplit_once('/') else {
+            return component_text(path);
+        };
+        let module = module.split('/').map(component_text).collect::<Vec<_>>();
+        format!("{}::{}", module.join("."), component_text(entry))
+    }
+
+    format!(
+        "DuplicateStubName({}, {})",
+        path_text(first),
+        path_text(second)
+    )
+    .into()
 }
 
 /// Complete all generation before touching the requested output directory.
@@ -453,7 +490,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     for entry in &describe.exported {
         let name = stub_name(&entry.identity)?;
         if let Some(old) = names.insert(name, &entry.identity) {
-            return Err(format!("DuplicateStubName({old:?}, {:?})", entry.identity).into());
+            return Err(duplicate_stub_name(old, &entry.identity));
         }
     }
     let mut js = RUNTIME.to_owned();
@@ -698,17 +735,15 @@ mod tests {
             target: "t".into(),
             n_place: 16,
             revision: vec![],
-            exported: vec![entry("a", "toggle"), entry("b", "toggle")],
+            exported: vec![entry("api/a", "toggle"), entry("api/b", "toggle")],
             tables: vec![],
             bindings: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("absent");
-        assert!(
-            write(&d, &out)
-                .unwrap_err()
-                .to_string()
-                .starts_with("DuplicateStubName(")
+        assert_eq!(
+            write(&d, &out).unwrap_err().to_string(),
+            "DuplicateStubName(api.a::toggle, api.b::toggle)"
         );
         assert!(!out.exists());
         assert_eq!(
@@ -733,11 +768,9 @@ mod tests {
         let mut d = d;
         d.exported[0].identity = generic_cases[0].0.to_vec();
         d.exported[1].identity = b"\x01app@1/main/pick[u32]{plain[u32]}($0,$0)->$0".to_vec();
-        assert!(
-            write(&d, &out)
-                .unwrap_err()
-                .to_string()
-                .starts_with("DuplicateStubName(")
+        assert_eq!(
+            write(&d, &out).unwrap_err().to_string(),
+            "DuplicateStubName(main::pick, main::pick)"
         );
         assert!(!out.exists());
         let existing = dir.path().join("existing");

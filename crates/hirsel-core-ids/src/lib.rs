@@ -334,4 +334,74 @@ mod tests {
         assert!(path.write_to(&mut Refuse).is_err());
         assert!(write!(&mut Refuse, "{path}").is_err());
     }
+
+    #[test]
+    fn legacy_record_wire_vectors() {
+        use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+        fn expect<T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq>(
+            value: T,
+            fixed: &[u8],
+            compact: &[u8],
+        ) {
+            let mut out = Vec::new();
+            encoding::write_fixed(&mut out, &value).unwrap();
+            assert_eq!(out, fixed);
+            assert_eq!(encoding::fixed_size(&value).unwrap(), fixed.len() as u64);
+            assert_eq!(encoding::read_fixed::<T>(fixed).unwrap(), value);
+            out.clear();
+            encoding::write_compact(&mut out, &value).unwrap();
+            assert_eq!(out, compact);
+            assert_eq!(encoding::read_compact::<T>(compact).unwrap(), value);
+        }
+
+        // Values through 250 are their own byte. Tags 251 through 254 name
+        // the width of the little-endian payload: 16, 32, 64 or 128 bits.
+        for (value, compact) in [
+            (250u128, &[250][..]),
+            (251, &[251, 251, 0]),
+            (65_535, &[251, 255, 255]),
+            (65_536, &[252, 0, 0, 1, 0]),
+            (4_294_967_295, &[252, 255, 255, 255, 255]),
+            (4_294_967_296, &[253, 0, 0, 0, 0, 1, 0, 0, 0]),
+            (
+                18_446_744_073_709_551_616,
+                &[254, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ] {
+            expect(value, &value.to_le_bytes(), compact);
+        }
+        // Single-byte integers are raw. Wider signed integers use zigzag in compact mode.
+        expect(
+            (255u8, -1i8, -126i16),
+            &[255, 255, 130, 255],
+            &[255, 255, 251, 251, 0],
+        );
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum Field {
+            Empty,
+            Number(u16),
+        }
+        // Option uses a one-byte tag. The enum index is u32, and Vec length is u64.
+        expect(None::<Field>, &[0], &[0]);
+        expect(
+            Some(Field::Number(251)),
+            &[1, 1, 0, 0, 0, 251, 0],
+            &[1, 1, 251, 251, 0],
+        );
+        expect(vec![4u8, 5], &[2, 0, 0, 0, 0, 0, 0, 0, 4, 5], &[2, 4, 5]);
+
+        assert!(encoding::read_compact::<u64>(&[255]).is_err());
+        assert!(encoding::read_compact::<u64>(&[251, 251]).is_err());
+        assert!(encoding::read_compact::<u16>(&[252, 0, 0, 1, 0]).is_err());
+        assert!(encoding::read_fixed::<serde::de::IgnoredAny>(&[]).is_err());
+        for error in [
+            encoding::read_fixed::<u8>(&[42, 0]).unwrap_err(),
+            encoding::read_compact::<u8>(&[42, 0]).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "trailing record bytes");
+        }
+    }
 }

@@ -1,2 +1,0 @@
-# The pinned toolchain is stable. The script only detects nightly rustc.
-buildscript.run = false

@@ -12,6 +12,9 @@ shortlist amendments (VP5, VP8, VP9), and R28 and R29.
 
 Version note (verify-model-2038): T2 ends with `(Recv,3)`.
 
+Version note (verify-model-2038): A `show` failure keeps the triggering tape and
+records its source depth separately.
+
 `std.model` checks a pure reducer. It explores every state that a finite transition
 relation can reach and checks the model's laws on every transition. It is ordinary
 Hirsel code: it takes no capability, reads no verdict, and returns ordinary values. As R28
@@ -156,13 +159,21 @@ on it:
 
 - for `Violated`, the depth of the edge's source plus 1, or 0 for an initial
   pseudo-edge;
-- for `Stuck` and `Handler`, the depth of the state;
+- for `Stuck` and `Handler`, the depth of the state, which for a failing
+  `show` is the source of the action being displayed;
 - for `Unwitnessed`, 0, because there is no path.
 
  Because the walk is breadth first, it has
 the fewest transitions of any path to the failing edge or state. Its **tape** is the
 initial state's index in `init`, followed by the index of each action within its state's
 `actions` list.
+
+When `show` fails, the report displays the path through that action's source.
+The token keeps the full tape for the failure that triggered the report. Replay
+reaches that failure, invokes `show` again, and recovers the source depth
+separately from the tape length. For example, if C2's `show` fails while
+rendering the first `Inc`, the depth is 0 and the tape is still `[0, 0, 0, 0]`.
+Its token is `AQAEAAAAAA==`.
 
 `token` writes that tape in `std.prop`'s
 [token format](prop.md#report-and-replay) with case index 0:

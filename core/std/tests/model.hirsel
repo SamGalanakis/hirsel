@@ -319,6 +319,27 @@ fn replay_malformed() -> bool {
     false
 }
 
+// C2's tape is [0, 0, 0, 0]: initial state 0 and three Inc actions at index 0.
+// Base64 of 01 00 04 00 00 00 00 is AQAEAAAAAA== even if show fails at depth 0.
+// expect: run replay_show_handler() = true
+fn replay_show_handler() -> bool {
+    let mut counterexample = counter(true)
+    counterexample.show = fn(action: CounterAction, mut out: String) {
+        fail("show refused")
+    }
+    let Failed(f) = model.explore(counterexample, model_bounds()) else {
+        return false
+    }
+    let tape = failure_token(f)
+    if model.kind(f) != Handler || model.depth(f) != 0 || tape != "AQAEAAAAAA==" {
+        return false
+    }
+    let Reproduced(replayed) = model.replay(counterexample, model_bounds(), tape) else {
+        return false
+    }
+    model.kind(replayed) == Handler && model.depth(replayed) == 0 && failure_token(replayed) == "AQAEAAAAAA==" && failure_report(replayed) == "model: handler: reproduce: model.replay(m, b, \"AQAEAAAAAA==\"); Fail: show refused in show at depth 0; path: init 0"
+}
+
 type Pipe: key {
     sent: u64,
     outbox: u64,

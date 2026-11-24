@@ -96,6 +96,7 @@ pub type Kind: key = Violated(String) | Stuck | Unwitnessed(String) | Handler
 pub opaque type Failure {
     reason: Kind,
     tape: List[u64],
+    depth: u64,
     path: String,
     states: u64,
     handler: Option[HandlerError]
@@ -278,7 +279,10 @@ fn make_failure[A](show: own fn(A, mut String), b: Bounds, links: List[Breadcrum
     let Initial(initial) = links[at] else {
         fail("model: missing initial state on path")
     }
-    let mut tape: List[u64] = list.with_capacity(list.len(reversed) + 1)
+    let mut at_depth = list.len(reversed)
+    let mut tape: List[u64] = list.with_capacity(at_depth + 1)
+    let mut found = take reason
+    let mut fault = take handler
     list.push(mut tape, initial)
     let mut path = string.from("init ")
     string.push_u64(mut path, initial)
@@ -298,13 +302,16 @@ fn make_failure[A](show: own fn(A, mut String), b: Bounds, links: List[Breadcrum
                     fits = append_path(mut path, ", ") && append_path(mut path, text)
                 },
                 Error(take error) => {
-                    return Failure(reason: Handler, tape: take tape, path: take path, states: 0, handler: Some(take error))
+                    at_depth = list.len(tape) - 1
+                    found = Handler
+                    fault = Some(take error)
+                    fits = false
                 },
             }
         }
         list.push(mut tape, index)
     }
-    Failure(reason: take reason, tape: take tape, path: take path, states: 0, handler: take handler)
+    Failure(reason: take found, tape: take tape, depth: at_depth, path: take path, states: 0, handler: take fault)
 }
 
 fn validate[S: key, A](m: Model[S, A]) {
@@ -409,7 +416,7 @@ pub fn explore[S: key, A](m: Model[S, A], b: Bounds) -> Outcome {
     }
     for entry in stats.witnessed {
         if entry.1 == 0 {
-            return Failed(Failure(reason: Unwitnessed(string.from(entry.0)), tape: list.new(), path: string.new(), states: stats.states, handler: None))
+            return Failed(Failure(reason: Unwitnessed(string.from(entry.0)), tape: list.new(), depth: 0, path: string.new(), states: stats.states, handler: None))
         }
     }
     Closed(take stats)
@@ -420,12 +427,7 @@ pub fn kind(f: Failure) -> Kind {
 }
 
 pub fn depth(f: Failure) -> u64 {
-    let n = list.len(f.tape)
-    if n == 0 {
-        0
-    } else {
-        n - 1
-    }
+    f.depth
 }
 
 fn put_uleb(mut data: Bytes, value: u64) {

@@ -346,14 +346,35 @@ fn f0 = n0 g0 {
 fn explicit_closure_tuples_preserve_published_identity() {
     let module = text::parse(include_str!("../../samples/failure.core")).unwrap();
     let closure = module.closure(TypeId(0));
-    // Fixed-width v1 tuple for Temp with a finalizer, hand-framed with hashlib.
+    // PROG-10's fixed-width v1 tuple for Temp, with a finalizer and no codecs.
+    let expected = hex(concat!(
+        "0100000000000000",                     // one row
+        "040000000000000054656d70",             // Temp
+        "010000000000000000000000",             // resource, address, record
+        "0100000000000000",                     // one field
+        "020000000000000069640000000009000000", // id: scalar u64
+        "00000000000000000000000000",           // no shape hooks, grant, send, held
+        "01",                                   // finalizer hook present
+        "070000000000000073616d706c6573",       // samples
+        "010000000000000030",                   // package version 0
+        "0100000000000000",                     // one module component
+        "07000000000000006661696c757265",       // failure
+        "090000000000000054656d702e64726f70",   // Temp.drop
+        "00000000000000000000000000000000",     // no dictionaries or type arguments
+        "01000000000000000000000001000000",     // one value parameter, ptr
+        "00000000000000000000",                 // no results, dest, or never
+        "0000",                                 // no clone or codec hooks
+    ));
+    let empty = Module::default();
+    let mut order = ModuleOrder::new(&empty);
+    let mut out = Write::module(&mut order);
+    wire::encode_closure(&closure.rows, &mut out);
+    assert_eq!(out.bytes, expected);
+
+    // SHA-256 over the length-framed domain and tuple above.
     assert_eq!(
         closure.hash.0.as_slice(),
         hex("9debaf6b4ea25b29f5812ee89b1043a97472e3787299e459bf95c5ee563c5254")
-    );
-    assert_eq!(
-        closure.hash,
-        ContentHash::of_encoded("hirsel.core-closure.v1", &closure.rows),
     );
 }
 

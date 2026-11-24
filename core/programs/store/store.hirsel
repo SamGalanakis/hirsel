@@ -4492,9 +4492,9 @@ type DiskState {
     pending: Option[Bytes],
     journal_task: Task[Result[(), Error]],
     journal_idle_task: Task[()],
-    // The pager of a store opened with a Tiered collection (§13.8); `Db.pager`
-    // holds its requests.
-    pager_task: Option[Task[()]]
+    // The pager of a store with a Tiered collection (§13.8), started from `tasks`; `restamp` is
+    // the collection a `set_residency` cut moves Memory -> Tiered on main.
+    pager_task: Option[Task[()]], tasks: Tasks, restamp: Option[u32]
 }
 
 fn open_number(db: Db) -> u64 {
@@ -4706,7 +4706,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, tasks, restamp: None))
     Ok(take db)
 }
 

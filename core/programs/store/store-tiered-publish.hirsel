@@ -2,7 +2,6 @@
 // It runs once per cut, before AP16 plans the Memory classes, because the
 // collection-map leaves that AP16 encodes must already name the class-3
 // roots it emits here.
-
 type TieredCutPack: send {
     seq: u64,
     wire: Bytes,
@@ -150,7 +149,7 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let mut queue = drain_cut(db, pager, take queued, take replaced, next_stamp)?
     queue.moved = take moved
     queue.retiring = take retiring
-    let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames(roots)?
+    let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames_restamped(roots, disk_state(db).restamp, mut next_stamp)?
     if list.len(pages) == 0 && !folded {
         return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queue: take queue, compaction: take compaction))
     }

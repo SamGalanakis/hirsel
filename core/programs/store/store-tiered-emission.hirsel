@@ -46,7 +46,9 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
     Ok(())
 }
 
-fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page]) -> Result[(), Error] {
+// `restamp` names the collection this cut moves Memory -> Tiered on the
+// first participant, main (§13.6a T2 "Re-stamping").
+fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page], restamp: Option[u32], mut next_stamp: u64) -> Result[(), Error] {
     let image = std.page.image_of(root)
     let leaf = std.page.level(image) == 0
     for slot in 0u64 .. std.page.count(image) {
@@ -54,21 +56,45 @@ fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page]) -> Re
             let Some(HotPage(child)) = std.page.child_slot(root, slot) else {
                 fail("store: a collection map has Hot children")
             }
-            tiered_emit_map(mut pending, child)?
+            tiered_emit_map(mut pending, child, restamp, mut next_stamp)?
         } else if let Some(_) = std.page.tiered_root_at(image, slot) {
             let key = option.unwrap(std.page.key_at(image, slot))
             let collection: u32 = list.word_be(key, 0)
             let edge = option.unwrap(std.page.child_slot(root, slot))
-            tiered_emit_tree(mut pending, collection, edge)?
+            if restamp == Some(collection) {
+                let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = restamp_tiered_emission(edge, collection, mut next_stamp)?
+                capacity(list.try_reserve(mut pending.pages, list.len(pages)))?
+                capacity(list.try_reserve(mut pending.blobs, list.len(blobs)))?
+                for take frame in take pages {
+                    list.push(mut pending.pages, take frame)
+                }
+                for take frame in take blobs {
+                    list.push(mut pending.blobs, take frame)
+                }
+            } else {
+                tiered_emit_tree(mut pending, collection, edge)?
+            }
         }
     }
     Ok(())
 }
 
 fn tiered_cut_frames(roots: List[Roots]) -> Result[TieredCutFrames, Error] {
+    let mut unused = 0u64
+    tiered_cut_frames_restamped(roots, None, mut unused)
+}
+
+fn tiered_cut_frames_restamped(roots: List[Roots], restamp: Option[u32], mut next_stamp: u64) -> Result[TieredCutFrames, Error] {
     let mut pending = TieredCutFrames(pages: list.new(), blobs: list.new(), seen: map.new())
+    let mut first = true
     for held in roots {
-        tiered_emit_map(mut pending, held.collections.root)?
+        let changed = if first {
+            restamp
+        } else {
+            None
+        }
+        first = false
+        tiered_emit_map(mut pending, held.collections.root, changed, mut next_stamp)?
     }
     Ok(take pending)
 }

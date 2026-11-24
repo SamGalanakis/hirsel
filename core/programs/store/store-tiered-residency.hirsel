@@ -114,3 +114,149 @@ fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp:
     restamp_tiered_frames(mut frames.pages, mut next_stamp)?
     Ok(take frames)
 }
+
+pub type Residency: send = Memory | Tiered
+
+fn collection_mode(tree: PageTree, key: Bytes) -> Option[(u8, u8)] {
+    match std.page.lookup(tree.root, key) {
+        Some(descriptor) => Some((descriptor[52], descriptor[53])),
+        None => None,
+    }
+}
+
+// §13.8 "Residency changes": a schema commit on main, published by its own
+// cut. Tables and Logs only; a Cell is `Missing("residency")`, and an index
+// follows its table's Memory tree (open_lookup and entries read it there).
+fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
+    if !is_disk(db) {
+        return Error(Tiered(Memory))
+    }
+    if object_writer_open(db) {
+        return Error(Tiered(Install))
+    }
+    healthy(db)?
+    let key = prefix(id)?
+    let Some((kind, residency)) = collection_mode(db.heads[0u64].roots.collections, key) else {
+        return Error(Stale(id))
+    }
+    if kind != 1 && kind != 4 {
+        return Error(Missing("residency"))
+    }
+    match r {
+        Tiered => {
+            if residency == 1 {
+                return Ok(())
+            }
+            residency_to_tiered(mut db, id, take key)
+        },
+        Memory => {
+            if residency == 0 {
+                return Ok(())
+            }
+            Error(Tiered(Migrate))
+        },
+    }
+}
+
+// §1.1 "Which plan": the first Tiered collection is admitted against the
+// Tiered plan before anything changes. The plan must be funded (r covers
+// C + K + D + P and the 64 MiB Memory floor, as at open), and the Memory rows
+// already resident must fit what the plan leaves them. The floor is their
+// room, so it is not added on top of them.
+fn admit_tiered_plan(db: Db) -> Result[(), Error] {
+    let o = disk_state(db).options
+    let reserve = int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes))
+    let requested = int.saturating_add(db.resident, reserve)
+    if !tiered_open_funded(o) || requested > o.resident_limit {
+        return Error(Full(Resident(Capacity(requested: requested, available: o.resident_limit))))
+    }
+    Ok(())
+}
+
+fn start_residency_pager(mut db: Db) -> Result[(), Error] {
+    let d = log_directory(db)?
+    let link = {
+        let state = disk_state(db)
+        let o = state.options
+        let funding = TieredPagerFunding(cache_bytes: o.cache_bytes, writer_pin_bytes: o.writer_pin_bytes, pager_task_bytes: o.pager_task_bytes, cut_pins: true)
+        start_tiered_pager_link(state.tasks, db.store, state.open, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
+    }
+    let worker = attach_tiered_pager(mut db, take link)
+    write_disk(mut db.disk, take worker, scoped fn(mut state: DiskState, take running: Task[()]) {
+        state.pager_task = Some(take running)
+    })
+    Ok(())
+}
+
+// A refused first change leaves the store as it was: no pager.
+fn stop_residency_pager(mut db: Db) waits {
+    clear_parked(mut db)
+    db.pager_writer = None
+    db.park_notices = None
+    db.pager = None
+    let running = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Task[()]] {
+        replace(mut state.pager_task, None)
+    })
+    if let Some(take started) = take running {
+        let mut pager = take started
+        task.cancel(mut pager)
+        let _ = task.join(take pager)
+    }
+}
+
+fn residency_to_tiered(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
+    if !store_has_tiered(db) {
+        admit_tiered_plan(db)?
+    }
+    let started = match db.pager {
+        Some(_) => false,
+        None => {
+            start_residency_pager(mut db)?
+            true
+        },
+    }
+    let changed = publish_tiered_residency(mut db, id, take key)
+    if let Error(_) = changed {
+        if started {
+            stop_residency_pager(mut db)
+        }
+    }
+    changed
+}
+
+// The head's collection becomes a Hot Tiered root over its Memory images.
+// The cut's T2 emits it with fresh stamps (§13.6a T2 "Re-stamping"), so no
+// stamp is reached in classes 0 and 3. Followers see the head's pre-change
+// roots: the same rows, and no Hot Tiered page that carries a Memory stamp.
+fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
+    let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
+    let mut changed = take roots
+    let mut tree = share_page_tree(changed.collections)
+    let (take root, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, key) else {
+            return Error(Stale(id))
+        }
+        let mut record = copied(before)?
+        record[53] = 1u8
+        (arc.share(here), take record)
+    }
+    let first = stamp_after(ids)?
+    let mut draw = first
+    page_result(std.page.insert(mut tree.root, clone(key), take descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, key, HotPage(take root), mut draw))?
+    changed.collections = take tree
+    let head = db.heads[0u64].head + 1
+    let replacement = ProposedMain(roots: take changed, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None)
+    let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, draw - 1))?
+    db.next_node = draw - 1
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.restamp = Some(id)
+    })
+    let installed = cut_install(mut db, ReplaceMain(take replacement, None))
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.restamp = None
+    })
+    let _ = installed?
+    publish(take publication)
+    Ok(())
+}

@@ -1,0 +1,162 @@
+// §13.8 "Residency changes" and §13.6a T2 "Re-stamping". A Memory table
+// moves to Tiered through its schema commit's cut. The oracle walks the
+// published tree frame by frame from the pack files (compact_walk), and the
+// pinned pre-change holder's Memory images give the stamps classes 0 and 1
+// still place. No stamp may be reached in both families (L88 (g)).
+fn residency_value(key: u64) -> Bytes {
+    // Even rows are BLOBs (class 4), odd rows inline in their leaf.
+    let width = if key % 2 == 0 {
+        1100u64
+    } else {
+        48u64
+    }
+    let mut body: Bytes = list.with_capacity(width)
+    list.fill(mut body, width, int.truncate(key))
+    take body
+}
+
+fn residency_rows(mut db: Db, row_count: u64) -> Result[Table[u64, Bytes], Error] waits {
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, None, copy_env((fixture, row_count)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+        for key in 0u64 .. env.1 {
+            put(mut tx, env.0, key, residency_value(key))?
+        }
+        Ok(())
+    })? else {
+        fail("residency: fixture puts did not commit")
+    }
+    Ok(rows)
+}
+
+fn residency_check_rows(db: Db, s: Snapshot, rows: Table[u64, Bytes], row_count: u64) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for key in 0u64 .. row_count {
+        if get(read_handle, s, rows, key)? != Some(residency_value(key)) {
+            fail("residency: every row reads back unchanged")
+        }
+    }
+    Ok(())
+}
+
+fn residency_memory_stamps(page: Arc[std.page.Page], mut stamps: List[u64]) {
+    let image = std.page.image_of(page)
+    list.push(mut stamps, std.page.stamp(image))
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(HotPage(child)) = std.page.child_slot(page, slot) {
+            residency_memory_stamps(child, mut stamps)
+        } else if let Some(ColdPage(_)) = std.page.child_slot(page, slot) {
+            fail("residency: a Memory holder's tree is resident")
+        } else if let Some(BlobEdge(body)) = std.page.owning_edge(image, slot) {
+            list.push(mut stamps, body.stamp)
+        }
+    }
+}
+
+fn residency_mode(db: Db, id: u32) -> Result[(u8, u8), Error] {
+    let Some(mode) = collection_mode(db.heads[0u64].roots.collections, prefix(id)?) else {
+        fail("residency: the table is in main's collection map")
+    }
+    Ok(mode)
+}
+
+fn residency_check_published(d: Dir, db: Db, id: u32, held_stamps: List[u64]) -> Result[(), Error] waits {
+    let walk = compact_walk(d, db, id)?
+    for stamp in held_stamps {
+        if map.contains(walk.places, stamp) {
+            fail("residency: a Tiered frame keeps a stamp the Memory holder still places")
+        }
+    }
+    // Every pack the walk reached is listed, and Tiered (class 3 or 4).
+    let mut reached = 0u64
+    let mut pages = false
+    let mut blobs = false
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if let Some(_) = map.get(walk.live, seq) {
+            if listed.class < 3 {
+                fail("residency: a Tiered frame sits in a Memory pack")
+            }
+            pages = pages || listed.class == 3
+            blobs = blobs || listed.class == 4
+            reached += 1
+        }
+    }
+    if reached != map.len(walk.live) {
+        fail("residency: a reached frame sits in an unlisted pack")
+    }
+    if !pages || !blobs {
+        fail("residency: the table's pages and BLOBs are both emitted")
+    }
+    Ok(())
+}
+
+@test
+fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 200u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = residency_rows(mut db, row_count)?
+    if let Some(_) = db.pager {
+        fail("residency: a store with no Tiered collection starts no pager")
+    }
+    let before = snapshot(db)
+    let _ = pin(mut db, "before", before)?
+    let mut held_stamps: List[u64] = list.new()
+    {
+        let Some((page, _)) = std.page.collection_entry(before.roots.collections.root, prefix(rows.id)?) else {
+            fail("residency: the pinned holder has the table")
+        }
+        residency_memory_stamps(arc.share(page), mut held_stamps)
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    if residency_mode(db, rows.id)? != (1u8, 1u8) {
+        fail("residency: main's descriptor names the table Tiered")
+    }
+    if let None = db.pager {
+        fail("residency: the first Tiered collection starts the pager")
+    }
+    residency_check_published(d, db, rows.id, held_stamps)?
+    residency_check_rows(db, snapshot(db), rows, row_count)?
+    residency_check_rows(db, before, rows, row_count)?
+    // A second change to the same residency is no commit.
+    let generation = db.checkpointed
+    set_residency(mut db, rows.id, Tiered)?
+    if db.checkpointed != generation {
+        fail("residency: an unchanged residency makes no cut")
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if residency_mode(reopened, rows.id)? != (1u8, 1u8) {
+        fail("residency: the change survives a reopen")
+    }
+    residency_check_published(d, reopened, rows.id, held_stamps)?
+    residency_check_rows(reopened, snapshot(reopened), rows, row_count)?
+    close(take reopened)
+}
+
+// §1.1 "Which plan": the first change is admitted against the Tiered plan.
+// On a store sized below its floor it is `Full(Resident(..))` and changes
+// nothing: no pager, no cut, no pack, and the table stays Memory.
+@test
+fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(182375271u64)?)?
+    let rows = residency_rows(mut db, 20)?
+    let generation = db.checkpointed
+    let next_pack = disk_state(db).pages.next_pack
+    let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Tiered) else {
+        fail("residency: a store below the Tiered floor refuses the first change")
+    }
+    if let Some(_) = db.pager {
+        fail("residency: a refused change leaves no pager")
+    }
+    if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
+        fail("residency: a refused change publishes nothing")
+    }
+    if residency_mode(db, rows.id)? != (1u8, 0u8) {
+        fail("residency: a refused change leaves the table Memory")
+    }
+    residency_check_rows(db, snapshot(db), rows, 20)?
+    close(take db)
+}

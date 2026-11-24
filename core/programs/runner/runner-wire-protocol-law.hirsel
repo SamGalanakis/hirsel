@@ -30,7 +30,6 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
         control: None, completion: take completion, allocation: take pool, report: None)
     let allowance = WIRE_OWNER_FLOOR + wire_connection_pool_bytes(config)
     let serve: fn(take WireAccept[WireSession[(), ()]]) -> Result[(), std.wsock.Error] waits = wire_accepted
-    let owner = task.spawn(tasks, bytes allowance, take job, serve)
 
     let mut request: Bytes = clone(b"GET /hirsel HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
     if list.len(offered) != 0u64 {
@@ -47,6 +46,8 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     while sent < list.len(request) {
         sent += result.unwrap(host.send_pair(mut writer, list.slice(request, sent, list.len(request)), b"", deadline))
     }
+    // A refusal may close as soon as it has the HTTP head. Queue the full pipeline first.
+    let owner = task.spawn(tasks, bytes allowance, take job, serve)
     let mut expected: Bytes = if list.len(selected) == 0u64 {
         clone(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
     } else {

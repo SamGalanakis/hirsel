@@ -1,0 +1,84 @@
+fn decodes(frame: Bytes, source: Addr, destination: Addr, length: u64, cap: u64) -> bool {
+    match proxy.step(frame, cap) {
+        Ok(Done(header, consumed)) => header.source == source && header.destination == destination && consumed == length,
+        _ => false
+    }
+}
+
+fn refusal(frame: Bytes, cap: u64, expected: proxy.Refusal) -> bool {
+    match (proxy.step(frame, cap), expected) {
+        (Error(Missing), Missing) => true,
+        (Error(Malformed), Malformed) => true,
+        (Error(Local), Local) => true,
+        (Error(Family), Family) => true,
+        (Error(TooLong), TooLong) => true,
+        _ => false
+    }
+}
+
+// HAProxy proxy-protocol.txt §2.2. Addresses, ports and lengths are in network byte order.
+// expect: run proxy_v2_header() = 0
+fn proxy_v2_header() -> u64 {
+    let cap = proxy.DEFAULT_HEADER_MAX
+    if cap != 536 {
+        return 1
+    }
+    let tcp4 = b"\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x0c\xc0\x00\x02\x01\xcb\x00\x71\x02\xc3\x50\x14\xe9"
+    let tcp6 = b"\r\n\r\n\x00\r\nQUIT\n\x21\x21\x00\x2e\x20\x01\x0d\xb8\x12\x34\x56\x78\x9a\xbc\xde\xf0\x00\x00\x00\x01\x20\x01\x0d\xb8\xa1\xb2\xc3\xd4\xe5\xf6\x10\x20\x00\x00\x00\x02\x01\xbb\x20\xfb\x03\x00\x04\x00\x00\x00\x00\xef\x00\x00"
+    for (frame, source, destination, length) in[
+    // TCP4 without TLVs, then TCP6 with CRC32C and an unknown empty TLV.
+    (tcp4, Addr(ip: V4(0xc0000201), port: 50000), Addr(ip: V4(0xcb007102), port: 5353), 28u64), (tcp6, Addr(ip: V6(0x20010db812345678, 0x9abcdef000000001), port: 443), Addr(ip: V6(0x20010db8a1b2c3d4, 0xe5f6102000000002), port: 8443), 62u64)] {
+        let mut buffer: Bytes = list.with_capacity(length + 3)
+        for i in 0u64 .. length {
+            let expected = if i < 16 {
+                16u64
+            } else {
+                length
+            }
+            match proxy.step(buffer, cap) {
+                Ok(Need(total)) => {
+                    if total != expected {
+                        return 2
+                    }
+                },
+                _ => return 3
+            }
+            list.push(mut buffer, frame[i])
+        }
+        if !decodes(buffer, source, destination, length, length) {
+            return 4
+        }
+        list.append(mut buffer, b"\x16\x03\x01")
+        match proxy.step(buffer, cap) {
+            Ok(Done(header, consumed)) => {
+                if header.source != source || header.destination != destination || consumed != length || list.slice(buffer, consumed, list.len(buffer)) != b"\x16\x03\x01" {
+                    return 5
+                }
+            },
+            _ => return 6
+        }
+    }
+    if !refusal(b"PROXY TCP4 192.0.2.1 203.0.113.2 50000 5353\r\n", cap, Missing) || !refusal(b"\r\n\r\n\x01\r\nQUIT\n\x10\xff\xff\xff", cap, Missing) {
+        return 7
+    }
+    let fixed_cases: Inline[(u8, u8, u16, proxy.Refusal), 19] =[
+    // Version, command, family and length errors win before policy refusals.
+    (0x10, 0x11, 12, Malformed), (0x22, 0x11, 12, Malformed), (0x20, 0x10, 0, Malformed), (0x21, 0x13, 12, Malformed), (0x21, 0x41, 12, Malformed), (0x21, 0x11, 11, Malformed), (0x21, 0x21, 35, Malformed), (0x21, 0x32, 215, Malformed), (0x21, 0x11, 14, Malformed),
+    // LOCAL and unsupported families precede TooLong.
+    (0x20, 0x00, 0, Local), (0x20, 0x00, 521, Local), (0x21, 0x00, 0, Family), (0x21, 0x12, 12, Family), (0x21, 0x22, 36, Family), (0x21, 0x31, 216, Family), (0x21, 0x32, 216, Family), (0x21, 0x12, 521, Family), (0x21, 0x11, 521, TooLong), (0x21, 0x21, 65535, TooLong)]
+    for (version_command, family, body_length, expected) in fixed_cases {
+        let mut fixed: Bytes = b"\r\n\r\n\x00\r\nQUIT\n"
+        list.push(mut fixed, version_command)
+        list.push(mut fixed, family)
+        list.push(mut fixed, int.truncate(body_length >> 8))
+        list.push(mut fixed, int.truncate(body_length))
+        if !refusal(fixed, cap, expected) {
+            return 8
+        }
+    }
+    let overrun = b"\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x10\xc0\x00\x02\x01\xcb\x00\x71\x02\xc3\x50\x14\xe9\x01\x00\x02a\x16\x03\x01"
+    if !refusal(overrun, cap, Malformed) || !refusal(b"\r\n\r\n\x00\r\nQUIT\n\x20\x00\x00\x03\x01\x00\x01", cap, Malformed) || !refusal(b"\r\n\r\n\x00\r\nQUIT\n\x21\x00\x00\x04\x01\x00\x00\x00", cap, Malformed) {
+        return 9
+    }
+    0
+}

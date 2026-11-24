@@ -1,0 +1,89 @@
+pub type Header {
+    source: Addr,
+    destination: Addr
+}
+
+pub type Refusal = Untrusted | Missing | Malformed | Local | Family | TooLong | Silent | Ended | Failed(NetError)
+
+pub type Step = Need(u64) | Done(Header, u64)
+
+pub const DEFAULT_HEADER_MAX: u64 = 536
+
+const fixed_size: u64 = 16
+
+/// Decodes the PROXY v2 header at the start of b. Need gives the total bytes
+/// to supply next, and Done gives the header length. Alloc: nothing.
+pub fn step(b: Bytes, header_max: u64) -> Result[Step, Refusal] {
+    let size = list.len(b)
+    if size >= 12 {
+        // The signature is \r\n\r\n\x00\r\nQUIT\n.
+        let first: u64 = list.word_be(b, 0)
+        let last: u32 = list.word_be(b, 8)
+        if first != 0x0d0a0d0a000d0a51 || last != 0x5549540a {
+            return Error(Missing)
+        }
+    }
+    if size < fixed_size {
+        return Ok(Need(fixed_size))
+    }
+    let version_command = b[12]
+    if version_command != 0x20 && version_command != 0x21 {
+        return Error(Malformed)
+    }
+    let family = b[13]
+    let address_size: u64 = match family {
+        0x00 => 0,
+        0x11 => 12,
+        0x12 => 12,
+        0x21 => 36,
+        0x22 => 36,
+        0x31 => 216,
+        0x32 => 216,
+        _ => return Error(Malformed)
+    }
+    let length: u16 = list.word_be(b, 14)
+    let end = fixed_size + (int.widen(length) : u64)
+    let tlvs = fixed_size + address_size
+    if end < tlvs || end > tlvs && end - tlvs < 3 {
+        return Error(Malformed)
+    }
+    // The fixed header decides over-cap requests without reading the body.
+    if end <= header_max && tlvs < end {
+        if size < end {
+            return Ok(Need(end))
+        }
+        let mut at = tlvs
+        while at < end {
+            if end - at < 3 {
+                return Error(Malformed)
+            }
+            let value_size: u16 = list.word_be(b, at + 1)
+            at += 3 + (int.widen(value_size) : u64)
+        }
+        if at != end {
+            return Error(Malformed)
+        }
+    }
+    if version_command == 0x20 {
+        return Error(Local)
+    }
+    if family != 0x11 && family != 0x21 {
+        return Error(Family)
+    }
+    if end > header_max {
+        return Error(TooLong)
+    }
+    if size < end {
+        return Ok(Need(end))
+    }
+    let header = if family == 0x11 {
+        let source = Addr(ip: V4(list.word_be(b, 16)), port: list.word_be(b, 24))
+        let destination = Addr(ip: V4(list.word_be(b, 20)), port: list.word_be(b, 26))
+        Header(source: source, destination: destination)
+    } else {
+        let source = Addr(ip: V6(list.word_be(b, 16), list.word_be(b, 24)), port: list.word_be(b, 48))
+        let destination = Addr(ip: V6(list.word_be(b, 32), list.word_be(b, 40)), port: list.word_be(b, 50))
+        Header(source: source, destination: destination)
+    }
+    Ok(Done(header, end))
+}

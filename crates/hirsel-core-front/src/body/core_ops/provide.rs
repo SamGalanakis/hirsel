@@ -79,10 +79,6 @@ impl Cx<'_, '_, '_> {
             let ok = self.runtime_nonzero(u, value, n)?;
             self.raise_unless(ok, requested, written, n);
         }
-        if op == HostOp::UdpFillPackets {
-            self.consume(vals[2], n);
-            self.drop_field(vals[2], self.p.fns[f].params[2].ty, n);
-        }
         if matches!(
             op,
             HostOp::ProvideStdout

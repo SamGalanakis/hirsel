@@ -827,11 +827,7 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     // The checked pointer reads the inner PAGE. The file's only frame after
     // HEADER is the extension containing it, so the offset cannot be live.
     disk_write_synced(path, "p-2", page_planted_pack_vector())?
-    let (_, take record) = disk_read_page_manifest("MANIFEST", page_manifest_vector())?
-    let mut forged = take record
-    forged.pack_root.offset = 88
-    let invalid = disk_page_manifest_bytes(id, forged)?
-    disk_write_synced(path, "MANIFEST", invalid)?
+    disk_write_synced(path, "MANIFEST", page_planted_manifest_vector())?
     disk_write_synced(path, "MANIFEST.tmp", string.as_bytes("tmp"))?
     disk_write_synced(path, "p-3", string.as_bytes("leftover"))?
     match read_selected_page_manifest(path) {

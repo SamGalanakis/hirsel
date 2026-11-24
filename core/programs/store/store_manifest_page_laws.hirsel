@@ -13,7 +13,8 @@ fn publish_page_manifest(d: Dir, id: StoreId, m: PageManifest, target: Option[Ta
     publish_page_manifest_bytes(d, scratch)
 }
 
-// These pack and MANIFEST vectors use the AP3/AP14 byte layouts with libxxhash.
+// Independently encoded from AP3, AP14, AP20 and §13.1 using libxxhash.
+// The 29-byte pack row has a zero index offset. Both live PAGEs start at byte 72.
 fn page_manifest_vector() -> Bytes {
     let words: Inline[u64, 69] =[
         0x0000003800010001,
@@ -26,7 +27,7 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000001,
         0x0000000000000000,
         0x000001cf00010031,
-        0xa07c5e1991034327,
+        0xf14d2727324ffe74,
         0x0000000000000001,
         0x0000100000001000,
         0x0100004000000400,
@@ -35,7 +36,7 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000003,
         0x0000000000000001,
         0x0000000000000001,
-        0x0000000000000000,
+        0x000000000000004e,
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
@@ -57,9 +58,9 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000000,
         0x0000000000000000,
         0x0000000200000000,
+        0x0000004800000000,
         0x0000004400000000,
         0xc222e9723fa736a5,
-        0x157b08ee7aee15c3,
         0x0000000000000002,
         0x0000000000000000,
         0x0000000000000000,
@@ -570,5 +571,13 @@ fn page_planted_pack_vector() -> Bytes {
     for byte in expected {
         list.push(mut raw, byte)
     }
+    take raw
+}
+
+fn page_planted_manifest_vector() -> Bytes {
+    let mut raw = page_manifest_vector()
+    // The pack-list PagePtr's offset is at byte 88 + 236 + 8.
+    list.set_word_le(mut raw, 332, 88u64)
+    list.set_word_le(mut raw, 80, 0x6443b6aa6cf3a14eu64)
     take raw
 }

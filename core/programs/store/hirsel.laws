@@ -43,7 +43,7 @@ store@1/store/disk_test_branches src=d8b67fed78a0f33f sig=0cda3aa08380b8c8 run=e
 store@1/store/disk_test_db src=86a0a4f74eac1694 sig=52c440fda99c4aaa run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_db_refusal src=95d1b4ad752de8cf sig=e2543e436001b32a run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_format4 src=734498598c596323 sig=4cb3887073e93671 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/disk_test_format_cutover src=2335723e8a6d9616 sig=d5fcd0025c844679 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/disk_test_format_cutover src=d5714f3476bd5f78 sig=d5fcd0025c844679 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_frames src=564272578f42507f sig=177851b951c67adc run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_import_read_boundaries src=d0d30f33980cec74 sig=21db0ae3126ee5ef run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/disk_test_load_path_layout src=b2e54b0228149e6f sig=c263428c50c2d2fc run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -53,7 +53,7 @@ store@1/store/disk_test_opening src=be16cf1a5e2d3b3b sig=acc6a2592790d500 run=ea
 store@1/store/disk_test_page_emission src=2c08486a2b9549d7 sig=7f47f1135ab06eb2 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_page_location_closure src=6a4a89744a851879 sig=2e012bbbdf49c1f0 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_paged_generation src=da03a7cb0e330e4d sig=89f56bb3141edbdf run=c44758d978325bd3 bug=- oracle=- rows=pending
-store@1/store/disk_test_paged_inventory src=a2c7b493642837fd sig=f83760c15dae0003 run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/disk_test_paged_inventory src=d7160256659b5066 sig=cc0bff229ee8ab3a run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/disk_test_paged_manifest src=ef751c34db624e00 sig=1e22b08750ba1041 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_publish_refusal src=1cc5c438be3fc68f sig=dbf92c46eb41e13f run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_read_only_snapshot src=7d22b65fe4206e16 sig=d11cb110ea669da0 run=ea720f3846592392 bug=- oracle=- rows=pending

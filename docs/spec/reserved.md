@@ -55,7 +55,10 @@ process is not such a boundary, because one package may use a handle from both k
 call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
 and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typed reading
 of a refused handle; varargs, arbitrary pointers, dynamic loading and
-macOS.
+macOS. The macOS (`aarch64-apple-darwin`) rules are written but not built: the `target`
+module (PROG-6), FFI-3's Mach-O rows and import check, and the macOS host text in net,
+launch, profiling and the Store spec. macOS leaves this list when its native Mac gate is
+green.
 
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;

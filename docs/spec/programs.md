@@ -321,7 +321,7 @@ adapted function for a `$callable` adapter, and the
 builtin address (PROG-10) for a core function the compiler implements, such as `float.widen`.
 Equal revisions mean equal addresses, so Hirsel has one identity for code; the revision only
 keeps the bytes a program holds apart from the keys of a code store. Nothing else enters: not
-the backend, the runtime, the target, the optimisation level, the root limit, source
+the backend, the runtime, the target (except through the arms PROG-6 retains for it), the optimisation level, the root limit, source
 positions or optimisation hints. So:
 
 - an edit to comments, layout, local or parameter names, item order, or an item the
@@ -421,7 +421,11 @@ owner's generated functions of that kind, in the order the checker emits them. N
 number enters the name, so wrapping an earlier expression in parentheses never renames a later
 closure. A generated adapter that several owners share keeps its one shared identity.
 
-**Body.** An instance's **body** is the normal form of its checked IR: its own function, the
+**Retained code.** An instance's **retained code** is its checked IR with the arms that a
+constant expression rules out removed ([PROG-6](#prog-6-one-meaning)); for a build with no
+such branch it is the whole checked IR. Only retained code makes slots, calls and reach.
+
+**Body.** An instance's **body** is the normal form of its retained code: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and
 its **slots**, the functions it uses but does not define. It holds:
 
@@ -565,7 +569,9 @@ replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)) and no recording 
 A program has one meaning. Whether it is accepted, and what each accepted program does,
 does not depend on the engine, the build mode, optimisation, flags, the host, or the order
 in which definitions are checked. There are no conditional compilation forms and no
-language switches. The one exception is an implementation's resource refusal: a program
+language switches. The one named input is the **target** of a build
+([SEM-8](semantics.md#sem-8-determinism)), chosen with `--target`: it is the only flag that
+reaches a program, and it does so only as below. The one exception is an implementation's resource refusal: a program
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation, or instantiation past a depth or count) may be refused with a message that
 names no rule; such a refusal is not a meaning of the program. Likewise, where a step bound
@@ -576,3 +582,70 @@ A package's dependencies are fixed before the compiler runs ([packages](packages
 published library by its root, a workspace member by its captured files, and a toolchain
 package by the toolchain, so `--locked` and `--frozen` decide only whether a command
 proceeds.
+
+Version note (2026-11-25, macos-s0-spec-2495; macOS decision D1, not yet built): the target
+becomes a named input through core module `target`, whose contract is
+[target](../../core/std/api/target.md). Nothing is conditionally compiled out of checking,
+and the host stays invisible.
+
+A program is checked identically for every target. The target of a build enters a program
+only as the values of the constants of core module `target`, `target.os` and `target.arch`,
+which the toolchain supplies (LANG-20). These rules hold:
+
+- **Every arm is checked on every target.** Every arm of a branch on such a constant is
+  parsed, resolved, typed and ownership-checked on every target, and `hirsel check`, which
+  has no target, checks them all. Types never differ by target: a foreign module's interface
+  is one text for all targets, and only its archive rows differ
+  ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)).
+- **A constant that depends on `target` is evaluated for every supported target.** A
+  failure on any one is a refusal on all, so acceptance never depends on the target
+  ([LANG-20](language.md#lang-20-constants)).
+- **Retention is decided by form.** A `match` whose scrutinee, or an `if` whose condition,
+  is a constant expression keeps only its taken arm in retained code (PROG-10). A constant
+  expression is exactly what LANG-20 admits in a constant's initialiser: literals,
+  operators and constants, with no call and no local. So `match target.os { ... }` keeps one
+  arm, and `let o = target.os` followed by `match o { ... }` keeps both, on every engine.
+  How much an engine folds never decides what is retained. The rule holds for every
+  constant, not only `target`'s. Reach ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused))
+  and FFI-3 are computed over retained code.
+- **`match` on `target.os` and `target.arch` is exhaustive**, as every `match` is, so a
+  target added later is a refusal at every branching site that names no arm for it.
+- **Reaching `target.unsupported(why)` refuses the build for that target.** It is never a
+  run-time failure and is not a meaning of the program. The refusal names the target and
+  the reach chain from the entry:
+  `PROG-6: main reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through app.run → queue.submit`.
+
+```hirsel unbuilt
+fn batched(n: u64) -> u64 { n + 1 }
+fn submit(n: u64) -> u64 {
+    match target.os {
+        Linux => batched(n),
+        Macos => target.unsupported("batched submit needs io_uring"),
+    }
+}
+```
+
+Built for `x86_64-unknown-linux-gnu`, `submit` retains the `Linux` arm only. Built for
+`aarch64-apple-darwin`, a program whose entry reaches `submit` is refused with the PROG-6
+line above, naming the chain. Both arms are typed for both targets: an arm that fails to type
+is refused on every target, with the build's target playing no part.
+
+```hirsel unbuilt
+fn pick() -> u64 {
+    let o = target.os
+    match o {
+        Linux => 1,
+        Macos => target.unsupported("needs Linux"),          // refused: PROG-6, on every target
+    }
+}
+```
+
+`o` is a local, so the scrutinee is not a constant expression, both arms are retained, and
+every build whose entry reaches `pick` reaches `target.unsupported`.
+
+`target` describes the artifact, never the machine a run is on: one binary has one value
+on every run and every replay, so it passes no replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)) and is not an authority
+([CAP-1](capabilities.md#cap-1-authority-is-explicit)). A run-time description of the host
+is not provided. A value of `target.Os` is not a claim that Hirsel supports that target:
+macOS stays in [reserved](reserved.md) until its native gate is green.

@@ -49,8 +49,24 @@ release build time for the x86-64 corpus from 268.18 s to 270.50 s (+0.87%).
 AWFY with embedded DWARF took 123.00 s before and 119.18 s after. LangArena
 with default flags took 145.18 s before and 151.32 s after.
 
+**Image identity per object format.** The rule above is written for ELF. A Mach-O
+image (`aarch64-apple-darwin`; not yet built) follows the same rule with the platform's
+equivalents:
+
+| | ELF | Mach-O |
+|---|---|---|
+| release link identity | GNU build ID | `LC_UUID`, which the linker derives from the image's content |
+| release link detached file | `.build-id/XX/REST.debug` | `NAME.dSYM/Contents/Resources/DWARF/NAME`, a Mach-O file with a `__DWARF` segment and the same UUID, where `lldb` looks with no configuration |
+| dev link identity | none, so the image digest | none: dev links pass `-no_uuid`, because the resident link patches them in place and a UUID is a digest of the whole image |
+| dev link detached file | `.hirsel-debug/DIGEST.debug` | the same |
+
+The driver writes the Mach-O debug file itself, as it writes the ELF one, so no `dsymutil`
+and no debug map are involved. In a `.hprof`, the `build_id` column and key hold the
+GNU build ID of an ELF image or the `LC_UUID` of a Mach-O image, as lowercase hexadecimal;
+the profile file's version does not change.
+
 A resolver reports `full_dwarf` when the image embeds DWARF or the detached
-file matches its GNU build ID or exact image digest. `symtab_only` provides
+file matches its image identity (GNU build ID, `LC_UUID`) or exact image digest. `symtab_only` provides
 ELF function names when the image has a symbol table. `offsets_only` reports
 the mapping and relative PC when neither source is available.
 

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.103: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.104: the M4 store library (lane store-spec-1001)
+
+v2.104 (macos-s0-spec-2495; macOS decision D5): §3.3c states how a macOS host executes every Store sync: `F_FULLFSYNC`, and nothing weaker. Text only; not built (macOS slice S8). The format, recovery, the commit law and the handle contracts of §3.3b are unchanged: a `Durable` or `Direct` completion means durable on every host. `F_BARRIERFSYNC` is rejected.
 
 v2.103 (run-activation-fate-amend2-2444; RUNNER-SPEC v2.66): recheck 2430's store amends to §3.5a. Text only; not built. **B1:** on a table the staging replaces, `stage_rewrite` edits the row in the staged replacement range and writes no 0x0085 row; this is build slice F1.5, after F1, which lands refusing it. OLD's M1–M3 check is unchanged: a frame row on a table the import replaces or drops is `ImportMalformed`. **B2:** the 0x0085 frame is the file's last, in role 6, and OLD's key check reads the catalog and collection roots the export lease captured. Reversible: the spec only.
 
@@ -3103,6 +3105,30 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
 | 39 | **M4, a free fence after a failed write (2249).** | A free fence means completed, not durable. The sync after the fence is required on every provider, and case (d2) is red without it (BL13). | Holds |
 | 40 | **A reader mid-creation.** A reader reads a bad HEADER and then a good END. | The reader reads END first and HEADER second, which is the reverse of the creator's write order. A good END therefore implies a good HEADER, and a missing END with a bad HEADER is absent (BL7). | Holds |
 | 41 | **The capture key reuses a stale candidate.** | Bytes below `d` are acked and only rewritten with the same bytes, and a good-header segment with a free fence is final. So an equal key implies an equal candidate, except after media damage between captures, which reuse does not re-detect, as before v2.98. | Holds; the damage exception is stated |
+
+### 3.3c Sync on a macOS host (v2.104; macOS decision D5; not yet built)
+
+**Rule.** On macOS, plain `fsync` returns before the drive has flushed its cache, so it is not `host.sync`. Every Store durability point on a macOS host is `fcntl(F_FULLFSYNC)`, and nothing weaker. This is the requirement §10 adopted from Goose for W1's `host.sync`. The guarantees a program sees, and every contract of §3.3b, are the same as on Linux: `host.sync` and `sync_dir` return after the bytes are durable, and the completion of a `write_at` or `zero_at` on a `Durable` or `Direct` handle means its bytes are durable. Only the mechanism differs.
+
+| Store need | Linux | macOS | note |
+|---|---|---|---|
+| `host.sync` of a file | `fdatasync` | `F_FULLFSYNC` | |
+| `sync_dir` | `fsync` of the directory | `F_FULLFSYNC` on the directory descriptor | that it flushes a directory entry is a requirement with a Mac law, below |
+| `Durable` handle | `O_DSYNC` | each `write_at` and `zero_at` completes only after its bytes are written and an `F_FULLFSYNC` of the handle returns | Darwin's `O_DSYNC` is not documented to flush the drive cache, so it is not used |
+| `Direct` handle | `O_DIRECT\|O_DSYNC` when `STATX_DIOALIGN` divides A | `F_NOCACHE`, then `Durable`'s completion rule. The host checks the alignment contract itself, as on every provider | Darwin has no `O_DIRECT` |
+| preallocation (§3.3a window) | `fallocate` | `F_PREALLOCATE` (contiguous, then any), then `ftruncate` | |
+| ZERO_EXTENSION | trusted per file system | not trusted: the window writes zeros (`zero_at`) until a Mac measurement shows APFS returns zeros for an extended range | |
+| copy-on-write clone | `FICLONE` | `fclonefileat` | a volume that is not APFS gets the refusal a Linux file system without reflink gets |
+
+**Group commit.** The journal task's group commit stays one `Direct` `write_at` with no separate `sync` (§3.3b). On macOS its completion includes one `F_FULLFSYNC`, so a commit still costs one write and one device flush.
+
+**The fence.** The fence and `LOCK` are `flock` on both hosts, so every rule of §3.3b's reader protocol carries over unchanged.
+
+**`F_BARRIERFSYNC` is rejected (D5).** It orders writes without forcing them to media, and Apple documents no durability guarantee for it. Store has one durability class, `host.sync`. A weaker class on one host would give the Store a different crash model there, and Linux has no matching primitive. If a Mac measurement later shows `F_FULLFSYNC` is the bottleneck after group commit, an ordering-barrier class is added to this spec for both hosts first.
+
+**Enforced at link time.** The Darwin libSystem allowlist leaves out `fsync` and `fdatasync` (macOS decision D3; [FFI-3](../../../docs/spec/foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)). So a runtime path or a foreign archive that forgets `F_FULLFSYNC` fails to link for Darwin on every Linux CI run.
+
+**Laws (need a Mac; slice S8).** Store's crash-cut suites run on the Darwin provider. A hosted runner cannot cut power, so no law shows that `F_FULLFSYNC` reaches media: the link-time ban is the mechanical guard, and the crash-cut harness covers ordering. Two facts are requirements until a Mac settles them: `F_FULLFSYNC` on a directory descriptor makes a rename durable, and its cost after group commit.
 
 ### 3.4 Recovery, step by step (`open`)
 

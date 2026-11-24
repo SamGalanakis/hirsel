@@ -186,7 +186,43 @@ grant; a symbol outside the prefix could stand in for `malloc` or a runtime entr
 features is closed: a section type, note or relocation this table does not admit is refused,
 not ignored. An archive adds no link input: its undefined symbols resolve only against the
 image's other inputs, and the driver passes the linker no library, search path or option for
-it. A member that needs another library fails to link; it never pulls one in.
+it. A member that needs another library never pulls one in: the import check below refuses
+it before the linker runs.
+
+The member, symbol, feature, prefix and ABI rows of the table are written for an ELF target
+(`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`). The other rows, and the import
+check, apply to every target.
+
+**Mach-O members** (`aarch64-apple-darwin`; macOS decision D1, not yet built). For a Mach-O
+target the ELF rows are replaced by these, with the same diagnostics. Names are LLVM's
+`BinaryFormat/MachO.h`.
+
+| check | ELF row it replaces |
+|---|---|
+| every member is a 64-bit Mach-O relocatable object (`MH_MAGIC_64`, `MH_OBJECT`) with `CPU_TYPE_ARM64` and `CPU_SUBTYPE_ARM64_ALL` (arm64, never arm64e), whose `LC_BUILD_VERSION` names platform macOS and a minimum version no later than the target's floor | the `ET_REL` row |
+| every load command is `LC_SEGMENT_64`, `LC_SYMTAB`, `LC_DYSYMTAB`, `LC_BUILD_VERSION`, `LC_DATA_IN_CODE` or `LC_LINKER_OPTIMIZATION_HINT`. `LC_LINKER_OPTION`, which asks the linker to load a library or framework, is refused like every other command | none; the feature `load command NAME` |
+| each reached symbol S is defined in one member as an external (`N_EXT`) symbol of type `N_SECT` in a section with `S_ATTR_SOME_INSTRUCTIONS` or `S_ATTR_PURE_INSTRUCTIONS`, under its C name with the platform's leading `_`, and the index's entry names that member | the `STB_GLOBAL`/`STT_FUNC` row |
+| each section's type (the low byte of its flags) is `S_REGULAR`, `S_ZEROFILL`, `S_CSTRING_LITERALS`, `S_4BYTE_LITERALS`, `S_8BYTE_LITERALS`, `S_16BYTE_LITERALS`, `S_LITERAL_POINTERS`, `S_COALESCED`, `S_THREAD_LOCAL_REGULAR`, `S_THREAD_LOCAL_ZEROFILL`, `S_THREAD_LOCAL_VARIABLES` or `S_THREAD_LOCAL_VARIABLE_POINTERS`. So `S_MOD_INIT_FUNC_POINTERS`, `S_MOD_TERM_FUNC_POINTERS`, `S_INIT_FUNC_OFFSETS`, `S_THREAD_LOCAL_INIT_FUNCTION_POINTERS`, `S_INTERPOSING` and `S_DTRACE_DOF` are refused, and so is a section in segment `__LLVM` (bitcode). No symbol has `N_SYMBOL_RESOLVER`, the Mach-O indirect function | the object-feature row; `X` adds `section SEG,SECT of type TYPE` and `symbol resolver S` |
+| every external or weak (`N_WEAK_DEF`) symbol a member defines starts with `_` followed by `M`'s symbol prefix | the prefix row |
+| exactly one section `__TEXT,__hirsel_abi` holds the ABI text | the `.hirsel_abi` row |
+
+A section-boundary symbol (`section$start$SEG$SECT`, `segment$start$SEG`) is the linker's
+way of letting code iterate a section, as `__start_` is on ELF. A member that imports one is
+refused by the import check, because no admitted input defines it.
+
+**Imports** (every target; not yet built). Before the linker runs, every symbol a member
+leaves undefined must be defined by another member of the same archive, another admitted
+archive, the runtime, the program's generated objects, or the target's libc stub, and
+nothing else. Otherwise: `FFI-3: archive F of P for T: member N imports S, which no admitted
+input defines`. The libc stub of a Linux target is the toolchain's glibc stub library. The
+libc stub of `aarch64-apple-darwin` is generated from the Hirsel-owned libSystem allowlist
+(macOS decision D3), and it is the only Darwin system library an archive may import from.
+That allowlist leaves out `fsync` and `fdatasync`, which on macOS return before the drive
+has flushed. A C library that calls them is refused for Darwin with the symbol named. Its
+recipe answers by defining the call itself, for example with a package function that calls
+`fcntl(F_FULLFSYNC)`, so a database inside a foreign archive never has weaker durability on
+macOS than the Store. Package authors build a Darwin row on any host with the pinned clang
+and the pinned Zig's Darwin headers at build time. Hirsel redistributes no Apple file.
 
 **ABI text.** A foreign module's **ABI text** is derived from its headers alone: one line per
 foreign function, in ascending order of C symbol bytewise, each
@@ -199,7 +235,7 @@ scalar's type name, or `new K` for `Option[foreign.Ptr[K]]`. So `sqlite`'s close
 `hsq_close waits (take sqlite@1/sqlite/DbHandle) -> i32`. `hirsel inspect --foreign-header P`
 prints, for the foreign module `P`, a C header with each function's prototype as FFI-5's
 table gives it, and a macro `HIRSEL_ABI_TEXT` whose expansion is one `static`, `__attribute__((used))`
-definition, placed in section `.hirsel_abi`, of a `const char` array holding the module's ABI text with no
+definition, placed in section `.hirsel_abi` (`__TEXT,__hirsel_abi` on Mach-O), of a `const char` array holding the module's ABI text with no
 terminating zero. The adapter includes that header, so its C compiler checks every definition
 against the prototype the Hirsel header implies, and it expands `HIRSEL_ABI_TEXT` once. The
 FFI-3 check then binds the audited object to the headers that call it: a header changed from

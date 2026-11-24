@@ -249,6 +249,10 @@ word and `public_connect_preflight` move to S3. A bare `*` is not a `tls_send` p
 The two law oracles are corrected. The table's, part 2's and `Resolve *`'s limits are
 stated.
 
+Version note (2026-11-25, macos-s0-spec-2495): part 2's provider reads the host's
+address-change source, which is netlink on Linux and `PF_ROUTE` on macOS. Nothing a program
+sees changes.
+
 A `Connect` rule may carry the reach `Public`. That rule then covers only an address that
 the address-class table below calls public, so a program granted
 `Connect 0.0.0.0/0 443-443 public` can reach any web server on the internet. It cannot
@@ -348,14 +352,19 @@ The check has two parts, kept apart because they depend on different things.
    call, and that delivery passes the replay point like any connect result
    ([CAP-8](capabilities.md#cap-8-the-replay-point)). A replay supplies the recorded
    delivery. This is NET-15's precedent of a `Denied` that arrives after issue. The native
-   provider keeps the address table from a `NETLINK_ROUTE` socket bound to
+   provider keeps the address table from the host's **address-change source**: a snapshot of
+   the host's addresses and a stream of changes, behind one host seam. Before it answers a
+   public-only connect, it drains that source, so an address added before the connect is
+   known. On Linux the source is a `NETLINK_ROUTE` socket bound to
    `RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR` (`0x10 | 0x100`), filled by one
    `RTM_GETADDR` dump when the first public-only connect is issued and kept current from
    `RTM_NEWADDR` and `RTM_DELADDR` messages. When the socket reports `ENOBUFS` (messages
    lost), the provider dumps again before it answers the next public-only connect. Before
    it answers a public-only connect, the provider reads the netlink socket until it would
-   block, so an address added before the connect is known. A
-   connect issued while a dump runs waits for the dump. A `std.sim.net` server answers
+   block. A connect issued while a dump runs waits for the dump. On macOS (not yet built;
+   macOS slice S11) the source is `getifaddrs` for the snapshot and a `PF_ROUTE` socket,
+   registered in the provider's kqueue, for `RTM_NEWADDR` and `RTM_DELADDR`. A lost message
+   (`ENOBUFS`) takes a new snapshot, as a netlink dump does. A `std.sim.net` server answers
    `Denied` to a public-only `Connect` to an address given by
    `sim.net.local_as(mut n, addrs)`<!-- doc-ref: planned -->.
 
@@ -538,7 +547,7 @@ pool sockets.
 | **S0** `*` name pattern | S | — | the bare `*` in `Resolve` and `Tls` patterns (`tls_rule.rs`, the resolve rule), its intersection, the NET-11 and TLS-3 text | a `*` case in the existing TLS-3 pattern-intersection tests | Devin SWE-2.1 high |
 | **S1** class table and `Public` reach | M | — | `class.rs`; `reach` in `Rule` (Rust and Hirsel), `Invalid` cases, intersection; the preflight; `net.class` and the `not_public` count | `public_class_table`, `public_reach_narrows` | Sol |
 | **S2** pool dials and sim rebinding | S | S1 | HTTP-18's dial skip and error rule; `sim.net.resolve_sequence` | `public_fetch_rebinding` | Devin SWE-2.1 high |
-| **S3** the host's own addresses | M | S1 | the grant parser's `public` word; `public` on the `Connect` provider operation; the native netlink table; `sim.net.local_as`; `own_address` | `public_connect_preflight`, `own_address_denied` | Sol |
+| **S3** the host's own addresses | M | S1 | the grant parser's `public` word; `public` on the `Connect` provider operation; the native address table over the Linux netlink source (the macOS `PF_ROUTE` source is macOS slice S11); `sim.net.local_as`; `own_address` | `public_connect_preflight`, `own_address_denied` | Sol |
 
 S0 and S1 run in parallel, and S2 and S3 run in parallel after S1. TURN's U4 uses `net.class`
 and so waits on S1. The grant word `public` is parsed only from S3 on, in the commit that
@@ -633,7 +642,8 @@ for a result that cannot be delivered. Everything that depends on host files is 
 replay supplies it without looking at a host path. A connect, bind or listen resolves `path`
 beneath its root as a `Dir` path is resolved, through no symbolic link and never out of the
 root, and acts on what that resolution found. There is no fallback that checks a path and then
-hands it to the kernel to resolve again.
+hands it to the kernel to resolve again, except the one stated limit of the macOS provider
+below.
 
 - Every operation first resolves the endpoint's parent components. A symbolic link, a
   non-directory or an escape among them gives `Denied`.
@@ -657,6 +667,17 @@ hands it to the kernel to resolve again.
   `UnixListener` is dropped. Removing one is a `Dir` operation.
 - Only `listen_unix` produces `BoundNotListening`. Any other Unix or IP operation that
   delivers it is `Corrupt` on a tape and fails a server with `Fail`.
+
+**The macOS provider's limit** (not yet built; macOS slice S7). Darwin cannot bind or
+connect a Unix socket through a descriptor. So the macOS provider resolves and pins the parent
+as above, checks the final component's device and inode (a socket for a connect, an empty
+slot for a bind), then enters the pinned parent with `pthread_fchdir_np` and binds or
+connects by the final component's name. A rename inside the pinned parent between that check
+and the call can win: the connect then reaches whatever socket holds the name at the call,
+and the bind creates its node in the same pinned parent. Neither can leave the root, and the
+race needs write access to the confined directory. Refusing Unix sockets on macOS would cost
+more than this race, so it is a stated limit, not a refusal. The parent components are still
+resolved through no symbolic link and never out of the root.
 
 A pathname names a slot, not a peer. A later operation resolves the slot anew, so if a
 legitimate rebind replaces the node, a later connect reaches the new listener.

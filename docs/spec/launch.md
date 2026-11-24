@@ -1507,6 +1507,15 @@ descendants and removing the cgroup. An explicit kill targets the whole cgroup.
 On a host without a delegated subtree, the pidfd tracks and reaps the direct child.
 Its descendants can outlive it and can keep inherited descriptors open. Neither path uses a pidfile.
 
+**macOS** (not yet built; macOS slices S7 and S12). macOS has no cgroups, so the macOS
+launcher is always the case without a delegated subtree. It starts each child with
+`posix_spawn` in a new session (`POSIX_SPAWN_SETSID`), never with `fork`, tracks it with
+`EVFILT_PROC` registered in its kqueue before it can be reaped, and kills its process group.
+A descendant that starts its own session escapes the group kill and can outlive `Ended`.
+That is the same limit as a Linux host without delegation, stated here for operators. The
+cgroup inventory a successor recovers, `cgroup.kill` and the `cgroup_lifecycle` law do not
+apply. Directory watches use `EVFILT_VNODE` on directory descriptors where Linux uses inotify.
+
 ### Child modes
 
 | Mode | Runs | Store | Inherited listener | Private descriptors |
@@ -1518,7 +1527,7 @@ Its descendants can outlive it and can keep inherited descriptors open. Neither 
 | serving | the place | the group's store | the group's listener (3) | its private endpoint (4) and wake report (5) |
 
 The image's recipe declares its Hirsel grants. The launcher runs children under its
-OS user and uses cgroups for lifecycle management. The serving child's private endpoint
+OS user and uses cgroups for lifecycle management where a delegated subtree exists. The serving child's private endpoint
 reaches only the launcher's handler for that child. Serving also gets the group's private
 staging directory for the export exchange. Prepare receives the path of the named export
 directory and syncs `PREPARED` there before it exits.

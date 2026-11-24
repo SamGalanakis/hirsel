@@ -23,8 +23,7 @@ response. Every later request sends them as `MCP-Protocol-Version` and
 `Mcp-Session-Id`. A 404 on a request that carried a session ID is
 `SessionExpired`, and the caller calls `connect` again. Per-request `_meta`,
 `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` belong to 2026-07-28 only.
-`client.stateless` makes a 2026-07-28 session without a round trip. Every call
-returns a `Reply` with the HTTP status, all response headers (`reply_header`
+Every call returns a `Reply` with the HTTP status, all response headers (`reply_header`
 looks one up) and the result. The client does not open the GET stream,
 resume with `Last-Event-ID` or use the HTTP+SSE transport.
 [2025-11-25 transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)

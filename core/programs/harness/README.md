@@ -145,10 +145,15 @@ is its `TriggerConfig.entries`.
 ## MCP tools
 
 Use `harness.mcp_tools.discover` outside the transaction to list a configured
-stateless MCP server. Publish the complete listing with
+MCP server. Inspect `harness.mcp_tools.rejected` for malformed definitions and
+their field paths. Publish the accepted definitions with
 `harness.mcp_tools.replace` against `h.mcp_catalog` in a trusted write
 transaction. Each refresh replaces only that server's rows. Use a new server
 ID when changing the endpoint or account behind it.
+
+Discovery and tool calls negotiate the protocol version with `mcp.client.connect`.
+If a session expires, the harness reconnects once and retries within the same
+deadline. Discovery restarts at the first page.
 
 Set `agent.mcp_peer` to a static resolver that maps catalog server IDs to
 the endpoints and grants available to the worker. Keep its server IDs scoped

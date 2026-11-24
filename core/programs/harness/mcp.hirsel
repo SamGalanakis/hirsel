@@ -77,17 +77,19 @@ pub fn deferred(remote: Remote) -> bool {
 
 pub opaque type Listing: send {
     server: String,
-    rows: Map[String, Remote]
+    rows: Map[String, Remote],
+    rejected: List[mcp.metadata.Malformed]
 }
 
-// Validate a complete listing before entering the write transaction. Keep
-// the wire definition so call_tool can project annotated argument headers.
+/// Validate the page sequence before entering the write transaction. Read
+/// `rejected` for definitions that were excluded from the listing.
 pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
     if list.len(pages) == 0u64 {
         return Error(())
     }
     let mut rows: Map[String, Remote] = map.new()
     let mut cursors: Map[String, bool] = map.new()
+    let mut malformed: List[mcp.metadata.Malformed] = list.new()
     for i in 0u64 .. list.len(pages) {
         let Ok(fields) = mcp.rpc.object(pages[i]) else {
             return Error(())
@@ -103,16 +105,15 @@ pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
         } else if i + 1u64 != list.len(pages) {
             return Error(())
         }
-        let Some(raw_tools) = map.get(fields, "tools") else {
+        let Ok(take page) = mcp.metadata.tools(pages[i]) else {
             return Error(())
         }
-        let Ok(definitions) = mcp.rpc.array(raw_tools) else {
-            return Error(())
+        let mcp.metadata.Listed(tools: take tools, rejected: take issues) = take page
+        for take issue in take issues {
+            list.push(mut malformed, take issue)
         }
-        for raw in definitions {
-            let Ok(take tool) = mcp.metadata.definition(raw) else {
-                return Error(())
-            }
+        for tool in tools {
+            let raw = mcp.metadata.tool_source(tool)
             let name = mcp.metadata.tool_name(tool)
             let key = offered_name(server, name)
             if map.contains(rows, key) {
@@ -129,7 +130,11 @@ pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
             map.insert(mut rows, take key, Remote(server: clone(server), definition: clone(raw), about: take description, input: string.from(mcp.metadata.tool_schema(tool)), fingerprint: harness.digest(fingerprint_bytes), deferred: false))
         }
     }
-    Ok(Listing(server: clone(server), rows: take rows))
+    Ok(Listing(server: clone(server), rows: take rows, rejected: take malformed))
+}
+
+pub fn rejected(next: Listing) -> View[List[mcp.metadata.Malformed]] in next {
+    view next.rejected
 }
 
 // Deferral is chosen by the trusted importer. The name is the server's wire name.
@@ -180,32 +185,60 @@ fn notice(_event: mcp.client.Notice) -> bool {
     true
 }
 
-pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result[Listing, harness.Fault] waits {
+fn with_session[T](peer: Peer, limit: u64, deadline: u64, request: scoped fn(mcp.client.Session) -> Result[T, mcp.client.Error] waits) -> Result[T, mcp.client.Error] waits {
+    let mut retried = false
+    loop {
+        let response = match mcp.client.connect(peer.net, peer.clock, peer.endpoint, None, peer.identity, limit, limit, deadline) {
+            Ok(session) => request(session),
+            Error(take issue) => Error(take issue),
+        }
+        match take response {
+            Error(SessionExpired) if !retried => {
+                retried = true
+            },
+            take done => return take done,
+        }
+    }
+}
+
+fn discover_pages(peer: Peer, session: mcp.client.Session, limit: u64, deadline: u64) -> Result[List[String], mcp.client.Error] waits {
     let mut pages: List[String] = list.new()
     let mut cursors: Map[String, bool] = map.new()
     let mut params: mcp.rpc.Fields = map.new()
     loop {
-        let session = mcp.client.stateless(peer.identity)
-        let reply = std.result.map_err(mcp.client.call(peer.net, peer.clock, peer.endpoint, session, None, TextId("list"), "tools/list", take params, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
-            wire_fault(take issue)
-        })?
+        let mut id = string.new()
+        string.push_u64(mut id, list.len(pages))
+        let reply = mcp.client.call(peer.net, peer.clock, peer.endpoint, session, None, IntegerId(take id), "tools/list", take params, limit, limit, deadline, notice)?
         let mcp.client.Reply(body: take body, ..) = take reply
         let Ok(fields) = mcp.rpc.object(body) else {
-            return Error(Refused("invalid MCP tool list"))
+            return Error(InvalidMessage)
         }
         list.push(mut pages, take body)
         let Some(cursor) = map.get(fields, "nextCursor") else {
             break
         }
         let Some(take value) = mcp.rpc.text(cursor) else {
-            return Error(Refused("invalid MCP cursor"))
+            return Error(InvalidMessage)
         }
         if map.contains(cursors, value) {
-            return Error(Refused("repeated MCP cursor"))
+            return Error(InvalidMessage)
         }
         map.insert(mut cursors, clone(value), true)
         params = map.new()
         mcp.rpc.put(mut params, "cursor", mcp.rpc.typed_json(value))
+    }
+    Ok(take pages)
+}
+
+pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result[Listing, harness.Fault] waits {
+    // Cursors belong to the session that issued them. Restart at page one
+    // after expiration and publish only the listing from the new session.
+    let pages = match with_session(peer, limit, deadline, scoped fn(session: mcp.client.Session) -> Result[List[String], mcp.client.Error] waits {
+        discover_pages(peer, session, limit, deadline)
+    }) {
+        Ok(take pages) => take pages,
+        Error(InvalidMessage) => return Error(Refused("invalid MCP tool list")),
+        Error(take issue) => return Error(wire_fault(take issue)),
     }
     match listing(server, pages) {
         Ok(take rows) => Ok(take rows),
@@ -219,6 +252,7 @@ fn wire_fault(issue: mcp.client.Error) -> harness.Fault {
         Transport(TooLarge) => TooLarge,
         Event(TooLarge) => TooLarge,
         Remote(failure) => Refused(clone(failure.message)),
+        SessionExpired => Refused("MCP session expired"),
         _ => Unavailable,
     }
 }
@@ -269,8 +303,12 @@ pub fn call(peer: Peer, remote: Remote, take args: Bytes, limit: u64, deadline: 
     let Ok(tool) = mcp.metadata.definition(remote.definition) else {
         return Error(Refused("invalid MCP definition"))
     }
-    let session = mcp.client.stateless(peer.identity)
-    let reply = std.result.map_err(mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, session, None, TextId("call"), tool, take arguments, None, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
+    if let Error(_) = mcp.rpc.object(arguments) {
+        return Error(BadArgs("invalid MCP arguments"))
+    }
+    let reply = std.result.map_err(with_session(peer, limit, deadline, scoped fn(session: mcp.client.Session) -> Result[mcp.client.Reply, mcp.client.Error] waits {
+        mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, session, None, TextId("call"), tool, string.from(arguments), None, limit, limit, deadline, notice)
+    }), fn(take issue) -> harness.Fault {
         wire_fault(take issue)
     })?
     result_text(reply.body)

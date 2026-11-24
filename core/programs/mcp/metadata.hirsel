@@ -71,6 +71,7 @@ pub fn media(value: String, expected: String) -> bool {
 }
 
 pub opaque type ToolDefinition: shareable + send {
+    source: String,
     name: String,
     description: Option[String],
     schema: String,
@@ -98,6 +99,10 @@ pub fn tool_description(tool: ToolDefinition) -> Option[View[String]] in tool {
 
 pub fn tool_schema(tool: ToolDefinition) -> View[String] in tool {
     view tool.schema
+}
+
+pub fn tool_source(tool: ToolDefinition) -> View[String] in tool {
+    view tool.source
 }
 
 /// A tool definition the client refused, naming the tool (when its name could
@@ -241,7 +246,7 @@ pub fn definition(source: String) -> Result[ToolDefinition, Malformed] {
     if let Error(take field) = scan(schema, true, mut path, mut at, mut mirrored) {
         return Error(Malformed(tool: Some(take name), field: take field))
     }
-    Ok(ToolDefinition(name: take name, description: take description, schema: string.from(schema), mirrored: take mirrored))
+    Ok(ToolDefinition(source: string.from(source), name: take name, description: take description, schema: string.from(schema), mirrored: take mirrored))
 }
 
 /// Reads a `tools/list` result. A malformed definition is excluded from

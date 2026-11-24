@@ -35,8 +35,7 @@ pub opaque type Session: send {
     id: Option[String]
 }
 
-/// A session at `rpc.REVISION`, which needs no handshake.
-pub fn stateless(identity: rpc.Identity) -> Session {
+fn per_request(identity: rpc.Identity) -> Session {
     Session(identity: rpc.Identity(name: string.from(identity.name), version: string.from(identity.version)), version: string.from(rpc.REVISION), id: None)
 }
 
@@ -415,9 +414,9 @@ fn initialize(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], iden
 /// `initialize` at the newest session version. The server may answer with
 /// an older one, and the client then sends `notifications/initialized`.
 pub fn connect(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], identity: rpc.Identity, body_max: u64, event_max: u64, deadline: u64) -> Result[Session, Error] waits {
-    let probe = post(n, clock, peer, stateless(identity), shared(bearer), Some(TextId(string.from("discover"))), "server/discover", map.new(), list.new(), false, body_max, event_max, deadline, ignore)
+    let probe = post(n, clock, peer, per_request(identity), shared(bearer), Some(TextId(string.from("discover"))), "server/discover", map.new(), list.new(), false, body_max, event_max, deadline, ignore)
     let mut requested = match take probe {
-        Ok(_) => return Ok(stateless(identity)),
+        Ok(_) => return Ok(per_request(identity)),
         Error(Remote(take fault)) => {
             if fault.code == -32022 {
                 match listed_version(fault.data, true) {

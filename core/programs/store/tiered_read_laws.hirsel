@@ -495,6 +495,43 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
 }
 
 @test
+fn test_l68_trim_preserves_untouched_cold_slots() -> Result[(), Error] {
+    let removed = std.page.BlobRef(stamp: 31, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let kept = std.page.BlobRef(stamp: 32, len: 1025, checksum: 102, pack: 7, offset: 1121, body: 1)
+    let mut rows: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(removed)))
+    list.push(mut rows, std.page.Entry(key: key_word(2), cell: BlobValue(kept)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let leaf = page_result(std.page.attach_cold(take leaf_image))?
+    let sibling = std.page.PagePtr(pack: 8, offset: 72, len: 45, checksum: 111, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: std.page.unlocated(40), rows: 2, charge: 2220))))
+    list.push(mut branches, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: sibling, rows: 1, charge: 86))))
+    let branch_image = page_result(std.page.encode(branches, 1, 42, Collection))?
+    let mut children: List[std.page.Slot] = list.with_capacity(2)
+    list.push(mut children, HotPage(arc.share(leaf)))
+    list.push(mut children, ColdPage(sibling))
+    let root = page_result(std.page.attach(take branch_image, take children, list.new()))?
+    let mut ids = 43u64
+    let trimmed = page_result(std.page.cut_before(root, key_word(2), mut ids))?
+    let Some(ColdPage(retained)) = std.page.child_slot(trimmed, 1) else {
+        fail("L68: trim loaded or dropped the right sibling")
+    }
+    let Some(HotPage(rewritten)) = std.page.child_slot(trimmed, 0) else {
+        fail("L68: trim lost the rewritten boundary leaf")
+    }
+    let Some(ColdBlob(retained_blob)) = std.page.blob_slot(rewritten, 0) else {
+        fail("L68: trim loaded or dropped the retained BLOB")
+    }
+    let mut expected_blob = kept
+    expected_blob.body = 0
+    if retained != sibling || retained_blob != expected_blob || std.page.totals(trimmed) != (2u64, 1196u64) {
+        fail("L68: trim changed the reference or charge of a surviving Cold slot")
+    }
+    Ok(())
+}
+
+@test
 fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     let owner = StoreId(hi: 3, lo: 4)
     let value = arc.new(string.into_bytes(string.from("test")))

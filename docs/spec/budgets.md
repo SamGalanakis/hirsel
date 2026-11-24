@@ -160,7 +160,7 @@ selected value's bytes when its type is streamable and the whole copied blob oth
 **Charge parity.** A provider operation's charges are the caller's, and they do not depend
 on the provider: against a virtual provider ([core](core.md#provide)) the caller pays exactly
 the admissions and steps it pays against the host for the same operations and results. Every
-byte the server keeps (handle records, staged reply bytes) comes out of its port's room `n`,
+byte the server keeps (handle records, staged reply bytes, staged UDP packet records) comes out of its port's room `n`,
 which the server admitted at `provide.dir`, `provide.net`, `provide.stdout` or
 `provide.stderr` or `provide.exec`. Bytes a server copies out with `provide.payload` land in capacity the server
 already holds. A reply that needs more room than is left raises `Capacity` in the server and

@@ -462,6 +462,19 @@ on a poller shares one budget per turn. A send window counts iovecs as well as m
 host allowance is a nominal per-run admission. A group's throughput is qualified apart from
 the standalone target.
 
+Version note (2026-11-24, media-udp-amend3-2259): closes the eight findings of the
+media-udp-recheck2-2256 review. A datagram split from a `UDP_GRO` record is truncated, like
+any other, when it is the first of a batch and the caller's buffer is short. Each poller
+gets a **completion ring** whose queue cannot overflow, and zero-copy sends move to it. Each
+readiness poll arm has its own identity. Member readers and writers publish their waiters
+and then recheck, with a sequentially consistent fence on both sides. A writable edge wakes
+every member writer waiting on the group's socket. The turn budget starts no step that does
+not fit what is left, and reaping counts every completion it examines. Served packet
+staging is paid from the port's room. A build law measures completion-mode receive against
+readiness-only receive. The faster one becomes the only receive path wherever io_uring
+opens, and the build deletes the other. The section ends with the
+[UDP build laws](#udp-build-laws).
+
 UDP gives programs IP datagrams for media, QUIC and DNS-like protocols. Its operations
 move **batches**: one call receives or sends many datagrams, so a program pays one call,
 one wait and one host crossing for a burst. The host's segmentation offloads
@@ -553,7 +566,8 @@ pub fn udp_local_addr(s: UdpSocket) -> Result[Addr, NetError] waits
 
 - `Oversize(max: u32)` (below).
 - `Exhausted`, a host resource the provider could not obtain after issue: the UDP host
-  allowance, a descriptor or a socket. It is recorded like any delivered error, and
+  allowance, a descriptor, a socket, or a reservation on the poller's completion ring
+  (NET-17). It is recorded like any delivered error, and
   nothing of the operation remains.
 
 `UdpSocket` is a mechanical resource of logical size 8. It is `send` and `cross`
@@ -610,13 +624,25 @@ deadline passes, then delivers a batch:
    the IP header's traffic class (RFC 3168), read with `IP_RECVTOS`/`IPV6_RECVTCLASS`.
 2. The first datagram is always delivered: when its payload is longer than `buf`'s spare
    capacity `r`, exactly `r` bytes are appended, `truncated` is true, `len` is its whole
-   length and its rest is lost, as in [NET-14](#net-14-unix-datagrams). A datagram longer
-   than one slot's payload room (`slot_bytes - 256`) is truncated to that room the same way,
-   before it reaches `buf`, and `len` is still its whole length.
+   length and its rest is lost, as in [NET-14](#net-14-unix-datagrams). This holds for
+   every datagram, including one split from a `UDP_GRO` record: a record carries no mark
+   that a program, a recording or a served Net could see. A datagram that was a whole record
+   and is longer than one slot's payload room (`slot_bytes - 256`) is truncated to that room
+   the same way, before it reaches `buf`, and `len` is still its whole length.
 3. Each later datagram is delivered only whole: a datagram that does not fit `buf`'s
    remaining spare capacity, would need an entry beyond `out`'s spare capacity, or was cut by
    its slot, stays queued for the next receive, where it is first. So batching never
    truncates a datagram and never loses one.
+
+Splitting and truncation happen at two separate stages. The host splits a record and applies
+the cut-record rule (Order and loss) when it takes the record from the kernel, before an
+intake steers it and before a datagram reaches a queue. Only whole datagrams leave that
+stage. Delivery into `buf` then applies steps 1 to 4 to those datagrams, whatever record
+they came from. Take a 2,400-byte record of stride 1,200, one spare entry and `r = 100`.
+The receive delivers the first datagram with `len` 1,200, 100 appended bytes and
+`truncated` true. The record's cursor moves past that datagram, so the second datagram is
+first at the next receive. With two spare entries and `r = 100`, the batch is the same
+single truncated datagram, since the second does not fit (step 3).
 4. A batch ends when the queued datagrams run out, `out` is full or the next datagram does not
    fit. It never waits for more after the first.
 
@@ -694,9 +720,10 @@ with exactly these named exceptions, which `std.sim.udp` models in the same way:
 - a group discards a datagram steered to a member that is dropped, or whose queue is full
   (below);
 - a `UDP_GRO` record that its slot cut (its length `L` above the captured bytes) loses every
-  datagram not wholly captured. The host delivers the datagrams that end within the captured
-  bytes and discards the rest, including a partly captured one, so no datagram of a cut
-  record is ever delivered truncated. With 65,536 captured bytes, a stride of 1,200 and
+  datagram not wholly captured. The host keeps the datagrams that end within the captured
+  bytes and discards the rest, including a partly captured one. So the cut never truncates
+  a datagram, though a short `buf` can still truncate a kept one that is first in a batch
+  (Receiving, step 2). With 65,536 captured bytes, a stride of 1,200 and
   `L` above 65,536, it delivers 54 datagrams. Linux 7.0 keeps a UDP coalesce below 65,536
   bytes (`gro.c:116-119`, `gro.c:226`) and a local GSO send below the family maximum, both of
   which a 65,536-byte payload room holds, so this happens only if a kernel breaks that bound;
@@ -723,12 +750,89 @@ queue entry before it copies, and when the queue is full it discards that datagr
 on. A full member queue therefore holds a bounded number of datagrams, and a datagram for a
 full member never takes another member's entry.
 
-Notifications carry no datagrams. A member records which poller its current reader waits
-on. After a turn that made a member's queue nonempty while its reader was waiting, the intake
-posts one wake to that poller (several datagrams in one turn give one wake). A wake to a
-reader that has since moved is harmless. The new reader checks its queue when it attaches and
-before every wait. A wake the destination ring refuses (`EOVERFLOW` from `MSG_RING`,
-`msg_ring.c:136-141`) stays pending at the intake, which retries it at its next turn.
+Notifications carry no datagrams. Each member has two **waiter words** in host memory, one
+for its reader and one for its writer (below). A word is empty or names a waiting call: its
+poller and its token. A reader and the intake follow one protocol:
+
+- **Reader.** A `udp_recv` that finds its queue empty stores its waiter in the reader word,
+  issues a sequentially consistent fence (`fence(SeqCst)`), and then loads the queue's write
+  index again. If the queue is now nonempty, it swaps the word back to empty and reads. Only
+  if the queue is still empty does it park on its poller.
+- **Intake.** After each turn's copies to a member, the intake stores the queue's write index
+  (release), issues `fence(SeqCst)`, and then swaps the member's reader word to empty. If
+  the swap returned a waiter, the intake posts one wake to that waiter's poller. Several
+  datagrams in one turn still give one wake.
+
+The two fences make this a Dekker handshake. Both fences are in the single total order of
+sequentially consistent operations, so whichever comes second sees the other side's
+store. If the intake's fence is second, its swap finds the waiter and posts a wake. If the
+reader's fence is second, its recheck finds the datagram and it does not park. Release and
+acquire alone would let both sides miss. The swap is a read-modify-write, so exactly one
+party takes a published waiter: the intake, which then wakes it, or the reader, which then
+reads.
+
+The wake stays observable between the reader's last check and its park. A wake is a
+completion posted to the reader's poller's readiness ring (or a write to the epoll
+backend's eventfd). That ring keeps it until it is reaped, and a poller's wait returns at
+once while a completion is queued. A wake the destination ring refuses (`EOVERFLOW` from
+`MSG_RING`, `msg_ring.c:136-141`) stays pending at the intake. The intake's poller does not
+block while a wake is pending, and it retries the wake at its next turn. A wake the
+destination ring drops on overflow is recovered by that poller (NET-17, Lost readiness): its
+wait returns `EBADR`, and every reader and writer parked on it rechecks.
+
+A reader leaves the waiting state by a wake, a deadline or a cancellation. On a deadline or
+a cancellation it swaps its word to empty. If the swap returns empty, the intake has already
+taken the waiter and a wake is in flight. That wake later reaches a call that is no longer
+waiting and is ignored, as a stale token is today. A member moves only between calls,
+because a waiting call holds the handle. So a published waiter never travels with a move.
+The new reader checks its queue when it attaches and before every wait. A wake to the old
+poller is harmless.
+
+**Member writers.** Every member sends through the group's one kernel socket, from the
+thread of the unit that holds it, so several members can find the send buffer full at once.
+Each member has at most one call in flight, so it has at most one writer. The group's
+readiness watch lives on the intake's poller (NET-17), and the intake owns the writer words
+of all `members` members. A member whose window gets `EAGAIN` waits this way:
+
+- **Writer.** It stores its waiter in its writer word. It links its member into the
+  group's **writer list** unless the member is already linked, using a sequentially
+  consistent compare-and-swap on the list's head. It then issues `fence(SeqCst)` and
+  retries the same window once. If the retry commits or fails with any error but `EAGAIN`,
+  it swaps the word to empty and goes on. Only on a second `EAGAIN` does it park.
+- **Intake.** When it reaps a writable edge for the group's socket, or recovers lost
+  readiness (NET-17), it issues `fence(SeqCst)` and then takes the whole writer list by
+  swapping its head to empty. For each member on it, it clears the member's linked mark
+  and swaps the member's writer word to empty. It posts one wake for each waiter it took,
+  to that waiter's poller (locally when the poller is its own). A member whose word was
+  already empty, because its writer was cancelled or timed out, is skipped.
+
+A readiness result reports the socket's whole mask, so a receive edge on a writable socket
+also carries `EPOLLOUT`. The list keeps that cheap. An edge with no published writer costs
+one swap of an empty head, and an edge with writers costs one step per published writer,
+never one per member.
+
+The intake wakes every published writer, not one, so no writer's waiter replaces another's.
+Each woken writer retries, and one that gets `EAGAIN` again publishes again before it
+retries. The guarantee is the kernel's writability rule, the one epoll gives any writer. A
+send gets `EAGAIN` only while the queued send bytes are at least `sk_sndbuf`
+(`sock.c:2983`). The kernel posts a writable edge when it frees send space while the queued
+bytes are below half of `sk_sndbuf` (`sock_writeable`, `sock.h:2631-2640`,
+`sock.c:2668-2693`, `sock.c:3617-3636`). The intake's multishot poll stays on the socket's
+wait queue, so `skwq_has_sleeper` is true. A parked writer is therefore woken once its
+socket's queue drains below half. While the queue sits between half and full, a send would
+succeed and no edge fires, so a writer can stay parked with some space free. As with
+readers, the race between publishing and parking is closed. A writer's retry that finds the
+buffer full ran after its publish and fence. The edge that later reports the drain below
+half is reaped after that free, and the free came after the retry read the full buffer. The
+intake's fence follows the reap. The retry's read of the socket's
+allocation is coherence-ordered before the free, and the free happens before the intake's
+fence through the completion's release and the reap's acquire. So the writer's fence
+precedes the intake's in the total order (C++20 [atomics.order]/4), and the intake's swap
+sees the published waiter. A writer's deadline or cancellation swaps its word to empty, and a wake that was
+already taken is ignored, as for a reader. A member's drop empties its writer word with the
+rest of its state. At most `members` wakes go out per edge. They wake waiting calls and carry
+no datagrams. A standalone socket has one handle and so one writer. Its writable wait stays
+on its owner's poller, unchanged.
 
 `steer` picks the member for one datagram, from the datagram and its source alone. Every
 provider, the host and `std.sim.udp` compute it with the same function:
@@ -838,8 +942,9 @@ before that event sees the old charge still held and can be refused. A pool's cr
 therefore never funds a new pool while the old one's storage is still live.
 
 - **Retiring a socket** removes its readiness watch, closes its descriptor and frees its
-  pool (NET-17, Teardown). No step waits for a completion. The kernel holds no pointer into
-  the pool between calls, since both backends receive by `recvmmsg` into it. Datagrams still
+  pool (NET-17, Teardown). Under the readiness arm (NET-17, Receive mode), no step waits for
+  a completion, and the kernel holds no pointer into the pool between calls, since both
+  backends receive by `recvmmsg` into it. Datagrams still
   queued in the kernel or the pool are discarded, and there is no linger.
 - **Retiring a member** stops the intake's dispatch to it and frees its queue at the intake's
   next turn. The intake pool retires with the kernel socket, after the last member's
@@ -918,9 +1023,10 @@ Laws:
   datagram of the batch is whole, and `at` of each entry is the length of `buf` before its
   payload. With `e = 0` the receive returns `Ok(0)` and takes nothing. Across successive
   receives, the datagrams delivered are exactly what the host took from the kernel for this
-  socket or member, in order, less only the named exceptions of Order and loss. Only a
-  datagram that was a whole record can be truncated. A datagram split from a `UDP_GRO` record
-  is either delivered whole or discarded under the cut-record exception.
+  socket or member, in order, less only the named exceptions of Order and loss. Truncation
+  has exactly two causes: a datagram that is first in its batch and longer than `r`, and a
+  datagram that was a whole record longer than `room`. The cut-record exception discards,
+  and never truncates.
 - A send returning `k` committed packets `0..k`, each once and whole, and none after them.
   This holds within each execution, whatever the host's GSO grouping, its windows or its
   backend, and when the kernel refused a GSO train that the host resent as single datagrams.
@@ -960,6 +1066,8 @@ deadline. A delivery holds one of:
 - the new ordinals and bound endpoint;
 - the delivered datagrams (peer, length, truncation, ECN and appended bytes);
 - `k`;
+- the endpoint a `udp_local_addr` returns, since creation recorded port 0 for an opened
+  socket and a send delivers only `k`;
 - the error.
 
 A replay supplies the recorded datagrams and touches no socket. Which datagrams formed a
@@ -1007,9 +1115,24 @@ with `members` 1 is `udp_bind`. A served receive stages two things apart:
 - **payload bytes** with `provide.fill`, at most `room`;
 - **packet records** with `provide.fill_packets`, at most `entries`.
 
-`provide.fill_packets` stages at most `entries` records and returns how many it took. Its
-staging holds at most `entries` records of 48 bytes each, admitted from the server's current
-limit at the fill and freed at the reply. The caller derives each `at` itself from the
+`provide.fill_packets` stages at most `entries` records and returns how many it took. Each
+staged record takes 48 bytes of the **port's room** `n`, the one payer of every byte a server
+keeps ([MEM-24](budgets.md#mem-24-logical-charges), Charge parity), as staged payload bytes
+already do. It never takes them from the server's current limit. When the room cannot hold
+every record the call would stage, `fill_packets` stages none and raises `Capacity` in the
+server, as for any reply that needs more room than is left. The caller is never charged. The staged bytes return to
+the room exactly once, when the call settles, whichever way it settles:
+
+- an accepted reply, after the caller has copied the records out;
+- a reply that fails validation, when the server fails with `Fail`;
+- a withdrawal of the call by its caller;
+- the call being dropped (its caller cancelled or ended);
+- the seal of the port, for every call still staged.
+
+The settlement takes the staging with it, so no later path can return the same bytes. With
+one spare entry, 48 bytes free in the room and none in the server's current limit, the
+record is staged. With 0 bytes free in the room and plenty in the current limit, the server
+raises `Capacity`. The caller derives each `at` itself from the
 running total of `appended`. So a receive with room 0 and one entry can still return the
 peer, the whole length, the ECN bits and `truncated` (`len > appended`). A `UdpPackets(count)`
 reply passes when `count` equals the staged records and they and the staged bytes pass the
@@ -1045,29 +1168,115 @@ of its home slot (NET-16).
 **One datapath.** Both backends move UDP datagrams with the same system calls on the owning
 poller's thread: `recvmmsg` into a pool and `sendmmsg` from the caller's `data`. A backend only
 tells the poller when a descriptor is ready, by an io_uring multishot poll as for every Net
-socket (NET-7) or by epoll. So no completion queue entry ever carries a datagram, a send's
-result or a retirement, and a UDP socket adds one readiness watch to its ring and nothing
-more. There is no provided-buffer ring, no multishot `recvmsg` and no linked send chain.
+socket (NET-7) or by epoll. So no completion queue entry carries a datagram, a send's result
+or a retirement, and a UDP socket adds one readiness watch to its ring and nothing more.
+This is the **readiness arm**. The receive half of it is on trial against the completion arm
+(Receive mode, below) until the build decides. The send half is final: the trial does not
+change how UDP sends.
 
-**Lost readiness.** On io_uring a ring's completion queue is shared by every producer the
-reactor has: readiness polls, mailbox wakes and TCP transmit completions. When the queue is
-full, the kernel keeps an overflow entry only while it can allocate one, and otherwise drops
-the completion (`io_uring.c:630-645`). For UDP a dropped completion can only be a readiness
-edge, so it delays a read and loses no datagram. The kernel counts each drop in the ring's
-`cq_overflow` word (`io_uring.c:641`), which user space maps at `cq_off.overflow`
-(`io_uring.c:2896`). The poller reads that word every turn. When it has changed, the poller:
+**Two rings.** On io_uring, each poller has two rings with different loss rules:
 
-- marks every UDP source it owns runnable (below);
-- removes and re-adds each of their readiness watches, since a multishot poll whose terminal
-  completion was dropped has ended without notice.
+- The **readiness ring** carries producers whose completions may be lost and recovered:
+  multishot readiness polls, their removals, and `MSG_RING` wakes. Its queue is shared and
+  unbounded in what it is offered. It can therefore drop a completion (below), and every
+  loss is recovered.
+- The **completion ring** carries every operation whose completion is the only record of
+  its state. That means a TCP zero-copy send (its result and its buffer notification), and a
+  completion-mode UDP receive if the build keeps one (Receive mode). Its queue **cannot
+  overflow**. Before submitting an operation, the poller reserves on the ring the most
+  completions that operation can post. A zero-copy send reserves 2: one result and at most
+  one notification (`sendzc.rs`, one send per transmit slot at a time). A multishot receive
+  reserves its buffer count plus 1 (below). A cancellation reserves 1. The reservations
+  never exceed the ring's queue entries. A completion's reservation returns once the poller
+  has reaped it. Whatever an operation reserved and did not use returns at its last
+  completion. For example, a zero-copy result without `IORING_CQE_F_MORE` posts no
+  notification (`sendzc.rs`, `tx_complete`), so its second reservation returns with the
+  result. The ring opens at first use with the kernel's largest queue, 65,536 entries
+  (`IORING_MAX_CQ_ENTRIES`, `io_uring.h:170-171`), and keeps that size. It is not resized,
+  because `IORING_REGISTER_RESIZE_RINGS` requires `IORING_SETUP_DEFER_TASKRUN`
+  (`register.c:510-512`). That flag would post completions only when the owner enters, and
+  the poller reads this queue from shared memory each turn. Zero-copy sends may hold at most
+  4,096 of the entries. A zero-copy send that finds no room sends by copying instead, the
+  way `HIRSEL_NET_SEND_ZC` already lets a send copy ([HTTP](http.md)). Completion-mode
+  receives hold the other 61,440 entries as **one run-wide total**, so every poller's ring
+  can take any socket's reservation. A receive that would exceed the total fails its
+  socket's creation with `Exhausted` (NET-16). A move between pollers therefore always finds
+  room on the destination ring.
+
+The completion ring never reaches the kernel's overflow path (`io_uring.c:628-649`), because
+its unreaped completions never outnumber its queue. So no completion on it is lost, and no
+recovery is needed for it. The readiness ring holds a multishot poll on the completion
+ring's descriptor, which is readable while its queue holds completions
+(`io_uring.c:2240-2275`). An epoll poller adds that descriptor to its epoll set. A poller
+also reads the completion ring's queue head and tail, which are shared memory, in every
+turn, and it does not block while the queue is nonempty. So the completion ring can be
+reaped even if its readiness edge was lost. The epoll backend has no zero-copy sends. It
+opens a completion ring only for a completion-mode receive.
+
+**Lost readiness.** The readiness ring's completion queue is shared by every producer on it.
+When the queue is full, the kernel keeps an overflow entry only while it can allocate one.
+Otherwise it drops the completion, counts it in the ring's `cq_overflow` word, and sets a
+dropped bit (`io_uring.c:628-649`). User space maps that word at `cq_off.overflow`
+(`io_uring.c:2896`). A waiter blocked in `io_uring_enter` is woken. Its wait returns `EBADR`
+while the dropped bit is set, and the enter that returns `EBADR` clears it
+(`wait.c:287-296`, `io_uring.c:2654-2660`). Nothing on this ring is the only record of any
+state. A dropped completion can only be a readiness edge, a removal's answer, a terminal
+poll completion or a wake. So the poller reads the word every turn, and treats a changed
+word or `EBADR` this way:
+
+- It treats the drop as a wake for every wake consumer it has. It drains its mailbox, marks
+  every UDP source it owns runnable (below), and readies every Net waiter parked on it. Each
+  waiter retries its system call before it commits a result, as after any stale edge.
+  Member readers and writers recheck their queue or retry their window (NET-16, Member
+  queues).
+- It reaps the completion ring.
+- It marks every readiness watch on the ring for replacement, since a multishot poll whose
+  terminal completion was dropped has ended without notice. It replaces at most 32 watches
+  per turn, so each turn submits at most 64 entries: one removal and one arm each. That fits
+  the ring's 64 submission entries, and it adds at most 96 completions (an answer, a
+  terminal and one edge per watch), which is under one turn's 128 reaped. The poller does
+  not block while watches await replacement. Their sockets' waiters were already readied,
+  so no readiness waits on a replacement.
 
 The recovery needs no completion of its own. A runnable source is read by a nonblocking
-`recvmmsg`, and `EAGAIN` simply makes it idle. A removal whose completion is itself dropped
-loses nothing, since no UDP state waits for it. An epoll backend drops no readiness.
+`recvmmsg`, and `EAGAIN` simply makes it idle. A second drop during recovery starts it
+again, with every watch marked once more. Replacement is idempotent: an extra removal of a
+retired id returns `-ENOENT`. So repeated drops delay readiness and lose no state. An epoll
+backend drops no readiness.
+
+**Watch identity.** Each arming of a readiness poll gets its own **watch id**: the poller
+takes it from a 62-bit counter per ring, and it never repeats in the ring's life. That id is
+the poll's `user_data`, and it keys the poller's watch table. The table maps an id to its
+socket (slot index and full 32-bit generation) and records whether the id is the socket's
+**current** watch. The socket keeps a list of its **retired** ids. A removal's `user_data`
+is the id with bit 62 set, so its completion names the watch it removed. The values with the
+top bit set stay reserved for wakes and transmit completions. Arming and removal follow
+these rules:
+
+- **Replace.** To replace a watch, the poller moves the current id to retired, submits a
+  removal of it, and arms a fresh id as current. It never waits for the old watch to end.
+- **Terminal.** When a poll completion without `IORING_CQE_F_MORE` arrives, the poller
+  re-arms with a fresh id only if that id is still current and its socket still
+  registered. A retired id is erased, and nothing is re-armed. A readiness result from a
+  retired id still readies waiters, who retry their system calls.
+- **Removal answer.** A removal's completion erases the retired id it names, whatever its
+  result. `0` means the poll was removed, and its own terminal completion follows.
+  `-ENOENT` means the poll had already ended.
+- **Teardown.** Teardown submits a removal for the current id and for every retired id not
+  yet erased. A removal matches the first poll with that `user_data` (`poll.c:912-925`).
+  Every live poll has a distinct id, so each removal ends exactly one poll, and no poll is
+  left holding the file.
+- **Recovery.** An overflow recovery replaces each current watch. It also resubmits a removal
+  for each retired id still in the table, since both of that id's completions may have been
+  dropped.
+
+The counter cannot wrap in a ring's life: 2^62 arms at one per nanosecond take 146 years. A
+ring that would reach the end fails its poller with a resource failure. It never reuses an
+id. The ids replace the old registration tags as the poll's identity, so the 16-bit
+generation of a shared tag no longer decides staleness.
 
 **Turn budget.** All UDP host work on one poller shares one budget per poller turn. A turn
-handles at most 64 logical datagrams and copies at most 256 KiB of payload, whichever comes
-first, and it always handles at least one datagram when one is pending. A **logical
+handles at most 64 logical datagrams and copies at most 256 KiB of payload. A **logical
 datagram** is one datagram split from a record. It counts whether it is delivered, copied
 into a member queue, or discarded by the ingress filter, a full or dropped member, or the
 cut-record exception. The budget covers:
@@ -1080,19 +1289,35 @@ cut-record exception. The budget covers:
 Retirement drains nothing, so it is not on that list. The kernel's own work queueing
 datagrams for a socket, which its softirq does, is not host work and not charged to a turn.
 
-The budget is enforced before each system call. A read asks `recvmmsg` for at most as many
-messages as there are free slots, logical datagrams left in the budget, and whole slot
-payload rooms in the byte budget left, and at least one. A record can hold up to 128
-datagrams (NET-16), so the budget can end inside a record. The record then keeps its slot
-and its cursor, and dispatch resumes there in a later turn.
+The budget is enforced before each step, and a step starts only if its worst case fits what
+is left. A read asks `recvmmsg` for as many messages as the smallest of three counts: the
+free slots, the logical datagrams left, and the whole slot payload rooms that fit in the
+bytes left. When that count is 0, the read waits for a later turn. A copy into a member
+queue starts only if the datagram's length fits in the bytes left. There is no separate
+floor. A slot's payload room is at most 65,536 bytes and a datagram at most 65,527, so a
+fresh turn always admits at least one read and one copy. Take a turn that copied four
+65,507-byte datagrams into queues, leaving 116 bytes and 60 datagrams. A next read of
+65,536-byte rooms asks for 0 messages and waits, and so does a fifth copy. A record can hold
+up to 128 datagrams (NET-16), so the budget can end inside a record. The record then keeps
+its slot and its cursor, and dispatch resumes there in a later turn.
 
 A source with work left when the budget ends stays **runnable**: a partly dispatched record,
-a kernel queue that was not read to `EAGAIN`, or a `udp_recv` still waiting. The poller serves
-runnable sources in rotation, so a busy intake cannot hold the head of every turn, and it
-reaches them again with no fresh readiness edge. A poller does not block while it has a
-runnable source, a pending member wake (NET-16, Member queues) or an overflow it has not
-rescanned: its next wait has a zero timeout. Reaping completions that carry no UDP work is
-bounded by the reactor's existing event array per turn.
+a kernel queue that was not read to `EAGAIN`, or a `udp_recv` still waiting. Each turn starts
+at the runnable source after the one that started the previous turn. So within as many turns
+as there are runnable sources, each one starts a fresh turn, where its read or copy fits. A
+busy intake cannot hold the head of every turn, and no source that needs a whole room
+starves behind sources that need less. Runnable sources need no fresh readiness edge. A
+poller does not block while it has a runnable source, a pending member wake (NET-16, Member
+queues), a nonempty completion ring, or an overflow it has not handled: its next wait has a
+zero timeout.
+
+**Reaping.** A turn examines at most 128 completions on each ring, the size of the reactor's
+event array. It counts every completion it examines, including those that yield no event: a
+removal's answer, a completion for a retired watch, a transmit completion that readies no
+writer, and a wake. The rest stay queued for the next turn, whose wait then has a zero
+timeout. A completion left queued on the completion ring keeps its reservation, so it cannot
+make that ring overflow. Take 129 removal answers queued at once: a turn examines 128 and
+leaves 1.
 
 **Receiving.** The pool is the iovec array of a `recvmmsg`, one slot per message. `MSG_TRUNC`
 is among its input flags, so each message's length is its record's whole length even after
@@ -1101,6 +1326,40 @@ per-record header: the source address, the control space for the `UDP_GRO` and T
 messages, and the record's length and cursor. The rest is payload room. A standalone
 socket's waiting `udp_recv` reads on its owner's poller. An intake is read on its home
 poller, by host work under the budget.
+
+**Receive mode.** Linux UDP receive has one end-state path. The build picks it by the
+receive-mode law ([UDP build laws](#udp-build-laws)) and deletes the other. Readiness-only receive is the W0.1
+comparison arm and is not kept as a fallback. The two arms are:
+
+- **Readiness** (above): a readiness watch, then a nonblocking `recvmmsg` into the pool.
+- **Completion**: the socket's pool slots are registered as a provided buffer ring
+  (`IORING_REGISTER_PBUF_RING`), one buffer per slot. One multishot `IORING_OP_RECVMSG` with
+  buffer select runs on the poller's completion ring. Each completion names a slot that
+  holds one record: the kernel's `io_uring_recvmsg_out`, the source address and the control
+  messages in the slot's 256-byte header, then the payload. The record is split, filtered,
+  steered and delivered exactly as a `recvmmsg` record is. A slot returns to the buffer ring
+  when every datagram in it has been delivered. The receive reserves `slots + 1`
+  completions on the completion ring: each unreaped completion holds a distinct slot that has
+  not yet returned to the buffer ring, plus one terminal completion. When the buffer ring is
+  empty, the kernel ends the multishot receive with `ENOBUFS` (`kbuf.c:262-270`). Datagrams
+  then wait in the socket's kernel queue, which is the same backpressure a full pool gives
+  the readiness arm. The poller re-arms once a slot returns. The turn budget applies to the
+  splitting and dispatch of each reaped record. A record the budget cannot reach stays in
+  its slot, as under the readiness arm.
+
+The completion arm puts kernel pointers into the pool. So, if the build keeps it, a
+standalone socket's retirement and move each wait for one completion. That is the terminal
+completion of its multishot receive, after an async cancellation, and only then is the
+buffer ring unregistered. The completion ring cannot drop that completion (Two rings). The
+statements in NET-16 and below that no retirement waits on a completion, and that the kernel
+holds no pointer into the pool, describe the readiness arm. The build that keeps the
+completion arm replaces them with this paragraph.
+
+The decision covers every host where io_uring opens. If the completion arm wins, every
+poller on such a host opens a completion ring for UDP receive, including a slot whose
+readiness backend D5 sets to epoll. A host that refuses io_uring entirely runs the epoll
+backend. Its only receive is `recvmmsg`, as D5 keeps epoll for TCP, and no comparison arm
+is kept for it.
 
 **Sending.** The host validates the whole list first (NET-16) and then sends it in
 **windows**, in order, under one deadline. A message is one GSO train or one single datagram,
@@ -1118,8 +1377,9 @@ both backends, below the kernel's window of 1,024 messages (`UIO_MAXIOV`, `socke
 It returns how many messages the kernel accepted, which is a prefix, and reports an error only
 when the first message failed. It discards the error of any later message
 (`socket.c:2752-2754`). `k` is the sum of the packets that the accepted messages carried. After
-a short count the next window starts at the first unaccepted message, so the host learns that
-message's refusal as the first error of the next window. On `EAGAIN` for a window's first
+a short count the next window starts at the first unaccepted message. That window gets that
+message's new result, which may be a success. The refusal the kernel discarded is not
+recovered. On `EAGAIN` for a window's first
 message the host waits for the socket to be writable under the deadline, then retries from the
 same message. Any other error on a window's first message ends the call: GSO refusals are
 handled as below, and otherwise the call returns `Ok(k)`, or the error when `k` is 0. The
@@ -1145,7 +1405,8 @@ window's first message, and treats it this way:
 
 **Teardown.** Retirement (NET-16) works the same way on both backends. The host removes the
 socket's readiness watch, closes its descriptor and frees its pool, and then emits the
-retirement event. None of these waits for a completion. On io_uring the removal is a
+retirement event. Under the readiness arm none of these waits for a completion (the
+completion arm's one wait is under Receive mode). On io_uring the removal is a
 poll-remove submission, and a cancelled poll gives up its reference to the file through task
 work (`io_uring/poll.c:380-385`). So the kernel socket and its bound endpoint can outlive the
 close briefly. The pool does not depend on them. Retirement therefore does not promise that
@@ -1179,3 +1440,100 @@ build lane qualifies a group separately, with no target number:
 A group's receive rate is bounded by its one intake core in W0.1. Any deployment envelope (for
 example the number of 20 ms audio streams one endpoint carries) is quoted from that
 measurement per endpoint, never derived from the standalone target.
+
+### UDP build laws
+
+The W0.1 build lane makes each law below pass, and writes it **red first**: the case is added
+to its named harness before the code it tests, and it fails there. A law's oracle comes from
+outside the code under test: a hand derivation from this spec, the kernel's own counters,
+or an exhaustive schedule. Each law exists because of the named finding of the
+media-udp-recheck2-2256 review. The laws for B1 and H1 to H4 are required, and the build
+does not close until they pass. The receive-mode law decides an end-state path. The medium
+laws (M1 to M3) are required as well, but each is a single case.
+
+- **`udp_gro_first_truncates` (B1).** *Scenario:* on loopback, a `UDP_SEGMENT` send of two
+  1,200-byte packets to a `udp_bind` socket with `slot_bytes` 65,792 (`UDP_GRO` on) reaches
+  it as one intact 2,400-byte record. A local GSO send reaches a GRO socket unsegmented
+  (NET-16). The first `udp_recv` has 100 bytes of `buf` spare and two entries. The second
+  has room for both. *Oracle:* NET-16 Receiving, steps 2 and 3, by hand. The first receive
+  returns `Ok(1)` with `len` 1,200, 100 appended bytes equal to the first packet's first
+  100, and `truncated` true. The second returns `Ok(1)` with the second packet whole. The
+  receive validator accepts both recorded deliveries. *Harness:* the NET law suite
+  (`core/std/tests/net.hirsel`), plus one replay of the recording through the receive
+  validator.
+- **`completion_ring_never_overflows` (H1).** *Scenario:* a poller whose completion ring is
+  opened at its smallest queue issues zero-copy TCP sends to a loopback peer under
+  `HIRSEL_NET_SEND_ZC=always`. It issues more sends than the queue holds and reaps
+  nothing until they are all issued. *Oracle:* the kernel. The ring's `cq_overflow` word
+  stays 0, and `IORING_SQ_CQ_OVERFLOW` is never set in its `sq_flags`, since the kernel sets
+  it whenever it keeps an overflow entry (`io_uring.c:645-647`). After reaping, every
+  transmit slot recycles, and the sends past the reservation went by copying. On today's
+  shared ring the flag is set, so the law is red. *Harness:* the reactor tests
+  (`crates/hirsel-core-net/src/reactor/tests.rs`), beside
+  `an_answered_slot_is_not_reused_before_its_notification`.
+- **`replaced_watch_leaves_one_poll` (H2).** *Scenario:* register a UDP socket on an io_uring
+  poller and run overflow recovery twice in a row without reaping. Then reap everything,
+  including the old watches' terminal `-ECANCELED` completions, and tear the socket down.
+  *Oracle:* the kernel's `PollList` in the ring's `/proc/self/fdinfo` entry
+  (`fdinfo.c:231`). Its rows name no file or `user_data`, so the law counts them against
+  the ring's count before registration: the readiness ring also holds the poll on the
+  completion ring's descriptor. It lists exactly one more armed poll after each recovery,
+  and none more after teardown. On today's tag-keyed re-arm, a second poll is listed after the stale terminal is reaped, so
+  the law is red. *Harness:* the reactor tests.
+- **`member_reader_never_misses_its_wake` (H3).** *Scenario:* the reader's three steps
+  (publish, fence and recheck, park) and the intake's three steps (store the write index,
+  fence, swap the word and wake), run under every one of the 20 interleavings of those six
+  steps, with an unlimited deadline. The wake from an earlier turn is already reaped. A
+  test-only seam in the member queue pauses each side between steps. *Oracle:* exhaustive
+  enumeration against the invariant that no interleaving ends with a nonempty queue, a
+  parked reader and no wake queued for its poller. The check-then-publish order of the
+  finding fails the schedule *reader checks, intake stores and sees no waiter, reader
+  publishes and parks*. *Harness:* the reactor tests. The fences' weak-memory role is
+  argued in NET-16 and is not tested by this enumeration.
+- **`every_member_writer_is_woken` (H4).** *Scenario:* two waiters arm the write direction
+  of one registration (members 0 and 1 of a group), and then one writable edge is
+  dispatched. A third case cancels one waiter before the edge. *Oracle:* by hand from NET-16
+  Member writers. The edge readies both tokens. With a cancellation, it readies only the
+  other, and the cancelled token is never readied. Today's registry keeps one write waiter
+  per socket, and the second `arm` replaces the first (`reactor.rs`, `Sockets::arm`), so
+  the law is red. *Harness:* the reactor tests, beside
+  `a_writer_parked_beside_a_waiting_reader_is_woken_alone`.
+- **`udp_receive_mode` (end-state).** *Scenario:* both receive arms (NET-17, Receive mode)
+  run on Linux 7.0 loopback, on the same CPUs, kernel, pool options, `UDP_GRO` setting and
+  turn budget, through the same `udp_recv`. Each arm is measured at two shapes:
+  - **S1**: the NET-17 Target, one `udp_bind` socket fed 1.0 million 1,200-byte datagrams
+    per second in 64-packet sends from one source.
+  - **S2**: 100,000 datagrams per second, from 2,000 source endpoints at 50 per second each
+    (20 ms audio). Each has a 200-byte payload, chosen to cover a 64 kbit/s Opus frame with
+    its RTP header and SRTP tag. S2 runs once on a standalone `udp_bind` socket and once on
+    a `Hash`-steered group of 8 members, 4 on the intake's poller and 4 on others.
+
+  *Oracle:* the measurement, matched as the host rules require. Each arm and shape reports:
+  system calls per second on the receiving threads, counted by `raw_syscalls:sys_enter`,
+  with receive calls and `io_uring_enter` counted apart; instructions and cycles per
+  delivered datagram, with cycles from 60 interleaved pairs on shielded CPUs; delivered
+  datagrams and each named discard; and the p99 and p99.9 delay from send to `udp_recv`
+  return, or from intake read to member delivery for the group. *Decision:* the completion
+  arm wins only if, at S1 and at both runs of S2, it spends at least 3% fewer cycles per
+  delivered datagram, delivers no fewer datagrams, and keeps p99 within 1.10× of readiness.
+  Every other outcome is a readiness win, including a split between shapes or a difference
+  within 3%. The tie goes to the arm that needs no buffer ring and no completion
+  reservation for receive. The same lane deletes the losing arm's code and its text in
+  NET-17, Receive mode. *Harness:* the NET-17 Target bench that the W0.1 build adds, with
+  S2 as its second shape.
+- **`turn_budget_starts_only_what_fits` (M1).** *Scenario:* the finding's turn: four
+  65,507-byte datagrams copied to member queues, then a ready kernel queue with 65,536-byte
+  rooms. *Oracle:* by hand. The read asks for 0 messages, a fifth copy waits, and the next
+  turn starts with the next runnable source and admits the read. *Harness:* the reactor
+  tests.
+- **`reaping_counts_every_completion` (M2).** *Scenario:* 129 removal answers queued on a
+  readiness ring. *Oracle:* by hand. One turn examines 128 and leaves 1, and the next turn's
+  wait has a zero timeout. Today's reap loop takes all 129 (`uring.rs`, `reap`), so the law
+  is red. *Harness:* the reactor tests.
+- **`served_staging_has_one_payer` (M3).** *Scenario:* one spare entry, 48 bytes free in the
+  port's room and 0 in the server's current limit, and then the reverse balances. Each is
+  settled once by a reply, a `Fail`, a withdrawal, a dropped call and the seal. *Oracle:*
+  MEM-24 Charge parity, by hand. The first stages the record and the second raises
+  `Capacity` in the server. After each settlement the room is back to its starting balance
+  and the current limit is unchanged. *Harness:* the provider laws
+  (`core/programs/harness/provider_laws.hirsel`).

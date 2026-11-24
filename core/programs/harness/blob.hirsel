@@ -134,7 +134,7 @@ fn doubt[F](ctx: runner.TriggerContext, settle_entry: StaticFn[F], key: EffectKe
     }
 }
 
-fn remote_effect[G: send](read_handle: store.Reader, snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G], port: G) -> Outcome waits {
+fn remote_effect[G: send, App: inert + send](read_handle: store.Reader, snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G, App], port: G) -> Outcome waits {
     let Some(resolve) = a.mcp_peer else {
         return Gone
     }
@@ -169,7 +169,7 @@ fn remote_effect[G: send](read_handle: store.Reader, snap: store.Snapshot, h: Ha
     tool_result(port, a, take reply)
 }
 
-fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) -> Outcome waits {
+fn tool_result[G: send, App: inert + send](port: G, a: Agent[G, App], take reply: Result[Bytes, Fault]) -> Outcome waits {
     let body = match take reply {
         Ok(take output) => take output,
         Error(Unavailable) => return InDoubt,
@@ -188,7 +188,7 @@ fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) 
     }
 }
 
-fn reconcile_tool[G: send](port: G, a: Agent[G], key: EffectKey, e: Effect) -> Option[Receipt] waits {
+fn reconcile_tool[G: send, App: inert + send](port: G, a: Agent[G, App], key: EffectKey, e: Effect) -> Option[Receipt] waits {
     let Some(c) = view e.call else {
         return None
     }
@@ -206,7 +206,7 @@ fn reconcile_tool[G: send](port: G, a: Agent[G], key: EffectKey, e: Effect) -> O
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 // A target streams the model's draft and each tool's progress to the preview hub.
-pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
+pub fn effect[G: send, App: inert + send, F](ctx: runner.TriggerContext, h: Handles, port: G, take key: EffectKey, a: Agent[G, App], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
     let (recover, dispatches) = match permit {
         Some(Go(n)) => (false, n),
@@ -216,9 +216,6 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         None => return Ok(Lost),
     }
     let Ok((take read_handle, snap)) = runner.trigger_snapshot(ctx) else {
-        return Ok(Lost)
-    }
-    let Ok(h) = handles(store.snapshot_schema(snap)) else {
         return Ok(Lost)
     }
     let Ok(Some(take e)) = store.get(read_handle, snap, h.effects, key) else {

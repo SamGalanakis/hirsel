@@ -230,8 +230,7 @@ fn model_check(mut law: ModelStore, i: u64, op: ModelOp) waits {
 pub fn check_trigger_model(tasks: Tasks, seed: u64) waits {
     let (c, hand) = provide.clock(0u64, 0u64)
     let mut db = store.memory(c, provide.random(seed), result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(migrate)))
-    let model_tables = result.unwrap(store.with_schema(mut db, code.describe(tables)))
+    let model_tables = result.unwrap(store.bind_declaration(mut db, Migrate, declare_tables))
     let reader = result.unwrap(store.reader(db, store.VALUE_LIMIT + 1048576u64))
     let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
     let mut allowed = empty_entries()

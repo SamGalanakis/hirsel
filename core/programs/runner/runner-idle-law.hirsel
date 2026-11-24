@@ -3,7 +3,7 @@ const IDLE_MS: u64 = 30u64
 type IdleSeed: send { clock: Clock, starts: Sender[u64] }
 type IdleGrant: send { clock: Clock, starts: Sender[u64], attempt: u64 }
 
-fn idle_grant(seed: IdleSeed, take ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
+fn idle_grant(seed: IdleSeed, unused_handles: Hd, take ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
     let number = triggers.number(runner.trigger_attempt(ctx))
     Ok(IdleGrant(clock: seed.clock, starts: channel.sender(seed.starts), attempt: number))
 }
@@ -23,6 +23,7 @@ fn idle_entries() -> (triggers.Entries, triggers.Entry[u64]) {
 }
 
 fn idle_place(mut r: runner.Registry[IdleGrant, Hd]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables { ping_tables(h) })
     runner.granted(mut r, code.describe(idle_body), 65536u64, runner.DEFAULT_STEPS)
 }
 
@@ -52,7 +53,7 @@ fn idle_triggers(dir: Dir, time: Clock, random: Random, tasks: Tasks, due: u64, 
     let mut declaration = result.unwrap(store.declare(db, Migrate))
     let _ = result.unwrap(ping_schema(mut declaration))
     let _ = result.unwrap(store.seal(mut db, take declaration))
-    let tables = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
+    let tables = ping_tables(result.unwrap(store.bind_declaration(mut db, Migrate, ping_schema)))
     let (entries, target) = idle_entries()
     let schedule = store.run(mut db, None, (store.copy_env(due), store.copy_env(future), store.copy_env(tables), store.copy_env(entries), store.copy_env(target)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
         let id = triggers.write(mut tx, call_env.2, call_env.3, call_env.4, 3u64 * IDLE_MS, At(call_env.0))?
@@ -136,7 +137,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let _ = take stop_to
     let _ = take started
     let mut db = result.unwrap(store.open(tasks, dir, wall_clock, random, disk_options()))
-    let tables = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
+    let tables = ping_tables(result.unwrap(store.bind_declaration(mut db, Open, ping_schema)))
     if let Ok(Some(Returned(raw))) = triggers.outcome(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), tables, id) {
         want(result.unwrap(std.codec.decode(std.codec.of_u64(), raw)) == 1u64, "idle: the run did not finish on attempt one")
     } else { fail("idle: no terminal result") }

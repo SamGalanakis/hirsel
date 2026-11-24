@@ -3242,12 +3242,6 @@ fn remove_store_collection(mut tree: PageTree, id: u32, mut final_item: u64) -> 
     Ok(charge)
 }
 
-pub opaque type Schema {
-    store: StoreId,
-    catalog: PageTree,
-    bindings: Option[core.Log[IndexRegistration]]
-}
-
 pub opaque type Migration {
     plan: SchemaPlan,
     tiered: bool
@@ -3283,30 +3277,6 @@ fn application_name(name: String) -> Result[(), Error] {
         return Error(Exists("reserved"))
     }
     Ok(())
-}
-
-pub fn with_schema[H](mut db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
-    healthy(db)?
-    let (take handles, take bindings) = bind_schema(db.store, db.heads[0].roots.catalog, make)?
-    for take schema_binding in take bindings {
-        register_index(mut db.indexes, take schema_binding)
-    }
-    Ok(take handles)
-}
-
-fn bind_schema[H](id: StoreId, catalog: PageTree, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[(H, List[IndexRegistration]), Error] {
-    let schema = Schema(store: id, catalog: share_page_tree(catalog), bindings: Some(log.new()))
-    let handles = (code.callable(make))(schema)?
-    let Schema(bindings: take bindings, ..) = take schema
-    Ok((take handles, log.finish(option.unwrap(take bindings))))
-}
-
-pub fn snapshot_schema(s: Snapshot) -> Schema {
-    Schema(store: s.store, catalog: share_page_tree(s.roots.catalog), bindings: None)
-}
-
-pub fn tx_schema(tx: Tx) -> Schema {
-    Schema(store: tx.store, catalog: share_page_tree(tx.roots.catalog), bindings: None)
 }
 
 type MigrationJob: send {
@@ -3509,11 +3479,6 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     Ok(Table(store: plan.store, id: c.id, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved))
 }
 
-pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    application_name(name)?
-    catalog_handle(source.store, source.catalog, take name, take key, take value)
-}
-
 fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
     let c = match get_page_row(catalog, k) {
@@ -3561,16 +3526,6 @@ fn bind_table_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     let (take k, take c) = read_catalog_index(db.store, catalog, t, name, by, key)?
     let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None, std.codec.of_unit())?
     register_index(mut db.indexes, bind_index(t, c, by, key))
-    Ok(take handle)
-}
-
-pub fn schema_index[J, K, V](source: Schema, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    application_name(name)?
-    let (take k, take c) = read_catalog_index(source.store, source.catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(source.catalog, t, c, take k, key, None, std.codec.of_unit())?
-    if let Some(bindings) = source.bindings {
-        log.append(bindings, bind_index(t, c, by, key))
-    }
     Ok(take handle)
 }
 

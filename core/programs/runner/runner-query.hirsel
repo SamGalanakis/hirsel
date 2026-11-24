@@ -57,8 +57,8 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
     }
 }
 
-fn query_projection[H: inert + send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R],
-    codec: std.codec.Codec[R], declared: Slots[H], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
+fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R],
+    codec: std.codec.Codec[R], declared: Slots[Outer], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let steps = attempt.steps
     match store.look(read_handle, newest, None, attempt, query_attempt) {
         Ok(Seen(take answer)) => {
@@ -92,11 +92,11 @@ fn query_projection[H: inert + send, A, R](access: PublisherReads, read_handle: 
     }
 }
 
-fn adapt_query[H: inert + send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R],
-    declared: Slots[H], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: H, caller: Caller, arg: Bytes,
+fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R],
+    declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, select: fn(Outer) -> H, caller: Caller, arg: Bytes,
     n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let result = bound bytes n {
-        let attempt = QueryAttempt(body: body, args: ca, handles: store.copy_env(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
+        let attempt = QueryAttempt(body: body, args: ca, handles: select(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
         bound steps steps {
             query_projection(access, read_handle, attempt, cr, declared, bindings, newest, prior, rows, old)
         }
@@ -116,16 +116,23 @@ type QueryEntry[H: send]: send {
 
 pub fn query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
     f: StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, Plain(f), take declarations, n, s)
+    register_query(mut r, Plain(f), take declarations, store.copy_env, n, s)
 }
 
 pub fn query_as[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
     f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, As(f), take declarations, n, s)
+    register_query(mut r, As(f), take declarations, store.copy_env, n, s)
 }
 
-fn register_query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
-    body: QueryBody[H, A, R], take registered_slots: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query_as_with[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](
+    mut r: Registry[G, Outer], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]],
+    take declarations: Slots[H], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
+    let projected = map_slots(take declarations, select)
+    register_query(mut r, As(f), take projected, select, n, s)
+}
+
+fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer],
+    body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let value = std.codec.schema(cr) ?=> |_| Bounds
@@ -140,9 +147,9 @@ fn register_query[G: send, H: shareable + inert + send, A: codec, R: codec](mut 
     d.slots = take schemas
     d.value = take value
     register_check(mut r, key, ca, n, s)?
-    let go = fn(declared: Slots[H], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: H, caller: Caller, arg: Bytes,
+    let go = fn(declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, caller: Caller, arg: Bytes,
         newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
-        adapt_query(body, ca, cr, declared, bindings, access, read_handle, h, caller, arg, n, s, newest, prior, rows, old)
+        adapt_query(body, ca, cr, declared, bindings, access, read_handle, h, select, caller, arg, n, s, newest, prior, rows, old)
     }
     let by_caller = match body { As(_) => true, Plain(_) => false }
     insert(mut r, take key, take d, Query(n, s, QueryEntry(by_caller: by_caller, slots: take registered_slots, run: take go)))

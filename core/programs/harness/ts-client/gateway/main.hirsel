@@ -1,14 +1,14 @@
 // The scripted gateway that the TypeScript client is tested against.
-fn scripted_revoke_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[(), harness.Refused] {
-    harness.set_reader(mut tx, h, caller, false)
+fn scripted_revoke_entry(mut tx: store.Tx, h: notes.main.Handles, caller: store.Caller, take unused: ()) -> Result[(), harness.Refused] {
+    harness.set_reader(mut tx, h.harness, caller, false)
 }
 
-fn scripted_entries(mut r: runner.Registry[notes.main.Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
+fn scripted_entries(mut r: runner.Registry[notes.main.Grants, notes.main.Handles]) -> Result[(), runner.RegisterError] {
     notes.main.place(mut r)?
     runner.transact(mut r, code.describe(scripted_revoke_entry), notes.main.BYTES, runner.DEFAULT_STEPS)
 }
 
-fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
     let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
     config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     config.place = code.describe(scripted_entries)
@@ -88,10 +88,10 @@ pub fn main(out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, 
     let (ask, asks): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, notes.main.HelperSeed(inbox: take asks, dir: helper_dir, clock: clock, random: random, tasks: tasks, net: net), notes.main.helper_service)
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(notes.main.seed_schema)
     let d = harness.gateway.door_of(way)
     let seed = notes.main.Services(helper: channel.sender(ask), clock: clock, live: None, stream: Some(notes.main.Stream(door: harness.preview.door(hub), group: "")))
-    let config = harness.gateway.GatewayConfig(root: data, options: notes.main.options(), migrate: code.describe(notes.main.migrate), factory: scripted_factory(), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: data, options: notes.main.options(), factory: scripted_factory(), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return notes.main.quit(out, "could not start the gateway")
     }

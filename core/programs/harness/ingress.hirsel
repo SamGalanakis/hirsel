@@ -6,7 +6,7 @@
 // identical bytes (and the same `when`) answers its current disposition;
 // different bytes conflict. Nothing is refused for being busy: the item waits
 // at its enqueue_seq. An idle session takes it in this same transaction.
-pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, when: When, take m: Submit) -> Result[Disposition, Refused] {
+pub fn submit[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, caller: store.Caller, when: When, take m: Submit) -> Result[Disposition, Refused] {
     if string.byte_len(m.text) > INLINE_LIMIT {
         return Error(TooLarge)
     }
@@ -16,11 +16,11 @@ pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, cal
 
 // Admits a session command. It applies at the next turn boundary, ahead of
 // every input queued with it.
-pub fn command[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take client_key: String, take c: Command) -> Result[Disposition, Refused] {
+pub fn command[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, caller: store.Caller, take client_key: String, take c: Command) -> Result[Disposition, Refused] {
     lodge(mut tx, h, a, w, InboxKey(caller: clone(caller), client_key: take client_key), Command(take c))
 }
 
-fn lodge[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take key: InboxKey, take item: Item) -> Result[Disposition, Refused] {
+fn lodge[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, take key: InboxKey, take item: Item) -> Result[Disposition, Refused] {
     let Some(raw) = encoded(item) else {
         return Error(Malformed("item"))
     }
@@ -83,7 +83,7 @@ fn queue_window(tx: store.Tx, h: Handles, l: Limits) -> Result[List[(u64, Lodged
 
 // A turn boundary: no run is active. Every command in the window applies in
 // enqueue order, each alone, then the earliest input starts the next run.
-fn boundary[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session) -> Result[(), Refused] {
+fn boundary[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session) -> Result[(), Refused] {
     let rows = queue_window(tx, h, a.limits)?
     if list.len(rows) == a.limits.ingress {
         let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
@@ -127,7 +127,7 @@ fn apply(mut tx: store.Tx, h: Handles, mut s: Session, c: Command) -> Result[(),
 
 // Early input from the run's caller joins the run at its prepare, in enqueue
 // order. Everything else in the window waits for a boundary.
-fn steer[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session, id: u64, caller: store.Caller) -> Result[(), Refused] {
+fn steer[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], mut s: Session, id: u64, caller: store.Caller) -> Result[(), Refused] {
     let rows = queue_window(tx, h, a.limits)?
     for (seq, row) in rows {
         if let Input(Early, text) = view row.item {

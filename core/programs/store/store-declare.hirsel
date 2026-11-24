@@ -53,6 +53,30 @@ pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error] {
     }
 }
 
+pub fn bind_declaration[H](mut db: Db, mode: Mode, schema: fn(mut Declare) -> Result[H, Error]) -> Result[H, Error] waits {
+    let mut declaration = declare(db, mode)?
+    let handles = schema(mut declaration)?
+    let _ = seal(mut db, take declaration)?
+    Ok(take handles)
+}
+
+pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
+    let key = table_key(name)?
+    Ok(match get_page_row(snap.roots.catalog, key) {
+        Some(raw) => raw[0] == 1u8,
+        None => false,
+    })
+}
+
+pub fn declare_read_only(source: ReadOnly) -> Declare {
+    let snap = view source.snapshot
+    let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head,
+        stamp: snap.watermark, changes: 0u64, live: 0u64)
+    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark,
+        next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new())
+    new_declaration(Follower, base, take plan, true)
+}
+
 pub type DeclaredCollection: codec + send { name: String, id: u32, owner: u32, kind: u8 }
 
 pub fn describe_declarations[H](clock: Clock,

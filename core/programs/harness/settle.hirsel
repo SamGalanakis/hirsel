@@ -9,8 +9,7 @@ pub type Filed: codec + send = Recorded | Ignored
 // and schedules derivation; a tool receipt settles its member and advances.
 // None records the effect as in doubt. The app's settle entry is a fenced
 // attempt entry whose body calls this; a refusal rolls the transaction back.
-pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
-    let h = handles(store.tx_schema(tx))?
+pub fn settle[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
     match settle_in(mut tx, h, a, w, attempt, take m) {
         Ok(d) => Ok(d),
         Error(Storage) => Error(Missing("harness: storage refused the settle")),
@@ -18,7 +17,7 @@ pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner
     }
 }
 
-fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
+fn settle_in[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
     let Settle(key: key, receipt: take receipt) = take m
     if !kept(effect_active(tx, h, key))? {
         return Ok(Ignored)

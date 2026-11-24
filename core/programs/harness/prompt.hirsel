@@ -2,11 +2,11 @@
 // built from a sealed cutoff's entries.
 type Shown = Text(String) | Absent | Kept
 
-fn render(tx: store.Tx, sec: Section, l: Limits) -> Shown {
+fn render[App: inert + send](tx: store.Tx, h: Handles, app: App, sec: Section[App], l: Limits) -> Shown {
     let go = code.callable(sec.render)
     let ran = bound bytes l.section_bytes {
         bound steps l.section_steps {
-            go(tx)
+            go(tx, h, app)
         }
     }
     match take ran {
@@ -31,11 +31,11 @@ fn hash_of(list: List[SectionHash], key: String) -> Option[Bytes] {
 
 const TOOL_SEARCH: String = "tool_search"
 
-fn search_tool[G: send]() -> Tool[G] {
+fn search_tool[G: send, App: inert + send]() -> Tool[G, App] {
     inside(TOOL_SEARCH, "Search the MCP tool catalog and offer matching tools in the next request.", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", code.describe(tool_search))
 }
 
-fn tool_search(mut tx: store.Tx, inv: Invoke) -> Result[Reply, Fault] {
+fn tool_search[App: inert + send](mut tx: store.Tx, h: Handles, app: App, inv: Invoke) -> Result[Reply, Fault] {
     let Ok(args) = string.from_utf8(clone(inv.args)) else {
         return Error(BadArgs("tool_search expects a query string"))
     }
@@ -45,7 +45,6 @@ fn tool_search(mut tx: store.Tx, inv: Invoke) -> Result[Reply, Fault] {
     let Some(query) = mcp.rpc.field_text(fields, "query") else {
         return Error(BadArgs("tool_search expects a query string"))
     }
-    let h = handles(store.tx_schema(tx)) ?=> |_| Unavailable
     let mut s = session_of(tx, h) ?=> |_| Unavailable
     let mut names: List[String] = list.new()
     let mut texts: List[String] = list.new()
@@ -81,7 +80,7 @@ fn tool_search(mut tx: store.Tx, inv: Invoke) -> Result[Reply, Fault] {
     Ok(Now(take output))
 }
 
-fn local_definition[G: send](t: Tool[G]) -> ToolDef {
+fn local_definition[G: send, App: inert + send](t: Tool[G, App]) -> ToolDef {
     ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None)
 }
 
@@ -89,7 +88,7 @@ fn remote_definition(take name: String, r: mcp_tools.Remote) -> ToolDef {
     ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)), rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r))))
 }
 
-fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result[List[ToolDef], Refused] {
+fn offered[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App], s: Session) -> Result[List[ToolDef], Refused] {
     let mut defs: List[ToolDef] = list.new()
     let has_catalog = tool_search_enabled(a)
     for t in a.tools {
@@ -102,7 +101,7 @@ fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result
     }
     if has_catalog {
         if narrowed(s, TOOL_SEARCH) {
-            let tool: Tool[G] = search_tool()
+            let tool: Tool[G, App] = search_tool()
             list.push(mut defs, local_definition(tool))
         }
         let Ok(take cursor) = store.range(tx, h.mcp_catalog, Unbounded, Unbounded) else {
@@ -134,7 +133,7 @@ fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result
 // A patch whose order differs from the shown order is a baseline; a baseline
 // that would need a kept section's text, which only the log holds, is put off
 // to the next request and every section keeps its shown text.
-fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> Result[(), Refused] {
+fn plan[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], mut s: Session) -> Result[(), Refused] {
     let first = list.len(s.active_tools_hash) == 0u64
     let mut shown: List[SectionHash] = list.new()
     let mut changes: List[Change] = list.new()
@@ -142,7 +141,7 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
     let mut kept_any = false
     for sec in a.sections {
         let old = hash_of(s.active_sections_hashes, sec.key)
-        match render(tx, sec, a.limits) {
+        match render(tx, h, a.app, sec, a.limits) {
             Text(take text) => {
                 let hash = digest(string.as_bytes(text))
                 list.push(mut shown, SectionHash(key: clone(sec.key), hash: clone(hash)))

@@ -106,6 +106,19 @@ pub fn table_slot[H: send, K: codec, V: codec](take name: String, select: Static
     Ok(take declared)
 }
 
+fn map_slots[Outer: send, H: send](take input: Slots[H], select: fn(Outer) -> H) -> Slots[Outer] {
+    let Slots(declared: take definitions, numbers: take numbers) = take input
+    let mut declared: List[SlotDeclaration[Outer]] = list.with_capacity(list.len(definitions))
+    for take definition in take definitions {
+        let SlotDeclaration(description: take description, bind: take bind) = take definition
+        let projected = fn(handles: Outer, schema: SlotSchema) -> Result[BoundSlot, RegisterError] {
+            bind(select(handles), schema)
+        }
+        list.push(mut declared, SlotDeclaration(description: take description, bind: take projected))
+    }
+    Slots(declared: take declared, numbers: take numbers)
+}
+
 fn bind_slots[H: send](s: Slots[H], h: H) -> Result[List[BoundSlot], RegisterError] {
     let mut out: List[BoundSlot] = list.with_capacity(list.len(s.declared))
     for declaration in s.declared {

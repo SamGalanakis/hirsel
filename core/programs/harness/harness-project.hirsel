@@ -13,11 +13,11 @@ pub type Projection: codec + send {
     prefix: Bytes
 }
 
-pub fn project[G: send](tx: store.Tx, h: Handles, a: Agent[G]) -> Result[Projection, Refused] {
+pub fn project[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App]) -> Result[Projection, Refused] {
     let s = session_of(tx, h)?
     let mut sections: List[SectionHash] = list.new()
     for sec in a.sections {
-        match render(tx, sec, a.limits) {
+        match render(tx, h, a.app, sec, a.limits) {
             Text(take text) => list.push(mut sections, SectionHash(key: clone(sec.key), hash: digest(string.as_bytes(text)))),
             Absent => (),
             Kept => if let Some(take hash) = hash_of(s.active_sections_hashes, sec.key) {
@@ -98,13 +98,13 @@ pub type ForkDiffError: send = Unrecorded(store.UnknownReason) | Overran | Store
 // the store's recorded-call re-execution on a private copy of that call's base (RUNNER-SPEC
 // §7), then `cache_diff`. Nothing either side writes is kept. A base the store cannot
 // rebuild, a projection over `bounds`, or a refused projection has no diff.
-pub fn fork_cache_diff[G: send, N: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, live: Agent[G], next: Agent[N]) -> Result[CacheDiff, ForkDiffError] waits {
+pub fn fork_cache_diff[G: send, App: inert + send, N: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, live: Agent[G, App], next: Agent[N, App]) -> Result[CacheDiff, ForkDiffError] waits {
     let before = projected_at(db, b, v, bounds, h, live)?
     let after = projected_at(db, b, v, bounds, h, next)?
     Ok(cache_diff(before, after))
 }
 
-fn projected_at[G: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G]) -> Result[Projection, ForkDiffError] waits {
+fn projected_at[G: send, App: inert + send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G, App]) -> Result[Projection, ForkDiffError] waits {
     let attempt = store.project_recorded(db, b, v, bounds, (store.copy_env(h), store.copy_env(a)), fn(tx, env) -> Result[Projection, Refused] {
         project(tx, env.0, env.1)
     }) ?=> Store

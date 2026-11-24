@@ -103,50 +103,12 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
 }
 
-fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
+pub fn present(snap: store.Snapshot) -> Result[bool, store.Error] {
+    store.has_table(snap, rows_name())
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let value: std.codec.Codec[SubRow] = std.codec.of()
-    let terminal: std.codec.Codec[Terminal] = std.codec.of()
-    let mut spec = store.spec(rows_name(), id_key(), value)
-    store.with_index(mut spec, "due", code.describe(row_due), std.codec.key_u64())?
-    created(store.migration_create_table(mut phase, take spec))?
-    created(store.migration_create_table(mut phase, store.spec(outcomes_name(), id_key(), terminal)))
-}
-
-fn pending_table(source: store.Schema) -> Result[store.Table[Id, SubRow], store.Error] {
-    let value: std.codec.Codec[SubRow] = std.codec.of()
-    store.schema_table(source, rows_name(), id_key(), value)
-}
-
-pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
-    let mut rows = pending_table(source)?
-    let terminal: std.codec.Codec[Terminal] = std.codec.of()
-    let due = store.schema_index(source, rows, "due", code.describe(row_due), std.codec.key_u64())?
-    let outcomes = store.schema_table(source, outcomes_name(), id_key(), terminal)?
-    Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
-}
-
-pub opaque type PendingTable { table: Option[store.Table[Id, SubRow]] }
-
-pub fn pending_table_if_present(source: store.Schema) -> Result[PendingTable, store.Error] {
-    match pending_table(source) {
-        Ok(take table) => Ok(PendingTable(table: Some(take table))),
-        Error(Missing(_)) => Ok(PendingTable(table: None)),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-pub fn scan_pending(read_handle: store.Reader, s: store.Snapshot, t: PendingTable) -> Result[Option[PendingRows], store.Error] waits {
-    match t.table {
-        Some(table) => Ok(Some(PendingRows(rows: store.scan(read_handle, s, table, Unbounded, Unbounded)?))),
-        None => Ok(None),
-    }
+pub fn scan_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables) -> Result[PendingRows, store.Error] waits {
+    Ok(PendingRows(rows: store.scan(read_handle, s, t.rows, Unbounded, Unbounded)?))
 }
 
 pub fn next_scanned(read_handle: store.Reader, mut cursor: PendingRows) -> Result[Option[Pending], store.Error] waits {
@@ -154,14 +116,6 @@ pub fn next_scanned(read_handle: store.Reader, mut cursor: PendingRows) -> Resul
         if id.branch == 0u32 { return Ok(Some(Pending(id: id, row: take row))) }
     }
     Ok(None)
-}
-
-pub fn tables_for_settlement(read_handle: store.Reader, source: store.Schema, snapshot: store.Snapshot) -> Result[Option[Tables], store.Error] waits {
-    let pending = pending_table_if_present(source)?
-    let Some(take cursor) = scan_pending(read_handle, snapshot, pending)? else { return Ok(None) }
-    let mut remaining = take cursor
-    if let None = next_scanned(read_handle, mut remaining)? { return Ok(None) }
-    Ok(Some(tables(source)?))
 }
 
 fn stored[T](take r: Result[T, store.Error]) -> Result[T, Error] {

@@ -24,8 +24,8 @@ fn mcp_blob_model(g: Grants, take r: harness.Request, mut draft: Option[harness.
     Ok(take answer)
 }
 
-fn mcp_blob_agent() -> harness.Agent[Grants] {
-    let mut a = harness.agent("mcp-blob", "scripted", code.describe(mcp_blob_model))
+fn mcp_blob_agent() -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("mcp-blob", "scripted", code.describe(mcp_blob_model), ())
     a.mcp_peer = Some(code.describe(mcp_peer))
     a.store_result = Some(code.describe(stage_blob))
     a
@@ -40,25 +40,24 @@ fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, 
 }
 
 fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
+    harness.effect(g.context, g.handles, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
 }
 
-fn mcp_blob_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn mcp_blob_settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let w = mcp_blob_wiring() ?=> |_| Missing("MCP blob wiring")
-    harness.settle(mut tx, mcp_blob_agent(), w, a, take m)
+    harness.settle(mut tx, h, mcp_blob_agent(), w, a, take m)
 }
 
 fn mcp_blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(mcp_blob_advance), code.describe(mcp_blob_effect), code.describe(mcp_blob_settle), BYTES, 8388608u64)?
+    harness.register_standard(mut r, code.describe(mcp_blob_advance), code.describe(mcp_blob_effect), code.describe(mcp_blob_settle), harness.select_handles, BYTES, 8388608u64)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
     runner.query_as(mut r, code.describe(harness.window), harness.window_slots()?, BYTES, runner.DEFAULT_STEPS)
 }
 
 fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: store.Caller) waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     update_catalog(mut db, OLD_SCHEMA)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(mcp_blob_wiring())
     let committed = result.unwrap(store.run(mut db, None, (store.copy_env(caller), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
         harness.set_reader(mut tx, call_env.1, call_env.0, true)?
@@ -189,7 +188,7 @@ fn admission_catalog(mut db: store.Db, h: harness.Handles) waits {
     match take changed { Ok(Committed(_)) => (), _ => fail("admission catalog fixture") }
 }
 
-fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grants], round: u64, hidden: Option[String]) waits {
+fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grants, ()], round: u64, hidden: Option[String]) waits {
     let saved = store.run(mut db, None, (store.copy_env(h), store.copy_env(hidden), store.copy_env(round)), fn(mut tx, call_env) -> Result[(), store.Error] {
         let key = harness.EffectKey(run: 0u64, round: call_env.2, kind: harness.MODEL, ordinal: 0u64)
         let mut e = option.unwrap(store.fetch(tx, call_env.0.effects, key)?)
@@ -230,7 +229,7 @@ fn test_wave2_catalog_admission_prefix(parent: Dir, clock: Clock, random: Random
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = fresh(dir, clock, random, tasks)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let mut a = sectioned(false)
     a.mcp_peer = Some(code.describe(unused_peer))
     admission_catalog(mut db, h)
@@ -316,8 +315,8 @@ fn reconcile_bump(g: Grants, key: harness.EffectKey) -> Result[Option[Bytes], ha
     }
 }
 
-fn reconcile_agent() -> harness.Agent[Grants] {
-    let mut a = harness.agent("reconcile", "scripted", code.describe(reconcile_model))
+fn reconcile_agent() -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("reconcile", "scripted", code.describe(reconcile_model), ())
     list.push(mut a.tools, harness.Tool(name: "bump", about: "adds one", input: "{}", rev: 1u64, repair: None,
         run: Outside(code.describe(bump), Once, Some(code.describe(reconcile_bump)))))
     take a
@@ -332,17 +331,17 @@ fn reconcile_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller,
 }
 
 fn reconcile_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, reconcile_agent(), code.describe(reconcile_settle), None)
+    harness.effect(g.context, g.handles, g, take key, reconcile_agent(), code.describe(reconcile_settle), None)
 }
 
-fn reconcile_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn reconcile_settle(mut tx: store.Tx, h: harness.Handles, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let w = reconcile_wired() ?=> |_| Missing("reconciliation wiring")
     let a = reconcile_agent()
     let key = m.key
-    let filed = harness.settle(mut tx, a, w, attempt, take m)?
+    let filed = harness.settle(mut tx, h, a, w, attempt, take m)?
     if key.kind == harness.TOOL {
         if let Recorded = filed {
-            let Ignored = harness.settle(mut tx, a, w, attempt, other_receipt(key))? else {
+            let Ignored = harness.settle(mut tx, h, a, w, attempt, other_receipt(key))? else {
                 return Error(Missing("duplicate settle was recorded"))
             }
         }
@@ -351,7 +350,7 @@ fn reconcile_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: 
 }
 
 fn reconcile_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(reconcile_advance), code.describe(reconcile_effect), code.describe(reconcile_settle), BYTES, BYTES)
+    harness.register_standard(mut r, code.describe(reconcile_advance), code.describe(reconcile_effect), code.describe(reconcile_settle), harness.select_handles, BYTES, BYTES)
 }
 
 @test
@@ -396,9 +395,9 @@ fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random:
     let _ = result.unwrap(result.unwrap(task.join(take second)))
     let asked = model_asked(services)
     let dispatched = tool_ran(services)
-    let db = result.unwrap(store.open(tasks, reopened, clock, random, runner.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, reopened, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
-    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let s = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64)))
     let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64)))
     let finished = match run.phase { Finished(Answered) => true, _ => false }

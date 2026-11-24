@@ -39,7 +39,7 @@ store@1/store/cell_elision_and_inline_boundary src=fc556c3cb74daf7b sig=16007234
 store@1/store/cell_log_format_l79_l77_l78 src=b14e4cdcd6fe11ad sig=5b6d050389d961ce run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=3031abe6e70c903a sig=5184eeb944e466f5 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=1603be365862436f sig=08f9ed9d768145bd run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/disk_test_branches src=d8b67fed78a0f33f sig=6d051ea5209b4f65 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/disk_test_branches src=d8b67fed78a0f33f sig=0cda3aa08380b8c8 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_db src=86a0a4f74eac1694 sig=52c440fda99c4aaa run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_db_refusal src=95d1b4ad752de8cf sig=e2543e436001b32a run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_format4 src=734498598c596323 sig=4cb3887073e93671 run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -217,7 +217,7 @@ store@1/store/test_reserve_latches src=4759012171d697e5 sig=edb00f0d507e74da run
 store@1/store/test_resident src=ed15ea9720e338e4 sig=0408e830adc1896d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_retention_keeps_steps src=0bb86bac89221728 sig=af081a34ee9d3e49 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_rollback_on_overrun src=010f69ef874f6de6 sig=c2c4c92c37dd2be7 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_schema_numbers src=f197b5e02b56343b sig=cb8beed8b43fb326 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_schema_numbers src=f197b5e02b56343b sig=c4c44bb8c17fb586 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_settled_callinfo src=6d6a3e6fff4928ca sig=3a9b5136354076da run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_shared_changes src=22389ed1931ba70b sig=53de2f894768566b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_shared_payload_copy src=77566de5d790ef64 sig=d282461ab9934e52 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -229,7 +229,7 @@ store@1/store/test_streams src=04e6d17c62004c50 sig=60ab363565c240ad run=aff7b6b
 store@1/store/test_typed_foreign src=ad09a39160866d68 sig=43d91a6cd85b95a0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_indexes src=e65a1533fe64c4fa sig=510117ac48d39b30 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_model src=a7c51105c83bee58 sig=c095af47386ecad4 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_typed_read_laws src=3c4ebf3838953141 sig=5ec6f7ceb67b09e2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_typed_read_laws src=3c4ebf3838953141 sig=1ba23c7b420c8816 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_resident src=e91858d9691ae86a sig=f266470af9e44958 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_snapshot_task src=ea90a3abef9ccbed sig=eb33f02e7124dd04 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_unique_conflict_atomic src=2074cd58f95efba3 sig=10a07cf79cae4463 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

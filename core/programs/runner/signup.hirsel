@@ -5,39 +5,30 @@ type StatusRequest: codec + send { id: u64, run: triggers.Id }
 pub type WriteError: codec + send = Exists | Missing | Rejected | PaymentUnknown
 type RunResult: codec + send = Active | Held | Cancelled | MailInDoubt | ChargeInDoubt | Rejected
 
-type Tables: shareable + send {
+pub opaque type Tables: shareable + send {
     accounts: store.Table[u64, Account],
     triggers: triggers.Tables,
+    steps: steps.Tables,
 }
 
 fn accounts_name() -> String { "signup.accounts" }
 const ENTRY_BYTES: u64 = 131072u64
 const PLACE_BYTES: u64 = 1048576u64
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    triggers.migrate(mut phase)?
-    steps.migrate(mut phase)?
-    let account: std.codec.Codec[Account] = std.codec.of()
-    store.migration_create_table(mut phase, store.spec(accounts_name(), std.codec.key_u64(), account))
-}
-
-fn schema(mut d: store.Declare) -> Result[Tables, store.Error] {
-    let trigger_tables = triggers.declare_tables(mut d)?
-    steps.declare_tables(mut d)?
+pub fn schema(mut d: store.Declare) -> Result[Tables, store.Error] {
+    let pending = triggers.declare_tables(mut d)?
+    let step_handles = steps.declare_tables(mut d, clone(pending))?
     let account: std.codec.Codec[Account] = std.codec.of()
     let declared = store.declare_table(mut d, accounts_name(), std.codec.key_u64(), account)?
     let account_table = store.finish(mut d, take declared)?
-    Ok(Tables(accounts: take account_table, triggers: take trigger_tables))
+    Ok(Tables(accounts: take account_table, triggers: take pending, steps: take step_handles))
 }
 
-fn accounts(catalog: store.Schema) -> Result[store.Table[u64, Account], store.Error] {
-    let account: std.codec.Codec[Account] = std.codec.of()
-    store.schema_table(catalog, accounts_name(), std.codec.key_u64(), account)
-}
+pub fn trigger_tables(h: Tables) -> triggers.Tables { clone(h.triggers) }
 
-fn handles(catalog: store.Schema) -> Result[Tables, store.Error] {
-    Ok(Tables(accounts: accounts(catalog)?, triggers: triggers.tables(catalog)?))
-}
+pub fn step_tables(h: Tables) -> steps.Tables { clone(h.steps) }
+
+fn same_tables(h: Tables) -> Tables { clone(h) }
 
 fn stored[R](take x: Result[R, store.Error]) -> Result[R, WriteError] {
     match take x { Ok(take a) => Ok(take a), Error(_) => Error(Rejected) }
@@ -57,28 +48,25 @@ fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -
     let copied: String = clone(arg.email)
     let email = take copied
     stored(store.put(mut tx, h.accounts, arg.id, Account(email: take email, active: false)))?
-    match steps.schedule(mut tx, entries, target, arg, 3u64, AfterCommit) {
+    match steps.schedule(mut tx, h.steps, entries, target, arg, 3u64, AfterCommit) {
         Ok(id) => Ok(id),
         Error(_) => Error(Rejected),
     }
 }
 
-pub fn activate(mut tx: store.Tx, id: u64) -> Result[(), WriteError] {
-    let table = stored(accounts(store.tx_schema(tx)))?
-    let Some(take found) = stored(store.fetch(tx, table, id))? else { return Error(Missing) }
+pub fn activate(mut tx: store.Tx, h: Tables, id: u64) -> Result[(), WriteError] {
+    let Some(take found) = stored(store.fetch(tx, h.accounts, id))? else { return Error(Missing) }
     let mut account = take found
     account.active = true
-    stored(store.put(mut tx, table, id, account))
+    stored(store.put(mut tx, h.accounts, id, account))
 }
 
-pub fn enroll(mut tx: store.Tx, id: u64) -> Result[triggers.Id, WriteError] {
-    let h = stored(handles(store.tx_schema(tx)))?
+pub fn enroll(mut tx: store.Tx, h: Tables, id: u64) -> Result[triggers.Id, WriteError] {
     signup(mut tx, h, store.Caller(issuer: 1u8, subject: list.new()), Signup(id: id, email: "ada@example.test", card: "scripted-card"))
 }
 
-pub fn active(db: store.Db, id: u64) -> Result[bool, store.Error] waits {
+pub fn active(db: store.Db, h: Tables, id: u64) -> Result[bool, store.Error] waits {
     let snapshot = store.snapshot(db)
-    let h = handles(store.snapshot_schema(snapshot))?
     let row = store.get(result.unwrap(store.reader(db, 0u64)), snapshot, h.accounts, id)?
     Ok(match row { Some(account) => account.active, None => false })
 }
@@ -94,7 +82,7 @@ type Payment: send = Charge(Bytes, String, Sender[u64]) | Lookup(Bytes, Sender[O
 pub type Services: send { mail: Sender[Mail], payment: Sender[Payment] }
 type Grants: send { context: runner.TriggerContext, services: Services }
 
-fn make_grants(services: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+fn make_grants(services: Services, unused_handles: Tables, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     Ok(Grants(context: take ctx, services: Services(mail: channel.sender(services.mail), payment: channel.sender(services.payment))))
 }
 
@@ -213,10 +201,11 @@ fn run(g: Grants, caller: runner.Caller, take arg: Signup) -> Result[RunResult, 
 }
 
 fn place(mut registry: runner.Registry[Grants, Tables]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut registry, fn(h: Tables) -> triggers.Tables { trigger_tables(h) })
     runner.transact(mut registry, code.describe(signup), ENTRY_BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut registry, code.describe(signup_status), ENTRY_BYTES, runner.DEFAULT_STEPS)?
-    steps.register(mut registry, ENTRY_BYTES, runner.DEFAULT_STEPS)?
-    steps.register_transaction(mut registry, code.describe(activate), ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    steps.register(mut registry, step_tables, ENTRY_BYTES, runner.DEFAULT_STEPS)?
+    steps.register_transaction(mut registry, code.describe(activate), step_tables, same_tables, ENTRY_BYTES, runner.DEFAULT_STEPS)?
     runner.granted(mut registry, code.describe(run), ENTRY_BYTES, runner.DEFAULT_STEPS)
 }
 
@@ -296,12 +285,12 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("sign-up: place did not stop") }
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let snapshot = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, schema))
     let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(db, 0u64)), snapshot, h.triggers, run_id)) else { fail("sign-up: missing terminal outcome") }
     let result_codec: std.codec.Codec[RunResult] = std.codec.of()
     if let Ok(Active) = std.codec.decode(result_codec, outcome) {} else { fail("sign-up: expected an active outcome") }
-    let welcome: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, steps.StepId(run: run_id, index: 0u64))
-    let paid: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, steps.StepId(run: run_id, index: 1u64))
+    let welcome: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: 0u64))
+    let paid: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: 1u64))
     if let Ok(Some(Ok(1u64))) = welcome {} else { fail("sign-up: missing welcome receipt") }
     if let Ok(Some(Ok(1u64))) = paid {} else { fail("sign-up: missing payment receipt") }
     result.unwrap(store.close(take db))

@@ -21,11 +21,6 @@ fn idle_preview_tab(net: Net, clock: Clock, port: u16, me: Bytes, reads: Receive
     }
 }
 
-fn routes_migrate(mut m: store.Migration) -> Result[(), store.Error] {
-    harness.migrate(mut m)?
-    harness.release.migrate(mut m)
-}
-
 fn settle_release_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take ask: harness.release.DevSettlement) -> Result[harness.Filed, harness.Refused] {
     harness.release.dev_settle(mut tx, h, caller, gated_agent(), wired()?, take ask)
 }
@@ -48,10 +43,10 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let root = result.unwrap(host.mkdtemp(parent, mut name))
     let (asks, _inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), migrate: code.describe(routes_migrate), factory: platform.local.seeded_factory(routes_place), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: platform.local.seeded_factory(routes_place), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let g = result.unwrap(harness.gateway.gateway(take way, take config))
     let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
     let front = harness.gateway_http.Front(bind: code.describe(runner.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: runner.client.transact_entry(code.describe(submit_entry)), decide: runner.client.transact_entry(code.describe(decide_entry)), settle: Some(runner.client.transact_entry(code.describe(settle_release_entry))), keys: result.unwrap(runner.client.entry_keys(code.describe(routes_entries))), socket: wire().socket, agent: "scripted", narrow: All, preview: None, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)

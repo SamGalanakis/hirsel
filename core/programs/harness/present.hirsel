@@ -29,7 +29,7 @@ fn joined(a: String, b: String) -> String {
 
 // The agent's presenter, bounded like a gate, or the standard wording when it
 // is absent, fails, overruns or answers more than INLINE_LIMIT bytes.
-fn presented[G: send](a: Agent[G], c: Call, o: Outcome) -> Presented {
+fn presented[G: send, App: inert + send](a: Agent[G, App], c: Call, o: Outcome) -> Presented {
     let Some(hook) = a.presenter else {
         return worded(o)
     }

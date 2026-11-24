@@ -92,11 +92,12 @@ agent and the wiring:
 | --- | --- | --- |
 | `advance(tx, h, caller, wake)` | transact trigger target | `harness.advance` |
 | `effect(grants, caller, key)` | granted trigger target | `harness.effect` |
-| `begin` | fenced attempt entry | registered by `harness.register` |
-| `settle(tx, attempt, m)` | fenced attempt entry | `harness.settle` |
+| `begin` | fenced attempt entry | registered by `harness.register_standard` |
+| `settle(tx, h, attempt, m)` | fenced attempt entry | `harness.settle` |
 
-`harness.migrate` and `harness.handles` are the place's `migrate` and
-`handles`. `harness.entries(wiring)` is its `TriggerConfig.entries`.
+The place's `schema` calls `harness.declare_tables` and passes the returned
+handles to its transactions and trigger workers. `harness.entries(wiring)`
+is its `TriggerConfig.entries`.
 `harness.open_session` and `harness.submit` run in any write transaction;
 `harness.window` reads the transcript under the session ACL when registered with `query_as`.
 

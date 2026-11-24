@@ -384,69 +384,6 @@ pub fn wait_key() -> std.codec.Key[WaitKey] {
 
 // Re-running the migration on a migrated store is a no-op, as for the
 // trigger tables, so a place reopens a store a host seeded.
-fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
-}
-
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    runner.triggers.migrate(mut phase)?
-    mcp_tools.migrate(mut phase)?
-    release.migrate(mut phase)?
-    let c_session: std.codec.Codec[Session] = std.codec.of()
-    let c_entry: std.codec.Codec[Entry] = std.codec.of()
-    let c_received: std.codec.Codec[Received] = std.codec.of()
-    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
-    let c_run: std.codec.Codec[Run] = std.codec.of()
-    let c_effect: std.codec.Codec[Effect] = std.codec.of()
-    let c_wait: std.codec.Codec[Wait] = std.codec.of()
-    let c_shown: std.codec.Codec[View] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec(session_name(), std.codec.key_u64(), c_session)))?
-    created(store.migration_create_table(mut phase, store.spec(entries_name(), std.codec.key_u64(), c_entry)))?
-    created(store.migration_create_table(mut phase, store.spec(inbox_name(), inbox_key(), c_received)))?
-    created(store.migration_create_table(mut phase, store.spec(ingress_name(), std.codec.key_u64(), c_lodged)))?
-    let c_frame: std.codec.Codec[Frame] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("harness.frames", std.codec.key_u64(), c_frame)))?
-    created(store.migration_create_table(mut phase, store.spec(runs_name(), std.codec.key_u64(), c_run)))?
-    created(store.migration_create_table(mut phase, store.spec(effects_name(), effect_key(), c_effect)))?
-    created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
-    created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))?
-    let c_reader: std.codec.Codec[bool] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("harness.readers", std.codec.key_bytes(), c_reader)))?
-    created(store.migration_create_table(mut phase, store.spec("harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())))
-}
-
-pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
-    let c_session: std.codec.Codec[Session] = std.codec.of()
-    let c_entry: std.codec.Codec[Entry] = std.codec.of()
-    let c_received: std.codec.Codec[Received] = std.codec.of()
-    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
-    let c_frame: std.codec.Codec[Frame] = std.codec.of()
-    let c_run: std.codec.Codec[Run] = std.codec.of()
-    let c_effect: std.codec.Codec[Effect] = std.codec.of()
-    let c_wait: std.codec.Codec[Wait] = std.codec.of()
-    let c_shown: std.codec.Codec[View] = std.codec.of()
-    let c_reader: std.codec.Codec[bool] = std.codec.of()
-    Ok(Handles(
-        session: store.schema_table(schema, session_name(), std.codec.key_u64(), c_session)?,
-        entries: store.schema_table(schema, entries_name(), std.codec.key_u64(), c_entry)?,
-        inbox: store.schema_table(schema, inbox_name(), inbox_key(), c_received)?,
-        ingress: store.schema_table(schema, ingress_name(), std.codec.key_u64(), c_lodged)?,
-        frames: store.schema_table(schema, "harness.frames", std.codec.key_u64(), c_frame)?,
-        runs: store.schema_table(schema, runs_name(), std.codec.key_u64(), c_run)?,
-        effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
-        waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
-        views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
-        readers: store.schema_table(schema, "harness.readers", std.codec.key_bytes(), c_reader)?,
-        fork_cuts: store.schema_table(schema, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
-        mcp_catalog: mcp_tools.catalog(schema)?,
-        triggers: runner.triggers.tables(schema)?,
-        source: release.tables(schema)?,
-    ))
-}
-
 fn declare_table[K, V](mut d: store.Declare, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
     let table = store.declare_table(mut d, name, key, value)?
     store.finish(mut d, take table)
@@ -511,18 +448,18 @@ pub type Invoke: codec + send {
 // place's reply), and the call stays parked until then.
 pub type Reply: codec + send = Now(Bytes) | Later
 
-pub type ToolRun[G: send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat, Option[StaticFn[fn(G, EffectKey) -> Result[Option[Bytes], Fault] waits]]) | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
+pub type ToolRun[G: send, App: inert + send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat, Option[StaticFn[fn(G, EffectKey) -> Result[Option[Bytes], Fault] waits]]) | Inside(StaticFn[fn(mut store.Tx, Handles, App, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
 
 // `rev` names the tool's behaviour in approval keys: raise it when the same
 // arguments would now do something else, so earlier approvals stop matching.
 // `repair` is a pure rewrite of the arguments that runs before the gates.
-pub type Tool[G: send]: send {
+pub type Tool[G: send, App: inert + send]: send {
     name: String,
     about: String,
     input: String,
     rev: u64,
     repair: Option[StaticFn[fn(Bytes) -> Result[Bytes, Fault]]],
-    run: ToolRun[G]
+    run: ToolRun[G, App]
 }
 
 // A gate's verdict. Verdicts fold by maximum, Pass < Hold < Deny, so adding
@@ -537,25 +474,25 @@ pub type Ask: codec + send {
     call: Call
 }
 
-pub type Gate: send {
+pub type Gate[App: inert + send]: send {
     name: String,
-    check: StaticFn[fn(store.Tx, Ask) -> Verdict]
+    check: StaticFn[fn(store.Tx, Handles, App, Ask) -> Verdict]
 }
 
 // A keyed system-prompt section, rendered from rows each time a request is
 // prepared. List order is prompt order. `None` removes it; a render that
 // fails or overruns keeps the text it showed last.
-pub type Section: send {
+pub type Section[App: inert + send]: send {
     key: String,
-    render: StaticFn[fn(store.Tx) -> Result[Option[String], store.Error]]
+    render: StaticFn[fn(store.Tx, Handles, App) -> Result[Option[String], store.Error]]
 }
 
 // Runs in the transaction that appends an entry, with the entry's position.
 // It may write its own rows and triggers. It cannot veto or edit the entry:
 // a reaction that fails has its writes rolled back and is recorded as a Note.
-pub type After: send {
+pub type After[App: inert + send]: send {
     name: String,
-    run: StaticFn[fn(mut store.Tx, u64, Entry) -> Result[(), Fault]]
+    run: StaticFn[fn(mut store.Tx, Handles, App, u64, Entry) -> Result[(), Fault]]
 }
 
 pub type Limits: send {
@@ -583,9 +520,10 @@ pub type KeepWarm: send {
     requests: u64
 }
 
-pub type Agent[G: send]: send {
+pub type Agent[G: send, App: inert + send]: send {
     name: String,
     route: String,
+    app: App,
     // The model gets a draft source when the effect has a preview target; it may
     // ignore it.
     model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits],
@@ -603,26 +541,24 @@ pub type Agent[G: send]: send {
     prompt_view: Option[StaticFn[fn(store.Tx, Pressure) -> List[Omit]]],
     // The app supplies object authority when a result outgrows the journal.
     store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
-    tools: List[Tool[G]],
+    tools: List[Tool[G, App]],
     mcp_peer: Option[StaticFn[fn(G, String) -> Option[mcp_tools.Peer]]],
-    gates: List[Gate],
-    sections: List[Section],
-    reactions: List[After],
+    gates: List[Gate[App]],
+    sections: List[Section[App]],
+    reactions: List[After[App]],
     limits: Limits,
 }
 
-pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, charge: RequireGuarantee, keep_warm: None, hedged_model: None, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
-    // Gates and sections read rows; opening a table alone takes over
-    // 10,000 steps.
+pub fn agent[G: send, App: inert + send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits], take app: App) -> Agent[G, App] {
+    Agent(name: take name, route: take route, app: take app, model: model, charge: RequireGuarantee, keep_warm: None, hedged_model: None, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
     inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64, no_progress: Bounded(3u64)))
 }
 
-pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
+pub fn outside[G: send, App: inert + send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G, App] {
     Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat, None))
 }
 
-pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) -> Tool[G] {
+pub fn inside[G: send, App: inert + send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Handles, App, Invoke) -> Result[Reply, Fault]]) -> Tool[G, App] {
     Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Inside(f))
 }
 

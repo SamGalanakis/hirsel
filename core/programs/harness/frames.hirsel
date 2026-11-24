@@ -35,7 +35,7 @@ fn pressure_of(s: Session, run: u64, round: u64) -> Pressure {
 
 // Asks the pressure hook once, bounded like a gate. Anything but a valid
 // OpenFrame continues the run unchanged.
-fn pressed[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session, run: u64, round: u64) -> Result[(), Refused] {
+fn pressed[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], mut s: Session, run: u64, round: u64) -> Result[(), Refused] {
     let Some(hook) = a.pressure else {
         return Ok(())
     }
@@ -62,7 +62,7 @@ fn is_result(tx: store.Tx, h: Handles, p: u64) -> Result[bool, Refused] {
 // The view's omit ranges for one request, clamped to [frame, tail]. A range
 // that would split a call from its result is dropped, and at most MAX_OMIT
 // are kept. A failing or overrunning view omits nothing.
-fn viewed[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session, run: u64, round: u64) -> Result[List[Omit], Refused] {
+fn viewed[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App], s: Session, run: u64, round: u64) -> Result[List[Omit], Refused] {
     let mut out: List[Omit] = list.new()
     let Some(hook) = a.prompt_view else {
         return Ok(take out)

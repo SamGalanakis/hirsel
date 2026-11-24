@@ -11,7 +11,7 @@ const IDLE_MS: u64 = 300u64
 type ModelAsk: send = Ask(bool, Sender[harness.Answer]) | Asked(Sender[u64])
 type ToolAsk: send = Run(Bytes, Sender[Bytes]) | Ran(Sender[u64])
 type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
-type Grants: send { context: runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
+type Grants: send { handles: harness.Handles, context: runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
 
 type BlobCut: send = BlobWritten | PlaceEnded
 type BlobFixture: send { net: Net, tasks: Tasks, clock: Clock, random: Random, cut: Option[Sender[BlobCut]], peer: Option[(Addr, Net)] }
@@ -77,8 +77,8 @@ fn tool_service(take seed: ToolSeed) -> () waits {
 
 fn copy_services(s: Services) -> Services { Services(model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)) }
 
-fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
-    Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
+fn make_grants(s: Services, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
 
 fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
@@ -97,8 +97,8 @@ fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
 
 // ---- the agent and its four forwarding entries ----
 
-fn crash_agent() -> harness.Agent[Grants] {
-    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
+fn crash_agent() -> harness.Agent[Grants, ()] {
+    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model), ())
     list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
     a.store_result = Some(code.describe(stage_blob))
     a
@@ -112,16 +112,16 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, crash_agent(), code.describe(settle), None)
+    harness.effect(g.context, g.handles, g, take key, crash_agent(), code.describe(settle), None)
 }
 
-fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = wired() else { return Error(Missing("harness: wiring")) }
-    harness.settle(mut tx, crash_agent(), w, a, take m)
+    harness.settle(mut tx, h, crash_agent(), w, a, take m)
 }
 
 fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness.select_handles, BYTES, BYTES)
 }
 
 // ---- running a place ----
@@ -166,10 +166,9 @@ fn seed_session(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> () wait
 
 // The submit's trigger names the advance entry of `w`, so the place that
 // runs the session must register that entry.
-fn seed_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Agent[Grants], w: harness.Wiring) -> () waits {
+fn seed_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Agent[Grants, ()], w: harness.Wiring) -> () waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(w), store.copy_env(h)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, call_env.2, "scripted", All)?
         harness.submit(mut tx, call_env.2, call_env.0, call_env.1, store.Caller(issuer: 1u8, subject: list.new()), NextTurn, harness.Submit(client_key: "k1", text: "bump it"))
@@ -235,7 +234,7 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let ran = tool_ran(services)
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let session = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64)))
     let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64)))
     let finished = match run.phase { Finished(Answered) => true, _ => false }
@@ -267,8 +266,7 @@ fn test_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
 // A session with `n` earlier entries, each a 200-byte user line, and no run.
 fn history(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> store.Db waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let filled = store.run(mut db, None, (store.copy_env(n), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, call_env.1, "scripted", All)?
         for p in 0u64..call_env.0 {
@@ -286,7 +284,7 @@ fn history(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> stor
 // changed, from the store's own diff of the snapshots around it.
 fn round_bytes(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> u64 waits {
     let mut db = history(dir, clock, random, tasks, n)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let w = result.unwrap(wired())
     let before = store.snapshot(db)
     let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Disposition, harness.Refused] {
@@ -356,8 +354,7 @@ fn parent_log() -> List[harness.Entry] {
 
 fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harness.Entry]) -> store.Db waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let ran = store.run(mut db, None, (store.copy_env(log), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
         for p in 0u64..list.len(call_env.0) { store.put(mut tx, call_env.1.entries, p, clone(call_env.0[p]))? }
         store.put(mut tx, call_env.1.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: list.len(call_env.0),
@@ -375,8 +372,8 @@ fn bytes_of[A: codec](a: A) -> Bytes {
     take raw
 }
 
-fn exported(db: store.Db, upto: u64) -> Result[harness.Prefix, harness.Refused] waits {
-    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+fn exported(mut db: store.Db, upto: u64) -> Result[harness.Prefix, harness.Refused] waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     harness.export(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h, upto)
 }
 
@@ -403,15 +400,14 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
     let mut to_name = string.with_capacity(32u64)
     let to = result.unwrap(host.mkdtemp(parent, mut to_name))
     let log = parent_log()
-    let src = logged(from, clock, random, tasks, log)
+    let mut src = logged(from, clock, random, tasks, log)
     let mut bad = 0u64
-    let inside = exported(src, 6u64)
+    let inside = exported(mut src, 6u64)
     if let Error(Conflict) = inside { () } else { bad = 1u64 }
-    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, frame: 0u64, frames: list.new(), entries: list.new(), cuts: list.new()) } }
+    let prefix = match exported(mut src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, frame: 0u64, frames: list.new(), entries: list.new(), cuts: list.new()) } }
     result.unwrap(store.close(take src))
     let mut db = result.unwrap(store.open(tasks, to, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let adopted = store.run(mut db, None, (store.copy_env(prefix), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
     harness.adopt(mut tx, call_env.1, clone(call_env.0)) })
     match take adopted { Ok(Committed(_)) => (), _ => { if bad == 0u64 { bad = 3u64 } } }
@@ -464,22 +460,21 @@ fn test_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: Tas
 
 // ---- gates, approvals and inside tools ----
 
-fn pass_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Pass }
+fn pass_gate(tx: store.Tx, h: harness.Handles, app: (), ask: harness.Ask) -> harness.Verdict { Pass }
 // Holds only after reading the session row, so a gate bound too tight to read
 // the store shows up as a denial.
-fn hold_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Deny("schema") }
+fn hold_gate(tx: store.Tx, h: harness.Handles, app: (), ask: harness.Ask) -> harness.Verdict {
     match store.fetch(tx, h.session, 0u64) { Ok(Some(_)) => Hold("ask"), _ => Deny("no session") }
 }
-fn deny_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Deny("no") }
+fn deny_gate(tx: store.Tx, h: harness.Handles, app: (), ask: harness.Ask) -> harness.Verdict { Deny("no") }
 
-fn gate_named(n: u8) -> harness.Gate {
+fn gate_named(n: u8) -> harness.Gate[()] {
     if n == 0u8 { harness.Gate(name: "pass", check: code.describe(pass_gate)) }
     else if n == 1u8 { harness.Gate(name: "hold", check: code.describe(hold_gate)) }
     else { harness.Gate(name: "deny", check: code.describe(deny_gate)) }
 }
 
-fn gated(take order: List[u8]) -> harness.Agent[Grants] {
+fn gated(take order: List[u8]) -> harness.Agent[Grants, ()] {
     let mut a = crash_agent()
     for n in order { list.push(mut a.gates, gate_named(n)) }
     a
@@ -496,14 +491,15 @@ pub fn law_gates_fold_by_maximum(parent: Dir, clock: Clock, random: Random, task
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = fresh(dir, clock, random, tasks)
-    let ran = store.run(mut db, None, (), fn(mut tx, unused_env) -> Result[bool, store.Error] {Ok(folds_by_maximum(tx)) })
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let ran = store.run(mut db, None, store.copy_env(h), fn(mut tx, handles) -> Result[bool, store.Error] { Ok(folds_by_maximum(tx, handles)) })
     let ok = match take ran { Ok(Committed(store.Done(value: v, ..))) => v, _ => false }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
     ok
 }
 
-fn folds_by_maximum(tx: store.Tx) -> bool {
+fn folds_by_maximum(tx: store.Tx, h: harness.Handles) -> bool {
     // Every sequence of 0 to 3 gates (0 pass, 1 hold, 2 deny): 40 orders.
     let mut len = 0u64
     while len <= 3u64 {
@@ -518,7 +514,7 @@ fn folds_by_maximum(tx: store.Tx) -> bool {
         let mut want = 0u8
         for n in order { if n > want { want = n } }
         let ask = harness.Ask(caller: alice(), call: bump_call("{}"))
-        if rank_of(harness.verdict(tx, gated(clone(order)), ask)) != want { return false }
+        if rank_of(harness.verdict(tx, h, gated(clone(order)), ask)) != want { return false }
       }
       len = len + 1u64
     }
@@ -537,20 +533,17 @@ fn strip_spaces(raw: Bytes) -> Result[Bytes, harness.Fault] {
     Ok(take out)
 }
 
-fn scribble_ok(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+fn scribble_ok(mut tx: store.Tx, h: harness.Handles, app: (), inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
     Ok(Now(string.into_bytes("ok")))
 }
 
-fn scribble_bad(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+fn scribble_bad(mut tx: store.Tx, h: harness.Handles, app: (), inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
     Error(BadArgs("bad"))
 }
 
-fn scribble_spin(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+fn scribble_spin(mut tx: store.Tx, h: harness.Handles, app: (), inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
     loop {}
 }
@@ -560,27 +553,27 @@ fn alice() -> store.Caller { store.Caller(issuer: 1u8, subject: string.into_byte
 // A session whose run 0 has its model answer (one call) committed and not yet
 // derived.
 fn answered(dir: Dir, clock: Clock, random: Random, tasks: Tasks, take call: harness.Call) -> store.Db waits {
-    answered_with(dir, clock, random, tasks, false, take call)
+    answered_with(dir, clock, random, tasks, take call)
 }
 
-fn kick(mut db: store.Db, a: harness.Agent[Grants]) -> () waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+fn kick(mut db: store.Db, a: harness.Agent[Grants, ()]) -> () waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let w = result.unwrap(wired())
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
     harness.advance(mut tx, call_env.1, call_env.0, call_env.2, Kick) })
     match take ran { Ok(Committed(_)) => (), _ => fail("kick: advance did not commit") }
 }
 
-fn waking(mut db: store.Db, a: harness.Agent[Grants], take wake: harness.Wake) -> () waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+fn waking(mut db: store.Db, a: harness.Agent[Grants, ()], take wake: harness.Wake) -> () waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let w = result.unwrap(wired())
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(wake), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
     harness.advance(mut tx, call_env.2, call_env.0, call_env.3, clone(call_env.1)) })
     match take ran { Ok(Committed(_)) => (), _ => fail("waking: advance did not commit") }
 }
 
-fn deciding(mut db: store.Db, a: harness.Agent[Grants], who: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+fn deciding(mut db: store.Db, a: harness.Agent[Grants, ()], who: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let w = result.unwrap(wired())
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(d), store.copy_env(who), store.copy_env(h), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Ruling, harness.Refused] {
     harness.decide(mut tx, call_env.3, call_env.0, call_env.4, call_env.2, clone(call_env.1)) })
@@ -591,8 +584,8 @@ fn deciding(mut db: store.Db, a: harness.Agent[Grants], who: store.Caller, take 
     }
 }
 
-fn member(db: store.Db) -> harness.EffectPhase waits {
-    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+fn member(mut db: store.Db) -> harness.EffectPhase waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
     let Some(found) = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.effects, key)) else { fail("member: no row") }
     clone(found.phase)
@@ -615,21 +608,21 @@ pub fn law_approval_bound_to_arguments(parent: Dir, clock: Clock, random: Random
     a.tools[0].repair = Some(code.describe(strip_spaces))
     let mut db = answered(dir, clock, random, tasks, bump_call("{ }"))
     kick(mut db, a)
-    let held = match member(db) { Held => true, _ => false }
+    let held = match member(mut db) { Held => true, _ => false }
     let raw_key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{ }")))
     let rev_key = harness.approval_key("bump", 2u64, Inline(string.into_bytes("{}")))
     let right = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
     let unrepaired = match deciding(mut db, a, alice(), decision(take raw_key, true)) { Error(Conflict) => true, _ => false }
     let revised = match deciding(mut db, a, alice(), decision(take rev_key, true)) { Error(Conflict) => true, _ => false }
     let stranger = match deciding(mut db, a, store.Caller(issuer: 1u8, subject: string.into_bytes("mallory")), decision(clone(right), true)) { Error(NotAllowed) => true, _ => false }
-    let still_held = match member(db) { Held => true, _ => false }
+    let still_held = match member(mut db) { Held => true, _ => false }
     let approved = match deciding(mut db, a, alice(), decision(clone(right), true)) { Ok(Approved) => true, _ => false }
-    let sealed = match member(db) { Sealed => true, _ => false }
+    let sealed = match member(mut db) { Sealed => true, _ => false }
     // The first decision wins: repeating it returns its ruling, and the
     // opposite decision conflicts.
     let repeated = match deciding(mut db, a, alice(), decision(clone(right), true)) { Ok(Approved) => true, _ => false }
     let reversed = match deciding(mut db, a, alice(), decision(take right, false)) { Error(Conflict) => true, _ => false }
-    let still_sealed = match member(db) { Sealed => true, _ => false }
+    let still_sealed = match member(mut db) { Sealed => true, _ => false }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
     held && unrepaired && revised && stranger && still_held && approved && sealed && repeated && reversed && still_sealed
@@ -650,14 +643,14 @@ fn inside_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, kind: u8
     list.push(mut a.tools, harness.inside("scribble", "writes a row", "{}", f))
     let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "scribble", args: Inline(string.into_bytes("{}"))))
     kick(mut db, a)
-    let phase_after_derive = member(db)
+    let phase_after_derive = member(mut db)
     let _ = phase_after_derive
     kick(mut db, a)
     result.unwrap(store.close(take db))
     let mut reopened = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(mut reopened, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut reopened, Open, harness.declare_tables))
     let wrote = match result.unwrap(store.get(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), h.views, 999u64)) { Some(_) => true, None => false }
-    let phase = member(reopened)
+    let phase = member(mut reopened)
     result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     (wrote, take phase)
@@ -687,19 +680,18 @@ fn test_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random, ta
 
 // Each section shows the text in its views row; a missing row removes it and
 // any other row makes its render fail.
-fn section_text(tx: store.Tx, k: u64) -> Result[Option[String], store.Error] {
-    let h = harness.handles(store.tx_schema(tx))?
+fn section_text(tx: store.Tx, h: harness.Handles, k: u64) -> Result[Option[String], store.Error] {
     match store.fetch(tx, h.views, k)? {
         Some(Status(text)) => Ok(Some(clone(text))),
         Some(_) => Error(Missing("section")),
         None => Ok(None),
     }
 }
-fn section_a(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1000u64) }
-fn section_b(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1001u64) }
-fn section_c(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1002u64) }
+fn section_a(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] { section_text(tx, h, 1000u64) }
+fn section_b(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] { section_text(tx, h, 1001u64) }
+fn section_c(tx: store.Tx, h: harness.Handles, app: ()) -> Result[Option[String], store.Error] { section_text(tx, h, 1002u64) }
 
-fn sectioned(reversed: bool) -> harness.Agent[Grants] {
+fn sectioned(reversed: bool) -> harness.Agent[Grants, ()] {
     let mut a = crash_agent()
     let sa = harness.Section(key: "a", render: code.describe(section_a))
     let sb = harness.Section(key: "b", render: code.describe(section_b))
@@ -721,8 +713,7 @@ fn put_shows(mut tx: store.Tx, h: harness.Handles, k: u64, s: Shows) -> Result[(
 
 fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let filled = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env.entries, 0u64, User("go"))?
         store.put(mut tx, call_env.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 1u64,
@@ -736,8 +727,8 @@ fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits
 // System entries it appended as (baseline, changes, tools replaced).
 type Prepared { system: List[String], tools: List[harness.ToolDef], patches: List[(bool, u64, bool)] }
 
-fn prepared(mut db: store.Db, a: harness.Agent[Grants], round: u64, take shows: List[Shows], narrow: bool) -> Prepared waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+fn prepared(mut db: store.Db, a: harness.Agent[Grants, ()], round: u64, take shows: List[Shows], narrow: bool) -> Prepared waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let before = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.session, 0u64))).next_pos
     let set = store.run(mut db, None, (store.copy_env(narrow), store.copy_env(round), store.copy_env(shows), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
         for i in 0u64..list.len(call_env.2) { put_shows(mut tx, call_env.3, 1000u64 + i, call_env.2[i])? }
@@ -843,15 +834,13 @@ fn test_system_patches_fold_to_sections(parent: Dir, clock: Clock, random: Rando
     if bad == 0u64 { Ok(()) } else { Error(bad) }
 }
 
-fn mark_user(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+fn mark_user(mut tx: store.Tx, h: harness.Handles, app: (), at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
     let User(_) = view e else { return Ok(()) }
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
     let Ok(()) = store.put(mut tx, h.views, 2000u64 + at, Status("seen")) else { return Error(Unavailable) }
     Ok(())
 }
 
-fn mark_then_fail(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+fn mark_then_fail(mut tx: store.Tx, h: harness.Handles, app: (), at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
     let Ok(()) = store.put(mut tx, h.views, 3000u64 + at, Status("half")) else { return Error(Unavailable) }
     Error(Refused("no"))
 }
@@ -864,8 +853,7 @@ pub fn law_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let mut a = crash_agent()
     list.push(mut a.reactions, harness.After(name: "mark", run: code.describe(mark_user)))
     list.push(mut a.reactions, harness.After(name: "half", run: code.describe(mark_then_fail)))
@@ -906,10 +894,10 @@ fn hold_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, hold_ms: u
     let mut db = answered(dir, clock, random, tasks, bump_call("{}"))
     kick(mut db, a)
     if timer { waking(mut db, a, Expire(wait_zero())) }
-    let lapsed = denied_expired(member(db))
+    let lapsed = denied_expired(member(mut db))
     let right = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
     let ruling = deciding(mut db, a, alice(), decision(take right, true))
-    let after = member(db)
+    let after = member(mut db)
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
     (lapsed, take ruling, take after)
@@ -935,15 +923,14 @@ fn test_late_decisions_lapse(parent: Dir, clock: Clock, random: Random, tasks: T
 }
 
 // Counts its runs in views row 4000 and parks.
-fn park(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+fn park(mut tx: store.Tx, h: harness.Handles, app: (), inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let runs = match store.fetch(tx, h.views, 4000u64) { Ok(Some(Status(n))) => string.byte_len(n), _ => 0u64 }
     let Ok(()) = store.put(mut tx, h.views, 4000u64, Status(string.repeat("x", runs + 1u64))) else { return Error(Unavailable) }
     Ok(Later)
 }
 
-fn resuming(mut db: store.Db, a: harness.Agent[Grants], take out: String) -> harness.Filed waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+fn resuming(mut db: store.Db, a: harness.Agent[Grants, ()], take out: String) -> harness.Filed waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let w = result.unwrap(wired())
     let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(out), store.copy_env(h), store.copy_env(w), store.copy_env(key)), fn(mut tx, call_env) -> Result[harness.Filed, harness.Refused] {
@@ -966,10 +953,10 @@ pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, t
     kick(mut db, a)
     kick(mut db, a)
     kick(mut db, a)
-    let parked = match member(db) { Parked => true, _ => false }
+    let parked = match member(mut db) { Parked => true, _ => false }
     let first = match resuming(mut db, a, "woke") { Recorded => true, _ => false }
     let second = match resuming(mut db, a, "again") { Ignored => true, _ => false }
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let snap = store.snapshot(db)
     let once = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.views, 4000u64)) { Some(Status(n)) => n == "x", _ => false }
     let shown = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, 2u64)) {
@@ -993,16 +980,15 @@ fn test_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, task
 type MatrixScenario: key + send = ToolAndAnswer | ApprovalAndPark
 type MatrixAction: codec + send = Approve | WakePark(harness.EffectKey)
 
-fn matrix_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+fn matrix_gate(tx: store.Tx, h: harness.Handles, app: (), ask: harness.Ask) -> harness.Verdict {
     if ask.call.name == "bump" { Hold("approve bump") } else { Pass }
 }
 
 // The first answer adds a section for the next request. The text is also
 // a counter, so replaying this reaction twice is visible in the patch.
-fn matrix_reaction(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+fn matrix_reaction(mut tx: store.Tx, h: harness.Handles, app: (), at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
     let Assistant(reply) = view e else { return Ok(()) }
     if list.len(reply.calls) == 0u64 { return Ok(()) }
-    let h = harness.handles(store.tx_schema(tx)) ?=> |_| Unavailable
     let seen = match store.fetch(tx, h.views, 1000u64) ?=> |_| Unavailable {
         Some(Status(text)) => string.byte_len(text),
         _ => 0u64,
@@ -1011,14 +997,13 @@ fn matrix_reaction(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), ha
     Ok(())
 }
 
-fn matrix_park(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let h = harness.handles(store.tx_schema(tx)) ?=> |_| Unavailable
-    let reply = park(mut tx, inv)?
+fn matrix_park(mut tx: store.Tx, h: harness.Handles, app: (), inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let reply = park(mut tx, h, app, inv)?
     matrix_queue(mut tx, h, WakePark(inv.key)) ?=> |_| Unavailable
     Ok(take reply)
 }
 
-fn matrix_agent() -> harness.Agent[Grants] {
+fn matrix_agent() -> harness.Agent[Grants, ()] {
     let mut a = crash_agent()
     list.push(mut a.tools, harness.inside("park", "waits for a wake", "{}", code.describe(matrix_park)))
     list.push(mut a.gates, harness.Gate(name: "bump approval", check: code.describe(matrix_gate)))
@@ -1071,17 +1056,17 @@ fn matrix_action(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn matrix_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, matrix_agent(), code.describe(matrix_settle), None)
+    harness.effect(g.context, g.handles, g, take key, matrix_agent(), code.describe(matrix_settle), None)
 }
 
-fn matrix_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn matrix_settle(mut tx: store.Tx, h: harness.Handles, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = matrix_wired() else { return Error(Missing("harness: wiring")) }
-    harness.settle(mut tx, matrix_agent(), w, attempt, take m)
+    harness.settle(mut tx, h, matrix_agent(), w, attempt, take m)
 }
 
 fn matrix_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(matrix_action), BYTES, runner.DEFAULT_STEPS)?
-    harness.register_standard(mut r, code.describe(matrix_advance), code.describe(matrix_effect), code.describe(matrix_settle), BYTES, BYTES)
+    harness.register_standard(mut r, code.describe(matrix_advance), code.describe(matrix_effect), code.describe(matrix_settle), harness.select_handles, BYTES, BYTES)
 }
 
 fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
@@ -1242,7 +1227,7 @@ fn stage_blob(g: Grants, take body: Bytes) -> Result[harness.BlobRef, harness.Fa
 }
 
 fn blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, 8388608u64)
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness.select_handles, BYTES, 8388608u64)
 }
 
 fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
@@ -1259,7 +1244,7 @@ fn first_blob_life(take start: FirstBlobLife) waits {
 
 fn stored_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, cut: bool) -> Option[harness.BlobRef] waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let snap = store.snapshot(db)
     let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64)))
     let entry = result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.entries, 3u64))
@@ -1527,7 +1512,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
     let (check_dir, check_server) = mount(tasks, clock, take finished_image, std.sim.world.plan(0u64))
     let mut db = result.unwrap(store.open(tasks, check_dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let session = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64)))
     let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64)))
     let t = tally(result.unwrap(store.reader(db, 0u64)), snap, h, session.next_pos)
@@ -1618,7 +1603,7 @@ const LATE_MODEL_MS: u64 = 2500u64
 const LATE_TOOL_MS: u64 = 4000u64
 const SLOW_TOOL_MS: u64 = 2000u64
 
-fn race_agent() -> harness.Agent[Grants] {
+fn race_agent() -> harness.Agent[Grants, ()] {
     let mut a = crash_agent()
     a.limits.model_ms = RACE_MODEL_MS
     a.limits.tool_ms = RACE_TOOL_MS
@@ -1633,16 +1618,16 @@ fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
 }
 
 fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, race_agent(), code.describe(race_settle), None)
+    harness.effect(g.context, g.handles, g, take key, race_agent(), code.describe(race_settle), None)
 }
 
-fn race_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn race_settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = race_wired() else { return Error(Missing("harness: wiring")) }
-    harness.settle(mut tx, race_agent(), w, a, take m)
+    harness.settle(mut tx, h, race_agent(), w, a, take m)
 }
 
 fn race_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(race_advance), code.describe(race_effect), code.describe(race_settle), BYTES, BYTES)
+    harness.register_standard(mut r, code.describe(race_advance), code.describe(race_effect), code.describe(race_settle), harness.select_handles, BYTES, BYTES)
 }
 
 // Which reply comes after its deadline.
@@ -1703,7 +1688,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     let ran = tool_ran(services)
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let session = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.session, 0u64)))
     let run = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, h.runs, 0u64)))
     let ending: Option[harness.Finish] = match run.phase { Finished(f) => Some(clone(f)), _ => None }
@@ -1752,7 +1737,7 @@ fn cancel_approval_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     let a = gated(take holds)
     let mut db = answered(dir, clock, random, tasks, bump_call("{}"))
     kick(mut db, a)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let refused = match cancelling(mut db, h, store.Caller(issuer: 2u8, subject: string.into_bytes("alice"))) { Error(NotAllowed) => true, _ => false }
     let d = decision(harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}"))), true)
     let was_approved = decide_first && match deciding(mut db, a, alice(), clone(d)) { Ok(Approved) => true, _ => false }
@@ -1780,12 +1765,12 @@ fn cancel_park_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ord
     let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "park", args: Inline(string.into_bytes("{}"))))
     kick(mut db, a)
     kick(mut db, a)
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
-    let was_parked = match member(db) { Parked => true, _ => false }
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
+    let was_parked = match member(mut db) { Parked => true, _ => false }
     let first = ordering != CancelFirst || match cancelling(mut db, h, alice()) { Ok(Cancelled) => true, _ => false }
     let filed = resuming(mut db, a, "woke")
     let repeated = cancelling(mut db, h, alice())
-    let settled = match (ordering, filed, member(db)) {
+    let settled = match (ordering, filed, member(mut db)) {
         (CancelFirst, Ignored, Settled(Tool(Failed(why)))) => why == "run cancelled",
         (ResumeFirst, Recorded, Settled(Tool(Returned(Inline(out))))) => out == string.into_bytes("woke"),
         (DeadlineFirst, Ignored, Settled(Tool(Failed(why)))) => why == "tool deadline",
@@ -1803,7 +1788,7 @@ fn cancel_model_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ca
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     seed_session(dir, clock, random, tasks)
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let who = store.Caller(issuer: 1u8, subject: list.new())
     let id = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
     let pending = option.unwrap(result.unwrap(runner.triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, fn(candidate: runner.triggers.Id) -> bool { false })))
@@ -1907,7 +1892,7 @@ fn test_deadline_races(parent: Dir, clock: Clock, random: Random, tasks: Tasks, 
 
 fn unused_peer(g: Grants, id: String) -> Option[mcp_tools.Peer] { None }
 
-fn catalog_agent() -> harness.Agent[Grants] {
+fn catalog_agent() -> harness.Agent[Grants, ()] {
     let mut a = sectioned(false)
     a.mcp_peer = Some(code.describe(unused_peer))
     list.push(mut a.gates, harness.Gate(name: "approval", check: code.describe(hold_gate)))

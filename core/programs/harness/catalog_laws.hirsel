@@ -2,7 +2,7 @@ const OLD_SCHEMA: String = "{\"type\":\"object\"}"
 const NEW_SCHEMA: String = "{\"type\":\"object\",\"required\":[\"text\"]}"
 
 fn update_catalog(mut db: store.Db, input: String) -> () waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let mut page = string.from("{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo text\",\"inputSchema\":")
     string.push(mut page, input)
     string.push(mut page, "}]}")
@@ -16,7 +16,7 @@ fn update_catalog(mut db: store.Db, input: String) -> () waits {
 }
 
 fn ready_catalog_call(mut db: store.Db, round: u64, name: String) -> () waits {
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let ran = store.run(mut db, None, (store.copy_env(name), store.copy_env(round), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), store.Error] {
         let key = harness.EffectKey(run: 0u64, round: call_env.1, kind: harness.MODEL, ordinal: 0u64)
         let Some(take row) = store.fetch(tx, call_env.2.effects, key)? else { return Error(Missing("model effect")) }
@@ -35,8 +35,8 @@ fn ready_catalog_call(mut db: store.Db, round: u64, name: String) -> () waits {
     kick(mut db, catalog_agent())
 }
 
-fn held_key(db: store.Db, round: u64) -> Bytes waits {
-    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+fn held_key(mut db: store.Db, round: u64) -> Bytes waits {
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let key = harness.WaitKey(run: 0u64, slot: 0u64, kind: harness.APPROVAL, generation: round)
     match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.waits, key)) {
         Some(Open(take approval, _)) => take approval,
@@ -61,7 +61,7 @@ fn test_mcp_catalog_approval_and_patch(parent: Dir, clock: Clock, random: Random
     let name = mcp_tools.offered_name("fixture", "echo")
     if list.len(first.tools) != 3u64 || first.tools[2u64].name != name || first.tools[2u64].input != OLD_SCHEMA { return Error(1u64) }
     ready_catalog_call(mut db, 0u64, name)
-    let old_approval = held_key(db, 0u64)
+    let old_approval = held_key(mut db, 0u64)
     update_catalog(mut db, NEW_SCHEMA)
     match deciding(mut db, a, alice(), decision(clone(old_approval), true)) {
         Error(Conflict) => (),
@@ -82,7 +82,7 @@ fn test_mcp_catalog_approval_and_patch(parent: Dir, clock: Clock, random: Random
     if patched.tools[2u64].name != name || patched.tools[2u64].input != NEW_SCHEMA
         || patched.tools[2u64].catalog == first.tools[2u64].catalog { return Error(7u64) }
     ready_catalog_call(mut db, 1u64, name)
-    let new_approval = held_key(db, 1u64)
+    let new_approval = held_key(mut db, 1u64)
     let stale = harness.Decision(run: 0u64, round: 1u64, ordinal: 0u64, key: take old_approval, allow: true)
     let valid = harness.Decision(run: 0u64, round: 1u64, ordinal: 0u64, key: take new_approval, allow: true)
     match deciding(mut db, a, alice(), take stale) { Error(Conflict) => (), _ => return Error(8u64) }

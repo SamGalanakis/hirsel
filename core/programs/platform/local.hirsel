@@ -35,10 +35,9 @@ pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Fa
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
 // `place_bytes` is the budget every live child shares; `max_places` bounds the sessions
 // and is, with `idle_ms`, the host's Config (§14.2, §14.4). `sessions` is the wire
-// sessions every place admits at once (`PlaceConfig.max_sessions`). `migrate` makes a new
-// session's store.
+// sessions every place admits at once (`PlaceConfig.max_sessions`).
 pub type Config[T: send]: send {
-    root: Dir, options: store.Options, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], factory: Factory[T], seed: T,
+    root: Dir, options: store.Options, factory: Factory[T], seed: T,
     max_places: u64, idle_ms: u64, place_bytes: u64, sessions: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
 }
@@ -103,7 +102,7 @@ type Sessions { catalog: Catalog, by_id: Map[u64, Bytes], by_key: Map[Bytes, u64
 
 type Actor[T: send] {
     h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], max_sessions: u64, s: Sessions,
+    max_sessions: u64, s: Sessions,
     // Each session's marks since the host started, who watches them and who waits for its next end.
     marks: Map[u64, Marks],
     watching: Map[u64, Map[u64, Sender[()]]],
@@ -535,7 +534,6 @@ fn group_spec(name: String) -> platform.NewGroup {
 
 fn seed_store[T: send](a: Actor[T], dir: Dir, seed: Seed) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Failed("seed store")) }
-    if let Error(_) = store.run_migration(mut db, a.tasks, a.migrate) { let _ = store.close(take db); return Error(Failed("seed migration")) }
     let seeded = seed(mut db)
     let _ = store.close(take db)
     match take seeded { Ok(()) => Ok(()), Error(take why) => Error(Failed(take why)) }
@@ -842,7 +840,7 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
 
 fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let Config(root: root, options: take options, migrate: migrate, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
+    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
         sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, listed_sessions, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
@@ -853,7 +851,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, migrate: migrate, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)

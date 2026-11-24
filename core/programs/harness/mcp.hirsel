@@ -25,18 +25,6 @@ fn table_spec() -> store.TableSpec[String, Remote] {
     store.spec(table_name(), std.codec.key_string(), row_codec)
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    match store.migration_create_table(mut phase, table_spec()) {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
-}
-
-pub fn catalog(schema: store.Schema) -> Result[store.Table[String, Remote], store.Error] {
-    let row_codec: std.codec.Codec[Remote] = std.codec.of()
-    store.schema_table(schema, table_name(), std.codec.key_string(), row_codec)
-}
-
 pub fn declare_catalog(mut d: store.Declare) -> Result[store.Table[String, Remote], store.Error] {
     let row_codec: std.codec.Codec[Remote] = std.codec.of()
     let table = store.declare_table(mut d, table_name(), std.codec.key_string(), row_codec)?

@@ -34,8 +34,6 @@ const A: u64 = 0u64
 
 // A session's store starts empty, as a group's store does, so its place's genesis is its
 // first activation.
-fn unmigrated(mut phase: store.Migration) -> Result[(), store.Error] { Ok(()) }
-
 // A host with an in-process launcher and one session `A` on disk, whose children idle out
 // after `idle_ms`.
 fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
@@ -47,7 +45,7 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
 fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
-    let config = local.Config(root: dir, options: disk_options(), migrate: code.describe(unmigrated), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
+    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
         place_bytes: LOCAL_BUDGET, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(local.doorway(), take config) { Ok(take made) => take made, Error(_) => fail("local: refused a valid configuration") }
     let door = local.door(made)
@@ -253,7 +251,7 @@ fn test_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Task
 // commit's wall time; `kept` reads k back.
 fn keep(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     if let Error(_) = store.put(mut tx, h.t, k, k) { return Error(1u32) }
-    let Ok(t) = runner.triggers.tables(store.tx_schema(tx)) else { return Error(2u32) }
+    let Some(t) = view h.triggers else { return Error(2u32) }
     let (entries, target) = ping_entries()
     let due = store.info(mut tx).at + 1000u64
     match runner.triggers.write(mut tx, t, entries, target, k, At(due)) {
@@ -266,7 +264,10 @@ fn kept(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u
     match store.fetch(tx, h.t, k) { Ok(Some(value)) => Ok(value), Ok(None) => Ok(0u64), Error(_) => Error(1u32) }
 }
 
+fn ping_tables(h: Hd) -> runner.triggers.Tables { option.unwrap(clone(h.triggers)) }
+
 fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> runner.triggers.Tables { ping_tables(h) })
     runner.transact(mut r, code.describe(keep), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(kept), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(ping_outcome), 65536u64, runner.DEFAULT_STEPS)?
@@ -331,32 +332,17 @@ fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tas
 }
 
 // The laws' place: one u64 table, "data", and the reads and writes the laws call.
-type Hd: shareable + send { t: store.Table[u64, u64] }
+type Hd: shareable + send { t: store.Table[u64, u64], triggers: Option[runner.triggers.Tables] }
 
 type Calls = runner.Registry[(), Hd]
 
 const N_PLACE: u64 = 1048576u64
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
-}
-
 fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
     let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
     let t = store.finish(mut d, take table)?
-    Ok(Hd(t: t))
+    Ok(Hd(t: take t, triggers: None))
 }
 
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
@@ -415,7 +401,7 @@ fn ping_entries() -> (runner.triggers.Entries, runner.triggers.Entry[u64]) {
 
 // Returns the ping's result once the run scheduled at `version` has its terminal row, else 0.
 fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u64) -> Result[u64, u32] {
-    let Ok(t) = runner.triggers.tables(store.tx_schema(tx)) else { return Error(1u32) }
+    let Some(t) = view h.triggers else { return Error(1u32) }
     let info = store.info(mut tx)
     let id = runner.triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
     match runner.triggers.fetch_outcome(tx, t, id) {
@@ -426,11 +412,13 @@ fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u6
 }
 
 fn ping_schema(mut d: store.Declare) -> Result[Hd, store.Error] {
-    let _ = runner.triggers.declare_tables(mut d)?
-    schema(mut d)
+    let triggers = runner.triggers.declare_tables(mut d)?
+    let mut handles = schema(mut d)?
+    handles.triggers = Some(take triggers)
+    Ok(take handles)
 }
 
-fn unit_grant(seed: (), take context: runner.TriggerContext) -> Result[(), Capacity] {
+fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext) -> Result[(), Capacity] {
     let _ = take context
     Ok(())
 }

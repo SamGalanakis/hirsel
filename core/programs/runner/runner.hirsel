@@ -74,15 +74,15 @@ pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: se
     on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
-    wire: Option[Wire[G, B]], triggers: Option[TriggerConfig[G, S]], idle: Option[u64],
+    wire: Option[Wire[G, B]], triggers: Option[TriggerConfig[G, H, S]], idle: Option[u64],
 }
 // Grants are made per attempt. The context routes place calls back to the
 // same head and carries the attempt fence.
-pub type TriggerConfig[G: send, S: send]: send {
+pub type TriggerConfig[G: send, H: shareable + inert + send, S: send]: send {
     entries: triggers.Entries,
     author: Caller,
     grants: S,
-    grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits,
+    grant: fn(S, H, take TriggerContext) -> Result[G, Capacity] waits,
     grant_bytes: u64,
 }
 
@@ -631,7 +631,7 @@ fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: send](take p
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: shareable + inert + send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], TransactAdapters[H]) | Query(u64, u64, QueryEntry[H]) | Fenced(u64, u64, own[send] fn(mut store.Db, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits)
+type Slot[G: send, H: shareable + inert + send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], TransactAdapters[H]) | Query(u64, u64, QueryEntry[H]) | Fenced(u64, u64, own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits)
 
 // One granted call's launcher, made from its slot where the Registry is and called by the
 // task that holds the grant (§3 "One Registry").
@@ -642,11 +642,12 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     bound_slots: Map[Bytes, List[BoundSlot]],
     exported: List[Exported],
     checks: Map[Bytes, own[send] fn(Bytes) -> Option[Refusal]],
-    gone: Map[Bytes, ()]
+    gone: Map[Bytes, ()],
+    trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
 
 pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
-    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new())
+    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), gone: map.new(), trigger_tables: None)
 }
 
 fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
@@ -1755,7 +1756,7 @@ type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
     head_to: Sender[HeadInput], cut: CutActivity,
-    triggering: Option[TriggerConfig[G, S]], idle: Option[u64], expected_store: Option[(u64, u64)],
+    triggering: Option[TriggerConfig[G, H, S]], idle: Option[u64], expected_store: Option[(u64, u64)],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
@@ -1825,7 +1826,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         }
     } else { list.new() }
     if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) { return head_closed(take db) }
-    let trigger_drive = match open_trigger_drive(mut db, clock, tasks, channel.sender(head_to), reg.exported, n_place, take triggering) {
+    let trigger_drive = match open_trigger_drive(db, local, reg, clock, tasks, channel.sender(head_to), n_place, take triggering) {
         Ok(take drive) => take drive,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
     }
@@ -1947,7 +1948,7 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
         return Error(Open(take problem))
     }
     let mut declaration = store.declare_export(source, p.tasks, p.on_migrate) ?=> |problem| Open(Migrate(problem))
-    let _ = (code.callable(p.schema))(mut declaration) ?=> |problem| Open(Migrate(problem))
+    let handles = (code.callable(p.schema))(mut declaration) ?=> |problem| Open(Migrate(problem))
     let staged = store.finish_export_declaration(source, take declaration) ?=> |problem| Open(Migrate(problem))
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
     let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
@@ -1955,19 +1956,22 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
         resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes,
         checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
-    let scan = prepare_trigger_scan(source, staged, registered, p.triggers, binding)?
+    let snapshot = store.staged_snapshot(source, staged)
+    let tables = prepare_open_result(declared_triggers(registered, handles, snapshot))?
+    let scan = prepare_trigger_scan(source, snapshot, tables, registered, p.triggers, binding)?
     write_trigger_scan(p.scratch, scan)?
     prepare_result(store.write_prepared(source, staged, p.scratch, take target))
 }
 
 fn trigger_scan_limit() -> PrepareError { Deploy(Scratch(Limit(Triggers))) }
 
-fn prepare_trigger_scan[G: send, H: shareable + inert + send](source: store.Preparation, staged: store.StagedMigration, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] waits {
-    let read_handle = prepare_open_result(store.staged_reader(source, 0u64))?
-    let snapshot = store.staged_snapshot(source, staged)
-    let table = prepare_open_result(triggers.pending_table_if_present(store.snapshot_schema(snapshot)))?
-    let rows = match prepare_open_result(triggers.scan_pending(read_handle, snapshot, table))? {
-        Some(take cursor) => collect_trigger_scan(read_handle, take cursor, source, reg, choices, digest)?,
+fn prepare_trigger_scan[G: send, H: shareable + inert + send](source: store.Preparation, snapshot: store.Snapshot, tables: Option[triggers.Tables], reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] waits {
+    let rows = match tables {
+        Some(table) => {
+            let read_handle = prepare_open_result(store.staged_reader(source, 0u64))?
+            let cursor = prepare_open_result(triggers.scan_pending(read_handle, snapshot, table))?
+            collect_trigger_scan(read_handle, take cursor, source, reg, choices, digest)?
+        },
         None => list.new(),
     }
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
@@ -2798,34 +2802,6 @@ pub fn trigger_hold(ctx: TriggerContext, step_index: u64, take expected: Bytes, 
     })
 }
 
-type GrantRequest[G: send]: send { ctx: TriggerContext, reply: Sender[Result[G, Capacity]] }
-type GrantWorker[G: send, S: send]: send {
-    grants: S,
-    grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits,
-    inbox: Receiver[GrantRequest[G]],
-}
-
-fn supply_grants[G: send, S: send](take supply: GrantWorker[G, S]) -> () waits {
-    // A grant callback may wait. Keep it off the head that serves its context.
-    while let Ok(take request) = channel.receive(supply.inbox) {
-        let GrantRequest(ctx: take ctx, reply: take reply) = take request
-        let given = (supply.grant)(supply.grants, take ctx)
-        let _ = channel.send(reply, take given)
-    }
-}
-
-fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext) -> Result[G, Outcome] waits {
-    let (reply, inbox): (Sender[Result[G, Capacity]], Receiver[Result[G, Capacity]]) = channel.new(1u64)
-    if let Error(_) = channel.send(to, GrantRequest(ctx: take ctx, reply: take reply)) {
-        return Error(Failed(Gone))
-    }
-    match channel.receive(inbox) {
-        Ok(Ok(take given)) => Ok(take given),
-        Ok(Error(cap)) => Error(Failed(OutOfBytes(room(cap)))),
-        Error(_) => Error(Failed(Gone)),
-    }
-}
-
 type ArmedTimer { at: u64, task_handle: Task[()] }
 
 type TriggerGrants[G: send] { to: Sender[GrantRequest[G]], worker: Task[()] }
@@ -2843,28 +2819,31 @@ type TriggerDrive[G: send] {
     timer: Option[ArmedTimer]
 }
 
-fn make_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
-    let tables = store.with_schema(mut db, code.describe(triggers.tables))?
+fn make_trigger_drive[G: send, H: shareable + inert + send, S: send](take tables: triggers.Tables, h: H, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, H, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let stamp = copy_bytes(revision)?
     let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
     let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
-    let supply = GrantWorker(grants: take seed, grant: grant, inbox: take inbox)
+    let supply = GrantWorker(grants: take seed, handles: store.copy_env(h), grant: grant, inbox: take inbox)
     let granting = task.spawn(tasks, bytes allowance, take supply, supply_grants)
     let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to,
         entries: take entries, author: take author, grants: Some(TriggerGrants(to: take grants, worker: take granting)), active: map.new(), timer: None)
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
+fn open_trigger_drive[G: send, H: shareable + inert + send, S: send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig[G, H, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
+    let snapshot = store.snapshot(db)
+    let tables = declared_triggers(reg, h, snapshot)?
     if let Some(take configured) = take config {
         if !triggers.is_empty(configured.entries) {
-            return Ok(Some(make_trigger_drive(mut db, clock, tasks, take to, trigger_stamp(exported, n_place)?, take configured)?))
+            let Some(take opened_tables) = take tables else { return Error(Missing("trigger table selector")) }
+            return Ok(Some(make_trigger_drive(take opened_tables, h, clock, tasks, take to, trigger_stamp(reg.exported, n_place)?, take configured)?))
         }
     }
-    let snapshot = store.snapshot(db)
-    let Some(_) = triggers.tables_for_settlement(store.reader(db, 0u64)?, store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
-    let tables = store.with_schema(mut db, code.describe(triggers.tables))?
-    let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(exported, n_place)?, clock: clock, tasks: tasks, to: take to,
+    let Some(take opened_tables) = take tables else { return Ok(None) }
+    let read_handle = store.reader(db, 0u64)?
+    let mut remaining = triggers.scan_pending(read_handle, snapshot, opened_tables)?
+    if let None = triggers.next_scanned(read_handle, mut remaining)? { return Ok(None) }
+    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.exported, n_place)?, clock: clock, tasks: tasks, to: take to,
         entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
     Ok(Some(box.new(take drive)))
 }
@@ -3245,10 +3224,10 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
 
 // The W2 fixture calls the same release gate as trigger_message. It owns the
 // database and reads the volatile head separately from the answer.
-pub fn journal_attempt_gate(take db: store.Db, take registered: Registry[(), ()], t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes)
+pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take registered: Registry[(), H], take handles: H, t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes)
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
-    let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: arc.new(()), out: take to,
+    let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to,
         busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
@@ -3260,7 +3239,7 @@ pub fn journal_attempt_gate(take db: store.Db, take registered: Registry[(), ()]
 pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, registered: Registry[G, H], h: H, trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
     match map.get(registered.slots, key) {
         Some(Transact(_, _, _, _, go)) => (go.attempt)(mut db, h, author, trigger_tables, a, arg),
-        Some(Fenced(_, _, go)) => go(mut db, trigger_tables, a, arg),
+        Some(Fenced(_, _, go)) => go(mut db, h, trigger_tables, a, arg),
         _ => store.run(mut db, None, (store.copy_env(trigger_tables), store.copy_env(a)), fn(mut tx, env) -> Result[Outcome, FencedRefusal] {
             check_attempt(tx, env.0, env.1)?
             Error(BodyOutcome(Refused(NoEntry)))

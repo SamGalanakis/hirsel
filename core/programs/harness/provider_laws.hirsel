@@ -462,7 +462,7 @@ fn retry_pending(db: store.Db, h: harness.Handles, id: runner.triggers.Id) -> Op
     result.unwrap(runner.triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, scoped fn(other) { other != id }))
 }
 
-fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock], w: harness.Wiring, key: harness.EffectKey,
+fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock, ()], w: harness.Wiring, key: harness.EffectKey,
     p: runner.triggers.Pending, take fault: harness.ModelFault) -> u64 waits {
     let ran = store.run(mut db, None, (store.copy_env(a), store.copy_env(fault), store.copy_env(h), store.copy_env(key), store.copy_env(p), store.copy_env(w)), fn(mut tx, call_env) -> Result[harness.Filed, store.Error] {
         let started = runner.triggers.start(mut tx, call_env.2.triggers, call_env.4, b"revision") ?=> |err| {
@@ -478,7 +478,7 @@ fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock], w: 
         e.phase = Dispatched(runner.triggers.number(attempt))
         e.dispatches += 1u64
         store.put(mut tx, call_env.2.effects, call_env.3, e)?
-        harness.settle(mut tx, call_env.0, call_env.5, attempt, harness.Settle(key: call_env.3, receipt: Some(ModelFailed(clone(call_env.1)))))
+        harness.settle(mut tx, call_env.2, call_env.0, call_env.5, attempt, harness.Settle(key: call_env.3, receipt: Some(ModelFailed(clone(call_env.1)))))
     })
     match take ran {
         Ok(Committed(store.Done(value: Recorded, info: info, ..))) => info.at,
@@ -509,10 +509,9 @@ fn law_typed_retry(tasks: Tasks, random: Random, seed: u64) -> bool waits {
     let (time, take controller) = provide.clock(0u64, 1000000u64)
     let mut hand = take controller
     let mut db = store.memory(time, random, runner.triggers.law_options())
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
-    let mut a = harness.agent("retry", "m", code.describe(retry_model))
+    let mut a = harness.agent("retry", "m", code.describe(retry_model), ())
     a.charge = BoundedDuplicate(5u64)
     let caller = store.Caller(issuer: 1u8, subject: b"test")
     let prepared = store.run(mut db, None, (store.copy_env(h), store.copy_env(w), store.copy_env(a), store.copy_env(caller)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
@@ -588,8 +587,8 @@ fn pending_id(db: store.Db, h: harness.Handles, wanted: runner.triggers.Id) -> r
     option.unwrap(result.unwrap(runner.triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, scoped fn(id) { id != wanted })))
 }
 
-fn warm_agent() -> harness.Agent[Clock] {
-    let mut a = harness.agent("warm", "m", code.describe(retry_model))
+fn warm_agent() -> harness.Agent[Clock, ()] {
+    let mut a = harness.agent("warm", "m", code.describe(retry_model), ())
     a.keep_warm = Some(harness.KeepWarm(cache: Ephemeral, lifetime_ms: 5000u64, margin_ms: 1000u64, requests: 2u64))
     take a
 }
@@ -613,7 +612,7 @@ fn warm_answer(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: har
         store.put(mut tx, call_env.0.effects, call_env.1, dispatched)?
         let answer = harness.Answer(text: "answered", calls: list.new(), stop: "stop",
             usage: harness.Usage(input: 0u64, output: 0u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64))
-        let filed = harness.settle(mut tx, warm_agent(), call_env.2, attempt, harness.Settle(key: call_env.1, receipt: Some(Model(take answer))))?
+        let filed = harness.settle(mut tx, call_env.0, warm_agent(), call_env.2, attempt, harness.Settle(key: call_env.1, receipt: Some(Model(take answer))))?
         runner.triggers.finish(mut tx, call_env.0.triggers, attempt, Returned(b"")) ?=> |_| Missing("finish warm trigger")
         Ok(filed)
     })
@@ -641,8 +640,7 @@ fn law_warm_bounds(tasks: Tasks, random: Random, seed: Option[u64]) -> Result[()
     let (time, take controller) = provide.clock(0u64, 1000u64)
     let mut hand = take controller
     let mut db = store.memory(time, random, runner.triggers.law_options())
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
     let opened = store.run(mut db, None, h, fn(mut tx, call_env) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, call_env, "m", All)
@@ -788,10 +786,10 @@ fn serve_hedge_peer(take job: HedgePeer) -> u64 waits {
 }
 
 type HedgeServices: send { worker: provider.Worker, net: Net, address: Addr, clock: Clock, enabled: bool }
-type HedgeGrants: send { context: runner.TriggerContext, service: HedgeServices }
+type HedgeGrants: send { handles: harness.Handles, context: runner.TriggerContext, service: HedgeServices }
 
-fn grant_hedge(s: HedgeServices, take ctx: runner.TriggerContext) -> Result[HedgeGrants, Capacity] {
-    Ok(HedgeGrants(context: take ctx, service: HedgeServices(worker: provider.share_worker(s.worker), net: s.net,
+fn grant_hedge(s: HedgeServices, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[HedgeGrants, Capacity] {
+    Ok(HedgeGrants(handles: clone(h), context: take ctx, service: HedgeServices(worker: provider.share_worker(s.worker), net: s.net,
         address: s.address, clock: s.clock, enabled: s.enabled)))
 }
 
@@ -810,8 +808,8 @@ fn model_hedged(g: HedgeGrants, take req: harness.Request, mut sink: Option[harn
     Ok(take answer)
 }
 
-fn hedge_agent(enabled: bool) -> harness.Agent[HedgeGrants] {
-    let mut a = harness.agent("hedge", "m", code.describe(model_single))
+fn hedge_agent(enabled: bool) -> harness.Agent[HedgeGrants, ()] {
+    let mut a = harness.agent("hedge", "m", code.describe(model_single), ())
     if enabled { a.charge = BoundedDuplicate(2u64) }
     a.hedged_model = Some(code.describe(model_hedged))
     a.limits.model_reserve = 2u64
@@ -827,15 +825,15 @@ fn hedge_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn hedge_effect(g: HedgeGrants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, hedge_agent(g.service.enabled), code.describe(hedge_settle), None)
+    harness.effect(g.context, g.handles, g, take key, hedge_agent(g.service.enabled), code.describe(hedge_settle), None)
 }
 
-fn hedge_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
-    harness.settle(mut tx, hedge_agent(false), hedge_wire(), attempt, take m)
+fn hedge_settle(mut tx: store.Tx, h: harness.Handles, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    harness.settle(mut tx, h, hedge_agent(false), hedge_wire(), attempt, take m)
 }
 
 fn hedge_place(mut r: runner.Registry[HedgeGrants, harness.Handles]) -> Result[(), runner.RegisterError] {
-    harness.register_standard(mut r, code.describe(hedge_advance), code.describe(hedge_effect), code.describe(hedge_settle), 131072u64, HEDGE_ENTRY_BYTES)
+    harness.register_standard(mut r, code.describe(hedge_advance), code.describe(hedge_effect), code.describe(hedge_settle), harness.select_handles, 131072u64, HEDGE_ENTRY_BYTES)
 }
 
 fn hedge_submit(mut tx: store.Tx, h: harness.Handles, i: u64, enabled: bool) -> Result[(), harness.Refused] {
@@ -848,8 +846,7 @@ fn hedge_submit(mut tx: store.Tx, h: harness.Handles, i: u64, enabled: bool) -> 
 
 fn seed_hedge(dir: Dir, clock: Clock, random: Random, tasks: Tasks, enabled: bool) waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, harness.declare_tables))
     let setup = store.run(mut db, None, (store.copy_env(enabled), store.copy_env(h)), fn(mut tx, call_env) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, call_env.1, "m", All)?
         let count = if call_env.0 { 10u64 } else { 1u64 }
@@ -893,8 +890,8 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let _ = task.join(take history)
     let _ = take world
     let Ok(_) = ended else { return Error(20u64) }
-    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let expected = if enabled { 10u64 } else { 1u64 }
     for id in 0u64 .. expected {
         let key = harness.EffectKey(run: id, round: 0u64, kind: harness.MODEL, ordinal: 0u64)

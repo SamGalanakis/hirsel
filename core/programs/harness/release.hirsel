@@ -6,8 +6,8 @@
 // proposal's parked tool call its result.
 //
 // The app lists the tools with `add_tools` from its `agent()`, so every entry reaches them,
-// creates the tables with `migrate` beside `harness.migrate`, and forwards the query and
-// settle entries after checking the host's Caller. The host uses release_publish.
+// declares the tables through `harness.declare_tables`, and forwards the query and settle
+// entries after checking the host's Caller. The host uses release_publish.
 
 pub type File: codec + send {
     path: String,
@@ -47,29 +47,6 @@ fn proposals_name() -> String {
     "release.proposals"
 }
 
-pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let c_text: std.codec.Codec[String] = std.codec.of()
-    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec(files_name(), std.codec.key_string(), c_text)) {
-        Error(Exists(_)) => (),
-        Error(take e) => return Error(take e),
-        Ok(()) => (),
-    }
-    match store.migration_create_table(mut phase, store.spec(proposals_name(), std.codec.key_bytes(), c_proposal)) {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
-    }
-}
-
-pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
-    let c_text: std.codec.Codec[String] = std.codec.of()
-    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
-    Ok(Tables(
-        files: store.schema_table(schema, files_name(), std.codec.key_string(), c_text)?,
-        proposals: store.schema_table(schema, proposals_name(), std.codec.key_bytes(), c_proposal)?,
-    ))
-}
-
 pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     let c_text: std.codec.Codec[String] = std.codec.of()
     let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
@@ -81,18 +58,11 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
 }
 
 // The four Inside tools.
-pub fn add_tools[G: send](mut a: harness.Agent[G]) {
+pub fn add_tools[G: send, App: inert + send](mut a: harness.Agent[G, App]) {
     list.push(mut a.tools, harness.inside("read_source", "Reads one source file of this harness.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", code.describe(read_source)))
     list.push(mut a.tools, harness.inside("write_source", "Writes one source file of this harness; empty text deletes it.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}", code.describe(write_source)))
     list.push(mut a.tools, harness.inside("list_source", "Lists this harness's source files, one path per line.", "{\"type\":\"object\"}", code.describe(list_source)))
     list.push(mut a.tools, harness.inside("propose_release", "Proposes the current source as this harness's next release; the result arrives when the host has decided.", "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"package\":{\"type\":\"string\"},\"grants\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"dirs\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"summary\"]}", code.describe(propose_release)))
-}
-
-fn opened(tx: store.Tx) -> Result[Tables, harness.Fault] {
-    match tables(store.tx_schema(tx)) {
-        Ok(take t) => Ok(take t),
-        Error(_) => Error(Unavailable),
-    }
 }
 
 fn arguments(args: Bytes) -> Result[mcp.rpc.Fields, harness.Fault] {
@@ -139,8 +109,8 @@ fn path_arg(args: Bytes) -> Result[String, harness.Fault] {
     Ok(path)
 }
 
-fn read_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn read_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let path = path_arg(inv.args)?
     match store.fetch(tx, t.files, path) {
         Ok(Some(take text)) => Ok(Now(string.into_bytes(take text))),
@@ -149,8 +119,8 @@ fn read_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
     }
 }
 
-fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn write_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let path = path_arg(inv.args)?
     let text = arg(inv.args, "text")?
     let wrote: Result[(), store.Error] = if string.byte_len(text) == 0u64 {
@@ -167,8 +137,8 @@ fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, 
     }
 }
 
-fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn list_source[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let Ok(take cursor) = store.range(tx, t.files, Unbounded, Unbounded) else {
         return Error(Unavailable)
     }
@@ -231,8 +201,8 @@ fn call_id(key: harness.EffectKey) -> Bytes {
 }
 
 // Files the current tree as a proposal and parks the call until the host settles it.
-fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
-    let t = opened(tx)?
+fn propose_release[App: inert + send](mut tx: store.Tx, h: harness.Handles, app: App, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = view h.source
     let fields = arguments(inv.args)?
     let summary = text_arg(fields, "summary")?
     let package = if mcp.rpc.contains(fields, "package") { text_arg(fields, "package")? } else { "." }
@@ -309,7 +279,7 @@ pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
     runner.table_answer("proposals", shape, Included(list.new()), Excluded(list.new()))
 }
 
-pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
+pub fn dev_settle[G: send, App: inert + send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G, App], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
     if !(harness.reader_allowed(tx, h, caller) ?=> |_| Storage) {
         return Error(NotAllowed)
     }
@@ -354,7 +324,7 @@ fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }
 // calls this after authorizing its caller as the host. A proposal already settled, or
 // unknown, is Ignored; the proposal row records the decision even when the call has since
 // timed out.
-pub fn settle[G: send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
+pub fn settle[G: send, App: inert + send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G, App], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
     let Ok(found) = store.fetch(tx, t.proposals, id) else {
         return Error(Storage)
     }

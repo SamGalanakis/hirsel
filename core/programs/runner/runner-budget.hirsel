@@ -18,7 +18,7 @@ fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
     }
 }
 
-fn trigger_bytes[G: send, S: send](config: Option[TriggerConfig[G, S]]) -> u64 {
+fn trigger_bytes[G: send, H: shareable + inert + send, S: send](config: Option[TriggerConfig[G, H, S]]) -> u64 {
     match config {
         Some(c) if !triggers.is_empty(c.entries) => c.grant_bytes,
         _ => 0u64,

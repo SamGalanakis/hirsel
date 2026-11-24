@@ -35,7 +35,7 @@ fn cancel_warm(mut tx: store.Tx, h: Handles, mut s: Session) -> Result[(), Refus
     Ok(())
 }
 
-fn warm_wake[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, frame: u64) -> Result[(), Refused] {
+fn warm_wake[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session, frame: u64) -> Result[(), Refused] {
     let Some(Waiting(model, _, due)) = s.warm else { return Ok(()) }
     if s.active_run != None || frame != s.frame || s.warm_left == 0u64 || now(mut tx) < due || !queue_empty(tx, h)? {
         return Ok(())
@@ -58,7 +58,7 @@ fn warm_wake[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut 
     kept(store.put(mut tx, h.session, 0u64, s))
 }
 
-fn settle_warm[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, receipt: Option[Receipt]) -> Result[(), Refused] {
+fn settle_warm[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, key: EffectKey, receipt: Option[Receipt]) -> Result[(), Refused] {
     let _ = kept(store.delete(mut tx, h.effects, key))?
     let mut s = session_of(tx, h)?
     s.warm = None

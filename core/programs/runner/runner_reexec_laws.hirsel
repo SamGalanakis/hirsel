@@ -5,14 +5,6 @@ const REPLAY_BYTES: u64 = 131072u64
 const REPLAY_STEPS: u64 = 65536u64
 const REPLAY_PLACE_BYTES: u64 = 1048576u64
 
-fn replay_members(schema: store.Schema) -> Result[ReplayMembers, store.Error] {
-    store.schema_table(schema, "replay.members", std.codec.key_bytes(), std.codec.of_u64())
-}
-
-fn replay_other_members(schema: store.Schema) -> Result[ReplayMembers, store.Error] {
-    store.schema_table(schema, "replay.other", std.codec.key_bytes(), std.codec.of_u64())
-}
-
 fn replay_tables(mut d: store.Declare) -> Result[(ReplayMembers, ReplayMembers), store.Error] {
     let members = store.declare_table(mut d, "replay.members", std.codec.key_bytes(), std.codec.of_u64())?
     let h = store.finish(mut d, take members)?
@@ -32,11 +24,6 @@ fn replay_other_schema(mut d: store.Declare) -> Result[ReplayMembers, store.Erro
 
 fn replay_missing_members(mut _declaration: store.Declare) -> Result[ReplayMembers, store.Error] {
     Error(Missing("replay opened handles before checking code"))
-}
-
-fn replay_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    store.migration_create_table(mut phase, store.spec("replay.members", std.codec.key_bytes(), std.codec.of_u64()))?
-    store.migration_create_table(mut phase, store.spec("replay.other", std.codec.key_bytes(), std.codec.of_u64()))
 }
 
 fn replay_member(mut tx: store.Tx, h: ReplayMembers, caller: Caller, take arg: u64) -> Result[u64, u64] {
@@ -117,10 +104,7 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     string.push(mut name, "runner-replay-")
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
-    let migration = result.unwrap(store.stage_migration(db, tasks, code.describe(replay_migrate)))
-    result.unwrap(store.install_activation(mut db, take migration))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(replay_members)))
-    let other = result.unwrap(store.with_schema(mut db, code.describe(replay_other_members)))
+    let (take h, take other) = result.unwrap(store.bind_declaration(mut db, Migrate, replay_tables))
     replay_seed(mut db, h, 1u64)
     replay_seed(mut db, other, 1u64)
     let identity = result.unwrap(activation_identity(code.identity(code.describe(replay_place)), None, code.identity(code.describe(replay_schema))))

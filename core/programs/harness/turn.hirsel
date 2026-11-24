@@ -2,10 +2,10 @@
 // begin/settle protocol, as rows and short transactions.
 // Appends one entry at the session tail and its visible line in the same
 // transaction. The caller writes the session row.
-fn append[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session, take e: Entry) -> Result[u64, Refused] {
+fn append[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], mut s: Session, take e: Entry) -> Result[u64, Refused] {
     let at = put_entry(mut tx, h, mut s, e)?
     for r in a.reactions {
-        if !reacted(mut tx, r, at, e, a.limits) {
+        if !reacted(mut tx, h, a.app, r, at, e, a.limits) {
             let _ = put_entry(mut tx, h, mut s, Note("reaction failed", string.into_bytes(clone(r.name))))?
         }
     }
@@ -24,11 +24,11 @@ fn put_entry(mut tx: store.Tx, h: Handles, mut s: Session, e: Entry) -> Result[u
 
 // One reaction, under the Inside byte and step bounds, with its writes rolled
 // back if it fails or overruns.
-fn reacted(mut tx: store.Tx, r: After, at: u64, e: Entry, l: Limits) -> bool {
+fn reacted[App: inert + send](mut tx: store.Tx, h: Handles, app: App, r: After[App], at: u64, e: Entry, l: Limits) -> bool {
     let go = code.callable(r.run)
     let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[(), Fault] {
         let bounded = bound bytes l.inside_bytes {
-            go(mut t, at, clone(e))
+            go(mut t, h, app, at, clone(e))
         }
         match take bounded {
             Ok(take done) => take done,
@@ -146,13 +146,13 @@ fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[runner.triggers.
     Ok(())
 }
 
-fn tool_search_enabled[G: send](a: Agent[G]) -> bool {
+fn tool_search_enabled[G: send, App: inert + send](a: Agent[G, App]) -> bool {
     match a.mcp_peer { Some(_) => true, None => false }
 }
 
-fn tool_of[G: send](a: Agent[G], name: String) -> Option[Tool[G]] {
+fn tool_of[G: send, App: inert + send](a: Agent[G, App], name: String) -> Option[Tool[G, App]] {
     if name == TOOL_SEARCH && tool_search_enabled(a) {
-        let tool: Tool[G] = search_tool()
+        let tool: Tool[G, App] = search_tool()
         return Some(take tool)
     }
     for t in a.tools {
@@ -195,7 +195,7 @@ fn current_remote(tx: store.Tx, h: Handles, cutoff: Cutoff, name: String) -> Res
     }
 }
 
-fn resolve_tool[G: send](tx: store.Tx, h: Handles, a: Agent[G], cutoff: Cutoff, name: String) -> Result[Option[Tool[G]], Refused] {
+fn resolve_tool[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App], cutoff: Cutoff, name: String) -> Result[Option[Tool[G, App]], Refused] {
     if !mcp_tools.reserved(name) {
         return Ok(tool_of(a, name))
     }
@@ -209,7 +209,7 @@ fn resolve_tool[G: send](tx: store.Tx, h: Handles, a: Agent[G], cutoff: Cutoff, 
 }
 
 // Runs the tool's repair on the call's arguments, bounded like a gate.
-fn repaired[G: send](t: Tool[G], l: Limits, mut call: Call) -> Result[(), String] {
+fn repaired[G: send, App: inert + send](t: Tool[G, App], l: Limits, mut call: Call) -> Result[(), String] {
     let Some(f) = t.repair else {
         return Ok(())
     }
@@ -246,13 +246,13 @@ fn rank(v: Verdict) -> u8 {
 
 // The fold of every gate's verdict by maximum. A gate that overruns its
 // bounds denies: a gate fails closed.
-pub fn verdict[G: send](tx: store.Tx, a: Agent[G], ask: Ask) -> Verdict {
+pub fn verdict[G: send, App: inert + send](tx: store.Tx, h: Handles, a: Agent[G, App], ask: Ask) -> Verdict {
     let mut out: Verdict = Pass
     for g in a.gates {
         let go = code.callable(g.check)
         let ran = bound bytes a.limits.gate_bytes {
             bound steps a.limits.gate_steps {
-                go(tx, ask)
+                go(tx, h, a.app, ask)
             }
         }
         let v: Verdict = match take ran {
@@ -324,7 +324,7 @@ fn ruled(allow: bool) -> Ruling {
 // key the call is held under; a key for any other tool, revision or
 // arguments conflicts and changes nothing. The first decision wins: a repeat
 // of it returns its ruling, and a different one conflicts.
-pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take d: Decision) -> Result[Ruling, Refused] {
+pub fn decide[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, caller: store.Caller, take d: Decision) -> Result[Ruling, Refused] {
     let Some(run) = kept(store.fetch(tx, h.runs, d.run))? else {
         return Error(Malformed("no such run"))
     }
@@ -411,7 +411,7 @@ fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
 // Settles a parked Inside call. The app's own entry calls it from whatever
 // wakes the park, after authorizing its caller. Only the first resume of a
 // parked call in the active run counts.
-pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, take outcome: Outcome) -> Result[Filed, Refused] {
+pub fn resume[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, key: EffectKey, take outcome: Outcome) -> Result[Filed, Refused] {
     let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
         return Ok(Ignored)
     }
@@ -442,7 +442,7 @@ pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key
     Ok(Recorded)
 }
 
-fn tool_named[G: send](a: Agent[G], name: String) -> Option[ToolRun[G]] {
+fn tool_named[G: send, App: inert + send](a: Agent[G, App], name: String) -> Option[ToolRun[G, App]] {
     if name == TOOL_SEARCH && tool_search_enabled(a) {
         return Some(Inside(code.describe(tool_search)))
     }
@@ -485,7 +485,7 @@ fn now(mut tx: store.Tx) -> u64 {
 // most `limits.calls` effect rows of the current round, so its cost does not
 // depend on the length of the conversation. It runs at most one Inside tool
 // and schedules itself AfterCommit when more remain.
-pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
+pub fn advance[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, take wake: Wake) -> Result[(), Refused] {
     let mut s = session_of(tx, h)?
     if let Warm(frame) = wake {
         return warm_wake(mut tx, h, a, w, mut s, frame)
@@ -528,7 +528,7 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
     }
 }
 
-fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
+fn prepare[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
     let mut run = take r
     if run.rounds_left == 0u64 {
         return finish(mut tx, h, w, mut s, id, take run, OutOfRounds, None)
@@ -552,7 +552,7 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 // After model.answer committed: one member row per returned call, in model
 // order. Calls beyond the limit, unknown tools and narrowed-away tools are
 // settled at once with a typed outcome and never dispatched.
-fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, answered_ms: u64) -> Result[(), Refused] {
+fn derive[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, answered_ms: u64) -> Result[(), Refused] {
     let mut run = take r
     let model_key = EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64)
     let Some(e) = kept(store.fetch(tx, h.effects, model_key))? else {
@@ -581,7 +581,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
                 None => Settled(Tool(Gone)),
                 Some(t) => match repaired(t, a.limits, mut call) {
                     Error(take why) => Settled(Tool(Failed(take why))),
-                    Ok(()) => match verdict(tx, a, Ask(caller: clone(run.caller), call: clone(call))) {
+                    Ok(()) => match verdict(tx, h, a, Ask(caller: clone(run.caller), call: clone(call))) {
                         Pass => Pending,
                         Deny(take why) => Settled(Tool(Denied(take why))),
                         Hold(_) => {
@@ -610,7 +610,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
     Ok(())
 }
 
-fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+fn step_round[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
     let mut open = false
     // Whether an open member has a worker or a sealed call; a round whose
     // open members are all Held or Parked shows "waiting".
@@ -671,7 +671,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                     return Ok(())
                 }
                 ran_inside = true
-                e.phase = match run_inside(mut tx, f, key, call.args, a.limits) {
+                e.phase = match run_inside(mut tx, h, a.app, f, key, call.args, a.limits) {
                     Gave(take outcome) => Settled(Tool(take outcome)),
                     Parks => {
                         open = true
@@ -710,7 +710,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
 // bounds. A tool that fails or overruns either bound leaves none of its writes.
 type Ran = Gave(Outcome) | Parks
 
-fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]], key: EffectKey, args: Payload, l: Limits) -> Ran {
+fn run_inside[App: inert + send](mut tx: store.Tx, h: Handles, app: App, f: StaticFn[fn(mut store.Tx, Handles, App, Invoke) -> Result[Reply, Fault]], key: EffectKey, args: Payload, l: Limits) -> Ran {
     let Inline(raw) = view args else {
         return Gave(Failed("blob arguments are not supported yet"))
     }
@@ -718,7 +718,7 @@ fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[R
     let given = Invoke(key: key, args: clone(raw))
     let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[Reply, Fault] {
         let bounded = bound bytes l.inside_bytes {
-            go(mut t, given)
+            go(mut t, h, app, given)
         }
         match take bounded {
             Ok(take r) => take r,
@@ -748,7 +748,7 @@ fn fault_text(take f: Fault) -> String {
 
 // All members settled: append their results in model order, then prepare the
 // next request in the same transaction.
-fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+fn present[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
     let mut run = take r
     let mut progressed = false
     for i in 0u64 .. n {
@@ -857,8 +857,7 @@ fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
 // begin(E) records the dispatch before the worker may send. A Once effect
 // whose earlier attempt began and never settled is in doubt at once; it never
 // waits for its deadline and never sends again.
-fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
-    let h = handles(store.tx_schema(tx))?
+fn begin(mut tx: store.Tx, h: Handles, attempt: runner.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
     let Some(take found) = store.fetch(tx, h.effects, key)? else {
         return Ok(Shut)
     }
@@ -928,10 +927,9 @@ pub fn try_hedge(h: Hedge) -> bool waits {
     allowed == Some(true)
 }
 
-fn hedge_attempt(mut tx: store.Tx, attempt: runner.triggers.Attempt, take ask: (EffectKey, u64)) -> Result[bool, store.Error] {
+fn hedge_attempt(mut tx: store.Tx, h: Handles, attempt: runner.triggers.Attempt, take ask: (EffectKey, u64)) -> Result[bool, store.Error] {
     let (key, dispatches) = take ask
     if key.kind != MODEL { return Ok(false) }
-    let h = handles(store.tx_schema(tx))?
     if !active(tx, h, key.run)? { return Ok(false) }
     let Some(take saved) = store.fetch(tx, h.effects, key)? else { return Ok(false) }
     let mut e = take saved
@@ -949,24 +947,33 @@ fn hedge_attempt(mut tx: store.Tx, attempt: runner.triggers.Attempt, take ask: (
     Ok(true)
 }
 
-pub fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
-    runner.register_attempt(mut r, code.describe(begin), (), fn(mut tx: store.Tx, a: runner.triggers.Attempt, take key: EffectKey, unused: ()) -> Result[Permit, store.Error] {
-        begin(mut tx, a, take key)
+pub fn select_handles(h: Handles) -> Handles { clone(h) }
+
+fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], select: fn(H) -> Handles, n: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    runner.register_attempt(mut r, code.describe(begin), select, fn(mut tx: store.Tx, h: H, a: runner.triggers.Attempt, take key: EffectKey, pick: fn(H) -> Handles) -> Result[Permit, store.Error] {
+        begin(mut tx, pick(h), a, take key)
     }, n, steps)?
-    runner.register_attempt(mut r, code.describe(hedge_attempt), (), fn(mut tx: store.Tx, a: runner.triggers.Attempt, take asked: (EffectKey, u64), unused: ()) -> Result[bool, store.Error] {
-        hedge_attempt(mut tx, a, take asked)
+    runner.register_attempt(mut r, code.describe(hedge_attempt), select, fn(mut tx: store.Tx, h: H, a: runner.triggers.Attempt, take asked: (EffectKey, u64), pick: fn(H) -> Handles) -> Result[bool, store.Error] {
+        hedge_attempt(mut tx, pick(h), a, take asked)
     }, n, steps)
 }
 
-// The entries every harness place registers: the app's advance, its granted
-// effect, and the begin and settle attempts the effect calls. `effect_n` bounds
-// the effect's argument and reply, which grow with blob staging.
-pub fn register_standard[G: send](mut r: runner.Registry[G, Handles], advance_entry: StaticFn[fn(mut store.Tx, Handles, store.Caller, take Wake) -> Result[(), Refused]], effect_entry: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[Worked, Capacity] waits], settle_entry: StaticFn[fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]], n: u64, effect_n: u64) -> Result[(), runner.RegisterError] {
+// Registers the application's advance and effect, plus the fenced attempts used by the effect.
+pub fn register_standard[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H],
+    advance_entry: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[(), Refused]],
+    effect_entry: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[Worked, Capacity] waits],
+    settle_entry: StaticFn[fn(mut store.Tx, H, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]],
+    select: fn(H) -> Handles, n: u64, effect_n: u64) -> Result[(), runner.RegisterError] {
     let steps = runner.DEFAULT_STEPS
+    let choose = fn(h: H) -> runner.triggers.Tables {
+        let handles = select(h)
+        clone(handles.triggers)
+    }
+    runner.use_trigger_tables(mut r, take choose)
     runner.transact(mut r, advance_entry, n, steps)?
     runner.granted(mut r, effect_entry, effect_n, steps)?
-    register(mut r, n, steps)?
-    runner.register_attempt(mut r, settle_entry, settle_entry, fn(mut tx: store.Tx, a: runner.triggers.Attempt, take asked: Settle, body: StaticFn[fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]]) -> Result[Filed, store.Error] {
-        code.callable(body)(mut tx, a, take asked)
+    register(mut r, select, n, steps)?
+    runner.register_attempt(mut r, settle_entry, settle_entry, fn(mut tx: store.Tx, h: H, a: runner.triggers.Attempt, take asked: Settle, body: StaticFn[fn(mut store.Tx, H, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]]) -> Result[Filed, store.Error] {
+        code.callable(body)(mut tx, h, a, take asked)
     }, n, steps)
 }

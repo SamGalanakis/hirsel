@@ -158,14 +158,14 @@ pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], re
 
 // An attempt entry has no wire slot or call record. Only the head can attach
 // the checked attempt, and the application must register the entry at open.
-type FencedEntry[Env: inert + send, A, R]: send {
-    body: fn(mut store.Tx, triggers.Attempt, take A, Env) -> Result[R, store.Error],
+type FencedEntry[H, Env: inert + send, A, R]: send {
+    body: fn(mut store.Tx, H, triggers.Attempt, take A, Env) -> Result[R, store.Error],
     env: Env,
     args: std.codec.Codec[A],
     reply: std.codec.Codec[R]
 }
 
-fn run_fenced_entry[Env: inert + send, A, R](mut tx: store.Tx, env: (FencedEntry[Env, A, R], triggers.Tables, triggers.Attempt, Bytes, u64)) -> Result[Outcome, FencedRefusal] {
+fn run_fenced_entry[H: shareable + inert + send, Env: inert + send, A, R](mut tx: store.Tx, env: (FencedEntry[H, Env, A, R], triggers.Tables, triggers.Attempt, Bytes, u64, H)) -> Result[Outcome, FencedRefusal] {
     check_attempt(tx, env.1, env.2)?
     let ran: Result[Result[Outcome, FencedRefusal], Capacity] = bound bytes env.4 {
         let entry = view env.0
@@ -173,7 +173,7 @@ fn run_fenced_entry[Env: inert + send, A, R](mut tx: store.Tx, env: (FencedEntry
             Ok(take value) => take value,
             Error(_) => return Error(Refusal(Store(Missing("attempt argument")))),
         }
-        let answer = (entry.body)(mut tx, env.2, take decoded, entry.env) ?=> |problem| Refusal(Store(take problem))
+        let answer = (entry.body)(mut tx, env.5, env.2, take decoded, entry.env) ?=> |problem| Refusal(Store(take problem))
         let mut raw: Bytes = list.new()
         std.codec.encode(entry.reply, answer, mut raw) ?=> |_| Refusal(Store(Limit(Value)))
         Ok(Returned(take raw))
@@ -185,19 +185,19 @@ fn run_fenced_entry[Env: inert + send, A, R](mut tx: store.Tx, env: (FencedEntry
 }
 
 pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + send, A: codec, R: codec](mut registered: Registry[G, H], definition: StaticFn[F],
-    env: Env, run: fn(mut store.Tx, triggers.Attempt, take A, Env) -> Result[R, store.Error], n: u64, steps: u64) -> Result[(), RegisterError] {
+    env: Env, run: fn(mut store.Tx, H, triggers.Attempt, take A, Env) -> Result[R, store.Error], n: u64, steps: u64) -> Result[(), RegisterError] {
     check_call_reserve(n, steps)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let key = attempt_key(definition, ca, cr) ?=> |_| Bounds
     if map.contains(registered.slots, key) { return Error(AlreadyRegistered(take key)) }
     let entry = FencedEntry(body: run, env: store.copy_env(env), args: ca, reply: cr)
-    let adapter = fn(mut db: store.Db, tables: triggers.Tables, active: triggers.Attempt, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
+    let adapter = fn(mut db: store.Db, h: H, tables: triggers.Tables, active: triggers.Attempt, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
         let raw: Bytes = clone(arg)
-        let body_env: (FencedEntry[Env, A, R], triggers.Tables, triggers.Attempt, Bytes, u64) = (store.copy_env(entry), store.copy_env(tables), store.copy_env(active), take raw, n)
+        let body_env: (FencedEntry[H, Env, A, R], triggers.Tables, triggers.Attempt, Bytes, u64, H) = (store.copy_env(entry), store.copy_env(tables), store.copy_env(active), take raw, n, store.copy_env(h))
         store.run(mut db, Some(steps), body_env, run_fenced_entry)
     }
-    let ready: own[send] fn(mut store.Db, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits = take adapter
+    let ready: own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits = take adapter
     map.insert(mut registered.slots, take key, Fenced(n, steps, take ready))
     Ok(())
 }

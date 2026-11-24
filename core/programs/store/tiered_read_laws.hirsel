@@ -525,6 +525,15 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
         fail("L68: the second indexed BLOB should fit at its worst-case size")
     }
     let (take raw, pack) = finish_tiered_pack(take complete)?
+    let mut packed_frames: List[TieredEmitFrame] = list.with_capacity(2)
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, key: clone(first_key), frame: clone(first)))
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, key: clone(second_key), frame: clone(second)))
+    let layout = layout_tiered_packs(take packed_frames, 4, 8, 238)?
+    let expected_pack = planned_tiered_pack(layout, layout.packs[0u64])
+    if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 ||
+        expected_pack.index != 128 || expected_pack.live != 24 || expected_pack.frames != 2 || expected_pack.class != 4 {
+        fail("T4: the pack row must use the actual front-coded width before emission")
+    }
     if left.offset != 72 || right.offset != 100 || pack.index != 128 || pack.payload_bytes != 227 || pack.live != 24 || pack.frames != 2 {
         fail("L68: pack inventory did not describe the frames and full object")
     }
@@ -533,8 +542,23 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     if trailer.kind != PACK_INDEX_KIND || trailer.end != 227 {
         fail("L68: pack did not finish with its authenticated index")
     }
+    let payload = list.slice(raw, trailer.payload, trailer.end)
+    let (prior_offset, take index_start) = start_pack_index("p-8", pack.index, payload, 0)?
+    let mut cursor = take index_start
+    let Some(take indexed_first) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+        fail("L68: probing one row must yield the first index key")
+    }
+    if prior_offset != 0 || indexed_first.offset != 72 || cursor.remaining != 1 || indexed_first.key != first_key {
+        fail("L68: a partial index read must preserve the cursor at the second BLOB")
+    }
+    let Some(take indexed_second) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+        fail("L68: the cursor must resume the front-coded key")
+    }
+    if indexed_second.offset != 100 || indexed_second.key != second_key || cursor.remaining != 0 {
+        fail("L68: index resume must recover the second BLOB's full key")
+    }
     let mut last_offset = 0u64
-    let decoded_index = decode_pack_index("p-8", pack.index, list.slice(raw, trailer.payload, trailer.end), mut last_offset)?
+    let decoded_index = decode_pack_index("p-8", pack.index, payload, mut last_offset)?
     if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key ||
         decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
         fail("L68: the index did not describe the second BLOB")

@@ -204,7 +204,7 @@ A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known release identity (an available `revision`)
 and returns `IdentityUnknown` if it is unavailable.
 
-**Held runs (RUNNER-SPEC v2.64 §14.6 "The activation fate").** An install whose store holds
+**Held runs (RUNNER-SPEC v2.66 §14.6 "The activation fate").** An install whose store holds
 a run that this activation holds (one parked, or one started under another release identity)
 settles it in the install's own commit. `--hirsel-held=release|cancel`<!-- doc-ref: external --> gives every held run a
 fate, and each `--hirsel-held-entry=PATH=release|cancel`<!-- doc-ref: external --> gives one for that entry path. Both
@@ -1562,15 +1562,16 @@ takes the first that applies:
 The report gives the exact count and earliest due time for each (class, kind, entry path,
 argument schema). Each `held` group also carries `fate: Option[HeldFate]`, resolved from the
 deploy's `Fates` (the prepare launch's fourth argument). Each `held` group is also keyed by
-`hold: Option[HeldBy]`, `None` on other classes, with `HeldBy = Cut | Revision | Request(same_code: bool)`: `Cut` is a started run that is not
+`hold: Option[HeldBy]`, `None` on other classes, with `HeldBy = Cut | Revision(same_code: bool) | Request(same_code: bool)`: `Cut` is a started run that is not
 parked, `Revision` and `Request` name its hold, and `same_code` is true when the rows' stamp
-equals NEW's identity digest. A `Request(same_code: true)` group was held by this code
-(RUNNER-SPEC v2.64 §14.6, residual R-2393-1). TRIGGERS is the value-codec
+equals NEW's identity digest. A `Request(same_code: true)` group was held by this code, and a `Revision(same_code: true)` group is a
+rollback to the code that started it. The fate is one per entry path; `hold` informs it and never selects it
+(RUNNER-SPEC v2.66 §14.6, residual R-2393-1). TRIGGERS is the value-codec
 `TriggerReport { rows: List[TriggerScanRow], unmatched: List[Bytes] }`, and `unmatched` lists
 each `entries` path that is the entry path of no pending row and of no entry OLD or NEW
 registers. When every held group has a fate and `unmatched`
-is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.102
-§3.5a); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
+is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.103
+§3.5a; when NEW's migration replaces `store.triggers.pending`, the scan reads the staged range and the settled rows travel in that range instead); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
 `Unsettled`. A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
 whose entry revision covers changes in `handles` such as table names, bindings and key codecs,

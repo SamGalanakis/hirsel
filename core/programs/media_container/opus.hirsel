@@ -1,0 +1,154 @@
+// RFC 7845 identification and comment packets for Ogg Opus.
+pub type Error = Truncated | InvalidHead | UnsupportedVersion | UnsupportedMapping | InvalidTags | ShortBuffer
+
+pub type Head {
+    channels: u8,
+    pre_skip: u16,
+    input_rate: u32,
+    gain: i16,
+    family: u8,
+    streams: u8,
+    coupled: u8
+}
+
+const OPUS_HEAD: u64 = 0x646165487375704f
+
+const OPUS_TAGS: u64 = 0x736761547375704f
+
+pub fn read_head(packet: Bytes) -> Result[Head, Error] {
+    let size = list.len(packet)
+    if size < 19 {
+        return Error(Truncated)
+    }
+    let magic: u64 = list.word_le(packet, 0)
+    if magic != OPUS_HEAD {
+        return Error(InvalidHead)
+    }
+    let version = packet[8]
+    if version == 0 || version > 15 {
+        return Error(UnsupportedVersion)
+    }
+    let channels = packet[9]
+    if channels == 0 {
+        return Error(InvalidHead)
+    }
+    let family = packet[18]
+    let mut streams = 1u8
+    let mut coupled = channels - 1
+    if family == 0 {
+        if channels > 2 || (version == 1 && size != 19) {
+            return Error(InvalidHead)
+        }
+    } else {
+        if family != 1 && family != 255 {
+            return Error(UnsupportedMapping)
+        }
+        let count: u64 = int.widen(channels)
+        if size < 21 + count {
+            return Error(Truncated)
+        }
+        if version == 1 && size != 21 + count {
+            return Error(InvalidHead)
+        }
+        streams = packet[19]
+        coupled = packet[20]
+        let mono: u16 = int.widen(streams)
+        let stereo: u16 = int.widen(coupled)
+        let decoded = mono + stereo
+        if streams == 0 || coupled > streams || decoded > 255 || (family == 1 && channels > 8) {
+            return Error(InvalidHead)
+        }
+        for i in 0u64 .. count {
+            let channel: u16 = int.widen(packet[21 + i])
+            if channel != 255 && channel >= decoded {
+                return Error(InvalidHead)
+            }
+        }
+    }
+    let bits: u16 = list.word_le(packet, 16)
+    let gain: i16 = int.truncate(bits)
+    Ok(Head(channels: channels, pre_skip: list.word_le(packet, 10), input_rate: list.word_le(packet, 12), gain: gain, family: family, streams: streams, coupled: coupled))
+}
+
+// Produce the family-0 mono/stereo identification packet.
+pub fn write_head(mut out: Bytes, channels: u8, pre_skip: u16, input_rate: u32, gain: i16) -> Result[(), Error] {
+    if channels == 0 || channels > 2 {
+        return Error(InvalidHead)
+    }
+    if list.capacity(out) < 19 {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    list.put_word_le(mut out, OPUS_HEAD)
+    list.push(mut out, 1)
+    list.push(mut out, channels)
+    list.put_word_le(mut out, pre_skip)
+    list.put_word_le(mut out, input_rate)
+    let bits: u16 = int.truncate(gain)
+    list.put_word_le(mut out, bits)
+    list.push(mut out, 0)
+    Ok(())
+}
+
+// Validate the comment packet and loan each string as raw bytes. The first
+// callback receives the vendor. Later callbacks receive comment fields.
+pub fn read_tags(packet: Bytes, field: scoped fn(Bytes)) -> Result[(), Error] {
+    let size = list.len(packet)
+    if size < 16 {
+        return Error(Truncated)
+    }
+    let magic: u64 = list.word_le(packet, 0)
+    if magic != OPUS_TAGS {
+        return Error(InvalidTags)
+    }
+    let vendor: u32 = list.word_le(packet, 8)
+    let vendor_end = 12u64 + int.widen(vendor)
+    if vendor_end > size - 4 {
+        return Error(Truncated)
+    }
+    let count: u32 = list.word_le(packet, vendor_end)
+    let mut at = vendor_end + 4
+    // Validate the full packet before publishing any of its fields.
+    for _ in 0u32 .. count {
+        at = comment_end(packet, at, size)?
+    }
+    field(list.slice(packet, 12, vendor_end))
+    at = vendor_end + 4
+    for _ in 0u32 .. count {
+        let hi = comment_end(packet, at, size)?
+        field(list.slice(packet, at + 4, hi))
+        at = hi
+    }
+    Ok(())
+}
+
+fn comment_end(packet: Bytes, at: u64, size: u64) -> Result[u64, Error] {
+    if size - at < 4 {
+        return Error(Truncated)
+    }
+    let length: u32 = list.word_le(packet, at)
+    let lo = at + 4
+    let n: u64 = int.widen(length)
+    if n > size - lo {
+        return Error(Truncated)
+    }
+    Ok(lo + n)
+}
+
+// Write a vendor-only comment packet into caller-provided capacity.
+pub fn write_tags(mut out: Bytes, vendor: Bytes) -> Result[(), Error] {
+    let size = list.len(vendor)
+    if size > 0xffffffff {
+        return Error(InvalidTags)
+    }
+    if list.capacity(out) < 16 + size {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    list.put_word_le(mut out, OPUS_TAGS)
+    let length: u32 = int.narrow(size)
+    list.put_word_le(mut out, length)
+    list.append(mut out, vendor)
+    list.put_word_le(mut out, 0u32)
+    Ok(())
+}

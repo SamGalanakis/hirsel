@@ -1,2 +1,2 @@
 [workspace]
-members = ["ffi_laws", "harness", "harness/serve", "harness/ts-client/gateway", "media_bits", "mcp", "notes", "platform", "postgres", "runner", "search", "sqlite", "store", "store-crash", "stun_ice"]
+members = ["ffi_laws", "harness", "harness/serve", "harness/ts-client/gateway", "media_bits", "media_container", "mcp", "notes", "platform", "postgres", "runner", "search", "sqlite", "store", "store-crash", "stun_ice"]

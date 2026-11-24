@@ -1,0 +1,78 @@
+// FFmpeg 6.1.1 libopus, 440 Hz sine, 60 ms, mono, bitexact, serial 17.
+// ffprobe -show_packets -show_data_hash SHA256
+fn digest(packet: Bytes) -> String {
+    let hash = sha256.hash(packet)
+    let mut text: Bytes = list.with_capacity(32)
+    for byte in hash {
+        list.push(mut text, byte)
+    }
+    std.hex.encode(text)
+}
+
+fn check_round_trip(input: Bytes, at: u64, page: ogg.Page, laces: Bytes, body: Bytes) {
+    let mut encoded: Bytes = list.with_capacity(282)
+    let size = result.unwrap(ogg.write_page(mut encoded, ogg.header(page), laces, body))
+    if encoded != list.slice(input, at, at + size) || body != list.slice(input, at + size, ogg.next(page)) {
+        fail("page differs from the FFmpeg muxer")
+    }
+}
+
+@test
+fn ogg_opus_reference() -> Result[(), ()] {
+    let tone = b"\x4f\x67\x67\x53\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x00\x00\x00\x00\x2a\x38\x74\x42\x01\x13\x4f\x70\x75\x73\x48\x65\x61\x64\x01\x01\x38\x01\x80\xbb\x00\x00\x00\x00\x00\x4f\x67\x67\x53\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x01\x00\x00\x00\xd5\x79\xe9\xf3\x01\x2e\x4f\x70\x75\x73\x54\x61\x67\x73\x06\x00\x00\x00\x66\x66\x6d\x70\x65\x67\x01\x00\x00\x00\x14\x00\x00\x00\x65\x6e\x63\x6f\x64\x65\x72\x3d\x4c\x61\x76\x63\x20\x6c\x69\x62\x6f\x70\x75\x73\x4f\x67\x67\x53\x00\x04\x78\x0c\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x02\x00\x00\x00\x4e\x86\x65\x5b\x04\x73\x45\x48\x37\x78\x81\x7b\xc6\x11\x76\xf4\x75\x00\x00\x07\x8e\xca\x69\xdb\xbb\xe2\x9f\xd3\xac\x1b\x0e\xbd\xe0\xfe\x4b\x06\xf8\x3d\xcd\x0c\xa7\x91\x18\x3a\x5d\x4b\xe1\xc9\x14\xef\xff\x52\x04\xf0\xcf\xab\x8c\x5c\x9c\xf7\x60\x00\x57\x13\x7b\x97\xa9\x04\x01\x10\x9c\x4e\x59\x9f\x96\x1a\x41\x82\xd0\x3f\xa6\x16\x78\xa0\x2d\x0f\xe8\xf3\x40\xbc\x3d\xcc\x44\x28\x18\xe6\x31\x83\x79\x40\x60\x3f\xec\xb3\x26\x64\x83\xa2\xd9\x4e\x34\x41\xff\x59\x22\x1c\x4d\xc3\x63\x4e\xb4\x8e\x89\x4d\x78\x9e\x1e\xa1\xe7\xff\x83\x5e\xee\xa1\xc5\x6d\xb2\x50\xc0\x56\x74\x5a\xe6\x19\x4e\x59\xab\xca\x03\xff\x36\x70\xa4\x43\x38\xde\xab\xc4\x24\xff\x42\x0f\xba\xf8\x3d\x8f\xa3\x55\xce\xde\x25\x55\x37\x32\x2a\xc0\xe7\xc0\x2a\xd4\xbc\xcf\x2b\x95\x1e\x24\xd9\xd5\xd8\xba\xf7\x15\xd1\x78\x99\xc2\x5f\x73\x2d\xd2\x33\x3a\x39\x23\xf1\x09\x26\xec\x17\x82\x2e\x5e\x71\x07\x1c\x7d\xc8\xfd\x7f\x05\x0f\xc3\xac\x39\x1e\x2b\x87\x91\x8a\x6b\x56\x73\x53\x29\xb2\x75\xdc\x5e\xb2\xbc\x66\xcc\x1b\xf6\x69\x94\xe3\x10\xd2\x69\xb3\x6d\x96\xcc\x4a\x26\xf8\x34\x4f\xb8\xe6\xe7\x67\x44\x5f\x78\x06\x30\x66\x81\x73\xc6\xc0\x49\xb8\xcc\x3d\x39\xb6\x5b\xe0\x2e\xdf\xf2\xf0\x0b\xc5\xc5\xb0\x5e\x08\xaa\x15\xc2\xd8\xd9\x5a\xf3\x4b\x10\xfb\x11\x59\xac\x9a\x9f\xab\x0f\xa1\xdf\x37\x5e\x14\x29\x18\xd4\xcd\x65\x75\x21"
+    let mut stream = ogg.open_stream(17)
+    let begin = result.unwrap(ogg.demux(mut stream, tone, 0, scoped fn(packet: Bytes, start: bool, end_packet: bool) {
+        let h = result.unwrap(opus.read_head(packet))
+        if !start || !end_packet || h.channels != 1 || h.pre_skip != 312 || h.input_rate != 48000 || h.gain != 0 || h.family != 0 {
+            fail("RFC 7845 OpusHead disagrees with the FFmpeg identification packet")
+        }
+        let mut head: Bytes = list.with_capacity(19)
+        result.unwrap(opus.write_head(mut head, 1, 312, 48000, 0))
+        if head != packet {
+            fail("identification packet differs from FFmpeg")
+        }
+    }))
+    check_round_trip(tone, 0, begin, b"\x13", list.slice(tone, 28, 47))
+    let comments = result.unwrap(ogg.demux(mut stream, tone, ogg.next(begin), scoped fn(packet: Bytes, start: bool, end_packet: bool) {
+        let mut fields = 0u64
+        result.unwrap(opus.read_tags(packet, scoped fn(field: Bytes) {
+            if (fields == 0 && field != b"ffmpeg") || (fields == 1 && field != b"encoder=Lavc libopus") {
+                fail("OpusTags field differs from FFmpeg")
+            }
+            fields += 1
+        }))
+        if !start || !end_packet || fields != 2 {
+            fail("OpusTags packet boundary")
+        }
+        let mut tags: Bytes = list.with_capacity(22)
+        result.unwrap(opus.write_tags(mut tags, b"ffmpeg"))
+        if tags != b"OpusTags\x06\x00\x00\x00ffmpeg\x00\x00\x00\x00" {
+            fail("RFC 7845 vendor-only OpusTags packet")
+        }
+    }))
+    check_round_trip(tone, 47, comments, b"\x2e", list.slice(tone, 75, 121))
+    let hashes: Inline[String, 4] =[string.from("f12879bd942e8920d57837165dd5b4c0ad84adc1abeb116ff2b3c3b2680fcbe6"), string.from("cb9137cc2ecefd9458e3bf9e3b88ce9b6cebe8804206e06c55c337deddb10466"), string.from("715b709527bb214df0fa50a58881ed2824c57bbdfbe79377f65eaa7bbd56e585"), string.from("4c8ff20f630fb819f805941ce1aeff623abcc9bfdb4deed1b92213c7152ec3a1")]
+    let sizes: Inline[u64, 4] =[115, 69, 72, 55]
+    let mut count = 0u64
+    let final = result.unwrap(ogg.demux(mut stream, tone, ogg.next(comments), scoped fn(packet: Bytes, start: bool, end_packet: bool) {
+        if !start || !end_packet || count >= 4 || list.len(packet) != sizes[count] || digest(packet) != hashes[count] {
+            fail("packet boundaries or payload differ from ffprobe")
+        }
+        count += 1
+    }))
+    let info = ogg.header(final)
+    if count != 4 || ogg.next(final) != list.len(tone) || !info.flags.ending || info.granule != 3192 {
+        fail("EOS differs from the FFmpeg fixture")
+    }
+    check_round_trip(tone, 121, final, b"\x73\x45\x48\x37", list.slice(tone, 152, list.len(tone)))
+    if let Error(Truncated) = ogg.read(list.slice(tone, 0, list.len(tone) - 1), 121) {} else {
+        fail("a page without its final payload byte was accepted")
+    }
+    let mut corrupt: Bytes = list.with_capacity(list.len(tone))
+    list.append(mut corrupt, tone)
+    corrupt[30] ^= 1
+    if let Error(BadChecksum) = ogg.read(corrupt, 0) {} else {
+        fail("a checksum-mismatched page was accepted")
+    }
+    Ok(())
+}

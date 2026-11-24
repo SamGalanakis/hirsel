@@ -1,0 +1,18 @@
+[package]
+name = "media_container"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"ogg.hirsel" = "ogg"
+"opus.hirsel" = "opus"
+
+[tests]
+limit = 16777216
+grants = []
+
+[tests.sources]
+"ogg_laws.hirsel" = "tests"

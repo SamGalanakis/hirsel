@@ -310,9 +310,8 @@ fn avif_property(input: Bytes, kind: u32, start: u64, end: u64, essential: bool,
             if has_icc(header) {
                 return Error(Malformed)
             }
-            icc_header(input, start + 4, end)?
+            header.color_space = raw_icc_color(input, start + 4, end)?
             header.icc_profile = Some(IccProfile(start: start + 4, end: end, storage: Raw))
-            header.color_space = EmbeddedIcc
         }
     } else if essential && kind != 0x61763143 && kind != 0x636c6c69 && kind != 0x6d646376 {
         return Error(Unsupported)

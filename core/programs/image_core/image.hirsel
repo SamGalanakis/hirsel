@@ -221,6 +221,17 @@ fn probe_png(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
                 return Error(Malformed)
             }
             header.color_space = Srgb
+        } else if tag == 0x63494350 {
+            if count != 4 || input[body + 3] > 1 {
+                return Error(Malformed)
+            }
+            if input[body + 1] == 13 && input[body + 2] == 0 && input[body + 3] == 1 {
+                if input[body] == 1 {
+                    header.color_space = Srgb
+                } else if input[body] == 12 {
+                    header.color_space = DisplayP3
+                }
+            }
         } else if tag == 0x69434350 {
             let start = png_icc_offset(input, body, end)?
             header.icc_profile = Some(IccProfile(start: start, end: end, storage: Zlib))

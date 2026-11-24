@@ -42,7 +42,7 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             if icc_seen != int.widen(icc_count) {
                 return Error(Malformed)
             }
-            if icc_seen != 0 {
+            if icc_seen > 1 {
                 header.icc_profile = Some(IccProfile(start: icc_first, end: icc_end, storage: JpegSegments))
                 header.color_space = EmbeddedIcc
             }
@@ -112,7 +112,8 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
                 icc_count = count
             }
             if count == 1 {
-                icc_header(input, body + 14, end)?
+                header.color_space = raw_icc_color(input, body + 14, end)?
+                header.icc_profile = Some(IccProfile(start: body + 14, end: end, storage: Raw))
             }
             icc_end = end
             icc_seen += 1

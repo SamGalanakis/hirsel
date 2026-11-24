@@ -159,9 +159,8 @@ fn probe_webp(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             if flags & 0x20 == 0 || image || anim || has_icc(header) {
                 return Error(Malformed)
             }
-            icc_header(input, start, end)?
+            header.color_space = raw_icc_color(input, start, end)?
             header.icc_profile = Some(IccProfile(start: start, end: end, storage: Raw))
-            header.color_space = EmbeddedIcc
         } else if name == 0x45584946 {
             if flags & 8 == 0 || exif {
                 return Error(Malformed)

@@ -1,0 +1,131 @@
+// L62 bind_expiry (RUNNER-SPEC CHANGES-v2.57). The place runs on a virtual Clock whose wall
+// starts at 1000 ms and moves only when the driver sets it. Credential [s, e] binds
+// Caller(2, [s]) with the exclusive expiry 990 + e ms, so e = 10 expires at the starting wall.
+type Expiring: send { d: Drive, hand: ClockHand }
+
+fn expiring_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, ()] {
+    if list.len(credential) != 2u64 { return Error(()) }
+    Ok(runner.BoundCaller(caller: subject_caller(credential[0u64]), expires_at_ms: Some(990u64 + int.widen(credential[1u64]))))
+}
+
+fn expiring_pair(d: Drive, e: u8) -> Result[(wire_client.Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+    let binding: runner.Wire[(), ()] = runner.wire_bind((), code.describe(expiring_caller), 4096u64, 65536u64)
+    let mut credential: Bytes = list.new()
+    list.push(mut credential, 2u8)
+    list.push(mut credential, e)
+    wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take binding), d.head, d.post,
+        code.describe(place), client_keys(), Some(take credential), 1u64, 2097152u64)
+}
+
+// A binding whose expiry the wall has reached (before it, or equal to it) is refused at
+// Hello with 1008; one a millisecond later binds.
+fn drive_expiry_at_bind(take job: Expiring) -> () waits {
+    let Expiring(d: take d, hand: _) = take job
+    if let Error(Protocol(1008u16)) = expiring_pair(d, 9u8) {} else { fail("bind_expiry: an expired binding was accepted") }
+    if let Error(Protocol(1008u16)) = expiring_pair(d, 10u8) {} else { fail("bind_expiry: a binding expiring at the wall was accepted") }
+    let (take wire, take session) = paired(expiring_pair(d, 11u8))
+    want(wire.caller.subject == subject_caller(2u8).subject, "bind_expiry: an unexpired binding names its Caller")
+    hang(Socket(take wire, take session))
+}
+
+// The session's end: no data frame after the expiry may reach the client, and the
+// place closes with 4401 AuthExpired.
+fn expiry_ends(wire: wire_client.Conn, context: String) -> () waits {
+    loop {
+        match wire_client.wait(wire) {
+            Got(Batch(_, _, _, done)) if list.len(done) != 0u64 => fail(clone(context)),
+            Got(_) => (),
+            Woke(_) => (),
+            Gone => break,
+        }
+    }
+    want(wire_client.shut_code(wire) == Some(4401u16), "bind_expiry: the session closes with 4401 AuthExpired")
+}
+
+// An idle session stays open before its expiry; the wall alarm closes it with 4401 at it
+// (equality latches) though the client sends nothing.
+fn drive_expiry_idle(take job: Expiring) -> () waits {
+    let Expiring(d: take d, hand: take h) = take job
+    let mut hand = take h
+    let (take wire, take session) = paired(expiring_pair(d, 60u8))
+    clock.set_wall(mut hand, 1049u64)
+    want(match wire_client.try_next(wire) { Error(Closed) => false, _ => true }, "bind_expiry: the session ends before its expiry")
+    clock.set_wall(mut hand, 1050u64)
+    expiry_ends(wire, string.from("bind_expiry: an idle session delivered data past its expiry"))
+    let _ = task.join(take session)
+}
+
+// A Granted call taken before the expiry whose answer is ready only after it is never
+// delivered: the body waits on the virtual monotonic clock, which moves after the wall
+// passes the session's expiry.
+type ExpiryHold: send { clock: Clock }
+
+fn expiry_held(grant: ExpiryHold, caller: runner.Caller, take value: u64) -> Result[u64, Capacity] waits {
+    host.sleep_until(grant.clock, 1u64)
+    Ok(value)
+}
+
+fn expiry_hold_place(mut registry: runner.Registry[ExpiryHold, Hd]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut registry, code.describe(expiry_held), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn expiring_hold_caller(_grant: ExpiryHold, credential: Bytes) -> Result[runner.BoundCaller, ()] {
+    expiring_caller((), credential)
+}
+
+fn drive_expiry_late(take job: Expiring) -> () waits {
+    let Expiring(d: take d, hand: take h) = take job
+    let mut hand = take h
+    let mut requested: List[Bytes] = list.new()
+    list.push(mut requested, key_of(code.identity(code.describe(expiry_held)), std.codec.of_u64(), std.codec.of_u64()))
+    let mut config = runner.wire_defaults(524288u64)
+    config.q = 0u64
+    config.budget = 65536u64
+    config.socket.max_frame = 32768u64
+    config.n_granted = 131072u64
+    let grant = runner.wire(ExpiryHold(clock: d.clock), Some(code.describe(expiring_hold_caller)), 4096u64, 65536u64)
+    let mut credential: Bytes = list.new()
+    list.push(mut credential, 2u8)
+    list.push(mut credential, 60u8)
+    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take grant), d.head, d.post,
+        code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
+    wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, u64_arg(7u64)))
+    clock.set_wall(mut hand, 1050u64)
+    clock.advance_to(mut hand, 1u64)
+    expiry_ends(wire, string.from("bind_expiry: a call answered after the expiry was delivered"))
+    let _ = task.join(take session)
+}
+
+// One place on a virtual clock (wall 1000 ms, mono 0); the driver holds the clock's hand.
+fn served_expiring(r: Random, tasks: Tasks, n: Net, f: fn(take Expiring) -> () waits) -> bool waits {
+    let (c, hand) = provide.clock(0u64, 1000u64)
+    let db = store.memory(c, r, result.unwrap(store.sized(Directory, 2147483648u64)))
+    let (head, inbox) = calls_inbox()
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let credential = ingress.credential(r)
+    let d = Drive(head: take head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: take credential, accepted: None)
+    let driving = task.spawn(tasks, bytes 33554432u64, Expiring(d: take d, hand: take hand), f)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
+    let drove = task.join(take driving)
+    if let Error(e) = opened { fail(opened_text(e)) }
+    match take drove {
+        Ok(()) => true,
+        Error(Failed(take cs)) => fail(cause_text("bind_expiry: the driver failed: ", cs)),
+        Error(Cancelled(take cs)) => fail(cause_text("bind_expiry: the driver was cancelled: ", cs)),
+    }
+}
+
+@test
+fn test_bind_expiry_at_bind(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if served_expiring(r, tasks, n, drive_expiry_at_bind) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_bind_expiry_idle(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if served_expiring(r, tasks, n, drive_expiry_idle) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_bind_expiry_late_delivery(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if served_expiring(r, tasks, n, drive_expiry_late) { Ok(()) } else { Error(()) }
+}

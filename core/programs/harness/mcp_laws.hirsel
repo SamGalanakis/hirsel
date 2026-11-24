@@ -133,7 +133,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let credential = runner.ingress.credential(random)
-    seed_mcp_blob(dir, clock, random, tasks, result.unwrap(runner.ingress.caller((), credential)))
+    seed_mcp_blob(dir, clock, random, tasks, result.unwrap(runner.ingress.caller((), credential)).caller)
     let (take input, at) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take input
     let seed = match std.sim.world.test_seed(seed_grant) { Some(n) => n, None => 7u64 }

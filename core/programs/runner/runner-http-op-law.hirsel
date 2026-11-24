@@ -51,18 +51,18 @@ fn http_op_bad_status(mut r: Registry[(), HttpLawHandles]) -> Result[(), Registe
     bind(mut r, take wrong)
 }
 
-fn http_op_bind_original(_seed: (), credential: Bytes) -> Result[Caller, ()] {
+fn http_op_bind_original(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
     http_op_bind_value(credential, b"A")
 }
 
-fn http_op_bind_changed(_seed: (), credential: Bytes) -> Result[Caller, ()] {
-    if credential == b"original-token" { return Ok(store.Caller(issuer: 7u8, subject: b"A")) }
+fn http_op_bind_changed(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
+    if credential == b"original-token" { return Ok(BoundCaller(caller: store.Caller(issuer: 7u8, subject: b"A"), expires_at_ms: None)) }
     http_op_bind_value(credential, b"B")
 }
 
-fn http_op_bind_value(credential: Bytes, subject: Bytes) -> Result[Caller, ()] {
+fn http_op_bind_value(credential: Bytes, subject: Bytes) -> Result[BoundCaller, ()] {
     if credential != b"token" { return Error(()) }
-    Ok(store.Caller(issuer: 7u8, subject: std.http.copy_bytes(subject)))
+    Ok(BoundCaller(caller: store.Caller(issuer: 7u8, subject: std.http.copy_bytes(subject)), expires_at_ms: None))
 }
 
 type HttpOpPlace = StaticFn[fn(mut Registry[(), HttpLawHandles]) -> Result[(), RegisterError]]

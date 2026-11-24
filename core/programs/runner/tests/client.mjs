@@ -22,6 +22,7 @@ const savedStream = (state, position=0) => state.streams[state.directory[positio
 const returned = n => ({tag:'Returned',value:bytes(n)});
 const refused = tag => ({tag:'Refused',value:{tag}});
 const call = (stream,p,arg,slot=0,deadline=30000) => ({tag:'Call',values:[stream,p,slot,deadline,bytes(arg)]});
+const equalBytes = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 const settle = async () => { for (let i=0;i<40;i++) await new Promise(resolve => setImmediate(resolve)); };
 const row = (slot, key, value) => ({slot,key:bytes(key),value:value === undefined
   ? {tag:'None'} : {tag:'Some',value:bytes(value)}});
@@ -138,7 +139,7 @@ export async function laws(codec, only, mutant, entries) {
   async function setup(storage=new Memory(),options={}) {
     const time=new Time(),server=new Server(codec,storage),events=[],diagnostics=[];
     const opts={url:'ws://scripted',storage,frame:codec,wants:[want],socket:server.socket,clock:time,
-      credential,onRecovered:o=>events.push(o),onDiagnostic:d=>diagnostics.push(d),...options};
+      credential:async()=>credential,onRecovered:o=>events.push(o),onDiagnostic:d=>diagnostics.push(d),...options};
     options.prepare?.(server);
     const client=await runtime.Client.open(opts);clients.push(client);await settle();
     return {client,server,storage,time,events,diagnostics,opts};
@@ -386,13 +387,83 @@ export async function laws(codec, only, mutant, entries) {
   // state, not Incompatible, naming the missing credential when none was sent.
   tests.unbound_before_welcome=async()=>{
     const refuse=server=>{server.onHello=s=>server.close(s,1008);};
-    for(const given of [undefined,credential]) {
+    for(const given of [undefined,async()=>credential]) {
       const h=await setup(new Memory(),{credential:given,prepare:refuse});await settle();await h.time.advance(120000);
       assert.equal(h.client.state,'Unbound');assert.equal(h.server.sockets.length,1);
       assert.equal(h.diagnostics.some(d=>d.includes('pass `credential`')),given===undefined);
       h.server.onHello=undefined;h.client.reconnect();await ready(h);
       assert.equal(h.client.state,'Ready');h.server.check();
     }
+  };
+  // A credential source answers in the order its promises are settled by the law.
+  const source=()=>{
+    const asks=[];const fn=()=>new Promise((resolve,reject)=>asks.push({resolve,reject}));
+    return {fn,asks,give:async(i,b)=>{asks[i].resolve(b);await settle();},fail:async i=>{asks[i].reject(new Error('down'));await settle();}};
+  };
+  const hello=f=>f.tag==='Hello';
+  const helloCredential=(h,i)=>h.server.sent.filter(hello)[i]?.values[0];
+  // 4401 ends a Welcomed session: images clear at once, the expired bytes are never sent
+  // again, one refresh reconnects, and the pending call replays only after the same Caller's Welcome.
+  tests.auth_expired_refreshes_once_and_recovers=async()=>{
+    const c=source(),fresh=bytes(...Array(16).fill(2));
+    const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+    const changes=[];h.client.subscribe(want,bytes(1),(_,change)=>changes.push(change));await settle();
+    h.server.emit(h.server.sockets[0],batch(1n,[0],[group(0,[row(0,1,1)])]));await settle();
+    const answer=h.client.call(want,bytes(7),x=>x);await settle();
+    assert.deepEqual(h.server.calls[0].frame,call(savedStream(h.storage.raw).id,0n,7));
+    const seen=changes.length;
+    h.server.close(h.server.sockets[0],4401);
+    assert(changes.length>seen,'the public image clears when the expiry is observed');
+    await settle();assert.equal(h.client.state,'CredentialNeeded');
+    await h.time.advance(120000);
+    assert.equal(h.server.sockets.length,1,'no Hello may carry the expired credential');assert.equal(c.asks.length,2);
+    await c.give(1,fresh);await settle();
+    assert.deepEqual(helloCredential(h,1),{tag:'Some',value:fresh});
+    assert.deepEqual(h.server.calls[1].frame,call(savedStream(h.storage.raw).id,0n,7));
+    h.server.answer(h.server.sockets[1],savedStream(h.storage.raw).id,0n,returned(7));await settle();
+    assert.deepEqual(await answer,returned(7));assert.equal(h.client.state,'Ready');h.server.check();
+  };
+  // An offline client whose ticket lapsed sees the expiry as 1008 before Welcome and recovers the same way.
+  tests.offline_expiry_seen_as_1008_recovers=async()=>{
+    const c=source(),fresh=bytes(...Array(16).fill(2));
+    const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+    const answer=h.client.call(want,bytes(7),x=>x);await settle();
+    h.server.close(h.server.sockets[0],1001);await settle();
+    h.server.onHello=(s,f)=>{if(equalBytes(f.values[0].value,credential))h.server.close(s,1008);};
+    await h.time.advance(50);
+    assert.equal(h.client.state,'CredentialNeeded');assert.equal(h.server.calls.length,1);
+    await c.give(1,fresh);await settle();
+    assert.deepEqual(h.server.calls[1].frame,call(savedStream(h.storage.raw).id,0n,7));
+    h.server.answer(h.server.sockets.at(-1),savedStream(h.storage.raw).id,0n,returned(7));await settle();
+    assert.deepEqual(await answer,returned(7));h.server.check();
+  };
+  // One refresh per recovery attempt: an error, the refused bytes again, or a second refusal is Unbound.
+  tests.one_refresh_then_unbound=async()=>{
+    for(const ending of ['error','same','refused']) {
+      const c=source();
+      const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+      h.server.onHello=s=>h.server.close(s,1008);
+      h.server.close(h.server.sockets[0],4401);await settle();
+      if(ending==='error')await c.fail(1);
+      else await c.give(1,ending==='same'?credential:bytes(...Array(16).fill(3)));
+      await h.time.advance(120000);
+      assert.equal(h.client.state,'Unbound',ending);assert.equal(c.asks.length,2,ending);
+      assert.equal(h.server.sockets.length,ending==='refused'?2:1,ending);
+    }
+  };
+  // WS and HTTP refusals share one refresh in flight; a refresh that settles after close is discarded.
+  tests.refresh_shared_and_discarded_after_close=async()=>{
+    const c=source();let replies=[];
+    const fetch=()=>new Promise(resolve=>replies.push(resolve));
+    const h=await setup(new Memory(),{credential:c.fn,http:{url:'http://scripted/',fetch}});await c.give(0,credential);await ready(h);
+    const answer=h.client.callHttp(want,{path:'/.hirsel/op/save'});await settle();
+    assert.equal(replies.length,1);
+    h.server.close(h.server.sockets[0],4401);await settle();
+    replies[0]({status:401,text:async()=>'',headers:new Headers()});await settle();
+    assert.equal(c.asks.length,2,'one refresh serves both refusals');
+    const closed=h.client.close();await c.give(1,bytes(...Array(16).fill(2)));await closed;await h.time.advance(120000);
+    assert.equal(h.client.state,'Closed');assert.equal(h.server.sockets.length,1);
+    assert.deepEqual(await answer,{tag:'LocallyUnknown'});
   };
   // The scripted Welcome serves n_place 1024; bindings generated for another value name both.
   tests.n_place_mismatch_names_both=async()=>{

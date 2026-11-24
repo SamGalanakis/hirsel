@@ -2,7 +2,7 @@
 // owns a list is refused like a movable wire grant.
 type OwnedSeed: send { values: List[u64] }
 
-fn bind(seed: OwnedSeed, credential: Bytes) -> Result[runner.Caller, ()] { Error(()) }
+fn bind(seed: OwnedSeed, credential: Bytes) -> Result[runner.BoundCaller, ()] { Error(()) }
 
 pub fn configure(seed: OwnedSeed) -> runner.Wire[(), OwnedSeed] {
     runner.wire_bind(seed, code.describe(bind), 0u64, 0u64)

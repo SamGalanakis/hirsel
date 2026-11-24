@@ -202,8 +202,10 @@ and needs Node type declarations when you type-check it.
 
 `Client.open` requires the ingress WebSocket `url`, the generated `frame`
 codec and `wants`, and a `storage` adapter. Pass the generated `identity` to
-check the launch digest, target and `n_place`. Optional `credential` bytes go
-in Hello. `deadlineMs` sets the server's call deadline and defaults to 30,000.
+check the launch digest, target and `n_place`. The optional `credential` is an
+async source, `() => Promise<Uint8Array | undefined>`, whose bytes go in Hello.
+The client calls it before its first Hello and once per credential recovery
+(below), never inside its serialized work or the storage lock. `deadlineMs` sets the server's call deadline and defaults to 30,000.
 The optional `socket` factory and `clock` override the platform WebSocket and
 time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
@@ -236,11 +238,42 @@ reload. Reconnection waits for all Placed frames, recovers pending calls, and
 restores subscriptions using new IDs. Disconnect invalidates old images.
 Each subscription stays pending until its new `complete` (above).
 
-The application may supply credential bytes in Client options. The client
-sends them in Hello and stores the returned Caller with the stream. It replays
+The client sends the bytes of the application's credential source in Hello and stores the returned Caller with the stream. It replays
 pending work only when Welcome returns the same Caller. If an anonymous
 connection receives a new anonymous Caller, the client reports any pending
 outcome as LocallyUnknown and starts at position zero for that Caller.
+
+A place's binding may give the session an expiry (RUNNER-SPEC CHANGES-v2.57).
+When it is reached, the place closes an established socket with the private
+code 4401 `AuthExpired` and answers a private HTTP call with 401. A client that
+was offline past its credential's expiry first sees Close 1008 before Welcome
+instead. All three are one credential recovery. The client drops the refused
+bytes, so no path sends them again, clears every public image at once, enters
+the `CredentialNeeded` state, reports a diagnostic and calls the credential
+source once. WS and HTTP refusals share the one refresh in flight. The client
+reconnects with the fresh bytes. If the source throws, gives no bytes, gives
+the bytes just refused, or the place refuses the refreshed credential too, the
+client enters `Unbound` with no further refresh. A recovery attempt ends at
+Welcome; the next refusal starts a new one. A refresh that settles after
+`close()` or fencing is discarded. Durable pending work is replayed only after
+Welcome names the same Caller: the client recovers the exact pending identity
+and resubscribes with fresh ids and complete images, as on any reconnect. A
+different Caller follows the Caller change rules above, and the anonymous
+issuer-1 reset to LocallyUnknown is unchanged. Calls queued in memory wait
+through `CredentialNeeded`.
+
+An SSE subscription (http.md B-9) shares the same credential source and the
+same refresh in flight. Its final event `expired`, and a 401 on any SSE
+request or re-request, are the same credential recovery as Close 4401: the
+consumer clears that subscription's image, never re-requests with the refused
+bytes, and re-requests with the refreshed ones, under the same one-refresh
+rule and the same `Unbound` ends. A stream that ends with no final event
+(`lease_end` or a place's stop) is not a credential failure: the consumer
+re-requests at once with the credential it holds, without calling the source.
+If `expired` was lost, that re-request gets 401, which starts the recovery,
+so the consumer never needs the event to stay correct. Every re-request is a
+fresh subscription (no `Last-Event-ID`), and the image is replaced from empty
+at its completing `batch` event.
 
 ## Calling an entry from the terminal
 

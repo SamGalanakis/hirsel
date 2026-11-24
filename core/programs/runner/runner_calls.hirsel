@@ -802,9 +802,9 @@ fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.Regist
     runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.Caller, ()] {
+fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, ()] {
     if list.len(credential) != 1u64 { return Error(()) }
-    Ok(subject_caller(credential[0]))
+    Ok(runner.BoundCaller(caller: subject_caller(credential[0]), expires_at_ms: None))
 }
 
 fn drive_bind_only(take d: Drive) -> () waits {
@@ -1367,7 +1367,7 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
 
 fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
     match got {
-        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)), 0u32) && if entry == 0u64 {
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)).caller, 0u32) && if entry == 0u64 {
             revision_is(c.record.revision, code.describe(write))
         } else if entry == 1u64 {
             revision_is(c.record.revision, code.describe(refuse))

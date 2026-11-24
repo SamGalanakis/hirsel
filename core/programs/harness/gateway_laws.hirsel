@@ -1239,7 +1239,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
                 return Error(30u64)
             }
             let d = harness.preview.door(hub)
-            let owner = result.unwrap(runner.ingress.caller((), me))
+            let owner = result.unwrap(runner.ingress.caller((), me)).caller
             let (posted_next, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 1u64), json(harness.Submit(client_key: "p2", text: "preview it")))
             if posted_next != 202u16 {
                 return Error(2200u64 + int.widen(posted_next))

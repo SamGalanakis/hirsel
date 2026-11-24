@@ -5,12 +5,13 @@ pub type Command: send = Send(runner.Frame) | Control(u8, std.websocket.Control)
 // same queue through `alarm`, so one receive sees a frame, the end or the bound in order.
 pub type Incoming: send = Got(runner.Frame) | Woke(u64) | Gone
 
+// `shut` holds the code of the peer's Close, once one arrives.
 pub type Conn {
     to: Sender[Command], from: Receiver[Incoming], wake: Sender[Incoming], credit: Sender[()], caller: runner.Caller,
-    reading: Task[()], writing: Task[()]
+    reading: Task[()], writing: Task[()], shut: Receiver[u16]
 }
 
-type Read: send { reader: std.wsock.Reader, to: Sender[Incoming], control: Sender[Command], credits: Receiver[()], clock: Clock, idle_ms: u64 }
+type Read: send { reader: std.wsock.Reader, to: Sender[Incoming], control: Sender[Command], credits: Receiver[()], clock: Clock, idle_ms: u64, shut: Sender[u16] }
 type Write: send { writer: std.wsock.Writer, outgoing: std.wsock.Outbound, from: Receiver[Command], clock: Clock }
 
 fn deadline(c: Clock) -> Until { within(c, 5000u64) }
@@ -47,7 +48,7 @@ fn read(take seed: Read) -> () waits {
 }
 
 fn read_frames(take seed: Read) -> () waits {
-    let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c, idle_ms: idle_ms) = take seed
+    let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c, idle_ms: idle_ms, shut: take shut) = take seed
     let mut r = take input
     loop {
         if let Error(_) = channel.receive(credits) { return }
@@ -63,7 +64,15 @@ fn read_frames(take seed: Read) -> () waits {
             Ok(Ping(p)) => { if let Error(_) = channel.send(control, Control(10u8, p)) { break } },
             Ok(Pong(_)) => (),
             Ok(Need) => (),
-            Ok(Closed(p)) => { let _ = channel.send(control, Control(8u8, p)); return },
+            Ok(Closed(p)) => {
+                if p.len >= 2u64 {
+                    let high: u16 = int.widen(p.data[0u64])
+                    let low: u16 = int.widen(p.data[1u64])
+                    let _ = channel.try_send(shut, (high << 8u16) | low)
+                }
+                let _ = channel.send(control, Control(8u8, p))
+                return
+            },
             _ => { let _ = channel.send(control, Close); return },
         }
         }
@@ -145,11 +154,17 @@ pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Rando
     let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
     let wake = channel.sender(frames)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let read_seed = Read(reader: take r, to: take frames, control: channel.sender(to), credits: take credits, clock: c, idle_ms: idle_ms)
+    let (shut_to, shut): (Sender[u16], Receiver[u16]) = channel.new(1u64)
+    let read_seed = Read(reader: take r, to: take frames, control: channel.sender(to), credits: take credits, clock: c, idle_ms: idle_ms, shut: take shut_to)
     let reading = task.spawn(tasks, bytes 1048576u64, take read_seed, read)
     let write_seed = Write(writer: take w, outgoing: take out, from: take commands, clock: c)
     let writing = task.spawn(tasks, bytes 1048576u64, take write_seed, write)
-    Ok(Conn(to: take to, from: take from, wake: take wake, credit: take credit, caller: take who, reading: take reading, writing: take writing))
+    Ok(Conn(to: take to, from: take from, wake: take wake, credit: take credit, caller: take who, reading: take reading, writing: take writing, shut: take shut))
+}
+
+// The code of the peer's Close, once the reader has seen it.
+pub fn shut_code(c: Conn) -> Option[u16] {
+    match channel.try_receive(c.shut) { Ok(code) => Some(code), _ => None }
 }
 
 pub fn send_frame(c: Conn, take f: runner.Frame) -> () waits {
@@ -158,7 +173,7 @@ pub fn send_frame(c: Conn, take f: runner.Frame) -> () waits {
 
 pub fn close(take cn: Conn) -> bool waits {
     let _ = channel.send(cn.to, Close)
-    let Conn(to: _, from: _, wake: _, credit: _, caller: _, reading: take reader_task, writing: take writing) = take cn
+    let Conn(to: _, from: _, wake: _, credit: _, caller: _, reading: take reader_task, writing: take writing, shut: _) = take cn
     let mut reading = take reader_task
     let wrote = task.join(take writing)
     task.cancel(mut reading)

@@ -30,6 +30,7 @@ pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bound
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
 pub type Caller = store.Caller
+
 pub const SUBJECT_MAX: u64 = store.SUBJECT_MAX
 
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity] {
@@ -3743,7 +3744,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[Caller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[BoundCaller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 type WireParsed: send { reader: Box[std.wsock.Reader], packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -4061,6 +4062,8 @@ type WireLoop[C: send] {
     allocation_to: Sender[Option[AllocatedState[C]]], allocation_from: Receiver[Option[AllocatedState[C]]],
     encoder: std.wsock.Outbound, rh: Task[()], wh: Option[Task[()]], lease: Option[std.wsock.Pending],
     hello_at: Option[u64], hello_seen: bool, hello_alarm: Option[Task[()]],
+    // The binding's session expiry (exclusive, Unix ms) and its idle alarm; transport only (CHANGES-v2.57).
+    auth_end: Option[u64], auth_alarm: Option[Task[()]],
     run: u64, held: Option[WireEvent], held_credit: bool, deferred: List[(Frame, u64)], busy: bool, control: Option[Bytes], closing: bool, alarm: Option[Task[()]],
     read_back: Option[Box[std.wsock.Reader]], writer: Option[Box[std.wsock.Writer]], read_closed: bool, write_closed: bool, close_at: Option[u64], expired: bool,
 }
@@ -4117,6 +4120,7 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
         to: take to, inbox: take inbox, credit: take credit, out: out, first_write: take first_write, done: None,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
         encoder: encoder, rh: take rh, wh: None, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm,
+        auth_end: None, auth_alarm: None,
         run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None,
         read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
     Ok((take st, take service))
@@ -4139,17 +4143,24 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
         let frame = match take received {
             Input(take f, at) => {
                 if st.closing { let _ = channel.try_send(st.credit, ()); continue }
-                let arrival = match f { Call(..) => host.mono_ns(st.clock), _ => at }
-                match wire_owner_input(mut st, take service, pool, take f, arrival) {
-                    Some((take kept, take outcome)) => {
-                        service = take kept
-                        match take outcome { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
-                    },
-                    None => {
-                        let lost = wire_owner_lost(take st)
-                        wire_tail(take tail, take pool, 0u64)
-                        return lost
-                    },
+                // Taking a client frame is the session's last admission point.
+                if wire_auth_lapsed(mut st) {
+                    let _ = channel.try_send(st.credit, ())
+                    let refused: Option[Frame] = None
+                    refused
+                } else {
+                    let arrival = match f { Call(..) => host.mono_ns(st.clock), _ => at }
+                    match wire_owner_input(mut st, take service, pool, take f, arrival) {
+                        Some((take kept, take outcome)) => {
+                            service = take kept
+                            match take outcome { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
+                        },
+                        None => {
+                            let lost = wire_owner_lost(take st)
+                            wire_tail(take tail, take pool, 0u64)
+                            return lost
+                        },
+                    }
                 }
             },
             FromRunner(take e) => {
@@ -4163,11 +4174,26 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
                     },
                 }
             },
-            HelloBound(take identity_result, sample) => {
+            HelloBound(take given, sample) => {
                 st.work.stream_time = sample
                 let _ = replace(mut st.work.asking, None)
+                let mut auth_end: Option[u64] = None
+                let identity_result = match unexpired(st.clock, take given) {
+                    Some(BoundCaller(caller: take caller, expires_at_ms: end)) => { auth_end = end; Some(take caller) },
+                    None => None,
+                }
                 match wire_owner_hello(mut st, take service, pool, take identity_result) {
-                    Some(take kept) => { service = take kept; None },
+                    Some(take kept) => {
+                        service = take kept
+                        if let Some(end) = auth_end {
+                            if !st.closing {
+                                st.auth_end = Some(end)
+                                let h = std.clock.wall_alarm(st.tasks, st.clock, end, st.to, wire_event(AuthExpired))
+                                st.auth_alarm = Some(take h)
+                            }
+                        }
+                        None
+                    },
                     None => {
                         let lost = wire_owner_lost(take st)
                         wire_tail(take tail, take pool, 0u64)
@@ -4183,6 +4209,10 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
             },
             JoinReady => None,
             DrainWake => None, HttpStream(_) => None,
+            AuthExpired => {
+                if st.closing || !wire_auth_lapsed(mut st) { continue }
+                None
+            },
             HelloExpired => {
                 if st.hello_seen { continue }
                 wire_owner_refuse(mut st, 1008u16)
@@ -4522,6 +4552,8 @@ fn wire_owner_poll[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], t
 // the close alarm once closing.
 fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], pool: Sender[WireAllocation[C]], take outgoing: Option[Frame]) -> WireStep waits {
     let mut data_frame: Option[(Bytes, bool, Option[u64])] = None
+    // Outbound delivery is the second check: nothing reaches the client past expiry.
+    let _ = wire_auth_lapsed(mut st)
     if wire_ready(st.busy) && !st.write_closed && !st.closing && none(st.control) {
         let next = match take outgoing {
             Some(take f) => Some(take f),
@@ -4599,7 +4631,7 @@ fn wire_owner_lost[C: send](take st: WireLoop[C]) -> Result[(), std.wsock.Error]
     // when the loop was inline.
     let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, first_write: take first_write, done: take done,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
-        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, held: take held, control: take control,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, auth_alarm: take auth_alarm, deferred: take deferred, held: take held, control: take control,
         alarm: take alarm, read_back: take read_back, writer: take write_back, write_closed: write_closed, clock: clock, close_at: close_at, expired: expired, ..) = take st
     wire_join(take rh, take wh)
     Error(Protocol(1013u16))
@@ -4610,7 +4642,7 @@ fn wire_owner_end[C: send](take st: WireLoop[C], mut service: Box[Service[C]], t
     // loop was inline; only copyable fields are left out.
     let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, first_write: take first_write, done: take done,
         encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from,
-        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, deferred: take deferred, held: take held, control: take control,
+        encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, auth_alarm: take auth_alarm, deferred: take deferred, held: take held, control: take control,
         alarm: take alarm, read_back: take read_back, writer: take write_back, write_closed: write_closed, clock: clock, close_at: close_at, expired: expired, ..) = take st
     if let Some(take h) = take alarm {
         let mut timing = take h
@@ -4984,41 +5016,6 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     }
 }
 
-// A place's wire configuration (§3 "Binding"): the binding's plain seed `B` and, when wire
-// calls may reach `Granted` entries, the plain grant `G` each such call copies. The copiers
-// carry the plain bounds into sessions that also support registries with movable trigger
-// grants. `wire` makes both halves from one plain `G`; `wire_bind` makes the binding alone,
-// so a registry whose `G` is movable still binds its sessions, and its wire calls to
-// `Granted` entries are refused.
-pub opaque type Wire[G: send, B: send]: send {
-    grant: Option[WireGrant[G]], seed: B, duplicate: fn(B) -> B,
-    bind: Option[StaticFn[fn(B, Bytes) -> Result[Caller, ()] waits]], bind_bytes: u64, bind_steps: u64,
-}
-
-type WireGrant[G: send]: send { value: G, duplicate: fn(G) -> G }
-
-fn copy_plain[G: plain](g: G) -> G { g }
-
-pub fn wire[G: plain + send](grant: G, bind_app: Option[StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits]], bind_bytes: u64, bind_steps: u64) -> Wire[G, G] {
-    let duplicate: fn(G) -> G = copy_plain
-    Wire(grant: Some(WireGrant(value: grant, duplicate: duplicate)), seed: grant, duplicate: duplicate, bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
-}
-
-pub fn wire_bind[G: send, B: plain + send](seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[Caller, ()] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G, B] {
-    let duplicate: fn(B) -> B = copy_plain
-    Wire(grant: None, seed: seed, duplicate: duplicate, bind: Some(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
-}
-
-fn copy_wire[G: send, B: send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B]] {
-    match supplied {
-        Some(w) => {
-            let grant = match w.grant { Some(g) => Some(WireGrant(value: (g.duplicate)(g.value), duplicate: g.duplicate)), None => None }
-            Some(Wire(grant: take grant, seed: (w.duplicate)(w.seed), duplicate: w.duplicate, bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps))
-        },
-        None => None,
-    }
-}
-
 pub opaque type WireSession[G: send, B: send]: send {
     anonymous: Caller, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
     me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller],
@@ -5345,7 +5342,7 @@ fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSess
     let copied_entry: Bytes = clone(key)
     let key_copy = take copied_entry
     list.push(mut entries, take key_copy)
-    let context = admitted(take caller, take entries, at, host.mono_ns(s.clock), s.config.budget, s.config.socket.max_frame)
+    let context = admitted(take caller, None, take entries, at, host.mono_ns(s.clock), s.config.budget, s.config.socket.max_frame)
     let want = CallWant(key: take key, stream: stream, p: p, arg: take arg, deadline_ms: deadline_ms)
     match prepare(r, context, take want) {
         Ok(take sent) => {

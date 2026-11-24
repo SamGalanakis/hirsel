@@ -64,7 +64,7 @@ const PAGE_LINES_MAX: u64 = 256u64
 // over `harness.window`, and how to reach it. A new session starts as `agent` with
 // `narrow`. Each connection's task spends `conn_bytes`, which must hold a wire client.
 pub type Front: send {
-    bind: StaticFn[fn((), Bytes) -> Result[store.Caller, ()] waits],
+    bind: StaticFn[fn((), Bytes) -> Result[runner.BoundCaller, ()] waits],
     bind_bytes: u64,
     bind_steps: u64,
     authority: Bytes,
@@ -185,7 +185,7 @@ fn bearer(f: Front, req: Request) -> Result[Identity, u16] waits {
     let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else {
         return Error(401u16)
     }
-    let Some(take caller) = runner.bind_credential(f.tasks, (), f.bind, clone(credential), f.bind_bytes, f.bind_steps) else {
+    let Some(runner.BoundCaller(caller: take caller, expires_at_ms: _)) = runner.bind_credential(f.tasks, f.clock, (), f.bind, clone(credential), f.bind_bytes, f.bind_steps) else {
         return Error(401u16)
     }
     Ok(Identity(credential: take credential, caller: take caller))

@@ -277,7 +277,7 @@ fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harne
 // a repeated attempt reaches the same child and the same run.
 pub fn ask(d: Door, take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
     let credential = child_credential(key)
-    let Ok(take caller) = runner.ingress.caller((), credential) else { return Error(Unavailable) }
+    let Ok(runner.BoundCaller(caller: take caller, ..)) = runner.ingress.caller((), credential) else { return Error(Unavailable) }
     let id = match create_with(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }
     let mut submit: Option[harness.Submit] = Some(harness.Submit(client_key: "parent", text: take text))
     let mut before: Option[(String, u64)] = None

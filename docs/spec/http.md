@@ -901,9 +901,9 @@ A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follo
 - A committed `text/event-stream` stream gets a heartbeat. On a `Tick`, when the writer is idle and nothing is queued, the owner hands the writer `:\n\n`. Other streams have no heartbeat.
 - At `lease_end` the stream ends normally, and the client reconnects. For a subscription that is a fresh subscription (B-9).
 
-**Ending.** The owner decides the end on `SourceEnded`, `ReadEnd`, `WriteFailed`, the pre-head deadline, `lease_end`, or (B-9) a Reset or an Ended. Then, in this order:
+**Ending.** The owner decides the end on `SourceEnded`, `ReadEnd`, `WriteFailed`, the pre-head deadline, `lease_end`, its binding's expiry (B-9, RUNNER-SPEC v2.57), or (B-9) a Reset or an Ended. Then, in this order:
 1. Cancel the producer child, if there is one.
-2. If the writer is healthy and the head is committed, queue the terminating control item (the `0\r\n\r\n` chunk, or B-9's final event). It has one deadline, end decision + `write_ms`, shared with the unit in flight.
+2. If the writer is healthy and the head is committed, queue the terminating control item (the `0\r\n\r\n` chunk, or B-9's final event: `ended`, `reset` or `expired`; none at `lease_end` or a stop). It has one deadline, end decision + `write_ms`, shared with the unit in flight.
 3. On `Sent` of the terminal item, or at that deadline, cancel the writer, the reader and the timer.
 4. Join every child. Each cancel comes before its join.
 5. If both halves came back, call `net.finish` under `linger_ms`, from the owner's own 8192-byte scratch. Otherwise the halves were dropped with their children, which is a mechanical close.
@@ -1225,6 +1225,7 @@ Anonymous retirement uses a separate credit queue with one credit per HTTP conne
 | `Batch(version, complete, groups, outcomes)` | `event: batch` | `{"version": "<u64>", "complete": [<u32>…], "groups": [<Group>…], "outcomes": []}` |
 | `Ended(sub, outcome)` | `event: ended` | `{"sub": <u32>, "outcome": <Outcome>}`; then the stream ends |
 | `Reset(version, outcomes)` | `event: reset` | `{"version": "<u64>", "outcomes": []}`; then the stream ends |
+| (binding expiry, RUNNER-SPEC v2.57) | `event: expired` | `{"reason": "auth_expired"}`; then the stream ends |
 
 **A group** (RUNNER-SPEC v2.45, `Group{sub, value, rows}`) is `{"sub": <u32>, "value": <R>, "rows": [<Row>…]}`, with no `value` member when the group's value bytes are empty (unchanged). A completing group always has `value`: its bytes, even zero bytes, are decoded against R and written in R's B-4 form, so a unit R is `null` and an empty record is `{}` (RUNNER-SPEC v2.46, astra 1995 #12). The `value` member is omitted only on a non-completing group whose value was elided.
 
@@ -1238,6 +1239,13 @@ So a present row whose value is itself `null` (a V of `()`, `Option[T]`, or a nu
 - The completing initial Batch, an empty one included, is the event whose `complete` lists the subscription. A later event whose `complete` lists it is a repair (RUNNER-SPEC v2.20): the client replaces the subscription's image from empty, as for the first.
 
 **Encoding.** The writer encodes each event in pieces from the frame, through `out_cap`. JSON escapes CR and LF, so the data is one line, and the event's blank line is written last, so a cut event is discarded (HTTP-13). The event's length is bounded by B-5's analysis over the frame schema, `a·n + b` for a frame of n bytes, n ≤ `max_frame`; its memory is the frame, already on the `budget` ledger.
+
+**Binding expiry (RUNNER-SPEC v2.57).** A stream's binding may carry `expires_at_ms`. The owner latches expiry on the first read with `wall_ms >= expires_at_ms`, at every event (§2) and from a `std.clock.wall_alarm` it arms at `expires_at_ms` and cancels at the end.
+- In pre-head, expiry is answered as an ordinary response: 401, as a credential refused at bind.
+- Once committed, expiry is an end decision (§2 Ending). The owner writes no `batch` event after it. The final event is `event: expired`, which takes the control slot as `ended` and `reset` do.
+- `expired` is the only event that names expiry, and nothing else writes it. A stream that ends at `lease_end` or at a stop writes no final event: it ends with the terminating chunk. So the client tells the cases apart by the last event: `expired` means the credential needs a refresh; a bare end means reconnect with the same credential.
+- If `expired` misses its unit deadline, the stream closes without it, and the client sees a bare end. It reconnects with the same credential, and the binding refuses that request with 401 before any head. A 401 on a re-request is the authoritative signal; the event saves one round trip. No path keeps a stream open past expiry, and no path lets a client loop on an expired credential.
+- A raw private stream (§2) has no event layer. It ends its body, and its client learns of the expiry from the 401 on its next request.
 
 **Control is independent of data.** Batches wait for the writer. An `Ended` or a `Reset` takes the control slot (§2), and is written as soon as the writer finishes its current unit, under its own unit deadline. If that deadline passes, the stream closes without it, and the client sees no partial event (HTTP-13).
 

@@ -20,8 +20,11 @@ await client.whenReady();
 const api = bind(client);
 ```
 
-For reconnect recovery, supply an application `credential` that the server's
-binding maps to the same Caller on each open.
+For reconnect recovery, supply an application `credential` source,
+`async () => bytes`, that the server's binding maps to the same Caller on each
+open. The client calls it for the first Hello and once more when the place
+refuses or expires the credential (Close 4401, Close 1008 before Welcome, or
+HTTP 401); meanwhile the state is `CredentialNeeded`.
 Storage keeps the Caller returned by the server with each stream. When an
 anonymous reconnect receives a fresh Caller, any pending call becomes
 `LocallyUnknown` and the new stream starts at position zero.
@@ -46,8 +49,8 @@ leased again. A later explicit client can allocate another stream.
 
 `Incompatible` is terminal until `reconnect()` or a bindings reload. `Unbound`
 means the place closed the Hello with 1008 before Welcome: its `PlaceConfig.wire`
-binding refused the credential, or none was given (pass `credential`). It is
-terminal until `reconnect()`. The original
+binding refused the credential and one refresh did not recover, or none was
+given (pass `credential`). It is terminal until `reconnect()`. The original
 pending request survives both. `StorageUnavailable` permits no sends; close the
 client and reopen after storage is available. `close()` releases the stream lease
 and preserves pending durable work. Each send checks the installation generation

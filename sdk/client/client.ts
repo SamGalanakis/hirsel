@@ -98,10 +98,13 @@ export interface Transport {
 }
 export interface HttpReply { status: number; body: string; committed: boolean; replayed: boolean }
 interface HttpAttempt extends HttpReply { refusal?: string; at?: bigint; retention?: bigint }
-export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
+export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'CredentialNeeded' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
 export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
 export interface Options {
-  url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity; credential?: Uint8Array;
+  url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity;
+  // Called for the first Hello and once per credential recovery, outside the client's
+  // serialized work and storage lock. Undefined bytes mean none can be had.
+  credential?: () => Promise<Uint8Array | undefined>;
   http?: { url: string; fetch?: typeof fetch };
   onHttpRecovered?: (reply: HttpReply) => void;
   socket?: (url: string, protocol: string) => Socket; clock?: Clock; deadlineMs?: number;
@@ -159,6 +162,8 @@ export class Client implements Transport {
   readonly generation: bigint;
   private readonly installationId: bigint;
   private credential?: Uint8Array;
+  private refreshing = false;
+  private refreshed = false;
   private record: StreamRecord;
   private streamLease: Lease;
   private socket?: Socket;
@@ -194,7 +199,7 @@ export class Client implements Transport {
 
   private constructor(private options: Options, state: Installation, private stream: string, lease: Lease) {
     this.generation = state.generation; this.installationId = state.installation; this.streamLease = lease;
-    this.credential = options.credential?.slice(); this.record = structuredClone(state.streams[stream]);
+    this.record = structuredClone(state.streams[stream]);
     this.wants = options.wants.map(copyWant);
     const pending = this.record.pending;
     if (pending && !pending.http && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
@@ -271,7 +276,7 @@ export class Client implements Transport {
   }
   private setState(state: State): void {
     this.state = state;
-    if (state !== 'Ready' && state !== 'Connecting' && state !== 'Backoff') {
+    if (state !== 'Ready' && state !== 'Connecting' && state !== 'Backoff' && state !== 'CredentialNeeded') {
       for (const call of this.calls) {
         if (call.overlay) this.overlays.delete(call.overlay);
         call.reject(new ClientError(state));
@@ -311,7 +316,8 @@ export class Client implements Transport {
     } finally { await lock.release(); }
   }
   private connect(): void {
-    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'Unbound', 'StorageUnavailable'].includes(this.state)) return;
+    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'Unbound', 'CredentialNeeded', 'StorageUnavailable'].includes(this.state)) return;
+    if (this.options.credential && !this.credential) { this.setState('Connecting'); this.refresh(undefined); return; }
     this.setState('Connecting'); this.welcomed = false; this.placed = 0; this.sent = false;
     this.clearSubscriptions();
     const epoch = ++this.epoch;
@@ -348,8 +354,10 @@ export class Client implements Transport {
       this.clearSubscriptions();
     };
     socket.onclose = event => lost(async () => {
-      // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
-      if (event.code === 1008 && !this.welcomed) await this.unbound();
+      // 4401 AuthExpired ends an established session; 1008 before Welcome is the binding
+      // refusing this Hello's credential, which is how an expiry reached offline shows.
+      if (event.code === 4401) await this.credentialLost('Close 4401');
+      else if (event.code === 1008 && !this.welcomed) await this.credentialLost('Close 1008 before Welcome');
       else if (event.code === 1009) await this.incompatible(1009,
         !this.welcomed && event.reason === 'hirsel.4' ? 'Reload' : 'ReplyTooLarge');
       else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
@@ -396,16 +404,43 @@ export class Client implements Transport {
     }
     this.readyReject(new ClientError(problem));
   }
-  private async unbound(): Promise<void> {
-    this.cancelTimers(); this.disconnect(); this.setState('Unbound');
-    this.options.onDiagnostic?.(this.credential
-      ? 'Unbound: the place refused this credential (Close 1008 before Welcome)'
-      : 'Unbound: the place binds callers and needs a credential; pass `credential` to Client.open (Close 1008 before Welcome)');
+  private async unbound(cause: string): Promise<void> {
+    this.cancelTimers(); this.disconnect(); this.credential = undefined; this.setState('Unbound');
+    this.options.onDiagnostic?.(this.options.credential
+      ? `Unbound: the place refused the credential and one refresh did not recover (${cause})`
+      : `Unbound: the place binds callers and needs a credential; pass \`credential\` to Client.open (${cause})`);
     this.readyReject(new ClientError('Unbound'));
+  }
+  // A refused or expired credential is dropped at once, so no path sends it again. Each
+  // recovery attempt gets one refresh; WS and HTTP refusals join the refresh in flight.
+  // Pending work stays durable and is replayed only after Welcome names the same Caller.
+  private async credentialLost(cause: string): Promise<void> {
+    if (this.state === 'CredentialNeeded') return;
+    const refused = this.credential;
+    if (!this.options.credential || this.refreshed) { await this.unbound(cause); return; }
+    this.cancelTimers(); this.disconnect(); this.credential = undefined;
+    this.refreshed = true; this.setState('CredentialNeeded');
+    this.options.onDiagnostic?.(`CredentialNeeded: the place refused the session credential (${cause}); refreshing once`);
+    this.refresh(refused);
+  }
+  private refresh(refused: Uint8Array | undefined): void {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    const source = this.options.credential!, epoch = this.epoch;
+    const settled = (fresh: Uint8Array | undefined) => this.enqueue(async () => {
+      this.refreshing = false;
+      // A result after close, fencing or a newer attempt is discarded.
+      if (epoch !== this.epoch || (this.state !== 'CredentialNeeded' && this.state !== 'Connecting')) return;
+      if (!fresh || (refused && equal(fresh, refused))) {
+        await this.unbound(fresh ? 'the refresh returned the refused credential' : 'the credential source gave none'); return;
+      }
+      this.credential = fresh.slice(); this.setState('Connecting'); this.connect();
+    });
+    void Promise.resolve().then(source).then(settled, () => settled(undefined));
   }
   reconnect(): void {
     if (this.state !== 'Incompatible' && this.state !== 'Unbound' && this.state !== 'Backoff') throw new ClientError(this.state);
-    this.cancelTimers(); this.setState('Connecting');
+    this.cancelTimers(); this.refreshed = false; this.setState('Connecting');
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     void this.ready.catch(() => {});
     void this.enqueue(async () => this.connect());
@@ -438,7 +473,7 @@ export class Client implements Transport {
         });
         if (epoch !== this.epoch || this.state !== 'Connecting') return;
       }
-      this.welcomed = true; this.welcomedAt = this.clock.now();
+      this.welcomed = true; this.welcomedAt = this.clock.now(); this.refreshed = false;
       this.sampleTime(now, retention);
       if (this.wants.length === 0) await this.allPlaced();
       return;
@@ -691,6 +726,19 @@ export class Client implements Transport {
     if (pending?.p !== p || !pending.http || !pending.inflight) return;
     const {refusal, at, retention, ...reply} = attempt;
     if (at !== undefined) this.sampleTime(at, retention ?? this.retention);
+    // 401: the binding refused or expired the credential before anything was recorded, so the
+    // call stays pending, not in flight, for the same Caller after a fresh credential binds.
+    if (!reply.committed && reply.status === 401) {
+      await this.installation(async state => {
+        const record = state.streams[this.stream];
+        record.pending!.inflight = false;
+        await this.options.storage.write(state);
+        this.record = structuredClone(record);
+      });
+      this.sent = false;
+      await this.credentialLost('HTTP 401');
+      return;
+    }
     if (reply.committed) {
       const outcome = {tag: 'Returned' as const, value: new TextEncoder().encode(JSON.stringify(reply))};
       await this.completeCall(outcome, true, false, reply);

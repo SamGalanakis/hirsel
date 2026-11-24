@@ -52,6 +52,15 @@ fn mp4_reference() -> Result[(), ()] {
     }) {} else {
         fail("accepted a truncated mdat")
     }
+    // The first run starts at tfhd's moof-relative base when it has no data offset.
+    // That base is outside the following mdat, even when its payload would fit.
+    let missing_offset = b"\x00\x00\x00\x50\x6d\x6f\x6f\x66\x00\x00\x00\x10\x6d\x66\x68\x64\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x38\x74\x72\x61\x66\x00\x00\x00\x10\x74\x66\x68\x64\x00\x02\x00\x00\x00\x00\x00\x01\x00\x00\x00\x10\x74\x66\x64\x74\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x74\x72\x75\x6e\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x09\x6d\x64\x61\x74\x2a"
+    let implicit = mp4.Defaults(duration: 1, size: 1, flags: 0)
+    if let Error(InvalidFragment) = mp4.read_fragment(missing_offset, 0, true, implicit, scoped fn(_timing: mp4.Timing, _payload: Bytes) {
+        fail("used the mdat payload as the first run's implicit data offset")
+    }) {} else {
+        fail("a run starting outside mdat must be refused")
+    }
     Ok(())
 }
 

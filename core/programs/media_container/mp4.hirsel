@@ -498,7 +498,7 @@ fn demux_track(input: Bytes, traf: BoxHeader, moof_at: u64, mdat: BoxHeader, def
     let mut track = track_header(input, first, defaults)?
     let mut has_time = false
     let mut has_run = false
-    let mut offset = mdat.body
+    let mut offset = moof_at
     let mut at = first.next
     while at < traf.next {
         let b = read_box(input, at, traf.next, true)?

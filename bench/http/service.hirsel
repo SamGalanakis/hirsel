@@ -18,7 +18,6 @@ type CounterSource {
     listener: Listener,
     clock: Clock,
     err: Stderr,
-    shape: store.Table[u64, u64],
     buffer: Bytes,
     pending: List[(ReadHalf, WriteHalf)]
 }
@@ -33,8 +32,8 @@ fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits
     }
 }
 
-fn get_counter(db: store.Db, shape: store.Table[u64, u64]) -> u64 {
-    let read = result.unwrap(store.look(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), None, shape, fn(tx, call_env) -> u64 {
+fn get_counter(db: store.Db, table: store.Table[u64, u64]) -> u64 waits {
+    let read = result.unwrap(store.look(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), None, table, fn(tx, call_env) -> u64 {
         option.unwrap(result.unwrap(store.fetch(tx, call_env, 1u64)))
     }))
     match take read {
@@ -43,7 +42,7 @@ fn get_counter(db: store.Db, shape: store.Table[u64, u64]) -> u64 {
     }
 }
 
-fn receive_counter(db: store.Db, mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
+fn receive_counter(db: store.Db, table: store.Table[u64, u64], mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
     loop {
         let (take reader, take writer) = match list.pop(mut source.pending) {
             Some(take pair) => take pair,
@@ -62,7 +61,7 @@ fn receive_counter(db: store.Db, mut source: CounterSource, wait: bool) -> Optio
         match host.recv_bounded(mut input, mut source.buffer, 1, At(source.clock, end)) {
             Ok(1) if source.buffer[0] == 0xa3 => {
                 let socket = result.unwrap(net.join(take input, take writer))
-                return Some((take socket, get_counter(db, source.shape) + 1))
+                return Some((take socket, get_counter(db, table) + 1))
             },
             Error(TimedOut) if !wait => {
                 list.push(mut source.pending, (take input, take writer))
@@ -102,16 +101,17 @@ fn place_writer(take job: PlaceJob) waits {
     let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready, err: err) = take job
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
     let codec: std.codec.Codec[u64] = std.codec.of()
-    let ticket = result.unwrap(store.create_table(mut db, store.spec("counter", std.codec.key_u64(), codec)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let counter = result.unwrap(store.declare_table(mut declaration, "counter", std.codec.key_u64(), codec))
+    let table = result.unwrap(store.finish(mut declaration, take counter))
+    let ticket = result.unwrap(store.seal(mut db, take declaration))
     result.unwrap(store.durable(mut db, ticket))
-    let table = result.unwrap(store.table(mut db, "counter", std.codec.key_u64(), codec))
-    let shape = view table
     put_counter(mut db, table, 0)
-    let mut source = CounterSource(listener: take listener, clock: clock, err: err, shape: shape, buffer: list.with_capacity(8), pending: list.with_capacity(1))
+    let mut source = CounterSource(listener: take listener, clock: clock, err: err, buffer: list.with_capacity(8), pending: list.with_capacity(1))
     result.unwrap(channel.send(ready, ()))
     // One write transaction per request; the replies of a group go out after
     // one durable covers its last commit.
-    while let Some(take first) = receive_counter(db, mut source, true) {
+    while let Some(take first) = receive_counter(db, table, mut source, true) {
         let mut replies: List[(Socket, u64)] = list.with_capacity(64)
         let mut last: Option[store.Ticket] = None
         let mut next = Some(take first)
@@ -128,7 +128,7 @@ fn place_writer(take job: PlaceJob) waits {
             }
             list.push(mut replies, take request)
             if list.len(replies) == 64 { break }
-            next = receive_counter(db, mut source, false)
+            next = receive_counter(db, table, mut source, false)
         }
         if let Some(t) = last {
             result.unwrap(store.durable(mut db, t))

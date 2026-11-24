@@ -206,8 +206,9 @@ fn drive(take d: Drive) -> () waits {
 
 pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, seed: u64, mix: Mix) -> bool waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(observe_fixture.schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let input = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
@@ -308,8 +309,9 @@ fn drive_join(take input: JoinDrive) -> () waits {
 
 pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: JoinCase) -> bool waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(observe_fixture.schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)

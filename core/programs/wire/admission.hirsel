@@ -133,8 +133,9 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
         if mode == "wire_control_budget_too_small" { return fault_listener(n, c, tasks, true) }
     }
     let mut db = store.memory(c, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let codec: std.codec.Codec[u32] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     // An admitted, unreplied position on the retained key exercises V5 on resend.
     // The key is the runner's own stream key for the client's fixed token and stream 77.
     let mut token: Bytes = list.new()

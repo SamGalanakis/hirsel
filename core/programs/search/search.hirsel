@@ -69,25 +69,20 @@ fn table_name(name: String, suffix: String) -> String {
     take full
 }
 
-pub fn install[M: codec](mut migration: store.Migration, layout: Spec[M]) -> Result[(), store.Error] {
-    let forward: std.codec.Codec[List[String]] = std.codec.of_list()
-    let stats: std.codec.Codec[Stats] = std.codec.of()
-    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents))?
-    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".forward"), std.codec.key_u64(), forward))?
-    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64()))?
-    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64()))?
-    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".stats"), std.codec.key_u8(), stats))
-}
-
-pub fn open[M: codec](schema: store.Schema, layout: Spec[M], take analyzer: Tokenizer) -> Result[Index[M], store.Error] {
+pub fn declare[M: codec](mut d: store.Declare, layout: Spec[M], take analyzer: Tokenizer) -> Result[Index[M], store.Error] {
     let forward_codec: std.codec.Codec[List[String]] = std.codec.of_list()
     let stats_codec: std.codec.Codec[Stats] = std.codec.of()
-    let documents = store.schema_table(schema, table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents)?
-    let forward = store.schema_table(schema, table_name(layout.name, ".forward"), std.codec.key_u64(), forward_codec)?
-    let postings = store.schema_table(schema, table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64())?
-    let frequencies = store.schema_table(schema, table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64())?
-    let stats = store.schema_table(schema, table_name(layout.name, ".stats"), std.codec.key_u8(), stats_codec)?
-    Ok(Index(tokenizer: take analyzer, documents: take documents, forward: take forward, postings: take postings, frequencies: take frequencies, stats: take stats))
+    let doc_decl = store.declare_table(mut d, table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents)?
+    let forward_decl = store.declare_table(mut d, table_name(layout.name, ".forward"), std.codec.key_u64(), forward_codec)?
+    let posting_decl = store.declare_table(mut d, table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64())?
+    let frequency_decl = store.declare_table(mut d, table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64())?
+    let stats_decl = store.declare_table(mut d, table_name(layout.name, ".stats"), std.codec.key_u8(), stats_codec)?
+    Ok(Index(tokenizer: take analyzer,
+        documents: store.finish(mut d, take doc_decl)?,
+        forward: store.finish(mut d, take forward_decl)?,
+        postings: store.finish(mut d, take posting_decl)?,
+        frequencies: store.finish(mut d, take frequency_decl)?,
+        stats: store.finish(mut d, take stats_decl)?))
 }
 
 fn corpus_stats(take row: Option[Stats]) -> Stats {

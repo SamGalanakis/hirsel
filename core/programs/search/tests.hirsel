@@ -3,11 +3,6 @@ const LAST_ID: u64 = 18446744073709551615u64
 // Ranked by the independent Python oracle, with whole-corpus statistics.
 const INITIAL: Inline[(u64, f64), 5] =[(1u64, 1.007225464450901), (3u64, 0.8406763719039017), (LAST_ID, 0.8406763719039017), (2u64, 0.6881642867354947), (4u64, 0.4203381859519508)]
 
-fn install(mut migration: store.Migration) -> Result[(), store.Error] {
-    let layout: search.Spec[bool] = search.spec("test")
-    search.install(mut migration, layout)
-}
-
 fn expect_hit(hits: List[search.Hit], rank: u64, id: u64, score: f64) {
     let hit = hits[rank]
     if hit.id != id || !float.le(float.abs(hit.score - score), 0.000000001) {
@@ -30,7 +25,7 @@ fn load_fixture(mut db: store.Db, index: search.Index[bool]) -> () waits {
 }
 
 @test
-fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+fn snapshot_bm25(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut stop_words: List[String] = list.new()
     list.push(mut stop_words, string.from("THE"))
     let analyzer = search.tokenizer(stop_words)
@@ -45,9 +40,10 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
         }
     }
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
     let layout: search.Spec[bool] = search.spec("test")
-    let index = result.unwrap(search.open(store.snapshot_schema(store.snapshot(db)), layout, take analyzer))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let index = result.unwrap(search.declare(mut declaration, layout, take analyzer))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     load_fixture(mut db, index)
     let read_handle = result.unwrap(store.reader(db, 0u64))
     let before = store.snapshot(db)
@@ -136,13 +132,14 @@ fn mask_contains(mask: u64, id: u64) -> bool {
 }
 
 @test
-fn filtered_top_k(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+fn filtered_top_k(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
     let layout: search.Spec[bool] = search.spec("test")
     let mut stop_words: List[String] = list.new()
     list.push(mut stop_words, string.from("the"))
-    let index = result.unwrap(search.open(store.snapshot_schema(store.snapshot(db)), layout, search.tokenizer(stop_words)))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let index = result.unwrap(search.declare(mut declaration, layout, search.tokenizer(stop_words)))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
     load_fixture(mut db, index)
     let snapshot = store.snapshot(db)
     let read_handle = result.unwrap(store.reader(db, 0u64))

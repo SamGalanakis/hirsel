@@ -211,6 +211,7 @@ store@1/store/test_l68_installed_tiered_root_reopens src=e30ecdaa7d571aa7 sig=db
 store@1/store/test_l68_lazy_bucket_inventory src=af70f07139aa32ef sig=2c32b5bad5bcfabe run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l68_lazy_collection_root src=4436f663330a803c sig=9aee872b8cc25feb run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_lazy_directory_inventory src=ea47ef1349f76992 sig=4809440854e95e02 run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/test_l68_refused_cut_keeps_acknowledged_write src=2370b285fd13e3c3 sig=b98e0974b72b5e7f run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_replay_branch_accounts src=3894624864c040cf sig=eb3515efea012036 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_replay_overlay_table src=5c1366170259a19c sig=7d827ba5ee2d9ce1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_resident_images_ignore_cold_slots src=b2cbb1850a7afc5f sig=e18318497613195c run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

@@ -265,6 +265,46 @@ fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Task
     close(take reopened)
 }
 
+// L68 (e), a crash before the cut's rename: an acknowledged put of 31 over
+// Cold row 3 = 30, then a cut whose MANIFEST seal is refused after its class-3
+// pack is written. The reopen reads 31 from the journal's overlay, and the
+// next cut, which reuses the orphan's pack name, publishes it.
+@test
+fn test_l68_refused_cut_keeps_acknowledged_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    l68_write_rows(mut db, 3u64, 31u32, None)?
+    let installed = disk_state(db).pages.next_pack
+    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+        capacity(bound bytes 0 {
+            seal_page_manifest_file(mut raw, context, fence)
+        })?
+    }) {
+        Error(Full(Allocation(_))) => (),
+        _ => fail("L68: the refused seal fails the cut before its rename"),
+    }
+    if disk_state(db).pages.next_pack != installed {
+        fail("L68: the refused cut publishes nothing")
+    }
+    let orphan = disk_read_file(d, paged_pack_path(installed)?, 4194304)?
+    if list.len(orphan) <= 72 {
+        fail("L68: the refused cut wrote its class-3 pack before the rename")
+    }
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut reopened)? != (Some(10u32), Some(31u32), Some(50u32)) {
+        fail("L68: the acknowledged put reopens from the overlay")
+    }
+    let _ = checkpoint(mut reopened)?
+    close(take reopened)?
+    let mut published = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut published)? != (Some(10u32), Some(31u32), Some(50u32)) {
+        fail("L68: the next cut publishes the acknowledged put")
+    }
+    close(take published)
+}
+
 // L68 (e): writes that reach only the journal reopen as a replay overlay.
 // The next write into that collection waits for the fold cut, which applies
 // the overlay to the Cold tree, then reruns; the following checkpoint

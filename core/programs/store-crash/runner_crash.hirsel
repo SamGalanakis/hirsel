@@ -35,17 +35,22 @@ fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     }
 }
 
-fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
-    Ok(Hd(t: t))
-}
-
 fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let cv: std.codec.Codec[u64] = std.codec.of()
     let table = store.declare_table(mut d, "data", std.codec.key_u64(), cv)?
     let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
+}
+
+fn open_data(db: store.Db) -> Result[Hd, store.Error] {
+    let mut declaration = store.declare(db, Open)?
+    schema(mut declaration)
+}
+
+fn install_data(mut db: store.Db) -> Result[store.Ticket, store.Error] waits {
+    let mut declaration = store.declare(db, Migrate)?
+    let _ = schema(mut declaration)?
+    store.seal(mut db, take declaration)
 }
 
 fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
@@ -286,8 +291,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let encoded = option.unwrap(args.get(argv, 0u64))
     let token = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    result.unwrap(install_data(mut db))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), token: take token)
@@ -297,7 +301,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let mut o = options()
     o.create = false
     let mut again = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(store.with_schema(mut again, code.describe(handles)))
+    let h = result.unwrap(open_data(again))
     let total = result.unwrap(store.get(result.unwrap(store.reader(again, 0u64)), store.snapshot(again), h.t, 0u64))
     want(total == Some(2u64), "L31: two effects must be durable")
     let ticket = result.unwrap(store.checkpoint(mut again))
@@ -574,7 +578,7 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
     let mut o = options()
     o.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, o))
-    let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
+    let h = result.unwrap(open_data(db))
     let v = store.version(store.snapshot(db))
     let n = match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.t, 0u64)) {
         Some(n) => n,
@@ -604,8 +608,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         if genesis { result.unwrap(store.close(take db)); return }
-        let value: std.codec.Codec[u64] = std.codec.of()
-        let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        let _ = result.unwrap(install_data(mut db))
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
         let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
         let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.releases", std.codec.key_u64(), release_codec)))
@@ -658,7 +661,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
                 chosen = Current(0u64)
             }
         } else {
-            match store.with_schema(mut db, code.describe(handles)) {
+            match open_data(db) {
                 Error(Missing(_)) => (),
                 _ => fail("activation: genesis catalog committed without activation")
             }
@@ -800,7 +803,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let mut existing = options()
     existing.create = false
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
-    let data = result.unwrap(store.with_schema(mut db, code.describe(handles)))
+    let data = result.unwrap(open_data(db))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
     let stream = runner.wire_client.stream(result.unwrap(runner.ingress.caller((), named)), 0u32)
     want(match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), data.t, 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
@@ -836,8 +839,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-        let value: std.codec.Codec[u64] = std.codec.of()
-        let created = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        let created = result.unwrap(install_data(mut db))
         result.unwrap(store.durable(mut db, created))
         result.unwrap(store.close(take db))
     } else if phase == "write" {
@@ -881,8 +883,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
-        let cv: std.codec.Codec[u64] = std.codec.of()
-        result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+        result.unwrap(install_data(mut db))
         let opened = served(take db, Current(0u64), c, r, tasks, n, input, out, 1u64)
         want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the first head failed")
         return Ok(())

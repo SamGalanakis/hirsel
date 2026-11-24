@@ -57,6 +57,8 @@ pub struct Credit {
 pub struct Survivor {
     pub kind: u8,
     pub origin_kind: Option<u8>,
+    /// The stream that made it or is its home; its ordinal is that stream's.
+    pub stream: u32,
     pub ordinal: u64,
     pub amount: u64,
 }
@@ -362,6 +364,7 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
                     Ok(Survivor {
                         kind,
                         origin_kind,
+                        stream: c.u32()?,
                         ordinal: c.varint()?,
                         amount: c.u64()?,
                     })

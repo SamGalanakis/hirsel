@@ -328,10 +328,13 @@ fn take_cases() {
     continuation = [vec![9, 19], listener[8..].to_vec()].concat();
     assert_eq!(decoder.block(&continuation, false), Err(Corrupt));
 
+    // Each survivor names its stream before its ordinal, so one kept from a
+    // grandchild (stream 5) differs from the helper's own ordinal 4.
     let mut survivor = vec![4, 3, 0, 0, 0, 3];
-    for (kind, origin) in [(2, Some(1)), (7, Some(2)), (1, None)] {
+    for (kind, origin, stream) in [(2, Some(1), 3u32), (7, Some(2), 3), (1, None, 5)] {
         survivor.push(kind);
         survivor.extend(origin);
+        survivor.extend(stream.to_le_bytes());
         survivor.push(4);
         survivor.extend(48u64.to_le_bytes());
     }
@@ -348,9 +351,19 @@ fn take_cases() {
     assert_eq!(
         survivors
             .iter()
-            .map(|entry| (entry.kind, entry.origin_kind, entry.ordinal, entry.amount))
+            .map(|entry| (
+                entry.kind,
+                entry.origin_kind,
+                entry.stream,
+                entry.ordinal,
+                entry.amount
+            ))
             .collect::<Vec<_>>(),
-        [(2, Some(1), 4, 48), (7, Some(2), 4, 48), (1, None, 4, 48)]
+        [
+            (2, Some(1), 3, 4, 48),
+            (7, Some(2), 3, 4, 48),
+            (1, None, 5, 4, 48)
+        ]
     );
     survivor[7] = 6;
     assert_eq!(
@@ -439,6 +452,11 @@ fn port_delivery() {
     );
     assert_eq!(encoder.frame(frame), (first, vec![data.to_vec()]));
 
+    // A port fill never waits, so it is an OP and never an ISSUE.
+    assert_eq!(
+        Decoder::default().block(&[0x11, 7, 67, 1, 0], false),
+        Err(Corrupt)
+    );
     for done in [
         // A nonzero total with an empty first chunk.
         &[2, 0, 0, 42, 1, 72, 0][..],

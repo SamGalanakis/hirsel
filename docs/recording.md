@@ -512,7 +512,7 @@ holds. Its body is one of:
 | helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([CONC-15](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
 | credits | each credit's limit ordinal and amount |
 | last release | the connection's making stream and its ordinal there, its retained header and its unused room |
-| shared release | the `Shared` node's ordinal in its home unit |
+| shared release | the `Shared` node's home stream and its ordinal there |
 | cancel | nothing: a cancellation request for this unit's root |
 | refund | the limit ordinal and amount of a refund another unit posted to this unit's mailbox (a key object whose charge this unit paid and whose holder ended elsewhere, among others), or of a charge released by a run-wide count (above): a registry entry, a `Secret` designation or the sealed bytes behind one, at the paying unit's own drop or at a drain. A post that carries a UDP retirement is its `RETIRED` frame, not a refund take |
 
@@ -803,11 +803,15 @@ task bit is 0, because a take names no task. Then:
   available bytes as two `u64`s, and nothing for the others.
 - A **survivor** is its kind `u8` (connection 0, `Shared` node 1, `Secret` designation 2,
   key object 3, agreement registry entry 4, `UdpSocket` pool 5, group queue 6, sealed bytes
-  7), then for kinds 2 and 7 the designation's origin kind `u8`, then its ordinal `varint`
-  and its amount `u64`. The ordinal is the object ordinal in the helper's stream, for
-  kinds 2 and 7 the designation's ordinal in the helper's stream, and for kinds 3 and 4
-  the position in the helper's stream of the delivery that made it. Any other kind is
-  `Corrupt`.
+  7), then for kinds 2 and 7 the designation's origin kind `u8`, then the stream `u32` that
+  names it, its ordinal `varint` and its amount `u64`. The stream is the one that made the
+  survivor, or its home: for kinds 0, 1, 5 and 6 the stream whose object ordinal it is, for
+  kinds 2 and 7 the designation's stream, and for kinds 3 and 4 the stream of the delivery
+  that made it. A helper passes up charges it kept from its own helpers, so that stream need
+  not be the helper's. The ordinal is the object ordinal in that stream, for kinds 2 and 7
+  the designation's ordinal there, and for kinds 3 and 4 the position there of the delivery
+  that made it. A later `last release`, `shared release`, `RETIRED` or refund then names one
+  survivor, however many helper levels it passed through. Any other kind is `Corrupt`.
   The owner that keeps a kind 2, 4 or 7 survivor is its paying unit from then on, and takes
   its refund as above.
 - A settlement's position must name a `CONN_SEND` `ISSUE` of this stream that is still

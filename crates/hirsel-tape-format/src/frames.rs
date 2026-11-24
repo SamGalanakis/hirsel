@@ -375,7 +375,11 @@ impl Decoder {
                     let args = Args::decode(&mut c)?;
                     if matches!(
                         op,
-                        op::UNIT_SPAWN | op::CONN_TRY_SEND | op::UNIT_CANCEL | op::PORT_REPLY
+                        op::UNIT_SPAWN
+                            | op::CONN_TRY_SEND
+                            | op::UNIT_CANCEL
+                            | op::PORT_REPLY
+                            | op::PORT_FILL
                     ) || call_part(op)
                         || (op == op::CONN_SEND && args.recorded_spare().is_some())
                     {

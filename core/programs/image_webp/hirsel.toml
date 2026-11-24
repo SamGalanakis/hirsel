@@ -1,0 +1,17 @@
+[package]
+name = "image_webp"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+image_core = { major = 1, path = "../image_core" }
+
+[sources]
+"webp.hirsel" = "webp"
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hwebp_"
+archives = [
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_webp.a", sha256 = "d240a13c7188539a99c0c84a7e5981fe1cc2acc9538952a01974bedbeedebfc1" },
+]

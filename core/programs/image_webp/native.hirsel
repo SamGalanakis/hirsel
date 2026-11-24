@@ -1,0 +1,5 @@
+pub fn decode(f: Foreign[webp.Webp], input: Bytes, width: u32, height: u32, x: u32, y: u32, crop_width: u32, crop_height: u32, out_width: u32, out_height: u32, mut rgba: Bytes) -> i32
+
+pub fn decode_animation(f: Foreign[webp.Webp], input: Bytes, width: u32, height: u32, frames: u32, mut rgba: Bytes, mut timestamps: Bytes) -> i32
+
+pub fn encode(f: Foreign[webp.Webp], rgba: Bytes, width: u32, height: u32, quality: i32, mut output: Bytes) -> i32

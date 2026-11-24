@@ -191,16 +191,21 @@ def hirsel_inputs(src):
     std = {"name": "std", "version": "1"}
     app = {"name": "multicore", "version": "1"}
 
-    def unit(file, signatures):
-        return {"file": str(file), "modules": [file.stem], "signatures": signatures}
+    def unit(file, modules, signatures):
+        return {"file": str(file), "modules": modules, "signatures": signatures}
 
     def library(name):
-        return [unit(file, True) for file in sorted((ROOT / "core" / name).glob("*.hirsel"))]
+        directory = ROOT / "core" / name
+        return [
+            unit(file, list(relative.with_suffix("").parts), True)
+            for file in sorted(directory.rglob("*.hirsel"))
+            if (relative := file.relative_to(directory)).parts[0] != "tests"
+        ]
 
-    sources = [unit(src, False)]
+    sources = [unit(src, [src.stem], False)]
     if src.stem == "matmul_t16":
-        sources += [unit(ROOT / "core/langarena" / name, False)
-                    for name in ("matmul.hirsel", "helper.hirsel", "harness.hirsel")]
+        sources += [unit(ROOT / "core/langarena" / f"{name}.hirsel", [name], False)
+                    for name in ("matmul", "helper", "harness")]
 
     return {"core": core, "packages": [
         {"package": core, "dependencies": [], "sources": library("core")},

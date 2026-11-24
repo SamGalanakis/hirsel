@@ -1,4 +1,11 @@
-# STORE-SPEC v2.87: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.88: the M4 store library (lane store-spec-1001)
+
+v2.88 (store-mux-2189, owed by m3-s5-cell-2164's L63(d) block): text only, **not yet built**. The Db task gets a **call multiplexer** (§13.3a), so a served call that misses parks instead of making the Db task wait for its delivery. What parks is the call's latched attempt state and its pin map. The queue lives in `Db` and holds no body, so the caller hands back its `env` and `body` to `resume` (one input, passed to every attempt, §13.3). A call is running, parked, ready, held or cancelled. Three things wake a parked call: its pager delivery, a revocation, and a head move. The pager keeps at most one writer demand in flight, on a one-slot channel of its own, and posts one coalescing notice after each answer. The Db task polls with `try_receive` only and never waits on a send. A revocation or a cancel detaches the delivery. The Db task alone decides whether a delivery still belongs to its call, and the pager is never asked: a detached delivery is drained and dropped, and it never installs. Parked writers rerun in queue order, before any call not yet started. At most one call is held. A call is held from its third attempt, or at once when its delivery does not fit beside the other parked calls' pins. Every parked call ends within three of its own attempts. Payers:
+- Queue entries are fallible allocations on the Db task. A refused entry holds the call instead of parking it, so it changes scheduling and never an answer.
+- Pins share `writer_pin_bytes` across every parked call.
+- A delivery in flight is pager-cache frames.
+
+A parked call has written nothing, so a crash needs no replay: its admitted position is re-admitted as `Abandoned` (§1.8, AL1). `run`, `run_on` and `run_with_reply` stay inline. They are held from their first miss, with the revocation. `serve` gains `Served.Parked(Parked)`, and `resume`, `poll_parked`, `cancel_parked` and `park_notices` are new. The runner's Head relays `park_notices` as `ParkWake` and resumes ready calls before `next_waiting` (RUNNER-SPEC note in §13.3a). Laws: L63 (g) and (h), L64 (a) and (b) as written. Prior art: TigerBeetle's grid read queue and FoundationDB's `FlowLock`; Goose has no request queue (§13.3a "Prior art"). Reversible: a code change, with no format change.
 
 v2.87 (m3-s5-cell-2164, M3 S5): **built** for `serve`. Each attempt drafts at the head over the pin map its driver holds, and a latched miss is delivered into that map before the call drafts again, as for `run`. A latched pin limit is `NoRoom(pending, Cache(..))`, and a latched allocation limit is `Failed(pending, OutOfBytes(..))`, as for any refused allocation. Each attempt is metered by the plan's grant on its own. A served miss on a store with no pager is `Before(Io(Closed), None)`, and its completion is admitted again as `Abandoned`. `steps: None` is `Missing("steps")` only on the public `run`, `run_on` and `run_with_reply` (§1.5 #5). `admit`'s own body writes only the stream and runs unbounded, so an admission into a store with a Tiered collection is no longer refused. v2.85's "not yet built" list loses `serve`'s rerun. Law: L63 (a) for `serve`. Reversible: a code change, with no format change.
 
@@ -4907,7 +4914,7 @@ A later touch of the same target in the same attempt finds it in the touched set
 
 **Abort and rerun (Q1, Fable F12, F13).** A body is never `waits`. A latched attempt is undone (FAIL-16: its writes are dropped, and its staged ops and log are discarded), and the call reruns from the start once the pager has delivered its batch, which is added to the call's pin map. The pin map survives between attempts at one root and is released when the call ends.
 
-**The Db task never waits on a miss.**
+**The Db task never waits on a miss.** §13.3a (v2.88) is the mechanism: the queue, its wakes, the cancel, the order and the payers.
 - **Attempts 1 and 2: parked.** The call is parked with its pins, and the Db task runs other calls. When the batch arrives, the parked call reruns before any call not yet started, at the **current** head. If the head moved, the call's pins for the old root are released and its map starts empty at the new root.
 - **Attempt 3 on: held.** The call holds the head. The Db task starts no other call until this call commits, refuses or fails, and every rerun reads the root captured when the call entered held mode. A cut's install that publishes Cold edges for that version does not change the captured root, because `Arc` keeps it.
 - **Entering held mode revokes every other writer grant (v2.59, astra 1990 #8).** Before a call enters held mode, the Db task releases the pins of every other parked call and detaches their outstanding deliveries. Every demand and delivery is tagged with (call, grant generation, root), and the Db task drops a delivery whose tag is not current, so a late completion never reacquires a revoked grant. A revoked call keeps its place in the queue, and its next attempt starts with an empty map after the held call ends. The held call owns all of `writer_pin_bytes` until it ends.
@@ -4961,6 +4968,121 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
 - `Outcome.Refused(Cache(c))` and `Looked.Refused(Cache(c))` report the counter.
 - `serve` maps `Refused(Cache(c))` to `Served.NoRoom(p, Cache(c))` and settles it as AP15 settles NoRoom (settle 2).
 - AP15's "NoRoom is Resident or Allocation" now reads "Resident, Allocation or Cache, never Journal".
+
+### 13.3a The call multiplexer (v2.88, not yet built)
+
+§13.3 fixes what parks and what holds. This section fixes the mechanism: who owns the queue, its states, what wakes a parked call, how a call is cancelled, the order of reruns, the memory they use, and what a crash leaves. It never blocks a slot thread, because every wait it has is a task wait (`channel.receive` parks the task, and since workers-never-block-2157 no host call blocks a slot thread either). The point of the multiplexer is narrower: the **Db task** must keep starting other calls while a served call's pages are fetched.
+
+**Owner.** The Db task, which is the task that holds `mut Db` (the runner's Head), owns the queue. It lives in `Db.parked` and has no task of its own. An entry holds what the call needs between attempts and nothing the body can reach:
+- its id (a per-open counter, which fixes its place in the queue);
+- its state;
+- its attempt count;
+- its pin map (`TieredPins`, at the root of its last attempt);
+- the touched stamps of its last attempt, which protect the pins that attempt read;
+- its demand (sent, unsent or none) and its delivery receiver;
+- a pending delivery failure (§13.3's `pending`);
+- whether its last delivery was crowded (below).
+
+The caller holds the other half, an opaque, move-only `Parked`. It carries the entry's id, the `Completion`, the `CallRecord`, the `Plan`, the reserve, and the `at` taken when the call started (§13.3 "The deciding context"). No closure is stored. `serve`'s body is a plain `fn` and its `env` is `inert` (§13.3 "Bodies carry no authority"), so the caller already has both, and `resume` takes them again. For the runner they are the entry's adapter and the request's bytes, which it keeps beside the `Parked` (RUNNER v2.47 rule 4: A is decoded afresh in every attempt).
+
+```hirsel
+pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity) | Parked(Parked)
+pub opaque type Parked   // move-only; not copy, codec or send
+pub fn park_id(p: Parked) -> u64
+pub fn resume[E: inert](mut db: Db, take p: Parked, env: E, body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits
+pub fn poll_parked(mut db: Db) -> Result[List[u64], Error]
+pub fn cancel_parked(mut db: Db, take p: Parked) -> Pending
+pub fn park_notices(mut db: Db) -> Option[Receiver[()]]
+```
+
+**States.**
+
+| State | Where | Meaning | Leaves by |
+|---|---|---|---|
+| running | on the Db task, in `serve` or `resume` | one attempt is executing; at most one call is running | it decides (the call returns), or it latches a miss: then **parked** (attempts 1, 2) or **held** (attempt 3 on, or crowded) |
+| parked | `Db.parked` | its demand is unsent or in flight; pins kept | a delivery or a failure arrives: **ready**; a revocation or a head move: **ready**, with its map emptied; a cancel: **cancelled** |
+| ready | `Db.parked` | its next attempt can run | `resume`: **running** or **held** |
+| held | on the Db task, inline | §13.3's held mode: it owns `writer_pin_bytes`, reads the root it captured, and the Db task starts nothing else | it decides |
+| cancelled | gone from `Db.parked` | `cancel_parked` or `close` removed it; any delivery in flight is detached | — |
+
+`resume` of a call that is still parked runs nothing and returns `Parked` unchanged. So a caller may resume whatever it likes, and only ready calls do any work.
+
+**Demands and the wake channel.** The pager takes writer demands on a **one-slot writer channel** of its own, beside its shared inbox. At most one writer demand is in flight at a time. When the Db task parks a call, or finds an unsent demand on a poll, it does three things:
+1. If no writer demand is in flight, it `try_send`s the demand into the writer slot. The slot is empty, because the previous demand has been answered or drained (below).
+2. It `try_send`s a `PagerKick` into the shared inbox. If the inbox is full the kick is dropped and nothing is lost: the pager checks the writer slot before every blocking receive.
+3. It marks the demand in flight.
+
+The pager serves a writer demand as it serves any point demand (§13.3 "Demands are root-deterministic batches"). It answers on the demand's own one-slot answer channel with `try_send`, which never waits, and then `try_send`s `()` on the store's **park-notice channel**. That channel has capacity 1, so notices coalesce. The pager never waits on the Db task, and the Db task never waits on the pager outside held mode. So no cycle of waits can form between the Db task and the pager, and none can involve the 4-slot inbox (`TIERED_PAGER_QUEUE`).
+
+**Polling.** `poll_parked` scans the queue once, in id order:
+- **A parked entry with a demand in flight:** `try_receive` on its answer channel.
+  - On a delivery, the frames are installed in the order the batch names them (§13.3 "Installation is in logical demand order"), if the entry's root is still the head's root, under the **shared partition** (below). The entry becomes ready.
+  - On a failure, or a closed channel (the pager has ended), the failure is recorded as the entry's pending failure (`Io(Closed)` for a closed channel), and the entry becomes ready.
+  - If nothing has arrived yet, the entry stays parked.
+
+  A received answer, of any kind, clears the in-flight mark.
+- **The drain slot:** a detached receiver (below) is tried the same way, and whatever arrives is dropped.
+- **Unsent demands:** once nothing is in flight, the first unsent demand in id order is sent, as above.
+
+It returns the ready ids in id order. The Db task calls it whenever a park notice arrives, and before it starts any call. The runner's rule is below. Polling is level-triggered: a notice only says "look", so a lost or merged notice delays a wake until the next poll, and the next poll is never later than the next call start.
+
+**Wake sources.** There are three:
+- **A pager delivery or failure.** See above.
+- **A revocation.** Entering held mode, whether as a served call's third attempt, a crowded delivery, or an inline call's first miss (below), revokes every parked entry. A revoked entry's pins are released and its map emptied, its stamps are dropped, and its delivery is detached. Its state becomes ready, so it reruns after the held call ends. It keeps its id, and so its place in the queue, and its attempt count.
+- **A head move.** A commit or a cut install that changes the head's collections root revokes every parked entry whose root differs, as above. Its delivery would install nothing, because pins are root-scoped (§13.3 "A root change starts an empty map"). Waking it at once lets it rerun at the new head with its next demand, and spends no GET on frames it cannot install.
+
+**Detaching, and the per-call cancel.** A delivery is detached by moving the entry's answer receiver to the Db task's **drain slot**. The Db task then owns that receiver alone. It drains it on later polls, drops whatever arrives, and clears the in-flight mark once it arrives. The Db task is the only arbiter of whether a delivery belongs to its call: a delivery installs only from the receiver the entry holds now. The entry holds a receiver only for its current demand, and only while its root is the head's root. The pager is never asked to cancel anything, and it never needs to know whether its answer will be used. If the drain slot is full when another detach comes, the older receiver is dropped. That is safe, because the pager's `try_send` into a dropped channel fails and frees the frames on the pager. The in-flight mark is then cleared, so that demand's answer can no longer hold the writer slot. Only the one-slot writer channel bounds what is in flight, so at most two writer batches exist at once: one answering a detached demand and one current.
+
+`cancel_parked(take p)` is the per-call cancel. It detaches the entry's delivery, releases its pins, removes the entry, and returns `untried(completion, record, attempted)`. The caller concludes it (for example as a deadline refusal) or drops it, and a dropped position is re-admitted as `Abandoned` (§1.8). The runner uses it for a request whose deadline passes while it is parked, and for admission close.
+
+m3-s5-cell-2164 suggested that a revocation send the pager a per-call cancel, which the pager would answer by waking the parked attempt with an error. That is **not taken**. The pager handles one message at a time, so a cancel queued behind the demand reaches the pager only after the demand has been served, and the cancel would cost a message kind and a second answer. The detach above has the same effect at once: the parked call is woken (ready) by the revocation itself, and the late frames are dropped.
+
+**Order and fairness.**
+- Ready calls rerun in id order, before any call not yet started. This keeps §13.3's "before any call not yet started", and ties are broken by the queue, never by the order in which deliveries arrived or the order in which tasks were scheduled (no use of CONC-10's total order).
+- A demand is sent in id order as well. A call that parks later never gets its frames before an earlier call that has not yet been served.
+- At most one call is held.
+- **Termination.** Every resume of a parked call is one more attempt, revoked or not. Attempt 3 is held, and a held call ends (§13.3 "Termination"). So every parked call ends within three of its own resumes, and a held call holds the Db task for at most its distinct Cold targets plus one attempts.
+
+**The shared partition and crowding.** The pins of all parked entries share one budget: Σ retained ≤ `writer_pin_bytes`. That is the writer's share of the pager's cache (§13.8), so parking more calls never grows what the writer pins. A frame that does not fit beside the other entries' pins is not installed, and the entry is marked **crowded**. Its next attempt enters held mode at once, with the revocation (§13.3 "A parked call whose delivery does not fit"). Refusals do not depend on the partition: each attempt's touched-bytes counter is still checked against `writer_pin_bytes` alone (§13.3 step 1), so whether a call is refused, and its `requested`, still depend only on its root and its body. Crowding changes only which calls wait.
+
+**Inline calls.** `run`, `run_on` and `run_with_reply` return an `Outcome` to their caller, so they cannot park. A miss in one of them makes it a held call from that attempt on. It revokes every parked entry, then waits inline for its delivery on the shared inbox, as v2.85 built. This is the caller's choice: a task that calls `run` on the Db task waits for it. `look` and the Readers use the shared inbox and their own pin grants, and are untouched.
+
+**Ends.**
+- **`close`** cancels every entry and drops the drain slot before it stops the pager. The caller's `Parked` values outlive the `Db` only as values, and their positions are re-admitted as `Abandoned` at the next open.
+- **Poison and an unhealthy store.** `resume` checks `journal_poll` and `healthy` first, as `serve` does, and returns `Before(problem, None)`. The entry is removed.
+- **Pager death.** A closed answer channel is a pending failure, `Io(Closed)`. The next resume returns `Before(Io(Closed), None)`, as v2.87's served miss with no pager does.
+- **A cut.** A cut's install moves the head, so it revokes as above. Its Drain waits for no parked call, because nothing parked holds the head. A held call is inline, so no cut can start under it (§13.3).
+- **The runner's pause and cutover.** A write pause stops `next_waiting` but not resumes: parked calls are admitted work, and the Head settles them like any admitted call before a cutover proceeds, as it does today (the cutover request reaches the store only after the Head settles its admitted calls). A parked request whose deadline passes is cancelled with `cancel_parked` and answered `Refused(Deadline)`.
+
+**The deciding context.** Each resume builds a fresh `CallInfo` at the current head: version, seed and `next_node` are the head's now. It keeps the `at` it started with, raised to the branch's `at` if that is later (§13.3 "The deciding context"). Its pin root and pack inventory are re-read from the head too. v2.87's `serve` took one `CallInfo` for every attempt, which is wrong once the head can move between attempts.
+
+**Memory (MEM-19, MEM-30).**
+
+| Allocation | Bound | Payer | Refusal |
+|---|---|---|---|
+| a queue entry, and its slot in `Db.parked` | one per parked call; one `list.try_reserve(1)` | the Db task | the call is held instead of parked, so scheduling changes and the answer does not |
+| a parked entry's pin-map structure (map and order list) | its pins | the Db task (MEM-19) | `Refused(Allocation(..))`, as v2.85's install |
+| the pinned frames of every parked entry | Σ ≤ `writer_pin_bytes` | the pager task's reservation (the writer share of C) | none: a frame that does not fit is not installed, and the entry is crowded |
+| a parked entry's touched stamps | its last attempt's touched set (≤ `writer_pin_bytes` / 16 entries) | the Db task, moved from the finished attempt record, so it is not allocated again | — |
+| a writer batch in flight, and at most one detached batch | two batches | the pager's cache (C) | as the pager's own refusals (§13.2) |
+| `Parked` on the caller | one per parked call | the caller (the runner's Head, under its admission) | — |
+| an attempt's steps | the call's `Plan.s_e` per attempt | the call; non-deciding attempts are added to `Accounts.rerun_steps` | as §13.3 |
+
+The number of parked calls is the caller's number of admitted calls in flight. The store adds no cap, so no hidden cap changes an answer.
+
+**Crash.** Nothing about a parked call is durable, and nothing needs replay:
+- No attempt of a parked call has reached the journal. Every one was latched and discarded (§13.3 "The miss latch").
+- Its only durable trace is the `Admitted` stream row that `admit` committed.
+- After a crash that row is re-admitted as `Abandoned` at the next open (§1.8; AL1: "`serve` returns `Error` for a store failure, after which the position stays `Admitted`"; C-3). The runner runs it again from scratch, exactly as for a call that faulted before it settled.
+
+The queue, its pins and its demands are in memory only, and recovery reads none of them.
+
+**Runner (RUNNER-SPEC note, built with this section).** The Head keeps each `(Request, Parked)` it was handed. Before `next_waiting`, it calls `poll_parked` and resumes each ready id in the order returned. It relays `park_notices` into its inbox as `ParkWake`, as it relays `sync_notices` as `SyncWake`. On admission close it cancels every parked call with `Refused(Overloaded)`. A trigger's or attempt's `store.run` stays inline, as above.
+
+**Prior art.**
+- **TigerBeetle, the grid's read queue** (`/tmp/ref-tigerbeetle`, `src/vsr/grid.zig`). **ADOPTED:** a fixed number of reads in flight (`read_iops_max`, :38), with a FIFO of reads waiting for one (`read_pending_queue`, :226-230). When a read completes, its IOP is handed to the next pending read *before* the completed read's callback runs (:1380-1386), so a new arrival never overtakes a queued one. This section adopts the same ordering: unsent demands are sent in id order, and ready calls rerun before any new call. **ADAPTED:** TigerBeetle cancels by a state check at completion: `if (grid.callback == .cancel) { release; return }` (:1369-1373). The owner's state, not the I/O, decides whether a completion is used. Here, which receiver the entry holds plays that role, per call instead of for the whole grid.
+- **FoundationDB, `FlowLock`** (`/tmp/ref-fdb`, `flow/include/flow/genericactors.h`). **ADOPTED:** waiters are FIFO (`takers`, :2102), and `release` admits them strictly in order while they fit (:2069-2073). **ADAPTED:** a take larger than the permits is admitted when the lock is otherwise idle (`active + amount <= permits || active == 0`, :2059). That is this section's crowded call entering held mode once the others are revoked: an oversized demand runs alone rather than starving. **NOT TAKEN:** `kill()` breaks every waiter with `broken_promise` (:2093-2099). A Hirsel revocation does not fail the revoked call. It wakes it to rerun, because a revoked call has lost only pins, never its answer. A cancelled waiter erases itself and calls `release(0)`, so later waiters are not stuck behind it (:2108-2115). That is the drain slot's role here.
+- **Goose** (`/tmp/ref-goose`). It has no client or store request queue. Its runtime's `gs_park` parks a native thread and has no waiter ordering, so it gives nothing to compare.
 
 ### 13.4 The read API (Q2)
 
@@ -5241,6 +5363,9 @@ pub type TieredRefusal = Memory | Migrate | Export | Install | Authority
 | a call's pins | `writer_pin_bytes` | the call's partition |
 | a Reader's pins | its `pin_bytes` | the Reader's reservation |
 | touched set per attempt (v2.81) | `charge.map(bytes[u64], bytes[()], c)` at capacity c, reserved one entry ahead of each first touch; refusal `Refused(Allocation)` | the call or read (MEM-19) |
+| parked calls (v2.88, §13.3a): queue entries and pin-map structure | one entry per parked call; a refused entry holds the call instead (scheduling only) | the Db task (MEM-19) |
+| parked calls' pinned frames (v2.88) | Σ ≤ `writer_pin_bytes`, shared; a frame that does not fit crowds its call into held mode | the pager task's reservation |
+| writer batches in flight (v2.88) | at most one current and one detached | the pager's cache |
 | one GET range buffer, a cut's demand included | ≤ 1,048,576, or one frame's length | the pager task |
 | pager state (cache map, waiters, ghost list) | `pager_task_bytes` | the pager task |
 | dirty Tiered pages + replaced list + a trim's dropped list | `dirty_bytes` | the Db task |
@@ -5259,7 +5384,7 @@ Harness: `tiered_laws.hirsel` over `std.sim.s3` and the §3.9 file-system model.
 | Law | What must hold | Seeded bug it catches |
 |---|---|---|
 | **L62 residency is invisible** | The same body at the same root, run from a cold cache, a warm cache, after eviction, with NVMe hits, and on a follower, returns the same Outcome kind, value, reads and refusal `Capacity` whenever none is `Stopped`. Cases (v2.59): (a) a body that fetches a Cold key, then runs an inner `bound steps n` and stores 1 or 0, with n swept across the warm and cold remainders: the stored value is the same from every cache state on one build; (b) a display value and its membership flag on one Tiered leaf, read in that order: the read log holds both Points, and revoking the second hits the read set; (c) `scan_page` and a resumed `scan_next` on a follower with cold interiors, and a bounded `count` over uncached interiors, each through its own Reader; (d) a replay of a settle-1 `OutOfSteps` record whose rerun succeeds, of a success whose rerun stops, and of a `Raised` record whose rerun succeeds, with a `failed` encoder that maps every stop to the same bytes: `Unknown`, `Unknown` and `Different`; (e) (v2.63) after a crash whose journal suffix wrote Tiered keys, the same body run against the replay overlay before the fold cut, after it publishes, and on a follower's overlay returns the same value and reads whenever none is `Refused` or `Stopped`. The holder's overlay and a follower's give the same Outcome kind and `requested` too. Across the fold the layout changes, as across any cut, so `requested`, and with it a `Refused(Cache)` near `writer_pin_bytes`, may differ there; (f) (v2.67) with 96 MiB of shared room, 32 MiB of live Reader grants, 48 MiB cached and 8 MiB of overlap, a 24 MiB grant frees exactly 16 MiB of cached frames. When every cached frame is held, admission returns `Full(Cache)` with 8 MiB available. Reader drop and abandonment of a queued reply release the grant mechanically | refusal counting misses instead of touches; a deciding attempt reading the shared cache (`shared_cache_hit`); a read-log append only on a page's first touch (`first_touch_log`); a page constructor with no Reader that reads only warm pages; a replay verdict taken from reply bytes instead of the recorded stop; an overlay read that skips the Cold tree for keys outside the overlay, or a bounded count that ignores `base` (`overlay_count`) |
-| **L63 abort-and-rerun commits once** | A body that misses k times commits once. The journal holds one GROUP record, and no aborted attempt's write reaches the journal. Held mode ends within distinct Cold targets + 1 attempts. Cases (v2.59): (a) a body that wraps a cold `fetch` in `isolate` and loops forever on a caught failure, under `run(.., Some(s), ..)`, commits the row once; the same body with `None` is `Missing("steps")` before it runs; (b) a body that matches `Err(Missed)` and returns `Ok` commits nothing from that attempt; (c) a forward scan whose parent is an unsealed Hot page, a collection-root miss, and a parent evicted between request and service each serve the target; (d) (v2.63) a call parked on a Cold miss of key K while another call inserts K and commits: the rerun plans at the moved head and its put of K carries prior 1 + \|v\| of the other call's value, and replay's account equals the live one; (e) a write into a collection that still has a replay overlay parks until the fold cut publishes, then commits once, and with the fold cut refused for capacity it is `Refused` with the cut's cause; (f) (v2.64) the same parked write when the fold finds a `base` or trim evidence mismatch: `run` returns `Error(Corrupt(Malformed))`, `serve` returns `Before(Corrupt(Malformed), None)`, never `Refused`, `NoRoom` or `StoreCapacity`, and a later write into that collection fails at once while reads of it still answer | applying a `Missed` attempt's staged ops; a corrupt fold reported as a capacity refusal (`fold_corrupt_as_capacity`); a prior taken from the first attempt's root (`stale_prior`); a write applied to the overlay instead of waiting (`write_into_overlay`); a latch checked only after `Ok`; a miss that waits for its parent's cache key |
+| **L63 abort-and-rerun commits once** | A body that misses k times commits once. The journal holds one GROUP record, and no aborted attempt's write reaches the journal. Held mode ends within distinct Cold targets + 1 attempts. Cases (v2.59): (a) a body that wraps a cold `fetch` in `isolate` and loops forever on a caught failure, under `run(.., Some(s), ..)`, commits the row once; the same body with `None` is `Missing("steps")` before it runs; (b) a body that matches `Err(Missed)` and returns `Ok` commits nothing from that attempt; (c) a forward scan whose parent is an unsealed Hot page, a collection-root miss, and a parent evicted between request and service each serve the target; (d) (v2.63) a call parked on a Cold miss of key K while another call inserts K and commits: the rerun plans at the moved head and its put of K carries prior 1 + \|v\| of the other call's value, and replay's account equals the live one; (e) a write into a collection that still has a replay overlay parks until the fold cut publishes, then commits once, and with the fold cut refused for capacity it is `Refused` with the cut's cause; (f) (v2.64) the same parked write when the fold finds a `base` or trim evidence mismatch: `run` returns `Error(Corrupt(Malformed))`, `serve` returns `Before(Corrupt(Malformed), None)`, never `Refused`, `NoRoom` or `StoreCapacity`, and a later write into that collection fails at once while reads of it still answer; (g) (v2.88, §13.3a) a served call A that misses a Cold row is `Parked`, and the Db task commits a write B to a Hot table before A is resumed: B's commit moves the head and revokes A, `poll_parked` returns A as ready, and A's resume decides at the moved head. Its reply carries B's value, and it commits once at B's version + 1; (h) (v2.88) a revocation and a pager wake race on one parked call P: P's delivery has arrived but has not been polled, and an inline `run` that misses enters held mode. P's pins are released, its delivery is drained and never installed, and P keeps its place. After the held call commits, P resumes with an empty map, misses again, is delivered, and commits once. The same holds with the revocation before the pager answers | applying a `Missed` attempt's staged ops; installing a delivery whose call was revoked (`revoked_install`: P's map is not empty after the revocation); a resume that drafts with the CallInfo of the first attempt (`stale_call_info`: A's reply misses B's value);  a corrupt fold reported as a capacity refusal (`fold_corrupt_as_capacity`); a prior taken from the first attempt's root (`stale_prior`); a write applied to the overlay instead of waiting (`write_into_overlay`); a latch checked only after `Ok`; a miss that waits for its parent's cache key |
 | **L64 the cache refusal** | A body touching more than `writer_pin_bytes` is `Refused(Cache)` with the same `requested` from cold and warm caches, and `serve` reports `NoRoom(.., Cache)`. One touching less finishes from a cold cache with any `prefetch` Cases (v2.59): (a) the 64 MiB partition with B parked on 24 MiB of pins and a GET in flight, and A entering held mode with a disjoint 52 MiB demand: A completes, B's late completion is dropped, and B reruns after A; (b) a root change while parked releases the old root's pins before the next attempt; (c) the AP8 vector's 1,025-byte value as a Cold BLOB target reads a 1,049-byte range and verifies; (d) one leaf with several VALUE_LIMIT bodies is refused with `requested` counting each blob's payload and frame head, from cold and warm caches alike; (e) (v2.63) the fold cut's GETs are charged to the cut pin quota (v2.74): with the writer partition full of parked calls' pins (up to all of `writer_pin_bytes`, the room a held call owns alone, §13.3 "Termination"), the fold still completes, and no caller's `requested` changes | pinning hints into the call's partition; keeping a revoked parked call's pins (`held_without_revoke`); a BLOB range of 16 + `BlobRef.len` (`blob_short_range`); a leaf counted once for its blobs; fold reads charged to the writer partition (`fold_on_writer`) |
 | **L65 hits verify their edge** | Two edges name one (pack, offset) with different checksums or stamps. The wrong edge is `Corrupt` whether the frame was cached first by the right edge, pinned, on NVMe or delivered to a waiter | skipping the check on a cache hit |
 | **L66 lifetime and re-base** | An expired holder or follower Snapshot gets `Reclaimed(floor)` through Cold slots, cached or not. A live one with an erased pack gets `Corrupt(Absent)`. Across a re-base, old Snapshots answer from their own pages or `Reclaimed`, and `changes` across domains is `Foreign` | re-reading an expired Snapshot at the new root |

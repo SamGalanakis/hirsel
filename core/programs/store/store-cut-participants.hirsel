@@ -68,20 +68,24 @@ fn visit_cut_pins[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn
 
 type CutParticipants {
     holders: List[HeldPage],
-    roots: List[Roots]
+    roots: List[Roots],
+    // Each root's branch, for the rows a fold hands to `deferred_frees`.
+    branches: List[u32]
 }
 
 fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error] {
     let n = list.len(db.heads) + list.len(db.pins) + 1
-    let mut participants = CutParticipants(holders: list.with_capacity(3 * n), roots: list.with_capacity(n))
+    let mut participants = CutParticipants(holders: list.with_capacity(3 * n), roots: list.with_capacity(n), branches: list.with_capacity(n))
     visit_cut_heads(db, delta, mut participants, scoped fn(mut current: CutParticipants, head: Head, roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
         note_held_roots(mut current.holders, 0, int.widen(head.id), roots)
         list.push(mut current.roots, share_roots(roots))
+        list.push(mut current.branches, head.id)
         Ok(())
     })?
     visit_cut_pins(db, delta, mut participants, scoped fn(mut current: CutParticipants, held: Pin) -> Result[(), Error] {
         note_held_roots(mut current.holders, 1, held.serial, held.roots)
         list.push(mut current.roots, share_roots(held.roots))
+        list.push(mut current.branches, held.branch)
         Ok(())
     })?
     Ok(take participants)
@@ -97,7 +101,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     }
     let zero = std.page.unlocated(0)
     let account_tiered = cut_tiered_account(published)?
-    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new())
+    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: zero, deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new())
     let context = DiskContext(store: db.store, role: 1, seq: generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?

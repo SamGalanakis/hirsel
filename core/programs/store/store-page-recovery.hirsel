@@ -120,7 +120,14 @@ fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[Vie
         let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
         let PageTree(root: take packs, ..) = take list_tree
         let PageTree(root: take retired, ..) = take retirement_tree
-        Ok((take all, PagedLists(packs: take packs, retired: take retired)))
+        // An empty queue shares the empty retirement root; list edits copy it.
+        let deferred = if manifest.deferred_frees.stamp == 0 && manifest.retirement_root.stamp == 0 {
+            arc.share(retired)
+        } else {
+            let PageTree(root: take queue, ..) = attach_page_tree(pages, manifest.deferred_frees, Unprefixed, 1024, None)
+            take queue
+        }
+        Ok((take all, PagedLists(packs: take packs, retired: take retired, deferred: deferred, deferred_next: manifest.deferred_next)))
     })?
     Ok(LoadedPageStore(manifest: take manifest, holders: take holders, lists: take lists, locations: take locations))
 }

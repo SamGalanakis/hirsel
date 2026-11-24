@@ -300,7 +300,27 @@ fn build_retirement_list(retired: List[u64], mut next_stamp: u64) -> Result[Arc[
 
 type PagedLists: shareable + send {
     packs: Arc[std.page.Page],
-    retired: Arc[std.page.Page]
+    retired: Arc[std.page.Page],
+    // The deferred-free queue (§13.6), keyed by its sequence below `deferred_next`.
+    deferred: Arc[std.page.Page],
+    deferred_next: u64
+}
+
+// An empty queue shares the empty retirement root; list edits copy it.
+fn empty_paged_lists() -> PagedLists {
+    let retired = std.page.empty(0, 0, Unprefixed)
+    let deferred = arc.share(retired)
+    PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: take retired, deferred: take deferred, deferred_next: 0)
+}
+
+// T8 step 3: the rows this cut adds to the queue, each at `deferred_next`.
+fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, queued: List[DeferredFree], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[(), Error] {
+    for row in queued {
+        let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
+        page_result(std.page.insert(mut root, key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        deferred_next = stamp_after(deferred_next)?
+    }
+    Ok(())
 }
 
 type ListLayout: send {
@@ -334,11 +354,15 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
     }
 }
 
-fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
+fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queued: List[DeferredFree], carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
     let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
     change_list_root(mut known, installed.packs, pack_root, 0)?
+    let mut deferred_root = arc.share(installed.deferred)
+    let mut deferred_next = installed.deferred_next
+    transfer_deferred_rows(mut deferred_root, mut deferred_next, queued, private_from, mut next_stamp, issued)?
+    change_list_root(mut known, installed.deferred, deferred_root, 2)?
     // The old retirement tree contributes no edges to the new generation.
     remove_page_source(mut known, std.page.stamp(std.page.image_of(installed.retired)), ListSource(1))?
     let moves = if let Some(observed) = relocated {
@@ -360,10 +384,11 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Op
     }
     let mut emission = empty_cut_frames()
     plan_tree_frames(known, moves, pack_root, mut emission)
+    plan_tree_frames(known, moves, deferred_root, mut emission)
     let Some(carried_files) = carried else {
         let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
         apply_pack_layout(mut known, pack_plan)?
-        let roots = PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed))
+        let roots = PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed), deferred: take deferred_root, deferred_next: deferred_next)
         return Ok(ListLayout(roots: take roots, run_packs: take pack_plan, removals: take data_retired))
     }
     let mut retiring: Map[u64, ()] = map.new()
@@ -396,7 +421,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Op
     plan_tree_frames(known, moves, retired, mut emission)
     let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
     apply_pack_layout(mut known, pack_plan)?
-    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: take retired), run_packs: take pack_plan, removals: take removals))
+    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: take retired, deferred: take deferred_root, deferred_next: deferred_next), run_packs: take pack_plan, removals: take removals))
 }
 
 type PageRetryBase: send {
@@ -419,7 +444,7 @@ type PagedCutLayout: send {
     lists: ListLayout
 }
 
-fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
+fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, queued: List[DeferredFree], carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
     let first_stamp = next_stamp
     let issued = disk_allocation(fn() -> Result[core.Cell[u64], Error] {
         Ok(cell.new(first_stamp))
@@ -435,7 +460,7 @@ fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedL
         apply_pack_layout(mut candidate, blobs)?
         apply_pack_layout(mut candidate, data_pages)?
         let mut draw = first_stamp
-        let lists = plan_paged_lists(mut candidate, installed, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
+        let lists = plan_paged_lists(mut candidate, installed, queued, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
         Ok(PagedCutLayout(locations: take candidate, blobs: take blobs, data_pages: take data_pages, lists: take lists))
     })
     next_stamp = cell.into_inner(take issued)

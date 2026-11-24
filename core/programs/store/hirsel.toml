@@ -46,6 +46,7 @@ std = { major = 1 }
 "store-tiered-lineage.hirsel" = "store"
 "store-tiered-residency.hirsel" = "store"
 "store-manifest.hirsel" = "store"
+"store-list-read.hirsel" = "store"
 "store-manifest-wire.hirsel" = "store"
 "store-page-recovery.hirsel" = "store"
 "store-locations.hirsel" = "store"
@@ -139,6 +140,7 @@ dirs = ["."]
 "tiered_attempt_laws.hirsel" = "store"
 "tiered_call_laws.hirsel" = "store"
 "tiered_open_laws.hirsel" = "store"
+"tiered_queue_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
@@ -181,6 +183,9 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_l68_fold_cut_counts_pinned_cold_root"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_fold_cut_queues_detached_leaf"]
 limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]

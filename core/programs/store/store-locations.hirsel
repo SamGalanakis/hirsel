@@ -180,6 +180,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
     }
     add_page_source(mut known, validated.manifest.pack_root.stamp, ListSource(0))?
     add_page_source(mut known, validated.manifest.retirement_root.stamp, ListSource(1))?
+    add_page_source(mut known, validated.manifest.deferred_frees.stamp, ListSource(2))?
     Ok(take known)
 }
 

@@ -466,7 +466,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let participants = cut_participants(draft, NoHolderChange)?
     let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
     let mut next_stamp = stamp_after(draft.next_node)?
-    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), None, 1, 65536, map.new(), None, mut next_stamp)?
+    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), list.new(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536)?
     let (take layout, take packed) = history_write_page_cut(mut source.client, held.head.store, held.head.pair.epoch, 1, take cut_plan, source.locator, mut buffers, mut workspace, source.deadline)?
     if list.len(packed) != 3 || std.page.stamp(std.page.image_of(layout.lists.roots.retired)) != 0 {

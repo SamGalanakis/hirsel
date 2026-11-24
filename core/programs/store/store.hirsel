@@ -4425,10 +4425,6 @@ type DiskStartup: send {
     pages: PageDisk
 }
 
-fn empty_paged_lists() -> PagedLists {
-    PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
-}
-
 fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, roots: LocatedRoots) {
     if roots.collections.stamp != 0 {
         map.insert(mut owners, HolderSource(kind, owner, 0), roots.collections.stamp)
@@ -4978,8 +4974,8 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
         cut_participants(db, delta)
     })?
-    let CutParticipants(holders: take participants_held, roots: take roots) = take participants
-    let mut staged = stage_tiered_cut(db, take roots, pack_bytes)?
+    let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches) = take participants
+    let mut staged = stage_tiered_cut(db, take roots, branches, pack_bytes)?
     db.next_node = staged.stamp_end - 1
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
@@ -4995,7 +4991,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
         let cut_plan = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, holders, installed.lists, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, holders, installed.lists, staged.queued, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // A retry after emission reuses the segment created by the first attempt.

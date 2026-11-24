@@ -3,9 +3,7 @@ type DeferredFree: shareable + send {
     target: TieredTarget
 }
 
-fn deferred_free_entry(seq: u64, row: DeferredFree) -> std.page.Entry {
-    let mut key: Bytes = list.with_capacity(8)
-    list.put_word_be(mut key, seq)
+fn deferred_free_value(row: DeferredFree) -> Bytes {
     let (tag, take payload): (u8, Bytes) = match row.target {
         TieredPage(ptr) => (0, std.page.encode_ptr(ptr)),
         TieredBlob(reference) => (1, std.page.encode_ref(reference)),
@@ -14,7 +12,13 @@ fn deferred_free_entry(seq: u64, row: DeferredFree) -> std.page.Entry {
     list.push(mut value, tag)
     list.put_word_le(mut value, row.branch_id)
     list.append(mut value, payload)
-    std.page.Entry(key: take key, cell: InlineValue(take value))
+    take value
+}
+
+fn deferred_free_entry(seq: u64, row: DeferredFree) -> std.page.Entry {
+    let mut key: Bytes = list.with_capacity(8)
+    list.put_word_be(mut key, seq)
+    std.page.Entry(key: take key, cell: InlineValue(deferred_free_value(row)))
 }
 
 fn decode_deferred_free(file: String, at: u64, key: Bytes, value: Bytes, manifest: PageManifest) -> Result[(u64, DeferredFree), Error] {

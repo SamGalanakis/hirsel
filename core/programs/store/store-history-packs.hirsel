@@ -375,9 +375,9 @@ fn history_validate_manifest(mut client: std.object.Client, locator: HistoryLoca
 
 fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
+    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), deferred: list.new(), class_two: map.new(), live_graph: take blank)
     let mut final_item: Option[u64] = None
-    read_page_list(mut client, id, manifest, manifest.pack_root, None, false, mut final_item, mut lists,
+    read_page_list(mut client, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists,
         scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
             history_list_page(mut reader_client, locator, deadline, store_id, ptr)
         })?

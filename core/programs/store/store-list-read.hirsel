@@ -1,0 +1,191 @@
+// The class-2 list trees a MANIFEST names: the pack list, the retirement
+// list and the deferred-free queue (§13.6). Each is read whole at open.
+
+type ListKind: key = PackList | RetiredList | DeferredList
+
+type ListedPages {
+    allow_tiered: bool,
+    packs: Map[u64, PagePack],
+    retired: Map[u64, ()],
+    deferred: List[DeferredFree],
+    class_two: Map[u64, List[u64]],
+    live_graph: PageGraph
+}
+
+fn read_list_page(mut d: Dir, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
+    let path = paged_pack_path(ptr.pack)?
+    let mut opened = match host.open(d, path, Read) {
+        Ok(take file) => take file,
+        Error(NotFound) => return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp))),
+        Error(problem) => return Error(Io(problem)),
+    }
+    let size = disk_io(host.stat_file(mut opened))?.size
+    let width: u64 = int.widen(ptr.len)
+    if width > PAGE_LIMIT || ptr.offset > size || 16 + width > size - ptr.offset {
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    let raw = read_disk_bytes(mut opened, path, ptr.offset, 16 + width)?
+    disk_io(host.close(take opened))?
+    let image = decode_list_page(path, id, ptr, take raw)?
+    Ok((take path, take image))
+}
+
+fn decode_list_page(path: String, id: StoreId, ptr: std.page.PagePtr, take input: Bytes) -> Result[std.page.Image, Error] {
+    let context = DiskContext(store: id, role: 3, seq: ptr.pack)
+    let width: u64 = int.widen(ptr.len)
+    let mut raw = take input
+    disk_allocation(scoped fn() -> Result[(), Error] {
+        let head = list.slice(raw, 0, 16)
+        let frame = disk_read_frame_head(path, head, ptr.offset)?
+        let payload = list.slice(raw, 16, 16 + width)
+        if frame.kind != 0x0021 || frame.size != width || capacity(disk_check(context, ptr.offset, head, payload))? != frame.checksum {
+            return Error(disk_fault(path, ptr.offset, Checksum))
+        }
+        check_page_pointer(path, ptr, payload)
+    })?
+    list.copy_within(mut raw, 16, 0, width)
+    list.truncate(mut raw, width)
+    decode_located_page(path, ptr.offset, take raw, Unprefixed)
+}
+
+fn check_page_pointer(path: String, ptr: std.page.PagePtr, raw: Bytes) -> Result[(), Error] {
+    if list.len(raw) < 16 || list.len(raw) != int.widen(ptr.len) {
+        return Error(disk_fault(path, ptr.offset, Checksum))
+    }
+    let stamp: u64 = list.word_le(raw, 8)
+    if stamp != ptr.stamp || std.check.xxh3(raw, 0, list.len(raw)) != ptr.checksum {
+        return Error(disk_fault(path, ptr.offset, Checksum))
+    }
+    Ok(())
+}
+
+fn decode_located_page(path: String, offset: u64, take raw: Bytes, domain: std.page.Domain) -> Result[std.page.Image, Error] {
+    decode_manifest_page(path, offset, take raw, domain, false)
+}
+
+fn decode_manifest_page(path: String, offset: u64, take raw: Bytes, domain: std.page.Domain, allow_tiered: bool) -> Result[std.page.Image, Error] {
+    let image = std.page.decode(take raw, domain) ?=> |problem| match problem {
+        UnsupportedPage => Unsupported(0x0021),
+        _ => disk_fault(path, offset, Malformed),
+    }
+    // The eager opener cannot attach a Tiered root, even if that root is empty.
+    if !allow_tiered && std.page.has_tiered_roots(image) {
+        return Error(Unsupported(0x0021))
+    }
+    Ok(take image)
+}
+
+fn mark_reached(mut stamps: Map[u64, std.page.PagePtr], path: String, ptr: std.page.PagePtr) -> Result[bool, Error] {
+    if let Some(other) = map.get(stamps, ptr.stamp) {
+        if other.pack != ptr.pack || other.offset != ptr.offset {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+        if other != ptr {
+            return Error(disk_fault(path, ptr.offset, Checksum))
+        }
+        return Ok(false)
+    }
+    capacity(map.try_reserve(mut stamps, 1))?
+    map.insert(mut stamps, ptr.stamp, ptr)
+    Ok(true)
+}
+
+fn page_edge_order(path: String, parent: std.page.PagePtr, child: std.page.PagePtr) -> Result[(), Error] {
+    if child.pack > parent.pack || (child.pack == parent.pack && child.offset >= parent.offset) {
+        return Error(disk_fault(path, parent.offset, Order))
+    }
+    Ok(())
+}
+
+fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: std.page.PagePtr, expected_level: Option[u8], kind: ListKind, mut final_item: Option[u64], mut lists: ListedPages, load_list_image: scoped[view] fn(mut S, StoreId, std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits) -> Result[(), Error] waits {
+    if ptr.stamp == 0 {
+        return Ok(())
+    }
+    if ptr.pack == 0 || ptr.pack >= manifest.next_pack || ptr.stamp >= manifest.next_stamp {
+        let path = paged_pack_path(ptr.pack)?
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    let (take path, take image) = load_list_image(mut source, id, ptr)?
+    let height = std.page.level(image)
+    if let Some(expected) = expected_level {
+        if height != expected {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+    }
+    let first_visit = mark_reached(mut lists.live_graph.stamps, path, ptr)?
+    if first_visit {
+        let appended = map.update(mut lists.class_two, ptr.pack, fn(mut offsets: List[u64]) -> Result[(), Capacity] {
+            list.try_reserve(mut offsets, 1)?
+            list.push(mut offsets, ptr.offset)
+            Ok(())
+        })
+        match take appended {
+            Some(take result) => capacity(take result)?,
+            None => {
+                let mut offsets: List[u64] = list.new()
+                capacity(list.try_reserve(mut offsets, 1))?
+                list.push(mut offsets, ptr.offset)
+                capacity(map.try_reserve(mut lists.class_two, 1))?
+                map.insert(mut lists.class_two, ptr.pack, take offsets)
+            },
+        }
+    }
+    let mut kids: List[u64] = list.new()
+    for slot in 0u64 .. std.page.count(image) {
+        let row = disk_allocation(scoped fn() -> Result[std.page.Entry, Error] {
+            Ok(option.unwrap(std.page.entry(image, slot)))
+        })?
+        match row.cell {
+            Child(edge) => {
+                page_edge_order(path, ptr, edge.child)?
+                read_page_list(mut source, id, manifest, edge.child, Some(height - 1), kind, mut final_item, mut lists, load_list_image)?
+                capacity(list.try_reserve(mut kids, 1))?
+                list.push(mut kids, edge.child.stamp)
+            },
+            InlineValue(raw) => {
+                if list.len(row.key) != 8 {
+                    return Error(disk_fault(path, ptr.offset, Malformed))
+                }
+                let seq: u64 = list.word_be(row.key, 0)
+                if let Some(prior) = final_item {
+                    if seq <= prior {
+                        return Error(disk_fault(path, ptr.offset, Order))
+                    }
+                }
+                final_item = Some(seq)
+                match kind {
+                    DeferredList => {
+                        let (_, queued) = decode_deferred_free(path, ptr.offset, row.key, raw, manifest)?
+                        capacity(list.try_reserve(mut lists.deferred, 1))?
+                        list.push(mut lists.deferred, queued)
+                        continue
+                    },
+                    _ => (),
+                }
+                if seq == 0 || seq >= manifest.next_pack {
+                    return Error(disk_fault(path, ptr.offset, Malformed))
+                }
+                if let RetiredList = kind {
+                    if list.len(raw) != 0 || map.contains(lists.packs, seq) {
+                        return Error(disk_fault(path, ptr.offset, Malformed))
+                    }
+                    capacity(map.try_reserve(mut lists.retired, 1))?
+                    map.insert(mut lists.retired, seq, ())
+                } else {
+                    capacity(map.try_reserve(mut lists.packs, 1))?
+                    let pack = pack_record(path, ptr.offset, raw)?
+                    if !lists.allow_tiered && pack.class >= 3 {
+                        return Error(Unsupported(0x0023))
+                    }
+                    map.insert(mut lists.packs, seq, pack)
+                }
+            },
+            BlobValue(_) => return Error(disk_fault(path, ptr.offset, Malformed)),
+        }
+    }
+    if first_visit {
+        graph_add(mut lists.live_graph, ptr.stamp, ReadPage(take image, take kids, list.new()))?
+    }
+    Ok(())
+}
+

@@ -636,7 +636,7 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
         fail("L68: a Tiered root entered the Memory location table or account")
     }
     let mut ids = 101u64
-    let mut cut_plan = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut cut_plan = plan_page_cut(base, holders, empty_paged_lists(), list.new(), None, 9, 1048576, map.new(), None, mut ids)?
     if list.len(cut_plan.data_pages.frames) != 1 || list.len(cut_plan.blobs.frames) != 0 || list.len(cut_plan.lists.removals) != 0 {
         fail("L68: a Memory cut tried to re-emit or retire a Tiered frame")
     }
@@ -701,7 +701,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let mut installed = new_page_locations()
     capacity(disk_index_put(mut installed.packs, 8, inventory, pack_edge_charge))?
     let base = page_retry_base(installed, map.new(), holders, held_roots)?
-    let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), list.new(), None, 9, 1048576, map.new(), None, mut ids)?
     let mut buffers = cut_output_buffers(cut_plan, 1048576, 1048576)?
     let layout = write_page_cut(fixtures, owner, take cut_plan, mut buffers)?
     let mut manifest = page_manifest_empty()

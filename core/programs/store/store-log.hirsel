@@ -358,9 +358,16 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
             continue
         }
         let key = prefix(id)?
-        let dropped = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
-        if !tx.retain_old && !tiered_data_key(tx.roots.collections, key) {
-            tx.resident = int.saturating_sub(tx.resident, dropped)
+        // A Tiered Log's floor is staged by the Tiered write plan, whose
+        // `TieredDropped` figure the frame carries (§13.3).
+        let dropped = if tiered_data_key(tx.roots.collections, key) {
+            0u64
+        } else {
+            let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
+            if !tx.retain_old {
+                tx.resident = int.saturating_sub(tx.resident, removed)
+            }
+            removed
         }
         push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped))))
     }

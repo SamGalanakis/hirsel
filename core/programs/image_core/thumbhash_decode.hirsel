@@ -1,0 +1,157 @@
+pub fn decode_thumbhash(hash: Bytes, limits: Limits) -> Result[Raster, Error] {
+    let n = list.len(hash)
+    if n > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    if n < 5 || n > 25 {
+        return Error(Malformed)
+    }
+    match (bound steps limits.max_steps {
+        decode_thumbhash_inner(hash, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn thumb_ratio(value: u32, scale: f64) -> f64 {
+    let v: f64 = float.from_int(value)
+    v / scale
+}
+
+fn thumb_unpack(hash: Bytes, dc: f64, scale: f64, nx: u64, ny: u64, mut cursor: u64) -> Result[HashBand, Error] {
+    let mut ac: Inline[f64, 28] =[0.0; 28]
+    let mut count = 0u64
+    for y in 0u64 .. ny {
+        let mut x: u64 = if y == 0 {
+            1
+        } else {
+            0
+        }
+        while x * ny < nx * (ny - y) {
+            let at = cursor / 2
+            if at >= list.len(hash) {
+                return Error(Truncated)
+            }
+            let shift: u8 = if cursor % 2 == 0 {
+                0
+            } else {
+                4
+            }
+            let value: u32 = int.widen((hash[at] >> shift) & 15)
+            ac[count] = (thumb_ratio(value, 7.5) - 1.0) * scale
+            count += 1
+            cursor += 1
+            x += 1
+        }
+    }
+    Ok(HashBand(dc: dc, scale: scale, count: count, ac: ac))
+}
+
+fn decode_thumbhash_inner(hash: Bytes, limits: Limits) -> Result[Raster, Error] {
+    let header = u24le(hash, 0)
+    let layout: u32 = int.widen(tiff_short(hash, 3, true))
+    let alpha = header & 0x800000 != 0
+    let longest: u32 = if alpha {
+        5
+    } else {
+        7
+    }
+    let short = layout & 7
+    if short == 0 || short > longest || (alpha && list.len(hash) < 6) {
+        return Error(Malformed)
+    }
+    let landscape = layout & 0x8000 != 0
+    let (lx, ly) = if landscape {
+        (longest, short)
+    } else {
+        (short, longest)
+    }
+    let width = (64 * lx + longest) / (2 * longest)
+    let height = (64 * ly + longest) / (2 * longest)
+    check_size(width, height, 1, limits)?
+    let nx = order.max(3u64, int.widen(lx))
+    let ny = order.max(3u64, int.widen(ly))
+    let mut cursor: u64 = if alpha {
+        12
+    } else {
+        10
+    }
+    let l = thumb_unpack(hash, thumb_ratio(header & 63, 63.0), thumb_ratio((header >> 18) & 31, 31.0), nx, ny, mut cursor)?
+    let p = thumb_unpack(hash, thumb_ratio((header >> 6) & 63, 31.5) - 1.0, 1.25 * thumb_ratio((layout >> 3) & 63, 63.0), 3, 3, mut cursor)?
+    let q = thumb_unpack(hash, thumb_ratio((header >> 12) & 63, 31.5) - 1.0, 1.25 * thumb_ratio((layout >> 9) & 63, 63.0), 3, 3, mut cursor)?
+    let a = if alpha {
+        let packed: u32 = int.widen(hash[5])
+        thumb_unpack(hash, thumb_ratio(packed & 15, 15.0), thumb_ratio(packed >> 4, 15.0), 5, 5, mut cursor)?
+    } else {
+        HashBand(dc: 1.0, scale: 0.0, count: 0, ac:[0.0; 28])
+    }
+    if (cursor + 1) / 2 != list.len(hash) {
+        return Error(Malformed)
+    }
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    let fw: f64 = float.from_int(width)
+    let fh: f64 = float.from_int(height)
+    let mut rgba = alloc_bytes(w * h * 4)?
+    for y in 0u64 .. h {
+        let fy = thumb_cosine(y, fh)
+        for x in 0u64 .. w {
+            let fx = thumb_cosine(x, fw)
+            let luminance = thumb_transform(l, fx, fy, nx, ny)
+            let yellow = thumb_transform(p, fx, fy, 3, 3)
+            let red_green = thumb_transform(q, fx, fy, 3, 3)
+            let blue = luminance - 2.0 / 3.0 * yellow
+            let red = (3.0 * luminance - blue + red_green) / 2.0
+            let opacity = if alpha {
+                thumb_transform(a, fx, fy, 5, 5)
+            } else {
+                1.0
+            }
+            list.push(mut rgba, thumb_byte(red))
+            list.push(mut rgba, thumb_byte(red - red_green))
+            list.push(mut rgba, thumb_byte(blue))
+            list.push(mut rgba, thumb_byte(opacity))
+        }
+    }
+    Ok(Raster(width: width, height: height, rgba: take rgba))
+}
+
+fn thumb_cosine(position: u64, size: f64) -> Inline[f64, 7] {
+    let at: f64 = float.from_int(position)
+    let mut cosines: Inline[f64, 7] =[0.0; 7]
+    for i in 0u64 .. 7 {
+        let factor: f64 = float.from_int(i)
+        cosines[i] = std.float.cos(THUMB_PI / size * (at + 0.5) * factor)
+    }
+    cosines
+}
+
+fn thumb_transform(band: HashBand, fx: Inline[f64, 7], fy: Inline[f64, 7], nx: u64, ny: u64) -> f64 {
+    let mut result = band.dc
+    let mut at = 0u64
+    for y in 0u64 .. ny {
+        let mut x: u64 = if y == 0 {
+            1
+        } else {
+            0
+        }
+        let factor = fy[y] * 2.0
+        while x * ny < nx * (ny - y) {
+            result += band.ac[at] * (fx[x] * factor)
+            at += 1
+            x += 1
+        }
+    }
+    result
+}
+
+fn thumb_byte(value: f64) -> u8 {
+    if float.le(value, 0.0) {
+        0
+    } else if float.ge(value, 1.0) {
+        255
+    } else {
+        result.unwrap(float.to_int(value * 255.0))
+    }
+}
